@@ -6,6 +6,8 @@ docs/examples/remote-adapter.py	python-source	38
 install.sh	python-reference	38
 plugins/oh-my-setting/scripts/harness-hook.sh	python-reference	7
 rust/Cargo.toml	python-reference	1
+rust/crates/oms-command-graph/Cargo.toml	python-reference	1
+rust/crates/oms-command-graph/tests/project-engine-reference.json	python-reference	1
 rust/crates/oms-graph-python/Cargo.toml	python-reference	8
 rust/crates/oms-graph-python/tests/fixtures/legacy_cases.json	python-reference	149
 rust/crates/oms-graph-resolve/tests/legacy_fixture.json	python-reference	37

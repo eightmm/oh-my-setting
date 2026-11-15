@@ -363,3 +363,266 @@ fn review_depth_preserves_risk_globs() {
         }
     });
 }
+
+// Linux exposes bytes actually read, so the hot-path check needs no timing
+// threshold. Other supported hosts still exercise the same output contracts.
+fn read_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/thread-self/io")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("rchar: ")?.trim().parse().ok())
+}
+
+#[test]
+fn thread_hot_paths_read_each_log_once_and_keep_stale_contracts() {
+    isolated(
+        "thread_hot_paths_read_each_log_once_and_keep_stale_contracts",
+        || {
+            use oms_command_peer::{obj, providers::answer_quality, storage};
+            use std::os::unix::fs::MetadataExt;
+            let repo = Repo::new();
+            let source = Repo::new();
+            let row = |role: &str, body: &str, provider: &str| {
+                obj([
+                    ("thread", "history".into()),
+                    ("role", role.into()),
+                    ("text", body.into()),
+                    ("ts", "2000-01-01T00:00:00Z".into()),
+                    ("provider", provider.into()),
+                    ("quality", "ok".into()),
+                ])
+            };
+            let mut rows = vec![row("question", "first question", "codex")];
+            rows.push(row("topic", "  chosen\n topic  ", ""));
+            for i in 0..64 {
+                rows.push(row(
+                    if i == 0 { "question" } else { "answer" },
+                    &"x".repeat(4096),
+                    if i % 2 == 0 { "claude" } else { "codex" },
+                ));
+            }
+            let mut bytes = Vec::new();
+            for row in &rows {
+                bytes.extend(row.json(false).unwrap());
+                bytes.push(b'\n');
+            }
+            // Calibrate host /proc/*/stat scan overhead on an empty thread listing
+            // so hosts with hundreds of processes do not masquerade as extra log reads.
+            let base = {
+                let b0 = read_bytes();
+                let _ = run(&repo, &source.0, "thread", &["list", "--json"]);
+                b0.zip(read_bytes())
+                    .map_or(0, |(start, end)| end.saturating_sub(start))
+            };
+            repo.write(".oms/threads/history.jsonl", &bytes);
+            let minted = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            repo.write(".oms/threads/CURRENT", format!("history {minted}\n"));
+            for action in ["list", "stats", "show"] {
+                let before = read_bytes();
+                let output = success(run(&repo, &source.0, "thread", &[action, "--json"]));
+                if let (Some(before), Some(after)) = (before, read_bytes()) {
+                    assert!(
+                        after - before < bytes.len() as u64 + base + 32768,
+                        "{action} read {} bytes for a {} byte log (baseline {base})",
+                        after - before,
+                        bytes.len()
+                    );
+                }
+                let value = V::parse(&output).unwrap();
+                match action {
+                    "list" => {
+                        let entry = &value.get("threads").array()[0];
+                        assert_eq!(entry.get("topic").text(), Some("chosen topic"));
+                        assert_eq!(
+                            entry.get("providers"),
+                            &V::Arr(vec!["codex".into(), "claude".into()])
+                        );
+                        assert_eq!(entry.get("staleness").text(), Some("current"));
+                    }
+                    "stats" => {
+                        for key in ["threads", "open", "second_question", "multi_provider"] {
+                            assert_eq!(value.get("stats").get(key).py(), "1");
+                        }
+                        assert_eq!(value.get("stats").get("answers_ok").py(), "63");
+                    }
+                    "show" => assert_eq!(value, V::Arr(rows.clone())),
+                    _ => unreachable!(),
+                }
+            }
+            fs::remove_file(repo.0.join(".oms/threads/CURRENT")).unwrap();
+            for ttl in ["0", "9223372036854775807"] {
+                let output = V::parse(&success(run(
+                    &repo,
+                    &source.0,
+                    "thread",
+                    &["stats", "--json", "--stale-ttl", ttl],
+                )))
+                .unwrap();
+                assert_eq!(output.get("stale_ttl_seconds").py(), ttl);
+                assert_eq!(
+                    output.get("stats").get("stale_open").py(),
+                    if ttl == "0" { "1" } else { "0" }
+                );
+            }
+            for ttl in ["", "-1", "bad", "9223372036854775808"] {
+                for action in ["list", "stats", "close"] {
+                    let mut argv = vec![action, "--stale-ttl", ttl];
+                    if action == "close" {
+                        argv.push("--stale");
+                    }
+                    assert_eq!(run(&repo, &source.0, "thread", &argv).0, 2, "{argv:?}");
+                }
+            }
+            assert_eq!(
+                run(&repo, &source.0, "thread", &["close", "--stale-ttl", "0"]).0,
+                2
+            );
+            let room = row("note", "room", "");
+            let mut room = room;
+            room.set("thread", "room-0123456789ab");
+            repo.write(
+                ".oms/threads/room-0123456789ab.jsonl",
+                format!(
+                    "{}\n",
+                    String::from_utf8(room.json(false).unwrap()).unwrap()
+                ),
+            );
+            let mut event = row("note", "room event", "");
+            event.set("thread", "event-room");
+            event.set("room_event", obj([("kind", "created".into())]));
+            repo.write(
+                ".oms/threads/event-room.jsonl",
+                format!(
+                    "{}\n",
+                    String::from_utf8(event.json(false).unwrap()).unwrap()
+                ),
+            );
+            success(run(
+                &repo,
+                &source.0,
+                "thread",
+                &["close", "--stale", "--stale-ttl", "0", "--apply"],
+            ));
+            for name in ["room-0123456789ab", "event-room"] {
+                let value = V::parse(&success(run(
+                    &repo,
+                    &source.0,
+                    "thread",
+                    &["show", "--id", name, "--json"],
+                )))
+                .unwrap();
+                assert_eq!(value.array().len(), 1, "room remains open");
+            }
+            let value = V::parse(&success(run(
+                &repo,
+                &source.0,
+                "thread",
+                &["show", "--id", "history", "--json"],
+            )))
+            .unwrap();
+            assert_eq!(
+                value.array().last().unwrap().get("role").text(),
+                Some("closed")
+            );
+
+            let records = vec![
+                obj([("id", "b".into()), ("n", 1usize.into())]),
+                obj([("id", "a".into())]),
+                obj([("id", "b".into()), ("n", 2usize.into())]),
+            ];
+            assert_eq!(
+                storage::latest(&records).unwrap(),
+                vec![records[2].clone(), records[1].clone()]
+            );
+            assert!(storage::latest(&[]).unwrap().is_empty());
+            assert!(storage::latest(&[obj([])]).is_err());
+            for (raw, expected) in [
+                ("", "empty"),
+                ("Answer:\nVerification:\r\n", "empty"),
+                ("a substantive response", "ok"),
+                (
+                    "stop-reason: provider=codex reason=refusal subtype=test is_error=0",
+                    "blocked",
+                ),
+                (
+                    "[agy] print timeout after 5s with turn in progress; returning partial output",
+                    "truncated",
+                ),
+                (
+                    "stop-reason: provider=codex reason=stream_truncated subtype=test is_error=0",
+                    "truncated",
+                ),
+                (
+                    "stop-reason: provider=codex reason=refusal subtype=test is_error=0\n## Output\nanswer",
+                    "ok",
+                ),
+                (
+                    "## Output\r\nstop-reason: provider=codex reason=refusal subtype=test is_error=1",
+                    "blocked",
+                ),
+                ("served model\nvalue\nconfigured model\nvalue", "empty"),
+                ("jetski: no output produced", "blocked"),
+                ("jetski: no output produced\nanswer", "ok"),
+            ] {
+                assert_eq!(answer_quality(raw), expected);
+                assert_eq!(answer_quality(raw), expected, "cached expression parity");
+            }
+            repo.write(
+                "review/_findings-first.jsonl",
+                concat!(
+                    "{\"kind\":\"review-finding\",\"id\":\"a\",\"run\":\"r1\"}\n",
+                    "{\"kind\":\"review-finding\",\"id\":\"b\",\"run\":\"r1\"}\n",
+                    "{\"kind\":\"review-finding\",\"id\":\"b\",\"run\":\"r2\"}\n",
+                ),
+            );
+            repo.write("review/_finding-events.jsonl", concat!(
+                "{\"kind\":\"review-finding-event\",\"id\":\"a\",\"state\":\"open\"}\n",
+                "{\"kind\":\"review-finding-confirmation\",\"id\":\"a\",\"result\":\"old\"}\n",
+                "{\"kind\":\"review-finding-event\",\"id\":\"b\",\"state\":\"fixed\",\"runs\":[\"r1\"]}\n",
+                "{\"kind\":\"review-finding-event\",\"id\":\"a\",\"state\":\"fixed\",\"runs\":[\"r1\"]}\n",
+                "{\"kind\":\"review-finding-confirmation\",\"id\":\"a\",\"result\":\"new\"}\n",
+                "{\"kind\":\"review-finding-event\",\"id\":\"absent\",\"state\":\"fixed\"}\n",
+            ));
+            let findings = V::parse(&success(run(
+                &repo,
+                &source.0,
+                "peer-review",
+                &["findings", "list", "--artifact-dir", "review", "--json"],
+            )))
+            .unwrap();
+            assert_eq!(findings.array().len(), 2);
+            assert_eq!(findings.array()[0].get("status").text(), Some("fixed"));
+            assert_eq!(findings.array()[0].get("history").array().len(), 2);
+            assert_eq!(
+                findings.array()[0].get("confirmation").get("result").text(),
+                Some("new")
+            );
+            assert_eq!(findings.array()[1].get("status").text(), Some("open"));
+            storage::write(
+                &repo.0,
+                Path::new("same.json"),
+                b"{}\n".to_vec(),
+                true,
+                &STOP,
+            )
+            .unwrap();
+            let first = fs::metadata(repo.0.join("same.json")).unwrap();
+            storage::write(
+                &repo.0,
+                Path::new("same.json"),
+                b"{}\n".to_vec(),
+                true,
+                &STOP,
+            )
+            .unwrap();
+            let second = fs::metadata(repo.0.join("same.json")).unwrap();
+            assert_eq!(
+                (first.ino(), first.mtime(), first.mtime_nsec()),
+                (second.ino(), second.mtime(), second.mtime_nsec())
+            );
+        },
+    );
+}

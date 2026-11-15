@@ -6,6 +6,8 @@ pub mod notebook;
 pub mod project;
 mod util;
 
+pub use util::{GroupResolverGuard, with_group_resolver};
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -153,6 +155,10 @@ pub fn run_with_host(
     if interrupted.load(Ordering::SeqCst) {
         return (130, vec![], b"graph: interrupted\n".to_vec());
     }
+    let groups = runtime_services
+        .and_then(|s| s.group_resolver())
+        .or_else(|| plan_services.group_membership_resolver());
+    let _groups_guard = util::with_group_resolver(groups);
     let work = || -> Result<CommandResult> {
         if std::env::var_os("OMS_HARNESS_CHILD").as_deref() == Some(std::ffi::OsStr::new("1"))
             && (!args.text("html_fragment").is_empty()

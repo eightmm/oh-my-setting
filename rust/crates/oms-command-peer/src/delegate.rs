@@ -723,10 +723,7 @@ fn lint(body: &str) -> Vec<&'static str> {
             issues.push(label);
         }
     }
-    if !body.contains('/')
-        && !regex::Regex::new(r"\b[\w-]+\.(rs|py|sh|md|json|toml)\b")
-            .unwrap()
-            .is_match(body)
+    if !body.contains('/') && !cached_regex!(r"\b[\w-]+\.(rs|py|sh|md|json|toml)\b").is_match(body)
     {
         issues.push("file pointers");
     }

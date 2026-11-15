@@ -2,6 +2,14 @@
 //! separately from the repository; neither process cwd nor environment changes.
 #![forbid(unsafe_code)]
 
+// Each literal call site owns one compiled expression for the process lifetime.
+macro_rules! cached_regex {
+    ($pattern:expr $(,)?) => {{
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        RE.get_or_init(|| regex::Regex::new($pattern).expect("static regex"))
+    }};
+}
+
 mod board;
 pub mod cli;
 mod context_pack;

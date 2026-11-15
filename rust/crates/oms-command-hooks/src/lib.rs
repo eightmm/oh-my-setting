@@ -2,6 +2,14 @@
 //! is the trusted installation root, never a path recovered from hook input.
 #![forbid(unsafe_code)]
 
+// Each literal call site owns one compiled expression for the process lifetime.
+macro_rules! cached_regex {
+    ($pattern:expr $(,)?) => {{
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        RE.get_or_init(|| regex::Regex::new($pattern).expect("static regex"))
+    }};
+}
+
 pub mod assignment;
 mod bridge;
 mod common;
@@ -151,7 +159,9 @@ pub fn run_with_services(
     if stdin.len() > common::INPUT_MAX {
         return common::input_error(name);
     }
+    let snapshot = common::Snapshot::default();
     let ctx = common::Context {
+        snapshot: &snapshot,
         cwd,
         source,
         interrupted,
@@ -166,6 +176,9 @@ fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
     let Some(v) = common::document(stdin) else {
         return common::empty();
     };
+    if tool == "panel-hook" && !common::panel() {
+        return common::empty();
+    }
     let Some(repo) = common::repo(&v, ctx) else {
         return common::empty();
     };
@@ -174,14 +187,12 @@ fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
         source: ctx.source,
         interrupted: ctx.interrupted,
         provider: Some("codex"),
+        snapshot: ctx.snapshot,
         host: ctx.host,
     };
     let mut text = String::new();
     match tool {
         "panel-hook" => {
-            if !common::panel() {
-                return common::empty();
-            }
             lifecycle::activity(&v, &repo, ctx);
             if common::event(&v) == "UserPromptSubmit" {
                 for hint in [
@@ -212,7 +223,7 @@ fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
                 // Context loss re-arms the control-tower hint for the next prompt.
                 let _ = common::write(
                     &common::state_path(&repo, &v, ".resume"),
-                    &serde_json::json!({"schema":1,"updated_at":common::now(),"source":source}),
+                    &serde_json::json!({"schema":1,"updated_at":ctx.snapshot.now(),"source":source}),
                 );
                 let _ = std::fs::remove_file(common::state_path(&repo, &v, ".hint"));
                 if ["compact", "clear"].contains(&source) {
@@ -235,7 +246,7 @@ fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
             } else {
                 "session-start"
             };
-            common::injection(&repo, &v, kind, text.as_bytes());
+            common::injection(ctx, &repo, &v, kind, text.as_bytes());
         }
         common::out(text)
     }
@@ -276,6 +287,7 @@ fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'
                 source: ctx.source,
                 interrupted: ctx.interrupted,
                 provider: Some("codex"),
+                snapshot: ctx.snapshot,
                 host: ctx.host,
             };
             let mut out = dispatch(tool, &args[1..], stdin, &selected);

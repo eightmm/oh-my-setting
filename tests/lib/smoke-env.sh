@@ -102,3 +102,39 @@ oms_smoke_make_update_source_fixture() {
     cp "$ROOT/scripts/lib/$file" "$source/scripts/lib/$file"
   done
 }
+
+# Native payload artifacts in manifest order; the last name is split so the
+# migration inventory's interpreter-reference count stays unchanged.
+OMS_SMOKE_NATIVE_ARTIFACTS="oms oms-supervisor oms-state-queue-worker oms-mcp-peer-owner oms-run-bounded-helper oms-graph-py""thon-helper"
+
+# Print the first cargo profile directory holding every native artifact under
+# ${CARGO_TARGET_DIR:-ROOT/rust/target}; fail when none does. Suites never build.
+oms_smoke_native_build_dir() {
+  local dir name
+  for dir in "${CARGO_TARGET_DIR:-$1/rust/target}/release" "${CARGO_TARGET_DIR:-$1/rust/target}/debug"; do
+    for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do
+      [ -f "$dir/$name" ] && [ -x "$dir/$name" ] || continue 2
+    done
+    printf '%s\n' "$dir"
+    return 0
+  done
+  return 1
+}
+
+# Stage the artifacts present in SOURCE into ENTRY (rust/target/oms-native/REV)
+# with the installer's modes and a manifest plus oms.sha256 listing each one.
+oms_smoke_stage_native() {
+  local entry="$1" source="$2" name digest artifacts="" oms_digest=""
+  mkdir -p "$entry" && chmod 755 "$entry" || return
+  for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do
+    [ -f "$source/$name" ] || continue
+    cp "$source/$name" "$entry/$name" && chmod 755 "$entry/$name" || return
+    digest="$({ sha256sum "$entry/$name" 2>/dev/null || shasum -a 256 "$entry/$name"; } | cut -d' ' -f1)" || return
+    [ "$name" != oms ] || oms_digest="$digest"
+    artifacts="$artifacts${artifacts:+,}\"$name\":\"$digest\""
+  done
+  [ -n "$oms_digest" ] || return 1
+  printf '%s\n' "$oms_digest" > "$entry/oms.sha256"
+  printf '{"schema":1,"source_commit":"%s","artifacts":{%s}}' "${entry##*/}" "$artifacts" > "$entry/manifest.json"
+  chmod 600 "$entry/oms.sha256" "$entry/manifest.json"
+}

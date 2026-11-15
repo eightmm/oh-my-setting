@@ -614,3 +614,107 @@ fn commit_bound_dispatches_goal_drive_through_host_services() {
     assert!(calls[1].args.contains(&"task-1".to_owned()));
     assert!(calls[1].args.contains(&"--commit-message".to_owned()));
 }
+
+#[test]
+fn group_writable_repo_uses_host_group_resolver_and_fails_closed_without_one() {
+    if scrubbed_child("group_writable_repo_uses_host_group_resolver_and_fails_closed_without_one") {
+        return;
+    }
+
+    struct GroupHost;
+    impl oms_command_plan::Services for GroupHost {
+        fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+            fn resolve(
+                gid: u32,
+            ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+                let uid = rustix::process::getuid().as_raw();
+                Ok(oms_command_plan::services::GroupMembership {
+                    gid,
+                    explicit_member_uids: vec![uid],
+                    primary_member_uids: vec![uid],
+                })
+            }
+            Some(resolve)
+        }
+    }
+
+    let tmp = TempDir::new("group-repo");
+    let repo = tmp.path().join("repo");
+    fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    fs::write(repo.join("lib.sh"), "sample() { return 0; }\n").expect("write source");
+    git(&repo, &["add", "lib.sh"]);
+    let state = repo.join(".oms/project-graph");
+    fs::create_dir_all(&state).expect("create state dir");
+    fs::set_permissions(&repo, fs::Permissions::from_mode(0o775)).expect("chmod repo 0775");
+    fs::set_permissions(repo.join(".oms"), fs::Permissions::from_mode(0o775))
+        .expect("chmod .oms 0775");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o775)).expect("chmod state 0775");
+
+    let host = RecordingHost::new(None);
+    let cancel = AtomicBool::new(false);
+    let build_cmd = argv(&[
+        "project",
+        "build",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--json",
+    ]);
+
+    let (fail_code, _, fail_err) = run_with_host(
+        &build_cmd,
+        &repo,
+        &cancel,
+        None,
+        None,
+        &UnavailableServices,
+        &host,
+    );
+    assert_eq!(fail_code, 2);
+    assert!(
+        String::from_utf8_lossy(&fail_err).contains("account proof service unavailable"),
+        "unexpected build stderr: {}",
+        String::from_utf8_lossy(&fail_err)
+    );
+
+    let (ok_code, ok_out, ok_err) =
+        run_with_host(&build_cmd, &repo, &cancel, None, None, &GroupHost, &host);
+    assert_eq!(ok_code, 0, "stderr: {}", String::from_utf8_lossy(&ok_err));
+    let built: serde_json::Value = serde_json::from_slice(&ok_out).expect("parse build json");
+    assert_eq!(built["stats"]["files"].as_i64(), Some(2));
+
+    let check_cmd = argv(&[
+        "project",
+        "check",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--json",
+    ]);
+    let (check_fail_code, _, check_fail_err) = run_with_host(
+        &check_cmd,
+        &repo,
+        &cancel,
+        None,
+        None,
+        &UnavailableServices,
+        &host,
+    );
+    assert_eq!(check_fail_code, 2);
+    assert!(
+        String::from_utf8_lossy(&check_fail_err).contains("account proof service unavailable"),
+        "unexpected check stderr: {}",
+        String::from_utf8_lossy(&check_fail_err)
+    );
+
+    let (check_ok_code, check_ok_out, check_ok_err) =
+        run_with_host(&check_cmd, &repo, &cancel, None, None, &GroupHost, &host);
+    assert_eq!(
+        check_ok_code,
+        0,
+        "check stderr: {}",
+        String::from_utf8_lossy(&check_ok_err)
+    );
+    let checked: serde_json::Value =
+        serde_json::from_slice(&check_ok_out).expect("parse check json");
+    assert_eq!(checked["fresh"], true);
+}

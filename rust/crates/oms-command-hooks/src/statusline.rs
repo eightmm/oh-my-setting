@@ -25,9 +25,7 @@ fn clean(v: &Value, fallback: &str, limit: usize, ellipsis: bool) -> String {
     let Some(s) = v.as_str() else {
         return fallback.into();
     };
-    let stripped = regex::Regex::new("\x1b\\[[0-?]*[ -/]*[@-~]")
-        .unwrap()
-        .replace_all(s, "");
+    let stripped = cached_regex!("\x1b\\[[0-?]*[ -/]*[@-~]").replace_all(s, "");
     let s = flat(&stripped);
     let chars = s.chars().count();
     let s = if chars > limit && ellipsis {
@@ -102,7 +100,7 @@ fn subagent(v: &Value) -> Vec<u8> {
     let width = number(&v["columns"], 20., 500.).unwrap_or(100.) as usize;
     let now = clock();
     let mut result = Vec::new();
-    let date_suffix_re = regex::Regex::new(r"-\d{8}$").unwrap();
+    let date_suffix_re = cached_regex!(r"-\d{8}$");
     for task in v["tasks"].as_array().into_iter().flatten().take(128) {
         let Some(id) = task["id"]
             .as_str()
@@ -403,9 +401,7 @@ fn main_line(v: &Value, ctx: &Context<'_>) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(" | ");
-    let plain = regex::Regex::new("\x1b\\[[0-9;]*m")
-        .unwrap()
-        .replace_all(&single, "");
+    let plain = cached_regex!("\x1b\\[[0-9;]*m").replace_all(&single, "");
     if plain.chars().count() <= width {
         single
     } else {

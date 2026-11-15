@@ -649,7 +649,7 @@ fn prune_cache(state: &Path, wanted: &BTreeSet<String>) -> Result<()> {
     if !std::fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
         return Ok(());
     }
-    let store = oms_command_plan::storage::Store::open(state)?;
+    let store = crate::util::open_store(state)?;
     for name in store.names("cache", usize::MAX, true)? {
         let label = name.to_string_lossy();
         if !label.ends_with(".json") || wanted.contains(label.as_ref()) {
@@ -893,11 +893,12 @@ pub(super) fn read_cached_graph(
     let (store, prefix) = match state.strip_prefix(root.physical_root()) {
         Ok(relative) => (
             oms_command_plan::storage::Store::open(root.physical_root())?
-                .with_group_resolver(groups),
+                .with_group_resolver(groups.or_else(crate::util::current_group_resolver)),
             relative.to_path_buf(),
         ),
         Err(_) => (
-            oms_command_plan::storage::Store::open(&state)?.with_group_resolver(groups),
+            oms_command_plan::storage::Store::open(&state)?
+                .with_group_resolver(groups.or_else(crate::util::current_group_resolver)),
             PathBuf::new(),
         ),
     };
@@ -1026,12 +1027,15 @@ pub(super) fn fallback_graph(
             Ok(relative) => (
                 Some(
                     oms_command_plan::storage::Store::open(root.physical_root())?
-                        .with_group_resolver(groups),
+                        .with_group_resolver(groups.or_else(crate::util::current_group_resolver)),
                 ),
                 relative.to_path_buf(),
             ),
             Err(_) => (
-                Some(oms_command_plan::storage::Store::open(&state)?.with_group_resolver(groups)),
+                Some(
+                    oms_command_plan::storage::Store::open(&state)?
+                        .with_group_resolver(groups.or_else(crate::util::current_group_resolver)),
+                ),
                 PathBuf::new(),
             ),
         }

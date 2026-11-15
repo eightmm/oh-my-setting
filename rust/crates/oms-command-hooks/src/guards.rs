@@ -527,10 +527,8 @@ pub fn command(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
     (2, vec![], line.into_bytes())
 }
 fn note(command: &str, v: &Value) {
-    let re = regex::Regex::new(
-        r"(?:^|/)\.(?:ssh|aws|gnupg)(?:/|$)|(?:^|/)\.(?:netrc|env(?:\.[\w.-]+)?)$",
-    )
-    .unwrap();
+    let re =
+        cached_regex!(r"(?:^|/)\.(?:ssh|aws|gnupg)(?:/|$)|(?:^|/)\.(?:netrc|env(?:\.[\w.-]+)?)$",);
     for segment in shell::segments(command).unwrap_or_default() {
         let words = shell::words(&segment, false);
         let i = shell::command_index(&words);
@@ -705,19 +703,14 @@ fn transfer_command(name: &str, args: &[String]) -> Option<(String, bool)> {
     Some((host, single))
 }
 fn transfer_rule(command: &str, sid: &str, _ctx: &Context<'_>) -> Option<Verdict> {
-    if regex::Regex::new(r"\(\s*\)|(?:^|[\s;&|])function\s")
-        .unwrap()
-        .is_match(command)
-        || command.contains("=(")
+    if cached_regex!(r"\(\s*\)|(?:^|[\s;&|])function\s").is_match(command) || command.contains("=(")
     {
         return None;
     }
     let mut copies = Vec::new();
     let mut depth = 0usize;
-    let mut alternatives = command.contains("||")
-        || regex::Regex::new(r"(?:^|[\s;])case\s")
-            .unwrap()
-            .is_match(command);
+    let mut alternatives =
+        command.contains("||") || cached_regex!(r"(?:^|[\s;])case\s").is_match(command);
     let mut guarded = command.contains("&&");
     for segment in shell::segments(command).ok()? {
         let words = shell::words(&segment, true);

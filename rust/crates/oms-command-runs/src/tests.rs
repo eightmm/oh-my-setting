@@ -1256,3 +1256,54 @@ fn execute_with_hooks_delivers_live_child_pid_immediately_after_spawn() {
         .expect("child prints numeric pid");
     assert_eq!(observed_pid, Some(stdout_pid));
 }
+
+#[test]
+fn multi_metric_table_uses_one_ledger_snapshot() {
+    struct MutateOnOutput {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        replaced: bool,
+    }
+    impl std::io::Write for MutateOnOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if !self.replaced {
+                self.replaced = true;
+                fs::write(&self.path, b"{\"exit\":0,\"group\":\"later\",\"seed\":0,\"metrics\":{\"a\":99,\"b\":99}}\n")?;
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let f = Fixture::new();
+    let flag = AtomicBool::new(false);
+    let c = f.context(&flag);
+    f.write(
+        "docs/metric-contract.json",
+        br#"{"schema":1,"metrics":{"a":{"direction":"max"},"b":{"direction":"max"}}}"#,
+    );
+    f.write(
+        "docs/EXPERIMENTS.jsonl",
+        b"invalid\n{\"exit\":0,\"group\":\"original\",\"seed\":0,\"metrics\":{\"a\":1,\"b\":2}}\n",
+    );
+    let mut out = MutateOnOutput {
+        path: f.0.join("docs/EXPERIMENTS.jsonl"),
+        bytes: vec![],
+        replaced: false,
+    };
+    let mut err = vec![];
+    let code = run(
+        "run-ledger",
+        &["table".into(), "--mixed".into()],
+        &c,
+        &mut NoServices,
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let text = String::from_utf8(out.bytes).unwrap();
+    assert_eq!(text.matches("original").count(), 2);
+    assert!(!text.contains("later"));
+}

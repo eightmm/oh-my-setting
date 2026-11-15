@@ -244,7 +244,7 @@ fn verdicts(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             path.into()
         }
     };
-    let pattern = regex::Regex::new(r"-(\d{8}T\d{6}Z-\d+)(?:-r(\d+))?\.md\z").unwrap();
+    let pattern = cached_regex!(r"-(\d{8}T\d{6}Z-\d+)(?:-r(\d+))?\.md\z");
     let mut candidates = Vec::new();
     for name in storage::names(&repo, &directory, ".md")? {
         if name.starts_with('_') || name.ends_with(".export.md") || name.ends_with(".import.md") {
@@ -383,7 +383,7 @@ fn diff_lines(patch: &[u8]) -> Lines {
     let mut files = Lines::new();
     let mut current = None;
     let mut line = 0usize;
-    let hunk = regex::Regex::new(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@").unwrap();
+    let hunk = cached_regex!(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@");
     for raw in String::from_utf8_lossy(patch).lines() {
         if raw.starts_with("diff --git ") {
             current = None;
@@ -769,12 +769,25 @@ fn load_findings(repo: &Path, dir: &Path) -> Result<Vec<V>> {
         }
     }
     let events = storage::load(repo, &dir.join("_finding-events.jsonl"))?;
+    let mut histories: BTreeMap<&str, Vec<V>> = BTreeMap::new();
+    let mut confirmations = BTreeMap::new();
+    for row in &events {
+        if !entries.contains_key(text(row, "id")) {
+            continue;
+        }
+        match text(row, "kind") {
+            "review-finding-event" => histories
+                .entry(text(row, "id"))
+                .or_default()
+                .push(row.clone()),
+            "review-finding-confirmation" => {
+                confirmations.insert(text(row, "id"), row);
+            }
+            _ => {}
+        }
+    }
     for (ident, entry) in &mut entries {
-        let history = events
-            .iter()
-            .filter(|r| text(r, "id") == ident && text(r, "kind") == "review-finding-event")
-            .cloned()
-            .collect::<Vec<_>>();
+        let history = histories.remove(ident.as_str()).unwrap_or_default();
         let last = history.last();
         let mut status = last.map_or("open", |r| text(r, "state"));
         if ["fixed", "verified"].contains(&status)
@@ -795,10 +808,8 @@ fn load_findings(repo: &Path, dir: &Path) -> Result<Vec<V>> {
             V::Arr(sightings[ident].iter().map(|s| s.as_str().into()).collect()),
         );
         entry.set("history", V::Arr(history));
-        if let Some(confirmation) = events.iter().rev().find(|row| {
-            text(row, "id") == ident && text(row, "kind") == "review-finding-confirmation"
-        }) {
-            entry.set("confirmation", confirmation.clone());
+        if let Some(confirmation) = confirmations.get(ident.as_str()) {
+            entry.set("confirmation", (*confirmation).clone());
         }
     }
     Ok(entries.into_values().collect())
@@ -1074,8 +1085,12 @@ fn risk_paths(paths: &[String], patch: &[u8]) -> Vec<String> {
         })
         .cloned()
         .collect::<BTreeSet<_>>();
-    let deletion=regex::Regex::new(r"\bos\.(?:remove|unlink)\s*\(|\bshutil\.rmtree\s*\(|\.unlink\s*\(|\brm\s+-[^\s]*[rf][^\s]*(?:\s|$)|\bfind\b[^\n]*\s-delete\b").unwrap();
-    let lifecycle=regex::Regex::new(r#""(?:preinstall|install|postinstall|prepare|prepack|postpack|prepublish|prepublishOnly|simple-git-hooks|husky)"\s*:"#).unwrap();
+    let deletion = cached_regex!(
+        r"\bos\.(?:remove|unlink)\s*\(|\bshutil\.rmtree\s*\(|\.unlink\s*\(|\brm\s+-[^\s]*[rf][^\s]*(?:\s|$)|\bfind\b[^\n]*\s-delete\b"
+    );
+    let lifecycle = cached_regex!(
+        r#""(?:preinstall|install|postinstall|prepare|prepack|postpack|prepublish|prepublishOnly|simple-git-hooks|husky)"\s*:"#
+    );
     let mut current = String::new();
     let mut deleted = false;
     for line in String::from_utf8_lossy(patch).lines() {
@@ -1348,7 +1363,9 @@ fn confirm(
         0,
         context,
     )?;
-    let expression = regex::Regex::new(r"(?i)^[\s>*`-]*(f-[0-9a-f]{12})[`*]*\s*[:=]\s*[`*]*(confirmed|refuted|unverified)\b[`*]*[\s:.,;—–-]*(.*)$").unwrap();
+    let expression = cached_regex!(
+        r"(?i)^[\s>*`-]*(f-[0-9a-f]{12})[`*]*\s*[:=]\s*[`*]*(confirmed|refuted|unverified)\b[`*]*[\s:.,;—–-]*(.*)$"
+    );
     let mut labels = BTreeMap::new();
     if seat.complete && seat.code == 0 {
         for line in seat.answer.lines() {

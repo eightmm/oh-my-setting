@@ -8,13 +8,44 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const INPUT_MAX: usize = 8 * 1024 * 1024;
 pub const STATE_MAX: usize = 1024 * 1024;
+#[derive(Default)]
+pub struct Snapshot {
+    time: OnceLock<SystemTime>,
+    stamp: OnceLock<String>,
+    repository: OnceLock<(PathBuf, Option<PathBuf>)>,
+    pub activity: OnceLock<()>,
+}
+impl Snapshot {
+    pub fn time(&self) -> SystemTime {
+        *self.time.get_or_init(SystemTime::now)
+    }
+    pub fn seconds(&self) -> f64 {
+        self.time()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+    }
+    pub fn now(&self) -> String {
+        self.stamp
+            .get_or_init(|| {
+                chrono::DateTime::<chrono::Utc>::from(self.time())
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string()
+            })
+            .clone()
+    }
+}
 pub struct Context<'a> {
+    pub snapshot: &'a Snapshot,
     pub provider: Option<&'static str>,
     pub cwd: &'a Path,
     pub source: &'a Path,
@@ -284,18 +315,30 @@ pub fn root(raw: &Path, cwd: &Path) -> Option<PathBuf> {
     Some(p)
 }
 pub fn repo(v: &Value, ctx: &Context<'_>) -> Option<PathBuf> {
-    if let Some(p) = env_path("OMS_STATE_REPO") {
-        return root(&p, ctx.cwd);
-    }
-    for k in ["cwd", "currentWorkingDirectory"] {
-        if let Some(value) = v.get(k)
-            && !value.is_null()
-            && value != ""
-        {
-            return value.as_str().and_then(|p| root(Path::new(p), ctx.cwd));
+    let selected = if let Some(p) = env_path("OMS_STATE_REPO") {
+        p
+    } else {
+        let mut selected = ctx.cwd.to_owned();
+        for k in ["cwd", "currentWorkingDirectory"] {
+            if let Some(value) = v.get(k)
+                && !value.is_null()
+                && value != ""
+            {
+                selected = PathBuf::from(value.as_str()?);
+                break;
+            }
         }
+        selected
+    };
+    let (key, resolved) = ctx.snapshot.repository.get_or_init(|| {
+        let resolved = root(&selected, ctx.cwd);
+        (selected.clone(), resolved)
+    });
+    if key == &selected {
+        resolved.clone()
+    } else {
+        root(&selected, ctx.cwd)
     }
-    root(ctx.cwd, ctx.cwd)
 }
 pub fn adopted(repo: &Path) -> bool {
     fs::symlink_metadata(repo.join(".oms")).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
@@ -310,8 +353,7 @@ pub fn normalize_machine(raw: &str) -> String {
     } else {
         raw.into()
     };
-    regex::Regex::new(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+")
-        .unwrap()
+    cached_regex!(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+")
         .replace_all(&raw, "~")
         .into_owned()
 }
@@ -604,9 +646,7 @@ pub fn safe_text(raw: &str, limit: usize) -> String {
     if h != Path::new("/") {
         cleaned = cleaned.replace(h.to_string_lossy().as_ref(), "~");
     }
-    let cleaned = regex::Regex::new(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+")
-        .unwrap()
-        .replace_all(&cleaned, "~");
+    let cleaned = cached_regex!(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+").replace_all(&cleaned, "~");
     clip(&flat(&cleaned), limit)
 }
 pub fn clip(raw: &str, max: usize) -> String {
@@ -790,14 +830,14 @@ impl Drop for EventLock {
         }
     }
 }
-pub fn event_row(repo: &Path, v: &Value, fields: Value) {
+pub fn event_row(ctx: &Context<'_>, repo: &Path, v: &Value, fields: Value) {
     if !adopted(repo) {
         return;
     }
     let path = repo.join(".oms/hooks/events.jsonl");
     let raw_turn = first(v, &["turn_id", "turnId"]);
     let turn = bounded(&json!(raw_turn), 120);
-    let mut row = json!({"schema":1, "ts":now(), "agent":bounded(&json!(env("OMS_AGENT")),40),
+    let mut row = json!({"schema":1, "ts":ctx.snapshot.now(), "agent":bounded(&json!(env("OMS_AGENT")),40),
         "hook":bounded(&json!(event(v)),80), "session":session_hash(v), "turn_id":turn,
         "cwd_hash": if first(v,&["cwd","currentWorkingDirectory"]).is_empty() {String::new()} else {hash(first(v,&["cwd","currentWorkingDirectory"]))[..16].into()}});
     if text(&row, "agent").is_empty() {
@@ -816,11 +856,12 @@ pub fn event_row(repo: &Path, v: &Value, fields: Value) {
         let _ = append(&path, &row, 64 * INPUT_MAX);
     }
 }
-pub fn injection(repo: &Path, v: &Value, kind: &str, raw: &[u8]) {
+pub fn injection(ctx: &Context<'_>, repo: &Path, v: &Value, kind: &str, raw: &[u8]) {
     if raw.is_empty() || raw.len() > STATE_MAX || child() {
         return;
     }
     event_row(
+        ctx,
         repo,
         v,
         json!({"action":"injection", "status":kind, "bytes":raw.len(),

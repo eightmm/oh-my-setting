@@ -81,7 +81,7 @@ pub fn bound_with_host(
         )));
     }
     let path = util::at(repo, patch_ref);
-    let store = oms_command_plan::storage::Store::open(repo)?;
+    let store = crate::util::open_store(repo)?;
     let raw = store
         .read(&path, 256 * 1024 * 1024)
         .map_err(|_| Error::new(format!("task {task} has no readable stored patch")))?;

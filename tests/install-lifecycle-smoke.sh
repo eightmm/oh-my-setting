@@ -481,6 +481,163 @@ PY_NONFINITE
   saved="$(find "$root/rust/target/oms-native" -name oms.sha256 -print)"
   [ "$(cat "$saved")" = modified ] || fail "quarantine lost native cache data"
   oms_install_repair_native_cache "$root" || fail "repeated native cache repair failed"
+  # Companions: the staged set must equal the manifest set, byte for byte and executable.
+  mkdir -p "$TMP/native-companions"
+  for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do printf '#!/bin/sh\necho %s\n' "$name" > "$TMP/native-companions/$name"; done
+  oms_smoke_stage_native "$entry" "$TMP/native-companions" || fail "companion payload staging failed"
+  oms_install_repair_native_cache "$root" || fail "valid companion cache repair failed"
+  [ -f "$entry/oms-supervisor" ] || fail "repair moved a valid companion cache"
+  for change in digest missing mode unlisted; do
+    case "$change" in
+      digest) printf 'changed\n' >> "$entry/oms-supervisor" ;;
+      missing) rm "$entry/oms-mcp-peer-owner" ;;
+      mode) chmod 644 "$entry/oms-run-bounded-helper" ;;
+      unlisted) sed 's/,"oms-state-queue-worker":"[0-9a-f]*"//' "$entry/manifest.json" > "$TMP/native-unlisted" && cat "$TMP/native-unlisted" > "$entry/manifest.json" ;;
+    esac
+    find "$root/rust/target/oms-native" -name '.oms-quarantine.*' -prune -exec rm -rf {} +
+    oms_install_repair_native_cache "$root" > "$TMP/native-companion.out" || fail "companion $change repair failed"
+    [ ! -e "$entry" ] || fail "companion $change cache was not quarantined"
+    [ -n "$(find "$root/rust/target/oms-native" -path '*/.oms-quarantine.*/payload/manifest.json' -print)" ] || fail "companion $change quarantine lost the payload"
+    oms_smoke_stage_native "$entry" "$TMP/native-companions" || fail "companion payload restaging failed"
+  done
+  mv "$entry/oms-supervisor" "$TMP/native-real-supervisor"
+  ln -s "$TMP/native-real-supervisor" "$entry/oms-supervisor"
+  if oms_install_repair_native_cache "$root" > "$TMP/native-companion-link.out" 2>&1; then
+    fail "repair accepted a symlinked companion"
+  fi
+  [ -L "$entry/oms-supervisor" ] || fail "repair moved a symlinked companion"
+)
+# Shell half of native-first routing (scripts/oms, oms_native_route and the
+# Codex plugin hook) against a recording stub payload, so it needs no Rust
+# toolchain; a prebuilt cargo payload, when present, then runs the newly native
+# verbs through the same public entry. An interpreter poison that leaves a
+# marker proves no routed path reaches a fallback.
+test_native_shell_route() (
+  local d="$TMP/native-route" revision=2222222222222222222222222222222222222222
+  local root entry bin log marker rc name build
+  root="$d/root" bin="$d/bin" log="$d/native.log" marker="$d/interpreter-ran"
+  entry="$root/rust/target/oms-native/$revision"
+  mkdir -p "$root/scripts/lib" "$bin" "$d/home" "$d/stub" "$d/work"
+  cp "$ROOT/scripts/oms" "$ROOT/scripts/tick.sh" "$ROOT/scripts/agent-task.sh" "$root/scripts/"
+  cp -R "$ROOT/scripts/lib/." "$root/scripts/lib/"
+  : > "$root/scripts/turn-guard.sh"
+  git -C "$root" init -q
+  printf '%s\n' "$revision" > "$root/.git/HEAD"
+  for name in py""thon3 py""thon; do
+    printf '#!/bin/sh\n: > "%s"\nexit 99\n' "$marker" > "$bin/$name"
+    chmod +x "$bin/$name"
+  done
+  ln -s "$BASH" "$bin/bash"
+  cat > "$d/stub/oms" <<EOF_STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$log"
+case "\$1:\$5" in
+  --oms-select:journal|--oms-select:harness-hook) exit 0 ;;
+  --oms-select:fail-*) exit "\${5#fail-}" ;;
+  --oms-select:*) exit 75 ;;
+  --oms-dispatch:*) shift 4; printf 'native %s\n' "\$*"; cat; exit 42 ;;
+esac
+exit 64
+EOF_STUB
+  chmod +x "$d/stub/oms"
+  stage() { rm -rf "$entry"; oms_smoke_stage_native "$entry" "$d/stub" || fail "stub payload staging failed"; }
+  run() {
+    : > "$log"; rc=0
+    env -i HOME="$d/home" PATH="$bin:/usr/bin:/bin" TMPDIR="$d" OMS_HARNESS_CHILD="${child:-0}" \
+      OH_MY_SETTING_DIR="$root" "$BASH" "$@" > "$d/out" 2> "$d/err" || rc=$?
+  }
+  refused() {
+    run "$root/scripts/oms" journal show < /dev/null
+    [ "$rc" = 2 ] && grep -Fq "$1" "$d/err" && [ ! -s "$log" ] || fail "native route did not refuse ($1): rc=$rc $(cat "$d/err")"
+  }
+  stage
+  run "$root/scripts/oms" journal show '--x y' < <(printf 'stdin-bytes')
+  [ "$rc" = 42 ] || fail "native dispatch status not preserved: $rc $(cat "$d/err")"
+  [ "$(cat "$d/out")" = "native journal show --x y
+stdin-bytes" ] || fail "native dispatch lost argv or stdin: $(cat "$d/out")"
+  [ "$(sed -n 1p "$log")" = "--oms-select $root $revision -- journal show --x y" ] && [ "$(wc -l < "$log")" -eq 2 ] ||
+    fail "native route did not select once before dispatch: $(cat "$log")"
+  # A declined wrapper verb selects once; tick.sh must not select again.
+  run "$root/scripts/oms" tick --help < /dev/null
+  [ "$rc" = 0 ] && grep -Fq 'Usage: tick.sh run' "$d/out" && [ "$(wc -l < "$log")" -eq 1 ] ||
+    fail "declined tick was not served once by shell: rc=$rc log=$(cat "$log") $(cat "$d/err")"
+  run "$root/scripts/oms" fail-1 < /dev/null
+  [ "$rc" = 1 ] && [ "$(wc -l < "$log")" -eq 1 ] || fail "strict route hid a failing select: $rc"
+  run "$root/scripts/oms" fail-130 < /dev/null
+  [ "$rc" = 130 ] || fail "strict route hid an interrupted select: $rc"
+  ( . "$root/scripts/lib/platform.sh"
+    : > "$log"
+    oms_native_route recover "$root" fail-1 2> "$d/err" && [ "$OMS_NATIVE_OUTCOME" = unverified ] || fail "recover route blocked on a failing select"
+    oms_native_route recover "$root" fail-130 2> "$d/err" && fail "recover route hid an interrupted select"
+    oms_native_route hook "$root" fail-130 2> "$d/err" && fail "hook route hid an interrupted select"
+    oms_native_route recover "$root" tick 2> "$d/err" && [ "$OMS_NATIVE_OUTCOME" = declined ] || fail "recover route lost a decline"
+    [ "$(wc -l < "$log")" -eq 4 ] || fail "routing did not select once per call" ) || exit
+  # Codex plugin hook: stdin reaches the native hook unread; a harness child's
+  # turn-guard stays on the shell no-op without selecting.
+  run "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" turn-guard < <(printf '{"hook":1}')
+  [ "$rc" = 42 ] && [ "$(cat "$d/out")" = 'native harness-hook turn-guard
+{"hook":1}' ] || fail "plugin hook did not dispatch natively with its payload: rc=$rc $(cat "$d/out") $(cat "$d/err")"
+  child=1 run "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" turn-guard < <(printf '{"hook":1}')
+  [ "$rc" = 0 ] && [ ! -s "$log" ] || fail "harness child turn-guard entered native routing: $rc"
+  # Unverifiable payloads: strict refuses before running anything.
+  printf '\n' >> "$entry/oms"
+  refused 'native executable checksum mismatch'
+  stage; printf '%s' "$(cat "$entry/oms.sha256")" > "$entry/oms.sha256"
+  refused 'native executable checksum unavailable'
+  stage; : > "$entry/oms.sha256"
+  refused 'native executable checksum unavailable'
+  stage; tr a-f A-F < "$entry/oms.sha256" > "$d/upper"; cat "$d/upper" > "$entry/oms.sha256"
+  refused 'invalid native executable checksum'
+  stage; mv "$entry/oms.sha256" "$d/checksum"; ln -s "$d/checksum" "$entry/oms.sha256"
+  refused 'foreign native checksum'
+  stage; mv "$entry/oms" "$d/oms-real"; ln -s "$d/oms-real" "$entry/oms"
+  refused 'foreign native payload entry'
+  stage; chmod 644 "$entry/oms"
+  refused 'native payload unavailable'
+  stage; chmod 777 "$entry"
+  refused 'untrusted native payload ownership'
+  stage; chmod 757 "$entry/oms"
+  refused 'untrusted native payload ownership'
+  rm -rf "$entry"; mkdir -p "$d/elsewhere"; oms_smoke_stage_native "$d/elsewhere/$revision" "$d/stub" || fail "stub restaging failed"
+  ln -s "$d/elsewhere/$revision" "$entry"
+  refused 'foreign native payload entry'
+  rm "$entry"; mv "$root/rust/target/oms-native" "$d/cache"; ln -s "$d/cache" "$root/rust/target/oms-native"
+  refused 'foreign native payload directory'
+  rm "$root/rust/target/oms-native"; mkdir "$root/rust/target/oms-native"
+  run "$root/scripts/oms" tick --help < /dev/null
+  [ "$rc" = 0 ] && [ ! -s "$log" ] || fail "absent revision payload did not fall back to shell: $rc"
+  [ ! -e "$marker" ] || fail "routing reached an interpreter fallback"
+  # Build discovery: release before debug, and only a complete artifact set.
+  mkdir -p "$d/cargo/release" "$d/cargo/debug"
+  CARGO_TARGET_DIR="$d/cargo" oms_smoke_native_build_dir "$ROOT" > /dev/null && fail "empty cargo target accepted"
+  oms_smoke_stage_native "$d/no-oms/$revision" "$d/cargo/release" && fail "payload staged without its executable"
+  [ ! -e "$d/no-oms/$revision/oms.sha256" ] || fail "executable-less staging wrote a checksum"
+  cp "$d/stub/oms" "$d/cargo/release/oms"
+  CARGO_TARGET_DIR="$d/cargo" oms_smoke_native_build_dir "$ROOT" > /dev/null && fail "companion-less cargo build accepted"
+  for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do cp "$d/stub/oms" "$d/cargo/debug/$name"; done
+  [ "$(CARGO_TARGET_DIR="$d/cargo" oms_smoke_native_build_dir "$ROOT")" = "$d/cargo/debug" ] || fail "complete debug build not found"
+  for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do cp "$d/stub/oms" "$d/cargo/release/$name"; done
+  [ "$(CARGO_TARGET_DIR="$d/cargo" oms_smoke_native_build_dir "$ROOT")" = "$d/cargo/release" ] || fail "release build not preferred"
+  if ! build="$(oms_smoke_native_build_dir "$ROOT")"; then
+    echo 'native-route: ok (prebuilt cargo payload absent; real-binary routing skipped)'
+    return 0
+  fi
+  oms_smoke_stage_native "$entry" "$build" || fail "real payload staging failed"
+  cd "$d/work"
+  git init -q
+  for name in journal state room agent-task agent-plan autopilot graph run-ledger tick; do
+    run "$root/scripts/oms" "$name" --help < /dev/null
+    [ "$rc" = 0 ] && [ -s "$d/out" ] || fail "native $name --help failed: rc=$rc $(cat "$d/err")"
+  done
+  [ ! -e "$marker" ] || fail "native verbs reached an interpreter fallback"
+  rc=0; "$entry/oms" --oms-select "$root" "$revision" -- no-such-tool < /dev/null > /dev/null 2>&1 || rc=$?
+  [ "$rc" = 75 ] || fail "native payload did not decline an unknown verb: $rc"
+  printf 'changed' >> "$entry/oms-supervisor"
+  refused 'native artifact digest mismatch'
+  rm -rf "$entry"; oms_smoke_stage_native "$entry" "$build" || fail "real payload restaging failed"
+  printf 'foreign\n' > "$entry/stray"
+  refused 'unexpected file in native payload directory'
+  echo "native-route: ok (real payload from $build)"
 )
 if [ "${1:-}" = --native-repair-only ]; then
   test_native_cache_repair
@@ -489,6 +646,7 @@ fi
 if [ "${1:-}" = --native-copy-only ]; then
   test_native_copy_launcher
   test_native_cache_repair
+  test_native_shell_route
   exit
 fi
 if [ "${1:-}" = --panel-update-only ]; then
@@ -503,6 +661,7 @@ test_uninstall_with_old_python
 test_update_defers_live_panel_calls
 test_native_copy_launcher
 test_native_cache_repair
+test_native_shell_route
 
 # Count external path tools across the lifecycle. Each shim appends one short
 # line, including when independent children run at the same time.

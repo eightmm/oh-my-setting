@@ -193,6 +193,22 @@ fn excerpt(text: &str, at: usize, length: usize) -> String {
         }
     )
 }
+fn match_position(text: &str, folded_needle: &str) -> Option<usize> {
+    if text.is_ascii() && folded_needle.is_ascii() {
+        if folded_needle.is_empty() {
+            return Some(0);
+        }
+        text.as_bytes()
+            .windows(folded_needle.len())
+            .position(|part| part.eq_ignore_ascii_case(folded_needle.as_bytes()))
+    } else {
+        let folded = crate::unicode::casefold(text);
+        folded
+            .find(folded_needle)
+            .map(|byte| folded[..byte].chars().count())
+    }
+}
+
 pub fn run_recorded_search(
     repo: &Path,
     query: &str,
@@ -251,7 +267,7 @@ pub fn run_recorded_search(
         let relative = file.path.strip_prefix(repo).unwrap_or(&file.path);
         let rows = file.path.extension().is_some_and(|e| e == "jsonl");
         for (offset, line) in content.split('\n').enumerate() {
-            if !crate::unicode::casefold(line).contains(&needle) && !(rows && line.contains('\\')) {
+            if match_position(line, &needle).is_none() && !(rows && line.contains('\\')) {
                 continue;
             }
             let parsed = if rows {
@@ -266,8 +282,7 @@ pub fn run_recorded_search(
             } else {
                 line.into()
             };
-            let folded = crate::unicode::casefold(&haystack);
-            let Some(byte) = folded.find(&needle) else {
+            let Some(position) = match_position(&haystack, &needle) else {
                 continue;
             };
             if hits.len() >= MAX_COLLECTED {
@@ -317,11 +332,7 @@ pub fn run_recorded_search(
                 path: relative.into(),
                 line: first + offset,
                 open,
-                excerpt: excerpt(
-                    &haystack,
-                    folded[..byte].chars().count(),
-                    needle.chars().count(),
-                ),
+                excerpt: excerpt(&haystack, position, needle.chars().count()),
                 withheld: false,
             });
         }

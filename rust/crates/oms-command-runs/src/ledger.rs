@@ -2,7 +2,7 @@ use crate::{Context, Error, ExecutionRecord, Observation, Result, RunLink, Servi
 use crate::{metrics, process, store, value::*};
 use chrono::{DateTime, Utc};
 use oms_context::Json;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -905,11 +905,54 @@ fn detail(left: &std::collections::BTreeMap<String, usize>) -> String {
         .collect::<Vec<_>>()
         .join("; ")
 }
+type SelectedRows = Vec<(f64, std::rc::Rc<Json>)>;
+
+// All requested metrics share one validated ledger snapshot; byte limits remain per metric.
+fn rank_rows(
+    path: &Path,
+    root: &Path,
+    all: bool,
+    names: &[String],
+) -> Result<BTreeMap<String, SelectedRows>> {
+    let mut ranked = BTreeMap::<String, SelectedRows>::new();
+    let mut sizes = BTreeMap::<String, usize>::new();
+    store::rows_in(path, false, root, |row| {
+        if !all && get(&row, "exit").and_then(number) != Some(0.0) {
+            return Ok(());
+        }
+        let mut encoded_size = None;
+        let row = std::rc::Rc::new(row);
+        for name in names {
+            if let Some(v) = get(&row, "metrics")
+                .and_then(|m| get(m, name))
+                .and_then(number)
+            {
+                let size = match encoded_size {
+                    Some(size) => size,
+                    None => *encoded_size.insert(encode(&row, false, false)?.len()),
+                };
+                let bytes = sizes.entry(name.clone()).or_default();
+                *bytes = bytes.saturating_add(size);
+                if *bytes > store::LEDGER_BYTES {
+                    return Err(Error::usage("ranking input exceeds its byte limit"));
+                }
+                ranked
+                    .entry(name.clone())
+                    .or_default()
+                    .push((v, row.clone()));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(ranked)
+}
+
 fn rank_one(
     o: &RankOptions,
     path: &Path,
     contract_root: &Path,
     table: bool,
+    selected: Option<SelectedRows>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<i32> {
@@ -942,23 +985,21 @@ fn rank_one(
             o.direction
         )?;
     }
-    let mut rows = vec![];
-    let mut row_bytes = 0;
-    store::rows_in(path, false, contract_root, |row| {
-        let v = get(&row, "metrics")
-            .and_then(|m| get(m, &o.metric))
-            .and_then(number);
-        if let Some(v) = v
-            && (o.all || get(&row, "exit").and_then(number) == Some(0.0))
-        {
-            row_bytes += encode(&row, false, false)?.len();
-            if row_bytes > store::LEDGER_BYTES {
-                return Err(Error::usage("ranking input exceeds its byte limit"));
-            }
-            rows.push((v, row));
-        }
-        Ok(())
-    })?;
+    let selected = match selected {
+        Some(rows) => rows,
+        None => rank_rows(path, contract_root, o.all, std::slice::from_ref(&o.metric))?
+            .remove(&o.metric)
+            .unwrap_or_default(),
+    };
+    let mut rows: metrics::Ranked = selected
+        .into_iter()
+        .map(|(v, row)| {
+            (
+                v,
+                std::rc::Rc::try_unwrap(row).unwrap_or_else(|row| copy(&row)),
+            )
+        })
+        .collect();
     if rows.is_empty() {
         writeln!(
             err,
@@ -1340,19 +1381,29 @@ pub fn run(
                     .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
                     .collect::<Vec<_>>();
                 names.sort();
+                let mut ranked = rank_rows(&path, &contract_root, options.all, &names)?;
                 let mut printed = 0;
                 for name in names {
                     if printed > 0 {
                         writeln!(out)?;
                     }
                     options.metric = name;
-                    if rank_one(&options, &path, &contract_root, true, out, err)? == 0 {
+                    if rank_one(
+                        &options,
+                        &path,
+                        &contract_root,
+                        true,
+                        Some(ranked.remove(&options.metric).unwrap_or_default()),
+                        out,
+                        err,
+                    )? == 0
+                    {
                         printed += 1;
                     }
                 }
                 Ok(if printed > 0 { 0 } else { 3 })
             } else {
-                rank_one(&options, &path, &contract_root, table, out, err)
+                rank_one(&options, &path, &contract_root, table, None, out, err)
             }
         }
         _ => Ok(execute(args, ctx, services, out, err)?.code),

@@ -31,7 +31,7 @@ fn expected(native: &Path, id: &str) -> Result<BTreeMap<String, String>, String>
         .as_object()
         .ok_or("native hooks object missing")?;
     let mut result = BTreeMap::new();
-    let boundary = regex::Regex::new(r"([a-z0-9])([A-Z])").unwrap();
+    let boundary = cached_regex!(r"([a-z0-9])([A-Z])");
     for (event, groups) in hooks {
         let snake = boundary.replace_all(event, "${1}_${2}").to_lowercase();
         for (gi, group) in groups

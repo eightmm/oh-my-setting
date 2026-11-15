@@ -3416,9 +3416,56 @@ assert read["cacheScope"] in ("public", "private"), read
 PY
 }
 
+# A staged native payload serves `oms mcp-server` over stdio through the public
+# entry with an interpreter poison first on PATH. Needs a prebuilt cargo
+# payload (tests/lib/smoke-env.sh); without one it reports the skip.
+test_native_mcp_server_serves_stdio_without_interpreter() {
+  local d="$TMP/native-mcp" revision=3333333333333333333333333333333333333333 build name
+  if ! build="$(oms_smoke_native_build_dir "$ROOT")"; then
+    echo 'native-mcp-server: skipped (prebuilt cargo payload absent)'
+    return 0
+  fi
+  mkdir -p "$d/root/scripts/lib" "$d/bin" "$d/home"
+  cp "$ROOT/scripts/oms" "$d/root/scripts/oms"
+  cp "$ROOT/scripts/lib/platform.sh" "$d/root/scripts/lib/platform.sh"
+  git -C "$d/root" init -q
+  printf '%s\n' "$revision" > "$d/root/.git/HEAD"
+  oms_smoke_stage_native "$d/root/rust/target/oms-native/$revision" "$build" || fail "native payload staging failed"
+  for name in py""thon3 py""thon; do
+    printf '#!/bin/sh\n: > "%s"\nexit 99\n' "$d/interpreter-ran" > "$d/bin/$name"
+    chmod +x "$d/bin/$name"
+  done
+  ln -s "$BASH" "$d/bin/bash"
+  make_repo "$d/repo"
+  # Native graph state refuses a group-writable .oms without a private-group
+  # proof (umask 002); keep this wire check independent of the host umask.
+  chmod go-w "$d/repo/.oms"
+  printf 'def alpha_entry(value):\n    return value\n' > "$d/repo/a.py"
+  {
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+    printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oms_inbox","arguments":{"repo":"%s"}}}\n' "$d/repo"
+    printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"oms_project_graph_symbol","arguments":{"repo":"%s","name":"alpha_entry"}}}\n' "$d/repo"
+  } | (cd "$d/repo" && env -i HOME="$d/home" PATH="$d/bin:/usr/bin:/bin" TMPDIR="$d" XDG_STATE_HOME="$d/state" OMS_MCP_TOOL_PROFILE=full \
+      "$BASH" "$d/root/scripts/oms" mcp-server) > "$d/out" 2> "$d/err" || fail "native mcp-server failed: $(cat "$d/err")"
+  [ "$(wc -l < "$d/out")" -eq 4 ] || fail "native mcp-server answered other than the four requests: $(cat "$d/out")"
+  grep -Fq '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18",' "$d/out" &&
+    grep -Fq '"serverInfo":{"name":"oh-my-setting"' "$d/out" || fail "native initialize did not match the wire"
+  grep -F '"id":2,' "$d/out" | grep -F '"name":"oms_inbox"' | grep -Fq '"name":"oms_project_graph_symbol"' ||
+    fail "native tools/list lacks the inbox or graph symbol tool"
+  grep -F '"id":3,' "$d/out" | grep -F '"isError":false' | grep -Fq '\"schema\": 1' ||
+    fail "native oms_inbox call failed: $(grep -F '"id":3,' "$d/out")"
+  grep -F '"id":4,' "$d/out" | grep -F '"isError":false' | grep -Fq 'symbol:a.py::alpha_entry' ||
+    fail "native graph symbol call failed: $(grep -F '"id":4,' "$d/out")"
+  [ ! -e "$d/interpreter-ran" ] || fail "native mcp-server reached an interpreter"
+  echo "native-mcp-server: ok"
+}
+
 # SMOKE_TEST_CALLS_BEGIN
 test_inbox_orphan_and_unsealed_journal
 test_mcp_server_protocol
+test_native_mcp_server_serves_stdio_without_interpreter
 test_mcp_live_thread_reuses_peer_tools
 test_mcp_server_serves_modern_clients_without_a_handshake
 test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations

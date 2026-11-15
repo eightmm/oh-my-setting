@@ -202,8 +202,9 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
     let Some(repo) = repo(&v, ctx) else {
         return empty();
     };
+    let is_adopted = adopted(&repo);
     let mut output = String::from_utf8_lossy(&lifecycle::journal(&repo, true, ctx)).into_owned();
-    if env("OMS_LESSON_CAPTURE") == "1" && adopted(&repo) {
+    if env("OMS_LESSON_CAPTURE") == "1" && is_adopted {
         let capture_args = [
             OsString::from("capture"),
             OsString::from("--repo"),
@@ -217,7 +218,7 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
             ctx.interrupted,
         );
     }
-    if on("OMS_STATE_HINTS") && adopted(&repo) {
+    if on("OMS_STATE_HINTS") && is_adopted {
         let hint = state_hint(&v, &repo, ctx);
         if !hint.is_empty() {
             output.push_str(&hint);
@@ -230,7 +231,7 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
     lifecycle::activity(&v, &repo, ctx);
     for hint in [
         pressure(&v, &repo, ctx),
-        peers(&v, &repo),
+        peers(&v, &repo, ctx),
         panel_hint(&v, &repo, ctx),
         collaboration(&v, &repo, ctx),
         relay_hint(&v, &repo, ctx),
@@ -243,7 +244,10 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
     if agent(&v, ctx) == "claude" && on("OMS_CODEX_NOTIFY") && crate::notify::socket_path().exists()
     {
         let path = crate::notify::turn_state_path(&session_hash(&v));
-        let _ = write(&path, &json!({"schema":1,"prompt_at":seconds()}));
+        let _ = write(
+            &path,
+            &json!({"schema":1,"prompt_at":ctx.snapshot.seconds()}),
+        );
         if let Some(dir) = path.parent() {
             for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
                 let p = entry.path();
@@ -271,7 +275,7 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
             let _ = ensure_oms(&repo);
             let _ = mutate(&path, STATE_MAX, false, |raw| {
                 let old = document(raw).unwrap_or_else(|| json!({}));
-                let now_secs = seconds();
+                let now_secs = ctx.snapshot.seconds();
                 if old["schema"] == 1
                     && old["session"] == session_hash(&v)
                     && epoch(text(&old, "updated_at"))
@@ -279,7 +283,8 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
                 {
                     return Ok((raw.to_vec(), ()));
                 }
-                let mut row = json!({"schema":1,"session":session_hash(&v),"updated_at":now()});
+                let mut row =
+                    json!({"schema":1,"session":session_hash(&v),"updated_at":ctx.snapshot.now()});
                 for k in ["started_at", "budget_turns", "budget_band"] {
                     if let Some(value) = old.get(k) {
                         row[k] = value.clone();
@@ -357,6 +362,7 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
             }
             if guard {
                 event_row(
+                    ctx,
                     &repo,
                     &v,
                     json!({"action":"skill_hint","status":if names.is_empty(){"deduped"}else{"hinted"},"workflow":workflow,"risk":risk,"skills":names}),
@@ -367,11 +373,11 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
             }
         }
     }
-    injection(&repo, &v, "prompt", output.as_bytes());
+    injection(ctx, &repo, &v, "prompt", output.as_bytes());
     out(output)
 }
 fn state_hint(_v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
-    let day = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+    let day = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time())
         .format("%Y-%m-%d")
         .to_string();
     let path = repo.join(format!(".oms/hooks/state-hint.{day}"));
@@ -443,7 +449,7 @@ fn state_hint(_v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     }
     String::new()
 }
-fn peers(v: &Value, repo: &Path) -> String {
+fn peers(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     if !on("OMS_PEER_ADVISORY") || session(v).is_empty() || !adopted(repo) {
         return String::new();
     }
@@ -466,10 +472,10 @@ fn peers(v: &Value, repo: &Path) -> String {
             latest.insert(sid.into(), (t, row["hook"] == "SessionEnd"));
         }
     }
-    let now_secs = seconds();
+    let now_secs = ctx.snapshot.seconds();
     let me = session_hash(v);
     if latest.get(&me).is_none_or(|(t, _)| now_secs - t >= 60.) {
-        event_row(repo, v, json!({"action":"presence","status":"prompt"}));
+        event_row(ctx, repo, v, json!({"action":"presence","status":"prompt"}));
     }
     latest.retain(|sid, (t, end)| sid != &me && !*end && now_secs - *t <= 900.);
     let path = state_path(repo, v, ".peers");
@@ -495,13 +501,14 @@ fn peers(v: &Value, repo: &Path) -> String {
         .collect::<Vec<_>>();
     if write(
         &path,
-        &json!({"schema":1,"updated_at":now(),"session":me,"announced":seen}),
+        &json!({"schema":1,"updated_at":ctx.snapshot.now(),"session":me,"announced":seen}),
     )
     .is_err()
     {
         return String::new();
     }
     event_row(
+        ctx,
         repo,
         v,
         json!({"action":"peer_advisory","status":"announced","peers":fresh.len()}),
@@ -659,7 +666,7 @@ fn pressure(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     let save = |stage: &str, captured: bool| {
         let _ = write(
             &path,
-            &json!({"schema":1,"updated_at":now(),"session":session_hash(v),"stage":if stage.is_empty(){Value::Null}else{json!(stage)},"captured":captured,"percent_left":(left*10.).round_ties_even()/10.}),
+            &json!({"schema":1,"updated_at":ctx.snapshot.now(),"session":session_hash(v),"stage":if stage.is_empty(){Value::Null}else{json!(stage)},"captured":captured,"percent_left":(left*10.).round_ties_even()/10.}),
         );
     };
     if left > rearm {
@@ -680,6 +687,7 @@ fn pressure(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
             let started = trigger_pressure_capture(v, repo, source, left, ctx);
             save(stage, started || !on("OMS_CTX_CAPTURE"));
             event_row(
+                ctx,
                 repo,
                 v,
                 json!({"action":"context_capture","status":"early","percent_left":(left*10.).round_ties_even()/10.,"source":source,"capture":if started{"started"}else{"skipped"}}),
@@ -697,6 +705,7 @@ fn pressure(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     let captured = trigger_pressure_capture(v, repo, source, left, ctx);
     save(new_stage, state["captured"] == true || captured);
     event_row(
+        ctx,
         repo,
         v,
         json!({"action":"context_pressure","status":new_stage,"percent_left":(left*10.).round_ties_even()/10.,"source":source,"capture":if captured{"started"}else{"skipped"}}),
@@ -1048,7 +1057,7 @@ pub(crate) fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     let _ = write(&path, &state);
     if long {
         resumed["schema"] = json!(1);
-        resumed["updated_at"] = json!(now());
+        resumed["updated_at"] = json!(ctx.snapshot.now());
         resumed["delivered"] = json!(true);
         let _ = write(&pending, &resumed);
     }
@@ -1147,7 +1156,7 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
             continue;
         }
         let card = if other == "codex" {
-            codex_card(repo, max)
+            codex_card(repo, max, ctx)
         } else {
             load(&repo.join(".oms/hooks/relay/claude.json"))
         };
@@ -1155,7 +1164,7 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
         let Some(at) = epoch(ended) else {
             continue;
         };
-        if seconds() - at > max || old["seen"][other] == ended {
+        if ctx.snapshot.seconds() - at > max || old["seen"][other] == ended {
             continue;
         }
         old["seen"][other] = json!(ended);
@@ -1166,7 +1175,7 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
             .join(" ");
         lines.push(format!(
             "[oms relay] {other} finished a turn ~{}m ago{}: {}",
-            ((seconds() - at) / 60.).max(0.) as u64,
+            ((ctx.snapshot.seconds() - at) / 60.).max(0.) as u64,
             if place.is_empty() {
                 String::new()
             } else {
@@ -1182,11 +1191,12 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
         return String::new();
     }
     old["schema"] = json!(1);
-    old["updated_at"] = json!(now());
+    old["updated_at"] = json!(ctx.snapshot.now());
     if write(&path, &old).is_err() {
         return String::new();
     }
     event_row(
+        ctx,
         repo,
         v,
         json!({"action":"relay","status":"shown","agents":lines.len()}),
@@ -1194,8 +1204,8 @@ pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     lines.push("[oms relay] Tell the user this first; continue that work only if they ask.".into());
     lines.join("\n")
 }
-fn codex_card(repo: &Path, max_age: f64) -> Value {
-    let now_secs = seconds();
+fn codex_card(repo: &Path, max_age: f64, ctx: &Context<'_>) -> Value {
+    let now_secs = ctx.snapshot.seconds();
     let notify = crate::notify::thread_id();
     let mut files = crate::notify::rollout_files()
         .into_iter()
@@ -1371,10 +1381,9 @@ impl oms_command_task::Services for TaskServices<'_> {
 }
 fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, ctx: &Context<'_>) {
     if env("OMS_AUTO_TASK") != "1"
-        || regex::Regex::new(
+        || cached_regex!(
             r"(?i)^\s*(hi|hello|hey|thanks|thank you|안녕|안녕하세요|고마워|고맙|감사)\b",
         )
-        .unwrap()
         .is_match(prompt)
     {
         return;
@@ -1388,6 +1397,7 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
         && ["created", "appended", "rotated"].contains(&text(&previous, "status"))
     {
         event_row(
+            ctx,
             repo,
             v,
             json!({"action":"auto_task","status":"deduped","workflow":workflow,"risk":risk,"prompt_hash":digest}),
@@ -1395,7 +1405,7 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
         return;
     }
     let excerpt = clip(&flat(prompt), 600);
-    let explicit = regex::Regex::new(r"(?i)^\s*(goal|objective|목표)\s*[:：]\s*(.+)$").unwrap();
+    let explicit = cached_regex!(r"(?i)^\s*(goal|objective|목표)\s*[:：]\s*(.+)$");
     let explicit = explicit
         .captures(prompt.trim().lines().next().unwrap_or(""))
         .map(|c| clip(&flat(&c[2]), 600));
@@ -1422,7 +1432,7 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
             cap("OMS_AGENT_TASK_TTL", 604800, 0, 315360000)
                 .to_string()
                 .as_bytes(),
-            chrono::DateTime::from(std::time::SystemTime::now()),
+            chrono::DateTime::from(ctx.snapshot.time()),
         );
     let mut status = if task.is_empty() {
         "created"
@@ -1469,6 +1479,7 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
         }
         if call(args, &[]) != 0 {
             event_row(
+                ctx,
                 repo,
                 v,
                 json!({"action":"auto_task","status":"skipped_sensitive_or_error","workflow":workflow,"risk":risk,"prompt_hash":digest}),
@@ -1509,12 +1520,13 @@ fn auto_task(v: &Value, prompt: &str, workflow: &str, risk: &str, repo: &Path, c
         );
         let _ = write(
             &path,
-            &json!({"schema":1,"updated_at":now(),"session":source,"turn_id":turn,"prompt_hash":digest,"status":status}),
+            &json!({"schema":1,"updated_at":ctx.snapshot.now(),"session":source,"turn_id":turn,"prompt_hash":digest,"status":status}),
         );
     } else {
         status = "skipped_sensitive_or_error";
     }
     event_row(
+        ctx,
         repo,
         v,
         json!({"action":"auto_task","status":status,"workflow":workflow,"risk":risk,"prompt_hash":digest,"task":".oms/task/current.md"}),

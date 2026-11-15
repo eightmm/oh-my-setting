@@ -25,13 +25,19 @@ pub fn run(name: &str, args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Outp
     }
 }
 pub(crate) fn telemetry(v: &Value, ctx: &Context<'_>) {
-    let Some(repo) = repo(v, ctx).filter(|r| adopted(r)) else {
-        return;
-    };
-    activity(v, &repo, ctx);
     if event(v) == "Notification" {
+        if v["notification_type"] != "permission_prompt"
+            && !(panel() && v["notification_type"] == "elicitation_dialog")
+        {
+            return;
+        }
+        let Some(repo) = repo(v, ctx).filter(|r| adopted(r)) else {
+            return;
+        };
+        activity(v, &repo, ctx);
         if v["notification_type"] == "permission_prompt" {
             event_row(
+                ctx,
                 &repo,
                 v,
                 json!({"action":"permission_prompt","notification_type":"permission_prompt"}),
@@ -159,16 +165,25 @@ pub(crate) fn telemetry(v: &Value, ctx: &Context<'_>) {
             }
         }
     }
-    if ["SessionStart", "SessionEnd"].contains(&event(v))
+    let emit = ["SessionStart", "SessionEnd"].contains(&event(v))
         || any
         || fields["success"] == false
-        || env("OMS_TELEMETRY_DEBUG") == "1"
-    {
-        event_row(&repo, v, fields);
+        || env("OMS_TELEMETRY_DEBUG") == "1";
+    if !emit && !panel() {
+        return;
+    }
+    let Some(repo) = repo(v, ctx).filter(|r| adopted(r)) else {
+        return;
+    };
+    activity(v, &repo, ctx);
+    if emit {
+        event_row(ctx, &repo, v, fields);
     }
 }
 pub(crate) fn activity(v: &Value, repo: &Path, ctx: &Context<'_>) {
-    if !panel() || !["UserPromptSubmit", "PostToolUse", "Stop", "Notification"].contains(&event(v))
+    if ctx.snapshot.activity.get().is_some()
+        || !panel()
+        || !["UserPromptSubmit", "PostToolUse", "Stop", "Notification"].contains(&event(v))
     {
         return;
     }
@@ -188,9 +203,9 @@ pub(crate) fn activity(v: &Value, repo: &Path, ctx: &Context<'_>) {
         None
     };
     let path = repo.join(format!(".oms/hooks/panel-activity/{who}.json"));
-    let _ = mutate(&path, 4096, false, |raw| {
+    let updated = mutate(&path, 4096, false, |raw| {
         let old = document(raw).unwrap_or_else(|| json!({}));
-        let now = seconds();
+        let now = ctx.snapshot.seconds();
         let same = text(&old, "attempt") == attempt && text(&old, "room") == room;
         if event(v) == "PostToolUse"
             && same
@@ -207,7 +222,7 @@ pub(crate) fn activity(v: &Value, repo: &Path, ctx: &Context<'_>) {
             String::new()
         };
         if event(v) == "UserPromptSubmit" {
-            origin=if agent(v, ctx)=="claude"&&!same||regex::Regex::new(r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b|Another Claude session sent a message:|Your claude\.ai usage limit has reset\b)").unwrap().is_match(text(v,"prompt")){"harness"}else{"user"}.into();
+            origin=if agent(v, ctx)=="claude"&&!same||cached_regex!(r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b|Another Claude session sent a message:|Your claude\.ai usage limit has reset\b)").is_match(text(v,"prompt")){"harness"}else{"user"}.into();
         }
         let state = if kind.is_some() {
             "waiting"
@@ -237,6 +252,9 @@ pub(crate) fn activity(v: &Value, repo: &Path, ctx: &Context<'_>) {
         }
         Ok((json_line(&row), ()))
     });
+    if updated.is_ok() {
+        let _ = ctx.snapshot.activity.set(());
+    }
 }
 pub(crate) fn ledger(args: &[&str], repo: &Path, ctx: &Context<'_>) -> Output {
     let mut argv = vec![OsString::from("--repo"), repo.as_os_str().into()];
@@ -277,12 +295,10 @@ fn failure(v: &Value, ctx: &Context<'_>) -> Output {
             return empty();
         }
         let mut normalized = command.replace(home().to_string_lossy().as_ref(), "~");
-        normalized = regex::Regex::new(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+")
-            .unwrap()
+        normalized = cached_regex!(r"/(?:hom[e]|User[s])/[A-Za-z0-9._-]+")
             .replace_all(&normalized, "~")
             .into_owned();
-        normalized = regex::Regex::new(r"\d{8,}")
-            .unwrap()
+        normalized = cached_regex!(r"\d{8,}")
             .replace_all(
                 &normalized.split_whitespace().collect::<Vec<_>>().join(" "),
                 "N",
@@ -323,19 +339,14 @@ fn failure(v: &Value, ctx: &Context<'_>) -> Output {
         return empty();
     }
     let exit = if event(v) == "PostToolUseFailure" {
-        regex::Regex::new(r"^Exit code (\d+)")
-            .unwrap()
+        cached_regex!(r"^Exit code (\d+)")
             .captures(text(v, "error"))
             .and_then(|c| c[1].parse::<u64>().ok())
             .unwrap_or(1)
     } else {
         1
     };
-    if [0, 130, 141, 143].contains(&exit)
-        || regex::Regex::new(r"/tmp/claude-\d+/")
-            .unwrap()
-            .is_match(&command)
-    {
+    if [0, 130, 141, 143].contains(&exit) || cached_regex!(r"/tmp/claude-\d+/").is_match(&command) {
         return empty();
     }
     let prior = ledger(&["check", "--cmd", &command], &repo, ctx);
@@ -394,31 +405,48 @@ fn usage(_v: &Value, command: &str, repo: &Path, ctx: &Context<'_>) {
         return;
     }
     let override_path = ctx.source.join("config/usage-families.json");
+    let configured;
     let families = if override_path.is_file() {
-        load(&override_path)
+        configured = compile_usage(&load(&override_path));
+        &configured
     } else {
-        serde_json::from_str(EMBEDDED_USAGE_FAMILIES).unwrap_or_else(|_| json!({}))
+        static FAMILIES: std::sync::OnceLock<Vec<(String, regex::Regex)>> =
+            std::sync::OnceLock::new();
+        FAMILIES.get_or_init(|| {
+            compile_usage(
+                &serde_json::from_str(EMBEDDED_USAGE_FAMILIES).unwrap_or_else(|_| json!({})),
+            )
+        })
     };
-    let day = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+    let day = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time())
         .format("%Y-%m-%d")
         .to_string();
-    if let Some(families) = families["families"].as_object() {
-        for (name, spec) in families {
-            if regex::Regex::new(text(spec, "pattern"))
-                .ok()
-                .is_some_and(|re| {
-                    !text(spec, "pattern").is_empty() && re.is_match(&command.to_lowercase())
-                })
-            {
-                let _ = append(
-                    &repo.join(".oms/usage.jsonl"),
-                    &json!({"schema":1,"family":name,"day":day}),
-                    64 * INPUT_MAX,
-                );
-            }
+    let command = command.to_lowercase();
+    for (name, pattern) in families {
+        if pattern.is_match(&command) {
+            let _ = append(
+                &repo.join(".oms/usage.jsonl"),
+                &json!({"schema":1,"family":name,"day":day}),
+                64 * INPUT_MAX,
+            );
         }
     }
 }
+fn compile_usage(value: &Value) -> Vec<(String, regex::Regex)> {
+    value["families"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, spec)| {
+            let pattern = text(spec, "pattern");
+            if pattern.is_empty() {
+                return None;
+            }
+            regex::Regex::new(pattern).ok().map(|re| (name.clone(), re))
+        })
+        .collect()
+}
+
 pub(crate) fn capture(
     v: &Value,
     repo: &Path,
@@ -528,7 +556,7 @@ pub(crate) fn journal(repo: &Path, prompt: bool, ctx: &Context<'_>) -> Vec<u8> {
         let text = std::str::from_utf8(&raw).ok()?;
         let lines = text.lines().collect::<Vec<_>>();
         if lines.len() != 6
-            || lines[0].parse::<f64>().ok()? <= seconds()
+            || lines[0].parse::<f64>().ok()? <= ctx.snapshot.seconds()
             || head(repo).as_deref() != Some(lines[1])
             || prompt && lines[5] != signature
         {
@@ -559,7 +587,7 @@ pub(crate) fn journal(repo: &Path, prompt: bool, ctx: &Context<'_>) -> Vec<u8> {
             return Ok(String::new());
         }
         let store = oms_command_journal::store::JournalStore::open_for_write(repo, None)?;
-        let now = oms_command_journal::tz::current_utc_now();
+        let now = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time());
         store.capture_head_commit(now)?;
         store.materialize()?;
         let mut output = String::new();
@@ -603,7 +631,7 @@ pub(crate) fn stop(v: &Value, ctx: &Context<'_>) -> Output {
         match budget(v, &repo, ctx) {
             Ok(Some(reason)) => {
                 let raw = json_line(&json!({"decision":"block","reason":reason}));
-                injection(&repo, v, "turn-guard", &raw);
+                injection(ctx, &repo, v, "turn-guard", &raw);
                 return out(raw);
             }
             Err(_) => {
@@ -725,12 +753,12 @@ fn budget(v: &Value, repo: &Path, ctx: &Context<'_>) -> Result<Option<String>, S
     }
     let turns_cap = cap("OMS_SESSION_BUDGET_TURNS", 0, 0, u64::MAX);
     let hours_cap = cap("OMS_SESSION_BUDGET_HOURS", 0, 0, u64::MAX);
-    let now_secs = seconds();
+    let now_secs = ctx.snapshot.seconds();
     let result = mutate(&path, STATE_MAX, false, |raw| {
         let mut state = document(raw).ok_or("invalid budget state")?;
         let began = epoch(text(&state, "started_at")).unwrap_or(now_secs);
         if epoch(text(&state, "started_at")).is_none() {
-            state["started_at"] = json!(now());
+            state["started_at"] = json!(ctx.snapshot.now());
         }
         let turns = state["budget_turns"]
             .as_u64()
@@ -752,7 +780,7 @@ fn budget(v: &Value, repo: &Path, ctx: &Context<'_>) -> Result<Option<String>, S
         let continuing = v["stop_hook_active"] == true || v["stopHookActive"] == true;
         let block = band >= 4 && band > latched && !continuing;
         state["budget_turns"] = json!(turns);
-        state["updated_at"] = json!(now());
+        state["updated_at"] = json!(ctx.snapshot.now());
         if block {
             state["budget_band"] = json!(band);
         }
@@ -772,6 +800,7 @@ fn budget(v: &Value, repo: &Path, ctx: &Context<'_>) -> Result<Option<String>, S
             ctx,
         );
     event_row(
+        ctx,
         repo,
         v,
         json!({"action":"session_budget","status":"block","turns":turns,"hours":(hours*10.).round_ties_even()/10.,"capture":if captured{"started"}else{"skipped"}}),
@@ -809,7 +838,7 @@ fn claude_session_project(v: &Value, ctx: &Context<'_>) -> Option<std::path::Pat
         .then(|| root(Path::new(&project), ctx.cwd))
         .flatten()
 }
-pub(crate) fn pending_background(v: &Value, max_age_secs: f64) -> usize {
+pub(crate) fn pending_background(v: &Value, max_age_secs: f64, now: f64) -> usize {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{BufRead, BufReader, Read};
     let transcript = first(v, &["transcript_path", "transcriptPath"]);
@@ -819,13 +848,11 @@ pub(crate) fn pending_background(v: &Value, max_age_secs: f64) -> usize {
     let Ok(file) = fs::File::open(transcript) else {
         return 0;
     };
-    let launch_re = regex::Regex::new(
+    let launch_re = cached_regex!(
         r"^(?:Command running in background with ID: |Monitor started \(task )([A-Za-z0-9_-]+)",
-    )
-    .unwrap();
+    );
     let end_re =
-        regex::Regex::new(r"(?s)<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>")
-            .unwrap();
+        cached_regex!(r"(?s)<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>");
     let mut launched: BTreeMap<String, f64> = BTreeMap::new();
     let mut ended: BTreeSet<String> = BTreeSet::new();
     let reader = BufReader::new(file.take(16 * 1024 * 1024));
@@ -896,7 +923,6 @@ pub(crate) fn pending_background(v: &Value, max_age_secs: f64) -> usize {
             }
         }
     }
-    let now = seconds();
     launched
         .into_iter()
         .filter(|(tid, at)| !ended.contains(tid) && (now - *at) <= max_age_secs)
@@ -925,8 +951,8 @@ fn start_codex_notify_with(
     let Some(started) = state["prompt_at"].as_f64() else {
         return;
     };
-    let elapsed = seconds() - started;
-    if elapsed < 30.0 || pending_background(v, 86400.0) > 0 {
+    let elapsed = ctx.snapshot.seconds() - started;
+    if elapsed < 30.0 || pending_background(v, 86400.0, ctx.snapshot.seconds()) > 0 {
         return;
     }
     let elapsed_secs = elapsed as u64;
@@ -976,7 +1002,7 @@ pub(crate) fn relay(v: &Value, repo: &Path, ctx: &Context<'_>) {
         .chars()
         .skip(message.chars().count().saturating_sub(4000))
         .collect::<String>();
-    let row = json!({"schema":1,"agent":"claude","session":session_hash(v),"ended_at":now(),"head":git(repo,&["rev-parse","--short","HEAD"],ctx).unwrap_or_default(),"branch":git(repo,&["branch","--show-current"],ctx).unwrap_or_default(),"message":safe_text(&tail,cap("OMS_RELAY_BYTES",800,120,4000)as usize)});
+    let row = json!({"schema":1,"agent":"claude","session":session_hash(v),"ended_at":ctx.snapshot.now(),"head":git(repo,&["rev-parse","--short","HEAD"],ctx).unwrap_or_default(),"branch":git(repo,&["branch","--show-current"],ctx).unwrap_or_default(),"message":safe_text(&tail,cap("OMS_RELAY_BYTES",800,120,4000)as usize)});
     let _ = write(&repo.join(".oms/hooks/relay/claude.json"), &row);
 }
 pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
@@ -1006,7 +1032,7 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
     let goal = section("Goal");
     if !task_id.is_empty() && status != "closed" {
         let days = epoch(&meta("last_activity"))
-            .map(|s| ((seconds() - s) / 86400.).floor() as i64)
+            .map(|s| ((ctx.snapshot.seconds() - s) / 86400.).floor() as i64)
             .unwrap_or(0);
         lines.push(format!(
             "- task {task_id} ({status}{}): {}",
@@ -1162,7 +1188,7 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
     if panel() && ["startup", "compact", "clear", "resume"].contains(&text(v, "source")) {
         let _ = write(
             &state_path(&repo, v, ".resume"),
-            &json!({"schema":1,"updated_at":now(),"source":text(v,"source")}),
+            &json!({"schema":1,"updated_at":ctx.snapshot.now(),"source":text(v,"source")}),
         );
         let _ = std::fs::remove_file(state_path(&repo, v, ".hint"));
     }
@@ -1194,7 +1220,7 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         body = clip(&body, 4096 - footer.len());
     }
     body.push_str(&footer);
-    injection(&repo, v, "resume", body.as_bytes());
+    injection(ctx, &repo, v, "resume", body.as_bytes());
     if let Some((line, name)) = handoff
         && body.contains(&line)
     {
@@ -1205,7 +1231,7 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         };
         let _ = append(
             &repo.join(".oms/handoffs/consumed.jsonl"),
-            &json!({"schema":1,"kind":"handoff-consumed","handoff":name,"session":sid,"ts":now()}),
+            &json!({"schema":1,"kind":"handoff-consumed","handoff":name,"session":sid,"ts":ctx.snapshot.now()}),
             64 * INPUT_MAX,
         );
     }
@@ -1514,7 +1540,7 @@ mod tests {
         .expect("write transcript");
 
         let payload = json!({"transcript_path": transcript});
-        assert_eq!(pending_background(&payload, 86400.0), 1);
+        assert_eq!(pending_background(&payload, 86400.0, seconds()), 1);
     }
 
     #[test]
@@ -1533,7 +1559,9 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let host = MockHost::default();
+        let snapshot = Snapshot::default();
         let ctx = Context {
+            snapshot: &snapshot,
             provider: Some("claude"),
             cwd: &repo,
             source: &repo,
@@ -1592,7 +1620,9 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let host = MockHost::default();
+        let snapshot = Snapshot::default();
         let ctx = Context {
+            snapshot: &snapshot,
             provider: Some("claude"),
             cwd: &repo,
             source: &repo,
@@ -1623,7 +1653,9 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let host = MockHost::default();
+        let snapshot = Snapshot::default();
         let ctx = Context {
+            snapshot: &snapshot,
             provider: Some("claude"),
             cwd: &repo,
             source: &repo,

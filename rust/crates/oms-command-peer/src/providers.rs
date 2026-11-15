@@ -385,7 +385,7 @@ fn account_environment(
     let mut accounts = Vec::new();
     let mut ids = BTreeSet::new();
     let mut homes = BTreeSet::new();
-    let id_re = regex::Regex::new(r"\A[a-z0-9][a-z0-9_-]{0,63}\z").unwrap();
+    let id_re = cached_regex!(r"\A[a-z0-9][a-z0-9_-]{0,63}\z");
     for entry in entries {
         if !keys_are(entry, &["id", "home"]) || !entry.has("id") || !entry.has("home") {
             return fail("unknown or missing provider account fields");
@@ -439,26 +439,26 @@ fn account_environment(
     }
 }
 pub fn answer_quality(raw: &str) -> &'static str {
-    let lines = raw.lines().collect::<Vec<_>>();
-    let from = lines
-        .iter()
-        .rposition(|line| *line == "## Output")
-        .map_or(0, |at| at + 1);
-    let timeout = regex::Regex::new(
+    let mut from = 0;
+    for (at, line) in raw.lines().enumerate() {
+        if line == "## Output" {
+            from = at + 1;
+        }
+    }
+    let timeout = cached_regex!(
         r"^\[agy\] print timeout after .+ with turn in progress; returning partial output$",
-    )
-    .unwrap();
-    if lines[from..]
-        .iter()
+    );
+    if raw
+        .lines()
+        .skip(from)
         .any(|line| timeout.is_match(line.trim()))
     {
         return "truncated";
     }
-    let stop = regex::Regex::new(
+    let stop = cached_regex!(
         r"^stop-reason: provider=\S+ reason=(\S+) subtype=\S+ is_error=([01])(?: category=\S+)?$",
-    )
-    .unwrap();
-    for line in &lines[from..] {
+    );
+    for line in raw.lines().skip(from) {
         if let Some(capture) = stop.captures(line.trim()) {
             if &capture[2] == "1" || &capture[1] == "refusal" {
                 return "blocked";
@@ -469,19 +469,24 @@ pub fn answer_quality(raw: &str) -> &'static str {
             break;
         }
     }
-    let noise = regex::Regex::new(concat!(
+    let noise = cached_regex!(concat!(
         r"^\s*(model-route:|model-result:|usage detail:|",
         r"tok",
         r"ens used|\[REDACTED|OpenAI Codex|\[untrusted |\[end untrusted |",
         r"workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|",
         r"reasoning summaries:|session id:|-{3,}$|user$|DRY RUN)"
-    ))
-    .unwrap();
-    let headings = regex::Regex::new(r"(?i)^(?:#{1,6}\s*)?(?:Answer|Alternatives|Tradeoffs|Evidence|Counterargument|Risks|Recommendation|Verification|Changed from previous round|Remaining disagreements):\s*$").unwrap();
-    let refusal = regex::Regex::new(r"(?i)^(jetski: no output produced\b|add an allow-rule\b|alternatively, re-run with\b|.*\bcommand not found\b|(error|fatal)[: ].*\b(permission|not authenticated|not logged in|unauthorized|invalid api key|quota|rate limit)\b)").unwrap();
+    ));
+    let headings = cached_regex!(
+        r"(?i)^(?:#{1,6}\s*)?(?:Answer|Alternatives|Tradeoffs|Evidence|Counterargument|Risks|Recommendation|Verification|Changed from previous round|Remaining disagreements):\s*$"
+    );
+    let refusal = cached_regex!(
+        r"(?i)^(jetski: no output produced\b|add an allow-rule\b|alternatively, re-run with\b|.*\bcommand not found\b|(error|fatal)[: ].*\b(permission|not authenticated|not logged in|unauthorized|invalid api key|quota|rate limit)\b)"
+    );
     let mut skip_next = false;
-    let mut content = Vec::new();
-    for line in lines {
+    let mut content = false;
+    let mut only_headings = true;
+    let mut only_refusals = true;
+    for line in raw.lines() {
         if skip_next {
             skip_next = false;
             continue;
@@ -499,12 +504,14 @@ pub fn answer_quality(raw: &str) -> &'static str {
             continue;
         }
         if !trimmed.is_empty() && !noise.is_match(line) && !stop.is_match(trimmed) {
-            content.push(trimmed);
+            content = true;
+            only_headings = only_headings && headings.is_match(trimmed);
+            only_refusals = only_refusals && refusal.is_match(trimmed);
         }
     }
-    if content.is_empty() || content.iter().all(|line| headings.is_match(line)) {
+    if !content || only_headings {
         "empty"
-    } else if content.iter().all(|line| refusal.is_match(line)) {
+    } else if only_refusals {
         "blocked"
     } else {
         "ok"
@@ -927,10 +934,7 @@ fn configured_model(route: &Route, profile: Option<&std::ffi::OsStr>) -> Option<
         .ok()?;
     let config = oms_toml::parse_bounded(&raw, 4 * 1024 * 1024).ok()?;
     let model = config.get("model")?.as_str()?;
-    if !regex::Regex::new(r"\A[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}\z")
-        .ok()?
-        .is_match(model)
-    {
+    if !cached_regex!(r"\A[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}\z").is_match(model) {
         return None;
     }
     Some(model.to_owned())

@@ -122,7 +122,7 @@ pub fn facts(
             result.set(&(prefix + "reason"), st(task, "reason"));
         }
     }
-    let store = oms_command_plan::storage::Store::open(repo)?;
+    let store = crate::util::open_store(repo)?;
     let mut latest_admit = BTreeMap::new();
     let mut lands: BTreeMap<String, bool> = BTreeMap::new();
     let mut acceptance = Value::Null;
@@ -1225,12 +1225,14 @@ pub fn run_with_host(
                 cached,
             });
         }
+        let inherited_groups = crate::util::current_group_resolver();
         std::thread::scope(|scope| -> Result<()> {
             let (sender, receiver) = std::sync::mpsc::channel();
             for (index, job) in jobs.iter().enumerate() {
                 let sender = sender.clone();
                 let run = &run;
                 scope.spawn(move || {
+                    let _groups_guard = crate::util::with_group_resolver(inherited_groups);
                     let raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         work(repo, run, args, cancel, helper, job, services, host)
                     }))

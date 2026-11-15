@@ -860,3 +860,68 @@ fn skill_router_debounces_session_state_rewrites_within_a_minute() {
     let healed: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert_eq!(healed["schema"], 1);
 }
+
+#[test]
+fn panel_safe_point_reads_activity_once_and_keeps_noop_hook_parity() {
+    let name = "panel_safe_point_reads_activity_once_and_keeps_noop_hook_parity";
+    let extra = [
+        ("OMS_PANEL_MAIN_ATTEMPT", "att_test"),
+        ("OMS_PANEL_SESSION", "oms-test"),
+        ("OMS_ROOM_ID", "room-test"),
+        ("OMS_ROOM_PARTICIPANT", "part-test"),
+        ("OMS_LIVE_COLLAB", "0"),
+    ];
+    if !clean_env_child(name, &extra) {
+        return;
+    }
+    let tmp = TempDir::new("activity-once");
+    let repo = git_repo(&tmp);
+    let transcript = "t".repeat(2800);
+    let state = repo.join(".oms/hooks/panel-activity/part-test.json");
+    fs::create_dir_all(state.parent().unwrap()).unwrap();
+    let seed = serde_json::json!({"schema":1,"participant":"part-test","attempt":"att_test","room":"room-test","state":"busy","since":0,"updated_at":0,"origin":"user","transcript_path":transcript});
+    let seeded = format!("{seed}\n");
+    fs::write(&state, &seeded).unwrap();
+    let reads = || -> Option<u64> {
+        fs::read_to_string("/proc/self/io")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("rchar: ")?.trim().parse().ok())
+    };
+    let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":"s1","prompt":"","transcript_path":transcript});
+    let before = reads();
+    assert_eq!(harness(&tmp, "panel-hook", &payload), (0, String::new()));
+    if let (Some(before), Some(after)) = (before, reads()) {
+        assert!(
+            after - before < seeded.len() as u64 + 1024,
+            "activity read {} bytes for {} bytes of state",
+            after - before,
+            seeded.len()
+        );
+    }
+    let row: serde_json::Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    assert_eq!(row["state"], "busy");
+    assert_eq!(row["origin"], "user");
+    assert_eq!(row["since"], row["updated_at"]);
+    // A fresh invocation must still record a different event.
+    let stopped = serde_json::json!({"hook_event_name":"Stop","cwd":repo,"session_id":"s1"});
+    assert_eq!(harness(&tmp, "panel-hook", &stopped), (0, String::new()));
+    let row: serde_json::Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    assert_eq!(row["state"], "idle");
+    for raw in [
+        b"".as_slice(),
+        b"null",
+        b"[]",
+        b"{",
+        b"{}",
+        b"{\"duration_ms\":0}",
+    ] {
+        assert_eq!(hook(&tmp, "telemetry-hook", &[], raw).0, 0);
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            oms_command_hooks::notify::safe_message("hello\nworld", &repo, 64),
+            "hello\nworld\n"
+        );
+    }
+}

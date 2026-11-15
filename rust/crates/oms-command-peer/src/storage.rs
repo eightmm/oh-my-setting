@@ -86,19 +86,21 @@ pub fn load(repo: &Path, path: &Path) -> Result<Vec<V>> {
     rows(&read(repo, path, true)?)
 }
 pub fn latest(rows: &[V]) -> Result<Vec<V>> {
-    let mut values: Vec<V> = Vec::new();
+    let mut positions = std::collections::HashMap::new();
+    let mut values: Vec<&V> = Vec::new();
     for row in rows {
         let ident = crate::text(row, "id");
         if ident.is_empty() {
             return fail("record has no id");
         }
-        if let Some(old) = values.iter_mut().find(|v| crate::text(v, "id") == ident) {
-            *old = row.clone();
+        if let Some(&position) = positions.get(ident) {
+            values[position] = row;
         } else {
-            values.push(row.clone());
+            positions.insert(ident, values.len());
+            values.push(row);
         }
     }
-    Ok(values)
+    Ok(values.into_iter().cloned().collect())
 }
 pub fn lock(repo: &Path, path: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Guard> {
     relative(path)?;

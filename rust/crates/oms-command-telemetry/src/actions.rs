@@ -193,6 +193,7 @@ fn execute(o: &Options, caller: &Path, interrupted: &AtomicBool) -> Result<(i32,
 
 struct Joins<'a> {
     rows: &'a [V],
+    by_id: BTreeMap<&'a str, &'a V>,
     counts: BTreeMap<String, usize>,
     resolved: BTreeSet<Vec<u8>>,
     superseded: BTreeMap<String, String>,
@@ -209,6 +210,7 @@ impl<'a> Joins<'a> {
     fn new(rows: &'a [V]) -> Self {
         let mut j = Self {
             rows,
+            by_id: BTreeMap::new(),
             counts: BTreeMap::new(),
             resolved: crate::report::resolved(rows),
             superseded: BTreeMap::new(),
@@ -216,6 +218,7 @@ impl<'a> Joins<'a> {
             claimed: BTreeSet::new(),
         };
         for r in rows {
+            j.by_id.entry(text(r, "event_id")).or_insert(r);
             if let Some(id) = r["event_id"].text() {
                 *j.counts.entry(id.into()).or_default() += 1;
             }
@@ -580,9 +583,10 @@ fn resolve(
             if !ids.insert(id) {
                 continue;
             }
-            let r = rows
-                .iter()
-                .find(|r| text(r, "event_id") == id)
+            let r = j
+                .by_id
+                .get(id.as_str())
+                .copied()
                 .ok_or_else(|| outcome_error(format!("unknown artifact event: {id}")))?;
             if !j.complete(r) {
                 return Err(outcome_error(format!(
@@ -623,10 +627,10 @@ fn resolve(
                 && (!j.complete(r)
                     || j.claimed.contains(id)
                     || j.counts.get(winner) != Some(&1)
-                    || !rows.iter().any(|candidate| {
-                        text(candidate, "event_id") == winner
-                            && candidate["provider"] == r["provider"]
-                    }))
+                    || !j
+                        .by_id
+                        .get(winner.as_str())
+                        .is_some_and(|candidate| candidate["provider"] == r["provider"]))
             {
                 continue;
             }
@@ -1098,6 +1102,17 @@ fn migrate(
     interrupted: &AtomicBool,
 ) -> Result<String> {
     let files = artifact_files(root)?;
+    let mut by_name = BTreeMap::<_, Vec<_>>::new();
+    for path in &files {
+        by_name.entry(path.file_name()).or_default().push(path);
+    }
+    let mut digests = BTreeMap::new();
+    let mut digest_path = |path: &Path| {
+        digests
+            .entry(path.to_path_buf())
+            .or_insert_with(|| digest(root, path))
+            .clone()
+    };
     let mut changed = 0;
     let mut legacy = 0;
     let mut body = Vec::new();
@@ -1116,7 +1131,7 @@ fn migrate(
             let candidate = root.physical_root().join(path);
             if let Ok(canonical) = std::fs::canonicalize(&candidate)
                 && canonical.starts_with(root.physical_root())
-                && digest(root, &canonical).is_some()
+                && digest_path(&canonical).is_some()
             {
                 r[key] = canonical
                     .strip_prefix(root.physical_root())
@@ -1126,10 +1141,10 @@ fn migrate(
                     .into();
                 continue;
             }
-            let matches: Vec<_> = files
-                .iter()
-                .filter(|p| p.file_name() == path.file_name())
-                .collect();
+            let matches = by_name
+                .get(&path.file_name())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             if matches.len() == 1 {
                 r[key] = matches[0]
                     .strip_prefix(root.physical_root())
@@ -1139,7 +1154,7 @@ fn migrate(
                     .into();
             } else {
                 let mut ext = obj!("name":path.file_name().unwrap_or_default().to_string_lossy().to_string(),"owned":false,"legacy_unresolved":true);
-                if let Some(h) = digest(root, &candidate) {
+                if let Some(h) = digest_path(&candidate) {
                     ext["sha256"] = h.into();
                     ext.remove("legacy_unresolved");
                 }
@@ -1163,7 +1178,7 @@ fn migrate(
             let mut primary = None;
             for key in ["artifact", "patch"] {
                 if let Some(p) = r[key].text().filter(|s| !s.is_empty()) {
-                    primary = digest(root, Path::new(p)).or(primary);
+                    primary = digest_path(Path::new(p)).or(primary);
                 }
             }
             r["artifact_id"] = format!(
@@ -1187,9 +1202,12 @@ fn migrate(
         keep
     };
     let body = bounded(root.physical_root(), &lines(&body)?, keep, &[])?;
-    mutate(root, target, false, Some(snapshot), interrupted, |_| {
-        Ok(body.clone())
-    })?;
+    // Serialization alone is not a migration: retain exact bytes when no row changed.
+    if changed != 0 || lines(&body)?.len() != rows.len() {
+        mutate(root, target, false, Some(snapshot), interrupted, |_| {
+            Ok(body.clone())
+        })?;
+    }
     Ok(format!(
         "artifact-index: migrated {changed} row(s); legacy={legacy}; total={}\n",
         lines(&body)?.len()

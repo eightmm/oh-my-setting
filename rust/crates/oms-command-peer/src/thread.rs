@@ -27,7 +27,7 @@ fn active_task(repo: &Path) -> String {
         })
         .unwrap_or_default()
 }
-pub(crate) fn current(repo: &Path) -> Option<String> {
+fn current_id(repo: &Path) -> Option<String> {
     let bytes = storage::read(repo, Path::new(".oms/threads/CURRENT"), true).ok()?;
     let line = String::from_utf8_lossy(&bytes);
     let parts: Vec<_> = line.lines().next()?.split_whitespace().collect();
@@ -45,8 +45,15 @@ pub(crate) fn current(repo: &Path) -> Option<String> {
     if crate::seconds().saturating_sub(minted) > ttl {
         return None;
     }
-    storage::read(repo, &path(parts[0]).ok()?, false).ok()?;
     Some(parts[0].into())
+}
+fn current_snapshot(repo: &Path) -> Option<(String, Vec<u8>)> {
+    let ident = current_id(repo)?;
+    let bytes = storage::read(repo, &path(&ident).ok()?, false).ok()?;
+    Some((ident, bytes))
+}
+pub(crate) fn current(repo: &Path) -> Option<String> {
+    current_snapshot(repo).map(|(ident, _)| ident)
 }
 fn set_current(repo: &Path, ident: &str, context: &Context<'_>) -> Result<()> {
     storage::write(
@@ -59,19 +66,20 @@ fn set_current(repo: &Path, ident: &str, context: &Context<'_>) -> Result<()> {
 }
 fn load(repo: &Path, ident: &str) -> Result<Vec<V>> {
     let bytes = storage::read(repo, &path(ident)?, false)?;
+    parse_log(&bytes, ident)
+}
+fn parse_log(bytes: &[u8], ident: &str) -> Result<Vec<V>> {
     if bytes.len() > MAX_LOG {
         return fail("thread exceeds storage budget");
     }
-    let rows = storage::rows(&bytes)?;
+    let rows = storage::rows(bytes)?;
     if rows.iter().any(|row| text(row, "thread") != ident) {
         return fail("thread id does not match its log");
     }
     Ok(rows)
 }
 fn room_log(ident: &str, rows: &[V]) -> bool {
-    regex::Regex::new(r"(?i)\Aroom-[0-9a-f]{12}\z")
-        .unwrap()
-        .is_match(ident)
+    cached_regex!(r"(?i)\Aroom-[0-9a-f]{12}\z").is_match(ident)
         || rows
             .iter()
             .any(|r| text(r.get("room_event"), "kind") == "created")
@@ -441,8 +449,21 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         return fail("close --stale cannot combine with --id, --all or --json");
     }
     let repo = storage::repository(context, &args.path("repo", context.cwd))?;
+    if matches!(args.action(), "list" | "stats") {
+        return listing(&repo, &args);
+    }
+    if args.action() == "close" && args.has("stale") {
+        return close_stale(&repo, &args, context);
+    }
+    let selected = if args.action() == "show" && !args.has("id") {
+        current_snapshot(&repo)
+    } else {
+        None
+    };
     let ident = if args.has("id") {
         Some(args.get("id").to_owned())
+    } else if args.action() == "show" {
+        selected.as_ref().map(|(ident, _)| ident.clone())
     } else {
         current(&repo)
     };
@@ -481,8 +502,6 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             }
             return Ok(out(format!("{ident}\n").into_bytes()));
         }
-        "list" | "stats" => return listing(&repo, &args),
-        "close" if args.has("stale") => return close_stale(&repo, &args, context),
         _ => {}
     }
     let ident =
@@ -498,7 +517,10 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         )?
         .into_bytes())),
         "show" => {
-            let rows = load(&repo, &ident)?;
+            let rows = match selected {
+                Some((_, bytes)) => parse_log(&bytes, &ident)?,
+                None => load(&repo, &ident)?,
+            };
             Ok(out(if args.has("json") {
                 json(&V::Arr(rows))?
             } else {
@@ -671,18 +693,26 @@ fn closed(rows: &[V]) -> bool {
                 && storage::identifier(text(row.get("room_event"), "target"))
     })
 }
-fn classification(ident: &str, rows: &[V], current: &str, now: i64, ttl: i64) -> &'static str {
-    if closed(rows) {
+fn classification(
+    ident: &str,
+    rows: &[V],
+    current: &str,
+    now: i64,
+    ttl: i64,
+) -> (&'static str, Option<i64>) {
+    let stamp = last_epoch(rows);
+    let state = if closed(rows) {
         "closed"
     } else if ident == current {
         "current"
     } else {
-        match last_epoch(rows) {
+        match stamp {
             None => "unknown",
             Some(stamp) if now.saturating_sub(stamp) > ttl => "stale",
             _ => "fresh",
         }
-    }
+    };
+    (state, stamp)
 }
 fn human(age: Option<i64>) -> String {
     match age {
@@ -694,7 +724,7 @@ fn human(age: Option<i64>) -> String {
 }
 fn views(repo: &Path, args: &Args) -> Result<(Vec<V>, V, i64)> {
     let ttl = stale_ttl(args)?;
-    let current = current(repo).unwrap_or_default();
+    let current = current_id(repo).unwrap_or_default();
     let now = crate::seconds() as i64;
     let keys = [
         "threads",
@@ -712,15 +742,16 @@ fn views(repo: &Path, args: &Args) -> Result<(Vec<V>, V, i64)> {
     for name in storage::names(repo, Path::new(".oms/threads"), ".jsonl")? {
         let ident = name.trim_end_matches(".jsonl");
         let rows = load(repo, ident)?;
-        let state = classification(ident, &rows, &current, now, ttl);
+        let (state, stamp) = classification(ident, &rows, &current, now, ttl);
         if state == "closed" && !args.has("all") && args.action() != "stats" {
             continue;
         }
         let mut providers = Vec::new();
+        let mut seen_providers = std::collections::HashSet::new();
         let mut questions = 0;
         for row in &rows {
             let provider = text(row, "provider");
-            if !provider.is_empty() && !providers.contains(&provider) {
+            if !provider.is_empty() && seen_providers.insert(provider) {
                 providers.push(provider);
             }
             if text(row, "role") == "question" {
@@ -746,6 +777,9 @@ fn views(repo: &Path, args: &Args) -> Result<(Vec<V>, V, i64)> {
         {
             *counts.entry(key).or_default() += 1;
         }
+        if args.action() == "stats" {
+            continue;
+        }
         let topic = rows
             .iter()
             .find(|r| text(r, "role") == "topic")
@@ -760,7 +794,7 @@ fn views(repo: &Path, args: &Args) -> Result<(Vec<V>, V, i64)> {
             .chars()
             .take(80)
             .collect::<String>();
-        let age = last_epoch(&rows).map(|stamp| now.saturating_sub(stamp));
+        let age = stamp.map(|stamp| now.saturating_sub(stamp));
         let mut entry = obj([
             ("id", ident.into()),
             ("turns", rows.len().into()),
@@ -916,7 +950,7 @@ fn close_stale(repo: &Path, args: &Args, context: &Context<'_>) -> Result<Output
             let rows = storage::rows(old)?;
             let now = crate::seconds() as i64;
             if rows.iter().any(|r| r.has("room_event"))
-                || classification(ident, &rows, &current(repo).unwrap_or_default(), now, ttl)
+                || classification(ident, &rows, &current(repo).unwrap_or_default(), now, ttl).0
                     != "stale"
                 || rows.iter().any(|r| {
                     last_epoch(std::slice::from_ref(r))

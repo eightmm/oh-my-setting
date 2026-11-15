@@ -174,15 +174,11 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
         "failures",
         collector(failure, ctx.repo.join(".oms/failures.jsonl").exists()),
     )?;
-    let journal = if ctx.repo.join(".oms/work-journal").exists() {
-        decoded(oms_command_journal::run(
-            &["status".into(), "--json".into()],
-            &ctx.repo,
-            ctx.interrupted,
-        ))
-    } else {
-        Err(error(2, "work journal unavailable"))
-    };
+    let journal = decoded(oms_command_journal::run(
+        &["status".into(), "--json".into()],
+        &ctx.repo,
+        ctx.interrupted,
+    ));
     state.set(
         "work_journal",
         collector(journal, ctx.repo.join(".oms/work-journal").exists()),

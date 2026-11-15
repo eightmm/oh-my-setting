@@ -274,20 +274,15 @@ impl Client {
     }
 }
 pub fn safe_message(raw: &str, repo: &Path, maximum: usize) -> String {
-    let stripped = regex::Regex::new("\x1b\\[[0-?]*[ -/]*[@-~]")
-        .unwrap()
-        .replace_all(raw, "");
+    let stripped = cached_regex!("\x1b\\[[0-?]*[ -/]*[@-~]").replace_all(raw, "");
     let stripped = stripped
         .chars()
         .map(|c| if c == '\n' || !control(c) { c } else { ' ' })
         .collect::<String>();
     let stripped =
-        regex::Regex::new(r"(?i)\b(?:passw(?:or)?d|to[k]en|api[_-]?key|sec[r]et)\s*[:=]\s*\S+")
-            .unwrap()
+        cached_regex!(r"(?i)\b(?:passw(?:or)?d|to[k]en|api[_-]?key|sec[r]et)\s*[:=]\s*\S+")
             .replace_all(&stripped, "[redacted]");
-    let stripped = regex::Regex::new(r"(?i)\bBearer\s+\S+")
-        .unwrap()
-        .replace_all(&stripped, "[redacted]");
+    let stripped = cached_regex!(r"(?i)\bBearer\s+\S+").replace_all(&stripped, "[redacted]");
     let mut stripped = stripped.into_owned();
     for p in [home(), repo.canonicalize().unwrap_or_else(|_| repo.into())] {
         if p != Path::new("/") {
@@ -295,9 +290,8 @@ pub fn safe_message(raw: &str, repo: &Path, maximum: usize) -> String {
         }
     }
     // Normalize path-bearing notification data before its final byte bound.
-    let stripped = regex::Regex::new(r"(?:^|\s)/(?:[^\s/]+/)*[^\s/]+")
-        .unwrap()
-        .replace_all(&stripped, " [path]");
+    let stripped =
+        cached_regex!(r"(?:^|\s)/(?:[^\s/]+/)*[^\s/]+").replace_all(&stripped, " [path]");
     let lines = stripped
         .lines()
         .map(|s| safe_text(s, maximum.max(2400)))

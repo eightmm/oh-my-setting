@@ -660,3 +660,30 @@ fn stale_prune_without_drops_preserves_index() {
         before
     );
 }
+
+#[test]
+fn unchanged_migration_resolution_and_prune_preserve_index_identity() {
+    use std::os::unix::fs::MetadataExt;
+    let root = Temp::new();
+    root.index(event("evt_success", "delegate", 0, ""));
+    let path = root.0.join(".oms/artifacts/index.jsonl");
+    for args in [
+        vec!["migrate"],
+        vec!["resolve-superseded"],
+        vec!["resolve-recovered"],
+        vec!["prune", "1"],
+        vec!["prune", "--stale"],
+    ] {
+        let body = std::fs::read(&path).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        assert_ok(&native(&root, &args));
+        assert_ok(&native(&root, &args));
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(body, std::fs::read(&path).unwrap(), "{args:?}");
+        assert_eq!(
+            (before.ino(), before.mtime(), before.mtime_nsec()),
+            (after.ino(), after.mtime(), after.mtime_nsec()),
+            "{args:?}"
+        );
+    }
+}

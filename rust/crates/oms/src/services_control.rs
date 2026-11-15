@@ -571,6 +571,9 @@ impl oms_command_autonomy::Services for ControlServices<'_> {
         } else {
             repo.join(path)
         };
+        let _groups_guard = oms_command_graph::with_group_resolver(Some(
+            crate::services_runtime::resolve_group_membership,
+        ));
         oms_command_graph::project::context::validate_context_pack(&target, repo)
             .map_err(|e| autonomy_error(2, e.to_string()))
     }

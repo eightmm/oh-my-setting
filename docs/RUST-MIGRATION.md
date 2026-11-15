@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native core components and partial public routing integrated locally through 6fe9d74f; deployment and legacy retirement remain pending.
+Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native front-door cutover, `oms-command-graph` / SQLite / panel storage optimizations, and `GroupResolver` fixes integrated through Wave 4 (2026-11-15); M6 physical legacy `.py` retirement and release deployment remain gated on explicit authorization.
 
 ## Decision and completion boundary
 
@@ -711,3 +711,56 @@ temporary dependencies, and exact retirement criteria. Merge bounded changes
 through the existing repository rather than maintaining a long-lived rewrite
 branch. Completion means removed dependencies and proven native behavior, not
 the number of Rust files added.
+
+## Wave 3–4 native cutover and storage/graph/panel optimizations (2026-11-15)
+
+The Wave 3–4 integration cut public `oms` entry points over to the release native
+binaries while preserving reversible shell fallbacks until M6 physical deletion:
+
+- **Front-door & install lifecycle**: `scripts/lib/platform.sh` executes the
+  verified native `oms` binary directly without leaking
+  `OMS_NATIVE_DISPATCHED=1` into child invocations, and
+  `scripts/lib/install-contract.sh` validates the 6-binary native cache
+  (`oms` + companions) atomically.
+- **Project graph engine, SQLite read paths & `GroupResolver`**:
+  `oms-command-graph` threads host `GroupResolver` across `Store::open` calls
+  and `std::thread::scope` workers so standard group-writable (`0775`,
+  `umask 0002`) repositories verify cleanly under host group membership proof
+  and fail closed without it. Incremental discovery avoids directory walks when
+  file metadata matches the manifest, SQLite sidecar (`index.sqlite3`)
+  accelerates `symbol`/`api`/`neighbors`/`trace` read queries with parity against
+  `graph.json`, and `oms-mcp-server` caches loaded graphs in-process.
+- **Write amplification & file-sprawl reductions**:
+  - `oms state --json` runs read-only on unadopted repositories (`oms_created=false`,
+    zero `.oms/` files written) instead of implicitly initializing journal/state files.
+  - `oms-command-plan`, `oms-command-operations`, and `oms-command-graph`
+    consolidate transient JSON sidecars/WAL churn into bounded SQLite storage
+    and skip identical-byte rewrites.
+  - `oms room updates --after <cursor>` performs incremental byte-offset tail
+    reads across `room-bench.jsonl`, while `oms-command-peer`,
+    `oms-command-hooks`, `oms-command-journal`, `oms-command-runs`, and
+    `oms-command-telemetry` reuse repository snapshots, compiled `Regex` caches,
+    and single-pass JSONL readers.
+- **Legacy Python caller audit**: scanning all `298` Python files under
+  `scripts/` (`205` top-level scripts plus `93` submodules; `348` total tracked
+  `.py` files including docs, templates, and tests) showed `0` zero-caller
+  files eligible for early `git rm`; every script remains referenced by reversible
+  fallback guards, host helpers, or test suites until the M6 retirement gate.
+
+### Release binary benchmark measurements
+
+Measured in disposable temp clones against `cargo +1.99.1 --release --locked --offline`
+staged native binaries with poisoned `python`/`python3` shims (`exit 99`) first
+on `PATH` and ambient harness/room env vars cleared (single run for cold/warm/incremental
+builds; 3-run median for read queries and `oms state`):
+
+| Operation | Measured Latency (ms) | Scope / Parity Verification |
+| --- | --- | --- |
+| `oms state --json` (unadopted repo) | `706.81` median (`[1028.32, 556.78, 706.81]`) | `exit=0`, `.oms/` not created (`oms_created=false`) |
+| `oms state --json` (adopted repo) | `601.17` median (`[601.17, 653.37, 395.24]`) | `exit=0`, native surface status |
+| `oms graph project build` (cold) | `16062.97` | `files=846`, `nodes=12228`, `edges=137294`, `parsed=846`, `cached=0` |
+| `oms graph project build` (warm) | `4235.53` | `files=846`, `nodes=12228`, `edges=137294`, `parsed=0`, `cached=846` |
+| `oms graph project build` (1-file change) | `3607.34` | `files=846`, `parsed=1`, `cached=845` |
+| `oms graph project symbol` (`index.sqlite3` vs JSON) | `1480.13` vs `2493.56` (`1.68x`) | `index.sqlite3=89214976` B, `graph.json=46890861` B; JSON parity verified |
+| `oms graph project trace --no-refresh` (`index.sqlite3` vs JSON) | `38.67` vs `803.76` (`20.79x`) | Sub-40 ms SQLite traversal; JSON parity verified |
+| `oms room show` vs `room updates --after` (50 msgs, 5 tail) | `48.28` vs `45.38` (`1.06x`) | `room-bench.jsonl=15595` B; 5 exact tail turns returned |

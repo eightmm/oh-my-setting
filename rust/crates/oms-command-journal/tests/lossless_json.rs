@@ -485,3 +485,280 @@ fn config_roundtrip_keeps_unknown_large_integer_fields() {
         decimal
     );
 }
+
+fn disk_snapshot(root: &std::path::Path) -> Vec<(PathBuf, u64, i64, i64, Vec<u8>)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut pending = vec![root.to_path_buf()];
+    let mut result = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let info = fs::symlink_metadata(&path).unwrap();
+            let bytes = if info.is_dir() {
+                pending.push(path.clone());
+                Vec::new()
+            } else {
+                fs::read(&path).unwrap()
+            };
+            result.push((
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                info.ino(),
+                info.mtime(),
+                info.mtime_nsec(),
+                bytes,
+            ));
+        }
+    }
+    result.sort();
+    result
+}
+
+#[test]
+fn read_only_status_queries_and_ascii_search_preserve_missing_and_stale_storage() {
+    use std::ffi::OsString;
+    use std::sync::atomic::AtomicBool;
+    let scratch = Scratch::new();
+    let now = parse_rfc3339_utc("2026-07-31T03:00:00Z").unwrap();
+    let status = || {
+        oms_command_journal::run(
+            &[OsString::from("status"), OsString::from("--json")],
+            &scratch.0,
+            &AtomicBool::new(false),
+        )
+    };
+    let result = status();
+    assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
+    assert!(!scratch.0.join(".oms").exists());
+    let store = JournalStore::open_for_read(&scratch.0, Some("UTC")).unwrap();
+    store.status_report().unwrap();
+    assert!(store.recent_events(0).unwrap().is_empty());
+    assert!(store.decisions(None, 0).unwrap().items.is_empty());
+    assert!(store.distill(true, None, now).unwrap().lessons.is_empty());
+    assert!(!scratch.0.join(".oms").exists());
+
+    let root = scratch.0.join(".oms/work-journal");
+    fs::create_dir_all(&root).unwrap();
+    let bytes = canonical_json_bytes(&normalize(&event("1"))).unwrap();
+    fs::write(
+        root.join("events.jsonl"),
+        [bytes.as_slice(), b"\nmalformed\n"].concat(),
+    )
+    .unwrap();
+    for stale in [false, true] {
+        if stale {
+            fs::write(root.join("index.sqlite3"), b"invalid sqlite").unwrap();
+        }
+        let before = disk_snapshot(&scratch.0);
+        assert_eq!(status().0, 0);
+        let store = JournalStore::open_for_read(&scratch.0, Some("UTC")).unwrap();
+        assert_eq!(store.recent_events(256).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .load_events_for_period("daily", "2026-07-31")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(before, disk_snapshot(&scratch.0));
+    }
+
+    let writer = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    writer.rebuild().unwrap();
+    let db = rusqlite::Connection::open(&writer.db_path).unwrap();
+    db.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+    drop(db);
+    let before = disk_snapshot(&scratch.0);
+    JournalStore::open_for_read(&scratch.0, Some("UTC"))
+        .unwrap()
+        .status_report()
+        .unwrap();
+    assert_eq!(before, disk_snapshot(&scratch.0));
+    let db = rusqlite::Connection::open(&writer.db_path).unwrap();
+    db.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+    drop(db);
+    let mut live = fs::read(root.join("events.jsonl")).unwrap();
+    live.extend(canonical_json_bytes(&normalize(&event("2"))).unwrap());
+    live.push(b'\n');
+    fs::write(root.join("events.jsonl"), live).unwrap();
+    let before = disk_snapshot(&scratch.0);
+    let reader = JournalStore::open_for_read(&scratch.0, Some("UTC")).unwrap();
+    assert_eq!(reader.recent_events(256).unwrap().len(), 2);
+    reader.status_report().unwrap();
+    assert_eq!(before, disk_snapshot(&scratch.0));
+
+    fs::create_dir_all(scratch.0.join(".oms/handoffs")).unwrap();
+    fs::write(
+        scratch.0.join(".oms/handoffs/search.md"),
+        "Mixed ASCII match\nStraße café\nΜῆνιν\n",
+    )
+    .unwrap();
+    for (query, expected) in [
+        ("ascii", 1),
+        ("ASCII", 1),
+        ("strasse", 1),
+        ("CAFÉ", 1),
+        ("ΜῆΝΙΝ", 1),
+        ("absent", 0),
+    ] {
+        let before = disk_snapshot(&scratch.0);
+        let result = oms_command_journal::search::run_recorded_search(
+            &scratch.0,
+            query,
+            &["handoff".into()],
+            200,
+            true,
+        )
+        .unwrap();
+        let report = parse(std::str::from_utf8(&result.1).unwrap());
+        assert_eq!(
+            report
+                .get("matches")
+                .unwrap()
+                .as_integer()
+                .unwrap()
+                .as_decimal(),
+            expected.to_string()
+        );
+        assert_eq!(before, disk_snapshot(&scratch.0));
+    }
+    for (query, limit) in [("", 1), ("a\nb", 1), ("a", 0), ("a", 201)] {
+        assert!(
+            oms_command_journal::search::run_recorded_search(&scratch.0, query, &[], limit, true)
+                .is_err()
+        );
+    }
+    assert_eq!(status().0, 0);
+}
+
+#[test]
+fn sqlite_filters_skip_unrelated_payloads_and_preserve_distill_watermark() {
+    let scratch = Scratch::new();
+    let now = parse_rfc3339_utc("2026-07-31T03:00:00Z").unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    for raw in [
+        r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-01T00:00:00Z","source":{"type":"manual","id":"old"}}"#,
+        r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-30T00:00:00Z","source":{"type":"manual","id":"one"},"decision":"Choose the stable implementation"}"#,
+        r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T00:00:00Z","source":{"type":"manual","id":"two"},"decision":"Choose the stable implementation"}"#,
+        r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T01:00:00Z","source":{"type":"manual","id":"three"},"decision":"Keep the interface stable","blocker":"Await review"}"#,
+    ] {
+        store.record_event(&parse(raw), now).unwrap();
+    }
+    store.materialize().unwrap();
+    let db = rusqlite::Connection::open(&store.db_path).unwrap();
+    let old_payload: String = db
+        .query_row(
+            "SELECT payload FROM events WHERE local_date = '2026-07-01'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.execute(
+        "UPDATE events SET payload = '{}' WHERE local_date = '2026-07-01'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let result = store.decisions(Some("2026-07-30"), 1).unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.omitted, 1);
+    assert_eq!(store.decisions(None, 0).unwrap().omitted, 2);
+    assert_eq!(
+        store
+            .decisions(Some("2026-07-31"), 200)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    assert!(store.decisions(Some("2026-02-30"), 1).is_err());
+    assert_eq!(store.distill(true, None, now).unwrap().promoted, 2);
+    rusqlite::Connection::open(&store.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE events SET payload = ?1 WHERE local_date = '2026-07-01'",
+            [&old_payload],
+        )
+        .unwrap();
+    let blocker_id = store.decisions(None, 1).unwrap().items[0].event_id.clone();
+    assert!(store.resolve(&blocker_id, "", now).is_err());
+    assert!(store.resolve("invalid", "Reviewed", now).is_err());
+    let resolved = store.resolve(&blocker_id, "Reviewed", now).unwrap();
+    assert!(resolved.remaining_matching_blocker_ids.is_empty());
+    assert!(store.resolve(&blocker_id, "Reviewed", now).is_err());
+    // Advance through all active events, even when the newest one has no lesson.
+    store.record_event(&parse(r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T02:00:00Z","source":{"type":"manual","id":"tail"}}"#), now).unwrap();
+    let append = |_: &std::path::Path, _: &str, _: &str| {
+        Ok(oms_command_journal::MemoryAppendOutcome::Appended)
+    };
+    store.distill(false, Some(&append), now).unwrap();
+    assert_eq!(store.distill(true, None, now).unwrap().promoted, 0);
+}
+
+#[test]
+fn clean_materialize_and_distill_leave_files_unchanged() {
+    let scratch = Scratch::new();
+    let now = parse_rfc3339_utc("2026-07-31T03:00:00Z").unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    store.record_event(&event("1"), now).unwrap();
+    store.materialize().unwrap();
+    store.distill(false, None, now).unwrap();
+    let before = disk_snapshot(&scratch.0);
+    assert_eq!(store.materialize().unwrap().written_periods, 0);
+    store.distill(false, None, now).unwrap();
+    assert_eq!(before, disk_snapshot(&scratch.0));
+}
+
+#[test]
+fn cached_cold_archives_are_not_read_until_their_stat_stamp_changes() {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, SystemTime};
+    let scratch = Scratch::new();
+    let now = parse_rfc3339_utc("2026-08-31T03:00:00Z").unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    store.record_event(&event("1"), now).unwrap();
+    store.seal(true, now).unwrap();
+    let manifest = oms_command_journal::cold::load_cold_manifest(&store.root).unwrap();
+    assert_eq!(manifest.segments.len(), 1);
+    let archive = store.root.join("cold").join(&manifest.segments[0].file);
+    // Under relatime a future mtime makes each actual read update atime.
+    fs::File::open(&archive)
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(86400))
+        .unwrap();
+    let probe_before = fs::metadata(&archive).unwrap();
+    fs::read(&archive).unwrap();
+    let probe_after = fs::metadata(&archive).unwrap();
+    let observes_reads = (probe_before.atime(), probe_before.atime_nsec())
+        != (probe_after.atime(), probe_after.atime_nsec());
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    store.rebuild().unwrap();
+    let before = fs::metadata(&archive).unwrap();
+    let reader = JournalStore::open_for_read(&scratch.0, Some("UTC")).unwrap();
+    assert_eq!(reader.recent_events(1).unwrap().len(), 1);
+    reader.status_report().unwrap();
+    let after = fs::metadata(&archive).unwrap();
+    if observes_reads {
+        assert_eq!(
+            (before.atime(), before.atime_nsec()),
+            (after.atime(), after.atime_nsec())
+        );
+    }
+    let manifest_path = store.root.join("cold/manifest.json");
+    let mut body = fs::read(&manifest_path).unwrap();
+    body.push(b'\n');
+    fs::write(manifest_path, body).unwrap();
+    JournalStore::open_for_read(&scratch.0, Some("UTC")).unwrap();
+    let refreshed = fs::metadata(&archive).unwrap();
+    if observes_reads {
+        assert_ne!(
+            (after.atime(), after.atime_nsec()),
+            (refreshed.atime(), refreshed.atime_nsec())
+        );
+    } else {
+        eprintln!("archive read observation skipped: filesystem access times do not advance");
+    }
+    for broken in [b"".as_slice(), b"broken\n".as_slice()] {
+        fs::write(&archive, broken).unwrap();
+        assert!(JournalStore::open_for_read(&scratch.0, Some("UTC")).is_err());
+    }
+}

@@ -33,7 +33,7 @@ pub fn load(repo: &Path, run: &str) -> Result<Value> {
 }
 pub fn read(repo: &Path, run: &str) -> Result<Vec<Value>> {
     let path = directory(repo, run)?.join("events.jsonl");
-    let store = oms_command_plan::storage::Store::open(repo)?;
+    let store = crate::util::open_store(repo)?;
     let raw = store
         .optional(&path, 256 * 1024 * 1024)?
         .unwrap_or_default();
@@ -160,7 +160,7 @@ fn append_unlocked(repo: &Path, run: &str, event: &str, fields: Value) -> Result
                 .collect::<String>(),
         );
     }
-    let store = oms_command_plan::storage::Store::open(repo)?;
+    let store = crate::util::open_store(repo)?;
     let data = row.json(false).map_err(Error::new)?;
     let row = oms_command_plan::json::parse(&data)?;
     store.append(directory(repo, run)?.join("events.jsonl"), &row)?;

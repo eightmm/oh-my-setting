@@ -910,6 +910,7 @@ pub fn groups(rows: &[(f64, Json)], metric: &str) -> Result<(Vec<Group>, usize)>
     let mut scopes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut signatures = BTreeMap::new();
     let mut order = vec![];
+    let mut ordered = BTreeSet::new();
     let mut loose = 0;
     for (value, row) in rows {
         let group = s(row, "group");
@@ -946,18 +947,23 @@ pub fn groups(rows: &[(f64, Json)], metric: &str) -> Result<(Vec<Group>, usize)>
         let key = String::from_utf8(encode(&signature, false, false)?).unwrap();
         signatures.insert(key.clone(), signature);
         scopes.entry(group.clone()).or_default().insert(key.clone());
-        if !order.contains(&(group.clone(), key.clone())) {
+        if ordered.insert((group.clone(), key.clone())) {
             order.push((group.clone(), key.clone()));
         }
         latest.insert((group, key, seed.unwrap().into()), *value);
     }
+    let mut grouped = BTreeMap::<(String, String), Vec<(String, f64)>>::new();
+    for ((group, signature, seed), value) in latest {
+        grouped
+            .entry((group, signature))
+            .or_default()
+            .push((seed, value));
+    }
     let mut result = vec![];
     for (group, signature) in order {
-        let mut values = latest
-            .iter()
-            .filter(|((g, s, _), _)| *g == group && *s == signature)
-            .map(|((_, _, seed), v)| (seed.clone(), *v))
-            .collect::<Vec<_>>();
+        let mut values = grouped
+            .remove(&(group.clone(), signature.clone()))
+            .unwrap_or_default();
         values.sort_by(|a, b| integer_order(&a.0, &b.0));
         let label = if scopes[&group].len() > 1 {
             format!(

@@ -393,6 +393,7 @@ fn execute_mode(
     let mut cancelled = false;
     let mut stop_at = None;
     let mut write_error = false;
+    let mut idle_rounds = 0usize;
     loop {
         if status.is_none() {
             status = child_status(&child.0)?;
@@ -505,8 +506,11 @@ fn execute_mode(
         {
             break;
         }
-        if !progress {
-            std::thread::sleep(Duration::from_millis(10));
+        if progress {
+            idle_rounds = 0;
+        } else {
+            std::thread::sleep(poll_delay(idle_rounds));
+            idle_rounds = idle_rounds.saturating_add(1);
         }
     }
     if !line_large {
@@ -579,4 +583,13 @@ pub fn git_hash(ctx: &Context<'_>, args: &[&str]) -> Result<String> {
         return Err(Error::io("git diff query failed"));
     }
     Ok(r.hash)
+}
+
+pub(crate) fn poll_delay(idle_rounds: usize) -> Duration {
+    match idle_rounds {
+        0 => Duration::from_micros(250),
+        1 => Duration::from_millis(1),
+        2 => Duration::from_millis(4),
+        _ => Duration::from_millis(10),
+    }
 }

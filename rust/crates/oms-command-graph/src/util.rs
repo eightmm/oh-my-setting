@@ -1,11 +1,38 @@
 use crate::{Error, Result};
+use oms_command_plan::services::GroupResolver;
 use oms_command_plan::storage::Store;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    static GROUP_RESOLVER: Cell<Option<GroupResolver>> = const { Cell::new(None) };
+}
+
+pub struct GroupResolverGuard(Option<GroupResolver>);
+
+impl Drop for GroupResolverGuard {
+    fn drop(&mut self) {
+        GROUP_RESOLVER.with(|slot| slot.set(self.0));
+    }
+}
+
+pub fn with_group_resolver(resolver: Option<GroupResolver>) -> GroupResolverGuard {
+    let previous = GROUP_RESOLVER.with(|slot| slot.replace(resolver));
+    GroupResolverGuard(previous)
+}
+
+pub(crate) fn current_group_resolver() -> Option<GroupResolver> {
+    GROUP_RESOLVER.with(Cell::get)
+}
+
+pub(crate) fn open_store(path: &Path) -> Result<Store> {
+    Ok(Store::open(path)?.with_group_resolver(current_group_resolver()))
+}
 
 pub fn sha(data: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(data.as_ref()))
@@ -282,7 +309,7 @@ pub fn read_json(path: &Path, limit: usize) -> Result<Option<Value>> {
     if !parent.exists() {
         return Ok(None);
     }
-    let store = Store::open(parent)?;
+    let store = open_store(parent)?;
     store
         .optional(
             Path::new(
@@ -304,7 +331,7 @@ pub fn write(path: &Path, raw: &[u8]) -> Result<()> {
             .parent()
             .ok_or_else(|| Error::new("file has no existing ancestor"))?;
     }
-    let store = Store::open(root)?;
+    let store = open_store(root)?;
     store.mutate(path, None, raw, 256 * 1024 * 1024, true)?;
     Ok(())
 }

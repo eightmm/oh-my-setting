@@ -108,7 +108,7 @@ fn source_bytes(path: &Path) -> Result<Vec<u8>> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::new("file has no parent"))?;
-    let store = oms_command_plan::storage::Store::open(parent)?;
+    let store = crate::util::open_store(parent)?;
     Ok(store.read(
         Path::new(
             path.file_name()
