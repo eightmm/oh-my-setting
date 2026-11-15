@@ -71,8 +71,10 @@ holds the journal's canonical state lock during admission and materialization.
 No workspace sibling source or dependency feature was changed.
 
 `cli.json` was captured by walking `build_parser()` and serializing each
-parser's options, children, help and usage. `graph.html` is the literal
-`template` assignment in the legacy renderer's `_html_fragment` function.
+parser's options, children, help and usage. `graph.html` extends the legacy
+interactive template (staying synchronized with
+`oms-mcp-server/src/project-graph.html`) with precomputed search haystacks,
+zoom-tier label thresholds, and `/` + `Escape` search shortcuts.
 Changes to those Python contracts require updating the corresponding native
 asset and reviewing callers. The native schema additionally exposes `project
 benchmark --count N --revision REF --output FILE --snapshot FILE` and `project

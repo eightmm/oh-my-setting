@@ -30,6 +30,7 @@ use oms_panel_core::tick::{ApprovedContract, AutopilotHost, ContractError};
 use oms_supervisor::capture::{CaptureOptions, LimitAction};
 use oms_supervisor::process::{Completion, Progress, Reactor, Request, Scope, StopReason, Streams};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
@@ -1504,6 +1505,21 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
     }
 }
 
+fn read_bounded_regular(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() == 0 || meta.len() > limit {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    std::fs::File::open(path)
+        .ok()?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= limit && !bytes.is_empty()).then_some(bytes)
+}
+
 fn read_receipt(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let meta = std::fs::symlink_metadata(path).map_err(|_| "incoming receipt is missing")?;
@@ -1608,7 +1624,6 @@ impl CollabServices<'_> {
 
         // Idle threads: delegate to thread's locked stale closure (excludes rooms
         // and rechecks CURRENT/activity timestamps under each log lock).
-        let mut closed: Vec<String> = Vec::new();
         check()?;
         let cutoff = idle.saturating_mul(86400).to_string();
         let summary = format!("closed by oms tick: idle over {idle}d");
@@ -1625,12 +1640,16 @@ impl CollabServices<'_> {
         ];
         let close_out =
             oms_command_peer::run_with_executor("thread", &close_args, repo, source, stop, self);
-        if close_out.0 == 0 {
-            closed = String::from_utf8_lossy(&close_out.2)
-                .lines()
-                .filter_map(|line| line.strip_prefix("thread: closed ").map(str::to_owned))
-                .collect();
+        if close_out.0 != 0 {
+            return Err(format!(
+                "stale thread retirement failed (exit {})",
+                close_out.0
+            ));
         }
+        let closed: Vec<String> = String::from_utf8_lossy(&close_out.2)
+            .lines()
+            .filter_map(|line| line.strip_prefix("thread: closed ").map(str::to_owned))
+            .collect();
         check()?;
 
         // Goal-less idle task packet.
@@ -1651,10 +1670,14 @@ impl CollabServices<'_> {
         };
         check()?;
         let packet = repo.join(".oms/task/current.md");
-        if retire
-            && std::fs::symlink_metadata(&packet)
-                .is_ok_and(|m| m.file_type().is_file() && m.len() > 0)
-            && std::fs::read_to_string(&packet).is_ok_and(|t| goal_is_empty(&t))
+        let packet_bytes = if retire {
+            read_bounded_regular(&packet, RECEIPT_LIMIT)
+        } else {
+            None
+        };
+        if let Some(packet_bytes) = packet_bytes
+            .as_deref()
+            .filter(|b| std::str::from_utf8(b).is_ok_and(goal_is_empty))
         {
             let status = json_of(&task(&["status", "--json"]));
             let idle_active = status.is_some_and(|s| {
@@ -1666,7 +1689,8 @@ impl CollabServices<'_> {
             });
             if idle_active {
                 let reason = format!("closed by oms tick: goal-less packet idle over {task_idle}d");
-                if task(&["close", "--reason", &reason]).0 == 0 {
+                let sha = format!("{:x}", Sha256::digest(packet_bytes));
+                if task(&["close", "--reason", &reason, "--if-unchanged-sha256", &sha]).0 == 0 {
                     tasks_closed += 1;
                 }
             }
@@ -1679,10 +1703,14 @@ impl CollabServices<'_> {
             oms_command_plan::run_with_services(&with_repo(args), repo, stop, &self.control)
         };
         let plan_file = repo.join(".oms/plan/tasks.json");
-        if retire
-            && std::fs::symlink_metadata(&plan_file)
-                .is_ok_and(|m| m.file_type().is_file() && m.len() > 0)
-            && std::fs::read(&plan_file).is_ok_and(|b| plan_idle(&b, plan_idle_days))
+        let plan_bytes = if retire {
+            read_bounded_regular(&plan_file, 16 * 1024 * 1024)
+        } else {
+            None
+        };
+        if let Some(plan_bytes) = plan_bytes
+            .as_deref()
+            .filter(|b| plan_idle(b, plan_idle_days))
         {
             let checked = plan(&["retire", "--check"]);
             if checked.0 != 0 {
@@ -1698,8 +1726,10 @@ impl CollabServices<'_> {
                         && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
                     .then_some(sha)
                 });
+                let expected = format!("{:x}", Sha256::digest(plan_bytes));
                 plan_retire_rc = match sha {
                     None => json!(1),
+                    Some(sha) if sha != expected => json!("skipped"),
                     Some(sha) => {
                         let reason = format!(
                             "retired by oms tick: all tasks done and idle over {plan_idle_days}d"
@@ -2650,6 +2680,52 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let host = CollabServices::new(&stop, source()).expect("source is available");
         let repo = Fixture::new();
+        if std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1")
+            || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH")
+                .is_some_and(|v| !v.is_empty() && v != "0")
+        {
+            let out = host.tick_maintenance(repo.path(), source(), &stop);
+            assert_ne!(out.0, 0);
+            assert!(
+                String::from_utf8_lossy(&out.2).contains("stale thread retirement failed (exit 2)")
+            );
+            if std::env::var_os("OMS_HARNESS_TEST_DELEGATED").is_none() {
+                let child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "services_collab::tests::maintenance_receipt_has_exactly_the_native_fields",
+                    ])
+                    .env_remove("OMS_HARNESS_CHILD")
+                    .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                    .env("OMS_HARNESS_TEST_DELEGATED", "1")
+                    .output()
+                    .unwrap();
+                assert!(
+                    child.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&child.stdout),
+                    String::from_utf8_lossy(&child.stderr)
+                );
+            }
+            return;
+        }
+        if std::env::var_os("OMS_HARNESS_TEST_DELEGATED").is_none() {
+            let delegated = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "services_collab::tests::maintenance_receipt_has_exactly_the_native_fields",
+                ])
+                .env("OMS_HARNESS_CHILD", "1")
+                .env("OMS_HARNESS_TEST_DELEGATED", "1")
+                .output()
+                .unwrap();
+            assert!(
+                delegated.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&delegated.stdout),
+                String::from_utf8_lossy(&delegated.stderr)
+            );
+        }
         let out = host.tick_maintenance(repo.path(), source(), &stop);
         assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
         let row: Value = serde_json::from_slice(&out.1).expect("json");

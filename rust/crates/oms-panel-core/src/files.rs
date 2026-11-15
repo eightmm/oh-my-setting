@@ -81,10 +81,16 @@ pub fn patch_paths(data: &[u8]) -> Result<Vec<String>> {
     )?;
     let source = std::str::from_utf8(data)
         .map_err(|_| Error::new("non-UTF-8 patch requires the lossless owner adapter"))?;
-    let header = regex::Regex::new(r#"^("(?:[^"\\]|\\.)*"|a/.*?) ("(?:[^"\\]|\\.)*"|b/.*)$"#)
-        .map_err(Error::new)?;
-    let hunk = regex::Regex::new(r"^@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
-        .map_err(Error::new)?;
+    static HEADER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static HUNK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let header = HEADER.get_or_init(|| {
+        regex::Regex::new(r#"^("(?:[^"\\]|\\.)*"|a/.*?) ("(?:[^"\\]|\\.)*"|b/.*)$"#)
+            .expect("static regex")
+    });
+    let hunk = HUNK.get_or_init(|| {
+        regex::Regex::new(r"^@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
+            .expect("static regex")
+    });
     let mut paths = Vec::new();
     let mut names = Vec::new();
     let mut fallback = Vec::new();
@@ -147,35 +153,51 @@ pub fn patch_paths(data: &[u8]) -> Result<Vec<String>> {
 }
 pub fn patch_changes(data: &[u8]) -> Result<Vec<Change>> {
     let paths = patch_paths(data)?;
-    let mut changes = Vec::new();
-    for path in paths {
-        let section = file_diff(data, &path)?;
-        let section = std::str::from_utf8(&section).map_err(Error::new)?;
-        changes.push(Change {
-            path,
-            added: section
-                .lines()
-                .filter(|v| v.starts_with('+') && !v.starts_with("+++ "))
-                .count(),
-            removed: section
-                .lines()
-                .filter(|v| v.starts_with('-') && !v.starts_with("--- "))
-                .count(),
-        });
+    let mut counts: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for part in diff_parts(data)? {
+        let section = std::str::from_utf8(part).map_err(Error::new)?;
+        let mut in_hunk = false;
+        let (mut added, mut removed) = (0usize, 0usize);
+        for line in section.lines() {
+            if line.starts_with("@@ ") {
+                in_hunk = true;
+            } else if in_hunk && line.starts_with('+') {
+                added += 1;
+            } else if in_hunk && line.starts_with('-') {
+                removed += 1;
+            }
+        }
+        for path in patch_paths(part)? {
+            let entry = counts.entry(path).or_default();
+            entry.0 += added;
+            entry.1 += removed;
+        }
     }
-    Ok(changes)
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let (added, removed) = counts.get(&path).copied().unwrap_or_default();
+            Change {
+                path,
+                added,
+                removed,
+            }
+        })
+        .collect())
 }
-pub fn file_diff(data: &[u8], path: &str) -> Result<Vec<u8>> {
+fn diff_parts(data: &[u8]) -> Result<Vec<&[u8]>> {
     let text = std::str::from_utf8(data).map_err(Error::new)?;
-    let mut result = Vec::new();
     let starts: Vec<_> = text
         .match_indices("diff --git ")
         .filter(|(i, _)| *i == 0 || data[*i - 1] == b'\n')
         .map(|v| v.0)
         .chain(std::iter::once(data.len()))
         .collect();
-    for range in starts.windows(2) {
-        let part = &data[range[0]..range[1]];
+    Ok(starts.windows(2).map(|r| &data[r[0]..r[1]]).collect())
+}
+pub fn file_diff(data: &[u8], path: &str) -> Result<Vec<u8>> {
+    let mut result = Vec::new();
+    for part in diff_parts(data)? {
         if patch_paths(part)?.iter().any(|v| v == path) {
             result.extend_from_slice(part);
         }

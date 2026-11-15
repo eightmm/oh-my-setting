@@ -662,8 +662,8 @@ fn retry_projection() {
     index(
         &repo,
         &[
-            first,
-            second,
+            first.clone(),
+            second.clone(),
             review("20260101T000000Z-10", 0),
             review("20260101T000000Z-9", 1),
         ],
@@ -673,6 +673,22 @@ fn retry_projection() {
             ["state"],
         "passed"
     );
+    // Pagination is applied before off-page results are loaded.
+    let mut other = patch(&repo, "other", b"", 0);
+    other["task_id"] = "task-2".into();
+    other["ts"] = "2026-01-02T00:00:00Z".into();
+    index(&repo, &[first, second, other]);
+    let mut page = results::ResultsRequest {
+        limit: 1,
+        ..Default::default()
+    };
+    let head = results::results_page(&repo, &page, &fake, &STOP).unwrap();
+    assert_eq!(head["rows"][0]["task_id"], "task-2");
+    assert_eq!(head["truncated"], true);
+    page.offset = 1;
+    let tail = results::results_page(&repo, &page, &fake, &STOP).unwrap();
+    assert_eq!(tail["rows"][0]["task_id"], "task-1");
+    assert_eq!(tail["rows"].as_array().unwrap().len(), 1);
 }
 fn multiworker_finalize() {
     let repo = repo("multiworker");
@@ -693,6 +709,33 @@ fn multiworker_finalize() {
         results::outcomes(&repo, &["task-1".into()]).unwrap().len(),
         1
     );
+    let store = oms_panel_core::Store::open(&repo).unwrap();
+    let rows = results::index_rows(&repo).unwrap();
+    let plan_value: Value =
+        serde_json::from_slice(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+    let cache = oms_panel_core::cache::Cache::new(8, Duration::from_secs(60)).unwrap();
+    let tasks = ["task-1".to_owned()];
+    let first = results::outcomes_cached(&store, &plan_value, &rows, &tasks, Some((&cache, &repo)))
+        .unwrap();
+    let latest = rows
+        .iter()
+        .rev()
+        .find(|v| v["kind"] == "panel-result")
+        .unwrap();
+    let artifact = repo.join(latest["artifact"].as_str().unwrap());
+    let print = format!(
+        "{}:{}",
+        latest["artifact_sha256"].as_str().unwrap(),
+        oms_panel_core::cache::stamp(&artifact)
+    );
+    assert!(
+        cache.read("result:task-1", &print).is_some(),
+        "entry cached by stamp"
+    );
+    let again = results::outcomes_cached(&store, &plan_value, &rows, &tasks, Some((&cache, &repo)))
+        .unwrap();
+    assert_eq!(first, again);
+    assert_eq!(oms_panel_core::cache::stamp(&repo.join("absent")), "absent");
     let mut changed: Value =
         serde_json::from_slice(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
     changed["tasks"]["task-1"]["verify"] = "changed".into();

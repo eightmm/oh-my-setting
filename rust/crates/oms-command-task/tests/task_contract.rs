@@ -284,3 +284,20 @@ fn harness_child_cannot_init() {
     assert!(err.contains("parent-only"), "{err}");
     assert!(!repo.path().join(".oms/task/current.md").exists());
 }
+
+#[test]
+fn close_with_expected_digest_rejects_missing_packet() {
+    if !isolated("close_with_expected_digest_rejects_missing_packet", &[]) {
+        return;
+    }
+    let repo = Repo::new();
+    let mut svc = Fake::default();
+    let digest = "0".repeat(64);
+    let (code, _, err) = call(
+        &repo,
+        &mut svc,
+        &["close", "--reason", "r", "--if-unchanged-sha256", &digest],
+    );
+    assert_eq!(code, 4, "{err}");
+    assert!(err.contains("changed before close"), "{err}");
+}

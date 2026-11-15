@@ -1,6 +1,6 @@
 //! Cross-family read projections and the explicitly bounded mechanical repair set.
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 fn rows(ctx: &Context<'_>, path: &str) -> (Vec<Value>, usize) {
@@ -50,7 +50,7 @@ fn json_files(ctx: &Context<'_>, folder: &str) -> Result<Vec<Value>> {
 }
 fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usize)> {
     let (rows, mut bad) = rows(ctx, ".oms/artifacts/index.jsonl");
-    let mut counts = BTreeMap::new();
+    let mut counts = HashMap::new();
     for row in &rows {
         *counts.entry(row.text("event_id")).or_insert(0) += 1;
     }
@@ -65,15 +65,15 @@ fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usi
                 && counts.get(row.text("event_id")) == Some(&1)
     };
     let mut resolved = BTreeSet::new();
-    for (i, row) in rows.iter().enumerate() {
+    let mut previous = HashMap::new();
+    for row in &rows {
+        let target = previous.get(row.text("resolves_event_id")).copied();
+        previous.entry(row.text("event_id")).or_insert(row);
         if !valid(row) {
             bad += 1;
             continue;
         }
         if row.text("kind") == "artifact-resolution" {
-            let target = rows[..i]
-                .iter()
-                .find(|r| r.text("event_id") == row.text("resolves_event_id"));
             if target.is_some_and(|t| {
                 valid(t)
                     && t.get("schema").is_int(1)

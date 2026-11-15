@@ -200,7 +200,9 @@
     .attr('markerWidth', 5).attr('markerHeight', 5).attr('orient', 'auto')
     .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', 'var(--muted-foreground)');
   const links = data.edges.map(edge => ({...edge}));
-  const nodes = data.nodes.map((node, index) => ({...node, index}));
+  const nodes = data.nodes.map((node, index) => ({...node, index,
+    _search: `${node.id} ${node.label} ${node.path} ${node.kind} ${node.language}`.toLocaleLowerCase(),
+    _optionSearch: `${node.id} ${node.label} ${node.path} ${node.kind}`.toLocaleLowerCase()}));
   const byId = new Map(nodes.map(node => [node.id, node]));
   const narrowLabelIds = new Set(nodes.filter(node => node.show_label)
     .sort((a, b) => (b.degree || 0) - (a.degree || 0) || a.id.localeCompare(b.id))
@@ -288,9 +290,11 @@
   simulation.on('tick', paint);
 
   const zoom = d3.zoom().scaleExtent([.3, 5]).on('zoom', event => {
+    const tier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
+    const changed = tier(zoomScale) !== tier(event.transform.k);
     zoomScale = event.transform.k;
     viewport.attr('transform', event.transform);
-    applyFilters();
+    if (changed) applyFilters();
   });
   svg.call(zoom);
   node.call(d3.drag()
@@ -349,8 +353,7 @@
       return row.distance <= 2;
     };
     nodes.forEach(row => {
-      const text = `${row.id} ${row.label} ${row.path} ${row.kind} ${row.language}`.toLocaleLowerCase();
-      row._matchesSearch = !query || text.includes(query);
+      row._matchesSearch = !query || row._search.includes(query);
       row._outOfScope = row.id !== selectedId && !inScope(row) && !(query && row._matchesSearch);
       const rowState = data.kind === 'project' ? row.assurance : row.status;
       row._missesState = Boolean(stateName && rowState !== stateName);
@@ -378,8 +381,7 @@
     [...nodeSelect.options].forEach(option => {
       const row = byId.get(option.value);
       if (!row) return;
-      const text = `${row.id} ${row.label} ${row.path} ${row.kind}`.toLocaleLowerCase();
-      option.hidden = Boolean(query && !text.includes(query));
+      option.hidden = Boolean(query && !row._optionSearch.includes(query));
     });
     const visibleCount = nodes.filter(row => !row._outOfScope && !row._muted).length;
     visible.textContent = `${visibleCount}/${nodes.length} nodes visible`;
@@ -387,6 +389,22 @@
   node.on('click', (_event, row) => { selectNode(row.id, true); applyFilters(); });
   nodeSelect.addEventListener('change', () => { selectNode(nodeSelect.value, true); applyFilters(); });
   search.addEventListener('input', applyFilters);
+  document.addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const target = event.target;
+    const editing = target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+    if (event.key === '/' && !editing) {
+      event.preventDefault();
+      search.focus();
+    } else if (event.key === 'Escape' && document.activeElement === search) {
+      if (search.value) {
+        search.value = '';
+        applyFilters();
+      }
+      search.blur();
+    }
+  });
   relation.addEventListener('change', applyFilters);
   confidence.addEventListener('change', applyFilters);
   state.addEventListener('change', applyFilters);

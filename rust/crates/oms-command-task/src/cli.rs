@@ -12,6 +12,7 @@ pub const MODES: &[&str] = &[
 ];
 const OPTIONS: &[(&str, &str)] = &[
     ("dedupe-key", "hash"),
+    ("if-unchanged-sha256", "hash"),
     ("repo", "path"),
     ("file", "path"),
     ("agent", "name"),
@@ -142,6 +143,14 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Options> {
             "--dedupe-key requires append and a 64-character lowercase hex hash",
         ));
     }
+    if o.values.contains_key("if-unchanged-sha256")
+        && (!o.mode("close") || !hex(o.value("if-unchanged-sha256"), 64, 64))
+    {
+        return Err(Error::new(
+            2,
+            "--if-unchanged-sha256 requires close and a 64-character lowercase hex hash",
+        ));
+    }
     if o.json && !o.mode("status") {
         return Err(Error::new(2, "--json is only supported by status"));
     }
@@ -253,4 +262,27 @@ pub(crate) fn parent_guard(o: &Options) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod unchanged_tests {
+    use super::*;
+
+    #[test]
+    fn close_digest_option_requires_exact_lowercase_hash() {
+        for value in ["", "0", "g".repeat(64).as_str(), "a".repeat(65).as_str()] {
+            let args = ["close".into(), "--if-unchanged-sha256".into(), value.into()];
+            assert!(parse(&args).is_err());
+        }
+        let hash = "a".repeat(64);
+        assert!(
+            parse(&[
+                "close".into(),
+                "--if-unchanged-sha256".into(),
+                hash.clone().into()
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["show".into(), "--if-unchanged-sha256".into(), hash.into()]).is_err());
+    }
 }

@@ -595,6 +595,12 @@ fn execute(
         ));
     }
     if options.mode("close") && store.read()?.is_none() {
+        if options.has("if-unchanged-sha256") {
+            return Err(Error::new(
+                4,
+                "task packet changed before close; archival skipped",
+            ));
+        }
         line(
             out,
             &[
@@ -1153,6 +1159,12 @@ fn close(
     let mut reference = services.begin_reference(&task.state_repo, &task.store.path)?;
     let result = storage::locked(&task.lock_path, task.interrupted, task.signal, || {
         let Some(raw) = task.store.read()? else {
+            if task.options.has("if-unchanged-sha256") {
+                return Err(Error::new(
+                    4,
+                    "task packet changed before close; archival skipped",
+                ));
+            }
             line(
                 out,
                 &[
@@ -1163,6 +1175,14 @@ fn close(
             )?;
             return Ok(None);
         };
+        if task.options.has("if-unchanged-sha256")
+            && hash(&raw).as_bytes() != task.options.value("if-unchanged-sha256")
+        {
+            return Err(Error::new(
+                4,
+                "task packet changed before close; archival skipped",
+            ));
+        }
         reference.validate(&ReferenceWrite {
             repo: &task.state_repo,
             target: &task.store.path,

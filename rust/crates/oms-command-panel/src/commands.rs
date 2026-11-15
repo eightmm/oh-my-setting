@@ -93,7 +93,99 @@ fn policy(source: &Path) -> Result<routing::Policy> {
         routing::Policy::bundled()
     }
 }
+/// Per-watch-session reuse of derived reads; every entry is keyed by a file
+/// stamp or digest and nothing is persisted.
+pub(crate) struct Session {
+    cache: oms_panel_core::cache::Cache,
+    metrics: std::sync::Mutex<Option<(std::time::Instant, String, Value)>>,
+}
+const METRICS_TTL: Duration = Duration::from_secs(15);
+impl Session {
+    pub(crate) fn new() -> Self {
+        Self {
+            cache: oms_panel_core::cache::Cache::new(256, Duration::from_secs(3600))
+                .expect("static cache limits"),
+            metrics: Default::default(),
+        }
+    }
+    fn plan(&self, repo: &Path, store: &Store) -> Result<Value> {
+        let path = Path::new(".oms/plan/tasks.json");
+        let print = oms_panel_core::cache::stamp(&repo.join(path));
+        if let Some(v) = self.cache.read("plan", &print) {
+            return Ok(v);
+        }
+        let v = store
+            .json(path, 4 * 1024 * 1024, true)?
+            .unwrap_or(Value::Null);
+        let _ = self.cache.insert("plan".into(), print, v.clone());
+        Ok(v)
+    }
+    fn index(&self, repo: &Path) -> Result<Vec<Value>> {
+        let print = oms_panel_core::cache::stamp(&repo.join(".oms/artifacts/index.jsonl"));
+        if let Some(Value::Array(rows)) = self.cache.read("index", &print) {
+            return Ok(rows);
+        }
+        let rows = results::index_rows(repo)?;
+        let _ = self
+            .cache
+            .insert("index".into(), print, Value::Array(rows.clone()));
+        Ok(rows)
+    }
+    fn provider_status(
+        &self,
+        repo: &Path,
+        report: &Value,
+        main: Option<&str>,
+        rows: &[Value],
+    ) -> Value {
+        let print = oms_panel_core::digest(
+            format!(
+                "{}|{:?}|{}|{}",
+                report["room"]["participants"],
+                main,
+                oms_panel_core::cache::stamp(&repo.join(".oms/artifacts/index.jsonl")),
+                sessions_stamp()
+            )
+            .as_bytes(),
+        );
+        if let Ok(guard) = self.metrics.lock()
+            && let Some((at, key, value)) = guard.as_ref()
+            && *key == print
+            && at.elapsed() < METRICS_TTL
+        {
+            return value.clone();
+        }
+        let value = metrics::collect_local_with(report, main, unix_now(), Some(rows));
+        if let Ok(mut guard) = self.metrics.lock() {
+            *guard = Some((std::time::Instant::now(), print, value.clone()));
+        }
+        value
+    }
+}
+fn sessions_stamp() -> String {
+    let home = |name: &str, sub: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(sub)))
+    };
+    let codex = home("CODEX_HOME", ".codex").map(|p| p.join("sessions"));
+    let claude = home("CLAUDE_CONFIG_DIR", ".claude").map(|p| p.join("projects"));
+    format!(
+        "{}|{}",
+        codex.map_or("-".into(), |p| oms_panel_core::cache::stamp(&p)),
+        claude.map_or("-".into(), |p| oms_panel_core::cache::stamp(&p))
+    )
+}
 pub(crate) fn snapshot(
+    repo: &Path,
+    options: &Options,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<state::Snapshot> {
+    snapshot_with(&Session::new(), repo, options, services, stop)
+}
+pub(crate) fn snapshot_with(
+    session: &Session,
     repo: &Path,
     options: &Options,
     services: &dyn Services,
@@ -109,7 +201,11 @@ pub(crate) fn snapshot(
                 .map(str::to_owned)
         })
         .collect();
-    let decisions = results::outcomes(repo, &tasks)?;
+    let store = Store::open(repo)?;
+    let plan = session.plan(repo, &store)?;
+    let index = session.index(repo)?;
+    let decisions =
+        results::outcomes_cached(&store, &plan, &index, &tasks, Some((&session.cache, repo)))?;
     let mut finalized = serde_json::Map::new();
     for decision in decisions {
         if let Some(task) = decision["task_id"].as_str() {
@@ -121,12 +217,8 @@ pub(crate) fn snapshot(
         .get("owner-attempt")
         .map(str::to_owned)
         .or_else(|| snapshot.report["room"]["main"].as_str().map(str::to_owned));
-    snapshot.report["provider_status"] = metrics::collect_local(
-        Some(repo),
-        &snapshot.report,
-        main_attempt.as_deref(),
-        unix_now(),
-    );
+    snapshot.report["provider_status"] =
+        session.provider_status(repo, &snapshot.report, main_attempt.as_deref(), &index);
     Ok(snapshot)
 }
 

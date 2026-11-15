@@ -109,7 +109,17 @@ impl Navigation {
         Action::None
     }
 }
+/// Lowercased, whitespace-split filter words, computed once per filter.
+pub fn words(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_lowercase).collect()
+}
 pub fn matches(call: &serde_json::Value, query: &str) -> bool {
+    matches_words(call, &words(query))
+}
+pub fn matches_words(call: &serde_json::Value, words: &[String]) -> bool {
+    if words.is_empty() {
+        return true;
+    }
     let haystack = [
         "title", "role", "purpose", "provider", "model", "alias", "state",
     ]
@@ -119,10 +129,7 @@ pub fn matches(call: &serde_json::Value, query: &str) -> bool {
     .join(" ")
     .to_lowercase()
     .replace('_', " ");
-    query
-        .to_lowercase()
-        .split_whitespace()
-        .all(|word| haystack.contains(word))
+    words.iter().all(|word| haystack.contains(word.as_str()))
 }
 
 pub const BOARD_HINT: &str = "Up/Down Move  Enter Open  Tab View  / Filter  b Attention  g Graph  t Tree  u Refresh  ? Keys  q Quit";

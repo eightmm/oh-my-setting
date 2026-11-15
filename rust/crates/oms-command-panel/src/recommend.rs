@@ -449,6 +449,29 @@ fn size_bucket(table: &Value, lines: usize, files: usize) -> &'static str {
     "large"
 }
 
+fn numstat(
+    repo: &Path,
+    range: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<(Vec<String>, usize)> {
+    let argv = ["git", "diff", "--numstat", "--no-renames", range, "--"]
+        .map(OsString::from)
+        .to_vec();
+    let stat = services.execute(&ExecutionRequest::new(argv, repo), stop)?;
+    require(stat.code == 0, &format!("git diff failed for {range}"))?;
+    let mut paths = Vec::new();
+    let mut lines = 0usize;
+    for row in String::from_utf8_lossy(&stat.stdout).lines() {
+        let parts: Vec<&str> = row.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        lines += parts[0].parse::<usize>().unwrap_or(0) + parts[1].parse::<usize>().unwrap_or(0);
+        paths.push(parts[parts.len() - 1].to_owned());
+    }
+    Ok((paths, lines))
+}
 fn inspect_range(
     repo: &Path,
     range: &str,
@@ -460,36 +483,25 @@ fn inspect_range(
         !range.is_empty() && !range.starts_with('-'),
         "invalid diff range",
     )?;
-    let stat_argv = vec![
+    let diff_argv = vec![
         OsString::from("git"),
         OsString::from("diff"),
-        OsString::from("--numstat"),
         OsString::from("--no-renames"),
         OsString::from(range),
         OsString::from("--"),
     ];
-    let stat = services.execute(&ExecutionRequest::new(stat_argv, repo), stop)?;
-    require(stat.code == 0, &format!("git diff failed for {range}"))?;
-
-    let mut paths = Vec::new();
-    let mut lines = 0usize;
-    for row in String::from_utf8_lossy(&stat.stdout).lines() {
-        let parts: Vec<&str> = row.split('\t').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        lines += parts[0].parse::<usize>().unwrap_or(0) + parts[1].parse::<usize>().unwrap_or(0);
-        paths.push(parts[parts.len() - 1].to_owned());
-    }
-
-    let diff_argv = vec![
-        OsString::from("git"),
-        OsString::from("diff"),
-        OsString::from(range),
-        OsString::from("--"),
-    ];
     let diff = services.execute(&ExecutionRequest::new(diff_argv, repo), stop)?;
+    require(diff.code == 0, &format!("git diff failed for {range}"))?;
     let patch_slice = &diff.stdout[..diff.stdout.len().min(MAX_PATCH)];
+
+    let (paths, lines) = match oms_panel_core::files::patch_changes(&diff.stdout) {
+        Ok(changes) => (
+            changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>(),
+            changes.iter().map(|c| c.added + c.removed).sum::<usize>(),
+        ),
+        // Oversized, non-UTF-8 or unparsable patches keep the numstat view.
+        Err(_) => numstat(repo, range, services, stop)?,
+    };
 
     let risk = if paths.is_empty() {
         "low"

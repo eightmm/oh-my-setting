@@ -1209,6 +1209,46 @@ fn salvage_via_recorded_kept_and_reader_render_and_redaction() {
     );
     assert!(paged.contains("Detail line"));
 
+    // Idle polls draw nothing; scrolling reuses cached lines (the artifact is
+    // removed mid-session, so a re-render would fail) and never blanks the TTY.
+    let hint = "Tab View  r Raw";
+    for tty in [false, true] {
+        std::fs::write(repo.path().join(art_path), art_body).unwrap();
+        let mut script = vec![
+            vec![],
+            vec![Key::Char('r')],
+            vec![],
+            vec![],
+            vec![Key::Down],
+            vec![],
+            vec![Key::Char('q')],
+        ]
+        .into_iter();
+        let mut polls = 0;
+        let mut quiet = Vec::new();
+        reader::page_with(
+            repo.path(),
+            &reader_report["results"],
+            &mut |_timeout| {
+                polls += 1;
+                if polls == 5 {
+                    let _ = std::fs::remove_file(repo.path().join(art_path));
+                }
+                Ok(script.next().unwrap_or_else(|| vec![Key::Char('q')]))
+            },
+            &mut quiet,
+            &|| (80, 20),
+            tty,
+            &STOP,
+        )
+        .unwrap();
+        let quiet = String::from_utf8_lossy(&quiet);
+        // Initial frame, view change, and scroll: 3 draws over 7 polls.
+        assert_eq!(quiet.matches(hint).count(), 3, "tty={tty}: {quiet:?}");
+        assert!(!quiet.contains("\x1b[2J") && !quiet.contains("\x1b[H"));
+        assert_eq!(quiet.contains("\x1b[?2026h"), tty);
+    }
+
     // Managed job `_supervise` requires generation and validates against missing store cleanly.
     let (jcode, _jout, jerr) = run_with_services(
         "panel",

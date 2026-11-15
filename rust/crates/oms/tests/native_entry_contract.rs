@@ -1886,3 +1886,37 @@ fn public_slurm_lint_preserves_static_modes_source_roots_and_raw_arguments() {
     assert!(!f.0.join("preflight").exists());
     assert!(!f.0.join("executed").exists());
 }
+
+#[test]
+fn private_dispatch_accepts_verified_companions() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let dir = fixture.binary().parent().unwrap().to_path_buf();
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    for name in [
+        "oms-supervisor",
+        "oms-state-queue-worker",
+        "oms-mcp-peer-owner",
+        "oms-run-bounded-helper",
+        "oms-graph-python-helper",
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, name).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        manifest["artifacts"][name] = format!("{:x}", Sha256::digest(name.as_bytes())).into();
+    }
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let run = || {
+        Command::new(fixture.binary())
+            .arg("--oms-select")
+            .arg(&fixture.0)
+            .args(["1111111111111111111111111111111111111111", "--", "list"])
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success());
+    std::fs::write(dir.join("oms-supervisor"), "changed").unwrap();
+    assert_eq!(run().status.code(), Some(2));
+}

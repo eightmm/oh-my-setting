@@ -2,7 +2,7 @@
 //! Read-only canonical status validation and schema-2 work envelope projections.
 use oms_context::{Json, parse_experiment_json, parse_json};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
@@ -1066,10 +1066,9 @@ fn validate(raw: &Json) -> Result<Value> {
         .iter()
         .map(|a| id(a, "actionable task", false))
         .collect::<Result<Vec<_>>>()?;
+    let task_ids = tasks.iter().map(|t| s(&t["id"])).collect::<HashSet<_>>();
     if actionable.iter().collect::<BTreeSet<_>>().len() != actionable.len()
-        || actionable
-            .iter()
-            .any(|a| !tasks.iter().any(|t| t["id"] == *a))
+        || actionable.iter().any(|a| !task_ids.contains(a.as_str()))
     {
         return Err(invalid("actionable task set"));
     }
@@ -1221,10 +1220,18 @@ fn array(v: &Value) -> &Vec<Value> {
 fn s(v: &Value) -> &str {
     v.as_str().unwrap()
 }
+fn task_index(tasks: &[Value]) -> HashMap<&str, &Value> {
+    let mut index = HashMap::with_capacity(tasks.len());
+    for task in tasks {
+        index.entry(s(&task["id"])).or_insert(task);
+    }
+    index
+}
 fn matrix(v: &Value, limit: usize, filter: Option<&str>) -> Result<Value> {
     let tasks = array(&v["tasks"]);
+    let index = task_index(tasks);
     if let Some(t) = filter
-        && !tasks.iter().any(|x| s(&x["id"]) == t)
+        && !index.contains_key(t)
         && s(&v["active_task_id"]) != t
     {
         return Err(err("task is absent from this work snapshot"));
@@ -1234,7 +1241,7 @@ fn matrix(v: &Value, limit: usize, filter: Option<&str>) -> Result<Value> {
     let mut counts = BTreeMap::<String, usize>::new();
     for c in array(&v["criteria"]) {
         let mut tid = s(&c["plan_task_id"]);
-        let mut task = tasks.iter().find(|t| s(&t["id"]) == tid);
+        let mut task = index.get(tid).copied();
         let link = if !tid.is_empty()
             && task.is_some()
             && !s(&c["plan_id"]).is_empty()
@@ -1280,7 +1287,12 @@ fn matrix(v: &Value, limit: usize, filter: Option<&str>) -> Result<Value> {
 }
 fn inbox(v: &Value, limit: usize, filter: Option<&str>) -> Result<Value> {
     let tasks = array(&v["tasks"]);
-    if filter.is_some_and(|f| !tasks.iter().any(|t| s(&t["id"]) == f)) {
+    let index = task_index(tasks);
+    let actionable_ids = array(&v["actionable"])
+        .iter()
+        .map(s)
+        .collect::<HashSet<_>>();
+    if filter.is_some_and(|f| !index.contains_key(f)) {
         return Err(err("task is absent from this work snapshot"));
     }
     let contract = &v["contract"];
@@ -1293,7 +1305,7 @@ fn inbox(v: &Value, limit: usize, filter: Option<&str>) -> Result<Value> {
         }
         let mut waits = Vec::new();
         for d in array(&t["depends"]) {
-            let found = tasks.iter().find(|x| x["id"] == *d);
+            let found = index.get(s(d)).copied();
             let state = found.map(|x| s(&x["state"])).unwrap_or("unknown");
             if state != "done" {
                 waits.push(json!({"task_id":d,"state":state,"reason":if found.is_some(){"dependency-not-done"}else{"dependency-missing"}}))
@@ -1309,7 +1321,7 @@ fn inbox(v: &Value, limit: usize, filter: Option<&str>) -> Result<Value> {
         if !waits.is_empty() {
             reasons.push(json!({"code":"dependencies-unfinished","detail":"Cancelled tasks do not satisfy dependencies."}))
         }
-        let actionable = array(&v["actionable"]).contains(&t["id"]);
+        let actionable = actionable_ids.contains(s(&t["id"]));
         let contradiction = actionable && (!waits.is_empty() || blocked || t["state"] != "ready");
         if contradiction {
             reasons.push(json!({"code":"conflicting-projection","detail":"Re-read canonical plan state before acting."}))
@@ -1743,5 +1755,54 @@ mod tests {
     fn missing_limitation_is_empty() {
         let r = json!({"kind":"oms-evidence-matrix", "note":"note", "criteria":{"total":0,"omitted":0,"items":[]}, "tasks_without_criterion_link":{"total":0,"items":[]}});
         assert!(render_inner(&r).unwrap().ends_with("0 (0 shown)\n\n"));
+    }
+    fn chain(n: usize) -> Value {
+        let tasks = (0..n)
+            .map(|i| {
+                let depends = if i == 0 {
+                    json!([])
+                } else if i == 1 {
+                    json!(["ghost"])
+                } else {
+                    json!([format!("t{}", i - 1)])
+                };
+                let state = if i + 1 == n { "ready" } else { "done" };
+                json!({"id":format!("t{i}"),"state":state,"depends":depends,"title":"x","verify_digest":"","verify_present":false})
+            })
+            .collect::<Vec<_>>();
+        json!({"kind":"x","tasks":tasks,"actions":[],"actionable":[format!("t{}", n - 1)],
+            "contract":{"bound":false,"satisfied":true,"blocker":""},
+            "plan_id":"plan_a","active_task_id":"","criteria":[
+                {"id":"c1","text":"c","status":"met","plan_id":"plan_a","plan_task_id":"t3","active_task_id":"","evidence":[]},
+                {"id":"c2","text":"c","status":"met","plan_id":"plan_a","plan_task_id":"nope","active_task_id":"","evidence":[]}]})
+    }
+    #[test]
+    fn task_index_keeps_first_duplicate_and_matches_linear_scan() {
+        let tasks = vec![
+            json!({"id":"a","n":1}),
+            json!({"id":"a","n":2}),
+            json!({"id":"b"}),
+        ];
+        let index = task_index(&tasks);
+        assert_eq!(index["a"]["n"], 1);
+        assert!(index.contains_key("b") && !index.contains_key("c"));
+        assert_eq!(index.len(), 2);
+    }
+    #[test]
+    fn inbox_and_matrix_resolve_dependencies_through_the_index() {
+        let v = chain(400);
+        let rows = inbox(&v, 100, None).unwrap();
+        let text = rows.to_string();
+        assert!(
+            text.contains("dependency-missing"),
+            "ghost dependency flagged"
+        );
+        assert!(!text.contains("conflicting-projection"));
+        assert!(inbox(&v, 100, Some("t399")).is_ok());
+        assert!(inbox(&v, 100, Some("absent")).is_err());
+        let m = matrix(&v, 100, None).unwrap();
+        assert_eq!(m["total_declared_criteria"], 2);
+        assert_eq!(m["tasks_without_criterion_link"]["total"], 399);
+        assert!(matrix(&v, 100, Some("absent")).is_err());
     }
 }

@@ -457,25 +457,68 @@ pub(crate) fn validate_accept(request: &AcceptRequest) -> Result<()> {
 }
 pub fn outcomes(repo: &Path, tasks: &[String]) -> Result<Vec<Value>> {
     let store = Store::open(repo)?;
-    let raw = oms_command_telemetry::store::read_index(repo, None, true)
-        .map_err(crate::services::telemetry_error)?;
+    let rows = index_rows(repo)?;
     let plan = store
         .json(Path::new(".oms/plan/tasks.json"), 4 * MAX_RESULT, true)?
         .unwrap_or(Value::Null);
-    let mut newest = std::collections::BTreeMap::new();
-    for line in raw.split(|&v| v == b'\n').filter(|v| !v.is_empty()) {
-        let row = crate::decode(line, MAX_RESULT)?;
-        let task = text(&row, "task_id");
-        if row["kind"] != "panel-result" || !tasks.contains(&task) {
+    outcomes_from(&store, &plan, &rows, tasks)
+}
+/// Same as `outcomes` over rows and plan the caller already read.
+pub fn outcomes_from(
+    store: &Store,
+    plan: &Value,
+    rows: &[Value],
+    tasks: &[String],
+) -> Result<Vec<Value>> {
+    outcomes_cached(store, plan, rows, tasks, None)
+}
+/// `outcomes_from` reusing a verified result payload while the row digest and
+/// the artifact file stamp are unchanged.
+pub fn outcomes_cached(
+    store: &Store,
+    plan: &Value,
+    rows: &[Value],
+    tasks: &[String],
+    cache: Option<(&crate::cache::Cache, &Path)>,
+) -> Result<Vec<Value>> {
+    let wanted: std::collections::HashSet<&str> = tasks.iter().map(String::as_str).collect();
+    let mut latest: std::collections::BTreeMap<String, &Value> = std::collections::BTreeMap::new();
+    for row in rows {
+        if row["kind"] != "panel-result" {
             continue;
         }
-        let value = load_result(&store, &row)?;
+        let task = text(row, "task_id");
+        if wanted.contains(task.as_str()) {
+            latest.insert(task, row);
+        }
+    }
+    let mut newest = std::collections::BTreeMap::new();
+    for (task, row) in latest {
+        let value = match cache {
+            Some((cache, repo)) => {
+                let key = format!("result:{task}");
+                let print = format!(
+                    "{}:{}",
+                    text(row, "artifact_sha256"),
+                    crate::cache::stamp(&repo.join(text(row, "artifact")))
+                );
+                match cache.read(&key, &print) {
+                    Some(v) => v,
+                    None => {
+                        let v = load_result(store, row)?;
+                        cache.insert(key, print, v.clone())?;
+                        v
+                    }
+                }
+            }
+            None => load_result(store, row)?,
+        };
         newest.insert(task, value);
     }
     newest
         .into_iter()
         .filter_map(
-            |(task, value)| match crate::control::plan_binding(&plan, &task) {
+            |(task, value)| match crate::control::plan_binding(plan, &task) {
                 Ok(binding)
                     if binding.is_null()
                         || value["plan_binding"].is_null()
@@ -614,7 +657,7 @@ fn automatic_evidence(store: &Store, snapshot: &Value) -> Result<Vec<PathBuf>> {
     )?;
     Ok(evidence.into_iter().collect())
 }
-pub(crate) fn index_rows(repo: &Path) -> Result<Vec<Value>> {
+pub fn index_rows(repo: &Path) -> Result<Vec<Value>> {
     let raw = oms_command_telemetry::store::read_index(repo, None, true)
         .map_err(crate::services::telemetry_error)?;
     raw.split(|&v| v == b'\n')
@@ -823,17 +866,30 @@ pub fn results_page(
             .or_else(|| v["ts"].as_str())
             .unwrap_or_default()
     });
-    for row in chronology {
+    let mut seen = std::collections::HashSet::new();
+    for row in chronology.into_iter().rev() {
         let task = text(row, "task_id");
         if crate::identifier(&task).is_err()
             || (!request.include_preflight && task.starts_with("preflight-"))
         {
             continue;
         }
-        latest.retain(|v| v != &task);
-        latest.push(task);
+        if seen.insert(task.clone()) {
+            latest.push(task);
+        }
     }
-    latest.reverse();
+    let mut by_task: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    let mut by_attempt: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    let mut result_at: std::collections::HashMap<String, usize> = Default::default();
+    for (i, row) in indexed.iter().enumerate() {
+        let task = text(row, "task_id");
+        let attempt = text(row, "attempt_id");
+        if row["kind"] == "panel-result" {
+            result_at.insert(task.clone(), i);
+        }
+        by_task.entry(task).or_default().push(i);
+        by_attempt.entry(attempt).or_default().push(i);
+    }
     let mut output = Vec::new();
     let mut passed = 0;
     let mut capped = false;
@@ -841,52 +897,13 @@ pub fn results_page(
         if request.task_id.as_ref().is_some_and(|v| v != &task) {
             continue;
         }
-        let result_row = indexed
-            .iter()
-            .rev()
-            .find(|v| v["task_id"] == task && v["kind"] == "panel-result");
-        let mut issue = Value::Null;
-        let result = match result_row.map(|v| load_result(&store, v)).transpose() {
-            Ok(v) => v.unwrap_or(Value::Null),
-            Err(_) => {
-                issue = "result or delivery evidence unavailable".into();
-                Value::Null
-            }
-        };
         let mut metadata_attempts = array(&attempts)
             .iter()
             .filter(|v| v["task_id"] == task)
             .collect::<Vec<_>>();
-        let mut matching = metadata_attempts.clone();
-        if matching.is_empty() && result["main_attempt_id"].is_string() {
-            matching = array(&attempts)
-                .iter()
-                .filter(|v| {
-                    v["parent_attempt_id"] == result["main_attempt_id"]
-                        && v["task_id"].as_str().is_none_or(str::is_empty)
-                })
-                .collect();
-        }
-        let adopted = matching
-            .iter()
-            .map(|v| text(v, "attempt_id"))
-            .collect::<std::collections::BTreeSet<_>>();
         if let Some(member) = &request.room_participant {
             metadata_attempts.retain(|v| v["refs"]["panel_room_participant"] == *member);
-            matching.retain(|v| v["refs"]["panel_room_participant"] == *member);
         }
-        let linked = matching
-            .iter()
-            .map(|v| text(v, "attempt_id"))
-            .collect::<std::collections::BTreeSet<_>>();
-        let rows = indexed
-            .iter()
-            .filter(|v| {
-                (v["task_id"] == task || adopted.contains(&text(v, "attempt_id")))
-                    && (request.room_participant.is_none()
-                        || linked.contains(&text(v, "attempt_id")))
-            })
-            .collect::<Vec<_>>();
         if request.room_participant.is_some()
             && request.task_id.is_none()
             && metadata_attempts.is_empty()
@@ -901,6 +918,52 @@ pub fn results_page(
             capped = true;
             break;
         }
+        let mut issue = Value::Null;
+        let result_row = result_at.get(&task).map(|i| &indexed[*i]);
+        let result = match result_row.map(|v| load_result(&store, v)).transpose() {
+            Ok(v) => v.unwrap_or(Value::Null),
+            Err(_) => {
+                issue = "result or delivery evidence unavailable".into();
+                Value::Null
+            }
+        };
+        let mut matching = array(&attempts)
+            .iter()
+            .filter(|v| v["task_id"] == task)
+            .collect::<Vec<_>>();
+        if matching.is_empty() && result["main_attempt_id"].is_string() {
+            matching = array(&attempts)
+                .iter()
+                .filter(|v| {
+                    v["parent_attempt_id"] == result["main_attempt_id"]
+                        && v["task_id"].as_str().is_none_or(str::is_empty)
+                })
+                .collect();
+        }
+        let adopted = matching
+            .iter()
+            .map(|v| text(v, "attempt_id"))
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(member) = &request.room_participant {
+            matching.retain(|v| v["refs"]["panel_room_participant"] == *member);
+        }
+        let linked = matching
+            .iter()
+            .map(|v| text(v, "attempt_id"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut positions = by_task.get(&task).cloned().unwrap_or_default();
+        for id in &adopted {
+            positions.extend(by_attempt.get(id).into_iter().flatten());
+        }
+        positions.sort_unstable();
+        positions.dedup();
+        let rows = positions
+            .into_iter()
+            .map(|i| &indexed[i])
+            .filter(|v| {
+                request.room_participant.is_none() || linked.contains(&text(v, "attempt_id"))
+            })
+            .collect::<Vec<_>>();
         let last = metadata_attempts
             .last()
             .copied()

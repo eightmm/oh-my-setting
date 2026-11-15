@@ -729,6 +729,7 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
     drop(_spine_guard);
     let _claims = storage::lock(&ctx.repo.join(".oms/claims.jsonl"))?;
     let _figures = storage::lock(&ctx.repo.join(".oms/figures.jsonl"))?;
+    let mut references = None;
     for path in helpers::files(
         &ctx,
         &crate::capsule::directory(&ctx),
@@ -743,10 +744,14 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
         if run.is_some_and(|r| !closed.contains(r)) || !age(bundle, cutoff) {
             continue;
         }
-        let mut pinned = false;
-        for ledger in [".oms/claims.jsonl", ".oms/figures.jsonl"] {
-            let (refs, bad) = storage::rows(&ctx.repo, Path::new(ledger))?;
-            if bad > 0
+        if references.is_none() {
+            references = Some([
+                storage::rows(&ctx.repo, Path::new(".oms/claims.jsonl"))?,
+                storage::rows(&ctx.repo, Path::new(".oms/figures.jsonl"))?,
+            ]);
+        }
+        let pinned = references.as_ref().unwrap().iter().any(|(refs, bad)| {
+            *bad > 0
                 || refs.iter().any(|r| {
                     r.text("capsule") == id
                         || r.get("capsules")
@@ -755,10 +760,7 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
                             .iter()
                             .any(|s| *s == id)
                 })
-            {
-                pinned = true;
-            }
-        }
+        });
         if !pinned {
             let _guard = storage::lock(&path)?;
             if age(bundle, cutoff) {

@@ -19,6 +19,8 @@ Options:
   --loop-max N      init/update: set Loop State max_attempts.
   --diff-budget N   init/update: set Loop State diff_budget_lines.
   --verify-level L  init/update: set Loop State verification_level.
+  --if-unchanged-sha256 HASH
+                    close: archive only if the packet matches this lowercase SHA-256.
   --reason TEXT     close: close a task whose verification is missing or stale,
                     recording why. Required for that case.
   --replace-goal REASON

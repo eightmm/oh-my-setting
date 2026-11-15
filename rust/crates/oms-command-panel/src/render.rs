@@ -178,9 +178,12 @@ fn normalize(row: &Value) -> Value {
         "state":row["state"],"ending":row["reason_code"],"updated_at":row["updated_at"],"created_at":row["created_at"],"refs":refs})
 }
 pub fn visible(report: &Value, nav: &navigation::Navigation) -> Vec<Value> {
-    calls(report)
-        .into_iter()
-        .filter(|v| navigation::matches(v, &nav.filter))
+    visible_from(calls(report), nav)
+}
+fn visible_from(all: Vec<Value>, nav: &navigation::Navigation) -> Vec<Value> {
+    let words = navigation::words(&nav.filter);
+    all.into_iter()
+        .filter(|v| navigation::matches_words(v, &words))
         .filter(|v| {
             !nav.attention_only
                 || [
@@ -205,7 +208,9 @@ pub fn frame(
     read: &BTreeMap<String, String>,
 ) -> Vec<String> {
     let columns = columns.max(1);
-    let calls = visible(report, nav);
+    let all_calls = calls(report);
+    let total = all_calls.len();
+    let calls = visible_from(all_calls, nav);
     let attention = attention::items(report, read);
     let room = &report["room"];
     let mut lines = vec![format!(
@@ -252,7 +257,7 @@ pub fn frame(
                 nav.filter,
                 if nav.editing { "_" } else { "" },
                 calls.len(),
-                self::calls(report).len()
+                total
             ));
         }
         let view = nav.view.resolved(columns, height);

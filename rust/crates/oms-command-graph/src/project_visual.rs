@@ -50,11 +50,14 @@ pub fn model(
         .map(String::as_str)
         .filter(|id| ids.contains(id))
         .collect();
+    let paths: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let changed: BTreeSet<&str> = changed.iter().map(String::as_str).collect();
+    let impacted: BTreeSet<&str> = impacted.iter().map(String::as_str).collect();
     let context: BTreeSet<&str> = ids
         .iter()
         .copied()
         .filter(|id| {
-            paths.iter().any(|p| p == s(&graph.nodes[*id], "path"))
+            paths.contains(s(&graph.nodes[*id], "path"))
                 && ["file", "module", "test"].contains(&s(&graph.nodes[*id], "kind"))
         })
         .collect();
@@ -177,7 +180,7 @@ pub fn model(
     labels.extend(attention.into_iter().take(cap.min(4)));
     let mut assurance_counts = BTreeMap::<String, usize>::new();
     let mut change_counts = BTreeMap::<String, usize>::new();
-    let nodes:Vec<Value>=selected.iter().map(|id|{let node=&graph.nodes[*id];let path=s(node,"path");let change=if changed.iter().any(|p|p==path){"changed"}else if impacted.iter().any(|p|p==path){"impacted"}else{""};let mut row=json!({"id":id,"label":if s(node,"name").is_empty(){*id}else{s(node,"name")},"kind":node["kind"],"language":node["language"],"path":path,"degree":degree(id),"focus":primary.contains(id),"distance":task_distance.get(id),"change":change,"show_label":labels.contains(id),"line":node["metadata"]["line"]});if let Some(details)=assurance["nodes"][*id].as_object(){row.as_object_mut().unwrap().extend(details.clone());}*assurance_counts.entry(s(&row,"assurance").into()).or_default()+=1;if !change.is_empty(){*change_counts.entry(change.into()).or_default()+=1;}row}).collect();
+    let nodes:Vec<Value>=selected.iter().map(|id|{let node=&graph.nodes[*id];let path=s(node,"path");let change=if changed.contains(path){"changed"}else if impacted.contains(path){"impacted"}else{""};let mut row=json!({"id":id,"label":if s(node,"name").is_empty(){*id}else{s(node,"name")},"kind":node["kind"],"language":node["language"],"path":path,"degree":degree(id),"focus":primary.contains(id),"distance":task_distance.get(id),"change":change,"show_label":labels.contains(id),"line":node["metadata"]["line"]});if let Some(details)=assurance["nodes"][*id].as_object(){row.as_object_mut().unwrap().extend(details.clone());}*assurance_counts.entry(s(&row,"assurance").into()).or_default()+=1;if !change.is_empty(){*change_counts.entry(change.into()).or_default()+=1;}row}).collect();
     let coverage_view = if coverage.is_object() {
         json!({"parsed":n(coverage,"parsed"),"unparsed":n(coverage,"unparsed"),"unparsed_by_extension":coverage["unparsed_by_extension"]})
     } else {

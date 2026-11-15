@@ -47,13 +47,14 @@ pub fn run_with_writer(
     let mut log = eventlog::EventLog::default();
     let mut ticks = 0;
     let mut status;
+    let session = commands::Session::new();
     let mut last_frame: Vec<String> = vec![];
     let mut last_size = (0, 0);
     loop {
         if interrupted.load(Ordering::Acquire) {
             return Ok((130, vec![], vec![]));
         }
-        let snapshot = commands::snapshot(repo, options, services, interrupted);
+        let snapshot = commands::snapshot_with(&session, repo, options, services, interrupted);
         let report = match snapshot {
             Ok(state) => {
                 status = state.status;
@@ -112,8 +113,19 @@ pub fn run_with_writer(
                         .min(Duration::from_millis(100)),
                 )?;
                 let mut refresh = false;
+                let mut changed = false;
+                let mut calls_key: Option<(String, bool)> = None;
+                let mut calls: Vec<Value> = Vec::new();
                 for key in keys {
-                    let calls = render::visible(&report, &nav);
+                    if key == input::Key::Unbound {
+                        continue;
+                    }
+                    changed = true;
+                    let want = (nav.filter.clone(), nav.attention_only);
+                    if calls_key.as_ref() != Some(&want) {
+                        calls = render::visible(&report, &nav);
+                        calls_key = Some(want);
+                    }
                     let action = nav.apply(&key, calls.len(), last_size.1);
                     match action {
                         navigation::Action::Quit => return Ok((0, vec![], vec![])),
@@ -202,6 +214,8 @@ pub fn run_with_writer(
                         }
                         navigation::Action::None => {}
                     }
+                }
+                if changed {
                     let frame = render::frame(&report, &nav, last_size.0, last_size.1, &read);
                     draw(output, &frame, interactive, &mut last_frame, false)?;
                     output.flush().map_err(Error::new)?;
@@ -234,20 +248,19 @@ fn draw(
         if !force && previous == frame {
             return Ok(());
         }
-        if force || previous.is_empty() {
-            output.write_all(b"\x1b[H\x1b[2J").map_err(Error::new)?;
-        }
-        for row in 0..previous.len().max(frame.len()) {
-            if force || frame.get(row) != previous.get(row) {
-                write!(
-                    output,
-                    "\x1b[{};1H\x1b[2K{}",
-                    row + 1,
-                    frame.get(row).map(String::as_str).unwrap_or("")
-                )
-                .map_err(Error::new)?;
+        // One synchronized write; rows are overwritten, never blanked first.
+        let full = force || previous.is_empty();
+        let mut buffer = String::from("\x1b[?2026h");
+        for (row, line) in frame.iter().enumerate() {
+            if full || previous.get(row) != Some(line) {
+                buffer.push_str(&format!("\x1b[{};1H\x1b[2K{line}", row + 1));
             }
         }
+        if full || previous.len() > frame.len() {
+            buffer.push_str(&format!("\x1b[{};1H\x1b[J", frame.len() + 1));
+        }
+        buffer.push_str("\x1b[?2026l");
+        output.write_all(buffer.as_bytes()).map_err(Error::new)?;
     } else {
         for line in frame {
             writeln!(output, "{line}").map_err(Error::new)?;
@@ -255,4 +268,53 @@ fn draw(
     }
     *previous = frame.to_vec();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::draw;
+    struct Counting(Vec<u8>, usize);
+    impl std::io::Write for Counting {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.1 += 1;
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn rows(items: &[&str]) -> Vec<String> {
+        items.iter().map(|v| v.to_string()).collect()
+    }
+    #[test]
+    fn tty_draw_is_one_synchronized_overwrite_without_blanking() {
+        let mut out = Counting(vec![], 0);
+        let mut previous = vec![];
+        draw(
+            &mut out,
+            &rows(&["a", "b", "c"]),
+            true,
+            &mut previous,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.1, 1, "one write per frame");
+        let first = String::from_utf8(std::mem::take(&mut out.0)).unwrap();
+        assert!(first.starts_with("\x1b[?2026h") && first.ends_with("\x1b[?2026l"));
+        assert!(!first.contains("\x1b[2J") && !first.contains("\x1b[H"));
+        // Only the changed row is rewritten; shrinking clears the tail.
+        draw(&mut out, &rows(&["a", "x"]), true, &mut previous, false).unwrap();
+        let second = String::from_utf8(std::mem::take(&mut out.0)).unwrap();
+        assert!(second.contains("\x1b[2;1H\x1b[2Kx"));
+        assert!(!second.contains("\x1b[1;1H"));
+        assert!(second.contains("\x1b[3;1H\x1b[J"));
+        // An unchanged frame writes nothing; resize forces a full overwrite.
+        let writes = out.1;
+        draw(&mut out, &rows(&["a", "x"]), true, &mut previous, false).unwrap();
+        assert_eq!(out.1, writes);
+        draw(&mut out, &rows(&["a", "x"]), true, &mut previous, true).unwrap();
+        assert!(String::from_utf8_lossy(&out.0).contains("\x1b[1;1H"));
+        assert!(!String::from_utf8_lossy(&out.0).contains("\x1b[2J"));
+    }
 }

@@ -965,13 +965,21 @@ fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
     let Json::Object(entries) = artifacts else {
         return Err("invalid native artifacts".into());
     };
+    const ARTIFACTS: &[&str] = &[
+        "oms",
+        "oms-supervisor",
+        "oms-state-queue-worker",
+        "oms-mcp-peer-owner",
+        "oms-run-bounded-helper",
+        "oms-graph-python-helper",
+    ];
     if entries
         .iter()
-        .any(|(name, _)| name != b"oms" && name != b"oms-graph-python-helper")
+        .any(|(name, _)| !ARTIFACTS.iter().any(|known| name == known.as_bytes()))
     {
         return Err("invalid native artifact name".into());
     }
-    for name in ["oms", "oms-graph-python-helper"] {
+    for &name in ARTIFACTS {
         let Some(value) = get(artifacts, name.as_bytes()) else {
             if name == "oms" {
                 return Err("missing native executable digest".into());

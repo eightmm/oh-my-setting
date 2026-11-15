@@ -2,6 +2,7 @@ use crate::{Error, Result, input::Key, render, rows, text};
 use oms_panel_core::{Store, Value};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -36,8 +37,22 @@ pub struct Reader {
     pub query: String,
     pub searching: bool,
     pub section: usize,
+    rendered: Option<(View, usize, Arc<Vec<String>>)>,
 }
 impl Reader {
+    /// Rendered lines for the current view and width; artifact reads, patch
+    /// digests and redaction rerun only when either changes.
+    pub fn lines(&mut self, repo: &Path, report: &Value, width: usize) -> Result<Arc<Vec<String>>> {
+        if let Some((view, w, lines)) = &self.rendered
+            && *view == self.view
+            && *w == width
+        {
+            return Ok(Arc::clone(lines));
+        }
+        let lines = Arc::new(self.render(repo, report, width)?);
+        self.rendered = Some((self.view, width, Arc::clone(&lines)));
+        Ok(lines)
+    }
     pub fn render(&self, repo: &Path, report: &Value, width: usize) -> Result<Vec<String>> {
         let mut out = Vec::new();
         let store = Store::open(repo)?;
@@ -201,16 +216,14 @@ impl Reader {
         if self.query.is_empty() || lines.is_empty() {
             return;
         }
+        let needle = self.query.to_lowercase();
         for n in 1..=lines.len() {
             let index = if backwards {
                 (self.offset + lines.len() - n % lines.len()) % lines.len()
             } else {
                 (self.offset + n) % lines.len()
             };
-            if lines[index]
-                .to_lowercase()
-                .contains(&self.query.to_lowercase())
-            {
+            if lines[index].to_lowercase().contains(&needle) {
                 self.offset = index;
                 return;
             }
@@ -248,42 +261,65 @@ pub fn page_with(
 ) -> Result<()> {
     let mut reader = Reader::default();
     let eol = if tty { "\r\n" } else { "\n" };
+    type Drawn = (usize, usize, usize, bool, String, View, usize);
+    let mut drawn: Option<Drawn> = None;
+    let mut rows: Vec<String> = Vec::new();
     while !interrupted.load(Ordering::Acquire) {
         let (width, height) = size();
-        let lines = reader.render(repo, report, width)?;
-        let mut screen = if tty {
-            String::from("\x1b[H\x1b[2J")
-        } else {
-            String::new()
-        };
-        for line in lines
-            .iter()
-            .skip(reader.offset)
-            .take(height.saturating_sub(2))
-        {
-            screen.push_str(&render::clip(line, width));
-            screen.push_str(eol);
-        }
-        screen.push_str(&render::clip(
-            &format!(
-                "{} / {}{}",
-                reader.offset + 1,
-                lines.len(),
-                if reader.searching {
-                    format!(" /{}", reader.query)
-                } else {
-                    String::new()
-                }
-            ),
+        let lines = reader.lines(repo, report, width)?;
+        let state: Drawn = (
             width,
-        ));
-        screen.push_str(eol);
-        screen.push_str(&render::clip(crate::navigation::READER_HINT, width));
-        if !tty {
-            screen.push('\n');
+            height,
+            reader.offset,
+            reader.searching,
+            reader.query.clone(),
+            reader.view,
+            lines.len(),
+        );
+        if drawn.as_ref() != Some(&state) {
+            let mut frame: Vec<String> = lines
+                .iter()
+                .skip(reader.offset)
+                .take(height.saturating_sub(2))
+                .map(|line| render::clip(line, width))
+                .collect();
+            frame.push(render::clip(
+                &format!(
+                    "{} / {}{}",
+                    reader.offset + 1,
+                    lines.len(),
+                    if reader.searching {
+                        format!(" /{}", reader.query)
+                    } else {
+                        String::new()
+                    }
+                ),
+                width,
+            ));
+            frame.push(render::clip(crate::navigation::READER_HINT, width));
+            let mut screen = String::new();
+            if tty {
+                // Row overwrite inside synchronized output: no blank flash.
+                let full = drawn.as_ref().is_none_or(|d| (d.0, d.1) != (width, height));
+                screen.push_str("\x1b[?2026h");
+                for (i, row) in frame.iter().enumerate() {
+                    if full || rows.get(i) != Some(row) {
+                        screen.push_str(&format!("\x1b[{};1H{row}\x1b[K", i + 1));
+                    }
+                }
+                screen.push_str(&format!("\x1b[{};1H\x1b[J\x1b[?2026l", frame.len() + 1));
+            } else {
+                for (i, row) in frame.iter().enumerate() {
+                    screen.push_str(row);
+                    screen.push_str(if i + 1 < frame.len() { eol } else { "\n\n" });
+                }
+                screen.truncate(screen.len() - 1);
+            }
+            out.write_all(screen.as_bytes()).map_err(Error::new)?;
+            out.flush().map_err(Error::new)?;
+            rows = frame;
+            drawn = Some(state);
         }
-        out.write_all(screen.as_bytes()).map_err(Error::new)?;
-        out.flush().map_err(Error::new)?;
         for key in next_keys(Duration::from_millis(100))? {
             if !reader.apply(&key, &lines, height) {
                 return Ok(());

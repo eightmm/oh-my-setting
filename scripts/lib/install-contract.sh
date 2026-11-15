@@ -146,7 +146,7 @@ oms_install_repair_native_cache() (
   fi
   shopt -s dotglob nullglob
   for item in "$entry"/*; do
-    case "${item##*/}" in oms|oms.sha256|manifest.json|oms-graph-python-helper) ;; *)
+    case "${item##*/}" in oms|oms.sha256|manifest.json|oms-supervisor|oms-state-queue-worker|oms-mcp-peer-owner|oms-run-bounded-helper|oms-graph-python-helper) ;; *)
       echo "error: cannot repair native cache with foreign content: $entry" >&2; return 1 ;;
     esac
     if [ -L "$item" ] || [ ! -f "$item" ]; then
@@ -177,8 +177,16 @@ try:
     artifacts = row['artifacts']
     if type(row['schema']) is not int or row['schema'] != 1 or row['source_commit'] != revision:
         raise InvalidCache('identity')
-    if not isinstance(artifacts, dict) or 'oms' not in artifacts or set(artifacts) - {'oms', 'oms-graph-python-helper'}:
+    if not isinstance(artifacts, dict) or 'oms' not in artifacts or set(artifacts) - {'oms', 'oms-supervisor', 'oms-state-queue-worker', 'oms-mcp-peer-owner', 'oms-run-bounded-helper', 'oms-graph-python-helper'}:
         raise InvalidCache('artifacts')
+    actual_companions = set()
+    for disk_item in entry.iterdir():
+        if disk_item.is_symlink() or not disk_item.is_file():
+            raise InvalidCache('non-regular')
+        if disk_item.name not in {'manifest.json', 'oms.sha256'}:
+            actual_companions.add(disk_item.name)
+    if actual_companions != set(artifacts):
+        raise InvalidCache('artifacts mismatch')
     checksum_path = entry / 'oms.sha256'
     if checksum_path.stat().st_size != 65:
         raise InvalidCache('checksum size')

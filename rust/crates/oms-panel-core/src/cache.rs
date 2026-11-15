@@ -93,3 +93,19 @@ pub fn fingerprint(parts: &[(&str, &[u8])]) -> String {
     }
     crate::digest(&framed)
 }
+/// Identity of a file's current bytes without reading them: `absent` when it
+/// cannot be stat'ed, so a deleted source never serves a stale projection.
+pub fn stamp(path: &std::path::Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => format!(
+            "{}:{}:{}:{}:{}",
+            m.dev(),
+            m.ino(),
+            m.size(),
+            m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
+            m.ctime() as i128 * 1_000_000_000 + m.ctime_nsec() as i128
+        ),
+        Err(_) => "absent".into(),
+    }
+}

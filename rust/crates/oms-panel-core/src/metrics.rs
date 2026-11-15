@@ -198,6 +198,16 @@ pub fn collect_local(
     main_attempt: Option<&str>,
     now: f64,
 ) -> Value {
+    let rows = repo.and_then(|r| crate::results::index_rows(r).ok());
+    collect_local_with(report, main_attempt, now, rows.as_deref())
+}
+/// `collect_local` over artifact-index rows the caller already read.
+pub fn collect_local_with(
+    report: &Value,
+    main_attempt: Option<&str>,
+    now: f64,
+    index: Option<&[Value]>,
+) -> Value {
     let participants = crate::value::array(&report["room"]["participants"]);
     let mut output = serde_json::Map::new();
 
@@ -348,9 +358,7 @@ pub fn collect_local(
     agy.insert("context_left".into(), Value::Null);
     agy.insert("weekly_used".into(), Value::Null);
     agy.insert("source".into(), "unavailable".into());
-    if let Some(repo_path) = repo
-        && let Ok(rows) = crate::results::index_rows(repo_path)
-    {
+    if let Some(rows) = index {
         let cutoff = now - CODEX_WEEK_SECONDS;
         let mut calls = 0u64;
         let mut input = 0u64;
@@ -500,32 +508,27 @@ fn codex_readings(
     let years = scan_filtered(&sessions_root, 4, true, &mut remaining, |name| {
         name.len() == 4 && name.bytes().all(|b| b.is_ascii_digit())
     });
-    'search: for year in years {
+    'search: for (year, _) in years {
         let months = scan_filtered(&year, 2, true, &mut remaining, |name| {
             matches!(
                 name,
                 "01" | "02" | "03" | "04" | "05" | "06" | "07" | "08" | "09" | "10" | "11" | "12"
             )
         });
-        for month in months {
+        for (month, _) in months {
             let days = scan_filtered(&month, 2, true, &mut remaining, |name| {
                 name.len() == 2 && matches!(name.parse::<u8>(), Ok(1..=31))
             });
-            for day in days {
+            for (day, _) in days {
                 let mut found = scan_filtered(&day, usize::MAX, false, &mut remaining, |name| {
                     name.starts_with("rollout-") && name.ends_with(".jsonl")
                 });
-                for path in found.drain(..) {
-                    if let Ok(meta) = std::fs::symlink_metadata(&path)
-                        && meta.is_file()
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        let mtime =
-                            meta.mtime() as i128 * 1_000_000_000 + meta.mtime_nsec() as i128;
-                        files.push((mtime, meta.ino(), meta.size(), path));
-                    }
+                for (path, meta) in found.drain(..) {
+                    use std::os::unix::fs::MetadataExt;
+                    let mtime = meta.mtime() as i128 * 1_000_000_000 + meta.mtime_nsec() as i128;
+                    files.push((mtime, meta.ino(), meta.size(), path));
                 }
-                if !fallback_older && files.len() >= 16 {
+                if files.len() >= 16 && (!fallback_older || has_week_reading(&files, now)) {
                     break 'search;
                 }
             }
@@ -595,13 +598,31 @@ fn codex_readings(
     }
 }
 
+/// True when the newest files already yield a valid weekly reading, so older
+/// day directories cannot change the result.
+fn has_week_reading(files: &[(i128, u64, u64, std::path::PathBuf)], now: f64) -> bool {
+    let mut newest: Vec<_> = files.iter().collect();
+    newest.sort_by_key(|f| std::cmp::Reverse(f.0));
+    newest.into_iter().take(16).any(|(mtime, ino, size, path)| {
+        let Some((limits, _)) = read_rate_limits(path, *ino, *size, *mtime) else {
+            return false;
+        };
+        ["primary", "secondary"].iter().any(|key| {
+            let w = &limits[*key];
+            number(&w["window_minutes"]) == Some(10080.0)
+                && percent(&w["used_percent"]).is_some()
+                && number(&w["resets_at"]).is_some_and(|r| r > now)
+        })
+    })
+}
+
 fn scan_filtered(
     dir: &std::path::Path,
     expected_len: usize,
     want_dir: bool,
     remaining: &mut usize,
     pred: impl Fn(&str) -> bool,
-) -> Vec<std::path::PathBuf> {
+) -> Vec<(std::path::PathBuf, std::fs::Metadata)> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return vec![];
     };
@@ -627,10 +648,10 @@ fn scan_filtered(
         } else {
             meta.is_file()
         } {
-            out.push(path);
+            out.push((path, meta));
         }
     }
-    out.sort_by(|a, b| b.cmp(a));
+    out.sort_by(|a, b| b.0.cmp(&a.0));
     out
 }
 

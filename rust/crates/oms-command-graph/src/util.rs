@@ -108,6 +108,7 @@ pub fn process_detail(
     let mut stdout = vec![];
     let mut stderr = vec![];
     let mut reaped = false;
+    let mut poll_delay = Duration::from_micros(250);
     let result = (|| -> Result<i32> {
         loop {
             check(cancel)?;
@@ -129,7 +130,12 @@ pub fn process_detail(
             {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(poll_delay);
+            poll_delay = match poll_delay.as_micros() {
+                0..=250 => Duration::from_millis(1),
+                251..=1000 => Duration::from_millis(4),
+                _ => Duration::from_millis(10),
+            };
         }
         let _ = kill_process_group(pid, Signal::KILL);
         let status = child.wait()?;

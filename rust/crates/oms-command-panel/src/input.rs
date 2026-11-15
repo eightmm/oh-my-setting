@@ -239,7 +239,7 @@ impl TerminalInput {
             .map_err(Error::new)?;
         guard
             .file
-            .write_all(b"\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l")
+            .write_all(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l")
             .map_err(Error::new)?;
         Ok(Some(guard))
     }
@@ -285,7 +285,7 @@ impl Drop for TerminalInput {
     fn drop(&mut self) {
         let _ = self
             .file
-            .write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m");
+            .write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l");
         let _ = rustix::termios::tcsetattr(&self.file, OptionalActions::Now, &self.original);
     }
 }
