@@ -1305,11 +1305,6 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
     for argv in [
         vec![""],
         vec!["artifact-index.sh", "telemetry"],
-        vec!["artifact-index", "telemetry", "--waste"],
-        vec!["artifact-index", "list"],
-        vec!["input", "--help"],
-        vec!["input", "attach", "terminal"],
-        vec!["input", "list"],
         vec!["runtime", "experiment", "launch", "--help"],
         vec!["runtime", "experiment", "register", "{}"],
         vec![
@@ -1350,8 +1345,13 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
         vec!["slurm-lint.sh", "--unknown"],
         vec!["artifact-index", "telemetry", "--repo", "absent"],
         vec!["artifact-index", "telemetry", "--by", "bad"],
+        vec!["artifact-index", "telemetry", "--waste"],
+        vec!["artifact-index", "list"],
         vec!["agent-role", "init", "--name", "never-created"],
         vec!["agent-role", "surface"],
+        vec!["input", "--help"],
+        vec!["input", "attach", "terminal"],
+        vec!["input", "list"],
         vec!["input", "attach", "file", "absent"],
         vec!["input", "attachment", "missing"],
         vec![

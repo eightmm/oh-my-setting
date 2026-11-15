@@ -1020,6 +1020,12 @@ fn main() {
         std::process::exit(2);
     }
     let mut argv: Vec<_> = std::env::args_os().skip(1).collect();
+    if argv
+        .first()
+        .is_some_and(|v| v == services_control::SCAN_WORKER_FLAG)
+    {
+        std::process::exit(services_control::scan_worker_main(&argv[1..], &interrupted));
+    }
     let select = argv.first().is_some_and(|v| v == "--oms-select");
     let dispatch = select || argv.first().is_some_and(|v| v == "--oms-dispatch");
     let mut source_root = None;
