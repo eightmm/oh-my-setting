@@ -403,6 +403,7 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             "wait",
             "consumer",
             "room-event",
+            "stale-ttl",
         ],
         &[
             "json",
@@ -423,6 +424,12 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     }
     if args.has("stale") && !matches!(args.action(), "list" | "close") {
         return fail("--stale applies to list or close");
+    }
+    if args.has("stale-ttl") && !matches!(args.action(), "list" | "stats" | "close") {
+        return fail("--stale-ttl applies to list, stats or close");
+    }
+    if args.has("stale-ttl") && args.action() == "close" && !args.has("stale") {
+        return fail("--stale-ttl on close requires --stale");
     }
     if args.has("apply") && !(args.action() == "close" && args.has("stale")) {
         return fail("--apply requires close --stale");
@@ -635,7 +642,15 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     }
 }
 
-fn stale_ttl() -> Result<i64> {
+fn stale_ttl(args: &Args) -> Result<i64> {
+    if args.has("stale-ttl") {
+        return args
+            .get("stale-ttl")
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n >= 0)
+            .ok_or_else(|| Error::new(2, "--stale-ttl must be a nonnegative integer"));
+    }
     let raw = std::env::var("OMS_THREAD_STALE_TTL").unwrap_or_else(|_| "259200".into());
     raw.parse::<i64>()
         .ok()
@@ -678,7 +693,7 @@ fn human(age: Option<i64>) -> String {
     }
 }
 fn views(repo: &Path, args: &Args) -> Result<(Vec<V>, V, i64)> {
-    let ttl = stale_ttl()?;
+    let ttl = stale_ttl(args)?;
     let current = current(repo).unwrap_or_default();
     let now = crate::seconds() as i64;
     let keys = [

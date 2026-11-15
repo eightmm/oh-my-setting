@@ -1026,6 +1026,12 @@ fn main() {
     {
         std::process::exit(services_control::scan_worker_main(&argv[1..], &interrupted));
     }
+    if argv
+        .first()
+        .is_some_and(|v| v == services_collab::DETACH_WORKER_FLAG)
+    {
+        std::process::exit(services_collab::detach_worker_main());
+    }
     let select = argv.first().is_some_and(|v| v == "--oms-select");
     let dispatch = select || argv.first().is_some_and(|v| v == "--oms-dispatch");
     let mut source_root = None;
