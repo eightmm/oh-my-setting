@@ -61,7 +61,7 @@ pub struct Store {
 }
 pub struct Transaction<'a> {
     store: &'a Store,
-    _guard: Guard,
+    guard: Guard,
 }
 impl Store {
     pub fn open(repo: &Path) -> Result<Self> {
@@ -105,21 +105,25 @@ impl Store {
     pub fn lock_at(&self, relative: &Path, timeout: Duration) -> Result<Transaction<'_>> {
         path(relative)?;
         require(!timeout.is_zero(), "panel lock timeout must be positive")?;
-        let lock_path = self.repo().join(relative);
+        self.lock_at_raw(relative, timeout).map_err(|e| Error {
+            code: e.exit_code(),
+            ..Error::new(e)
+        })
+    }
+    pub(crate) fn lock_at_raw(
+        &self,
+        relative: &Path,
+        timeout: Duration,
+    ) -> std::result::Result<Transaction<'_>, oms_lock::Error> {
+        path(relative).map_err(|_| oms_lock::Error::InvalidTarget)?;
+        if timeout.is_zero() {
+            return Err(oms_lock::Error::InvalidSettings);
+        }
         let mut settings = self.settings.clone();
         settings.mode = Mode::Flock;
         settings.timeout = timeout;
-        let guard = Lock::at_path(lock_path, settings)
-            .map_err(Error::new)?
-            .acquire(None)
-            .map_err(|e| Error {
-                code: e.exit_code(),
-                ..Error::new(e)
-            })?;
-        Ok(Transaction {
-            store: self,
-            _guard: guard,
-        })
+        let guard = Lock::in_root(self.repo().to_path_buf(), relative, settings)?.acquire(None)?;
+        Ok(Transaction { store: self, guard })
     }
 }
 pub(crate) fn path(relative: &Path) -> Result<()> {
@@ -133,10 +137,21 @@ pub(crate) fn path(relative: &Path) -> Result<()> {
     )
 }
 impl Transaction<'_> {
+    pub fn check(&self) -> Result<()> {
+        self.check_raw().map_err(|e| Error {
+            code: e.exit_code(),
+            ..Error::new(e)
+        })
+    }
+    pub(crate) fn check_raw(&self) -> std::result::Result<(), oms_lock::Error> {
+        self.guard.check()
+    }
     pub fn read(&self, relative: &Path, maximum: usize, missing: bool) -> Result<Vec<u8>> {
+        self.check()?;
         self.store.read(relative, maximum, missing)
     }
     pub fn json(&self, relative: &Path, maximum: usize, missing: bool) -> Result<Option<Value>> {
+        self.check()?;
         self.store.json(relative, maximum, missing)
     }
     pub fn mutate(
@@ -146,6 +161,7 @@ impl Transaction<'_> {
         transform: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
         path(relative)?;
+        self.check()?;
         self.store
             .root
             .atomic_mutate(

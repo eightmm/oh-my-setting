@@ -34,6 +34,8 @@ struct Fake {
     plans: RefCell<Vec<Vec<OsString>>>,
     fail_plan: RefCell<bool>,
     publication: RefCell<Vec<u8>>,
+    publication_calls: std::cell::Cell<usize>,
+    replace_artifacts_on_publication: std::cell::Cell<usize>,
 }
 impl PeerExecutor for Fake {
     fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
@@ -247,12 +249,24 @@ impl Services for Fake {
     }
     fn publication_receipt(
         &self,
-        _: &Path,
+        repo: &Path,
         _: &Path,
         _: &str,
         _: &str,
         _: &AtomicBool,
     ) -> Result<Vec<u8>> {
+        let call = self.publication_calls.get() + 1;
+        self.publication_calls.set(call);
+        if call == self.replace_artifacts_on_publication.get() {
+            let artifacts = repo.join(".oms/artifacts");
+            let prev = repo.join(".oms/artifacts-prev");
+            let _ = std::fs::remove_dir_all(&prev);
+            std::fs::rename(&artifacts, &prev).unwrap();
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&artifacts)
+                .unwrap();
+        }
         Ok(self.publication.borrow().clone())
     }
     fn host_absent(&self, _: &Path, _: &Value) -> Result<bool> {
@@ -791,6 +805,20 @@ fn acceptance_recovery() {
     finalize.evidence = vec![PathBuf::from(candidate["artifact"].as_str().unwrap())];
     finalize.landed_commit = Some(head.clone());
     *fake.publication.borrow_mut() = serde_json::to_vec(&json!({"push":{"base":base}})).unwrap();
+    fake.publication_calls.set(0);
+    fake.replace_artifacts_on_publication.set(2);
+    assert!(results::finalize(&repo, &finalize, &fake, &STOP).is_err());
+    let still_review: Value =
+        serde_json::from_slice(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+    assert_ne!(still_review["tasks"]["task-1"]["state"], "done");
+    std::fs::remove_dir_all(repo.join(".oms/artifacts")).unwrap();
+    std::fs::rename(
+        repo.join(".oms/artifacts-prev"),
+        repo.join(".oms/artifacts"),
+    )
+    .unwrap();
+    fake.publication_calls.set(0);
+    fake.replace_artifacts_on_publication.set(0);
     assert_eq!(
         results::finalize(&repo, &finalize, &fake, &STOP).unwrap()["outcome"],
         "accepted"

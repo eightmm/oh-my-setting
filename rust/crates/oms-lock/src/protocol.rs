@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -94,10 +94,20 @@ fn open_dir(fd: &OwnedFd, name: &OsStr) -> Result<OwnedFd, Error> {
 }
 
 #[derive(Debug)]
+struct AnchorChain {
+    caller_path: PathBuf,
+    physical_path: PathBuf,
+    fd: OwnedFd,
+    stat: Stat,
+    segments: Vec<(OsString, Stat)>,
+}
+
+#[derive(Debug)]
 struct Root {
     fd: OwnedFd,
     path: PathBuf,
     identity: Stat,
+    anchor: Option<AnchorChain>,
 }
 impl Root {
     fn open(path: &Path, create: bool) -> Result<Self, Error> {
@@ -145,11 +155,167 @@ impl Root {
             fd,
             path: path.to_owned(),
             identity,
+            anchor: None,
         };
         root.check()?;
         Ok(root)
     }
+    fn open_in_anchor(
+        anchor_path: &Path,
+        parent_path: &Path,
+        create: bool,
+    ) -> Result<Option<Self>, Error> {
+        let rel_parent = parent_path
+            .strip_prefix(anchor_path)
+            .map_err(|_| Error::InvalidTarget)?;
+        let caller_stat = match fs::statat(fs::CWD, anchor_path, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) if file_kind(&st) == FileType::Directory => st,
+            Ok(_) | Err(Errno::LOOP | Errno::NOTDIR) => return Err(Error::Unsafe),
+            Err(_) => return Err(Error::Io),
+        };
+        let physical_anchor = std::fs::canonicalize(anchor_path).map_err(io)?;
+        let anchor_fd = fs::open(
+            &physical_anchor,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io)?;
+        let anchor_stat = fs::fstat(&anchor_fd).map_err(io)?;
+        if file_kind(&anchor_stat) != FileType::Directory {
+            return Err(Error::Unsafe);
+        }
+        if !same(&caller_stat, &anchor_stat) {
+            return Err(Error::Changed);
+        }
+        let mut segs = Vec::new();
+        for component in rel_parent.components() {
+            match component {
+                Component::Normal(seg) => segs.push(seg.to_owned()),
+                _ => return Err(Error::InvalidTarget),
+            }
+        }
+        let mut fd = anchor_fd.try_clone().map_err(io)?;
+        let mut recorded = Vec::with_capacity(segs.len());
+        let len = segs.len();
+        for (idx, seg) in segs.into_iter().enumerate() {
+            let is_leaf_parent = idx + 1 == len;
+            let mut created = false;
+            if create {
+                match fs::mkdirat(&fd, &seg, Mode::from_raw_mode(0o700)) {
+                    Ok(()) => created = true,
+                    Err(Errno::EXIST) => {}
+                    Err(Errno::LOOP | Errno::NOTDIR) => return Err(Error::Unsafe),
+                    Err(_) => return Err(Error::Io),
+                }
+            } else {
+                match fs::statat(&fd, &seg, AtFlags::SYMLINK_NOFOLLOW) {
+                    Err(Errno::NOENT) => return Ok(None),
+                    Err(Errno::LOOP | Errno::NOTDIR) => return Err(Error::Unsafe),
+                    Err(_) => return Err(Error::Io),
+                    Ok(st)
+                        if file_kind(&st) != FileType::Directory
+                            || (is_leaf_parent && !owned(&st)) =>
+                    {
+                        return Err(Error::Unsafe);
+                    }
+                    Ok(_) => {}
+                }
+            }
+            fd = open_dir(&fd, &seg)?;
+            let st = fs::fstat(&fd).map_err(io)?;
+            if file_kind(&st) != FileType::Directory || ((created || is_leaf_parent) && !owned(&st))
+            {
+                return Err(Error::Unsafe);
+            }
+            recorded.push((seg, st));
+        }
+        let identity = fs::fstat(&fd).map_err(io)?;
+        if file_kind(&identity) != FileType::Directory || !owned(&identity) {
+            return Err(Error::Unsafe);
+        }
+        let root = Self {
+            fd,
+            path: physical_anchor.join(rel_parent),
+            identity,
+            anchor: Some(AnchorChain {
+                caller_path: anchor_path.to_owned(),
+                physical_path: physical_anchor,
+                fd: anchor_fd,
+                stat: anchor_stat,
+                segments: recorded,
+            }),
+        };
+        root.check()?;
+        Ok(Some(root))
+    }
     fn check(&self) -> Result<(), Error> {
+        if let Some(chain) = &self.anchor {
+            for anchor_name in std::iter::once(&chain.caller_path)
+                .chain((chain.physical_path != chain.caller_path).then_some(&chain.physical_path))
+            {
+                let named_anchor = fs::statat(fs::CWD, anchor_name, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(|e| {
+                        if matches!(e, Errno::LOOP | Errno::NOTDIR) {
+                            Error::Unsafe
+                        } else {
+                            Error::Changed
+                        }
+                    })?;
+                if file_kind(&named_anchor) != FileType::Directory {
+                    return Err(Error::Unsafe);
+                }
+                if !same(&named_anchor, &chain.stat) {
+                    return Err(Error::Changed);
+                }
+            }
+            let current_anchor = fs::fstat(&chain.fd).map_err(io)?;
+            if !same(&current_anchor, &chain.stat) {
+                return Err(Error::Changed);
+            }
+            if file_kind(&current_anchor) != FileType::Directory {
+                return Err(Error::Unsafe);
+            }
+            let mut dir = chain.fd.try_clone().map_err(io)?;
+            for (idx, (seg, recorded_stat)) in chain.segments.iter().enumerate() {
+                let named = fs::statat(&dir, seg, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| {
+                    if matches!(e, Errno::LOOP | Errno::NOTDIR) {
+                        Error::Unsafe
+                    } else {
+                        Error::Changed
+                    }
+                })?;
+                if file_kind(&named) != FileType::Directory {
+                    return Err(Error::Unsafe);
+                }
+                if !same(&named, recorded_stat) {
+                    return Err(Error::Changed);
+                }
+                dir = match open_dir(&dir, seg) {
+                    Ok(next) => next,
+                    Err(Error::Unsafe) => return Err(Error::Unsafe),
+                    Err(_) => return Err(Error::Changed),
+                };
+                let opened = fs::fstat(&dir).map_err(io)?;
+                if !same(&opened, recorded_stat) {
+                    return Err(Error::Changed);
+                }
+                if file_kind(&opened) != FileType::Directory
+                    || (idx + 1 == chain.segments.len() && !owned(&opened))
+                {
+                    return Err(Error::Unsafe);
+                }
+            }
+            let current = fs::fstat(&dir).map_err(io)?;
+            let descriptor = fs::fstat(&self.fd).map_err(io)?;
+            if !same(&current, &self.identity) || !same(&descriptor, &self.identity) {
+                return Err(Error::Changed);
+            }
+            if file_kind(&current) != FileType::Directory || !owned(&current) || !owned(&descriptor)
+            {
+                return Err(Error::Unsafe);
+            }
+            return Ok(());
+        }
         let current = fs::statat(fs::CWD, &self.path, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|_| Error::Changed)?;
         let descriptor = fs::fstat(&self.fd).map_err(io)?;
@@ -446,7 +612,21 @@ impl Guard {
     }
     fn release_inner(&self) -> Result<(), Error> {
         match &self.held {
-            Held::Flock(_, _) => Ok(()), // Never unlink or explicitly unlock shared descriptions.
+            Held::Flock(fd, _) => {
+                // Never unlink flock files; unlock only from the acquiring PID so a
+                // forked non-exec child never unlocks its parent, while a concurrent
+                // fork..exec on another thread cannot extend a released parent guard.
+                if self.pid != std::process::id() {
+                    return Err(Error::Changed);
+                }
+                loop {
+                    match fs::flock(fd, FlockOperation::Unlock) {
+                        Ok(()) => return Ok(()),
+                        Err(Errno::INTR) => continue,
+                        Err(err) => return Err(io(err)),
+                    }
+                }
+            }
             Held::Mkdir(directory, _) => {
                 self.check()?;
                 directory.clean(&META)?;
@@ -507,7 +687,12 @@ pub(crate) fn acquire(
         deadline,
         cancellation,
     };
-    let root = Root::open(lock.path.parent().ok_or(Error::InvalidTarget)?, true)?;
+    let parent = lock.path.parent().ok_or(Error::InvalidTarget)?;
+    let root = if let Some(anchor) = lock.anchor() {
+        Root::open_in_anchor(anchor, parent, true)?.ok_or(Error::Io)?
+    } else {
+        Root::open(parent, true)?
+    };
     let name = lock
         .path
         .file_name()
@@ -789,19 +974,28 @@ pub(crate) fn probe(lock: &Lock) -> Result<Status, Error> {
         cancellation: None,
     };
     let parent = lock.path.parent().ok_or(Error::InvalidTarget)?;
-    if !parent.exists() {
-        let mut ancestor = parent;
-        while let Some(next) = ancestor.parent() {
-            match std::fs::symlink_metadata(ancestor) {
-                Ok(m) if !m.is_dir() || m.file_type().is_symlink() => return Err(Error::Unsafe),
-                Ok(_) => return Ok(Status::Free),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => ancestor = next,
-                Err(_) => return Err(Error::Io),
-            }
+    let root = if let Some(anchor) = lock.anchor() {
+        match Root::open_in_anchor(anchor, parent, false)? {
+            Some(root) => root,
+            None => return Ok(Status::Free),
         }
-        return Err(Error::Io);
-    }
-    let root = Root::open(parent, false)?;
+    } else {
+        if !parent.exists() {
+            let mut ancestor = parent;
+            while let Some(next) = ancestor.parent() {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(m) if !m.is_dir() || m.file_type().is_symlink() => {
+                        return Err(Error::Unsafe);
+                    }
+                    Ok(_) => return Ok(Status::Free),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => ancestor = next,
+                    Err(_) => return Err(Error::Io),
+                }
+            }
+            return Err(Error::Io);
+        }
+        Root::open(parent, false)?
+    };
     let name = lock.path.file_name().ok_or(Error::InvalidTarget)?;
     let stat = match root.stat(name) {
         Err(Errno::NOENT) => return Ok(Status::Free),
@@ -1022,5 +1216,206 @@ mod tests {
             modified + Duration::from_nanos(119_999_999_999)
         ));
         assert!(ownerless_old(modified, modified + Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn in_root_refuses_symlinked_oms_ancestor_without_touching_outside() {
+        let fixture = Fixture::new();
+        let repo = fixture.0.join("repo");
+        let outside = fixture.0.join("outside");
+        Fixture::directory(&repo).unwrap();
+        Fixture::directory(&outside).unwrap();
+        Fixture::directory(outside.join("artifacts")).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join(".oms")).unwrap();
+        for mode in [Selection::Flock, Selection::Mkdir] {
+            let lock = Lock::in_root(
+                repo.clone(),
+                Path::new(".oms/artifacts/panel-main-start.lock"),
+                Settings {
+                    mode,
+                    timeout: Duration::from_secs(1),
+                    poll_max: Duration::from_millis(50),
+                    lock_dir: None,
+                    home: fixture.0.clone(),
+                    temp_dir: fixture.0.clone(),
+                    cwd: repo.clone(),
+                    search_path: OsString::new(),
+                    force_mkdir: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(lock.acquire(None).unwrap_err(), Error::Unsafe);
+            assert!(
+                std::fs::read_dir(outside.join("artifacts"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+                "outside/artifacts must stay empty for {mode:?}"
+            );
+        }
+
+        // Group-writable (0775) repo root and pre-existing .oms are allowed as long as
+        // newly created dirs / final lock parent directory (.oms/artifacts) remain 0700.
+        for case in [
+            "missing_artifacts",
+            "existing_0775_oms",
+            "loose_leaf_parent",
+        ] {
+            for mode in [Selection::Flock, Selection::Mkdir] {
+                let shared_repo = fixture.0.join(format!("shared-{case}-{mode:?}"));
+                Fixture::directory(&shared_repo).unwrap();
+                std::fs::set_permissions(&shared_repo, std::fs::Permissions::from_mode(0o775))
+                    .unwrap();
+                if case != "missing_artifacts" {
+                    let oms = shared_repo.join(".oms");
+                    Fixture::directory(&oms).unwrap();
+                    std::fs::set_permissions(&oms, std::fs::Permissions::from_mode(0o775)).unwrap();
+                    let artifacts = oms.join("artifacts");
+                    Fixture::directory(&artifacts).unwrap();
+                    if case == "loose_leaf_parent" {
+                        std::fs::set_permissions(
+                            &artifacts,
+                            std::fs::Permissions::from_mode(0o775),
+                        )
+                        .unwrap();
+                    }
+                }
+                let lock = Lock::in_root(
+                    shared_repo.clone(),
+                    Path::new(".oms/artifacts/panel-main-start.lock"),
+                    Settings {
+                        mode,
+                        timeout: Duration::from_secs(1),
+                        poll_max: Duration::from_millis(50),
+                        lock_dir: None,
+                        home: fixture.0.clone(),
+                        temp_dir: fixture.0.clone(),
+                        cwd: shared_repo.clone(),
+                        search_path: OsString::new(),
+                        force_mkdir: false,
+                    },
+                )
+                .unwrap();
+                if case == "loose_leaf_parent" {
+                    assert_eq!(
+                        lock.acquire(None).unwrap_err(),
+                        Error::Unsafe,
+                        "{case} {mode:?}"
+                    );
+                } else {
+                    let guard = lock.acquire(None).unwrap();
+                    assert_eq!(lock.probe(), Status::Held, "{case} {mode:?}");
+                    guard.release().unwrap();
+                    assert_eq!(
+                        lock.probe(),
+                        if mode == Selection::Mkdir {
+                            Status::Free
+                        } else {
+                            Status::Unknown
+                        },
+                        "{case} {mode:?}"
+                    );
+                }
+            }
+        }
+
+        // Replacing an anchored root directory or retargeting an ancestor alias must
+        // invalidate held guards without touching the replacement directory.
+        for mode in [Selection::Flock, Selection::Mkdir] {
+            let shared_repo = fixture.0.join(format!("replaced-anchor-{mode:?}"));
+            let moved_repo = fixture.0.join(format!("moved-anchor-{mode:?}"));
+            Fixture::directory(&shared_repo).unwrap();
+            std::fs::set_permissions(&shared_repo, std::fs::Permissions::from_mode(0o775)).unwrap();
+            let lock = Lock::in_root(
+                shared_repo.clone(),
+                Path::new(".oms/artifacts/panel-main-start.lock"),
+                Settings {
+                    mode,
+                    timeout: Duration::from_secs(1),
+                    poll_max: Duration::from_millis(50),
+                    lock_dir: None,
+                    home: fixture.0.clone(),
+                    temp_dir: fixture.0.clone(),
+                    cwd: shared_repo.clone(),
+                    search_path: OsString::new(),
+                    force_mkdir: false,
+                },
+            )
+            .unwrap();
+            let guard = lock.acquire(None).unwrap();
+            std::fs::rename(&shared_repo, &moved_repo).unwrap();
+            Fixture::directory(&shared_repo).unwrap();
+            std::fs::set_permissions(&shared_repo, std::fs::Permissions::from_mode(0o775)).unwrap();
+            assert_eq!(guard.check(), Err(Error::Changed), "replace check {mode:?}");
+            assert_eq!(
+                guard.release(),
+                if mode == Selection::Mkdir {
+                    Err(Error::Changed)
+                } else {
+                    Ok(())
+                },
+                "replace release {mode:?}"
+            );
+            assert!(
+                std::fs::read_dir(&shared_repo).unwrap().next().is_none(),
+                "replacement anchor stays untouched for {mode:?}"
+            );
+            lock.acquire(None).unwrap().release().unwrap();
+
+            let real_a = fixture.0.join(format!("real-a-{mode:?}"));
+            let real_b = fixture.0.join(format!("real-b-{mode:?}"));
+            let alias_parent = fixture.0.join(format!("alias-parent-{mode:?}"));
+            Fixture::directory(&real_a).unwrap();
+            Fixture::directory(&real_b).unwrap();
+            Fixture::directory(real_a.join("repo")).unwrap();
+            Fixture::directory(real_b.join("repo")).unwrap();
+            std::fs::set_permissions(real_a.join("repo"), std::fs::Permissions::from_mode(0o775))
+                .unwrap();
+            std::fs::set_permissions(real_b.join("repo"), std::fs::Permissions::from_mode(0o775))
+                .unwrap();
+            std::os::unix::fs::symlink(&real_a, &alias_parent).unwrap();
+            let alias_repo = alias_parent.join("repo");
+            let alias_lock = Lock::in_root(
+                alias_repo.clone(),
+                Path::new(".oms/artifacts/panel-main-start.lock"),
+                Settings {
+                    mode,
+                    timeout: Duration::from_secs(1),
+                    poll_max: Duration::from_millis(50),
+                    lock_dir: None,
+                    home: fixture.0.clone(),
+                    temp_dir: fixture.0.clone(),
+                    cwd: fixture.0.clone(),
+                    search_path: OsString::new(),
+                    force_mkdir: false,
+                },
+            )
+            .unwrap();
+            let alias_guard = alias_lock.acquire(None).unwrap();
+            std::fs::remove_file(&alias_parent).unwrap();
+            std::os::unix::fs::symlink(&real_b, &alias_parent).unwrap();
+            assert_eq!(
+                alias_guard.check(),
+                Err(Error::Changed),
+                "retargeted alias check {mode:?}"
+            );
+            assert_eq!(
+                alias_guard.release(),
+                if mode == Selection::Mkdir {
+                    Err(Error::Changed)
+                } else {
+                    Ok(())
+                },
+                "retargeted alias release {mode:?}"
+            );
+            assert!(
+                std::fs::read_dir(real_b.join("repo"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+                "retargeted anchor stays untouched for {mode:?}"
+            );
+            alias_lock.acquire(None).unwrap().release().unwrap();
+        }
     }
 }

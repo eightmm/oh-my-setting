@@ -569,6 +569,7 @@ pub(crate) fn run<S: Services + ?Sized>(
         if let Some(reason) = &request.allow_floor_change {
             argv.extend(["--allow-floor-change".into(), reason.into()]);
         }
+        tx.check()?;
         service
             .command(NativeCommand::Land, &execution, &argv, stop)?
             .success()?;
@@ -629,6 +630,7 @@ pub(crate) fn run<S: Services + ?Sized>(
             "committed tree or HEAD differs from reviewed application",
         )?;
         recheck(repo, request, &snapshot, service, stop)?;
+        tx.check()?;
         complete(
             repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
         )?;
@@ -872,6 +874,7 @@ pub(crate) fn recover<S: Services + ?Sized>(
             saved["commit"].is_null(),
             "saved acceptance commit no longer names HEAD",
         )?;
+        tx.check()?;
         exact_commit(
             repo, &execution, request, &snapshot, &base, &tree, service, stop,
         )?
@@ -905,6 +908,7 @@ pub(crate) fn recover<S: Services + ?Sized>(
     saved["stage"] = "plan review".into();
     tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
     recheck(repo, request, &snapshot, service, stop)?;
+    tx.check()?;
     complete(
         repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
     )
@@ -1183,7 +1187,7 @@ pub(crate) fn finish_landed<S: Services + ?Sized>(
     let execution = std::fs::canonicalize(&request.execution_repo).map_err(Error::new)?;
     let store = Store::open(repo)?;
     let key = crate::digest(execution.as_os_str().as_encoded_bytes());
-    let _tx = store.transaction(
+    let tx = store.transaction(
         &format!("panel-accept-{}", &key[..24]),
         Duration::from_secs(10),
     )?;
@@ -1197,6 +1201,7 @@ pub(crate) fn finish_landed<S: Services + ?Sized>(
     if task["state"] == "done" {
         return Ok(());
     }
+    tx.check()?;
     for verb in if task["state"] == "claimed" || task["state"] == "running" {
         &["review", "finish"][..]
     } else {

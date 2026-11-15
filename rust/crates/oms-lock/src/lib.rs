@@ -10,7 +10,8 @@ mod paths;
 mod protocol;
 
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -159,6 +160,7 @@ impl Cancellation {
 #[derive(Debug, Clone)]
 pub struct Lock {
     path: PathBuf,
+    anchor: Option<PathBuf>,
     mode: Mode,
     settings: Settings,
 }
@@ -181,9 +183,41 @@ impl Lock {
         paths::validate_path(&path)?;
         Ok(Self {
             path,
+            anchor: None,
             mode: settings.selected_mode(),
             settings,
         })
+    }
+
+    /// Repository-anchored lock: allows canonical path resolution only down to
+    /// `anchor`, then walks every component of `relative` without following symlinks.
+    pub fn in_root(anchor: PathBuf, relative: &Path, settings: Settings) -> Result<Self, Error> {
+        settings.validate()?;
+        if !anchor.is_absolute()
+            || anchor.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative.as_os_str().is_empty()
+            || relative.file_name().is_none()
+            || relative.as_os_str().as_bytes().contains(&0)
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(Error::InvalidTarget);
+        }
+        paths::validate_path(&anchor)?;
+        let path = anchor.join(relative);
+        paths::validate_path(&path)?;
+        Ok(Self {
+            path,
+            anchor: Some(anchor),
+            mode: settings.selected_mode(),
+            settings,
+        })
+    }
+
+    pub(crate) fn anchor(&self) -> Option<&Path> {
+        self.anchor.as_deref()
     }
 
     pub fn path(&self) -> &Path {

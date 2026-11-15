@@ -36,8 +36,8 @@ pub fn swap_main(
         "invalid main swap target",
     )?;
     let store = Store::open(repo)?;
-    let _start = store.transaction("panel-main-start", Duration::from_secs(3))?;
-    let _session = store.transaction("panel-main-session", Duration::from_secs(3))?;
+    let start = store.transaction("panel-main-start", Duration::from_secs(3))?;
+    let session = store.transaction("panel-main-session", Duration::from_secs(3))?;
     let attempts = query(
         service,
         NativeCommand::Events,
@@ -91,6 +91,8 @@ pub fn swap_main(
                 }),
         "main swap room ownership changed",
     )?;
+    start.check()?;
+    session.check()?;
     let receipt = service
         .swap_main_host(repo, request, main, stop)
         .map_err(|e| Error {
@@ -228,8 +230,8 @@ pub fn release(
     crate::parent_only()?;
     crate::identifier(attempt)?;
     let store = Store::open(repo)?;
-    let _start = store.transaction("panel-main-start", Duration::from_secs(3))?;
-    let _session = store.transaction("panel-main-session", Duration::from_secs(3))?;
+    let start = store.transaction("panel-main-start", Duration::from_secs(3))?;
+    let session = store.transaction("panel-main-session", Duration::from_secs(3))?;
     let row = query(
         service,
         NativeCommand::Events,
@@ -256,6 +258,8 @@ pub fn release(
     };
     require(host_absent, "main host absence is unproven")?;
     prove_native_absent(&row)?;
+    start.check()?;
+    session.check()?;
     let mut argv = crate::services::args(&["transition", "--attempt", attempt, "--state"]);
     if row["state"] == "working" {
         argv.extend(crate::services::args(&["blocked", "--then", "abandoned"]));

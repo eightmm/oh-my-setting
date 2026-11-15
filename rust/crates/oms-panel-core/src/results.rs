@@ -300,8 +300,10 @@ pub fn finalize(
     }
     let request = &resolved;
     let before = {
-        let _tx = store.transaction("panel-results", Duration::from_secs(10))?;
-        service.finalize_authority(repo, request, stop)?
+        let tx = store.transaction("panel-results", Duration::from_secs(10))?;
+        let snap = service.finalize_authority(repo, request, stop)?;
+        tx.check()?;
+        snap
     };
     let landed = if request.landed_commit.is_some() {
         Some(crate::acceptance::validate_landed(
@@ -344,6 +346,7 @@ pub fn finalize(
             crate::acceptance::validate_landed(repo, request, service, stop)? == landed,
             "landed acceptance changed during verification",
         )?;
+        tx.check()?;
         crate::acceptance::finish_landed(repo, request, &before, service, stop)?;
         after = service.finalize_authority(repo, request, stop)?;
     }

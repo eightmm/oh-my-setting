@@ -430,6 +430,67 @@ esac
         .0,
         0
     );
+    // An invalid previous-day wake row refuses the sweep and keeps .oms/tick/last.json unchanged.
+    fs::create_dir_all(source.join(".oms/tick")).unwrap();
+    let bad_prev = "{\"wakes\":[{\"day\":\"2026-11-09\",\"main\":\"m\"}]}";
+    fs::write(source.join(".oms/tick/last.json"), bad_prev).unwrap();
+    let bad_sweep = call(
+        "tick",
+        &["run", "--repo", source.to_str().unwrap()],
+        &source,
+        &host,
+    );
+    assert_ne!(bad_sweep.0, 0);
+    assert!(
+        String::from_utf8_lossy(&bad_sweep.2).contains("malformed; prior receipt retained"),
+        "{:?}",
+        String::from_utf8_lossy(&bad_sweep.2)
+    );
+    assert_eq!(
+        fs::read_to_string(source.join(".oms/tick/last.json")).unwrap(),
+        bad_prev
+    );
+    // A wake callback reporting `refused:` with omitted wakes refuses sweep publication even when kept_receipt succeeded.
+    struct RefusingWakeHost<'a>(&'a NativeServices);
+    impl Services for RefusingWakeHost<'_> {
+        fn hook_protection(&self, source: &Path, stop: &AtomicBool) -> Output {
+            self.0.hook_protection(source, stop)
+        }
+        fn tick_maintenance(&self, repo: &Path, source: &Path, stop: &AtomicBool) -> Output {
+            self.0.tick_maintenance(repo, source, stop)
+        }
+        fn refresh_catalogs(&self, preview: bool, source: &Path, stop: &AtomicBool) -> Output {
+            self.0.refresh_catalogs(preview, source, stop)
+        }
+        fn wake_idle_main(&self, _: bool, _: &Path, _: &AtomicBool) -> Output {
+            (
+                0,
+                b"{\"wake\":0,\"status\":\"refused: tick receipt or its wakes ledger is malformed\"}\n".to_vec(),
+                Vec::new(),
+            )
+        }
+    }
+    let kept_valid = "{\"schema\":1,\"wakes\":[]}";
+    fs::write(source.join(".oms/tick/last.json"), kept_valid).unwrap();
+    fs::write(source.join(".oms/tick/schedules.jsonl"), "").unwrap();
+    let refused_sweep = call(
+        "tick",
+        &["run", "--repo", source.to_str().unwrap()],
+        &source,
+        &RefusingWakeHost(&host),
+    );
+    assert_ne!(refused_sweep.0, 0);
+    assert!(
+        String::from_utf8_lossy(&refused_sweep.2).contains("sweep publication refused"),
+        "{:?}",
+        String::from_utf8_lossy(&refused_sweep.2)
+    );
+    assert_eq!(
+        fs::read_to_string(source.join(".oms/tick/last.json")).unwrap(),
+        kept_valid
+    );
+    fs::remove_file(source.join(".oms/tick/schedules.jsonl")).unwrap();
+    fs::remove_file(source.join(".oms/tick/last.json")).unwrap();
     // Uninstall migrates a legacy owned interpreter link without requiring its producer.
     fs::create_dir_all(home.join(".local/bin")).unwrap();
     symlink(

@@ -258,23 +258,27 @@ fn spawn_main(
     )?;
 
     let store = Store::open(repo)?;
-    let _start_lock = store.transaction("panel-main-start", Duration::from_secs(3))?;
+    let start_lock = store.transaction("panel-main-start", Duration::from_secs(3))?;
     let (session, owner) = resolve_or_legacy_session(repo, services, stop)?;
     require(
         owner.as_deref() == Some(repo.to_string_lossy().as_ref()),
         "no OMS panel is open for this checkout; open one with oms panel",
     )?;
-    let ident = panel_room(repo, &session, options, services, stop)?;
+    start_lock.check()?;
+    let ident = panel_room(repo, &session, options, &start_lock, services, stop)?;
+    start_lock.check()?;
     release_dead_mains(repo, services, stop)?;
     require(
         live_mains(repo, &session, Some(&ident), None, services, stop)? < MAX_LIVE_MAINS,
         "another main is live or unverified; finish it before starting another",
     )?;
     {
-        let _sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
+        let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
         check_legacy_main(repo, &session, services, stop)?;
+        sess_lock.check()?;
     }
 
+    start_lock.check()?;
     let pane = add_main_window(
         repo,
         &prefix,
@@ -376,7 +380,7 @@ fn split_panel(
     stop: &AtomicBool,
 ) -> Result<()> {
     let store = Store::open(repo)?;
-    let _start_lock = store.transaction("panel-main-start", Duration::from_secs(3))?;
+    let start_lock = store.transaction("panel-main-start", Duration::from_secs(3))?;
     let (session, owner) = resolve_or_legacy_session(repo, services, stop)?;
     let repo_str = repo.to_string_lossy().into_owned();
     if let Some(o) = &owner {
@@ -415,16 +419,20 @@ fn split_panel(
     }
 
     if owner.is_some() {
-        let ident = panel_room(repo, &session, options, services, stop)?;
+        start_lock.check()?;
+        let ident = panel_room(repo, &session, options, &start_lock, services, stop)?;
+        start_lock.check()?;
         release_dead_mains(repo, services, stop)?;
         require(
             live_mains(repo, &session, Some(&ident), None, services, stop)? < MAX_LIVE_MAINS,
             "another main is live or unverified; finish it before starting another",
         )?;
         {
-            let _sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
+            let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
             check_legacy_main(repo, &session, services, stop)?;
+            sess_lock.check()?;
         }
+        start_lock.check()?;
         let pane = add_main_window(
             repo,
             prefix,
@@ -454,8 +462,9 @@ fn split_panel(
         )?;
     } else {
         {
-            let _sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
+            let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
             check_legacy_main(repo, &session, services, stop)?;
+            sess_lock.check()?;
         }
         let ident = if let Some(resume) = options.get("resume") {
             let bound = native_resume_binding(
@@ -466,8 +475,10 @@ fn split_panel(
                 stop,
             )?;
             let candidate = chosen_room.or_else(|| bound.into_iter().next());
+            start_lock.check()?;
             ensure_room(repo, candidate.as_deref(), services, stop)?
         } else {
+            start_lock.check()?;
             ensure_room(repo, chosen_room.as_deref(), services, stop)?
         };
         let execution = state::native_repository(repo, None)?;
@@ -495,6 +506,7 @@ fn split_panel(
         ]);
         argv.push(execution.into());
         argv.push(cmd.into());
+        start_lock.check()?;
         let pane = terminals::tmux(services, repo, &argv, stop)?;
         terminals::tmux(
             services,
@@ -582,10 +594,11 @@ fn run_native(
         "selected main transport launch is not available yet",
     )?;
     let store = Store::open(repo)?;
-    let _session_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
+    let session_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
     let session = std::env::var("OMS_PANEL_SESSION").unwrap_or_default();
     if !session.is_empty() {
         check_legacy_main(repo, &session, services, stop)?;
+        session_lock.check()?;
     }
 
     let execution = state::native_repository(repo, None)?;
@@ -597,6 +610,7 @@ fn run_native(
             bound_rooms.len() <= 1,
             "native session is bound to multiple rooms; resume refused",
         )?;
+        session_lock.check()?;
         let ident = ensure_room(
             repo,
             chosen_room
@@ -613,6 +627,7 @@ fn run_native(
         }
         ident
     } else {
+        session_lock.check()?;
         ensure_room(repo, chosen_room.as_deref(), services, stop)?
     };
 
@@ -657,6 +672,7 @@ fn run_native(
             format!("panel_session_digest={}", &digest[..32]),
         ]);
     }
+    session_lock.check()?;
     let attempt = event_id(repo, &start_args, services, stop)?;
     let member = attempt.clone();
 
@@ -1675,12 +1691,15 @@ fn panel_room(
     repo: &Path,
     session: &str,
     options: &Options,
+    lock: &oms_panel_core::Transaction<'_>,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<String> {
     let selected =
         crate::commands::room(options).or_else(|| recorded_room(services, repo, session, stop));
+    lock.check()?;
     let ident = ensure_room(repo, selected.as_deref(), services, stop)?;
+    lock.check()?;
     let _ = terminals::tmux(
         services,
         repo,

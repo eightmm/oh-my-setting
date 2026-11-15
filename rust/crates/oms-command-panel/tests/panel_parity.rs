@@ -253,6 +253,9 @@ struct Fake {
     plan: RefCell<Value>,
     tmux_panes: RefCell<String>,
     tmux_windows: RefCell<String>,
+    tmux_owner: RefCell<String>,
+    tmux_missing_session: std::cell::Cell<bool>,
+    replace_artifacts_on_tmux: std::cell::Cell<bool>,
     commands_seen: RefCell<Vec<(String, Vec<String>)>>,
     native_seen: RefCell<Vec<(NativeCommand, Vec<OsString>)>>,
 }
@@ -299,9 +302,36 @@ impl PeerExecutor for Fake {
         }
         if args.first().is_some_and(|v| v == "tmux") {
             let verb = args.get(1).map(String::as_str).unwrap_or("");
+            if matches!(verb, "has-session" | "show-options")
+                && self.replace_artifacts_on_tmux.get()
+            {
+                let should_trigger = if self.tmux_missing_session.get() {
+                    verb == "has-session"
+                } else {
+                    verb == "show-options"
+                };
+                if should_trigger {
+                    self.replace_artifacts_on_tmux.set(false);
+                    let artifacts = request.cwd.join(".oms/artifacts");
+                    let prev = request.cwd.join(".oms/artifacts-prev");
+                    let _ = std::fs::remove_dir_all(&prev);
+                    std::fs::rename(&artifacts, &prev).unwrap();
+                    ensure_private_dir(&artifacts);
+                }
+            }
+            if verb == "has-session" && self.tmux_missing_session.get() {
+                return Ok(CommandOutput {
+                    code: 1,
+                    stderr: b"can't find session\n".to_vec(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                });
+            }
             let stdout = match verb {
                 "list-panes" => self.tmux_panes.borrow().clone().into_bytes(),
                 "list-windows" => self.tmux_windows.borrow().clone().into_bytes(),
+                "show-options" => self.tmux_owner.borrow().clone().into_bytes(),
                 "display-message" => format!("$1\t{}\tsocket\n", std::process::id()).into_bytes(),
                 "has-session" | "select-pane" | "select-window" | "switch-client" => vec![],
                 _ => vec![],
@@ -1309,6 +1339,51 @@ fn missing_entry_refuses_before_mutation() {
                     "job refusal created durable state"
                 );
             }
+        }
+        // Post-acquisition replacement of .oms/artifacts must refuse before creating a room or mutating tmux.
+        for (missing_session, args) in [
+            (false, os(&["--spawn-main", "codex"])),
+            (true, os(&["--launch", "codex", "--host", "tmux"])),
+        ] {
+            let lock_repo = repo.join(format!("lock-swap-{missing_session}"));
+            ensure_private_dir(&lock_repo);
+            let scripts = lock_repo.join("scripts");
+            ensure_private_dir(&scripts);
+            write_private_file(&scripts.join("oms"), b"#!/bin/sh\nexit 0\n");
+            let services = Fake::default();
+            services.tmux_missing_session.set(missing_session);
+            *services.tmux_owner.borrow_mut() = format!("{}\n", lock_repo.display());
+            services.replace_artifacts_on_tmux.set(true);
+            let (code, _, err) =
+                run_with_services("panel", &args, &lock_repo, &lock_repo, &STOP, &services);
+            assert_ne!(code, 0, "{args:?}: expected refusal after lock replacement");
+            assert!(
+                !String::from_utf8_lossy(&err).is_empty(),
+                "{args:?}: expected error detail"
+            );
+            assert!(
+                services
+                    .native_seen
+                    .borrow()
+                    .iter()
+                    .all(|(kind, args)| *kind != NativeCommand::Room
+                        || args.first().is_none_or(|arg| arg != "new")),
+                "{args:?}: room created despite invalid start lock: {:?}",
+                services.native_seen.borrow()
+            );
+            assert!(
+                services.commands_seen.borrow().iter().all(|(_, args)| {
+                    args.first().is_none_or(|arg| arg != "tmux")
+                        || args.get(1).is_none_or(|arg| {
+                            !matches!(
+                                arg.as_str(),
+                                "set-environment" | "new-window" | "new-session"
+                            )
+                        })
+                }),
+                "{args:?}: tmux mutated despite invalid start lock: {:?}",
+                services.commands_seen.borrow()
+            );
         }
         return;
     }

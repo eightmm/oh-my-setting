@@ -288,15 +288,25 @@ pub(crate) fn run(
                         );
                     }
                 }
-                if receipt["wake"] == 1 && !receipt["wakes"].is_array() {
+                if receipt["status"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("refused:"))
+                    || !receipt["wakes"].is_array()
+                {
                     return r::fail(
-                        "wake callback omitted its daily ledger; sweep publication refused",
+                        "wake callback omitted or refused its daily ledger; sweep publication refused",
                     );
                 }
                 if let Some(wakes) = receipt.get("wakes") {
                     row["wakes"] = wakes.clone();
                 }
             } else {
+                let refreshed = kept_receipt(&target)?;
+                if let Some(wakes) = refreshed.get("wakes") {
+                    row["wakes"] = wakes.clone();
+                } else {
+                    row.as_object_mut().unwrap().remove("wakes");
+                }
                 row["status"] = json!("failed");
                 row["wake"] = json!(output.0);
             }
@@ -322,8 +332,12 @@ fn validate_wakes(row: &Value) -> Result<()> {
     if !row.is_object()
         || row.get("wakes").is_some_and(|v| {
             v.as_array().is_none_or(|a| {
-                a.iter()
-                    .any(|r| !r["day"].is_string() || !r["main"].is_string())
+                a.iter().any(|r| {
+                    !r["day"].as_str().is_some_and(|s| !s.is_empty())
+                        || !r["main"].as_str().is_some_and(|s| !s.is_empty())
+                        || !r["key"].as_str().is_some_and(|s| !s.is_empty())
+                        || !matches!(r["outcome"].as_str(), Some("woke" | "resumed" | "skipped"))
+                })
             })
         })
     {

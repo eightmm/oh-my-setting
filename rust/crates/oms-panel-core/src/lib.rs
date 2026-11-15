@@ -27,6 +27,7 @@ pub mod since;
 pub mod state;
 mod storage;
 pub mod terminals;
+pub mod tick;
 mod value;
 pub mod workspaces;
 

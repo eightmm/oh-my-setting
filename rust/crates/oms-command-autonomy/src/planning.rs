@@ -206,9 +206,27 @@ pub(crate) fn validate(
         value::text(proposal, "spec_sha256") == spec.sha256,
         "PROJECT.md changed after proposal generation",
     )?;
+    let tasks = proposal["tasks"]
+        .as_array()
+        .ok_or_else(|| Error::new(3, "proposal tasks must be an array"))?;
     require(
-        value::text(proposal, "base_sha") == ctx.git(&["rev-parse", "HEAD"])?
-            && value::commit(value::text(proposal, "base_sha")),
+        !tasks.is_empty() && tasks.len() as u64 <= cap,
+        format!("proposal tasks must contain 1..{cap} entries"),
+    )?;
+    let existing = ctx.plan()?.load()?;
+    let replay = tasks.iter().all(|task| {
+        task.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| existing.task(id).is_ok())
+    });
+    let base_sha = value::text(proposal, "base_sha");
+    require(
+        value::commit(base_sha)
+            && if replay {
+                ctx.plan()?.git().ancestor(base_sha, "HEAD").is_ok()
+            } else {
+                base_sha == ctx.git(&["rev-parse", "HEAD"])?
+            },
         "proposal base differs from HEAD",
     )?;
     let prefix = value::text(proposal, "id_prefix");
@@ -230,14 +248,6 @@ pub(crate) fn validate(
         strings(&proposal["acceptance_files"])? == spec.acceptance_files,
         "proposal acceptance_files differs from the current contract",
     )?;
-    let tasks = proposal["tasks"]
-        .as_array()
-        .ok_or_else(|| Error::new(3, "proposal tasks must be an array"))?;
-    require(
-        !tasks.is_empty() && tasks.len() as u64 <= cap,
-        format!("proposal tasks must contain 1..{cap} entries"),
-    )?;
-    let existing = ctx.plan()?.load()?;
     let mut seen = BTreeSet::new();
     for task in tasks {
         value::keys(
@@ -281,12 +291,14 @@ pub(crate) fn validate(
             "floor_incompatible_verifier: task reads content it may modify",
         )?;
         crate::selectors::validate(&ctx.repo, value::text(task, "verify"))?;
-        if let Some(path) = verify::missing_base(
-            &ctx.repo,
-            value::text(task, "verify"),
-            &paths,
-            ctx.interrupted,
-        )? {
+        if !replay
+            && let Some(path) = verify::missing_base(
+                &ctx.repo,
+                value::text(task, "verify"),
+                &paths,
+                ctx.interrupted,
+            )?
+        {
             return Err(Error::new(
                 3,
                 format!("verify names {path}, which does not exist at the base commit"),
@@ -401,83 +413,36 @@ pub(crate) fn apply(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         proposal["tasks"].as_array().unwrap().len()
     )))
 }
-pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
-    let modes = ["apply", "validate-spec", "scope-only", "roadmap"]
-        .iter()
-        .filter(|m| args.has(m))
-        .count();
-    require(
-        modes <= 1,
-        "apply, validate-spec, scope-only and roadmap are separate modes",
-    )?;
-    if args.has("apply") {
-        require(
-            !args.flag("discover") && !args.has("milestone"),
-            "discovery and milestones are propose-only",
-        )?;
-        return apply(ctx, args);
-    }
+struct PreparedPropose {
+    spec: Contract,
+    allowed: Vec<String>,
+    prefix: String,
+    max: u64,
+    before: String,
+    head: String,
+    old: Option<Vec<u8>>,
+    planner: String,
+    worker: String,
+    collaboration: String,
+    planner_model: String,
+    prompt: String,
+    discovery: Option<Value>,
+    wall: std::time::Duration,
+    extra_call_args: Vec<OsString>,
+}
+fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
     require(
         !args.has("expected-proposal-sha256"),
         "expected proposal digest requires --apply",
     )?;
-    let spec = if args.has("validate-spec") {
-        contract::parse(
-            &ctx.bytes(&args.path("validate-spec", &ctx.repo), MAX_FILE)?,
-            &ctx.repo,
-        )?
-    } else {
-        contract(ctx)?
-    };
-    if args.flag("scope-only") {
-        return Ok(Output::text(spec.allowed.join(",")));
-    }
-    if args.flag("roadmap") {
-        let rows = spec.roadmap()?;
-        if rows.is_empty() {
-            let mut out = Output::text(
-                "roadmap: PROJECT.md has no '## Roadmap' items (optional: '- [ ] M1: title (REQ-1, REQ-2)')",
-            );
-            out.code = 1;
-            return Ok(out);
-        }
-        let mut lines = vec![format!(
-            "roadmap: {} milestone(s); a checkbox is the document's own claim, not evidence",
-            rows.len()
-        )];
-        for row in &rows {
-            lines.push(format!(
-                "  [{}] {}: {}  ({})",
-                if row["checked"] == true { "x" } else { " " },
-                value::text(row, "id"),
-                value::text(row, "title"),
-                strings(&row["criteria"])?.join(", ")
-            ));
-        }
-        if let Some(next) = rows.iter().find(|r| r["checked"] != true) {
-            lines.push(format!(
-                "next unchecked: {}  ->  oms plan-from-spec --milestone {}",
-                value::text(next, "id"),
-                value::text(next, "id")
-            ));
-        }
-        return Ok(Output::text(lines.join("\n")));
-    }
-    if args.has("validate-spec") {
-        let mut out = Output::text(format!(
-            "validate-spec: acceptance ok ({})",
-            spec.acceptance
-        ));
-        out.stderr = spec.warnings().join("\n").into_bytes();
-        return Ok(out);
-    }
+    let spec = contract(ctx)?;
     ctx.parent()?;
     spec.confirmed()?;
     spec.planner_budget()?;
     let max = args.number("max-tasks", 6, 1, 12)?;
-    let prefix = args.text("id-prefix")?;
+    let prefix = args.text("id-prefix")?.to_owned();
     require(
-        prefix.is_empty() || value::id(prefix, 160),
+        prefix.is_empty() || value::id(&prefix, 160),
         "invalid --id-prefix",
     )?;
     let allowed = if args.has("allowed") {
@@ -500,9 +465,9 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     let worker = ctx
         .services
         .normalize_provider(args.get("worker-provider", "codex")?)?;
-    let collaboration = args.get("collaboration", "off")?;
+    let collaboration = args.get("collaboration", "off")?.to_owned();
     require(
-        ["off", "auto"].contains(&collaboration),
+        ["off", "auto"].contains(&collaboration.as_str()),
         "--collaboration must be off or auto",
     )?;
     let mut planner_model = args.text("model")?.to_owned();
@@ -552,6 +517,126 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             ["codex", "claude"].contains(&worker.as_str()),
             "auto collaboration requires codex or claude worker",
         )?;
+    }
+    let mut extra_call_args = Vec::new();
+    for key in ["model", "fallback-model", "reasoning-effort"] {
+        if args.has(key) {
+            if key == "reasoning-effort" {
+                verify::effort(args.text(key)?)?;
+            } else {
+                verify::model(args.text(key)?)?;
+            }
+            extra_call_args.push(format!("--{key}").into());
+            extra_call_args.push(args.text(key)?.into());
+        }
+    }
+    Ok(PreparedPropose {
+        spec,
+        allowed,
+        prefix,
+        max,
+        before,
+        head,
+        old,
+        planner,
+        worker,
+        collaboration,
+        planner_model,
+        prompt,
+        discovery,
+        wall,
+        extra_call_args,
+    })
+}
+pub(crate) fn preflight_propose(ctx: &Context<'_>, args: &Args) -> Result<()> {
+    prepare_propose(ctx, args).map(|_| ())
+}
+pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    let modes = ["apply", "validate-spec", "scope-only", "roadmap"]
+        .iter()
+        .filter(|m| args.has(m))
+        .count();
+    require(
+        modes <= 1,
+        "apply, validate-spec, scope-only and roadmap are separate modes",
+    )?;
+    if args.has("apply") {
+        require(
+            !args.flag("discover") && !args.has("milestone"),
+            "discovery and milestones are propose-only",
+        )?;
+        return apply(ctx, args);
+    }
+    if args.has("validate-spec") || args.flag("scope-only") || args.flag("roadmap") {
+        require(
+            !args.has("expected-proposal-sha256"),
+            "expected proposal digest requires --apply",
+        )?;
+        let spec = if args.has("validate-spec") {
+            contract::parse(
+                &ctx.bytes(&args.path("validate-spec", &ctx.repo), MAX_FILE)?,
+                &ctx.repo,
+            )?
+        } else {
+            contract(ctx)?
+        };
+        if args.flag("scope-only") {
+            return Ok(Output::text(spec.allowed.join(",")));
+        }
+        if args.flag("roadmap") {
+            let rows = spec.roadmap()?;
+            if rows.is_empty() {
+                let mut out = Output::text(
+                    "roadmap: PROJECT.md has no '## Roadmap' items (optional: '- [ ] M1: title (REQ-1, REQ-2)')",
+                );
+                out.code = 1;
+                return Ok(out);
+            }
+            let mut lines = vec![format!(
+                "roadmap: {} milestone(s); a checkbox is the document's own claim, not evidence",
+                rows.len()
+            )];
+            for row in &rows {
+                lines.push(format!(
+                    "  [{}] {}: {}  ({})",
+                    if row["checked"] == true { "x" } else { " " },
+                    value::text(row, "id"),
+                    value::text(row, "title"),
+                    strings(&row["criteria"])?.join(", ")
+                ));
+            }
+            if let Some(next) = rows.iter().find(|r| r["checked"] != true) {
+                lines.push(format!(
+                    "next unchecked: {}  ->  oms plan-from-spec --milestone {}",
+                    value::text(next, "id"),
+                    value::text(next, "id")
+                ));
+            }
+            return Ok(Output::text(lines.join("\n")));
+        }
+        let mut out = Output::text(format!(
+            "validate-spec: acceptance ok ({})",
+            spec.acceptance
+        ));
+        out.stderr = spec.warnings().join("\n").into_bytes();
+        return Ok(out);
+    }
+    let prepared = prepare_propose(ctx, args)?;
+    let spec = prepared.spec;
+    let allowed = prepared.allowed;
+    let prefix = prepared.prefix;
+    let max = prepared.max;
+    let before = prepared.before;
+    let head = prepared.head;
+    let old = prepared.old;
+    let planner = prepared.planner;
+    let worker = prepared.worker;
+    let collaboration = prepared.collaboration;
+    let planner_model = prepared.planner_model;
+    let mut prompt = prepared.prompt;
+    let discovery = prepared.discovery;
+    let wall = prepared.wall;
+    if collaboration == "auto" {
         let council_dir = format!(".oms/plan/council-{}", value::random("")?);
         ctx.store
             .publish_once(format!("{council_dir}/.native"), b"", 0)?;
@@ -607,17 +692,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         "--prompt".into(),
         prompt.into(),
     ];
-    for key in ["model", "fallback-model", "reasoning-effort"] {
-        if args.has(key) {
-            if key == "reasoning-effort" {
-                verify::effort(args.text(key)?)?;
-            } else {
-                verify::model(args.text(key)?)?;
-            }
-            call.push(format!("--{key}").into());
-            call.push(args.text(key)?.into());
-        }
-    }
+    call.extend(prepared.extra_call_args);
     if !args.has("model") && !planner_model.is_empty() {
         call.extend(["--model".into(), planner_model.into()]);
     }
