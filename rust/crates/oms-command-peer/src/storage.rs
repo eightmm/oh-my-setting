@@ -100,12 +100,7 @@ pub fn latest(rows: &[V]) -> Result<Vec<V>> {
     }
     Ok(values)
 }
-pub fn transaction<T>(
-    repo: &Path,
-    path: &Path,
-    interrupted: &AtomicBool,
-    f: impl FnOnce(&[u8]) -> Result<(Vec<u8>, T)>,
-) -> Result<T> {
+pub fn lock(repo: &Path, path: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Guard> {
     relative(path)?;
     let anchor = root(repo)?;
     let canonical = anchor.physical_root().join(path);
@@ -116,16 +111,27 @@ pub fn transaction<T>(
     let lock = oms_lock::Lock::for_file(&canonical, settings)
         .map_err(|_| Error::new(2, "cannot derive state lock"))?;
     let start = Instant::now();
-    let guard = loop {
+    loop {
         check(interrupted)?;
         match lock.try_acquire() {
-            Ok(g) => break g,
+            Ok(g) => return Ok(g),
             Err(oms_lock::Error::Busy) if start.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(20))
             }
             Err(e) => return Err(Error::new(e.exit_code(), "could not acquire state lock")),
         }
-    };
+    }
+}
+
+pub fn transaction_locked<T>(
+    repo: &Path,
+    path: &Path,
+    guard: &oms_lock::Guard,
+    interrupted: &AtomicBool,
+    f: impl FnOnce(&[u8]) -> Result<(Vec<u8>, T)>,
+) -> Result<T> {
+    relative(path)?;
+    let anchor = root(repo)?;
     check(interrupted)?;
     let mut result = None;
     anchor
@@ -161,6 +167,33 @@ pub fn transaction<T>(
         .map_err(|_| Error::new(2, "state lock ownership changed after publication"))?;
     result.ok_or_else(|| Error::new(2, "state transform did not run"))
 }
+
+pub fn transaction<T>(
+    repo: &Path,
+    path: &Path,
+    interrupted: &AtomicBool,
+    f: impl FnOnce(&[u8]) -> Result<(Vec<u8>, T)>,
+) -> Result<T> {
+    let guard = lock(repo, path, interrupted)?;
+    transaction_locked(repo, path, &guard, interrupted, f)
+}
+
+pub fn write_locked(
+    repo: &Path,
+    path: &Path,
+    guard: &oms_lock::Guard,
+    bytes: Vec<u8>,
+    replace: bool,
+    interrupted: &AtomicBool,
+) -> Result<()> {
+    transaction_locked(repo, path, guard, interrupted, |_old| {
+        if !replace && std::fs::symlink_metadata(repo.join(path)).is_ok() {
+            return fail("destination already exists");
+        }
+        Ok((bytes, ()))
+    })
+}
+
 pub fn write(
     repo: &Path,
     path: &Path,
@@ -168,12 +201,8 @@ pub fn write(
     replace: bool,
     interrupted: &AtomicBool,
 ) -> Result<()> {
-    transaction(repo, path, interrupted, |_old| {
-        if !replace && std::fs::symlink_metadata(repo.join(path)).is_ok() {
-            return fail("destination already exists");
-        }
-        Ok((bytes, ()))
-    })
+    let guard = lock(repo, path, interrupted)?;
+    write_locked(repo, path, &guard, bytes, replace, interrupted)
 }
 pub fn append(repo: &Path, path: &Path, row: &V, interrupted: &AtomicBool) -> Result<()> {
     let mut body = row.json(false)?;

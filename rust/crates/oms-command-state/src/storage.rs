@@ -28,6 +28,16 @@ pub fn lock(path: &Path) -> Result<oms_lock::Guard> {
 
 pub fn try_lock(path: &Path) -> Result<Option<oms_lock::Guard>> {
     let settings = oms_lock::Settings::from_env().map_err(|e| error(e.exit_code(), e))?;
+    try_lock_with(path, settings)
+}
+
+pub fn try_lock_in(cwd: &Path, path: &Path) -> Result<Option<oms_lock::Guard>> {
+    let mut settings = oms_lock::Settings::from_env().map_err(|e| error(e.exit_code(), e))?;
+    settings.cwd = cwd.to_owned();
+    try_lock_with(path, settings)
+}
+
+fn try_lock_with(path: &Path, settings: oms_lock::Settings) -> Result<Option<oms_lock::Guard>> {
     match oms_lock::Lock::for_file(path, settings).and_then(|l| l.try_acquire()) {
         Ok(guard) => Ok(Some(guard)),
         Err(oms_lock::Error::Busy) => Ok(None),

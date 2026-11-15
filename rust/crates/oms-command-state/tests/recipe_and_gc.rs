@@ -415,7 +415,11 @@ fn chmod_tree_private(root: &Path) {
 }
 
 fn age_file(path: &Path, mtime_secs: u64) {
-    let f = OpenOptions::new().write(true).open(path).unwrap();
+    let f = OpenOptions::new()
+        .read(true)
+        .write(!path.is_dir())
+        .open(path)
+        .unwrap();
     f.set_times(
         FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs)),
     )
@@ -424,6 +428,63 @@ fn age_file(path: &Path, mtime_secs: u64) {
 
 #[test]
 fn gc_completion_captures_host_hooks_telemetry_prune_and_orphans() {
+    if let Some(repo_raw) = std::env::var_os("OMS_GC_HOOK_REL_LOCK_REPO") {
+        let repo = Path::new(&repo_raw);
+        let cwd = std::env::current_dir().unwrap();
+        let flag = AtomicBool::new(false);
+        let mut no_svc = oms_command_state_test_services();
+        let repo_s = repo.to_string_lossy().into_owned();
+        let hook_args = os_args(&["--repo", &repo_s, "--days", "1", "--apply", "--json"]);
+        let (code, stdout, stderr) =
+            run_with_host("gc", &hook_args, &cwd, &flag, &mut no_svc, &StubHost);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let report = json::parse(&stdout).unwrap();
+        assert!(
+            !report
+                .get("items")
+                .array()
+                .unwrap()
+                .iter()
+                .any(|i| matches!(
+                    i.text("kind"),
+                    "hook-panel-activity" | "hook-state-hint" | "hook-session"
+                )),
+            "{report:?}"
+        );
+        assert!(
+            !report.get("deferred").array().unwrap().is_empty(),
+            "{report:?}"
+        );
+        return;
+    }
+
+    if let Some(repo_raw) = std::env::var_os("OMS_GC_REL_LOCK_TEST_REPO") {
+        let repo = Path::new(&repo_raw);
+        let cwd = std::env::current_dir().unwrap();
+        let flag = AtomicBool::new(false);
+        let mut no_svc = oms_command_state_test_services();
+        let repo_s = repo.to_string_lossy().into_owned();
+        let zero_args = os_args(&["--repo", &repo_s, "--days", "0", "--apply", "--json"]);
+        let (code, stdout, stderr) =
+            run_with_host("gc", &zero_args, &cwd, &flag, &mut no_svc, &StubHost);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let zero_report = json::parse(&stdout).unwrap();
+        assert!(
+            !zero_report
+                .get("items")
+                .array()
+                .unwrap()
+                .iter()
+                .any(|i| i.text("kind") == "orphan-peer-tmp"),
+            "{zero_report:?}"
+        );
+        assert!(
+            !zero_report.get("deferred").array().unwrap().is_empty(),
+            "{zero_report:?}"
+        );
+        return;
+    }
+
     let tmp = TempDir::new("oms-gc-state");
     let repo = tmp.path();
 
@@ -470,6 +531,57 @@ fn gc_completion_captures_host_hooks_telemetry_prune_and_orphans() {
     age_file(&kept_payload, 1000);
     age_file(&orphan_payload, 1000);
 
+    // Aged small-file residue: panel-activity, state-hint, orphan peer wrapper
+    // (no tree), a peer wrapper whose tree still exists, and a fresh hint.
+    let activity = repo.join(".oms/hooks/panel-activity/who.json");
+    let hint = repo.join(".oms/hooks/state-hint.2026-01-01");
+    let fresh_hint = repo.join(".oms/hooks/state-hint.2999-01-01");
+    let orphan_peer = repo.join(".oms/tmp/peer-orphan");
+    let live_peer = repo.join(".oms/tmp/peer-live");
+    fs::create_dir_all(activity.parent().unwrap()).unwrap();
+    fs::create_dir_all(live_peer.join("tree")).unwrap();
+    fs::create_dir_all(&orphan_peer).unwrap();
+    fs::write(&activity, b"{}").unwrap();
+    fs::write(&hint, b"1\n").unwrap();
+    fs::write(&fresh_hint, b"1\n").unwrap();
+    fs::write(orphan_peer.join("owner.json"), b"{}").unwrap();
+    fs::write(live_peer.join("owner.json"), b"{}").unwrap();
+    let extra_peer = repo.join(".oms/tmp/peer-extra");
+    let registered_peer = repo.join(".oms/tmp/peer-registered");
+    fs::create_dir_all(&extra_peer).unwrap();
+    fs::create_dir_all(&registered_peer).unwrap();
+    fs::write(extra_peer.join("owner.json"), b"{}").unwrap();
+    fs::write(extra_peer.join("note.txt"), b"keep").unwrap();
+    fs::write(registered_peer.join("owner.json"), b"{}").unwrap();
+    let registry = repo.join(".git/worktrees/peer-registered");
+    fs::create_dir_all(&registry).unwrap();
+    fs::write(
+        registry.join("gitdir"),
+        format!("{}/.git\n", registered_peer.join("tree").display()),
+    )
+    .unwrap();
+    chmod_tree_private(repo);
+    for p in [
+        &activity,
+        &hint,
+        &orphan_peer.join("owner.json"),
+        &live_peer.join("owner.json"),
+    ] {
+        age_file(p, 1000);
+    }
+    age_file(&orphan_peer, 1000);
+    age_file(&live_peer, 1000);
+    let future_mtime = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    age_file(&fresh_hint, future_mtime);
+    for p in [&extra_peer, &registered_peer] {
+        age_file(&p.join("owner.json"), 1000);
+        age_file(p, 1000);
+    }
+
     let flag = AtomicBool::new(false);
     let repo_s = repo.to_string_lossy().into_owned();
 
@@ -489,6 +601,17 @@ fn gc_completion_captures_host_hooks_telemetry_prune_and_orphans() {
     assert!(dry_report.get("deferred").array().unwrap().len() >= 2);
     assert!(repo.join(&cap_rel).exists());
     assert!(orphan_payload.exists());
+    let kinds: Vec<String> = dry_report
+        .get("items")
+        .array()
+        .unwrap()
+        .iter()
+        .map(|i| i.text("kind").to_owned())
+        .collect();
+    for kind in ["hook-panel-activity", "hook-state-hint", "orphan-peer-tmp"] {
+        assert_eq!(kinds.iter().filter(|k| *k == kind).count(), 1, "{kinds:?}");
+    }
+    assert!(activity.exists() && hint.exists() && orphan_peer.exists());
 
     // Apply via run_with_host + StubHost reclaims everything safely and preserves kept_payload + 1000 rows.
     let mut no_svc = oms_command_state_test_services();
@@ -509,12 +632,235 @@ fn gc_completion_captures_host_hooks_telemetry_prune_and_orphans() {
     assert!(!repo.join(&cap_rel).exists());
     assert!(!orphan_payload.exists());
     assert!(kept_payload.exists());
+    assert!(!activity.exists() && !hint.exists() && !orphan_peer.exists());
+    assert!(fresh_hint.exists() && live_peer.join("owner.json").exists());
+    assert!(extra_peer.join("note.txt").exists() && extra_peer.join("owner.json").exists());
+    assert!(
+        registered_peer.join("owner.json").exists(),
+        "registered kept"
+    );
     let final_lines = fs::read_to_string(repo.join(".oms/artifacts/index.jsonl"))
         .unwrap()
         .lines()
         .count();
     assert_eq!(final_lines, 1000);
     let _ = NoHostServices;
+
+    // A locked peer wrapper must not be reclaimed even under --days 0.
+    let locked_peer = repo.join(".oms/tmp/peer-locked");
+    fs::create_dir_all(&locked_peer).unwrap();
+    let locked_owner = locked_peer.join("owner.json");
+    fs::write(&locked_owner, b"{}").unwrap();
+    chmod_tree_private(repo);
+    age_file(&locked_owner, 1000);
+    age_file(&locked_peer, 1000);
+    let canon_owner = locked_owner.canonicalize().unwrap();
+    let mut settings = oms_lock::Settings::from_env().unwrap();
+    settings.cwd = repo.canonicalize().unwrap();
+    let _held = oms_lock::Lock::for_file(&canon_owner, settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    let zero_args = os_args(&["--repo", &repo_s, "--days", "0", "--apply", "--json"]);
+    let (code, stdout, stderr) =
+        run_with_host("gc", &zero_args, repo, &flag, &mut no_svc, &StubHost);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+    let zero_report = json::parse(&stdout).unwrap();
+    assert!(
+        !zero_report
+            .get("items")
+            .array()
+            .unwrap()
+            .iter()
+            .any(|i| i.text("kind") == "orphan-peer-tmp"),
+        "{zero_report:?}"
+    );
+    assert!(
+        !zero_report.get("deferred").array().unwrap().is_empty(),
+        "{zero_report:?}"
+    );
+    assert!(locked_owner.is_file(), "locked peer wrapper preserved");
+    drop(_held);
+
+    // Relative OMS_LOCK_DIR must resolve against the target repository, not the child's cwd.
+    let rel_locks = repo.join("locks");
+    let other_cwd = repo.join("elsewhere");
+    fs::create_dir_all(&rel_locks).unwrap();
+    fs::create_dir_all(&other_cwd).unwrap();
+    fs::set_permissions(&rel_locks, Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&other_cwd, Permissions::from_mode(0o750)).unwrap();
+    let mut rel_settings = oms_lock::Settings::from_env().unwrap();
+    rel_settings.cwd = repo.canonicalize().unwrap();
+    rel_settings.lock_dir = Some(PathBuf::from("locks"));
+    let _rel_held = oms_lock::Lock::for_file(&canon_owner, rel_settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let status = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "gc_completion_captures_host_hooks_telemetry_prune_and_orphans",
+            "--nocapture",
+        ])
+        .current_dir(&other_cwd)
+        .env("OMS_LOCK_DIR", "locks")
+        .env("OMS_GC_REL_LOCK_TEST_REPO", repo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        locked_owner.is_file(),
+        "locked peer wrapper preserved across relative OMS_LOCK_DIR"
+    );
+    drop(_rel_held);
+
+    // Hook writers resolve relative OMS_LOCK_DIR against "/"; GC must match across cwds.
+    let hook_lock_root = TempDir::new("oms-gc-hook-locks");
+    let hook_lock_canon = hook_lock_root.path().canonicalize().unwrap();
+    fs::set_permissions(&hook_lock_canon, Permissions::from_mode(0o700)).unwrap();
+    let rel_hook_locks = hook_lock_canon.strip_prefix("/").unwrap().to_path_buf();
+    let locked_activity = repo.join(".oms/hooks/panel-activity/locked.json");
+    let locked_hint = repo.join(".oms/hooks/state-hint.2020-01-01");
+    fs::write(&locked_activity, b"{}").unwrap();
+    fs::write(&locked_hint, b"1\n").unwrap();
+    chmod_tree_private(repo);
+    age_file(&locked_activity, 1000);
+    age_file(&locked_hint, 1000);
+    let mut hook_settings = oms_lock::Settings::from_env().unwrap();
+    hook_settings.cwd = PathBuf::from("/");
+    hook_settings.lock_dir = Some(rel_hook_locks.clone());
+    let _held_act = oms_lock::Lock::for_file(
+        &locked_activity.canonicalize().unwrap(),
+        hook_settings.clone(),
+    )
+    .unwrap()
+    .try_acquire()
+    .unwrap();
+    let _held_hint = oms_lock::Lock::for_file(&locked_hint.canonicalize().unwrap(), hook_settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    let hook_status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "gc_completion_captures_host_hooks_telemetry_prune_and_orphans",
+            "--nocapture",
+        ])
+        .current_dir(&other_cwd)
+        .env("OMS_LOCK_DIR", &rel_hook_locks)
+        .env("OMS_GC_HOOK_REL_LOCK_REPO", repo)
+        .status()
+        .unwrap();
+    assert!(hook_status.success());
+    assert!(
+        locked_activity.is_file(),
+        "locked hook activity preserved across relative OMS_LOCK_DIR"
+    );
+    assert!(
+        locked_hint.is_file(),
+        "locked hook state hint preserved across relative OMS_LOCK_DIR"
+    );
+}
+
+#[test]
+fn gc_keeps_peer_wrapper_when_git_registry_is_unknown() {
+    use std::os::unix::fs::symlink;
+    // (name, how to break the registry for a wrapper that has no tree)
+    type Setup = fn(&Path, &Path);
+    let cases: [(&str, Setup); 7] = [
+        ("symlinked-worktrees", |repo, _| {
+            let real = repo.join("elsewhere");
+            fs::create_dir_all(&real).unwrap();
+            fs::create_dir_all(repo.join(".git")).unwrap();
+            symlink(&real, repo.join(".git/worktrees")).unwrap();
+        }),
+        ("symlinked-gitdir", |repo, _| {
+            let entry = repo.join(".git/worktrees/other");
+            fs::create_dir_all(&entry).unwrap();
+            fs::write(repo.join("target"), b"/nowhere/.git\n").unwrap();
+            symlink(repo.join("target"), entry.join("gitdir")).unwrap();
+        }),
+        ("non-utf8-gitdir", |repo, _| {
+            let entry = repo.join(".git/worktrees/other");
+            fs::create_dir_all(&entry).unwrap();
+            fs::write(entry.join("gitdir"), [b'/', 0xff, 0xfe, b'\n']).unwrap();
+        }),
+        ("relative-gitdir", |repo, wrapper| {
+            let entry = repo.join(".git/worktrees/other");
+            fs::create_dir_all(&entry).unwrap();
+            let relative = format!(
+                "../../../.oms/tmp/{}/tree/.git\n",
+                wrapper.file_name().unwrap().to_string_lossy()
+            );
+            fs::write(entry.join("gitdir"), relative).unwrap();
+        }),
+        ("missing-gitdir", |repo, _| {
+            fs::create_dir_all(repo.join(".git/worktrees/other")).unwrap();
+        }),
+        ("dotdot-alias-gitdir", |repo, wrapper| {
+            let entry = repo.join(".git/worktrees/other");
+            fs::create_dir_all(&entry).unwrap();
+            fs::create_dir_all(repo.join(".oms/tmp/other")).unwrap();
+            let target = format!(
+                "{}/tree/.git\n",
+                repo.join(".oms/tmp/other/..")
+                    .join(wrapper.file_name().unwrap())
+                    .display()
+            );
+            fs::write(entry.join("gitdir"), target).unwrap();
+        }),
+        ("symlink-alias-gitdir", |repo, wrapper| {
+            let entry = repo.join(".git/worktrees/other");
+            fs::create_dir_all(&entry).unwrap();
+            let alias = repo.join("alias-wrapper");
+            symlink(wrapper, &alias).unwrap();
+            fs::write(
+                entry.join("gitdir"),
+                format!("{}/tree/.git\n", alias.display()),
+            )
+            .unwrap();
+        }),
+    ];
+    for (name, setup) in cases {
+        let tmp = TempDir::new("oms-gc-peer-registry");
+        let repo = tmp.path();
+        let wrapper = repo.join(".oms/tmp/peer-keep");
+        fs::create_dir_all(&wrapper).unwrap();
+        fs::create_dir_all(repo.join(".oms/hooks")).unwrap();
+        fs::write(wrapper.join("owner.json"), b"{}").unwrap();
+        setup(repo, &wrapper);
+        chmod_tree_private(repo);
+        age_file(&wrapper.join("owner.json"), 1000);
+        age_file(&wrapper, 1000);
+        let flag = AtomicBool::new(false);
+        let args = os_args(&[
+            "--repo",
+            &repo.to_string_lossy(),
+            "--days",
+            "1",
+            "--apply",
+            "--json",
+        ]);
+        let mut services = oms_command_state_test_services();
+        let (code, stdout, stderr) =
+            run_with_host("gc", &args, repo, &flag, &mut services, &StubHost);
+        assert_eq!(code, 0, "{name}: {}", String::from_utf8_lossy(&stderr));
+        let report = json::parse(&stdout).unwrap();
+        assert!(
+            !report
+                .get("items")
+                .array()
+                .unwrap()
+                .iter()
+                .any(|i| i.text("kind") == "orphan-peer-tmp"),
+            "{name}: {report:?}"
+        );
+        assert!(
+            wrapper.join("owner.json").is_file(),
+            "{name}: owner.json kept"
+        );
+    }
 }
 
 struct DummyRunServices;

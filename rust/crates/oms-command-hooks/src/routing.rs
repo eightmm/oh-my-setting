@@ -271,6 +271,14 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
             let _ = ensure_oms(&repo);
             let _ = mutate(&path, STATE_MAX, false, |raw| {
                 let old = document(raw).unwrap_or_else(|| json!({}));
+                let now_secs = seconds();
+                if old["schema"] == 1
+                    && old["session"] == session_hash(&v)
+                    && epoch(text(&old, "updated_at"))
+                        .is_some_and(|t| now_secs >= t && now_secs - t < 60.)
+                {
+                    return Ok((raw.to_vec(), ()));
+                }
                 let mut row = json!({"schema":1,"session":session_hash(&v),"updated_at":now()});
                 for k in ["started_at", "budget_turns", "budget_band"] {
                     if let Some(value) = old.get(k) {

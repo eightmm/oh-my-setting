@@ -25,9 +25,12 @@ impl Worktree {
         let base = String::from_utf8_lossy(&resolved).trim().to_owned();
         let name = crate::id("peer-")?;
         let directory = Path::new(".oms/tmp").join(&name);
-        storage::write(
+        let owner_path = directory.join("owner.json");
+        let _owner_guard = storage::lock(repo, &owner_path, context.interrupted)?;
+        storage::write_locked(
             repo,
-            &directory.join("owner.json"),
+            &owner_path,
+            &_owner_guard,
             json(&obj([
                 ("schema", 1usize.into()),
                 ("base", base.clone().into()),
@@ -83,9 +86,101 @@ impl Worktree {
             &self.owner,
             &["worktree", "remove", "--force", path],
         )?;
+        self.reclaim_wrapper();
         Ok(())
     }
+    /// Best effort after a clean removal: drop `owner.json` and the emptied
+    /// `.oms/tmp/peer-<id>` wrapper using descriptor-anchored `O_NOFOLLOW`
+    /// handles. Any symlink or unexpected entry leaves the wrapper untouched.
+    fn reclaim_wrapper(&self) {
+        use rustix::fs::{
+            AtFlags, Dir, FileType, Mode, OFlags, fstat, open, openat, statat, unlinkat,
+        };
+        let Some(wrapper) = self.path.parent() else {
+            return;
+        };
+        let Some(id) = wrapper.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        if !id.starts_with("peer-")
+            || wrapper.parent() != Some(self.owner.join(".oms/tmp").as_path())
+        {
+            return;
+        }
+        let Ok(oms) = open(
+            &self.owner,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .and_then(|root_fd| {
+            openat(
+                &root_fd,
+                ".oms",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+        })
+        .and_then(|oms_fd| {
+            openat(
+                &oms_fd,
+                "tmp",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+        }) else {
+            return;
+        };
+        let Ok(before) = statat(&oms, id, AtFlags::SYMLINK_NOFOLLOW) else {
+            return;
+        };
+        if FileType::from_raw_mode(before.st_mode) != FileType::Directory {
+            return;
+        }
+        let Ok(wrapper_fd) = openat(
+            &oms,
+            id,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return;
+        };
+        let Ok(opened) = fstat(&wrapper_fd) else {
+            return;
+        };
+        if opened.st_dev != before.st_dev || opened.st_ino != before.st_ino {
+            return;
+        }
+        let Ok(stream) = Dir::read_from(&wrapper_fd) else {
+            return;
+        };
+        let mut names = Vec::new();
+        for entry in stream {
+            let Ok(entry) = entry else { return };
+            let name = entry.file_name();
+            if [b".".as_slice(), b"..".as_slice()].contains(&name.to_bytes()) {
+                continue;
+            }
+            names.push(name.to_owned());
+        }
+        let owner_present = names.iter().any(|n| n.as_bytes() == b"owner.json");
+        if names.len() > usize::from(owner_present) {
+            return;
+        }
+        if owner_present {
+            let Ok(st) = statat(&wrapper_fd, c"owner.json", AtFlags::SYMLINK_NOFOLLOW) else {
+                return;
+            };
+            if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile
+                || unlinkat(&wrapper_fd, c"owner.json", AtFlags::empty()).is_err()
+            {
+                return;
+            }
+        }
+        drop(wrapper_fd);
+        let _ = unlinkat(&oms, id, AtFlags::REMOVEDIR);
+    }
 }
+
 pub(crate) fn transition(
     repo: &Path,
     attempt: &str,
@@ -636,4 +731,143 @@ fn lint(body: &str) -> Vec<&'static str> {
         issues.push("file pointers");
     }
     issues
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn repo(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("oms-peer-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        dir
+    }
+
+    #[test]
+    fn remove_reclaims_wrapper_only_after_clean_removal() {
+        let repo = repo("wrapper");
+        let stop = AtomicBool::new(false);
+        let native = process::Native;
+        let context = Context {
+            cwd: &repo,
+            source: &repo,
+            interrupted: &stop,
+            executor: &native,
+        };
+        let tree = Worktree::create(&repo, "HEAD", &context).unwrap();
+        let wrapper = tree.path.parent().unwrap().to_owned();
+        assert!(wrapper.join("owner.json").is_file());
+        // A changed HEAD preserves everything, wrapper included.
+        git(
+            &tree.path,
+            &["commit", "-q", "--allow-empty", "-m", "drift"],
+        );
+        let drifted = Worktree {
+            path: tree.path.clone(),
+            base: tree.base.clone(),
+            owner: tree.owner.clone(),
+        };
+        assert!(drifted.remove(&context).is_err());
+        assert!(tree.path.is_dir() && wrapper.join("owner.json").is_file());
+        git(&tree.path, &["reset", "-q", "--hard", &tree.base]);
+        tree.remove(&context).unwrap();
+        assert!(!wrapper.exists(), "wrapper dir reclaimed");
+        assert!(repo.join(".oms/tmp").is_dir());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn remove_leaves_wrapper_with_unexpected_entries_untouched() {
+        struct LockProbingExecutor {
+            repo: PathBuf,
+            saw_busy_during_worktree_add: AtomicBool,
+        }
+        impl process::Executor for LockProbingExecutor {
+            fn execute(
+                &self,
+                request: process::Invocation,
+                interrupted: &AtomicBool,
+            ) -> Result<process::Completed> {
+                let words: Vec<String> = request
+                    .argv
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                if words.windows(2).any(|w| w == ["worktree", "add"])
+                    && let Some(tree_arg) = words.iter().find(|w| w.ends_with("/tree"))
+                {
+                    let owner = Path::new(tree_arg).parent().unwrap().join("owner.json");
+                    assert!(owner.is_file(), "owner.json created under held lock");
+                    let mut settings = oms_lock::Settings::from_env().unwrap();
+                    settings.cwd = self.repo.clone();
+                    let lock = oms_lock::Lock::for_file(&owner, settings).unwrap();
+                    assert!(
+                        matches!(lock.try_acquire(), Err(oms_lock::Error::Busy)),
+                        "owner.json lock must remain held across git worktree add"
+                    );
+                    self.saw_busy_during_worktree_add
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                process::Native.execute(request, interrupted)
+            }
+        }
+
+        let repo = repo("extra");
+        let stop = AtomicBool::new(false);
+        let probing = LockProbingExecutor {
+            repo: repo.clone(),
+            saw_busy_during_worktree_add: AtomicBool::new(false),
+        };
+        let context = Context {
+            cwd: &repo,
+            source: &repo,
+            interrupted: &stop,
+            executor: &probing,
+        };
+        let tree = Worktree::create(&repo, "HEAD", &context).unwrap();
+        assert!(
+            probing
+                .saw_busy_during_worktree_add
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let wrapper = tree.path.parent().unwrap().to_owned();
+        std::os::unix::fs::symlink(&repo, wrapper.join("link")).unwrap();
+        tree.remove(&context).unwrap();
+        assert!(wrapper.join("owner.json").is_file(), "owner.json kept");
+        assert!(wrapper.join("link").exists());
+
+        // Swapping owner.json with a symlink must leave the target untouched.
+        let victim = repo.join("victim.txt");
+        std::fs::write(&victim, b"preserve").unwrap();
+        let sym_tree = Worktree::create(&repo, "HEAD", &context).unwrap();
+        let sym_wrapper = sym_tree.path.parent().unwrap().to_owned();
+        std::fs::remove_file(sym_wrapper.join("owner.json")).unwrap();
+        std::os::unix::fs::symlink(&victim, sym_wrapper.join("owner.json")).unwrap();
+        sym_tree.remove(&context).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"preserve");
+        assert!(sym_wrapper.join("owner.json").is_symlink());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }

@@ -17,6 +17,291 @@ fn age(path: &Path, cutoff: i64) -> bool {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .is_some_and(|t| (t.as_secs() as i64) < cutoff)
 }
+/// Sorted, bounded, interrupt-checked listing of `dir` entries whose name
+/// starts with `prefix`; a missing directory is empty, a symlink or any other
+/// open/read failure is an error. Each entry reports whether it is a regular
+/// file; symlinks are skipped.
+fn scan(ctx: &Context<'_>, dir: &Path, prefix: &str) -> Result<Vec<(std::path::PathBuf, bool)>> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) => require(
+            m.is_dir() && !m.is_symlink(),
+            "scan root must be a non-symlink directory",
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(error(2, e)),
+    }
+    let mut found = Vec::new();
+    for (seen, entry) in std::fs::read_dir(dir).map_err(|e| error(2, e))?.enumerate() {
+        crate::checkpoint(ctx.interrupted)?;
+        require(seen < 50000, "state scan entry limit exceeded")?;
+        let entry = entry.map_err(|e| error(2, e))?;
+        if !entry.file_name().to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+        let kind = entry.file_type().map_err(|e| error(2, e))?;
+        if !kind.is_symlink() && (kind.is_file() || kind.is_dir()) {
+            found.push((entry.path(), kind.is_file()));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+/// A `peer-*` wrapper holding only a regular `owner.json`, no checkout, no git
+/// registration, and older than `cutoff`. Never follows symlinks.
+fn peer_orphan(dir: &Path, cutoff: i64) -> bool {
+    let real_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let Some(repo) = dir.parent().and_then(Path::parent).and_then(Path::parent) else {
+        return false;
+    };
+    if !real_dir(&repo.join(".oms")) || !real_dir(dir.parent().unwrap_or(dir)) || !real_dir(dir) {
+        return false;
+    }
+    let owner = dir.join("owner.json");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        names.push(entry.file_name());
+    }
+    if names.len() != 1
+        || names[0] != "owner.json"
+        || !std::fs::symlink_metadata(&owner).is_ok_and(|m| m.is_file())
+        || !age(dir, cutoff)
+        || !age(&owner, cutoff)
+    {
+        return false;
+    }
+    registry_clear(&repo.join(".git"), &dir.join("tree"))
+}
+/// Resolve symlink/alias components on the deepest existing prefix while
+/// rejecting `.` or `..` segments or dangling symlinks.
+fn resolve_physical(path: &Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+    {
+        return None;
+    }
+    let mut existing = std::path::PathBuf::from("/");
+    let mut tail = Vec::new();
+    let mut missing = false;
+    for comp in path.components() {
+        match comp {
+            Component::RootDir => {}
+            Component::Normal(part) if !missing => {
+                let next = existing.join(part);
+                match std::fs::symlink_metadata(&next) {
+                    Ok(_) => existing = next,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        missing = true;
+                        tail.push(part);
+                    }
+                    Err(_) => return None,
+                }
+            }
+            Component::Normal(part) => tail.push(part),
+            _ => return None,
+        }
+    }
+    let mut resolved = std::fs::canonicalize(&existing).ok()?;
+    for part in tail {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// True only when git's worktree registry provably does not reference `tree`.
+/// Any symlink, unreadable or non-regular entry, non-UTF-8 text, `.`/`..`
+/// segment, unresolved alias or relative `gitdir` is unknown, hence not clear.
+fn registry_clear(git: &Path, tree: &Path) -> bool {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, fstat, open, openat, statat};
+    use rustix::io::Errno;
+    use std::io::Read;
+    let Some(canon_tree) = resolve_physical(tree) else {
+        return false;
+    };
+    let git_fd = match open(
+        git,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return true,
+        Err(_) => return false,
+    };
+    let registry_fd = match openat(
+        &git_fd,
+        "worktrees",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return true,
+        Err(_) => return false,
+    };
+    let Ok(entries) = Dir::read_from(&registry_fd) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        let name = entry.file_name();
+        if [b".".as_slice(), b"..".as_slice()].contains(&name.to_bytes()) {
+            continue;
+        }
+        let Ok(entry_stat) = statat(&registry_fd, name, AtFlags::SYMLINK_NOFOLLOW) else {
+            return false;
+        };
+        if FileType::from_raw_mode(entry_stat.st_mode) != FileType::Directory {
+            return false;
+        }
+        let Ok(entry_fd) = openat(
+            &registry_fd,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return false;
+        };
+        let Ok(opened) = fstat(&entry_fd) else {
+            return false;
+        };
+        if opened.st_dev != entry_stat.st_dev || opened.st_ino != entry_stat.st_ino {
+            return false;
+        }
+        let Ok(gitdir_stat) = statat(&entry_fd, c"gitdir", AtFlags::SYMLINK_NOFOLLOW) else {
+            return false;
+        };
+        if FileType::from_raw_mode(gitdir_stat.st_mode) != FileType::RegularFile
+            || gitdir_stat.st_size < 0
+            || gitdir_stat.st_size > 64 * 1024
+        {
+            return false;
+        }
+        let Ok(gitdir_fd) = openat(
+            &entry_fd,
+            c"gitdir",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return false;
+        };
+        let mut text = Vec::new();
+        if std::fs::File::from(gitdir_fd)
+            .take(64 * 1024 + 1)
+            .read_to_end(&mut text)
+            .is_err()
+            || text.len() > 64 * 1024
+        {
+            return false;
+        }
+        let Ok(text) = String::from_utf8(text) else {
+            return false;
+        };
+        let target = Path::new(text.trim());
+        let Some(canon_target) = resolve_physical(target) else {
+            return false;
+        };
+        if target.starts_with(tree) || canon_target.starts_with(&canon_tree) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Remove an orphaned `.oms/tmp/peer-<id>` wrapper holding solely a regular
+/// `owner.json` using descriptor-anchored `O_NOFOLLOW` handles.
+fn remove_peer_wrapper(repo: &Path, dir: &Path) -> Result<bool> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, fstat, open, openat, statat, unlinkat};
+    use rustix::io::Errno;
+    let Some(id) = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| n.starts_with("peer-"))
+    else {
+        return Ok(false);
+    };
+    if dir != repo.join(".oms/tmp").join(id) {
+        return Ok(false);
+    }
+    let mut cur = match open(
+        repo,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR) => return Ok(false),
+        Err(e) => return Err(error(2, e)),
+    };
+    for part in [".oms", "tmp"] {
+        cur = match openat(
+            &cur,
+            part,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR) => return Ok(false),
+            Err(e) => return Err(error(2, e)),
+        };
+    }
+    let before = match statat(&cur, id, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(s) => s,
+        Err(Errno::NOENT) => return Ok(false),
+        Err(e) => return Err(error(2, e)),
+    };
+    if FileType::from_raw_mode(before.st_mode) != FileType::Directory {
+        return Ok(false);
+    }
+    let wrapper_fd = match openat(
+        &cur,
+        id,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR) => return Ok(false),
+        Err(e) => return Err(error(2, e)),
+    };
+    let opened = fstat(&wrapper_fd).map_err(|e| error(2, e))?;
+    if opened.st_dev != before.st_dev || opened.st_ino != before.st_ino {
+        return Ok(false);
+    }
+    let mut names = Vec::new();
+    for entry in Dir::read_from(&wrapper_fd).map_err(|e| error(2, e))? {
+        let entry = entry.map_err(|e| error(2, e))?;
+        let name = entry.file_name();
+        if [b".".as_slice(), b"..".as_slice()].contains(&name.to_bytes()) {
+            continue;
+        }
+        names.push(name.to_owned());
+    }
+    if names.len() != 1 || names[0].as_bytes() != b"owner.json" {
+        return Ok(false);
+    }
+    let owner_stat = match statat(&wrapper_fd, c"owner.json", AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(s) => s,
+        Err(Errno::NOENT) => return Ok(false),
+        Err(e) => return Err(error(2, e)),
+    };
+    if FileType::from_raw_mode(owner_stat.st_mode) != FileType::RegularFile {
+        return Ok(false);
+    }
+    match unlinkat(&wrapper_fd, c"owner.json", AtFlags::empty()) {
+        Ok(()) => {}
+        Err(Errno::NOENT) => return Ok(false),
+        Err(e) => return Err(error(2, e)),
+    }
+    drop(wrapper_fd);
+    match unlinkat(&cur, id, AtFlags::REMOVEDIR) {
+        Ok(()) => Ok(true),
+        Err(Errno::NOENT) => Ok(false),
+        Err(e) => Err(error(2, e)),
+    }
+}
 fn document(ctx: &Context<'_>, path: &Path) -> Result<Value> {
     json::parse(&storage::read(&ctx.repo, path, storage::MAX_FILE, false)?)
 }
@@ -312,11 +597,70 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
         }
         for path in helpers::files(&ctx, &ctx.repo.join(".oms/hooks/sessions"), "", 50000)? {
             if age(&path, cutoff) {
-                let _guard = storage::lock(&path)?;
+                let Some(_guard) = storage::try_lock_in(Path::new("/"), &path)? else {
+                    deferred.push(string(
+                        "active hook state lock held; hook retention deferred",
+                    ));
+                    continue;
+                };
                 if age(&path, cutoff) {
                     candidate(&ctx, &mut items, "hook-session", &path, apply)?;
                 }
             }
+        }
+        let hooks = ctx.repo.join(".oms/hooks");
+        let activity = hooks.join("panel-activity");
+        let mut aged = Vec::new();
+        for path in helpers::files(&ctx, &activity, ".json", 50000)? {
+            if path.parent() == Some(activity.as_path()) {
+                aged.push(("hook-panel-activity", path));
+            }
+        }
+        for (path, is_file) in scan(&ctx, &hooks, "state-hint.")? {
+            if is_file {
+                aged.push(("hook-state-hint", path));
+            }
+        }
+        for (kind, path) in aged {
+            if age(&path, cutoff) {
+                let Some(_guard) = storage::try_lock_in(Path::new("/"), &path)? else {
+                    deferred.push(string(
+                        "active hook state lock held; hook retention deferred",
+                    ));
+                    continue;
+                };
+                if age(&path, cutoff) {
+                    candidate(&ctx, &mut items, kind, &path, apply)?;
+                }
+            }
+        }
+        for (dir, is_file) in scan(&ctx, &ctx.repo.join(".oms/tmp"), "peer-")? {
+            if is_file || !peer_orphan(&dir, cutoff) {
+                continue;
+            }
+            let Some(_guard) = storage::try_lock_in(&ctx.repo, &dir.join("owner.json"))? else {
+                deferred.push(string(
+                    "active peer wrapper lock held; orphan reclamation deferred",
+                ));
+                continue;
+            };
+            if !peer_orphan(&dir, cutoff) {
+                continue;
+            }
+            if apply && !remove_peer_wrapper(&ctx.repo, &dir)? {
+                continue;
+            }
+            items.push(object([
+                ("kind", string("orphan-peer-tmp")),
+                (
+                    "path",
+                    string(
+                        dir.strip_prefix(&ctx.repo)
+                            .unwrap_or(&dir)
+                            .to_string_lossy(),
+                    ),
+                ),
+            ]));
         }
     } else {
         deferred.push(string(

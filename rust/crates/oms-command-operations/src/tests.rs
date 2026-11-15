@@ -597,12 +597,20 @@ fn compact_preserves_parents_and_kept_row_bytes() {
         .collect();
     std::fs::write(&path, raw.concat()).unwrap();
     let before = std::fs::read(&path).unwrap();
-    assert!(
-        f.ok(App::Events, &["compact", "--days", "0"])
-            .contains("would drop 2 event(s) across 1")
-    );
+    let attempts = f.0.join(".oms/lifecycle/attempts");
+    let gone = attempts.join(&removed);
+    std::fs::create_dir_all(&gone).unwrap();
+    std::fs::write(gone.join("spec.json"), b"{}").unwrap();
+    let kept_dir = attempts.join(&child);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let dry = f.ok(App::Events, &["compact", "--days", "0"]);
+    assert!(dry.contains("would drop 2 event(s) across 1"), "{dry}");
+    assert!(dry.contains("1 attempt dir(s) to remove"), "{dry}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    f.ok(App::Events, &["compact", "--days", "0", "--apply"]);
+    assert!(gone.join("spec.json").exists());
+    let applied = f.ok(App::Events, &["compact", "--days", "0", "--apply"]);
+    assert!(applied.contains("removed 1 attempt dir(s)"), "{applied}");
+    assert!(!gone.exists() && kept_dir.exists());
     assert_eq!(std::fs::read(&path).unwrap(), raw[..3].concat().as_bytes());
     let projected = project_attempts(&read_rows(&path).unwrap()).unwrap();
     assert_eq!(projected.len(), 2);
@@ -842,4 +850,81 @@ fn python_numbers_and_parse_errors_before_effects() {
         .0,
         2
     );
+}
+
+#[test]
+fn atomic_unchanged_bytes_skip_rewrite_but_still_reconcile_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let f = Fixture::new();
+    let path = f.0.join("sub/state.json");
+    let alias = f.0.join("sub/alias.json");
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    storage::atomic(&path, b"{}\n", 0o600, false).unwrap();
+    let inode = std::fs::metadata(&path).unwrap().ino();
+    storage::atomic(&path, b"{}\n", 0o600, false).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    assert_eq!(mode(&path), 0o600);
+    // Unchanged path must still execute Ledger::open hardlink/durability verification.
+    std::fs::hard_link(&path, &alias).unwrap();
+    assert!(storage::atomic(&path, b"{}\n", 0o600, false).is_err());
+    std::fs::remove_file(&alias).unwrap();
+    storage::atomic(&path, b"{}\n", 0o600, false).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    storage::atomic(&path, b"{}\n", 0o640, false).unwrap();
+    assert_eq!(mode(&path), 0o640);
+    storage::atomic(&path, b"{\"a\":1}\n", 0o640, false).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"{\"a\":1}\n");
+}
+
+#[test]
+fn compact_converges_stray_attempt_dirs_and_keeps_unexpected_layouts() {
+    let f = Fixture::new();
+    let live = f.ok(App::Events, &["start", "--tool", "live"]);
+    let path = event_path(&f.0);
+    let before = std::fs::read(&path).unwrap();
+    let attempts = f.0.join(".oms/lifecycle/attempts");
+    std::fs::create_dir_all(&attempts).unwrap();
+    let live_dir = attempts.join(&live);
+    std::fs::create_dir_all(&live_dir).unwrap();
+    let stray = attempts.join("stray");
+    std::fs::create_dir_all(&stray).unwrap();
+    std::fs::write(stray.join("spec.json"), b"{}").unwrap();
+    let nested = attempts.join("nested");
+    std::fs::create_dir_all(nested.join("inner")).unwrap();
+    std::fs::write(nested.join("spec.json"), b"{}").unwrap();
+    let linked = attempts.join("linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::os::unix::fs::symlink(&f.0, linked.join("escape")).unwrap();
+    let crowded = attempts.join("crowded");
+    std::fs::create_dir_all(&crowded).unwrap();
+    for n in 0..65 {
+        std::fs::write(crowded.join(format!("f{n}")), b"").unwrap();
+    }
+    let at_limit = attempts.join("at-limit");
+    std::fs::create_dir_all(&at_limit).unwrap();
+    for n in 0..64 {
+        std::fs::write(at_limit.join(format!("f{n}")), b"").unwrap();
+    }
+    let dry = f.ok(App::Events, &["compact", "--days", "0"]);
+    assert!(dry.contains("2 attempt dir(s) to remove"), "{dry}");
+    assert!(stray.exists());
+    let applied = f.ok(App::Events, &["compact", "--days", "0", "--apply"]);
+    assert!(applied.contains("removed 2 attempt dir(s)"), "{applied}");
+    assert!(!stray.exists() && !at_limit.exists());
+    assert!(live_dir.exists() && nested.join("inner").is_dir());
+    assert!(linked.join("escape").exists() && crowded.exists());
+    assert_eq!(std::fs::read(&path).unwrap(), before, "ledger untouched");
+    assert!(
+        f.ok(App::Events, &["compact", "--days", "0", "--apply"])
+            .contains("nothing to drop")
+    );
+    // Descriptor-anchored removal refuses a symlinked attempt directory swap.
+    let victim = f.0.join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+    let swapped = attempts.join("swapped");
+    std::os::unix::fs::symlink(&victim, &swapped).unwrap();
+    assert!(!crate::events::remove_attempt_dir(&f.0, &swapped).unwrap());
+    assert!(victim.join("keep.txt").is_file());
+    assert!(swapped.is_symlink());
 }

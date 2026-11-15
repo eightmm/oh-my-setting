@@ -786,3 +786,77 @@ fn claude_app_notify_other_notify_values_do_not_disable_delivery() {
         "unbound"
     );
 }
+
+#[test]
+fn skill_router_debounces_session_state_rewrites_within_a_minute() {
+    use std::os::unix::fs::MetadataExt;
+    let name = "skill_router_debounces_session_state_rewrites_within_a_minute";
+    if !clean_env_child(name, &[("OMS_SESSION_BUDGET_TURNS", "10")]) {
+        return;
+    }
+    let tmp = TempDir::new("debounce");
+    let repo = git_repo(&tmp);
+    fs::create_dir_all(repo.join(".oms")).unwrap();
+    let payload = |id: &str| {
+        serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":id,"prompt":"inspect src/lib.rs"})
+            .to_string()
+    };
+    let sessions = repo.join(".oms/hooks/sessions");
+    let only = |dir: &Path| -> PathBuf {
+        let mut files: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        files.remove(0)
+    };
+    assert_eq!(
+        hook(&tmp, "skill-router", &[], payload("s1").as_bytes()).0,
+        0
+    );
+    let file = only(&sessions);
+    let first = fs::read(&file).unwrap();
+    // `updated_at` has one-second granularity, so age the stamp to prove the
+    // debounce rather than an identical-bytes no-op.
+    let mut row: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    let recent = chrono::DateTime::<chrono::Utc>::from(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(30),
+    );
+    row["updated_at"] = recent.format("%Y-%m-%dT%H:%M:%SZ").to_string().into();
+    let seeded = format!("{row}\n");
+    fs::write(&file, &seeded).unwrap();
+    let ino = fs::metadata(&file).unwrap().ino();
+    assert_eq!(
+        hook(&tmp, "skill-router", &[], payload("s1").as_bytes()).0,
+        0
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        seeded,
+        "30s-old stamp kept"
+    );
+    assert_eq!(fs::metadata(&file).unwrap().ino(), ino, "no rewrite");
+
+    // A stale stamp refreshes updated_at and keeps the budget fields.
+    let mut row: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    row["updated_at"] = "2000-01-01T00:00:00Z".into();
+    row["budget_turns"] = 3.into();
+    fs::write(&file, format!("{row}\n")).unwrap();
+    assert_eq!(
+        hook(&tmp, "skill-router", &[], payload("s1").as_bytes()).0,
+        0
+    );
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_ne!(after["updated_at"], "2000-01-01T00:00:00Z");
+    assert_eq!(after["budget_turns"], 3);
+
+    // A malformed or other-session file never short-circuits.
+    fs::write(&file, b"not json").unwrap();
+    assert_eq!(
+        hook(&tmp, "skill-router", &[], payload("s1").as_bytes()).0,
+        0
+    );
+    let healed: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(healed["schema"], 1);
+}

@@ -948,17 +948,20 @@ fn compact(
         kept_rows.push(row.clone());
     }
     let removed = rows.len() - kept_rows.len();
+    let kept_ids: HashSet<String> = kept_rows.iter().map(|r| r.get("attempt_id").py()).collect();
+    let stale_dirs = eligible_attempt_dirs(repo, &kept_ids)?;
     if !args.flag("apply") {
+        let dirs = stale_dirs.len();
         return line(
             out,
             format!(
-                "lifecycle-compact: would drop {removed} event(s) across {} terminal attempt(s) older than {days}d (keeping {})",
+                "lifecycle-compact: would drop {removed} event(s) across {} terminal attempt(s) older than {days}d (keeping {}); {dirs} attempt dir(s) to remove",
                 drop.len(),
                 kept_rows.len()
             ),
         );
     }
-    if drop.is_empty() {
+    if drop.is_empty() && stale_dirs.is_empty() {
         return line(
             out,
             format!("lifecycle-compact: nothing to drop ({} events)", rows.len()),
@@ -966,21 +969,175 @@ fn compact(
     }
     project_attempts(&kept_rows)?;
     checkpoint(interrupted)?;
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(&path)
-        .map_err(|e| e.to_string())?
-        .permissions()
-        .mode()
-        & 0o777;
-    storage::atomic(&path, &kept, mode, false)?;
+    if !drop.is_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        storage::atomic(&path, &kept, mode, false)?;
+    }
+    let mut dirs = 0;
+    for dir in &stale_dirs {
+        checkpoint(interrupted)?;
+        dirs += usize::from(remove_attempt_dir(repo, dir)?);
+    }
     line(
         out,
         format!(
-            "lifecycle-compact: dropped {removed} event(s) across {} terminal attempt(s) older than {days}d (kept {})",
+            "lifecycle-compact: dropped {removed} event(s) across {} terminal attempt(s) older than {days}d (kept {}); removed {dirs} attempt dir(s)",
             drop.len(),
             kept_rows.len()
         ),
     )
+}
+
+/// Attempt directories whose id no retained row references: this run's dropped
+/// attempts and strays from an interrupted earlier compaction. A directory is
+/// eligible only when every ancestor is a real directory and it holds at most
+/// 64 regular files; anything else is left untouched.
+fn eligible_attempt_dirs(repo: &Path, kept: &HashSet<String>) -> Result<Vec<PathBuf>> {
+    let mut root = repo.to_path_buf();
+    for part in [".oms", "lifecycle", "attempts"] {
+        root.push(part);
+        match std::fs::symlink_metadata(&root) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let mut found = Vec::new();
+    for (seen, entry) in std::fs::read_dir(&root)
+        .map_err(|e| e.to_string())?
+        .enumerate()
+    {
+        if seen >= 50000 {
+            return Err("attempt directory scan limit exceeded".into());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if kept.contains(&id) || !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            continue;
+        }
+        let mut files = 0;
+        let mut plain = true;
+        for child in std::fs::read_dir(entry.path()).map_err(|e| e.to_string())? {
+            let child = child.map_err(|e| e.to_string())?;
+            files += 1;
+            plain &= files <= 64 && child.file_type().map_err(|e| e.to_string())?.is_file();
+            if !plain {
+                break;
+            }
+        }
+        if plain {
+            found.push(entry.path());
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+/// Caller holds the ledger lock. Opens `.oms/lifecycle/attempts/<id>` using
+/// no-follow directory descriptors, inspects regular files up to 64 entries
+/// before unlinking anything via `unlinkat`, and removes the emptied dir.
+pub(crate) fn remove_attempt_dir(repo: &Path, dir: &Path) -> Result<bool> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, fstat, open, openat, statat, unlinkat};
+    use rustix::io::Errno;
+    let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+        return Ok(false);
+    };
+    if dir != repo.join(".oms/lifecycle/attempts").join(id) {
+        return Ok(false);
+    }
+    let mut cur = match open(
+        repo,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    for part in [".oms", "lifecycle", "attempts"] {
+        cur = match openat(
+            &cur,
+            part,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR) => return Ok(false),
+            Err(e) => return Err(e.to_string()),
+        };
+    }
+    let before = match statat(&cur, id, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(s) => s,
+        Err(Errno::NOENT) => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    if FileType::from_raw_mode(before.st_mode) != FileType::Directory {
+        return Ok(false);
+    }
+    let dir_fd = match openat(
+        &cur,
+        id,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR) => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    let opened = fstat(&dir_fd).map_err(|e| e.to_string())?;
+    if opened.st_dev != before.st_dev || opened.st_ino != before.st_ino {
+        return Ok(false);
+    }
+    let mut children = Vec::new();
+    for entry in Dir::read_from(&dir_fd).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        if [b".".as_slice(), b"..".as_slice()].contains(&name.to_bytes()) {
+            continue;
+        }
+        if children.len() >= 64 {
+            return Ok(false);
+        }
+        let child_stat = match statat(&dir_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(s) => s,
+            Err(Errno::NOENT) => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        if FileType::from_raw_mode(child_stat.st_mode) != FileType::RegularFile {
+            return Ok(false);
+        }
+        children.push((name.to_owned(), child_stat));
+    }
+    for (name, prev) in children {
+        let current = match statat(&dir_fd, &name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(s) => s,
+            Err(Errno::NOENT) => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        if current.st_dev != prev.st_dev
+            || current.st_ino != prev.st_ino
+            || FileType::from_raw_mode(current.st_mode) != FileType::RegularFile
+        {
+            return Err("attempt file changed before removal".into());
+        }
+        match unlinkat(&dir_fd, &name, AtFlags::empty()) {
+            Ok(()) | Err(Errno::NOENT) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    drop(dir_fd);
+    match unlinkat(&cur, id, AtFlags::REMOVEDIR) {
+        Ok(()) => Ok(true),
+        Err(Errno::NOENT) => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Cold authoritative read. No untrusted cache can substitute for ledger

@@ -366,17 +366,22 @@ pub(crate) fn atomic(path: &Path, bytes: &[u8], mode: u32, preserve: bool) -> Re
         preserve_existing: preserve,
         ..Default::default()
     };
-    root.atomic_mutate(
-        Path::new(path.file_name().ok_or("atomic file has no name")?),
-        options,
-        |_| Ok::<_, String>(bytes.to_vec()),
-    )
-    .map_err(|e| format!("atomic write: {e:?}"))?;
+    let outcome = root
+        .atomic_mutate(
+            Path::new(path.file_name().ok_or("atomic file has no name")?),
+            options,
+            |_| Ok::<_, String>(bytes.to_vec()),
+        )
+        .map_err(|e| format!("atomic write: {e:?}"))?;
     let opened = Ledger::open(path, false, false)?;
-    opened
-        .file
-        .set_permissions(fs::Permissions::from_mode(mode))
-        .map_err(|e| e.to_string())?;
+    if outcome.disposition != oms_safe_fs::MutationDisposition::Unchanged
+        || opened.opened.permissions().mode() & 0o7777 != mode & 0o7777
+    {
+        opened
+            .file
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(|e| e.to_string())?;
+    }
     opened.check()?;
     opened.file.sync_all().map_err(|e| e.to_string())?;
     opened.parent.sync_all().map_err(|e| e.to_string())
