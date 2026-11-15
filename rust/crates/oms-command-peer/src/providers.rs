@@ -118,11 +118,10 @@ pub fn discovered(provider: &str) -> bool {
     })
 }
 pub(crate) fn config(context: &Context<'_>, name: &str) -> Result<V> {
-    let bytes = storage::read(
-        context.source,
-        Path::new("config").join(name).as_path(),
-        false,
-    )?;
+    config_from(context.source, name)
+}
+fn config_from(source: &Path, name: &str) -> Result<V> {
+    let bytes = storage::read(source, Path::new("config").join(name).as_path(), false)?;
     V::parse(&bytes).map_err(Error::from)
 }
 #[derive(Clone, Debug)]
@@ -134,6 +133,24 @@ pub struct Route {
 }
 pub(crate) fn route(
     context: &Context<'_>,
+    target: &Target,
+    model: &str,
+    effort: &str,
+    role: &str,
+) -> Result<Route> {
+    route_with_source(context.source, target, model, effort, role)
+}
+pub fn resolve_route(
+    source: &Path,
+    provider: &str,
+    model: &str,
+    effort: &str,
+    role: &str,
+) -> Result<Route> {
+    route_with_source(source, &Target::parse(provider)?, model, effort, role)
+}
+fn route_with_source(
+    source: &Path,
     target: &Target,
     model: &str,
     effort: &str,
@@ -154,7 +171,7 @@ pub(crate) fn route(
         effort.into()
     };
     if selected.is_empty() {
-        let policy = config(context, "panel-routing.json")?;
+        let policy = config_from(source, "panel-routing.json")?;
         let tier = policy
             .get("roles")
             .get(role)
@@ -952,4 +969,22 @@ fn running_accounts(repo: &Path) -> Result<std::collections::BTreeMap<String, us
         }
     }
     Ok(counts)
+}
+
+#[cfg(test)]
+mod bridge_route_tests {
+    use super::*;
+    #[test]
+    fn route_uses_policy_and_target() {
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."));
+        let route = resolve_route(source, "agy", "custom", "high", "worker").unwrap();
+        assert_eq!(route.provider, "antigravity");
+        assert_eq!(route.model, "custom");
+        assert!(route.explicit);
+        let automatic = resolve_route(source, "codex", "", "auto", "worker").unwrap();
+        assert!(!automatic.model.is_empty());
+        assert!(!automatic.explicit);
+        assert!(resolve_route(source, "", "", "", "worker").is_err());
+        assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());
+    }
 }

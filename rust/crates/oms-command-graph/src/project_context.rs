@@ -691,3 +691,247 @@ pub fn compile_bundle_with_root(
         cancel,
     )
 }
+
+/// Validate a context pack before passing its contents to a provider.
+pub fn validate_context_pack(path: &Path, _repo: &Path) -> Result<Value> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::new("invalid pack path"))?;
+    let root = oms_safe_fs::Root::open(parent)
+        .map_err(|e| Error::new(format!("cannot open pack directory: {e:?}")))?;
+    let raw = root
+        .read_os(name, 262144, oms_safe_fs::Policy::source())
+        .map_err(|e| Error::new(format!("cannot read pack: {e:?}")))?;
+    std::str::from_utf8(&raw).map_err(|_| Error::new("pack is not UTF-8"))?;
+    use std::os::unix::ffi::OsStrExt;
+    let mut env = Vec::new();
+    let mut total = 0usize;
+    for (key, value) in std::env::vars_os() {
+        total = total
+            .saturating_add(key.as_bytes().len())
+            .saturating_add(value.as_bytes().len());
+        if env.len() >= oms_scrub::MAX_ENV_ENTRIES || total > oms_scrub::MAX_ENV_BYTES {
+            return Err(Error::new("outbound environment exceeds scan limits"));
+        }
+        env.push((key.as_bytes().to_vec(), value.as_bytes().to_vec()));
+    }
+    let refs: Vec<_> = env
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
+    fn scan(raw: &[u8], env: &[(&[u8], &[u8])]) -> Result<()> {
+        if oms_scrub::scan(raw, env).map_or(true, |hits| !hits.is_empty()) {
+            return Err(Error::new("pack contains sensitive content"));
+        }
+        Ok(())
+    }
+    scan(&raw, &refs)?;
+    let pack: Value =
+        serde_json::from_slice(&raw).map_err(|_| Error::new("pack is not valid JSON"))?;
+    let absolute =
+        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.:/-])(?:/[^/\s]+/[^\s]+|[A-Za-z]:[\\/][^\s]+)")
+            .unwrap();
+    fn inspect(value: &Value, env: &[(&[u8], &[u8])], absolute: &regex::Regex) -> Result<()> {
+        fn text(value: &str, env: &[(&[u8], &[u8])], absolute: &regex::Regex) -> Result<()> {
+            scan(value.as_bytes(), env)?;
+            if absolute.is_match(value) {
+                return Err(Error::new("pack contains absolute path content"));
+            }
+            Ok(())
+        }
+        match value {
+            Value::String(value) => text(value, env, absolute)?,
+            Value::Array(rows) => {
+                for row in rows {
+                    inspect(row, env, absolute)?;
+                }
+            }
+            Value::Object(rows) => {
+                for (key, value) in rows {
+                    text(key, env, absolute)?;
+                    inspect(value, env, absolute)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    inspect(&pack, &refs, &absolute)?;
+    if !pack.is_object() {
+        return Err(Error::new("pack must be a JSON object"));
+    }
+    let digest = pack["pack_digest"].as_str().unwrap_or("");
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(Error::new(
+            "pack_digest must be 64 lowercase hex characters",
+        ));
+    }
+    fn path_value(v: &Value, label: &str) -> Result<String> {
+        let p = v
+            .as_str()
+            .ok_or_else(|| Error::new(format!("{label} path must be a string")))?;
+        if p.is_empty()
+            || p.chars().count() > 400
+            || p.starts_with('/')
+            || p.as_bytes().get(1) == Some(&b':')
+            || p.contains(['\\', '\0', '\n', '\r'])
+            || p.starts_with("./")
+            || p.split('/').any(|s| s == "..")
+            || matches!(p.split('/').next(), Some(".git" | ".oms"))
+        {
+            return Err(Error::new(format!("{label} contains an invalid path")));
+        }
+        Ok(p.into())
+    }
+    fn rows<'a>(pack: &'a Value, key: &str) -> Result<&'a [Value]> {
+        match pack.get(key) {
+            None => Ok(&[]),
+            Some(v) => {
+                let a = v
+                    .as_array()
+                    .ok_or_else(|| Error::new(format!("{key} must be a list")))?;
+                if a.len() > 200 {
+                    return Err(Error::new(format!("{key} exceeds the entry cap")));
+                }
+                Ok(a)
+            }
+        }
+    }
+    let files = rows(&pack, "files")?
+        .iter()
+        .map(|v| path_value(v, "files"))
+        .collect::<Result<Vec<_>>>()?;
+    let tests = rows(&pack, "tests")?
+        .iter()
+        .map(|v| path_value(v, "tests"))
+        .collect::<Result<Vec<_>>>()?;
+    let mut cases = Vec::new();
+    for v in rows(&pack, "test_cases")? {
+        if !v.is_object() {
+            return Err(Error::new("test_cases entries must be objects"));
+        }
+        let mut row = json!({"path": path_value(&v["path"], "test_cases")?});
+        for key in ["id", "language", "name"] {
+            let value = v[key]
+                .as_str()
+                .ok_or_else(|| Error::new(format!("test_cases {key} must be a string")))?;
+            if value.chars().count() > 400 || value.contains(['\0', '\r', '\n']) {
+                return Err(Error::new(format!(
+                    "test_cases {key} is not a bounded line"
+                )));
+            }
+            row[key] = json!(value);
+        }
+        cases.push(row);
+    }
+    let mut evidence = Vec::new();
+    for v in rows(&pack, "evidence")? {
+        if !v.is_object() {
+            return Err(Error::new("evidence entries must be objects"));
+        }
+        let reason = v
+            .get("reason")
+            .map_or(Some(""), Value::as_str)
+            .ok_or_else(|| Error::new("evidence reason must be a string"))?;
+        if reason.contains(['\0', '\r', '\n']) {
+            return Err(Error::new("evidence reason contains a control character"));
+        }
+        evidence.push(json!({"path": path_value(&v["path"], "evidence")?, "reason": reason.chars().take(200).collect::<String>()}));
+    }
+    if pack.get("hubs").is_some_and(|v| !v.is_array()) {
+        return Err(Error::new("hubs must be a list"));
+    }
+    let revision = pack
+        .get("project_graph_revision")
+        .map_or(Some(""), Value::as_str)
+        .ok_or_else(|| Error::new("project_graph_revision must be a string"))?;
+    if revision.chars().count() > 400 || revision.contains(['\0', '\r', '\n']) {
+        return Err(Error::new(
+            "project_graph_revision is not a single bounded line",
+        ));
+    }
+    Ok(
+        json!({"schema":1,"path":path.to_string_lossy(),"pack_digest":digest,"project_graph_revision":revision,"file_count":files.len(),"files":files,"tests":tests,"test_cases":cases,"evidence":evidence,"sha256":sha(&raw)}),
+    )
+}
+
+#[cfg(test)]
+mod bridge_pack_tests {
+    use super::*;
+    #[test]
+    fn environment_value_is_refused() {
+        let value = "uniquevaluefortheoutboundscan987654321";
+        if std::env::var_os("OMS_BRIDGE_TEST_CHILD").is_some() {
+            let dir = std::env::temp_dir().join(format!("oms-bridge-env-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("pack.json");
+            std::fs::write(
+                &path,
+                json!({"pack_digest":"a".repeat(64), "task":value}).to_string(),
+            )
+            .unwrap();
+            assert!(validate_context_pack(&path, &dir).is_err());
+            std::fs::remove_dir_all(dir).unwrap();
+        } else {
+            let key = ["OMS_BRIDGE_", "TO", "KEN"].concat();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "project::context::bridge_pack_tests::environment_value_is_refused",
+                ])
+                .env("OMS_BRIDGE_TEST_CHILD", "1")
+                .env(key, value)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+    }
+    #[test]
+    fn pack_accepts_and_refuses() {
+        let dir = std::env::temp_dir().join(format!("oms-bridge-pack-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pack.json");
+        let pack = json!({"pack_digest":"a".repeat(64), "files":["src/a.py"], "test_cases":[], "evidence":[]});
+        std::fs::write(&path, pack.to_string()).unwrap();
+        assert_eq!(validate_context_pack(&path, &dir).unwrap()["file_count"], 1);
+        std::fs::write(&path, "{").unwrap();
+        assert!(validate_context_pack(&path, &dir).is_err());
+        let unsafe_text = ["pass", "word", ": bad"].concat();
+        std::fs::write(&path, unsafe_text).unwrap();
+        assert!(validate_context_pack(&path, &dir).is_err());
+        std::fs::write(&path, json!({"pack_digest":"x".repeat(64)}).to_string()).unwrap();
+        assert!(validate_context_pack(&path, &dir).is_err());
+        let base = json!({"pack_digest":"a".repeat(64), "task":"inspect parser references", "hubs":[], "coverage":{"parsed":5}, "files":[], "tests":[]});
+        std::fs::write(&path, base.to_string()).unwrap();
+        assert!(validate_context_pack(&path, &dir).is_ok());
+        for bad in [
+            json!({"project_graph_revision":"bad\0line"}),
+            json!({"hubs":{}}),
+            json!({"files":["../escape"]}),
+            json!({"files":vec!["x";201]}),
+        ] {
+            let mut pack = base.clone();
+            for (key, value) in bad.as_object().unwrap() {
+                pack[key] = value.clone();
+            }
+            std::fs::write(&path, pack.to_string()).unwrap();
+            assert!(validate_context_pack(&path, &dir).is_err());
+        }
+        let mut at_cap = base.clone();
+        at_cap["files"] = json!(vec!["x"; 200]);
+        std::fs::write(&path, at_cap.to_string()).unwrap();
+        assert_eq!(
+            validate_context_pack(&path, &dir).unwrap()["file_count"],
+            200
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

@@ -81,7 +81,7 @@ pub fn test_path(path: &str) -> bool {
     .iter()
     .any(|p| glob(p, parts.last().copied().unwrap_or("")))
 }
-fn language(path: &str) -> Option<(&'static str, u32)> {
+pub(super) fn language(path: &str) -> Option<(&'static str, u32)> {
     if path.to_lowercase().ends_with(".ipynb") {
         Some(("notebook", 1))
     } else {
@@ -589,4 +589,298 @@ pub(super) fn revision_nodes(
         cancel,
     };
     Ok(array(&extraction(path, text.as_bytes(), &mut python)?, "nodes").to_vec())
+}
+
+type Groups = Option<oms_command_plan::services::GroupResolver>;
+
+fn candidate(path: &str, options: &BuildOptions) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    safe_path(path)
+        && !excluded(path)
+        && language(path).is_some()
+        && ![
+            ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "*.p12", "*.pfx",
+        ]
+        .iter()
+        .any(|pattern| glob(pattern, name) || glob(pattern, path))
+        && !options.exclude.iter().any(|pattern| glob(pattern, path))
+        && (options.include.is_empty() || options.include.iter().any(|pattern| glob(pattern, path)))
+}
+
+fn candidates(
+    repo: &Path,
+    options: &BuildOptions,
+    cancel: &AtomicBool,
+) -> Result<(BTreeSet<String>, bool)> {
+    let mut pending = vec![PathBuf::new()];
+    let mut paths = BTreeSet::new();
+    let mut visited = 0usize;
+    while let Some(dir) = pending.pop() {
+        crate::util::check(cancel)?;
+        let entries = match std::fs::read_dir(repo.join(&dir)) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut entries = entries
+            .take(9001 - visited)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            crate::util::check(cancel)?;
+            visited += 1;
+            if visited > 9000 {
+                return Ok((paths, true));
+            }
+            let path = dir.join(entry.file_name());
+            let Some(label) = path.to_str() else { continue };
+            let kind = entry.file_type()?;
+            if kind.is_dir() && !excluded(label) && safe_path(label) {
+                pending.push(path);
+            } else if kind.is_file() && candidate(label, options) {
+                paths.insert(label.into());
+            }
+        }
+    }
+    Ok((paths, false))
+}
+
+pub(super) fn read_cached_graph(
+    repo: &Path,
+    state: &Path,
+    groups: Groups,
+    cancel: &AtomicBool,
+) -> Result<Option<Value>> {
+    let root = Root::open(repo).map_err(|e| Error::new(format!("source root: {e:?}")))?;
+    let state = if let Ok(relative) = state.strip_prefix(repo) {
+        root.physical_root().join(relative)
+    } else {
+        state.to_path_buf()
+    };
+    no_symlinks(&state)?;
+    match std::fs::symlink_metadata(&state) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+        Ok(_) => {}
+    }
+    let (store, prefix) = match state.strip_prefix(root.physical_root()) {
+        Ok(relative) => (
+            oms_command_plan::storage::Store::open(root.physical_root())?
+                .with_group_resolver(groups),
+            relative.to_path_buf(),
+        ),
+        Err(_) => (
+            oms_command_plan::storage::Store::open(&state)?.with_group_resolver(groups),
+            PathBuf::new(),
+        ),
+    };
+    let manifest = store.optional(prefix.join("manifest.json"), GRAPH_LIMIT)?;
+    let graph = store.optional(prefix.join("graph.json"), GRAPH_LIMIT)?;
+    let (Some(manifest), Some(graph)) = (manifest, graph) else {
+        return Ok(None);
+    };
+    let (Ok(manifest), Ok(graph)) = (
+        serde_json::from_slice::<Value>(&manifest),
+        serde_json::from_slice::<Value>(&graph),
+    ) else {
+        return Ok(None);
+    };
+    let options = BuildOptions::manifest(&manifest);
+    if !manifest["discovery"]["include"].is_array()
+        || !manifest["discovery"]["exclude"].is_array()
+        || !manifest["discovery"]["max_bytes"].is_i64()
+        || !options.include.is_empty()
+        || !options.exclude.is_empty()
+        || manifest["schema"] != SCHEMA
+        || manifest["parser_version"] != VERSION
+        || graph["schema"] != SCHEMA
+        || graph["revision"] != manifest["revision"]
+        || s(&graph, "revision").is_empty()
+        || !graph["nodes"].is_array()
+        || !graph["edges"].is_array()
+    {
+        return Ok(None);
+    }
+    let (paths, capped) = candidates(root.physical_root(), &options, cancel)?;
+    if capped {
+        return Ok(None);
+    }
+    let Some(files) = manifest["files"].as_object() else {
+        return Ok(None);
+    };
+    let mut found = BTreeMap::new();
+    for path in paths {
+        crate::util::check(cancel)?;
+        if let Ok(data) = root.read(
+            &path,
+            usize::try_from(options.max_bytes).unwrap_or(0),
+            Policy::source(),
+        ) && !data.iter().take(8192).any(|b| *b == 0)
+            && std::str::from_utf8(&data).is_ok()
+        {
+            found.insert(path, sha(&data));
+        }
+    }
+    if found.len() != files.len()
+        || found
+            .iter()
+            .any(|(path, digest)| files.get(path).is_none_or(|row| s(row, "sha256") != digest))
+    {
+        return Ok(None);
+    }
+    Ok(Some(graph))
+}
+
+pub(super) fn fallback_graph(
+    repo: &Path,
+    state: &Path,
+    graph: &Value,
+    targets: &[String],
+    helper_path: Option<&Path>,
+    groups: Groups,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    let root = Root::open(repo).map_err(|e| Error::new(format!("source root: {e:?}")))?;
+    let options = BuildOptions::default();
+    let (mut paths, capped) = candidates(root.physical_root(), &options, cancel)?;
+    if capped {
+        for dir in ["tests", "test"] {
+            let directory = root.physical_root().join(dir);
+            if !std::fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
+                continue;
+            }
+            if let Ok(entries) = std::fs::read_dir(directory) {
+                for entry in entries.flatten().take(256) {
+                    crate::util::check(cancel)?;
+                    if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                        continue;
+                    }
+                    let path = Path::new(dir).join(entry.file_name());
+                    if let Some(path) = path.to_str().filter(|p| candidate(p, &options)) {
+                        paths.insert(path.into());
+                    }
+                }
+            }
+        }
+    }
+    paths.extend(array(graph, "nodes").iter().filter_map(|node| {
+        let path = s(node, "path");
+        if matches!(s(node, "kind"), "file" | "test") && candidate(path, &options) {
+            Some(path.to_owned())
+        } else {
+            None
+        }
+    }));
+    paths.extend(targets.iter().cloned());
+    let mut sibling_budget = 488usize;
+    for target in targets {
+        let parent = Path::new(target).parent().unwrap_or(Path::new(""));
+        if let Ok(entries) = std::fs::read_dir(root.physical_root().join(parent)) {
+            for entry in entries.flatten().take(sibling_budget) {
+                sibling_budget -= 1;
+                crate::util::check(cancel)?;
+                if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                    continue;
+                }
+                let sibling = parent.join(entry.file_name());
+                if let Some(name) = sibling.to_str().filter(|name| candidate(name, &options)) {
+                    paths.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    let state = if let Ok(relative) = state.strip_prefix(repo) {
+        root.physical_root().join(relative)
+    } else {
+        state.to_path_buf()
+    };
+    let (store, prefix) = if state.exists() {
+        match state.strip_prefix(root.physical_root()) {
+            Ok(relative) => (
+                Some(
+                    oms_command_plan::storage::Store::open(root.physical_root())?
+                        .with_group_resolver(groups),
+                ),
+                relative.to_path_buf(),
+            ),
+            Err(_) => (
+                Some(oms_command_plan::storage::Store::open(&state)?.with_group_resolver(groups)),
+                PathBuf::new(),
+            ),
+        }
+    } else {
+        (None, PathBuf::new())
+    };
+    let mut python = Python {
+        session: None,
+        helper: helper(helper_path)?,
+        max_bytes: 0,
+        cancel,
+    };
+    let mut records = Vec::new();
+    for path in paths {
+        crate::util::check(cancel)?;
+        let target = targets.contains(&path);
+        let limit = if target {
+            oms_graph_python::MAX_SOURCE_BYTES
+        } else {
+            options.max_bytes as usize
+        };
+        let data = match root.read(&path, limit, Policy::source()) {
+            Ok(data) => data,
+            Err(e) if target => {
+                return Err(Error::new(format!("cannot read target {path}: {e:?}")));
+            }
+            Err(_) => continue,
+        };
+        if std::str::from_utf8(&data).is_err()
+            || data
+                .iter()
+                .take(if target { data.len() } else { 8192 })
+                .any(|b| *b == 0)
+        {
+            if target {
+                return Err(Error::new(format!("malformed target: {path}")));
+            }
+            continue;
+        }
+        let (lang, version) = language(&path).ok_or_else(|| Error::new("no target parser"))?;
+        let digest = sha(&data);
+        let key = sha(format!("{path}\n{digest}\n{version}\n{SCHEMA}"));
+        let cached = match &store {
+            Some(store) => store
+                .optional(
+                    prefix.join("cache").join(format!("{key}.json")),
+                    8 * 1024 * 1024,
+                )?
+                .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
+                .filter(|v| {
+                    v["path"] == path
+                        && v["sha256"] == digest
+                        && v["parser_version"] == version
+                        && v["nodes"].is_array()
+                        && v["edges"].is_array()
+                        && v["refs"].is_array()
+                }),
+            None => None,
+        };
+        let parsed = match cached {
+            Some(v) => v,
+            None => match extraction(&path, &data, &mut python) {
+                Ok(v) => v,
+                Err(e) if target => return Err(e),
+                Err(_) => continue,
+            },
+        };
+        records.push(oms_graph_resolve::Extraction {
+            path,
+            sha256: digest,
+            parser: lang.into(),
+            nodes: array(&parsed, "nodes").to_vec(),
+            edges: array(&parsed, "edges").to_vec(),
+            refs: array(&parsed, "refs").to_vec(),
+        });
+    }
+    let (nodes, edges) =
+        oms_graph_resolve::resolve(&records).map_err(|e| Error::new(e.to_string()))?;
+    Ok(json!({"nodes":nodes,"edges":edges}))
 }

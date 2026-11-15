@@ -608,3 +608,309 @@ pub(crate) fn dispatch(
     };
     Ok((code, out, err.into_bytes()))
 }
+
+/// Discover verified sources related to the supplied repository paths.
+pub fn context_dependencies(
+    repo: &Path,
+    targets: &[PathBuf],
+    helper: Option<&Path>,
+    cancel: &AtomicBool,
+) -> Result<Vec<oms_runtime::services::RelatedSource>> {
+    context_dependencies_with_groups(repo, targets, helper, None, cancel)
+}
+
+/// Discover context using the host's group ownership verifier for graph state.
+pub fn context_dependencies_with_groups(
+    repo: &Path,
+    targets: &[PathBuf],
+    helper: Option<&Path>,
+    groups: Option<oms_command_plan::services::GroupResolver>,
+    cancel: &AtomicBool,
+) -> Result<Vec<oms_runtime::services::RelatedSource>> {
+    use oms_safe_fs::{Policy, Root};
+    use std::collections::BTreeSet;
+    use std::path::Component;
+    crate::util::check(cancel)?;
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = Root::open(repo).map_err(|e| Error::new(format!("source root: {e:?}")))?;
+    let mut names = BTreeSet::new();
+    for target in targets {
+        crate::util::check(cancel)?;
+        let relative = if target.is_absolute() {
+            match target
+                .strip_prefix(repo)
+                .or_else(|_| target.strip_prefix(root.physical_root()))
+            {
+                Ok(path) => path,
+                Err(_) => continue,
+            }
+        } else {
+            target.as_path()
+        };
+        let mut normalized = PathBuf::new();
+        for part in relative.components() {
+            match part {
+                Component::CurDir => {}
+                Component::Normal(part) => normalized.push(part),
+                _ => return Err(Error::new("invalid target path")),
+            }
+        }
+        let name = normalized
+            .to_str()
+            .filter(|p| safe_path(p) && !p.contains('\\'))
+            .ok_or_else(|| Error::new("invalid target path"))?;
+        let data = root
+            .read(name, oms_graph_python::MAX_SOURCE_BYTES, Policy::source())
+            .map_err(|e| Error::new(format!("cannot read target {name}: {e:?}")))?;
+        if std::str::from_utf8(&data).is_err() || data.contains(&0) {
+            return Err(Error::new(format!("malformed target: {name}")));
+        }
+        names.insert(name.to_owned());
+    }
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths: Vec<_> = names.iter().cloned().collect();
+    let state = state_dir(repo)?;
+    let graph = build::read_cached_graph(repo, &state, groups, cancel)?;
+    let mut index = Graph::new(
+        graph
+            .clone()
+            .unwrap_or_else(|| json!({"nodes":[], "edges":[]})),
+    )?;
+    let mut blast = index.blast(&paths, Some(1), &["EXTRACTED"], &[])?;
+    let unmatched: Vec<_> = array(&blast, "unmatched")
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| build::language(name).is_some())
+        .map(str::to_owned)
+        .collect();
+    if !unmatched.is_empty() {
+        index = Graph::new(build::fallback_graph(
+            repo,
+            &state,
+            &index.graph,
+            &unmatched,
+            helper,
+            groups,
+            cancel,
+        )?)?;
+        blast = index.blast(&paths, Some(1), &["EXTRACTED"], &[])?;
+    }
+    let mut found: BTreeSet<String> = array(&blast, "files")
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    for path in &paths {
+        for node in index.nodes.values().filter(|n| s(n, "path") == path) {
+            for edge in index
+                .out
+                .get(s(node, "id"))
+                .into_iter()
+                .flatten()
+                .filter(|e| s(e, "confidence") == "EXTRACTED")
+            {
+                if let Some(other) = index.nodes.get(s(edge, "target")) {
+                    let p = s(other, "path");
+                    if !p.is_empty() {
+                        found.insert(p.into());
+                    }
+                }
+            }
+        }
+    }
+    let mut result = Vec::new();
+    for path in found.difference(&names) {
+        crate::util::check(cancel)?;
+        let data = root
+            .read(path, oms_graph_python::MAX_SOURCE_BYTES, Policy::source())
+            .map_err(|e| Error::new(format!("cannot read related source {path}: {e:?}")))?;
+        let is_test = build::test_path(path);
+        result.push(oms_runtime::services::RelatedSource {
+            path: PathBuf::from(path),
+            reason: if is_test {
+                "graph related test"
+            } else {
+                "graph dependency"
+            }
+            .into(),
+            priority: if is_test { 90 } else { 80 },
+            source_sha256: sha(&data),
+        });
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod bridge_dependency_tests {
+    use super::*;
+    #[test]
+    fn resolves_excluded_target_references() {
+        let repo = std::env::temp_dir().join(format!("oms-bridge-graph-{}", std::process::id()));
+        std::fs::create_dir_all(repo.join("vendor")).unwrap();
+        std::fs::write(repo.join("dep.sh"), "run_dep() { :; }\n").unwrap();
+        std::fs::write(repo.join("vendor/target.sh"), "source dep.sh\nrun_dep\n").unwrap();
+        let graph =
+            json!({"nodes":[{"id":"file:dep.sh", "kind":"file", "path":"dep.sh"}], "edges":[]});
+        let result = build::fallback_graph(
+            &repo,
+            &repo.join(".oms/project-graph"),
+            &graph,
+            &["vendor/target.sh".into()],
+            None,
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let index = Graph::new(result).unwrap();
+        assert!(
+            index
+                .out
+                .values()
+                .flatten()
+                .any(|edge| s(edge, "target").contains("dep.sh"))
+        );
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[test]
+    fn discovery_is_read_only_and_handles_paths() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let repo = std::env::temp_dir().join(format!("oms-bridge-readonly-{}", std::process::id()));
+        std::fs::create_dir_all(repo.join("vendor")).unwrap();
+        std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::write(repo.join("plain.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(repo.join("tool"), "text\n").unwrap();
+        std::fs::write(repo.join("dep.sh"), "run_dep() { :; }\n").unwrap();
+        std::fs::write(repo.join("vendor/target.sh"), "source dep.sh\nrun_dep\n").unwrap();
+        std::fs::write(repo.join("broken.sh"), [0xff]).unwrap();
+        std::fs::write(repo.join("binary.sh"), [0]).unwrap();
+        std::fs::write(repo.join("large.sh"), vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+        std::fs::write(repo.join(".env.json"), b"private").unwrap();
+        symlink("dep.sh", repo.join("link.sh")).unwrap();
+        let alias = repo.with_extension("alias");
+        symlink(&repo, &alias).unwrap();
+        let cancel = AtomicBool::new(false);
+        let plain = [PathBuf::from("./plain.rs"), PathBuf::from("tool")];
+        assert!(
+            context_dependencies(&alias, &plain, None, &cancel)
+                .unwrap()
+                .is_empty()
+        );
+        let rows =
+            context_dependencies(&alias, &[PathBuf::from("vendor/target.sh")], None, &cancel)
+                .unwrap();
+        assert!(rows.iter().any(|r| r.path == Path::new("dep.sh")));
+        assert!(!repo.join(".oms").exists());
+        assert!(
+            context_dependencies(
+                &alias,
+                &[repo.parent().unwrap().join("external-oms-source.sh")],
+                None,
+                &cancel
+            )
+            .is_ok()
+        );
+        for path in [
+            "link.sh",
+            "missing.sh",
+            "binary.sh",
+            "broken.sh",
+            "../escape.sh",
+        ] {
+            assert!(context_dependencies(&alias, &[PathBuf::from(path)], None, &cancel).is_err());
+        }
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[test]
+    fn trusted_group_graph_is_read_without_writes() {
+        use std::os::unix::fs::PermissionsExt;
+        fn group(
+            gid: u32,
+        ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+            Ok(oms_command_plan::services::GroupMembership {
+                gid,
+                explicit_member_uids: vec![],
+                primary_member_uids: vec![rustix::process::getuid().as_raw()],
+            })
+        }
+        let repo = std::env::temp_dir().join(format!("oms-bridge-group-{}", std::process::id()));
+        let state = repo.join(".oms/project-graph");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::write(repo.join("target.rs"), "fn main() {}\n").unwrap();
+        let manifest = json!({"schema":2,"parser_version":9,"revision":"r","discovery":{"include":[],"exclude":[],"max_bytes":2097152},"files":{}});
+        let graph = json!({"schema":2,"revision":"r","nodes":[],"edges":[]});
+        std::fs::write(state.join("manifest.json"), manifest.to_string()).unwrap();
+        std::fs::write(state.join("graph.json"), graph.to_string()).unwrap();
+        let target = [PathBuf::from("target.rs")];
+        let cancel = AtomicBool::new(false);
+        assert!(context_dependencies_with_groups(&repo, &target, None, None, &cancel).is_err());
+        assert!(
+            context_dependencies_with_groups(&repo, &target, None, Some(group), &cancel)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            context_dependencies_with_groups(&repo, &target, None, Some(group), &cancel).is_err()
+        );
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[test]
+    fn python_fallback_or_helper_refusal() {
+        let repo = std::env::temp_dir().join(format!("oms-bridge-python-{}", std::process::id()));
+        std::fs::create_dir_all(repo.join("vendor")).unwrap();
+        std::fs::write(repo.join("vendor/main.py"), "import sibling\n").unwrap();
+        std::fs::write(repo.join("sibling.py"), "value = 1\n").unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let helper = exe
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("oms-graph-python-helper");
+        let found = helper.is_file();
+        let local_helper = repo.join("parser-helper");
+        if found {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::copy(&helper, &local_helper).unwrap();
+            std::fs::set_permissions(&local_helper, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        let rows = context_dependencies(
+            &repo,
+            &[PathBuf::from("vendor/main.py")],
+            found.then_some(local_helper.as_path()),
+            &AtomicBool::new(false),
+        );
+        if found {
+            assert!(
+                rows.unwrap()
+                    .iter()
+                    .any(|r| r.path == Path::new("sibling.py"))
+            );
+        } else {
+            assert!(rows.is_err());
+        }
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[test]
+    fn rejects_unreadable_and_honors_cancel() {
+        let cancel = AtomicBool::new(false);
+        let repo = std::env::temp_dir();
+        assert!(
+            context_dependencies(
+                &repo,
+                &[PathBuf::from("absent-oms-source.sh")],
+                None,
+                &cancel
+            )
+            .is_err()
+        );
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(context_dependencies(&repo, &[], None, &cancel).is_err());
+    }
+}
