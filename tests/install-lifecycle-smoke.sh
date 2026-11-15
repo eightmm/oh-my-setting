@@ -500,6 +500,27 @@ PY_NONFINITE
     [ -n "$(find "$root/rust/target/oms-native" -path '*/.oms-quarantine.*/payload/manifest.json' -print)" ] || fail "companion $change quarantine lost the payload"
     oms_smoke_stage_native "$entry" "$TMP/native-companions" || fail "companion payload restaging failed"
   done
+  for perm_case in world-binary world-checksum world-entry hardlink-binary; do
+    case "$perm_case" in
+      world-binary) chmod 757 "$entry/oms" ;;
+      world-checksum) chmod 666 "$entry/oms.sha256" ;;
+      world-entry) chmod 777 "$entry" ;;
+      hardlink-binary) ln "$entry/oms" "$TMP/native-hardlink-oms" ;;
+    esac
+    find "$root/rust/target/oms-native" -name '.oms-quarantine.*' -prune -exec rm -rf {} +
+    oms_install_repair_native_cache "$root" > "$TMP/native-perm.out" || fail "permission $perm_case repair failed"
+    rm -f "$TMP/native-hardlink-oms"
+    [ ! -e "$entry" ] || fail "permission $perm_case cache was not quarantined"
+    [ -n "$(find "$root/rust/target/oms-native" -path '*/.oms-quarantine.*/payload/manifest.json' -print)" ] || fail "permission $perm_case quarantine lost the payload"
+    oms_smoke_stage_native "$entry" "$TMP/native-companions" || fail "permission payload restaging failed"
+  done
+  chmod 777 "$root/rust/target/oms-native"
+  if oms_install_repair_native_cache "$root" > "$TMP/native-untrusted-cache.out" 2>&1; then
+    chmod 755 "$root/rust/target/oms-native"
+    fail "repair accepted world-writable cache ancestor"
+  fi
+  chmod 755 "$root/rust/target/oms-native"
+  [ -f "$entry/oms" ] || fail "repair moved cache on untrusted ancestor"
   mv "$entry/oms-supervisor" "$TMP/native-real-supervisor"
   ln -s "$TMP/native-real-supervisor" "$entry/oms-supervisor"
   if oms_install_repair_native_cache "$root" > "$TMP/native-companion-link.out" 2>&1; then
@@ -598,6 +619,11 @@ stdin-bytes" ] || fail "native dispatch lost argv or stdin: $(cat "$d/out")"
   refused 'untrusted native payload ownership'
   stage; chmod 757 "$entry/oms"
   refused 'untrusted native payload ownership'
+  stage; chmod 666 "$entry/oms.sha256"
+  refused 'untrusted native payload ownership'
+  stage; chmod 777 "$root/rust/target/oms-native"
+  refused 'untrusted native payload ownership'
+  chmod 755 "$root/rust/target/oms-native"
   rm -rf "$entry"; mkdir -p "$d/elsewhere"; oms_smoke_stage_native "$d/elsewhere/$revision" "$d/stub" || fail "stub restaging failed"
   ln -s "$d/elsewhere/$revision" "$entry"
   refused 'foreign native payload entry'

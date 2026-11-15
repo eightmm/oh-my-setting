@@ -206,8 +206,9 @@ oms_bash_enter() {
 #
 # The staged executable is authenticated before either private invocation: it
 # must be a regular, non-symlinked, executable file in a non-symlinked entry
-# directory owned by the effective user and not world-writable, matching the
-# fixed-size oms.sha256 written by the staging step. Hashing uses
+# directory whose cache ancestors, entry, binary and fixed-size oms.sha256
+# checksum are owned by the effective user and not world-writable, matching
+# the oms.sha256 written by the staging step. Hashing uses
 # oms_sha256_file (sha256sum, BSD shasum or openssl), only host digest tools. Same-UID
 # replacement stays outside this boundary.
 
@@ -249,13 +250,18 @@ oms_native_resolve() {
     OMS_NATIVE_ERROR='native payload unavailable; run oms doctor --repair'
     return 2
   fi
-  if [ ! -O "$entry" ] || [ ! -O "$binary" ] ||
-     [ -n "$(find "$entry" "$binary" -prune -perm -0002 -print 2>/dev/null)" ]; then
+  if [ ! -f "$checksum" ]; then
+    OMS_NATIVE_ERROR='native executable checksum unavailable; run oms doctor --repair'
+    return 2
+  fi
+  if [ ! -O "$root/rust" ] || [ ! -O "$root/rust/target" ] || [ ! -O "$cache" ] ||
+     [ ! -O "$entry" ] || [ ! -O "$binary" ] || [ ! -O "$checksum" ] ||
+     [ -n "$(find "$root/rust" "$root/rust/target" "$cache" "$entry" "$binary" "$checksum" -prune -perm -0002 -print 2>/dev/null)" ]; then
     OMS_NATIVE_ERROR="untrusted native payload ownership: $entry"
     return 2
   fi
   size=""
-  [ ! -f "$checksum" ] || size="$(LC_ALL=C wc -c < "$checksum" 2>/dev/null)" || size=""
+  size="$(LC_ALL=C wc -c < "$checksum" 2>/dev/null)" || size=""
   size="${size//[[:space:]]/}"
   expected=""
   if [ "$size" != 65 ] || ! IFS= read -r expected < "$checksum"; then

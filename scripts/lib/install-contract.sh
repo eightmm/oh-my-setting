@@ -135,6 +135,11 @@ oms_install_repair_native_cache() (
       return 1
     fi
   done
+  if { [ "$(id -u)" -ne 0 ] && { [ ! -O "$root/rust" ] || [ ! -O "$root/rust/target" ] || [ ! -O "$cache" ]; }; } ||
+     [ -n "$(find "$root/rust" "$root/rust/target" "$cache" -prune -perm -0002 -print 2>/dev/null)" ]; then
+    echo "error: cannot repair untrusted native cache path: $cache" >&2
+    return 1
+  fi
   revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || return 1
   case "$revision" in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#revision}" = 40 ] || return 1
@@ -159,11 +164,15 @@ oms_install_repair_native_cache() (
     fi
   done
   if python3 - "$entry" "$revision" <<'PY_NATIVE_REPAIR'
-import hashlib, json, pathlib, re, sys
+import hashlib, json, os, pathlib, re, sys
 entry, revision = pathlib.Path(sys.argv[1]), sys.argv[2]
 class InvalidCache(Exception):
     pass
 try:
+    euid = os.geteuid()
+    entry_stat = entry.lstat()
+    if entry_stat.st_uid not in (0, euid) or (entry_stat.st_mode & 0o4002) != 0:
+        raise InvalidCache('entry permissions')
     manifest_path = entry / 'manifest.json'
     if manifest_path.stat().st_size > 4 * 1024 * 1024:
         raise InvalidCache('manifest size')
@@ -187,6 +196,9 @@ try:
     for disk_item in entry.iterdir():
         if disk_item.is_symlink() or not disk_item.is_file():
             raise InvalidCache('non-regular')
+        item_stat = disk_item.lstat()
+        if item_stat.st_uid not in (0, euid) or item_stat.st_nlink != 1 or (item_stat.st_mode & 0o6002) != 0:
+            raise InvalidCache('file permissions')
         if disk_item.name not in {'manifest.json', 'oms.sha256'}:
             actual_companions.add(disk_item.name)
     if actual_companions != set(artifacts):
