@@ -735,11 +735,12 @@ fn external_copy(source: &Path, target: &Path) -> Result<()> {
         r::new_file(target, &external_read(source)?, m.mode() & 0o777)?;
     } else if m.is_dir() {
         fs::create_dir(target)?;
-        fs::set_permissions(target, fs::Permissions::from_mode(m.mode() & 0o777))?;
+        fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
         for row in fs::read_dir(source)? {
             let row = row?;
             external_copy(&row.path(), &target.join(row.file_name()))?;
         }
+        fs::set_permissions(target, fs::Permissions::from_mode(m.mode() & 0o777))?;
         r::sync_dir(target)?;
     } else {
         return r::fail("provider snapshot refuses special files");
