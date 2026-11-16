@@ -151,8 +151,9 @@ impl Plan<'_> {
             if task.text("state") == "review" {
                 review += 1;
             }
-            if matches!(task.text("state"), "claimed" | "running")
-                && !self.expired(s, task, false)?
+            if task.text("state") == "landing"
+                || (matches!(task.text("state"), "claimed" | "running")
+                    && !self.expired(s, task, false)?)
             {
                 active.push(task.clone());
             }
@@ -204,14 +205,24 @@ impl Plan<'_> {
             }
         }
         let now = parse_ts(&self.context.ts).unwrap_or(0);
-        eligible.sort_by(|a, b| {
-            let priority = |t: &Value| t.opt("priority").and_then(|v| v.int().ok()).unwrap_or(0);
-            let age = |t: &Value| (now - parse_ts(t.text("created")).unwrap_or(now)).max(0);
-            priority(b)
-                .cmp(&priority(a))
+        let age = |t: &Value| (now - parse_ts(t.text("created")).unwrap_or(now)).max(0);
+        let score = |t: &Value| -> i128 {
+            let p = t
+                .opt("priority")
+                .and_then(|v| v.int().ok())
+                .unwrap_or(0)
+                .clamp(-100, 100);
+            let boost = (age(t) / 3600).min(200);
+            p + boost
+        };
+        let mut ranked: Vec<(usize, Value)> = eligible.into_iter().enumerate().collect();
+        ranked.sort_by(|(ia, a), (ib, b)| {
+            score(b)
+                .cmp(&score(a))
                 .then_with(|| age(b).cmp(&age(a)))
-                .then_with(|| a.text("id").cmp(b.text("id")))
+                .then_with(|| ia.cmp(ib))
         });
+        let eligible: Vec<Value> = ranked.into_iter().map(|(_, t)| t).collect();
         Ok((eligible, capacity, backpressure, review))
     }
     pub(crate) fn next(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {

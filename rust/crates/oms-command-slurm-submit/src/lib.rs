@@ -328,6 +328,39 @@ fn ledger_path(logical: &Path, repository: &repository::Repository) -> PathBuf {
         .map(|v| supplied_path(logical, &v))
         .unwrap_or_else(|| supplied_path(&repository.root, OsStr::new(".oms/slurm-submits.jsonl")))
 }
+pub(crate) fn safe_cluster(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-,".contains(&b))
+}
+
+pub(crate) fn cluster_from_args(args: &[OsString]) -> Option<String> {
+    let mut i = 0;
+    let mut found = None;
+    while i < args.len() {
+        let s = args[i].to_str()?;
+        let val = if s == "-M" || s == "--clusters" {
+            i += 1;
+            args.get(i).and_then(|v| v.to_str())
+        } else if let Some(rest) = s.strip_prefix("--clusters=") {
+            Some(rest)
+        } else if s.len() > 2 && s.starts_with("-M") && !s.starts_with("-M-") {
+            Some(&s[2..])
+        } else {
+            None
+        };
+        if let Some(c) = val
+            && safe_cluster(c)
+        {
+            found = Some(c.to_owned());
+        }
+        i += 1;
+    }
+    found
+}
+
 fn execute(
     mut options: Options,
     cwd: &Path,
@@ -417,6 +450,7 @@ fn execute(
     if interrupted.load(Ordering::Relaxed) {
         return Err("interrupted".into());
     }
+    let cluster_name = cluster_from_args(args);
     storage::ensure_ignore(&ledger, &logical, interrupted);
     let attempt = match ledger::begin(
         &ledger,
@@ -428,6 +462,7 @@ fn execute(
             tag,
             store_args,
             args,
+            cluster_name: cluster_name.as_deref(),
             provenance: &options.provenance,
         },
         interrupted,

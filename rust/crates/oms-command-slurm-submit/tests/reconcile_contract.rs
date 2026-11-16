@@ -2,6 +2,7 @@
 //! with a scrubbed environment because `set_var` is unsafe and the crate forbids it.
 #![forbid(unsafe_code)]
 
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -214,17 +215,7 @@ fn json_field(text: &str, name: &str) -> String {
 }
 fn short_of(key: &str) -> String {
     // sha256(key)[..12], matching the --comment oms-key=<short> that sbatch received.
-    let out = Command::new("sha256sum")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut c| {
-            use std::io::Write;
-            c.stdin.take().unwrap().write_all(key.as_bytes())?;
-            c.wait_with_output()
-        })
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout)[..12].to_owned()
+    format!("{:x}", Sha256::digest(key.as_bytes()))[..12].to_owned()
 }
 
 #[test]
@@ -402,4 +393,116 @@ fn key_aliases_and_provenance_flags_are_validated() {
         2
     );
     assert!(Path::new(&f.repo).join(".oms").exists());
+}
+
+#[test]
+fn forced_resubmit_never_adopts_earlier_attempt_and_job_id_keeps_its_attempt() {
+    let f = Fixture::new();
+    // Attempt 1 submits job 101 cleanly.
+    f.script("sbatch", "printf 'Submitted batch job 101\\n'\n");
+    let first = f.submit("cell-f", &[]);
+    assert_eq!(first.code, 0, "{}", first.err);
+
+    // Forced resubmit Attempt 2 loses its sbatch reply (intent only, no submitted row).
+    let marker = f.root.join("queued-f2");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let second = f.run(
+        &[
+            "--key",
+            "cell-f",
+            "--force-resubmit",
+            "--reason",
+            "retry",
+            "--",
+            "sbatch",
+            "job.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(second.code, 130);
+
+    // Historical sacct contains Attempt 1's completed job 101 with the same key tag.
+    let short = short_of("cell-f");
+    f.set(
+        "sacct",
+        &format!("101|job.sh|COMPLETED|0:0|oms-key={short}\n"),
+    );
+    // reconcile --key targets Attempt 2 and must NOT steal Attempt 1's job 101.
+    let rec2 = f.run(&["reconcile", "--key", "cell-f", "--json"], &[]);
+    assert_eq!(rec2.code, 75, "{}{}", rec2.out, rec2.err);
+    assert_eq!(json_field(&rec2.out, "state"), "unknown");
+
+    // reconcile --job-id 101 targets Attempt 1 and preserves Attempt 2 unresolved.
+    let attempt1 = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"101\""))
+        .map(|l| json_field(l, "attempt"))
+        .unwrap();
+    let rec1 = f.run(&["reconcile", "--job-id", "101", "--json"], &[]);
+    assert_eq!(rec1.code, 0, "{}{}", rec1.out, rec1.err);
+    assert_eq!(json_field(&rec1.out, "attempt"), attempt1);
+    assert_eq!(json_field(&rec1.out, "state"), "succeeded");
+    assert_eq!(f.submit("cell-f", &[]).code, 3);
+}
+
+#[test]
+fn cluster_flag_is_recorded_and_forwarded_to_scheduler_queries() {
+    let f = Fixture::new();
+    let squeue_log = f.root.join("squeue.args");
+    let sacct_log = f.root.join("sacct.args");
+    f.script(
+        "squeue",
+        &format!("printf '%s\\n' \"$@\" > '{}'\n", squeue_log.display()),
+    );
+    f.script(
+        "sacct",
+        &format!(
+            "printf '%s\\n' \"$@\" > '{}'\nprintf '505|job.sh|COMPLETED|0:0|oms-key=%s\\n' \"{}\"\n",
+            sacct_log.display(),
+            short_of("cell-c")
+        ),
+    );
+    let marker = f.root.join("queued-c");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let lost = f.run(
+        &[
+            "--key",
+            "cell-c",
+            "--",
+            "sbatch",
+            "-M",
+            "h100-clus",
+            "job.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(lost.code, 130);
+    assert!(f.ledger().contains("\"cluster_name\": \"h100-clus\""));
+
+    let rec = f.run(&["reconcile", "--key", "cell-c", "--json"], &[]);
+    assert_eq!(rec.code, 0, "{}{}", rec.out, rec.err);
+    assert!(
+        fs::read_to_string(&squeue_log)
+            .unwrap()
+            .contains("-M\nh100-clus\n")
+    );
+    assert!(
+        fs::read_to_string(&sacct_log)
+            .unwrap()
+            .contains("-M\nh100-clus\n")
+    );
+    let submitted_line = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"type\": \"submitted\""))
+        .unwrap()
+        .to_owned();
+    assert!(submitted_line.contains("\"cluster_name\": \"h100-clus\""));
 }

@@ -289,16 +289,16 @@ crate 수, 중앙 DB, 상주 daemon, 자동 계정 배포, 전역 자동 router�
 
 ## 15. Stages A–F 구현 및 검증 현황
 
-Stages A–F는 기존 순수 Rust 코어(`#199.1`, `#![forbid(unsafe_code)]`, 추가 외부 의존성 없음)의 opt-in 확장으로 구현했습니다. Stage G(측정 기반 라우팅·최적화)는 측정 데이터 축적 전까지 보류합니다.
+Stages A–F는 기존 순수 Rust 코어(`1.99.1`, `#![forbid(unsafe_code)]`, 추가 외부 의존성 없음)의 opt-in 확장으로 구현했습니다. Stage G(측정 기반 라우팅·최적화)는 측정 데이터 축적 전까지 보류합니다.
 
 | 단계 | 주요 구현 위치 | 핵심 동작 |
 |---|---|---|
 | A. 기준선·계약 | `oms-command-plan`, `oms-runtime`, `oms-command-autonomy` | 기존 Task/Lease/Target/Slurm/Landing 의미 유지 및 opt-in 확장 |
-| B. 로컬 병렬 실행 | `rust/crates/oms-command-plan/src/{engine,query,proposal}.rs`, `rust/crates/oms-command-autonomy/src/parallel.rs` | DAG cycle/unknown-dep 검증, `--resources`/`--priority`/`--max-writers`/`--max-review-backlog` backpressure, singleton controller lock, non-barrier `std::thread::scope` 병렬 실행 |
-| C. 협업·통합 | `rust/crates/oms-command-plan/src/contracts.rs`, `rust/crates/oms-command-autonomy/src/conflicts.rs` | 버전된 계약(`contract-propose`/`contract-accept`/`refresh-contracts`), stale 계약 gating, `.oms/plan/late-results.jsonl` 격리, detached worktree `--no-ff` 통합 재검증(`verify_combined`) 및 target drift 방어 |
-| D. 원격 준비 | `rust/crates/oms-runtime/src/{targets,exec_snapshot,cli_schema,parser,router}.rs`, `rust/crates/oms/src/main.rs` | `execution_approved: false` 기본값, identity fingerprint 결합 `approve`/`revoke`, 불변 `exec-snapshot` 생성·검증, `ssh-adapter` preflight 차단 |
-| E. 원격 실행·복구 | `rust/crates/oms-runtime/src/ssh_adapter.rs` | `.oms/runtime/remote-ops/<op_id>.json` durable ledger, `--op-id` 멱등/중복 차단, `reconcile`/`cancel` (`hostname`/`boot_id`/`pid`/`lstart` fencing), bounded streaming + SHA-256 atomic `collect` |
-| F. Slurm·산출물·다중 저장소 | `rust/crates/oms-command-slurm-submit/src/{lib,ledger,reconcile}.rs`, `rust/crates/oms-command-landing/src/{cli,delivery,manifest}.rs` | `slurm-submit` provenance 및 `reconcile`(`squeue`/`sacct` 복구·비정상 상태 실패 보존·`unknown` exit 75), `land --check-manifest` / `--execute-manifest` DAG 검증 및 `partial-hold`(exit 3) |
+| B. 로컬 병렬 실행 | `rust/crates/oms-command-plan/src/{engine,query,proposal}.rs`, `rust/crates/oms-command-autonomy/src/{parallel,planning,services}.rs`, `rust/crates/oms/src/services_control.rs` | DAG cycle/unknown-dep 검증, `--resources`/`--priority`/`--max-writers`/`--max-review-backlog` backpressure, singleton controller lock, non-barrier `std::thread::scope` 병렬 실행(`Services::invoke_concurrent` -> `Scope::ProcessGroup`으로 Linux 다중 스레드 감독) |
+| C. 협업·통합 | `rust/crates/oms-command-plan/src/contracts.rs`, `rust/crates/oms-command-autonomy/src/conflicts.rs` | 버전된 계약(`contract-propose`/`contract-accept`/`refresh-contracts`, `landing` 보호 및 claim 무효화 초기화), stale 계약 gating, `.oms/plan/late-results.jsonl` 격리, `oms plan-run --verify-combined` 및 detached worktree `--no-ff` 통합 재검증(`verify_combined`)·target drift 방어 |
+| D. 원격 준비 | `rust/crates/oms-runtime/src/{targets,exec_snapshot,ssh_adapter,cli_schema,parser,router}.rs`, `rust/crates/oms/src/main.rs` | `execution_approved: false` 기본값, identity fingerprint 결합 `approve`/`revoke`, 불변 `exec-snapshot` 생성·검증, `--target` 생략 시에도 등록된 미승인 호스트 차단 및 `--snapshot` 로컬·원격 checkout 일치 검증 |
+| E. 원격 실행·복구 | `rust/crates/oms-runtime/src/ssh_adapter.rs` | `.oms/runtime/remote-ops/<op_id>.json` durable ledger, `--op-id` 멱등/중복 차단, 16-hex nonce 기반 원격 프레임·bounded `dd`·`STILL_RUNNING` 출력 차단, `reconcile`/`cancel`(대기 루프 `runner.sh`, parent+child `SIGKILL`, `lstart` 미검증 시 `unknown` 보류), symlink 조상 거부·SHA-256 atomic `collect` |
+| F. Slurm·산출물·다중 저장소 | `rust/crates/oms-command-slurm-submit/src/{lib,ledger,reconcile}.rs`, `rust/crates/oms-command-landing/src/{cli,delivery,manifest}.rs` | `slurm-submit` provenance 및 attempt·`-M <cluster>` 단위 `reconcile`(`squeue`/`sacct` 복구·비정상 상태 실패 보존·`unknown` exit 75), `land --check-manifest` / `--execute-manifest` 엄격 `depends_on` 검증, state-root 중복 제거 락, checked-out target drift 방어 및 `partial-hold`(exit 3) |
 
 ### 13절 시나리오별 결정적 검증 매핑 (Fixture / Fault-Injection)
 
@@ -306,15 +306,15 @@ Stages A–F는 기존 순수 Rust 코어(`#199.1`, `#![forbid(unsafe_code)]`, �
 
 | # | 13절 검증 시나리오 | 검증 테스트 |
 |---|---|---|
-| 1 | 독립 작업·공유 API 계약 | `oms_command_autonomy::tests::parallel_run::{parallel_refills_slots_without_barrier_and_isolates_a_panicking_sibling, overlapping_scopes_never_run_together}`, `oms_command_plan::cli::{merged_dependencies_scheduling_and_late_results, versioned_contracts_gate_scheduling}` |
-| 2 | 검증 후 코드 또는 target 변경 | `oms_command_autonomy::tests::combined_verification::{textually_clean_merge_with_incompatible_combination_fails_verification, target_advancing_during_verification_cannot_verify, verified_combination_reports_identity_and_leaves_no_trace}`, `oms_runtime::tests::runtime_contract::snapshot_detects_checkout_and_lockfile_drift` |
+| 1 | 독립 작업·공유 API 계약 | `oms_command_autonomy::tests::parallel_run::{parallel_refills_slots_without_barrier_and_isolates_a_panicking_sibling, overlapping_scopes_never_run_together, overlapping_resources_never_run_together}`, `oms::services_control::tests::control_services_invoke_concurrent_works_across_threads_on_linux`, `oms_command_plan::cli::{merged_dependencies_scheduling_and_late_results, versioned_contracts_gate_scheduling}` |
+| 2 | 검증 후 코드 또는 target 변경 | `oms_command_autonomy::tests::combined_verification::{textually_clean_merge_with_incompatible_combination_fails_verification, target_advancing_during_verification_cannot_verify, verified_combination_reports_identity_and_leaves_no_trace, cli_verify_combined_returns_structured_outcomes}`, `oms_runtime::tests::runtime_contract::snapshot_detects_checkout_and_lockfile_drift`, `oms_command_landing::landing_contract::manifest_publish_refuses_checked_out_target_drift` |
 | 3 | Worker 종료·controller 재시작 | `oms_command_autonomy::tests::parallel_run::{one_controller_per_state_repository_and_flag_validation, parallel_refills_slots_without_barrier_and_isolates_a_panicking_sibling}` |
-| 4 | 원격 수락 직후 응답 손실 | `oms_runtime::ssh_adapter::tests::exec_op_id_disconnect_recovers_via_reconcile_without_duplicate` |
-| 5 | Slurm 제출 후 기록 전 장애 | `oms_command_slurm_submit::reconcile_contract::lost_sbatch_reply_is_recovered_from_the_scheduler_and_blocks_a_resubmit` |
+| 4 | 원격 수락 직후 응답 손실 | `oms_runtime::ssh_adapter::tests::{exec_op_id_disconnect_recovers_via_reconcile_without_duplicate, omitted_target_blocks_unapproved_host_and_snapshot_binds_remote_head}` |
+| 5 | Slurm 제출 후 기록 전 장애 | `oms_command_slurm_submit::reconcile_contract::{lost_sbatch_reply_is_recovered_from_the_scheduler_and_blocks_a_resubmit, forced_resubmit_never_adopts_earlier_attempt_and_job_id_keeps_its_attempt, cluster_flag_is_recorded_and_forwarded_to_scheduler_queries}` |
 | 6 | Lease 만료 뒤 이전 결과·계약 변경 | `oms_command_plan::cli::{merged_dependencies_scheduling_and_late_results, versioned_contracts_gate_scheduling}` |
-| 7 | 시계 차이·PID/Job ID 재사용 | `oms_runtime::ssh_adapter::tests::pid_reuse_boot_id_and_conflicting_op_id_are_fenced`, `oms_command_slurm_submit::reconcile_contract::terminal_states_never_map_to_success_and_lag_or_ambiguity_is_unknown` |
-| 8 | 전송 중단·digest 불일치·경로 탈출 | `oms_runtime::ssh_adapter::tests::collect_enforces_paths_bounds_and_digest_atomically`, `oms_runtime::tests::runtime_contract::target_approval_is_bound_to_identity` |
+| 7 | 시계 차이·PID/Job ID 재사용 | `oms_runtime::ssh_adapter::tests::{pid_reuse_boot_id_and_conflicting_op_id_are_fenced, cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart}`, `oms_command_slurm_submit::reconcile_contract::terminal_states_never_map_to_success_and_lag_or_ambiguity_is_unknown` |
+| 8 | 전송 중단·digest 불일치·경로 탈출 | `oms_runtime::ssh_adapter::tests::{collect_enforces_paths_bounds_and_digest_atomically, collect_rejects_symlink_ancestors_and_overflow_with_open_stderr}`, `oms_runtime::tests::runtime_contract::target_approval_is_bound_to_identity` |
 | 9 | 리뷰 backlog·한도 부족 backpressure | `oms_command_autonomy::tests::parallel_run::review_backlog_stops_claims_drains_in_flight_and_exits_three`, `oms_command_plan::cli::merged_dependencies_scheduling_and_late_results` |
-| 10 | 다중 저장소 부분 통합 실패 | `oms_command_landing::landing_contract::{manifest_failure_holds_dependents_keeps_integrated_repos_and_resumes_idempotently, manifest_rejects_malformed_graphs_and_missing_receipts_with_exit_two, manifest_check_publishes_nothing_and_execution_needs_the_publication_fence}` |
+| 10 | 다중 저장소 부분 통합 실패 | `oms_command_landing::landing_contract::{manifest_failure_holds_dependents_keeps_integrated_repos_and_resumes_idempotently, manifest_rejects_malformed_graphs_and_missing_receipts_with_exit_two, manifest_check_publishes_nothing_and_execution_needs_the_publication_fence, manifest_publish_refuses_checked_out_target_drift}` |
 
 실제 원격 호스트·실제 Slurm 클러스터·실제 GPU 환경에서의 end-to-end 스모크 테스트는 각 호스트의 명시적 `target approve` 이후 별도 증거로 기록합니다.

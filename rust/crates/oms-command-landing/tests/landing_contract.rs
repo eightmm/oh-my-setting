@@ -1196,6 +1196,13 @@ fn manifest_rejects_malformed_graphs_and_missing_receipts_with_exit_two() {
             text.replace("\"depends_on\": []", "\"depends_on\": [\"repo-app\"]"),
             "cycle",
         ),
+        (
+            text.replace(
+                "\"depends_on\": [\"repo-core\"]",
+                "\"depends_on\": \"repo-core\"",
+            ),
+            "depends_on must be an array",
+        ),
         (text.replacen(&m.repos[0].2, "abc", 1), "40 hex"),
     ] {
         write(&broken);
@@ -1212,4 +1219,50 @@ fn manifest_rejects_malformed_graphs_and_missing_receipts_with_exit_two() {
     );
     assert_eq!(code, 2);
     assert!(err.contains("required together"), "{err}");
+}
+
+#[test]
+fn manifest_publish_refuses_checked_out_target_drift() {
+    let iso = Isolated::new();
+    let repo = iso.repo("drift");
+    iso.git(&repo, &["checkout", "-q", "-b", "cand"]);
+    let inter_sha = iso.commit_file(&repo, "inter.txt");
+    let cand_sha = iso.commit_file(&repo, "cand.txt");
+    iso.git(&repo, &["checkout", "-q", "main"]);
+
+    let manifest_path = iso.home.path().join("drift-manifest.json");
+    let receipt_path = iso.home.path().join("drift-receipt.json");
+    let verify = format!("git -C {} merge -q --ff-only {inter_sha}", repo.display());
+    fs::write(
+        &manifest_path,
+        format!(
+            "{{\"schema\": 1, \"repos\": [{{\"id\": \"drift\", \"path\": \"{}\", \"target_ref\": \"main\", \"candidate_sha\": \"{cand_sha}\", \"depends_on\": [], \"verify_cmd\": [\"bash\", \"-c\", \"{verify}\"]}}]}}",
+            repo.display()
+        ),
+    )
+    .unwrap();
+
+    let (code, out, err) = iso.run_with_services(
+        "land",
+        iso.home.path(),
+        &[
+            "--check-manifest",
+            manifest_path.to_str().unwrap(),
+            "--manifest-receipt",
+            receipt_path.to_str().unwrap(),
+            "--execute-manifest",
+        ],
+        &[],
+    );
+    assert_eq!(code, 3, "out={out} err={err}");
+    assert!(
+        out.contains("target branch moved during verification"),
+        "{out}"
+    );
+    let receipt = fs::read_to_string(&receipt_path).unwrap();
+    assert!(
+        receipt.contains("target branch moved during verification"),
+        "{receipt}"
+    );
+    assert_eq!(iso.git_out(&repo, &["rev-parse", "main"]), inter_sha);
 }

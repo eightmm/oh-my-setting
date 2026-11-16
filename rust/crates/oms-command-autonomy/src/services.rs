@@ -134,6 +134,16 @@ pub trait Services: oms_command_plan::Services + Sync {
             "native OMS command service unavailable; parent CLI injection is required",
         ))
     }
+    /// Variant used by multi-threaded controllers (`plan-run --parallel`) where
+    /// process-wide single-thread subreaper ownership is unavailable; children
+    /// themselves remain single-threaded and retain their own containment.
+    fn invoke_concurrent(
+        &self,
+        command: &Invocation,
+        interrupted: &AtomicBool,
+    ) -> Result<CommandResult> {
+        self.invoke(command, interrupted)
+    }
     /// Native context-pack validator; an orientation pack never changes scope.
     fn validate_context_pack(
         &self,

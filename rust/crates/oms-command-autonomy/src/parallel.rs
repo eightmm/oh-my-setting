@@ -15,6 +15,7 @@ use std::time::Duration;
 
 struct Flight {
     paths: Vec<String>,
+    resources: Vec<String>,
     lease: String,
 }
 struct Done {
@@ -109,11 +110,14 @@ fn pick(
             rows.iter()
                 .filter(|t| {
                     let id = value::text(t, "id");
+                    let paths = strings(&t["allowed"]);
+                    let resources = strings(&t["resources"]);
                     !attempted.contains(id)
                         && !flights.contains_key(id)
-                        && !flights
-                            .values()
-                            .any(|f| overlaps(&f.paths, &strings(&t["allowed"])))
+                        && !flights.values().any(|f| {
+                            overlaps(&f.paths, &paths)
+                                || resources.iter().any(|r| f.resources.contains(r))
+                        })
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -231,6 +235,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                             id.clone(),
                             Flight {
                                 paths: strings(&task["allowed_paths"]),
+                                resources: strings(&task["resources"]),
                                 lease: value::text(&task, "lease_id").to_owned(),
                             },
                         );

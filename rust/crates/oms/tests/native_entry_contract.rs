@@ -27,7 +27,16 @@ impl Fixture {
         std::fs::write(root.join(".git/HEAD"), format!("{revision}\n")).unwrap();
         let dir = root.join("rust/target/oms-native").join(revision);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(env!("CARGO_BIN_EXE_oms"), dir.join("oms")).unwrap();
+        // Copy out-of-process so concurrent test threads doing fork()+exec()
+        // never inherit a writable FD to the copied executable (ETXTBSY).
+        assert!(
+            Command::new("cp")
+                .arg(env!("CARGO_BIN_EXE_oms"))
+                .arg(dir.join("oms"))
+                .status()
+                .unwrap()
+                .success()
+        );
         let digest = OMS_DIGEST.get_or_init(|| {
             format!(
                 "{:x}",

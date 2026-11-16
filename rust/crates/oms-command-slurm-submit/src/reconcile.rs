@@ -5,6 +5,7 @@ use crate::ledger::{self, f, kind};
 use crate::{json as j, scheduler, storage};
 use oms_context::Json;
 use oms_json::Value;
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -66,10 +67,8 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
         }
         index += 1;
     }
-    if options.key.is_empty() == options.job_id.is_empty() {
-        return Err(crate::fail(
-            b"reconcile needs exactly one of --key KEY or --job-id ID",
-        ));
+    if options.key.is_empty() && options.job_id.is_empty() {
+        return Err(crate::fail(b"reconcile needs --key KEY or --job-id ID"));
     }
     if !options.job_id.is_empty() && !digits(&options.job_id) {
         return Err(crate::fail(b"--job-id must be a numeric Slurm job id"));
@@ -227,15 +226,21 @@ fn tagged(text: &str, short: &str) -> bool {
 
 pub(crate) enum Matcher<'a> {
     Job(&'a str),
-    Tag(&'a str),
-    /// No identifier can select a job (untagged attempt, no job id).
+    Tag {
+        short: &'a str,
+        excluded_jobs: &'a BTreeSet<String>,
+    },
+    /// Ambiguous multiple unresolved tagged attempts or untagged without job id.
     Nothing,
 }
 impl Matcher<'_> {
     fn selects(&self, entry: &Entry) -> bool {
         match self {
             Matcher::Job(id) => entry.base == *id,
-            Matcher::Tag(short) => tagged(&entry.text, short),
+            Matcher::Tag {
+                short,
+                excluded_jobs,
+            } => !excluded_jobs.contains(&entry.base) && tagged(&entry.text, short),
             Matcher::Nothing => false,
         }
     }
@@ -447,6 +452,7 @@ struct Target {
     attempt: Option<Value>,
     attempt_id: Vec<u8>,
     job_id: Option<String>,
+    cluster_name: Option<String>,
     short: Option<String>,
     start: String,
     provenance: Vec<(&'static str, Value)>,
@@ -458,31 +464,54 @@ fn text_of(row: &Json, name: &str) -> Option<String> {
         _ => None,
     }
 }
-/// The ledger's authoritative view of `key`, using the same window rules as
-/// `slurm-submit`; only an unresolved or submitted attempt can be reconciled.
-fn target(rows: &[Json], key: &OsStr) -> Result<Option<Target>, String> {
-    let state = ledger::state(rows, key)?;
-    let Some(row) = state.row else {
-        return Ok(None);
+fn cluster_from_intent_args(intent: &Json) -> Option<String> {
+    let Json::Array(items) = f(intent, "args")? else {
+        return None;
     };
-    let attempt = f(row, "attempt");
-    let wanted = ledger::identity(attempt)?;
-    let intent = ledger::rows_for(rows, key).into_iter().rev().find(|r| {
-        kind(r, "intent") && ledger::identity(f(r, "attempt")).ok().as_ref() == Some(&wanted)
-    });
-    let short = intent.and_then(|i| {
-        if f(i, "tag") == Some(&Json::Bool(false)) {
-            return None;
-        }
-        Some(if text_of(i, "key_source").as_deref() == Some("custom") {
+    let os_args: Vec<OsString> = items
+        .iter()
+        .filter_map(|item| match item {
+            Json::String(s) => Some(OsString::from_vec(s.clone())),
+            _ => None,
+        })
+        .collect();
+    crate::cluster_from_args(&os_args)
+}
+fn intent_short(intent: &Json, key: &OsStr) -> Option<String> {
+    if f(intent, "tag") == Some(&Json::Bool(false)) {
+        return None;
+    }
+    Some(
+        if text_of(intent, "key_source").as_deref() == Some("custom") {
             ledger::digest(key.as_bytes())[..12].to_owned()
         } else {
             String::from_utf8_lossy(key.as_bytes())
                 .chars()
                 .take(12)
                 .collect()
-        })
+        },
+    )
+}
+fn build_target(rows: &[Json], key: &OsStr, row: &Json) -> Result<Target, String> {
+    let attempt = f(row, "attempt");
+    let wanted = ledger::identity(attempt)?;
+    let mine = ledger::rows_for(rows, key);
+    let intent = mine.iter().copied().rev().find(|r| {
+        kind(r, "intent") && ledger::identity(f(r, "attempt")).ok().as_ref() == Some(&wanted)
     });
+    let submitted = mine.iter().copied().rev().find(|r| {
+        kind(r, "submitted") && ledger::identity(f(r, "attempt")).ok().as_ref() == Some(&wanted)
+    });
+    let short = intent.and_then(|i| intent_short(i, key));
+    let cluster_name = submitted
+        .and_then(|s| text_of(s, "cluster_name"))
+        .filter(|c| crate::safe_cluster(c))
+        .or_else(|| {
+            intent
+                .and_then(|i| text_of(i, "cluster_name"))
+                .filter(|c| crate::safe_cluster(c))
+        })
+        .or_else(|| intent.and_then(cluster_from_intent_args));
     let provenance = intent
         .map(|i| {
             ledger::PROVENANCE_FIELDS
@@ -491,17 +520,43 @@ fn target(rows: &[Json], key: &OsStr) -> Result<Option<Target>, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(Some(Target {
+    Ok(Target {
         key: key.to_owned(),
         attempt: attempt.map(|a| j::copy(Some(a))),
         attempt_id: wanted,
-        job_id: (state.name == "submitted")
-            .then(|| text_of(row, "job_id"))
-            .flatten(),
+        job_id: submitted.and_then(|s| text_of(s, "job_id")),
+        cluster_name,
         short,
         start: window(&text_of(intent.unwrap_or(row), "ts").unwrap_or_default()),
         provenance,
-    }))
+    })
+}
+/// The ledger's authoritative latest active/submitted attempt of `key`.
+fn target(rows: &[Json], key: &OsStr) -> Result<Option<Target>, String> {
+    let state = ledger::state(rows, key)?;
+    let Some(row) = state.row else {
+        return Ok(None);
+    };
+    Ok(Some(build_target(rows, key, row)?))
+}
+fn target_for_attempt(
+    rows: &[Json],
+    key: &OsStr,
+    attempt_id: &[u8],
+) -> Result<Option<Target>, String> {
+    let row = ledger::rows_for(rows, key).into_iter().rev().find(|r| {
+        (kind(r, "submitted") || kind(r, "intent") || kind(r, "failed"))
+            && ledger::identity(f(r, "attempt")).ok().as_deref() == Some(attempt_id)
+    });
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if ledger::rows_for(rows, key).into_iter().any(|r| {
+        kind(r, "failed") && ledger::identity(f(r, "attempt")).ok().as_deref() == Some(attempt_id)
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(build_target(rows, key, row)?))
 }
 
 fn last_reconciled(rows: &[Json], target: &Target) -> Option<(String, String)> {
@@ -532,11 +587,20 @@ fn record(
     };
     let guard = ledger::acquire(ledger_path, logical, interrupted)?;
     let rows = storage::load(ledger_path, logical).map_err(str::to_owned)?;
-    let Some(current) = target(&rows, &old.key)? else {
+    let Some(current) = target_for_attempt(&rows, &old.key, &old.attempt_id)? else {
         return Ok(false);
     };
     // A concurrent forced resubmit or result row changed what this attempt is.
-    if current.attempt_id != old.attempt_id || current.job_id.is_some() != old.job_id.is_some() {
+    if current.job_id.is_some() != old.job_id.is_some() {
+        return Ok(false);
+    }
+    if old.job_id.is_none()
+        && rows.iter().any(|r| {
+            kind(r, "submitted")
+                && text_of(r, "job_id").as_deref() == Some(job.as_str())
+                && ledger::identity(f(r, "attempt")).ok().as_ref() != Some(&old.attempt_id)
+        })
+    {
         return Ok(false);
     }
     let base = |kind: &str| {
@@ -561,7 +625,11 @@ fn record(
     let mut lines = Vec::new();
     if old.job_id.is_none() {
         let mut row = base("submitted");
-        j::put(&mut row, "cluster_name", j::text(""));
+        j::put(
+            &mut row,
+            "cluster_name",
+            j::text(old.cluster_name.as_deref().unwrap_or("")),
+        );
         lines.extend(ledger::line(&row));
     }
     let now = (verdict.class.name().to_owned(), job.clone());
@@ -584,15 +652,54 @@ fn record(
     Ok(true)
 }
 
-fn submitted_key(rows: &[Json], job: &str) -> Option<OsString> {
+fn submitted_attempt(rows: &[Json], job: &str) -> Option<(OsString, Vec<u8>)> {
     rows.iter().rev().find_map(|r| {
         (kind(r, "submitted") && text_of(r, "job_id").as_deref() == Some(job))
-            .then(|| match f(r, "key") {
-                Some(Json::String(k)) => Some(OsString::from_vec(k.clone())),
-                _ => None,
+            .then(|| {
+                let key = match f(r, "key") {
+                    Some(Json::String(k)) => OsString::from_vec(k.clone()),
+                    _ => return None,
+                };
+                let attempt_id = ledger::identity(f(r, "attempt")).ok()?;
+                Some((key, attempt_id))
             })
             .flatten()
     })
+}
+
+fn tag_exclusions(rows: &[Json], target: &Target, short: &str) -> (BTreeSet<String>, bool) {
+    let mut excluded_jobs = BTreeSet::new();
+    let mut attempt_has_result = std::collections::BTreeSet::new();
+    for r in rows {
+        if let Ok(att) = ledger::identity(f(r, "attempt")) {
+            if kind(r, "submitted") {
+                if att != target.attempt_id
+                    && let Some(job_id) = text_of(r, "job_id")
+                {
+                    excluded_jobs.insert(job_id);
+                }
+                attempt_has_result.insert(att);
+            } else if kind(r, "failed") || kind(r, "reconciled") {
+                attempt_has_result.insert(att);
+            }
+        }
+    }
+    let ambiguous_other_unresolved = rows.iter().any(|r| {
+        if !kind(r, "intent") {
+            return false;
+        }
+        let Ok(att) = ledger::identity(f(r, "attempt")) else {
+            return false;
+        };
+        if att == target.attempt_id || attempt_has_result.contains(&att) {
+            return false;
+        }
+        let Some(Json::String(k)) = f(r, "key") else {
+            return false;
+        };
+        intent_short(r, OsStr::from_bytes(k)).as_deref() == Some(short)
+    });
+    (excluded_jobs, ambiguous_other_unresolved)
 }
 
 pub(crate) fn run(
@@ -619,24 +726,55 @@ pub(crate) fn run(
     let ledger_path = crate::ledger_path(&base, repository);
     storage::validate_path(&ledger_path).map_err(str::to_owned)?;
     let rows = storage::load(&ledger_path, &base).map_err(str::to_owned)?;
-    let key = if options.key.is_empty() {
-        submitted_key(&rows, &options.job_id)
+    let (key, found) = if !options.job_id.is_empty() {
+        match submitted_attempt(&rows, &options.job_id) {
+            Some((rec_key, rec_att)) => {
+                if !options.key.is_empty() && rec_key != options.key {
+                    return Err("--key does not match the recorded --job-id".into());
+                }
+                let t = target_for_attempt(&rows, &rec_key, &rec_att)?;
+                (Some(rec_key), t)
+            }
+            None if !options.key.is_empty() => {
+                let t = target(&rows, &options.key)?;
+                if let Some(existing_job) = t.as_ref().and_then(|x| x.job_id.as_deref())
+                    && existing_job != options.job_id
+                {
+                    return Err("--job-id does not match the active submission for --key".into());
+                }
+                (Some(options.key.clone()), t)
+            }
+            None => (None, None),
+        }
     } else {
-        Some(options.key.clone())
+        let t = target(&rows, &options.key)?;
+        if t.is_none() {
+            return Err("no submitted or unresolved ledger record for this key".into());
+        }
+        (Some(options.key.clone()), t)
     };
-    let found = match &key {
-        Some(key) => target(&rows, key)?,
-        None => None,
-    };
-    if found.is_none() && options.job_id.is_empty() {
-        return Err("no submitted or unresolved ledger record for this key".into());
-    }
     let job = (!options.job_id.is_empty())
         .then(|| options.job_id.clone())
         .or_else(|| found.as_ref().and_then(|t| t.job_id.clone()));
+    let mut excluded_jobs = BTreeSet::new();
+    let mut ambiguous_tag = false;
     let matcher = match (&job, found.as_ref().and_then(|t| t.short.as_deref())) {
         (Some(id), _) => Matcher::Job(id),
-        (None, Some(short)) => Matcher::Tag(short),
+        (None, Some(short)) => {
+            if let Some(t) = found.as_ref() {
+                let (excl, ambig) = tag_exclusions(&rows, t, short);
+                excluded_jobs = excl;
+                ambiguous_tag = ambig;
+            }
+            if ambiguous_tag {
+                Matcher::Nothing
+            } else {
+                Matcher::Tag {
+                    short,
+                    excluded_jobs: &excluded_jobs,
+                }
+            }
+        }
         (None, None) => Matcher::Nothing,
     };
     let start = found
@@ -647,6 +785,12 @@ pub(crate) fn run(
     let mut sacct_args: Vec<OsString> = ["-X", "--parsable2", "-n", "-S"].map(Into::into).to_vec();
     sacct_args.push(start.into());
     sacct_args.push("--format=JobIDRaw,JobName,State,ExitCode,Comment".into());
+    if let Some(cluster) = found.as_ref().and_then(|t| t.cluster_name.as_deref()) {
+        for args in [&mut squeue_args, &mut sacct_args] {
+            args.push("-M".into());
+            args.push(cluster.into());
+        }
+    }
     match (&job, who) {
         (Some(id), _) => {
             for args in [&mut squeue_args, &mut sacct_args] {
@@ -676,7 +820,11 @@ pub(crate) fn run(
         };
     let squeue = query("OMS_SLURM_SQUEUE_BIN", "squeue", &squeue_args, parse_squeue)?;
     let sacct = query("OMS_SLURM_SACCT_BIN", "sacct", &sacct_args, parse_sacct)?;
-    let verdict = resolve(&squeue, &sacct, &matcher);
+    let mut verdict = resolve(&squeue, &sacct, &matcher);
+    if ambiguous_tag && verdict.class == Class::Unknown {
+        verdict.reason =
+            "multiple unresolved tagged attempts share this key tag; pass --job-id".into();
+    }
     let recorded = match &found {
         Some(t) if verdict.class != Class::Unknown => {
             record(&ledger_path, &base, t, &verdict, interrupted)?
@@ -757,32 +905,51 @@ mod tests {
 
     #[test]
     fn array_and_heterogeneous_ids_collapse_to_one_job() {
+        let empty = BTreeSet::new();
         let v = verdict(
             "77_1|RUNNING|n|oms-key=abc\n77_2|PENDING|n|oms-key=abc\n77+0|RUNNING|n|oms-key=abc\n",
             "",
-            &Matcher::Tag("abc"),
+            &Matcher::Tag {
+                short: "abc",
+                excluded_jobs: &empty,
+            },
         );
         assert_eq!((v.class, v.job_id.as_deref()), (Class::Active, Some("77")));
     }
 
     #[test]
     fn live_row_beats_terminal_history_and_a_longer_tag_never_matches() {
+        let empty = BTreeSet::new();
         let v = verdict(
             "5|PENDING|n|oms-key=abc\n",
             "5|n|PREEMPTED|0:0|oms-key=abc\n",
-            &Matcher::Tag("abc"),
+            &Matcher::Tag {
+                short: "abc",
+                excluded_jobs: &empty,
+            },
         );
         assert_eq!((v.class, v.source), (Class::Active, "squeue"));
-        let v = verdict("", "5|n|COMPLETED|0:0|oms-key=abcd\n", &Matcher::Tag("abc"));
+        let v = verdict(
+            "",
+            "5|n|COMPLETED|0:0|oms-key=abcd\n",
+            &Matcher::Tag {
+                short: "abc",
+                excluded_jobs: &empty,
+            },
+        );
         assert_eq!(v.class, Class::Unknown);
     }
 
     #[test]
     fn pipes_inside_free_text_do_not_hide_the_state() {
+        let empty = BTreeSet::new();
         let v = verdict(
             "",
             "9|a|b|TIMEOUT|0:15|oms-key=abc|x\n",
-            &Matcher::Tag("abc"),
+            &Matcher::Tag {
+                short: "abc",
+                excluded_jobs: &empty,
+            },
         );
         assert_eq!((v.class, v.job_id.as_deref()), (Class::Timeout, Some("9")));
     }

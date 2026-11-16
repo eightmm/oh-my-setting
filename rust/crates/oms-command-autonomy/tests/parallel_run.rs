@@ -381,6 +381,8 @@ fn one_controller_per_state_repository_and_flag_validation() {
         &["--parallel", "--max-review-backlog", "65"],
         &["--max-writers", "2", "--next"],
         &["--max-review-backlog", "2", "--next"],
+        &["--verify-combined", "--parallel"],
+        &["--base-ref", "main", "--next"],
     ] {
         let (code, out, _) = run(&repo, &mock, bad);
         assert_eq!(code, 2, "{bad:?}: {out}");
@@ -392,4 +394,49 @@ fn one_controller_per_state_repository_and_flag_validation() {
     // Nothing left to claim is a refusal, not a silent success.
     let (code, _, err) = run(&repo, &mock, &["--parallel"]);
     assert_eq!(code, 2, "{err}");
+}
+
+#[test]
+fn overlapping_resources_never_run_together() {
+    if scrubbed_child("overlapping_resources_never_run_together") {
+        return;
+    }
+    let repo = fixture(&[]);
+    let mock = Mock::default();
+    for (id, allowed, resources) in [
+        ("res1", "a/", Some("gpu-0")),
+        ("res2", "b/", Some("gpu-0")),
+        ("res3", "c/", None),
+    ] {
+        let mut args = vec![
+            "add",
+            "--id",
+            id,
+            "--title",
+            id,
+            "--allowed",
+            allowed,
+            "--verify",
+            "true",
+        ];
+        if let Some(res) = resources {
+            args.extend(["--resources", res]);
+        }
+        mock.plan(&repo.0, &args);
+    }
+    let (code, out, err) = run(&repo, &mock, &["--parallel", "--max-writers", "3"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let together = mock.together.lock().unwrap().clone();
+    let pair = |a: &str, b: &str| {
+        together
+            .iter()
+            .any(|(x, y)| (x == a && y == b) || (x == b && y == a))
+    };
+    assert!(
+        !pair("res1", "res2"),
+        "shared resource must serialize res1 and res2: {together:?}"
+    );
+    for id in ["res1", "res2", "res3"] {
+        assert_eq!(state(&repo, id)["state"], "review");
+    }
 }

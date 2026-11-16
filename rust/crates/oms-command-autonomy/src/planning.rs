@@ -69,7 +69,11 @@ pub(crate) fn invoke_configured(
             .environment
             .push(("OMS_GOAL_CYCLE".into(), cycle.to_string().into()));
     }
-    let (code, stdout, stderr) = ctx.services.invoke(&command, ctx.interrupted)?;
+    let (code, stdout, stderr) = if ctx.gates.is_some() {
+        ctx.services.invoke_concurrent(&command, ctx.interrupted)?
+    } else {
+        ctx.services.invoke(&command, ctx.interrupted)?
+    };
     Ok(Output {
         code,
         stdout,

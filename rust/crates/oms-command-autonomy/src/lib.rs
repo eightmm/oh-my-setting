@@ -100,11 +100,28 @@ pub fn run_with_services(
         match tool {
             "intent" => intent::execute(&context, &args),
             "plan-from-spec" => planning::execute(&context, &args),
-            "plan-run" if args.flag("parallel") => parallel::execute(&context, &args),
+            "plan-run" if args.flag("verify-combined") => conflicts::execute_cli(&context, &args),
+            "plan-run" if args.flag("parallel") => {
+                require(
+                    !args.has("base-ref")
+                        && !args.has("base-sha")
+                        && !args.has("candidates")
+                        && !args.has("verify-cmd"),
+                    "--base-ref, --base-sha, --candidates and --verify-cmd require --verify-combined",
+                )?;
+                parallel::execute(&context, &args)
+            }
             "plan-run" => {
                 require(
                     !args.has("max-writers") && !args.has("max-review-backlog"),
                     "--max-writers and --max-review-backlog require --parallel",
+                )?;
+                require(
+                    !args.has("base-ref")
+                        && !args.has("base-sha")
+                        && !args.has("candidates")
+                        && !args.has("verify-cmd"),
+                    "--base-ref, --base-sha, --candidates and --verify-cmd require --verify-combined",
                 )?;
                 runner::execute(&context, &args)
             }

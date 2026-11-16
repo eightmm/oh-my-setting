@@ -604,3 +604,128 @@ pub fn verify_combined(
         tree_sha: tree,
     })
 }
+
+pub(crate) fn execute_cli(
+    ctx: &crate::storage::Context<'_>,
+    args: &crate::cli::Args,
+) -> Result<crate::Output> {
+    ctx.parent()?;
+    for conflict in [
+        "parallel",
+        "next",
+        "land",
+        "auto-repair",
+        "retry-known",
+        "dry-run",
+        "allow-verifier-change",
+    ] {
+        require(
+            !args.flag(conflict),
+            format!("--{conflict} cannot be combined with --verify-combined"),
+        )?;
+    }
+    for conflict in [
+        "id",
+        "repair",
+        "allow-floor-change",
+        "max-writers",
+        "max-review-backlog",
+    ] {
+        require(
+            !args.has(conflict),
+            format!("--{conflict} cannot be combined with --verify-combined"),
+        )?;
+    }
+    let base_ref = args.required("base-ref")?;
+    let base_sha = args.required("base-sha")?;
+    let raw_candidates = args.required("candidates")?;
+    let mut candidates = Vec::new();
+    for item in raw_candidates.split(',') {
+        let trimmed = item.trim();
+        require(
+            value::commit(trimmed),
+            "--candidates must be comma-separated full commit SHAs",
+        )?;
+        candidates.push(trimmed.to_owned());
+    }
+    require(
+        !candidates.is_empty(),
+        "--candidates requires at least one commit",
+    )?;
+    let verify_argv = if args.has("verify-cmd") {
+        let cmd = args.required("verify-cmd")?;
+        Some(vec![
+            OsString::from("sh"),
+            OsString::from("-c"),
+            OsString::from(cmd),
+        ])
+    } else {
+        None
+    };
+    let outcome = verify_combined(
+        &ctx.repo,
+        base_ref,
+        base_sha,
+        &candidates,
+        verify_argv.as_deref(),
+        ctx.interrupted,
+    )?;
+    let (code, body) = match outcome {
+        CombinedOutcome::Verified {
+            combined_sha,
+            tree_sha,
+        } => (
+            0,
+            serde_json::json!({
+                "schema": 1,
+                "status": "verified",
+                "combined_sha": combined_sha,
+                "tree_sha": tree_sha,
+            }),
+        ),
+        CombinedOutcome::TargetDrifted {
+            expected_base_sha,
+            actual_base_sha,
+        } => (
+            3,
+            serde_json::json!({
+                "schema": 1,
+                "status": "target_drifted",
+                "expected_base_sha": expected_base_sha,
+                "actual_base_sha": actual_base_sha,
+            }),
+        ),
+        CombinedOutcome::MergeConflict { commit, stderr } => (
+            1,
+            serde_json::json!({
+                "schema": 1,
+                "status": "merge_conflict",
+                "commit": commit,
+                "stderr": stderr,
+            }),
+        ),
+        CombinedOutcome::VerificationFailed {
+            commit,
+            code,
+            stdout,
+            stderr,
+        } => (
+            1,
+            serde_json::json!({
+                "schema": 1,
+                "status": "verification_failed",
+                "commit": commit,
+                "exit_code": code,
+                "stdout": stdout,
+                "stderr": stderr,
+            }),
+        ),
+    };
+    let mut stdout = serde_json::to_vec(&body).map_err(|e| Error::new(2, e.to_string()))?;
+    stdout.push(b'\n');
+    Ok(crate::Output {
+        code,
+        stdout,
+        stderr: Vec::new(),
+    })
+}

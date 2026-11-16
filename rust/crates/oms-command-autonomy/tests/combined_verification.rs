@@ -263,3 +263,48 @@ fn conflicts_and_invalid_inputs_are_refused_without_side_effects() {
     assert_eq!(err.code, 130);
     no_scratch(repo);
 }
+
+#[test]
+fn cli_verify_combined_returns_structured_outcomes() {
+    let s = setup();
+    let repo = &s.fixture.0;
+    let stop = AtomicBool::new(false);
+    let svc = oms_command_autonomy::LocalServices::new(&stop);
+    let call = |cmd: &str| {
+        let candidates = format!("{},{}", s.a, s.b);
+        let args = argv(&[
+            "--repo",
+            repo.to_str().unwrap(),
+            "--verify-combined",
+            "--base-ref",
+            "refs/heads/target",
+            "--base-sha",
+            &s.base,
+            "--candidates",
+            &candidates,
+            "--verify-cmd",
+            cmd,
+        ]);
+        oms_command_autonomy::run_with_services("plan-run", &args, repo, &stop, &svc)
+    };
+    let (code, out, err) = call("test -f callee.txt && test -f caller.txt");
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let ok: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(ok["status"], "verified");
+
+    let (code, out, _) = call("grep -q '^name=new' callee.txt && ! grep -q '^use=old' caller.txt");
+    assert_eq!(code, 1);
+    let fail: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(fail["status"], "verification_failed");
+
+    let drift = format!(
+        "git -C '{}' update-ref refs/heads/target {}",
+        repo.display(),
+        s.b
+    );
+    let (code, out, _) = call(&drift);
+    assert_eq!(code, 3);
+    let drifted: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(drifted["status"], "target_drifted");
+    no_scratch(repo);
+}

@@ -411,6 +411,28 @@ impl oms_command_plan::Services for ControlServices<'_> {
     }
 }
 
+impl<'a> ControlServices<'a> {
+    fn invoke_with_scope(
+        &self,
+        command: &oms_command_autonomy::Invocation,
+        scope: Scope,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<oms_command_autonomy::CommandResult> {
+        if self.native.is_empty() || !native_verb(&command.tool) {
+            return Err(autonomy_error(2, "invalid native command prefix or verb"));
+        }
+        let mut argv = self.native.clone();
+        argv.push(command.tool.clone().into());
+        argv.extend(command.args.iter().cloned());
+        let spawn = Spawn::new(scope, argv, command.wall, command.output_limit);
+        let spawn = spawn
+            .cwd(&command.cwd)
+            .environment(command.environment.clone());
+        let child = run_child(spawn, interrupted).map_err(|e| autonomy_error(2, e))?;
+        Ok((child.code, child.stdout, child.stderr))
+    }
+}
+
 impl oms_command_autonomy::Services for ControlServices<'_> {
     /// Resolves explicit assignments and `config/panel-routing.json` tier defaults
     /// using the native `oms-command-peer` routing table, failing closed on missing
@@ -542,18 +564,17 @@ impl oms_command_autonomy::Services for ControlServices<'_> {
         command: &oms_command_autonomy::Invocation,
         interrupted: &AtomicBool,
     ) -> oms_command_autonomy::Result<oms_command_autonomy::CommandResult> {
-        if self.native.is_empty() || !native_verb(&command.tool) {
-            return Err(autonomy_error(2, "invalid native command prefix or verb"));
-        }
-        let mut argv = self.native.clone();
-        argv.push(command.tool.clone().into());
-        argv.extend(command.args.iter().cloned());
-        let spawn = Spawn::new(self.scope, argv, command.wall, command.output_limit);
-        let spawn = spawn
-            .cwd(&command.cwd)
-            .environment(command.environment.clone());
-        let child = run_child(spawn, interrupted).map_err(|e| autonomy_error(2, e))?;
-        Ok((child.code, child.stdout, child.stderr))
+        self.invoke_with_scope(command, self.scope, interrupted)
+    }
+    fn invoke_concurrent(
+        &self,
+        command: &oms_command_autonomy::Invocation,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<oms_command_autonomy::CommandResult> {
+        // Worker threads in `plan-run --parallel` run concurrently in one
+        // controller process where `Scope::WholeTree` refuses multi-threaded
+        // callers. Each child `oms` process still enforces its own containment.
+        self.invoke_with_scope(command, Scope::ProcessGroup, interrupted)
     }
     fn controller_digest(&self) -> oms_command_autonomy::Result<String> {
         oms_reference::controller::Controller::capture_current()
@@ -2902,6 +2923,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.message.contains("exclusive"), "{}", err.message);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn control_services_invoke_concurrent_works_across_threads_on_linux() {
+        use oms_command_autonomy::{Invocation, Services};
+        let dir = Tmp::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut control = ControlServices::new(&stop, dir.path()).unwrap();
+        control.native = sh("printf '%s\\n' \"$1\"");
+        let inv = || Invocation::new("peer-delegate", dir.path(), vec![]);
+        let single_err = control.invoke(&inv(), &stop).unwrap_err();
+        assert!(
+            single_err.message.contains("exclusive"),
+            "{}",
+            single_err.message
+        );
+        let (a, b) = std::thread::scope(|s| {
+            let h1 = s.spawn(|| control.invoke_concurrent(&inv(), &stop));
+            let h2 = s.spawn(|| control.invoke_concurrent(&inv(), &stop));
+            (h1.join().unwrap().unwrap(), h2.join().unwrap().unwrap())
+        });
+        assert_eq!(a.0, 0);
+        assert_eq!(b.0, 0);
     }
 
     #[test]

@@ -979,6 +979,26 @@ fn versioned_contracts_gate_scheduling() {
     assert!(ok(&["show", "--id", "downstream"]).contains("api@v2"));
     assert!(ok(&["ready"]).contains("downstream"));
     ok(&["claim", "--id", "downstream", "--provider", "codex"]);
+    ok(&[
+        "review",
+        "--id",
+        "downstream",
+        "--artifact",
+        "v2-review.md",
+        "--patch",
+        "v2.diff",
+    ]);
+    ok(&["contract-propose", "--id", "api", "--summary", "v3"]);
+    ok(&["contract-accept", "--id", "api", "--version", "3"]);
+    let refreshed = ok(&["refresh-contracts", "--task", "downstream"]);
+    assert!(refreshed.contains("api@v3"), "{refreshed}");
+    assert!(refreshed.contains("\"state\": \"ready\""), "{refreshed}");
+    assert!(refreshed.contains("\"artifact\": \"\""), "{refreshed}");
+    assert!(refreshed.contains("\"patch\": \"\""), "{refreshed}");
+    assert!(
+        refreshed.contains("\"review_lease_id\": \"\""),
+        "{refreshed}"
+    );
     assert_eq!(
         run(&["add", "--id", "bad", "--title", "bad", "--priority", "abc"]).0,
         2
@@ -990,6 +1010,9 @@ fn versioned_contracts_gate_scheduling() {
 fn contract_child_accept() {
     let repo = PathBuf::from(std::env::var_os("CONTRACT_TEST_REPO").unwrap());
     let (code, _, err) = go(&repo, &["contract-accept", "--id", "api", "--version", "2"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("parent-only"), "{err}");
+    let (code, _, err) = go(&repo, &["refresh-contracts", "--task", "downstream"]);
     assert_eq!(code, 2);
     assert!(err.contains("parent-only"), "{err}");
 }

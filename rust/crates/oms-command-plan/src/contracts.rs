@@ -188,9 +188,15 @@ pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
 }
 
 pub(crate) fn refresh(plan: &Plan<'_>, req: &Request, snapshot: &mut Snapshot) -> Result<Response> {
+    plan.context.parent()?;
     let id = req.value("task")?;
     require(valid_id(id), "invalid task id")?;
     let mut task = snapshot.task(id)?.clone();
+    let state = task.text("state").to_owned();
+    require(
+        !matches!(state.as_str(), "done" | "cancelled" | "landing"),
+        format!("cannot refresh contracts on {state} task"),
+    )?;
     let refs = task
         .opt("contracts")
         .map(Value::strings)
@@ -213,6 +219,28 @@ pub(crate) fn refresh(plan: &Plan<'_>, req: &Request, snapshot: &mut Snapshot) -
         )?;
         pins.push(format!("{cid}@v{accepted}"));
     }
+    if matches!(state.as_str(), "claimed" | "running" | "review")
+        || !task.text("lease_id").is_empty()
+        || !task.text("review_lease_id").is_empty()
+        || !task.text("artifact").is_empty()
+        || !task.text("patch").is_empty()
+        || task.opt("panel_accept").is_some()
+    {
+        crate::engine::clear_claim(snapshot, &mut task)?;
+        for field in [
+            "review_lease_id",
+            "artifact",
+            "patch",
+            "executor_id",
+            "executor_soul_sha256",
+            "repair_artifact",
+        ] {
+            task.set(field, string(""))?;
+        }
+        task.set("repair_count", number(0))?;
+        task.remove("panel_accept");
+    }
+    task.set("updated", string(&plan.context.ts))?;
     task.set("contracts", list(pins.iter().map(String::as_str)))?;
     snapshot.put(id, task.clone())?;
     plan.save(snapshot)?;

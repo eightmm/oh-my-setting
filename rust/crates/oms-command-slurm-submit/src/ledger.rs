@@ -350,6 +350,7 @@ pub struct BeginOptions<'a> {
     pub tag: &'a str,
     pub store_args: bool,
     pub args: &'a [OsString],
+    pub cluster_name: Option<&'a str>,
     pub provenance: &'a Provenance,
 }
 /// Optional links from an intent to the orchestrator task that requested it.
@@ -450,6 +451,9 @@ pub fn begin(
         if let Some(value) = value {
             j::put(&mut row, name, j::text(value));
         }
+    }
+    if let Some(cluster) = options.cluster_name.filter(|c| !c.is_empty()) {
+        j::put(&mut row, "cluster_name", j::text(cluster));
     }
     if options.store_args && crate::clean(&crate::joined(options.args)) {
         j::put(

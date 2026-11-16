@@ -40,7 +40,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
     )?;
     Ok(out.stdout)
 }
-fn clean(repo: &Path) -> Result<()> {
+pub(crate) fn clean(repo: &Path) -> Result<()> {
     let status = git(
         repo,
         &[

@@ -128,12 +128,18 @@ fn parse(manifest: &V, base: &Path) -> Result<Vec<Repo>> {
             .filter(|p| p.is_dir())
             .ok_or_else(|| Error::new(2, format!("{id}: path is not an existing directory")))?;
         let mut deps = Vec::new();
-        for dep in entry.get("depends_on").array() {
-            deps.push(
-                dep.text()
-                    .ok_or_else(|| Error::new(2, format!("{id}: depends_on holds ids")))?
-                    .to_owned(),
-            );
+        match entry.get("depends_on") {
+            V::Null => {}
+            V::Arr(items) => {
+                for dep in items {
+                    deps.push(
+                        dep.text()
+                            .ok_or_else(|| Error::new(2, format!("{id}: depends_on holds ids")))?
+                            .to_owned(),
+                    );
+                }
+            }
+            _ => return Err(Error::new(2, format!("{id}: depends_on must be an array"))),
         }
         let verify = match entry.get("verify_cmd") {
             V::Null => None,
@@ -276,7 +282,21 @@ fn publish(c: &Context<'_>, repo: &Repo, git: &Git<'_>, tip: &str) -> Result<()>
     check(c.interrupted)?;
     if here {
         git.tracked_clean()?;
+        let current_tip = git
+            .commit(&branch)
+            .map_err(|_| Error::new(2, "target branch does not exist"))?;
+        require(
+            current_tip == tip,
+            "target branch moved during verification; re-verify before publishing",
+        )?;
         git.run(&["merge", "--ff-only", &repo.sha])?;
+        let after = git
+            .commit("HEAD")
+            .map_err(|_| Error::new(2, "failed to resolve HEAD after merge"))?;
+        require(
+            after == repo.sha,
+            "HEAD did not advance to candidate commit",
+        )?;
     } else {
         git.run(&["update-ref", &branch, &repo.sha, tip])?;
     }
@@ -404,9 +424,18 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let mut guards = Vec::new();
     if execute {
         parent()?;
-        let mut paths: Vec<&PathBuf> = repos.iter().map(|r| &r.path).collect();
-        paths.sort();
-        for path in paths {
+        oms_reference::repository::Resolver::from_env()?;
+        let mut lock_roots = BTreeSet::new();
+        for repo in &repos {
+            if Git::root(&repo.path, c.interrupted).is_ok() {
+                let state = c.state(&repo.path)?;
+                storage::ensure_ignore(&state, c.interrupted)?;
+                lock_roots.insert(state);
+            } else {
+                lock_roots.insert(repo.path.clone());
+            }
+        }
+        for path in &lock_roots {
             guards.push(c.services.publication_guard(path, c.interrupted)?);
         }
     }

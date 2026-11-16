@@ -1,13 +1,13 @@
 //! OpenSSH transport for repository bundles and remote commands.
 use crate::{Result, error, require, router::Response, status};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]";
@@ -123,9 +123,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             "--repo" if action != "probe" => &mut repo,
             "--remote-dir" if action != "probe" => &mut remote,
             "--base" if action == "sync-bundle" => &mut base,
-            "--target" if ["exec", "reconcile", "cancel", "collect"].contains(&action) => {
-                &mut target
-            }
+            "--target" if action != "probe" => &mut target,
             "--snapshot" if action == "exec" => &mut snapshot,
             "--op-id" if ["exec", "reconcile", "cancel"].contains(&action) => &mut op_id,
             "--grace-seconds" if action == "cancel" => &mut grace_seconds,
@@ -255,12 +253,13 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         };
     }
     let remote = remote.expect("non-reconcile/cancel requires --remote-dir");
-    if let Some(target) = target.as_deref() {
-        validate_target(&repo, target, &host, &remote)?;
-    }
-    if let Some(snapshot) = snapshot.as_deref() {
-        validate_snapshot(&repo, snapshot)?;
-    }
+    enforce_target_policy(&repo, target.as_deref(), &host, &remote)?;
+    let snapshot_pins = if let Some(digest) = snapshot.as_deref() {
+        let snap = validate_snapshot(&repo, digest)?;
+        Some(verify_snapshot_checkouts(&repo, &snap)?)
+    } else {
+        None
+    };
     if action == "collect" {
         let remote_path_rel = remote_path_arg
             .as_deref()
@@ -355,6 +354,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             remote: &remote,
             target: target.as_deref(),
             snapshot: snapshot.as_deref(),
+            snapshot_pins,
             head_sha: &head,
             op_id,
             tail: &tail,
@@ -372,7 +372,17 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             })
             .collect::<Result<Vec<_>>>()?
             .join(" ");
-        let script = format!("cd -- {} && {}", remote_path(&remote), command);
+        let script = if let Some((snap_head, snap_tree)) = &snapshot_pins {
+            format!(
+                "cd -- {} && (test \"$(git rev-parse --verify HEAD 2>/dev/null)\" = {} && test \"$(git rev-parse --verify 'HEAD^{{tree}}' 2>/dev/null)\" = {} && test -z \"$(git status --porcelain --untracked-files=no 2>/dev/null)\" || {{ printf 'remote checkout does not match snapshot\\n' >&2; exit 2; }}) && {}",
+                remote_path(&remote),
+                quote(snap_head),
+                quote(snap_tree),
+                command
+            )
+        } else {
+            format!("cd -- {} && {}", remote_path(&remote), command)
+        };
         let remote_command = format!("sh -lc {}", quote(&script));
         value["command_sha256"] = sha256(remote_command.as_bytes()).into();
         value["control_path"] = control.into();
@@ -385,6 +395,18 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         value["stderr"] = String::from_utf8_lossy(&out.stderr).into_owned().into();
     }
     json_response(code, &value, pretty)
+}
+
+fn read_runtime_file_opt(repo: &Path, path: &Path) -> Result<Vec<u8>> {
+    let root = oms_safe_fs::Root::open(repo).map_err(|e| error(format!("repository: {e:?}")))?;
+    root.read_no_follow(
+        path,
+        oms_safe_fs::ByteReadOptions {
+            missing_ok: true,
+            max_bytes: crate::storage::MAX_STATE,
+        },
+    )
+    .map_err(|e| error(format!("runtime input: {e:?}")))
 }
 
 fn read_runtime_file(repo: &Path, path: &Path) -> Result<Vec<u8>> {
@@ -420,6 +442,65 @@ fn validate_target(repo: &Path, name: &str, host: &str, remote: &str) -> Result<
     )
 }
 
+fn enforce_target_policy(
+    repo: &Path,
+    target: Option<&str>,
+    host: &str,
+    remote: &str,
+) -> Result<()> {
+    if let Some(name) = target {
+        return validate_target(repo, name, host, remote);
+    }
+    require(
+        std::env::var_os("OMS_SSH_REQUIRE_TARGET").as_deref() != Some(OsStr::new("1")),
+        "--target is required by OMS_SSH_REQUIRE_TARGET",
+    )?;
+    let raw = read_runtime_file_opt(repo, Path::new(crate::targets::FILE))?;
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let registry = crate::value::parse(&raw)?;
+    crate::value::keys(&registry, &["schema", "targets"], &[])?;
+    require(
+        registry.get("schema").is_int(1),
+        "invalid remote target registry",
+    )?;
+    let Ok(entries) = registry.get("targets").object() else {
+        return Ok(());
+    };
+    let mut matched_exact = false;
+    let mut exact_approved = false;
+    let mut matched_host = false;
+    let mut host_approved = false;
+    for (_, row) in entries {
+        if row.text("ssh_alias") == host {
+            matched_host = true;
+            let is_ok = crate::targets::approved(row)?;
+            if is_ok {
+                host_approved = true;
+            }
+            if row.text("workdir") == remote {
+                matched_exact = true;
+                if is_ok {
+                    exact_approved = true;
+                }
+            }
+        }
+    }
+    if matched_exact {
+        require(
+            exact_approved,
+            "registered remote target is not approved for execution",
+        )?;
+    } else if matched_host {
+        require(
+            host_approved,
+            "registered SSH host is not approved for execution",
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_sha256_hex(digest: &str, label: &str) -> Result<()> {
     require(
         digest.len() == 64
@@ -430,7 +511,7 @@ fn validate_sha256_hex(digest: &str, label: &str) -> Result<()> {
     )
 }
 
-fn validate_snapshot(repo: &Path, digest: &str) -> Result<()> {
+fn validate_snapshot(repo: &Path, digest: &str) -> Result<crate::value::Value> {
     validate_sha256_hex(digest, "snapshot SHA256")?;
     let path = PathBuf::from(format!(".oms/runtime/snapshots/{digest}.json"));
     let value = crate::value::parse(&read_runtime_file(repo, &path)?)?;
@@ -453,7 +534,52 @@ fn validate_snapshot(repo: &Path, digest: &str) -> Result<()> {
                 &["snapshot_sha256"],
             ))?) == digest,
         "snapshot integrity mismatch",
-    )
+    )?;
+    Ok(value)
+}
+
+fn verify_snapshot_checkouts(repo: &Path, snap: &crate::value::Value) -> Result<(String, String)> {
+    crate::exec_snapshot::clean(repo)?;
+    let head = git(repo, &["rev-parse", "--verify", "HEAD"])?;
+    require(
+        head.status.success(),
+        "cannot resolve local HEAD for snapshot",
+    )?;
+    let actual_head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+    let expected_head = snap.text("head_sha").to_owned();
+    require(
+        actual_head == expected_head,
+        "local HEAD does not match --snapshot",
+    )?;
+    let tree = git(repo, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+    require(
+        tree.status.success(),
+        "cannot resolve local tree for snapshot",
+    )?;
+    let actual_tree = String::from_utf8_lossy(&tree.stdout).trim().to_owned();
+    let expected_tree = snap.text("tree_sha").to_owned();
+    require(
+        actual_tree == expected_tree,
+        "local tree does not match --snapshot",
+    )?;
+    for (rel_bytes, expected) in snap.get("lockfiles").object()? {
+        let rel = std::str::from_utf8(rel_bytes).map_err(error)?;
+        require(
+            !rel.is_empty()
+                && !rel.chars().any(char::is_control)
+                && Path::new(rel)
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_))),
+            "invalid lockfile path in snapshot",
+        )?;
+        let expected_sha = expected.str()?;
+        let bytes = read_runtime_file(repo, Path::new(rel))?;
+        require(
+            crate::value::sha(&bytes) == expected_sha,
+            format!("local lockfile digest mismatch for {rel}"),
+        )?;
+    }
+    Ok((expected_head, expected_tree))
 }
 
 fn validate_op_id(id: &str) -> Result<()> {
@@ -671,6 +797,29 @@ fn write_remote_op(repo: &Path, op_id: &str, record: &serde_json::Value) -> Resu
     Ok(())
 }
 
+static FRAME_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn new_frame_nonce() -> String {
+    let mut seed = Vec::with_capacity(48);
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let mut buf = [0u8; 16];
+        if f.read_exact(&mut buf).is_ok() {
+            seed.extend_from_slice(&buf);
+        }
+    }
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    seed.extend_from_slice(&nanos.to_le_bytes());
+    seed.extend_from_slice(&std::process::id().to_le_bytes());
+    seed.extend_from_slice(
+        &FRAME_NONCE_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .to_le_bytes(),
+    );
+    sha256(&seed)[..16].to_owned()
+}
+
 const REMOTE_SH_HELPERS: &str = r#"
 read_host_id() {
   cur_hn=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
@@ -685,14 +834,17 @@ read_host_id() {
   [ -n "$cur_bid" ] || cur_bid='unknown'
 }
 emit_part() {
-  name="$1"; file="$2"
+  tok="$1"; name="$2"; file="$3"; tmp="$4"
   if [ -f "$file" ]; then
-    sz=$(wc -c < "$file" | tr -d ' \t\r\n')
-    printf '__OMS_PART__ %s %s\n' "$name" "$sz"
-    cat -- "$file"
+    rm -f -- "$tmp"
+    dd if="$file" of="$tmp" bs=65536 count=8 2>/dev/null || cp -- "$file" "$tmp"
+    sz=$(wc -c < "$tmp" | tr -d ' \t\r\n')
+    printf '__OMS_PART_%s__ %s %s\n' "$tok" "$name" "$sz"
+    cat -- "$tmp"
+    rm -f -- "$tmp"
     printf '\n'
   else
-    printf '__OMS_PART__ %s -1\n' "$name"
+    printf '__OMS_PART_%s__ %s -1\n' "$tok" "$name"
   fi
 }
 find_op_dir() {
@@ -712,10 +864,13 @@ struct ParsedStream {
     parts: BTreeMap<String, Vec<u8>>,
 }
 
-fn parse_framed_stream(data: &[u8]) -> Result<ParsedStream> {
+fn parse_framed_stream(data: &[u8], nonce: &str) -> Result<ParsedStream> {
+    let part_prefix = format!("__OMS_PART_{nonce}__ ");
+    let mark_prefix = format!("__OMS_MARK_{nonce}__ ");
     let mut pos = 0usize;
     let mut markers = Vec::new();
     let mut parts = BTreeMap::new();
+    let mut seen_parts = BTreeSet::new();
     while pos < data.len() {
         let rest = &data[pos..];
         let line_end = rest
@@ -729,12 +884,16 @@ fn parse_framed_stream(data: &[u8]) -> Result<ParsedStream> {
         } else {
             data.len()
         };
-        if let Some(after) = line.strip_prefix("__OMS_PART__ ") {
+        if let Some(after) = line.strip_prefix(&part_prefix) {
             let mut split = after.splitn(2, ' ');
             let name = split
                 .next()
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| error("malformed remote part header"))?;
+            require(
+                seen_parts.insert(name.to_owned()),
+                format!("duplicate remote part: {name}"),
+            )?;
             let len_str = split
                 .next()
                 .ok_or_else(|| error("malformed remote part length"))?
@@ -754,8 +913,8 @@ fn parse_framed_stream(data: &[u8]) -> Result<ParsedStream> {
                     pos += 1;
                 }
             }
-        } else if line.starts_with("__OMS_")
-            && let Some((kind, payload)) = line.split_once(' ')
+        } else if let Some(after) = line.strip_prefix(&mark_prefix)
+            && let Some((kind, payload)) = after.split_once(' ')
         {
             markers.push((kind.to_owned(), payload.to_owned()));
         }
@@ -771,6 +930,7 @@ struct DurableExecRequest<'a> {
     remote: &'a str,
     target: Option<&'a str>,
     snapshot: Option<&'a str>,
+    snapshot_pins: Option<(String, String)>,
     head_sha: &'a str,
     op_id: &'a str,
     tail: &'a [OsString],
@@ -909,11 +1069,24 @@ fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
     write_remote_op(req.repo, req.op_id, &record)?;
 
     let rd_key = &sha256(req.remote.as_bytes())[..16];
+    let tok = new_frame_nonce();
+    let snap_check = if let Some((snap_head, snap_tree)) = &req.snapshot_pins {
+        format!(
+            "if ! ( cd -- \"$rd\" && test \"$(git rev-parse --verify HEAD 2>/dev/null)\" = {h} && test \"$(git rev-parse --verify 'HEAD^{{tree}}' 2>/dev/null)\" = {t} && test -z \"$(git status --porcelain --untracked-files=no 2>/dev/null)\" ); then printf '__OMS_MARK_%s__ SNAPSHOT_DRIFT 1\\n' {tok}; exit 0; fi",
+            h = quote(snap_head),
+            t = quote(snap_tree),
+            tok = quote(&tok),
+        )
+    } else {
+        String::new()
+    };
     let remote_script = format!(
         r#"set -eu
 rd={rd}
 rd_key={rd_key}
 op_id_arg={op_id}
+tok={tok}
+{snap_check}
 if [ -n "${{OMS_REMOTE_STATE_DIR:-}}" ]; then
   base="$OMS_REMOTE_STATE_DIR"
 elif [ -d "$rd/.git" ]; then
@@ -924,7 +1097,7 @@ fi
 mkdir -p -- "$base"
 op_dir="$base/$op_id_arg"
 if ! mkdir -- "$op_dir" 2>/dev/null; then
-  printf '__OMS_EXISTS__ 1\n'
+  printf '__OMS_MARK_%s__ EXISTS 1\n' "$tok"
   exit 75
 fi
 {helpers}
@@ -934,6 +1107,8 @@ set -eu
 trap '' HUP
 op_dir="$1"
 rd="$2"
+cmd_sha="$3"
+snap_val="$4"
 hn=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
 [ -n "$hn" ] || hn='unknown'
 if [ -r /proc/sys/kernel/random/boot_id ]; then
@@ -946,44 +1121,61 @@ fi
 [ -n "$bid" ] || bid='unknown'
 pid=$$
 ls_val=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
-printf '{{"hostname":"%s","boot_id":"%s","pid":%s,"lstart":"%s"}}\n' "$hn" "$bid" "$pid" "$ls_val" >"$op_dir/meta.json.tmp"
+printf '{{"hostname":"%s","boot_id":"%s","pid":%s,"lstart":"%s","command_sha256":"%s","snapshot":"%s"}}\n' "$hn" "$bid" "$pid" "$ls_val" "$cmd_sha" "$snap_val" >"$op_dir/meta.json.tmp"
 mv -f -- "$op_dir/meta.json.tmp" "$op_dir/meta.json"
 child=""
-trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null || :; exit 143' TERM
+trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null || true' TERM
 ( cd -- "$rd" && exec sh "$op_dir/cmd.sh" ) >"$op_dir/stdout" 2>"$op_dir/stderr" &
 child=$!
 printf '%s\n' "$child" >"$op_dir/child.pid"
 set +e
-wait "$child"
-rc=$?
+while :; do
+  wait "$child"
+  rc=$?
+  if ! kill -0 "$child" 2>/dev/null; then
+    break
+  fi
+done
 set -e
+if [ -f "$op_dir/cancel.req" ]; then
+  exit 143
+fi
 printf '{{"exit_code":%d}}\n' "$rc" >"$op_dir/result.json.tmp"
 mv -f -- "$op_dir/result.json.tmp" "$op_dir/result.json"
 EOF
-nohup sh "$op_dir/runner.sh" "$op_dir" "$rd" </dev/null >/dev/null 2>&1 &
+nohup sh "$op_dir/runner.sh" "$op_dir" "$rd" {cmd_sha} {snap_val} </dev/null >/dev/null 2>&1 &
 rpid=$!
 i=0
 while [ ! -f "$op_dir/result.json" ]; do
   if [ -f "$op_dir/meta.json" ] && ! kill -0 "$rpid" 2>/dev/null; then
     sleep 0.05 2>/dev/null || sleep 1
     [ -f "$op_dir/result.json" ] && break
-    printf '__OMS_RUNNER_DIED__ 1\n'
+    printf '__OMS_MARK_%s__ RUNNER_DIED 1\n' "$tok"
     break
   fi
   i=$((i + 1))
   [ "$i" -ge 1200 ] && break
   sleep 0.05 2>/dev/null || sleep 1
 done
-emit_part meta "$op_dir/meta.json"
-emit_part result "$op_dir/result.json"
-emit_part stdout "$op_dir/stdout"
-emit_part stderr "$op_dir/stderr"
+if [ -f "$op_dir/result.json" ]; then
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+else
+  printf '__OMS_MARK_%s__ STILL_RUNNING 1\n' "$tok"
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+fi
 "#,
         rd = remote_path(req.remote),
         rd_key = quote(rd_key),
         op_id = quote(req.op_id),
+        tok = quote(&tok),
+        snap_check = snap_check,
         helpers = REMOTE_SH_HELPERS,
         cmd = quote(&cmd_script),
+        cmd_sha = quote(&command_sha256),
+        snap_val = quote(req.snapshot.unwrap_or("")),
     );
     let out = build_ssh(req.host, req.port, req.control)
         .arg(format!("sh -lc {}", quote(&remote_script)))
@@ -992,7 +1184,7 @@ emit_part stderr "$op_dir/stderr"
 
     let ssh_uncertain = out.status.code().is_none() || out.status.code() == Some(255);
     if ssh_uncertain || !out.status.success() {
-        if let Ok(parsed) = parse_framed_stream(&out.stdout)
+        if let Ok(parsed) = parse_framed_stream(&out.stdout, &tok)
             && let Some(meta) = parse_meta_part(&parsed.parts)
         {
             record["remote_meta"] = meta;
@@ -1003,7 +1195,7 @@ emit_part stderr "$op_dir/stderr"
         return json_response(75, &record, req.pretty);
     }
 
-    let parsed = match parse_framed_stream(&out.stdout) {
+    let parsed = match parse_framed_stream(&out.stdout, &tok) {
         Ok(parsed) => parsed,
         Err(_) => {
             record["state"] = "unknown".into();
@@ -1015,7 +1207,34 @@ emit_part stderr "$op_dir/stderr"
     if parsed
         .markers
         .iter()
-        .any(|(kind, _)| kind == "__OMS_EXISTS__" || kind == "__OMS_RUNNER_DIED__")
+        .any(|(kind, _)| kind == "SNAPSHOT_DRIFT")
+    {
+        record["state"] = "failed".into();
+        record["exit_code"] = 2.into();
+        let ts = now()?;
+        record["updated_at"] = ts.clone().into();
+        record["completed_at"] = ts.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return Err(error("remote checkout does not match --snapshot"));
+    }
+    if parsed
+        .markers
+        .iter()
+        .any(|(kind, _)| kind == "STILL_RUNNING")
+    {
+        if let Some(meta) = parse_meta_part(&parsed.parts) {
+            verify_remote_meta_binding(&record, &meta)?;
+            record["remote_meta"] = meta;
+        }
+        record["state"] = "running".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
+    }
+    if parsed
+        .markers
+        .iter()
+        .any(|(kind, _)| kind == "EXISTS" || kind == "RUNNER_DIED")
     {
         if let Some(meta) = parse_meta_part(&parsed.parts) {
             record["remote_meta"] = meta;
@@ -1026,6 +1245,9 @@ emit_part stderr "$op_dir/stderr"
         return json_response(75, &record, req.pretty);
     }
 
+    if let Some(meta) = parse_meta_part(&parsed.parts) {
+        verify_remote_meta_binding(&record, &meta)?;
+    }
     match apply_result_parts(&mut record, &parsed.parts)? {
         Some(rc) => {
             write_remote_op(req.repo, req.op_id, &record)?;
@@ -1038,6 +1260,30 @@ emit_part stderr "$op_dir/stderr"
             json_response(75, &record, req.pretty)
         }
     }
+}
+
+fn verify_remote_meta_binding(record: &serde_json::Value, meta: &serde_json::Value) -> Result<()> {
+    let expected_cmd = record
+        .get("command_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let meta_cmd = meta
+        .get("command_sha256")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| error("remote operation metadata missing command_sha256"))?;
+    require(
+        meta_cmd == expected_cmd,
+        "remote operation metadata command_sha256 mismatch",
+    )?;
+    let expected_snap = record
+        .get("snapshot")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let meta_snap = meta.get("snapshot").and_then(|v| v.as_str()).unwrap_or("");
+    require(
+        meta_snap == expected_snap,
+        "remote operation metadata snapshot mismatch",
+    )
 }
 
 struct ReconcileRequest<'a> {
@@ -1081,11 +1327,12 @@ fn validate_existing_scope(
             "operation belongs to a different --remote-dir",
         )?;
     }
-    if let Some(target) = target {
-        validate_target(repo, target, host, &stored_remote)?;
-    } else if let Some(stored_target) = record.get("target").and_then(|v| v.as_str()) {
-        validate_target(repo, stored_target, host, &stored_remote)?;
-    }
+    enforce_target_policy(
+        repo,
+        target.or_else(|| record.get("target").and_then(|v| v.as_str())),
+        host,
+        &stored_remote,
+    )?;
     Ok(stored_remote)
 }
 
@@ -1115,24 +1362,26 @@ fn run_reconcile(req: ReconcileRequest<'_>) -> Result<Response> {
     }
 
     let rd_key = &sha256(remote_dir.as_bytes())[..16];
+    let tok = new_frame_nonce();
     let script = format!(
         r#"set -eu
 rd={rd}
 rd_key={rd_key}
 op_id_arg={op_id}
+tok={tok}
 {helpers}
 read_host_id
 find_op_dir
 if [ -z "$op_dir" ]; then
-  printf '__OMS_PROBE__ missing|%s|%s\n' "$cur_hn" "$cur_bid"
+  printf '__OMS_MARK_%s__ PROBE missing|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
   exit 0
 fi
 if [ -f "$op_dir/result.json" ]; then
-  printf '__OMS_PROBE__ result|%s|%s\n' "$cur_hn" "$cur_bid"
-  emit_part meta "$op_dir/meta.json"
-  emit_part result "$op_dir/result.json"
-  emit_part stdout "$op_dir/stdout"
-  emit_part stderr "$op_dir/stderr"
+  printf '__OMS_MARK_%s__ PROBE result|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   exit 0
 fi
 mpid=""
@@ -1152,21 +1401,20 @@ if [ -n "$mpid" ] && kill -0 "$mpid" 2>/dev/null; then
   esac
 fi
 if [ "$alive" = 0 ] && [ -f "$op_dir/result.json" ]; then
-  printf '__OMS_PROBE__ result|%s|%s\n' "$cur_hn" "$cur_bid"
-  emit_part meta "$op_dir/meta.json"
-  emit_part result "$op_dir/result.json"
-  emit_part stdout "$op_dir/stdout"
-  emit_part stderr "$op_dir/stderr"
+  printf '__OMS_MARK_%s__ PROBE result|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   exit 0
 fi
-printf '__OMS_PROBE__ live|%s|%s|%s|%s\n' "$cur_hn" "$cur_bid" "$alive" "$cur_ls"
-emit_part meta "$op_dir/meta.json"
-emit_part stdout "$op_dir/stdout"
-emit_part stderr "$op_dir/stderr"
+printf '__OMS_MARK_%s__ PROBE live|%s|%s|%s|%s\n' "$tok" "$cur_hn" "$cur_bid" "$alive" "$cur_ls"
+emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
 "#,
         rd = remote_path(&remote_dir),
         rd_key = quote(rd_key),
         op_id = quote(req.op_id),
+        tok = quote(&tok),
         helpers = REMOTE_SH_HELPERS,
     );
     let effective_port = req.port.or_else(|| {
@@ -1185,7 +1433,7 @@ emit_part stderr "$op_dir/stderr"
         write_remote_op(req.repo, req.op_id, &record)?;
         return json_response(75, &record, req.pretty);
     }
-    let parsed = match parse_framed_stream(&out.stdout) {
+    let parsed = match parse_framed_stream(&out.stdout, &tok) {
         Ok(v) => v,
         Err(_) => {
             record["state"] = "unknown".into();
@@ -1194,11 +1442,7 @@ emit_part stderr "$op_dir/stderr"
             return json_response(75, &record, req.pretty);
         }
     };
-    let Some((_, payload)) = parsed
-        .markers
-        .iter()
-        .find(|(kind, _)| kind == "__OMS_PROBE__")
-    else {
+    let Some((_, payload)) = parsed.markers.iter().find(|(kind, _)| kind == "PROBE") else {
         record["state"] = "unknown".into();
         record["updated_at"] = now()?.into();
         write_remote_op(req.repo, req.op_id, &record)?;
@@ -1209,6 +1453,7 @@ emit_part stderr "$op_dir/stderr"
     let cur_hn = fields.get(1).copied().unwrap_or("unknown");
     let cur_bid = fields.get(2).copied().unwrap_or("unknown");
     if let Some(meta) = parse_meta_part(&parsed.parts) {
+        verify_remote_meta_binding(&record, &meta)?;
         let meta_hn = meta.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
         if !meta_hn.is_empty() && meta_hn != cur_hn {
             record["state"] = "unknown".into();
@@ -1217,6 +1462,11 @@ emit_part stderr "$op_dir/stderr"
             return json_response(75, &record, req.pretty);
         }
         record["remote_meta"] = meta;
+    } else if kind != "missing" {
+        record["state"] = "unknown".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
     }
     match kind {
         "missing" => {
@@ -1240,12 +1490,6 @@ emit_part stderr "$op_dir/stderr"
         "live" => {
             let alive = fields.get(3).copied() == Some("1");
             let cur_ls = fields.get(4).copied().unwrap_or("");
-            if let Some(out_bytes) = parsed.parts.get("stdout") {
-                record["stdout"] = bounded_output(out_bytes).into();
-            }
-            if let Some(err_bytes) = parsed.parts.get("stderr") {
-                record["stderr"] = bounded_output(err_bytes).into();
-            }
             let Some(meta) = record.get("remote_meta").and_then(|v| v.as_object()) else {
                 record["state"] = "unknown".into();
                 record["updated_at"] = now()?.into();
@@ -1258,6 +1502,12 @@ emit_part stderr "$op_dir/stderr"
                 .unwrap_or("unknown");
             let meta_ls = meta.get("lstart").and_then(|v| v.as_str()).unwrap_or("");
             let rebooted = meta_bid != "unknown" && cur_bid != "unknown" && meta_bid != cur_bid;
+            if alive && !rebooted && !meta_ls.is_empty() && cur_ls.is_empty() {
+                record["state"] = "unknown".into();
+                record["updated_at"] = now()?.into();
+                write_remote_op(req.repo, req.op_id, &record)?;
+                return json_response(75, &record, req.pretty);
+            }
             let pid_reused = !meta_ls.is_empty()
                 && !cur_ls.is_empty()
                 && normalize_ws(meta_ls) != normalize_ws(cur_ls);
@@ -1318,30 +1568,41 @@ fn run_cancel(req: CancelRequest<'_>) -> Result<Response> {
     }
 
     let rd_key = &sha256(remote_dir.as_bytes())[..16];
+    let tok = new_frame_nonce();
     let script = format!(
         r#"set -eu
 rd={rd}
 rd_key={rd_key}
 op_id_arg={op_id}
 grace={grace}
+tok={tok}
 {helpers}
 norm() {{ printf '%s' "$1" | awk '{{$1=$1;print}}'; }}
+pid_live() {{
+  p="$1"
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null || return 1
+  st=$(LC_ALL=C ps -p "$p" -o stat= 2>/dev/null | tr -d ' \t\r\n' || true)
+  case "$st" in
+    Z*) return 1 ;;
+    *) return 0 ;;
+  esac
+}}
 read_host_id
 find_op_dir
 if [ -z "$op_dir" ]; then
-  printf '__OMS_CANCEL__ missing|%s|%s\n' "$cur_hn" "$cur_bid"
+  printf '__OMS_MARK_%s__ CANCEL missing|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
   exit 0
 fi
 if [ -f "$op_dir/result.json" ]; then
-  printf '__OMS_CANCEL__ finished|%s|%s\n' "$cur_hn" "$cur_bid"
-  emit_part meta "$op_dir/meta.json"
-  emit_part result "$op_dir/result.json"
-  emit_part stdout "$op_dir/stdout"
-  emit_part stderr "$op_dir/stderr"
+  printf '__OMS_MARK_%s__ CANCEL finished|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   exit 0
 fi
 if [ ! -f "$op_dir/meta.json" ]; then
-  printf '__OMS_CANCEL__ missing_meta|%s|%s\n' "$cur_hn" "$cur_bid"
+  printf '__OMS_MARK_%s__ CANCEL missing_meta|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
   exit 0
 fi
 m_hn=$(sed -n 's/.*"hostname":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
@@ -1349,27 +1610,32 @@ m_bid=$(sed -n 's/.*"boot_id":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 
 m_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
 m_ls=$(sed -n 's/.*"lstart":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
 if [ -z "$m_hn" ] || [ "$m_hn" != "$cur_hn" ]; then
-  printf '__OMS_CANCEL__ host_mismatch|%s|%s\n' "$cur_hn" "$cur_bid"
-  emit_part meta "$op_dir/meta.json"
+  printf '__OMS_MARK_%s__ CANCEL host_mismatch|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   exit 0
 fi
-if [ -z "$m_pid" ] || ! kill -0 "$m_pid" 2>/dev/null; then
+if [ -z "$m_pid" ] || ! pid_live "$m_pid"; then
   if [ -f "$op_dir/result.json" ]; then
-    printf '__OMS_CANCEL__ finished|%s|%s\n' "$cur_hn" "$cur_bid"
-    emit_part meta "$op_dir/meta.json"
-    emit_part result "$op_dir/result.json"
-    emit_part stdout "$op_dir/stdout"
-    emit_part stderr "$op_dir/stderr"
+    printf '__OMS_MARK_%s__ CANCEL finished|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+    emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
+    emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+    emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   else
-    printf '__OMS_CANCEL__ lost|exited|%s|%s\n' "$cur_hn" "$cur_bid"
-    emit_part meta "$op_dir/meta.json"
+    printf '__OMS_MARK_%s__ CANCEL lost|exited|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   fi
   exit 0
 fi
 cur_ls=$(LC_ALL=C ps -p "$m_pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
-if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" != "$cur_bid" ] || [ -z "$m_ls" ] || [ -z "$cur_ls" ] || [ "$(norm "$m_ls")" != "$(norm "$cur_ls")" ]; then
-  printf '__OMS_CANCEL__ mismatch|%s|%s|%s\n' "$cur_hn" "$cur_bid" "$cur_ls"
-  emit_part meta "$op_dir/meta.json"
+if [ -z "$m_ls" ] || [ -z "$cur_ls" ]; then
+  printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  exit 0
+fi
+if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" != "$cur_bid" ] || [ "$(norm "$m_ls")" != "$(norm "$cur_ls")" ]; then
+  printf '__OMS_MARK_%s__ CANCEL mismatch|%s|%s|%s\n' "$tok" "$cur_hn" "$cur_bid" "$cur_ls"
+  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   exit 0
 fi
 cpid=""
@@ -1382,43 +1648,56 @@ if [ -f "$op_dir/child.pid" ]; then
     fi
   fi
 fi
+: > "$op_dir/cancel.req"
+[ -n "$cpid" ] && kill -TERM "$cpid" 2>/dev/null || true
 kill -TERM "$m_pid" 2>/dev/null || true
 ticks=$((grace * 10))
 i=0
 sig="SIGTERM"
 while [ "$i" -lt "$ticks" ]; do
-  if ! kill -0 "$m_pid" 2>/dev/null; then
-    break
-  fi
+  alive_any=0
+  if pid_live "$m_pid"; then alive_any=1; fi
+  if [ -n "$cpid" ] && pid_live "$cpid"; then alive_any=1; fi
+  [ "$alive_any" = 0 ] && break
   i=$((i + 1))
   sleep 0.1 2>/dev/null || sleep 1
 done
-if kill -0 "$m_pid" 2>/dev/null; then
+still_running=0
+if pid_live "$m_pid"; then still_running=1; fi
+if [ -n "$cpid" ] && pid_live "$cpid"; then still_running=1; fi
+if [ "$still_running" = 1 ]; then
   sig="SIGKILL"
-  [ -n "$cpid" ] && kill -KILL "$cpid" 2>/dev/null || true
+  if [ -n "$cpid" ]; then
+    if command -v pkill >/dev/null 2>&1; then
+      pkill -KILL -P "$cpid" 2>/dev/null || true
+    fi
+    kill -KILL "$cpid" 2>/dev/null || true
+  fi
   kill -KILL "$m_pid" 2>/dev/null || true
   j=0
   while [ "$j" -lt 20 ]; do
-    if ! kill -0 "$m_pid" 2>/dev/null; then
-      break
-    fi
+    alive_any=0
+    if pid_live "$m_pid"; then alive_any=1; fi
+    if [ -n "$cpid" ] && pid_live "$cpid"; then alive_any=1; fi
+    [ "$alive_any" = 0 ] && break
     j=$((j + 1))
     sleep 0.1 2>/dev/null || sleep 1
   done
 fi
-if kill -0 "$m_pid" 2>/dev/null; then
-  printf '__OMS_CANCEL__ still_alive|%s\n' "$sig"
+if pid_live "$m_pid" || {{ [ -n "$cpid" ] && pid_live "$cpid"; }}; then
+  printf '__OMS_MARK_%s__ CANCEL still_alive|%s\n' "$tok" "$sig"
   exit 0
 fi
-printf '__OMS_CANCEL__ cancelled|%s\n' "$sig"
-emit_part meta "$op_dir/meta.json"
-emit_part stdout "$op_dir/stdout"
-emit_part stderr "$op_dir/stderr"
+printf '__OMS_MARK_%s__ CANCEL cancelled|%s\n' "$tok" "$sig"
+emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
 "#,
         rd = remote_path(&remote_dir),
         rd_key = quote(rd_key),
         op_id = quote(req.op_id),
         grace = req.grace_seconds,
+        tok = quote(&tok),
         helpers = REMOTE_SH_HELPERS,
     );
     let effective_port = req.port.or_else(|| {
@@ -1437,8 +1716,17 @@ emit_part stderr "$op_dir/stderr"
         write_remote_op(req.repo, req.op_id, &record)?;
         return json_response(75, &record, req.pretty);
     }
-    let parsed = parse_framed_stream(&out.stdout)?;
+    let parsed = match parse_framed_stream(&out.stdout, &tok) {
+        Ok(v) => v,
+        Err(_) => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            return json_response(75, &record, req.pretty);
+        }
+    };
     if let Some(meta) = parse_meta_part(&parsed.parts) {
+        verify_remote_meta_binding(&record, &meta)?;
         record["remote_meta"] = meta;
     }
     if let Some(out_bytes) = parsed.parts.get("stdout") {
@@ -1447,11 +1735,7 @@ emit_part stderr "$op_dir/stderr"
     if let Some(err_bytes) = parsed.parts.get("stderr") {
         record["stderr"] = bounded_output(err_bytes).into();
     }
-    let Some((_, payload)) = parsed
-        .markers
-        .iter()
-        .find(|(kind, _)| kind == "__OMS_CANCEL__")
-    else {
+    let Some((_, payload)) = parsed.markers.iter().find(|(kind, _)| kind == "CANCEL") else {
         record["state"] = "unknown".into();
         record["updated_at"] = now()?.into();
         write_remote_op(req.repo, req.op_id, &record)?;
@@ -1494,6 +1778,7 @@ emit_part stderr "$op_dir/stderr"
         }
         _ => {
             record["state"] = "unknown".into();
+            record["signal_sent"] = false.into();
             record["updated_at"] = now()?.into();
             write_remote_op(req.repo, req.op_id, &record)?;
             json_response(75, &record, req.pretty)
@@ -1635,7 +1920,26 @@ fn run_collect(req: CollectRequest<'_>) -> Result<Response> {
         r#"set -eu
 rd={rd}
 rp={rp}
-target="$rd/$rp"
+if [ ! -d "$rd" ] || [ -L "$rd" ]; then
+  printf '%s\n' 'remote_dir must be a real non-symlink directory' >&2
+  exit 2
+fi
+cur="$rd"
+old_ifs="$IFS"
+IFS=/
+set -f
+set -- $rp
+IFS="$old_ifs"
+set +f
+while [ "$#" -gt 1 ]; do
+  cur="$cur/$1"
+  if [ ! -d "$cur" ] || [ -L "$cur" ]; then
+    printf '%s\n' 'remote path ancestor must be a real non-symlink directory' >&2
+    exit 2
+  fi
+  shift
+done
+target="$cur/$1"
 if [ -L "$target" ] || [ ! -f "$target" ]; then
   printf '%s\n' 'remote path must be a regular non-symlink file' >&2
   exit 2
@@ -1689,12 +1993,13 @@ exec cat -- "$target"
             }
             hasher.update(&buf[..n]);
         };
+        drop(reader);
+        if copy_res.is_err() {
+            let _ = child.kill();
+        }
         let err_buf = err_handle.join().unwrap_or_default();
         (copy_res.map(|()| (total, hasher.finish())), err_buf)
     });
-    if stream_res.is_err() {
-        let _ = child.kill();
-    }
     let status_out = child.wait().map_err(error)?;
     let (total_bytes, digest) = stream_res?;
     let exit = exit_code(status_out);
@@ -2192,19 +2497,25 @@ mod tests {
 
     #[test]
     fn parse_framed_stream_handles_binary_and_marker_lines() {
-        let payload = b"__OMS_PART__ spoofed 999\nline2\n";
+        let nonce = "0123456789abcdef";
+        let payload = b"__OMS_PART_0123456789abcdef__ spoofed 999\n__OMS_PART__ old 1\nline2\n";
         let stream = format!(
-            "__OMS_PROBE__ result|h1|b1\n__OMS_PART__ stdout {}\n{}__OMS_PART__ stderr 0\n\n",
+            "untrusted banner\n__OMS_MARK_{nonce}__ PROBE result|h1|b1\n__OMS_PART_{nonce}__ stdout {}\n{}__OMS_PART_{nonce}__ stderr 0\n\n",
             payload.len(),
             String::from_utf8_lossy(payload),
         );
-        let parsed = parse_framed_stream(stream.as_bytes()).unwrap();
+        let parsed = parse_framed_stream(stream.as_bytes(), nonce).unwrap();
         assert_eq!(
             parsed.markers,
-            vec![("__OMS_PROBE__".to_owned(), "result|h1|b1".to_owned())]
+            vec![("PROBE".to_owned(), "result|h1|b1".to_owned())]
         );
         assert_eq!(parsed.parts.get("stdout").unwrap(), payload);
         assert_eq!(parsed.parts.get("stderr").unwrap(), b"");
+
+        let dup = format!(
+            "__OMS_PART_{nonce}__ result 15\n{{\"exit_code\":1}}\n__OMS_PART_{nonce}__ result 15\n{{\"exit_code\":0}}\n"
+        );
+        assert!(parse_framed_stream(dup.as_bytes(), nonce).is_err());
     }
 
     #[test]
@@ -2678,6 +2989,7 @@ exec sh -c "$last"
             .trim()
             .to_owned();
 
+        let reuse_cmd_sha = sha256(b"exec 'true'");
         let reuse_op_dir = state_dir.join("op-reuse");
         std::fs::create_dir_all(&reuse_op_dir).unwrap();
         std::fs::write(
@@ -2686,7 +2998,9 @@ exec sh -c "$last"
                 "hostname": cur_hn,
                 "boot_id": cur_bid,
                 "pid": sleeper_pid,
-                "lstart": "Mon Jan  1 00:00:00 1990"
+                "lstart": "Mon Jan  1 00:00:00 1990",
+                "command_sha256": reuse_cmd_sha,
+                "snapshot": ""
             }))
             .unwrap(),
         )
@@ -2701,7 +3015,7 @@ exec sh -c "$last"
                 "host": "example",
                 "port": serde_json::Value::Null,
                 "remote_dir": rd,
-                "command_sha256": sha256(b"exec 'true'"),
+                "command_sha256": reuse_cmd_sha,
             }),
         )
         .unwrap();
@@ -2727,7 +3041,9 @@ exec sh -c "$last"
                     "hostname": cur_hn,
                     "boot_id": "00000000-0000-0000-0000-000000000000",
                     "pid": sleeper_pid,
-                    "lstart": cur_ls
+                    "lstart": cur_ls,
+                    "command_sha256": reuse_cmd_sha,
+                    "snapshot": ""
                 }))
                 .unwrap(),
             )
@@ -2951,5 +3267,486 @@ exec sh -c "$last"
             .filter(|e| e.file_name().to_string_lossy().starts_with(".oms-collect-"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn omitted_target_blocks_unapproved_host_and_snapshot_binds_remote_head() {
+        if std::env::var_os("OMS_TEST_TARGET_SNAPSHOT").is_none() {
+            let temp = TempDir::new().unwrap();
+            let fake = temp.0.join("ssh");
+            let args_log = temp.0.join("args");
+            std::fs::write(
+                &fake,
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$OMS_TEST_ARGS\"\nfor last do :; done\nexec sh -c \"$last\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::omitted_target_blocks_unapproved_host_and_snapshot_binds_remote_head",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_TARGET_SNAPSHOT", "1")
+                .env("OMS_SSH_BIN", &fake)
+                .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_TEST_ARGS", &args_log)
+                .env_remove("OMS_HARNESS_CHILD")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        use crate::value::*;
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        init_temp_git_repo(&repo);
+        init_temp_git_repo(&remote);
+        std::fs::create_dir_all(repo.join(".oms/runtime/snapshots")).unwrap();
+        let identity = object([
+            ("ssh_alias", string("cluster-a")),
+            ("workdir", string(remote.to_str().unwrap())),
+            ("scheduler", string("none")),
+            ("scratch_root", string("")),
+        ]);
+        let fp = sha(canonical(&identity).unwrap());
+        let mut row = identity;
+        row.set("execution_approved", b(false)).unwrap();
+        row.set("approved_fingerprint", string(&fp)).unwrap();
+        let reg = object([
+            ("schema", number(1)),
+            ("targets", object([("gpu", row.clone())])),
+        ]);
+        std::fs::write(
+            repo.join(".oms/runtime/targets.json"),
+            canonical(&reg).unwrap(),
+        )
+        .unwrap();
+
+        let rs = repo.to_str().unwrap();
+        let rd = remote.to_str().unwrap();
+        // Omitting --target still blocks unapproved registered host.
+        let omitted = invoke(
+            &[
+                "exec",
+                "--host",
+                "cluster-a",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--",
+                "true",
+            ],
+            &root,
+        );
+        assert_eq!(omitted.code, 2);
+        assert!(!root.join("args").exists());
+
+        row.set("execution_approved", b(true)).unwrap();
+        let reg = object([("schema", number(1)), ("targets", object([("gpu", row)]))]);
+        std::fs::write(
+            repo.join(".oms/runtime/targets.json"),
+            canonical(&reg).unwrap(),
+        )
+        .unwrap();
+
+        let head = String::from_utf8(git(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let tree = String::from_utf8(git(&repo, &["rev-parse", "HEAD^{tree}"]).unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let mut snap = object([
+            ("schema", number(1)),
+            ("head_sha", string(&head)),
+            ("tree_sha", string(&tree)),
+            ("lockfiles", empty()),
+        ]);
+        let snap_digest = sha(canonical(&snap).unwrap());
+        snap.set("snapshot_sha256", string(&snap_digest)).unwrap();
+        std::fs::write(
+            repo.join(format!(".oms/runtime/snapshots/{snap_digest}.json")),
+            canonical(&snap).unwrap(),
+        )
+        .unwrap();
+
+        // Sync repo commit to remote so local+remote HEAD match snapshot -> ok.
+        let synced = invoke(
+            &[
+                "sync-bundle",
+                "--host",
+                "cluster-a",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--target",
+                "gpu",
+            ],
+            &root,
+        );
+        assert_eq!(synced.code, 0);
+        let ok = invoke(
+            &[
+                "exec",
+                "--host",
+                "cluster-a",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--target",
+                "gpu",
+                "--snapshot",
+                &snap_digest,
+                "--",
+                "printf",
+                "ok",
+            ],
+            &root,
+        );
+        assert_eq!(ok.code, 0, "{}", String::from_utf8_lossy(&ok.stderr));
+
+        // Remote checkout advances away from snapshot -> refused with exit 2 before running payload.
+        std::fs::write(remote.join("file"), "drifted\n").unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(&remote)
+                .args(["commit", "-qam", "drift"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let drifted = invoke(
+            &[
+                "exec",
+                "--host",
+                "cluster-a",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--target",
+                "gpu",
+                "--snapshot",
+                &snap_digest,
+                "--",
+                "sh",
+                "-c",
+                "printf ran > should-not-exist",
+            ],
+            &root,
+        );
+        assert_eq!(drifted.code, 2);
+        assert!(!remote.join("should-not-exist").exists());
+    }
+
+    #[test]
+    fn cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart() {
+        if std::env::var_os("OMS_TEST_CANCEL_HARDENING").is_none() {
+            let temp = TempDir::new().unwrap();
+            let state_dir = temp.0.join("remote_state");
+            let fake = temp.0.join("ssh");
+            let script = r#"#!/bin/sh
+for last do :; done
+if [ -f "$OMS_TEST_DROP_ACTIVE" ]; then
+  rm -f "$OMS_TEST_DROP_ACTIVE"
+  sh -c "$last" >/dev/null 2>&1 &
+  i=0
+  while [ ! -f "$OMS_REMOTE_STATE_DIR/op-sigign/child.pid" ] && [ "$i" -lt 250 ]; do
+    i=$((i + 1))
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  exit 255
+fi
+exec sh -c "$last"
+"#;
+            std::fs::write(&fake, script).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_CANCEL_HARDENING", "1")
+                .env("OMS_SSH_BIN", &fake)
+                .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
+                .env("OMS_REMOTE_STATE_DIR", &state_dir)
+                .env("OMS_LOCK_DIR", temp.0.join("locks"))
+                .env_remove("OMS_HARNESS_CHILD")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let state_dir = PathBuf::from(std::env::var_os("OMS_REMOTE_STATE_DIR").unwrap());
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        init_temp_git_repo(&repo);
+        std::fs::create_dir_all(&remote).unwrap();
+        let rs = repo.to_str().unwrap();
+        let rd = remote.to_str().unwrap();
+
+        // 1. Workload ignoring SIGTERM is escalated to SIGKILL and actually terminated.
+        std::fs::write(root.join("drop_active"), "1").unwrap();
+        let launched = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-sigign",
+                "--",
+                "sh",
+                "-c",
+                "trap '' TERM; printf '__OMS_PART__ result 15\\n{\"exit_code\":0}\\n'; sleep 30",
+            ],
+            &root,
+        );
+        assert_eq!(launched.code, 75);
+        // Un-nonced forged frame printed to stdout never causes reconcile to mark succeeded.
+        let rec_running = invoke(
+            &[
+                "reconcile",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-sigign",
+            ],
+            &root,
+        );
+        assert_eq!(rec_running.code, 75);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&rec_running.stdout).unwrap()["state"],
+            "running"
+        );
+        let child_pid: i32 = std::fs::read_to_string(state_dir.join("op-sigign/child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let canceled = invoke(
+            &[
+                "cancel",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-sigign",
+                "--grace-seconds",
+                "1",
+            ],
+            &root,
+        );
+        assert_eq!(
+            canceled.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&canceled.stderr)
+        );
+        let vc: serde_json::Value = serde_json::from_slice(&canceled.stdout).unwrap();
+        assert_eq!(vc["state"], "cancelled");
+        assert_eq!(vc["signal"], "SIGKILL");
+        let alive = Command::new("kill")
+            .args(["-0", &child_pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "workload ignoring SIGTERM survived cancel");
+
+        // 2. Empty lstart on a live process causes cancel to hold unknown (75), not lost.
+        let mut sleeper = ChildKillGuard(Some(Command::new("sleep").arg("20").spawn().unwrap()));
+        let sleeper_pid = sleeper.0.as_ref().unwrap().id();
+        let meta_src: serde_json::Value = serde_json::from_slice::<serde_json::Value>(
+            &rec_running.stdout,
+        )
+        .unwrap()["remote_meta"]
+            .clone();
+        let cur_hn = meta_src["hostname"].as_str().unwrap();
+        let cur_bid = meta_src["boot_id"].as_str().unwrap();
+        let empty_ls_sha = sha256(b"exec 'true'");
+        std::fs::create_dir_all(state_dir.join("op-empty-ls")).unwrap();
+        std::fs::write(
+            state_dir.join("op-empty-ls/meta.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "hostname": cur_hn,
+                "boot_id": cur_bid,
+                "pid": sleeper_pid,
+                "lstart": "",
+                "command_sha256": empty_ls_sha,
+                "snapshot": ""
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        write_remote_op(
+            &repo,
+            "op-empty-ls",
+            &serde_json::json!({
+                "schema": 1,
+                "op_id": "op-empty-ls",
+                "state": "unknown",
+                "host": "example",
+                "port": serde_json::Value::Null,
+                "remote_dir": rd,
+                "command_sha256": empty_ls_sha,
+            }),
+        )
+        .unwrap();
+        let unverifiable = invoke(
+            &[
+                "cancel",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-empty-ls",
+            ],
+            &root,
+        );
+        assert_eq!(unverifiable.code, 75);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&unverifiable.stdout).unwrap()["state"],
+            "unknown"
+        );
+        assert!(sleeper.0.as_mut().unwrap().try_wait().unwrap().is_none());
+
+        // 3. Reconcile rejects remote meta.json bound to a different command_sha256.
+        std::fs::write(
+            state_dir.join("op-empty-ls/meta.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "hostname": cur_hn,
+                "boot_id": cur_bid,
+                "pid": sleeper_pid,
+                "lstart": "",
+                "command_sha256": sha256(b"exec 'false'"),
+                "snapshot": ""
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mismatch = invoke(
+            &[
+                "reconcile",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-empty-ls",
+            ],
+            &root,
+        );
+        assert_eq!(mismatch.code, 2);
+    }
+
+    #[test]
+    fn collect_rejects_symlink_ancestors_and_overflow_with_open_stderr() {
+        if std::env::var_os("OMS_TEST_COLLECT_HARDENING").is_none() {
+            let temp = TempDir::new().unwrap();
+            let fake = temp.0.join("ssh");
+            let script = r#"#!/bin/sh
+for last do :; done
+if [ -f "$OMS_TEST_OPEN_STDERR_FLOOD" ]; then
+  i=0
+  while [ "$i" -lt 8192 ]; do
+    printf '0123456789abcdef0123456789abcdef'
+    i=$((i + 1))
+  done
+  exit 0
+fi
+exec sh -c "$last"
+"#;
+            std::fs::write(&fake, script).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::collect_rejects_symlink_ancestors_and_overflow_with_open_stderr",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_COLLECT_HARDENING", "1")
+                .env("OMS_SSH_BIN", &fake)
+                .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_TEST_OPEN_STDERR_FLOOD", temp.0.join("flood"))
+                .env_remove("OMS_HARNESS_CHILD")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        let outside = root.join("outside");
+        let dest_dir = root.join("dest");
+        init_temp_git_repo(&repo);
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::fs::write(outside.join("secret.txt"), "top-secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside, remote.join("sym_sub")).unwrap();
+
+        let rs = repo.to_str().unwrap();
+        let rd = remote.to_str().unwrap();
+        let symlink_ancestor = invoke(
+            &[
+                "collect",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--remote-path",
+                "sym_sub/secret.txt",
+                "--dest",
+                dest_dir.join("out.txt").to_str().unwrap(),
+            ],
+            &root,
+        );
+        assert_eq!(symlink_ancestor.code, 2);
+        assert!(!dest_dir.join("out.txt").exists());
+
+        std::fs::write(root.join("flood"), "1").unwrap();
+        let started = std::time::Instant::now();
+        let flood_over = invoke(
+            &[
+                "collect",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--remote-path",
+                "sym_sub/secret.txt",
+                "--dest",
+                dest_dir.join("flood.txt").to_str().unwrap(),
+                "--max-bytes",
+                "128",
+            ],
+            &root,
+        );
+        assert_eq!(flood_over.code, 2);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(!dest_dir.join("flood.txt").exists());
     }
 }
