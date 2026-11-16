@@ -548,18 +548,20 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
             candidate(&ctx, &mut items, "orphan-delegation", &path, apply)?;
         }
     }
-    for (folder, suffix, kind) in [
-        (".oms/task/archive", ".md", "task-archive"),
-        (".oms/handoffs", ".md", "handoff"),
-    ] {
-        for path in helpers::files(&ctx, &ctx.repo.join(folder), suffix, 50000)? {
-            if path.parent() == Some(ctx.repo.join(folder).as_path()) && age(&path, cutoff) {
-                let _guard = storage::lock(&path)?;
-                if age(&path, cutoff) {
-                    candidate(&ctx, &mut items, kind, &path, apply)?;
-                }
+    match crate::archive::compact(&ctx, 0, Some(cutoff), apply) {
+        Ok(report) => {
+            for (path, family, _, _) in report.entries {
+                items.push(object([
+                    ("kind", string("archived-cold")),
+                    ("family", string(family)),
+                    ("path", string(path)),
+                ]));
+            }
+            if report.unlink_failed > 0 {
+                deferred.push(string("cold archive originals retained after commit"));
             }
         }
+        Err(e) => deferred.push(string(format!("cold archive deferred: {}", e.message))),
     }
     if let Ok(entries) = std::fs::read_dir(ctx.repo.join(".oms/checkpoints")) {
         for entry in entries {

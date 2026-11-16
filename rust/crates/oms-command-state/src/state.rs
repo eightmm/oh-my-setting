@@ -10,7 +10,7 @@ use std::path::Path;
 #[path = "state_projection.rs"]
 mod projection;
 
-pub(crate) const HELP: &str = "Usage: oms state [--repo PATH] [--json] [--refresh-ci]\n       oms state gpu-status [--json]\n       oms state gpu-wait --min-free-mib N [--gpu IDX] [--timeout-secs S] [--poll-ms M] [--json]\n       oms state-verify [--repo PATH] [--json]\n       oms inbox [--repo PATH] [--json] [--fix-safe]\n       oms dashboard [--repo PATH] [--json] [--watch [--interval N] [--count N]]\nState views never grant authority. Unsupported sources are reported as degraded.\n";
+pub(crate) const HELP: &str = "Usage: oms state [--repo PATH] [--json] [--refresh-ci]\n       oms state gpu-status [--json]\n       oms state gpu-wait --min-free-mib N [--gpu IDX] [--timeout-secs S] [--poll-ms M] [--json]\n       oms state compact [--repo PATH] [--keep-recent N] [--dry-run] [--json]\n       oms state archive <list|show|search|stats> [--repo PATH] [--json]\n       oms state-verify [--repo PATH] [--json]\n       oms inbox [--repo PATH] [--json] [--fix-safe]\n       oms dashboard [--repo PATH] [--json] [--watch [--interval N] [--count N]]\nState views never grant authority. Unsupported sources are reported as degraded.\n";
 
 fn decoded(output: Output) -> Result<Value> {
     require(output.0 == 0, String::from_utf8_lossy(&output.2))?;
@@ -382,6 +382,11 @@ pub(crate) fn run(
         && let Some(action @ ("gpu-status" | "gpu-wait")) = args.first().and_then(|v| v.to_str())
     {
         return crate::gpu::run(action, &args[1..], ctx);
+    }
+    if tool == "state"
+        && let Some(action @ ("compact" | "archive")) = args.first().and_then(|v| v.to_str())
+    {
+        return crate::archive::run(action, &args[1..], ctx);
     }
     let (values, flags): (&[&str], &[&str]) = match tool {
         "state" => (&["repo"], &["json", "refresh-ci"]),

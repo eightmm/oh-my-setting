@@ -124,6 +124,9 @@ pub fn parse<P: Parser + ?Sized>(
             }
         }
         Selection::Markdown => Ok(document(path, text, digest, true)),
+        Selection::Config if path == "Cargo.toml" || path.ends_with("/Cargo.toml") => Ok(
+            polyglot::cargo(path, text, digest, document(path, text, digest, false)),
+        ),
         Selection::Config => Ok(document(path, text, digest, false)),
         selection @ (Selection::Rust | Selection::JavaScript | Selection::Go | Selection::Cpp) => {
             Ok(polyglot::parse(selection, path, text, digest))

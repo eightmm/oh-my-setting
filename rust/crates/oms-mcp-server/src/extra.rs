@@ -230,12 +230,12 @@ impl Server<'_> {
     pub(crate) fn state_compact(&self, tool: &Value, args: &Value) -> ToolResult {
         let repo = self.repo(args)?;
         let apply = boolean(args, "apply")?;
-        let mut argv = vec![
-            "gc".into(),
-            if apply { "--apply" } else { "--dry-run" }.to_owned(),
-        ];
-        if let Some(days) = optional_integer(args, "keep_recent", 1, 3650)? {
-            argv.extend(["--days".into(), days.to_string()]);
+        let mut argv = vec!["state".into(), "compact".into(), "--json".into()];
+        if !apply {
+            argv.push("--dry-run".into());
+        }
+        if let Some(keep) = optional_integer(args, "keep_recent", 1, 3650)? {
+            argv.extend(["--keep-recent".into(), keep.to_string()]);
         }
         self.run_argv(tool, &argv, &repo)
     }

@@ -516,3 +516,89 @@ fn check_lexical_reference() {
         assert_eq!(actual["evidence"], case["evidence"], "BM25 scores {case}");
     }
 }
+
+#[test]
+fn rust_workspace_cache_and_impact() {
+    let f = Fixture::new();
+    for (path, contents) in [
+        ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"core\"]\n"),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\n",
+        ),
+        ("core/Cargo.toml", "[package]\nname = \"core\"\n"),
+        ("app/src/lib.rs", "pub fn app() {}\n"),
+        ("core/src/lib.rs", "pub fn core() {}\n"),
+        ("app/tests/check.rs", "#[test]\nfn check() {}\n"),
+    ] {
+        let target = f.0.join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, contents).unwrap();
+    }
+    fs::create_dir_all(f.state().join("cache")).unwrap();
+    fs::write(f.state().join("cache/old.json"), "{}").unwrap();
+    f.build();
+    assert!(f.state().join("cache.sqlite3").is_file());
+    assert!(!f.state().join("cache").exists());
+    assert_eq!(
+        fs::metadata(f.state().join("cache.sqlite3"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let graph = project::load(&f.state()).unwrap();
+    assert!(
+        graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["source"] == "file:app/Cargo.toml" && e["target"] == "file:core/src/lib.rs")
+    );
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["name"] == "check" && n["metadata"]["test"] == true)
+    );
+    let warm = f.build();
+    assert!(warm["stats"]["cached"].as_u64().unwrap() > 0);
+    assert_eq!(warm["stats"]["parsed"], 0);
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&f.0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    let base = git(&["write-tree"]);
+    fs::write(f.0.join("core/src/lib.rs"), "pub fn changed() {}\n").unwrap();
+    git(&["add", "core/src/lib.rs"]);
+    let head = git(&["write-tree"]);
+    let (code, affected) = f.query(&[
+        "affected",
+        "--base",
+        &base,
+        "--head",
+        &head,
+        "--depth",
+        "8",
+        "--runnable",
+        "*.rs",
+    ]);
+    assert_eq!(code, 0, "{affected}");
+    assert!(
+        affected.to_string().contains("app/tests/check.rs"),
+        "{affected}"
+    );
+}

@@ -2338,11 +2338,14 @@ fn new_command_tools() {
         bad(&c.tool("oms_memory_recall", args), "error:");
     }
     good(&c.tool("oms_state_compact", json!({})));
-    assert_eq!(record(&source)["argv"], json!(["gc", "--dry-run"]));
+    assert_eq!(
+        record(&source)["argv"],
+        json!(["state", "compact", "--json", "--dry-run"])
+    );
     good(&c.tool("oms_state_compact", json!({"apply":true,"keep_recent":7})));
     assert_eq!(
         record(&source)["argv"],
-        json!(["gc", "--apply", "--days", "7"])
+        json!(["state", "compact", "--json", "--keep-recent", "7"])
     );
     bad(
         &c.tool("oms_state_compact", json!({"apply":"yes"})),

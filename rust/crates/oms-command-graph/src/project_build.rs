@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const GRAPH_LIMIT: usize = 256 * 1024 * 1024;
 const SCHEMA: u32 = 2;
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 const EXCLUDES: &[&str] = &[
     ".git",
     ".oms",
@@ -72,6 +72,8 @@ pub fn test_path(path: &str) -> bool {
     }) || [
         "test_*.py",
         "*_test.py",
+        "test_*.rs",
+        "*_test.rs",
         "*_spec.py",
         "test-*.sh",
         "*-test.sh",
@@ -480,6 +482,21 @@ fn extraction(path: &str, data: &[u8], python: &mut impl Parser) -> Result<Value
         oms_graph::parse(path, &text, &digest, python)
             .map_err(|e| Error::new(format!("parser failed: {e:?}")))?
     };
+    if lang == "rust" {
+        let crate_dir = path
+            .split_once("/src/")
+            .or_else(|| path.split_once("/tests/"))
+            .map(|(dir, _)| dir)
+            .or_else(|| (path.starts_with("src/") || path.starts_with("tests/")).then_some(""));
+        if let Some(dir) = crate_dir {
+            let manifest = if dir.is_empty() {
+                "Cargo.toml".to_owned()
+            } else {
+                format!("{dir}/Cargo.toml")
+            };
+            parsed.refs.push(json!({"from":format!("file:{path}"),"relation":"imports","kind":"path","value":manifest,"line":1}));
+        }
+    }
     let kind = if test_path(path) { "test" } else { "file" };
     let id = format!("{kind}:{path}");
     if kind == "test" {
@@ -525,6 +542,65 @@ pub fn build(
     let found = discover(repo, options, cancel)?;
     Ok(build_from(repo, state, options, cancel, explicit_helper, found)?.0)
 }
+fn cache_open(state: &Path, writable: bool) -> Result<Option<rusqlite::Connection>> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = state.join("cache.sqlite3");
+    no_symlinks(&path)?;
+    if writable {
+        std::fs::create_dir_all(state)?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(Error::new("invalid graph cache file"));
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    } else if !path.exists() {
+        return Ok(None);
+    }
+    let flags = if writable {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+    } | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let db = rusqlite::Connection::open_with_flags(&path, flags).map_err(cache_error)?;
+    if writable {
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS file_cache (cache_key TEXT PRIMARY KEY, path TEXT NOT NULL, sha256 TEXT NOT NULL, version INTEGER NOT NULL, schema_ver INTEGER NOT NULL, payload BLOB NOT NULL);").map_err(cache_error)?;
+    }
+    Ok(Some(db))
+}
+fn cache_error(e: rusqlite::Error) -> Error {
+    Error::new(format!("project extraction cache: {e}"))
+}
+fn cache_get(
+    db: &rusqlite::Connection,
+    key: &str,
+    path: &str,
+    digest: &str,
+    version: u32,
+) -> Option<Value> {
+    let data: Vec<u8> = db.query_row("SELECT payload FROM file_cache WHERE cache_key=?1 AND path=?2 AND sha256=?3 AND version=?4 AND schema_ver=?5", rusqlite::params![key,path,digest,version,SCHEMA], |row| row.get(0)).ok()?;
+    if data.len() > 8 * 1024 * 1024 {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&data).ok().filter(|v| {
+        v["path"] == path
+            && v["sha256"] == digest
+            && v["parser_version"] == version
+            && v["nodes"].is_array()
+            && v["edges"].is_array()
+            && v["refs"].is_array()
+    })
+}
+
 fn build_from(
     repo: &Path,
     state: &Path,
@@ -547,27 +623,28 @@ fn build_from(
     let mut files = BTreeMap::new();
     let mut extractions = vec![];
     let mut cached = 0;
-    let mut keys = BTreeSet::new();
+    let legacy = state.join("cache");
+    no_symlinks(&legacy)?;
+    if std::fs::symlink_metadata(&legacy).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
+        std::fs::remove_dir_all(&legacy)?;
+    }
+    let mut db = cache_open(state, true)?.expect("writable cache");
+    let transaction = db.transaction().map_err(cache_error)?;
+    transaction
+        .execute_batch("CREATE TEMP TABLE wanted_cache (cache_key TEXT PRIMARY KEY);")
+        .map_err(cache_error)?;
     let root = Root::open(repo).map_err(|e| Error::new(format!("source root: {e:?}")))?;
     for (path, (digest, size)) in &found.files {
         crate::util::check(cancel)?;
         let (lang, version) = language(path).unwrap();
-        let key = sha(format!("{path}\n{digest}\n{version}\n{SCHEMA}"));
-        keys.insert(format!("{key}.json"));
-        let cache_path = state.join("cache").join(format!("{key}.json"));
+        let key = sha(format!("{path}\n{digest}\n{version}\n{VERSION}\n{SCHEMA}"));
+        transaction
+            .execute("INSERT INTO wanted_cache VALUES (?1)", [&key])
+            .map_err(cache_error)?;
         let old = if options.force {
             None
         } else {
-            read_json(&cache_path, 8 * 1024 * 1024)
-                .ok()
-                .flatten()
-                .filter(|v| {
-                    v["path"] == *path
-                        && v["sha256"] == *digest
-                        && v["nodes"].is_array()
-                        && v["edges"].is_array()
-                        && v["refs"].is_array()
-                })
+            cache_get(&transaction, &key, path, digest, version)
         };
         let was_cached = old.is_some();
         let payload = match old {
@@ -591,7 +668,12 @@ fn build_from(
                 let v = extraction(path, &data, &mut python)?;
                 let raw = bytes(&v, false)?;
                 if raw.len() <= 8 * 1024 * 1024 {
-                    write(&cache_path, &raw)?;
+                    transaction
+                        .execute(
+                            "INSERT OR REPLACE INTO file_cache VALUES (?1,?2,?3,?4,?5,?6)",
+                            rusqlite::params![key, path, digest, version, SCHEMA, raw],
+                        )
+                        .map_err(cache_error)?;
                 }
                 v
             }
@@ -642,26 +724,16 @@ fn build_from(
         &state.join("orientation.json"),
         &json!({"schema":1,"revision":revision,"generated_at":now(),"text":brief}),
     )?;
-    prune_cache(state, &keys)?;
+    transaction
+        .execute(
+            "DELETE FROM file_cache WHERE cache_key NOT IN (SELECT cache_key FROM wanted_cache)",
+            [],
+        )
+        .map_err(cache_error)?;
+    transaction.commit().map_err(cache_error)?;
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(cache_error)?;
     Ok((manifest, index))
-}
-fn prune_cache(state: &Path, wanted: &BTreeSet<String>) -> Result<()> {
-    let directory = state.join("cache");
-    if !std::fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
-        return Ok(());
-    }
-    let store = crate::util::open_store(state)?;
-    for name in store.names("cache", usize::MAX, true)? {
-        let label = name.to_string_lossy();
-        if !label.ends_with(".json") || wanted.contains(label.as_ref()) {
-            continue;
-        }
-        let path = Path::new("cache").join(name);
-        if let Ok(Some(snapshot)) = store.snapshot(&path, 8 * 1024 * 1024, true) {
-            store.remove(&path, &snapshot.raw, Some(&snapshot.generation))?;
-        }
-    }
-    Ok(())
 }
 pub fn load(state: &Path) -> Result<Value> {
     read_json(&state.join("graph.json"), GRAPH_LIMIT)?
@@ -1023,26 +1095,8 @@ pub(super) fn fallback_graph(
     } else {
         state.to_path_buf()
     };
-    let (store, prefix) = if state.exists() {
-        match state.strip_prefix(root.physical_root()) {
-            Ok(relative) => (
-                Some(
-                    oms_command_plan::storage::Store::open(root.physical_root())?
-                        .with_group_resolver(groups.or_else(crate::util::current_group_resolver)),
-                ),
-                relative.to_path_buf(),
-            ),
-            Err(_) => (
-                Some(
-                    oms_command_plan::storage::Store::open(&state)?
-                        .with_group_resolver(groups.or_else(crate::util::current_group_resolver)),
-                ),
-                PathBuf::new(),
-            ),
-        }
-    } else {
-        (None, PathBuf::new())
-    };
+    let _ = groups;
+    let cache = cache_open(&state, false).ok().flatten();
     let mut python = Python {
         session: None,
         helper: helper(helper_path)?,
@@ -1078,24 +1132,10 @@ pub(super) fn fallback_graph(
         }
         let (lang, version) = language(&path).ok_or_else(|| Error::new("no target parser"))?;
         let digest = sha(&data);
-        let key = sha(format!("{path}\n{digest}\n{version}\n{SCHEMA}"));
-        let cached = match &store {
-            Some(store) => store
-                .optional(
-                    prefix.join("cache").join(format!("{key}.json")),
-                    8 * 1024 * 1024,
-                )?
-                .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
-                .filter(|v| {
-                    v["path"] == path
-                        && v["sha256"] == digest
-                        && v["parser_version"] == version
-                        && v["nodes"].is_array()
-                        && v["edges"].is_array()
-                        && v["refs"].is_array()
-                }),
-            None => None,
-        };
+        let key = sha(format!("{path}\n{digest}\n{version}\n{VERSION}\n{SCHEMA}"));
+        let cached = cache
+            .as_ref()
+            .and_then(|db| cache_get(db, &key, &path, &digest, version));
         let parsed = match cached {
             Some(v) => v,
             None => match extraction(&path, &data, &mut python) {

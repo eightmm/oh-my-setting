@@ -1,6 +1,7 @@
 //! Native state, ledger, workspace and local job commands.
 #![forbid(unsafe_code)]
 
+mod archive;
 mod capsule;
 mod checkpoints;
 mod claims;

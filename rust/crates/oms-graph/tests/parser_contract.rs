@@ -207,3 +207,43 @@ fn polyglot_tokens_are_iterative_and_extract_basic_declarations() {
             .any(|n| n["name"] == "deep")
     );
 }
+
+#[test]
+fn cargo_paths_and_rust_test_attributes() {
+    let cargo = parse("crates/app/Cargo.toml", "[package]\nname = \"app\"\n[dependencies]\ncore = { path = \"../core\" }\nbad = { path = \"../../../outside\" }\n[workspace]\nmembers = [\n \"../core\",\n]\n", "d", &mut Fake::default()).unwrap();
+    assert_eq!(cargo.nodes[0]["metadata"]["package"], "app");
+    assert!(
+        cargo
+            .refs
+            .iter()
+            .any(|r| r["value"] == "crates/core/Cargo.toml")
+    );
+    assert!(
+        cargo
+            .refs
+            .iter()
+            .any(|r| r["value"] == "crates/core/src/lib.rs")
+    );
+    assert!(
+        !cargo
+            .refs
+            .iter()
+            .any(|r| r["value"].as_str().unwrap().contains("outside"))
+    );
+    let rust = parse("crates/app/src/lib.rs", "mod inner;\nuse crate::inner::thing;\n#[test]\nfn first() {}\n#[tokio::test]\nasync fn second() {}\nfn normal() {}", "d", &mut Fake::default()).unwrap();
+    for name in ["first", "second"] {
+        assert!(rust.nodes.iter().any(|n| n["name"] == name
+            && n["kind"] == "function"
+            && n["metadata"]["test"] == true));
+    }
+    assert!(
+        rust.refs
+            .iter()
+            .any(|r| r["value"] == "crates/app/src/inner.rs")
+    );
+    assert!(
+        rust.nodes
+            .iter()
+            .any(|n| n["name"] == "normal" && n["metadata"].get("test").is_none())
+    );
+}
