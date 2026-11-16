@@ -272,7 +272,14 @@ fn unavailable_services_fail_closed_with_io_split() {
     let tmp = Tmp::new();
     let r = repo(&tmp);
     let rs = r.to_str().unwrap();
-    assert_eq!(go(&tmp.0, &["--repo", rs, "init", "--goal", "g"]).0, 0);
+    assert_eq!(
+        go(
+            &tmp.0,
+            &["--repo", rs, "init", "--goal", "g", "--accept", "true"]
+        )
+        .0,
+        0
+    );
     let lint = |verify: &str| {
         let a = args(&[
             "--repo",
@@ -304,24 +311,18 @@ fn unavailable_services_fail_closed_with_io_split() {
         (0, true, "")
     );
     // Service-backed actions refuse: exit 2, empty stdout, `error:` on stderr.
-    let (c, o, e) = go_with(&UnavailableServices, &tmp.0, &["--repo", rs, "retire"]);
+    let (c, o, e) = go_with(&UnavailableServices, &tmp.0, &["--repo", rs, "accept"]);
     assert_eq!((c, o.as_str()), (2, ""), "{e}");
     assert!(e.starts_with("error: "), "{e}");
-    // Provider normalisation is a native service: unknown names are refused.
+    // Provider normalisation is a native service: unknown names are refused on claim.
+    assert_eq!(
+        go(&tmp.0, &["--repo", rs, "add", "--id", "t1", "--title", "x"]).0,
+        0
+    );
     let (c, o, e) = go_with(
         &UnavailableServices,
         &tmp.0,
-        &[
-            "--repo",
-            rs,
-            "add",
-            "--id",
-            "t1",
-            "--title",
-            "x",
-            "--provider",
-            "bogus",
-        ],
+        &["--repo", rs, "claim", "--id", "t1", "--provider", "bogus"],
     );
     assert_eq!((c, o.as_str()), (2, ""), "{e}");
     assert!(e.starts_with("error: "), "{e}");
