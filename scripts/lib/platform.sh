@@ -308,7 +308,10 @@ oms_native_route() {
     "$OMS_NATIVE_BINARY" --oms-select "$OMS_NATIVE_ROOT" "$OMS_NATIVE_REVISION" -- "$@" </dev/null >/dev/null || status=$?
   fi
   case "$status" in
-    0) exec "$OMS_NATIVE_BINARY" --oms-dispatch "$OMS_NATIVE_ROOT" "$OMS_NATIVE_REVISION" -- "$@" ;;
+    0)
+      unset OMS_NATIVE_OUTCOME OMS_NATIVE_DISPATCHED
+      exec "$OMS_NATIVE_BINARY" --oms-dispatch "$OMS_NATIVE_ROOT" "$OMS_NATIVE_REVISION" -- "$@"
+      ;;
     75) OMS_NATIVE_OUTCOME=declined; return 0 ;;
   esac
   OMS_NATIVE_OUTCOME=unverified

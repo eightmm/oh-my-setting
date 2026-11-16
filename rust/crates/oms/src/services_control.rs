@@ -116,6 +116,12 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
     request.cwd = cwd.map(Path::to_owned);
     request.stdin = Some(Vec::new());
     request.environment = environment;
+    let mut remove_environment = remove_environment;
+    for key in ["OMS_NATIVE_OUTCOME", "OMS_NATIVE_DISPATCHED"] {
+        if !remove_environment.iter().any(|v| v == key) {
+            remove_environment.push(OsString::from(key));
+        }
+    }
     request.remove_environment = remove_environment;
     request.streams = if merged {
         Streams::Merged
@@ -2337,7 +2343,9 @@ mod tests {
         let supervised = oms_command_landing::Services::supervise(
             &control,
             &VerifyRequest {
-                argv: sh("printf out; printf err >&2; exit 3"),
+                argv: sh(
+                    "printf '%s' \"${OMS_NATIVE_OUTCOME:-}${OMS_NATIVE_DISPATCHED:-}out\"; printf err >&2; exit 3",
+                ),
                 cwd: root.path().to_owned(),
                 wall: Duration::from_secs(20),
                 environment: Vec::new(),
