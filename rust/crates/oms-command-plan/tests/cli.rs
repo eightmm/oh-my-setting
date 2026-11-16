@@ -835,3 +835,84 @@ fn invalid_parent_traversal_and_relative_cwd() {
     );
     assert_ne!(go(Path::new("missing-cwd-for-plan"), &["list"]).0, 0);
 }
+
+#[test]
+fn merged_dependencies_scheduling_and_late_results() {
+    if isolated("merged_dependencies_scheduling_and_late_results") {
+        return;
+    }
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    let rs = r.to_str().unwrap();
+    let run = |rest: &[&str]| {
+        let mut command = vec!["--repo", rs];
+        command.extend_from_slice(rest);
+        go(&tmp.0, &command)
+    };
+    assert_eq!(run(&["init", "--goal", "g"]).0, 0);
+    let (code, _, err) = run(&[
+        "add",
+        "--id",
+        "bad",
+        "--title",
+        "bad",
+        "--depends",
+        "missing",
+    ]);
+    assert_eq!(code, 2);
+    assert!(err.contains("missing"), "{err}");
+    let (code, _, err) = run(&["add", "--id", "self", "--title", "bad", "--depends", "self"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("cycle"), "{err}");
+    for (id, priority) in [("a", "-1"), ("b", "+2")] {
+        let (code, _, err) = run(&[
+            "add",
+            "--id",
+            id,
+            "--title",
+            id,
+            "--allowed",
+            id,
+            "--priority",
+            priority,
+            "--resources",
+            "gpu,gpu",
+        ]);
+        assert_eq!(code, 0, "{err}");
+    }
+    let (code, out, err) = run(&["ready"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "b\na\n");
+    let (code, out, err) = run(&["ready", "--json", "--max-writers", "0"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"capacity_full\": true"), "{out}");
+    assert_eq!(run(&["next", "--max-review-backlog", "0"]).0, 3);
+    let (code, _, err) = run(&["claim", "--id", "a", "--provider", "codex"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&["ready"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.is_empty(), "shared resource should block b: {out}");
+    let (code, _, err) = run(&["review", "--id", "a"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = run(&["ready", "--json", "--max-review-backlog", "1"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("\"backpressure\": true"), "{out}");
+    let (code, _, err) = run(&["next", "--max-review-backlog", "1"]);
+    assert_eq!(code, 3);
+    assert!(err.contains("review backlog backpressure"), "{err}");
+    let before = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let (code, _, err) = run(&[
+        "review",
+        "--id",
+        "a",
+        "--lease-id",
+        "old",
+        "--artifact",
+        "result",
+    ]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("stale lease"), "{err}");
+    assert_eq!(before, fs::read(r.join(".oms/plan/tasks.json")).unwrap());
+    let ledger = fs::read_to_string(r.join(".oms/plan/late-results.jsonl")).unwrap();
+    assert!(ledger.contains("\"supplied_lease_id\":\"old\""), "{ledger}");
+}

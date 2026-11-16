@@ -1,6 +1,6 @@
 use crate::engine::{
     assignment, clean_paths, ensure_lineage, lint, new_task, plain, project_snapshot, receipt_id,
-    screen, split_list, valid_id,
+    scheduling_metadata, screen, split_list, valid_id, validate_graph,
 };
 use crate::json::{self, Value, empty, list, number, object, string};
 use crate::{Plan, Request, Response, Result, Snapshot, error, require};
@@ -145,7 +145,7 @@ impl Plan<'_> {
             json::keys(
                 row,
                 &["id", "title", "allowed", "verify", "depends"],
-                &["assignment", "covers"],
+                &["assignment", "covers", "resources", "contracts", "priority"],
             )?;
             let route = row.opt("assignment").cloned().unwrap_or_else(empty);
             assignment(&route)?;
@@ -192,14 +192,6 @@ impl Plan<'_> {
                 unique.len() == depends.len() && depends.iter().all(|s| valid_id(s)),
                 "proposal dependencies must be unique ids",
             )?;
-            for dep in &depends {
-                if !seen.iter().any(|s| s == dep) {
-                    require(
-                        s.task(dep).is_ok_and(|t| s.verified_done(t)),
-                        "proposal depends on unknown/later or unfinished existing task",
-                    )?;
-                }
-            }
             let covers = row.opt("covers").cloned().unwrap_or(Value::Array(vec![]));
             let cover_ids = covers.strings()?;
             require(
@@ -220,12 +212,50 @@ impl Plan<'_> {
                 route,
                 &self.context.ts,
             )?;
+            if row.opt("resources").is_some()
+                || row.opt("contracts").is_some()
+                || row.opt("priority").is_some()
+            {
+                let resources = row
+                    .opt("resources")
+                    .map(Value::strings)
+                    .transpose()?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|v| v.trim().to_owned())
+                    .collect::<Vec<_>>();
+                let contracts = row
+                    .opt("contracts")
+                    .map(Value::strings)
+                    .transpose()?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|v| v.trim().to_owned())
+                    .collect::<Vec<_>>();
+                let priority = row
+                    .opt("priority")
+                    .map(Value::int)
+                    .transpose()?
+                    .unwrap_or(0);
+                let priority = i32::try_from(priority)
+                    .map_err(|_| error("proposal priority must be an i32"))?;
+                scheduling_metadata(&mut t, &resources, &contracts, priority)?;
+            }
             if !cover_ids.is_empty() {
                 t.set("covers", covers)?;
             }
             seen.push(id.to_owned());
             prepared.push(t);
         }
+        let mut graph = s.ordered()?;
+        for task in &prepared {
+            if let Some(existing) = graph.iter_mut().find(|t| t.text("id") == task.text("id")) {
+                *existing = task.clone();
+            } else {
+                graph.push(task.clone());
+            }
+        }
+        validate_graph(&graph)?;
         let contract = object([
             ("schema", number(1)),
             ("spec_sha256", string(spec)),
@@ -277,8 +307,13 @@ impl Plan<'_> {
                     "role",
                     "assignment",
                     "covers",
+                    "resources",
+                    "contracts",
+                    "priority",
                 ] {
-                    let default = if field == "assignment" {
+                    let default = if field == "priority" {
+                        number(0)
+                    } else if field == "assignment" {
                         empty()
                     } else if ["verify", "role"].contains(&field) {
                         string("")

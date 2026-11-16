@@ -1,4 +1,4 @@
-use crate::engine::{STATES, age, task_ttl};
+use crate::engine::{STATES, age, parse_ts, task_ttl};
 use crate::json::{self, Value, empty, list, number, object, string};
 use crate::{Action, Plan, Request, Response, Result, Snapshot, error, require};
 use std::collections::{BTreeMap, BTreeSet};
@@ -136,14 +136,91 @@ impl Plan<'_> {
             _ => Err(error("not a read action")),
         }
     }
-    pub(crate) fn next(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
-        let mut selected = None;
-        for t in s.ordered()? {
-            if self.actionable(s, &t)? {
-                selected = Some(t);
-                break;
+    fn scheduled(
+        &self,
+        req: &Request,
+        s: &mut Snapshot,
+    ) -> Result<(Vec<Value>, bool, bool, usize)> {
+        let tasks = s.ordered()?;
+        let mut active = Vec::new();
+        let mut review = 0;
+        for task in &tasks {
+            if task.text("state") == "review" {
+                review += 1;
+            }
+            if matches!(task.text("state"), "claimed" | "running")
+                && !self.expired(s, task, false)?
+            {
+                active.push(task.clone());
             }
         }
+        let capacity = req.has("max-writers")
+            && active.len() as u64
+                >= req
+                    .value("max-writers")?
+                    .parse::<u64>()
+                    .map_err(|_| error("invalid max-writers"))?;
+        let backpressure = req.has("max-review-backlog")
+            && review as u64
+                >= req
+                    .value("max-review-backlog")?
+                    .parse::<u64>()
+                    .map_err(|_| error("invalid max-review-backlog"))?;
+        let mut eligible = Vec::new();
+        if !capacity && !backpressure {
+            for task in tasks {
+                if !self.actionable(s, &task)? {
+                    continue;
+                }
+                let paths = task.get("allowed_paths").strings()?;
+                let resources = task
+                    .opt("resources")
+                    .map(Value::strings)
+                    .transpose()?
+                    .unwrap_or_default();
+                let mut conflict = false;
+                for writer in &active {
+                    let writer_paths = writer.get("allowed_paths").strings()?;
+                    let writer_resources = writer
+                        .opt("resources")
+                        .map(Value::strings)
+                        .transpose()?
+                        .unwrap_or_default();
+                    if oms_contract_markdown::scope::scopes_overlap(
+                        Some(&paths),
+                        Some(&writer_paths),
+                    ) || resources.iter().any(|r| writer_resources.contains(r))
+                    {
+                        conflict = true;
+                        break;
+                    }
+                }
+                if !conflict {
+                    eligible.push(task);
+                }
+            }
+        }
+        let now = parse_ts(&self.context.ts).unwrap_or(0);
+        eligible.sort_by(|a, b| {
+            let priority = |t: &Value| t.opt("priority").and_then(|v| v.int().ok()).unwrap_or(0);
+            let age = |t: &Value| (now - parse_ts(t.text("created")).unwrap_or(now)).max(0);
+            priority(b)
+                .cmp(&priority(a))
+                .then_with(|| age(b).cmp(&age(a)))
+                .then_with(|| a.text("id").cmp(b.text("id")))
+        });
+        Ok((eligible, capacity, backpressure, review))
+    }
+    pub(crate) fn next(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
+        let (eligible, capacity, backpressure, _) = self.scheduled(req, s)?;
+        if capacity || backpressure {
+            return Err(crate::drift(if backpressure {
+                "review backlog backpressure"
+            } else {
+                "capacity_full"
+            }));
+        }
+        let selected = eligible.into_iter().next();
         let Some(mut t) = selected else {
             let mut response = Response {
                 code: 3,
@@ -197,10 +274,8 @@ impl Plan<'_> {
     fn ready(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
         let mut rows = Vec::new();
         let mut stderr = Vec::new();
-        for t in s.ordered()? {
-            if !self.actionable(s, &t)? {
-                continue;
-            }
+        let (eligible, capacity, backpressure, review) = self.scheduled(req, s)?;
+        for t in eligible {
             let expired = self.expired(s, &t, false)?;
             if expired {
                 stderr.extend(
@@ -253,6 +328,9 @@ impl Plan<'_> {
                 items.push(v);
             }
             Response::json(&object([
+                ("capacity_full", Value::Bool(capacity)),
+                ("backpressure", Value::Bool(backpressure)),
+                ("review_backlog", number(review)),
                 ("schema", number(1)),
                 (
                     "plan_id",

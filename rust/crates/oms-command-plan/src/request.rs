@@ -139,6 +139,11 @@ pub(crate) const NAMES: &[&str] = &[
     "expected-landing-receipt-sha256",
     "assignment",
     "depends",
+    "resources",
+    "contracts",
+    "priority",
+    "max-writers",
+    "max-review-backlog",
     "allowed",
     "role",
     "discovered-from",
@@ -304,7 +309,13 @@ impl Request {
                     || self.has("refreeze-acceptance"))),
             "--landed-commit cannot be combined with typed patch-land finish options",
         )?;
-        for name in ["ttl", "limit", "max-tasks"] {
+        for name in [
+            "ttl",
+            "limit",
+            "max-tasks",
+            "max-writers",
+            "max-review-backlog",
+        ] {
             if self.has(name) {
                 let s = self.value(name)?;
                 require(
@@ -323,6 +334,23 @@ impl Request {
                     "--max-tasks must be 1..12",
                 )?;
             }
+        }
+        if self.has("priority") {
+            self.value("priority")?
+                .parse::<i32>()
+                .map_err(|_| error("--priority must be an i32"))?;
+        }
+        for name in ["resources", "contracts", "priority"] {
+            require(
+                !self.has(name) || self.action == Add,
+                format!("--{name} is invalid for {}", self.action.name()),
+            )?;
+        }
+        for name in ["max-writers", "max-review-backlog"] {
+            require(
+                !self.has(name) || matches!(self.action, Ready | Next),
+                format!("--{name} is invalid for {}", self.action.name()),
+            )?;
         }
         let completion_options = [
             "completion-bundle",

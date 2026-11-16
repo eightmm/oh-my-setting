@@ -4,7 +4,7 @@ use crate::services::Services;
 use crate::storage::{self, ACTIVE, MAX_JSON, MAX_PATCH, Store};
 use crate::{Action, Request, Response, Result, drift, error, require};
 use chrono::{DateTime, NaiveDateTime, Utc};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -124,6 +124,84 @@ impl Context {
         self.plan_file == self.state_repo.join(ACTIVE)
     }
 }
+
+pub(crate) fn scheduling_metadata(
+    task: &mut Value,
+    resources: &[String],
+    contracts: &[String],
+    priority: i32,
+) -> Result<()> {
+    let mut resources = resources.to_vec();
+    for token in &resources {
+        require(
+            !token.is_empty()
+                && token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b)),
+            format!("invalid resource: {token}"),
+        )?;
+    }
+    resources.sort();
+    resources.dedup();
+    for token in contracts {
+        let (id, version) = token
+            .split_once('@')
+            .map_or((token.as_str(), None), |(id, v)| (id, Some(v)));
+        require(
+            valid_id(id)
+                && version.is_none_or(|v| {
+                    v.strip_prefix('v').is_some_and(|n| {
+                        !n.is_empty()
+                            && n.bytes().all(|b| b.is_ascii_digit())
+                            && n.parse::<u64>().is_ok()
+                    })
+                }),
+            format!("invalid contract reference: {token}"),
+        )?;
+    }
+    task.set("resources", list(resources.iter().map(String::as_str)))?;
+    task.set("contracts", list(contracts.iter().map(String::as_str)))?;
+    task.set("priority", number(priority))
+}
+
+pub(crate) fn validate_graph(tasks: &[Value]) -> Result<()> {
+    let mut graph = BTreeMap::new();
+    for task in tasks {
+        let id = task.text("id");
+        require(!graph.contains_key(id), format!("duplicate task: {id}"))?;
+        graph.insert(id, task.get("depends").strings()?);
+    }
+    for (id, deps) in &graph {
+        for dep in deps {
+            require(
+                graph.contains_key(dep),
+                format!("task {id} has unknown dependency {dep}"),
+            )?;
+        }
+    }
+    let mut done = BTreeSet::new();
+    loop {
+        let before = done.len();
+        for (id, deps) in &graph {
+            if deps.iter().all(|dep| done.contains(dep)) {
+                done.insert(*id);
+            }
+        }
+        if done.len() == graph.len() {
+            return Ok(());
+        }
+        if done.len() == before {
+            let cycle = graph
+                .keys()
+                .filter(|id| !done.contains(*id))
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(error(format!("dependency cycle involving: {cycle}")));
+        }
+    }
+}
+
 pub struct Snapshot {
     pub plan: Value,
     pub raw: Option<Vec<u8>>,
@@ -617,7 +695,8 @@ impl<'a> Plan<'a> {
         }))
     }
     pub(crate) fn actionable(&self, s: &mut Snapshot, t: &Value) -> Result<bool> {
-        if t.get("executor_id").truth()
+        if t.get("contracts").truth()
+            || t.get("executor_id").truth()
             || t.get("executor_soul_sha256").truth()
             || s.contract.get("satisfied") != &Value::Bool(true)
             || !s.deps_done(t)
@@ -690,6 +769,36 @@ impl<'a> Plan<'a> {
         require(valid_id(id), "--id must match [A-Za-z0-9._-]+")?;
         let mut t = s.task(id)?.clone();
         let state = t.text("state").to_owned();
+        if matches!(req.action, Claim | Land | Finish) && t.get("contracts").truth() {
+            return Err(error(
+                "contract_stale: contract registry verification is unavailable",
+            ));
+        }
+        if req.action == Review && req.has("lease-id") {
+            let supplied = req.value("lease-id")?;
+            if !["claimed", "running"].contains(&state.as_str())
+                || t.text("lease_id") != supplied
+                || self.expired(s, &t, true)?
+            {
+                let row = object([
+                    ("schema", number(1)),
+                    ("ts", string(&self.context.ts)),
+                    ("task_id", string(id)),
+                    ("supplied_lease_id", string(supplied)),
+                    ("current_lease_id", string(t.text("lease_id"))),
+                    ("current_state", string(&state)),
+                    ("reason", string("stale_lease")),
+                    ("artifact", string(req.text("artifact")?)),
+                    ("patch", string(req.text("patch")?)),
+                    ("result_reason", string(req.text("reason")?)),
+                ]);
+                self.store
+                    .append_private_atomic(".oms/plan/late-results.jsonl", &row)?;
+                return Err(drift(
+                    "stale lease; late result preserved in .oms/plan/late-results.jsonl",
+                ));
+            }
+        }
         if matches!(req.action, Claim | Start | Review | Repair | Land | Finish) {
             require(
                 !t.get("executor_id").truth() && !t.get("executor_soul_sha256").truth(),
@@ -988,9 +1097,6 @@ impl<'a> Plan<'a> {
         plain(req.text("verify")?, "task verify")?;
         plain(req.text("role")?, "task role")?;
         let depends = split_list(req.text("depends")?);
-        for dep in &depends {
-            s.task(dep)?;
-        }
         let mut task = new_task(
             &id,
             title,
@@ -1002,9 +1108,28 @@ impl<'a> Plan<'a> {
             route,
             &self.context.ts,
         )?;
+        if req.has("resources") || req.has("contracts") || req.has("priority") {
+            let csv = |value: &str| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            scheduling_metadata(
+                &mut task,
+                &csv(req.text("resources")?),
+                &csv(req.text("contracts")?),
+                req.text("priority")?.parse::<i32>().unwrap_or(0),
+            )?;
+        }
         if !found.is_empty() {
             task.set("discovered_from", string(found))?;
         }
+        let mut graph = s.ordered()?;
+        graph.push(task.clone());
+        validate_graph(&graph)?;
         s.put(&id, task)?;
         self.save(s)?;
         let mut response = Response::text(format!("plan: added {id} ({title})"));

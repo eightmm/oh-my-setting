@@ -220,8 +220,16 @@ fn spec(r: &Request) -> Spec {
         (Mode::Capsule, "export", _) => ("", "output", "", "", 0, 0, false),
         (Mode::Capsule, "verify" | "import", _) => ("", "", "", "", 1, 1, false),
         (Mode::Capsule, "diff", _) => ("", "", "", "", 2, 2, false),
-        (Mode::Backend, "target", "add") => ("", "ssh-alias workdir", "", "ssh-alias", 1, 1, false),
-        (Mode::Backend, "target", "remove") => ("", "", "", "", 1, 1, false),
+        (Mode::Backend, "target", "add") => (
+            "",
+            "ssh-alias workdir capability scheduler scratch-root",
+            "capability",
+            "ssh-alias",
+            1,
+            1,
+            false,
+        ),
+        (Mode::Backend, "target", "remove" | "approve" | "revoke") => ("", "", "", "", 1, 1, false),
         (Mode::Backend, "target", "status") => ("", "timeout", "", "", 1, 1, false),
         (Mode::Backend, "target", "sync") => ("", "timeout sha", "", "", 1, 1, false),
         (Mode::Backend, "describe", _) => ("", "image adapter", "", "", 1, 1, false),
@@ -575,7 +583,9 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 || r.mode == Mode::Experiment && r.action == "sweep";
         } else if sub_needed {
             let choices = if r.mode == Mode::Backend {
-                vec!["add", "remove", "list", "status", "sync"]
+                vec![
+                    "add", "remove", "list", "status", "sync", "approve", "revoke",
+                ]
             } else {
                 vec!["plan"]
             };

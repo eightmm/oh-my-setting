@@ -67,6 +67,9 @@ pub fn run(
     if argv.first().and_then(|s| s.to_str()) == Some("ssh-adapter") {
         return crate::ssh_adapter::run(&argv[1..], cwd, interrupted);
     }
+    if argv.first().and_then(|s| s.to_str()) == Some("exec-snapshot") {
+        return crate::exec_snapshot::run(&argv[1..], cwd, install_root, services, interrupted);
+    }
     let result = (|| {
         let request = crate::parse(argv)?;
         if request.has("help") || request.mode == Mode::Help {
@@ -503,18 +506,30 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                 };
                 let value = match r.subaction.as_str() {
                     "list" => crate::targets::listing(rt)?,
-                    "add" => crate::targets::update(
-                        rt,
-                        name,
-                        Some(r.text("ssh-alias", "")?),
-                        r.os("workdir")
-                            .map(|s| {
-                                s.to_str()
-                                    .ok_or_else(|| error("remote workdir must be UTF-8"))
-                            })
-                            .transpose()?,
-                    )?,
+                    "add" => {
+                        require(
+                            !r.has("scratch-root") || !r.text("scratch-root", "")?.is_empty(),
+                            "--scratch-root must be non-empty",
+                        )?;
+                        crate::targets::update_with_options(
+                            rt,
+                            name,
+                            Some(r.text("ssh-alias", "")?),
+                            r.os("workdir")
+                                .map(|s| {
+                                    s.to_str()
+                                        .ok_or_else(|| error("remote workdir must be UTF-8"))
+                                })
+                                .transpose()?,
+                            &strings(&r.all("capability"))?,
+                            r.text("scheduler", "none")?,
+                            r.text("scratch-root", "")?,
+                        )?
+                    }
                     "remove" => crate::targets::update(rt, name, None, None)?,
+                    "approve" | "revoke" => {
+                        crate::targets::approval(rt, name, r.subaction == "approve")?
+                    }
                     "status" | "sync" => crate::targets::inspect(
                         rt,
                         name,

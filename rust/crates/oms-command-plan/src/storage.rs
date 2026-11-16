@@ -389,6 +389,36 @@ impl Store {
             old.is_none(),
         ))
     }
+    pub fn append_private_atomic(&self, path: impl AsRef<Path>, row: &Value) -> Result<()> {
+        let path = path.as_ref();
+        let snapshot = self.snapshot(path, MAX_STREAM, true)?;
+        if let Some(snapshot) = &snapshot {
+            require(
+                snapshot.mode == 0o600,
+                "private plan object requires exact private mode",
+            )?;
+        }
+        let old = snapshot
+            .as_ref()
+            .map(|s| s.raw.as_slice())
+            .unwrap_or_default();
+        rows(old)?;
+        let encoded = json::encoded(row)?;
+        require(
+            encoded.len() <= MAX_ROW && old.len() + encoded.len() <= MAX_STREAM,
+            "plan ledger exceeds bound",
+        )?;
+        let mut new = old.to_vec();
+        new.extend_from_slice(&encoded);
+        self.mutate(path, Some(old), &new, MAX_STREAM, true)?;
+        let published = self
+            .snapshot(path, MAX_STREAM, false)?
+            .ok_or_else(|| error("private ledger missing"))?;
+        require(
+            published.mode == 0o600,
+            "private plan object requires exact private mode",
+        )
+    }
     pub fn append(&self, path: impl AsRef<Path>, row: &Value) -> Result<()> {
         let path = path.as_ref();
         let old = self.optional(path, MAX_STREAM)?.unwrap_or_default();

@@ -1,4 +1,4 @@
-//! Local target metadata never grants remote command authority.
+//! Local target metadata and explicit execution approval.
 use crate::services::TargetRequest;
 use crate::storage::Runtime;
 use crate::value::*;
@@ -18,7 +18,66 @@ fn name(s: &str, label: &str) -> Result<()> {
     )
 }
 fn record(v: &Value) -> Result<()> {
-    keys(v, &["ssh_alias", "workdir"], &[])?;
+    keys(
+        v,
+        &["ssh_alias", "workdir"],
+        &[
+            "capabilities",
+            "scheduler",
+            "scratch_root",
+            "execution_approved",
+            "approved_fingerprint",
+        ],
+    )?;
+    if let Some(caps) = v.opt("capabilities") {
+        for cap in caps.array()? {
+            let cap = cap.str()?;
+            require(
+                !cap.is_empty()
+                    && cap.len() <= 64
+                    && cap.bytes().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-".contains(&c)
+                    }),
+                "invalid capability",
+            )?;
+        }
+    }
+    if let Some(scheduler) = v.opt("scheduler") {
+        require(
+            matches!(scheduler.str()?, "none" | "slurm"),
+            "invalid scheduler",
+        )?;
+    }
+    if let Some(root) = v.opt("scratch_root") {
+        let root = root.str()?;
+        if !root.is_empty() {
+            require(
+                (root.starts_with('/') || root.starts_with("~/"))
+                    && !root.chars().any(char::is_control)
+                    && root.split('/').all(|part| part != "..")
+                    && !crate::capsule::sensitive_value(root),
+                "invalid scratch root",
+            )?;
+            require(root != "~/", "invalid scratch root")?;
+        }
+    }
+    if let Some(approved) = v.opt("execution_approved") {
+        require(
+            matches!(approved, Value::Bool(_)),
+            "invalid execution approval",
+        )?;
+    }
+    if let Some(fingerprint) = v.opt("approved_fingerprint") {
+        let fingerprint = fingerprint.str()?;
+        require(
+            fingerprint.is_empty()
+                || fingerprint.len() == 64
+                    && fingerprint
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid approval fingerprint",
+        )?;
+    }
     name(v.text("ssh_alias"), "SSH alias")?;
     let workdir = v.get("workdir").str()?;
     require(
@@ -53,6 +112,17 @@ pub fn update(
     ssh: Option<&str>,
     workdir: Option<&str>,
 ) -> Result<Value> {
+    update_with_options(rt, target, ssh, workdir, &[], "none", "")
+}
+pub fn update_with_options(
+    rt: &Runtime<'_>,
+    target: &str,
+    ssh: Option<&str>,
+    workdir: Option<&str>,
+    capabilities: &[String],
+    scheduler: &str,
+    scratch_root: &str,
+) -> Result<Value> {
     name(target, "target name")?;
     let _guard = rt.lock(Path::new(FILE))?;
     rt.invalidate(Path::new(FILE));
@@ -79,7 +149,18 @@ pub fn update(
                 "remote workdir must equal the repository's resolved home-relative path: {expected}"
             ),
         )?;
-        let row = object([("ssh_alias", string(ssh)), ("workdir", string(expected))]);
+        let mut caps = capabilities.to_vec();
+        caps.sort();
+        caps.dedup();
+        let row = object([
+            ("ssh_alias", string(ssh)),
+            ("workdir", string(expected)),
+            ("capabilities", a(caps.iter().map(string))),
+            ("scheduler", string(scheduler)),
+            ("scratch_root", string(scratch_root)),
+            ("execution_approved", b(false)),
+            ("approved_fingerprint", string("")),
+        ]);
         record(&row)?;
         require(
             entries.opt(target).is_none(),
@@ -98,6 +179,56 @@ pub fn update(
     rt.write_locked(Path::new(FILE), &bytes, crate::storage::MAX_STATE, &_guard)?;
     Ok(value)
 }
+fn fingerprint(row: &Value) -> Result<String> {
+    let identity = object([
+        ("ssh_alias", string(row.text("ssh_alias"))),
+        ("workdir", string(row.text("workdir"))),
+        (
+            "scheduler",
+            string(row.opt("scheduler").map_or("none", text)),
+        ),
+        (
+            "scratch_root",
+            string(row.opt("scratch_root").map_or("", text)),
+        ),
+    ]);
+    Ok(sha(canonical(&identity)?))
+}
+pub fn approved(row: &Value) -> Result<bool> {
+    record(row)?;
+    Ok(row
+        .opt("execution_approved")
+        .is_some_and(|v| matches!(v, Value::Bool(true)))
+        && row.text("approved_fingerprint") == fingerprint(row)?)
+}
+pub fn approval(rt: &Runtime<'_>, target: &str, grant: bool) -> Result<Value> {
+    require(
+        !std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| !v.is_empty() && v != "0"),
+        "only a parent may change execution approval",
+    )?;
+    name(target, "target name")?;
+    let guard = rt.lock(Path::new(FILE))?;
+    rt.invalidate(Path::new(FILE));
+    let mut value = listing(rt)?;
+    let mut entries = value.get("targets").clone();
+    let mut row = entries
+        .opt(target)
+        .cloned()
+        .ok_or_else(|| error(format!("unknown remote target: {target}")))?;
+    let digest = if grant {
+        fingerprint(&row)?
+    } else {
+        String::new()
+    };
+    row.set("execution_approved", b(grant))?;
+    row.set("approved_fingerprint", string(digest))?;
+    entries.set(target, row)?;
+    value.set("targets", entries)?;
+    let mut bytes = sorted_pretty(&value)?;
+    bytes.push(b'\n');
+    rt.write_locked(Path::new(FILE), &bytes, crate::storage::MAX_STATE, &guard)?;
+    Ok(value)
+}
 pub fn check(rt: &Runtime<'_>, target: &str) -> Result<Value> {
     let valid = name(target, "target name").and_then(|_| {
         require(
@@ -109,7 +240,14 @@ pub fn check(rt: &Runtime<'_>, target: &str) -> Result<Value> {
         Ok(_) => "SSH target execution is not yet supported".into(),
         Err(e) => format!("{e}; SSH target execution is not yet supported"),
     };
+    let execution_approved = if valid.is_ok() {
+        let registry = listing(rt)?;
+        approved(registry.get("targets").get(target))?
+    } else {
+        false
+    };
     Ok(object([
+        ("execution_approved", b(execution_approved)),
         ("profile", string("remote")),
         ("ready", b(false)),
         ("target_valid", b(valid.is_ok())),

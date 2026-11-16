@@ -75,6 +75,7 @@ fn child_test(name: &str) -> bool {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name])
         .env_remove("OMS_HARNESS_CHILD")
+        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
         .env("OMS_RUNTIME_TEST_CHILD", "1")
         .env("OMS_LOCK_DIR", f.0.join("locks"))
         .status()
@@ -366,4 +367,100 @@ fn release_promotion_rejects_invalid_inputs() {
         false,
     );
     assert_eq!(response.code, 75);
+}
+
+#[test]
+fn snapshot_detects_checkout_and_lockfile_drift() {
+    if child_test("snapshot_detects_checkout_and_lockfile_drift") {
+        return;
+    }
+    let f = Fixture::new();
+    std::fs::write(f.0.join("Cargo.lock"), "original\n").unwrap();
+    for args in [
+        &["add", "Cargo.lock"][..],
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ][..],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&f.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let created = f.run(&["exec-snapshot", "create"], false);
+    assert_eq!(
+        created.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let snapshot: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let sha = snapshot["snapshot_sha256"].as_str().unwrap();
+    assert_eq!(
+        f.run(&["exec-snapshot", "verify", "--snapshot", sha], false)
+            .code,
+        0
+    );
+    std::fs::write(f.0.join("new-file"), "untracked").unwrap();
+    assert_eq!(
+        f.run(&["exec-snapshot", "verify", "--snapshot", sha], false)
+            .code,
+        2
+    );
+    assert_eq!(f.run(&["exec-snapshot", "create"], false).code, 2);
+    std::fs::remove_file(f.0.join("new-file")).unwrap();
+    std::fs::write(f.0.join("Cargo.lock"), "changed\n").unwrap();
+    assert_eq!(
+        f.run(&["exec-snapshot", "verify", "--snapshot", sha], false)
+            .code,
+        2
+    );
+}
+
+#[test]
+fn target_approval_is_bound_to_identity() {
+    if child_test("target_approval_is_bound_to_identity") {
+        return;
+    }
+    let f = Fixture::new();
+    let dir = f.0.join(".oms/runtime");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("targets.json");
+    std::fs::write(
+        &path,
+        r#"{"schema":1,"targets":{"node":{"ssh_alias":"node","workdir":"~/repo"}}}"#,
+    )
+    .unwrap();
+    let check = || f.run(&["backend", "check", "remote", "--target", "node"], false);
+    let result: serde_json::Value = serde_json::from_slice(&check().stdout).unwrap();
+    assert_eq!(result["execution_approved"], false);
+    let result = f.run(&["backend", "target", "approve", "node"], false);
+    assert_eq!(
+        result.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&check().stdout).unwrap();
+    assert_eq!(result["execution_approved"], true);
+    let mut data: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    data["targets"]["node"]["ssh_alias"] = "other".into();
+    std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&check().stdout).unwrap();
+    assert_eq!(result["execution_approved"], false);
+    assert_eq!(
+        f.run(&["backend", "target", "revoke", "node"], false).code,
+        0
+    );
 }

@@ -106,6 +106,7 @@ pub mod capsule;
 mod cli_schema;
 pub mod context;
 pub mod evidence;
+pub mod exec_snapshot;
 pub mod experiment;
 mod help;
 mod io;

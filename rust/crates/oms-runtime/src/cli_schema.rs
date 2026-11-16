@@ -276,7 +276,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"}
-   ],"children":[{"name":"add","help":"register metadata only; validates alias syntax without reading SSH config"},{"name":"list","help":"read local targets without creating state"},{"name":"remove","help":"remove one existing local target"},{"name":"status","help":"inspect checkout"},{"name":"sync","help":"clone or fast-forward through origin; push first"}],"groups":[]},
+   ],"children":[{"name":"add","help":"register metadata only; validates alias syntax without reading SSH config"},{"name":"list","help":"read local targets without creating state"},{"name":"remove","help":"remove one existing local target"},{"name":"approve","help":"approve execution for the current target identity"},{"name":"revoke","help":"revoke execution approval"},{"name":"status","help":"inspect checkout"},{"name":"sync","help":"clone or fast-forward through origin; push first"}],"groups":[]},
   {"path":["backend", "target", "add"],"description":"",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
@@ -284,7 +284,10 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
     {"names":["name"],"help":"unique local name with the same syntax as --ssh-alias"},
     {"names":["--ssh-alias"],"required":true,"help":"1..64 letters, digits, dots, underscores or hyphens; starts with a letter or digit"},
-    {"names":["--workdir"],"help":"optional ~/REL; must equal the resolved local repository path under HOME"}
+    {"names":["--workdir"],"help":"optional ~/REL; must equal the resolved local repository path under HOME"},
+    {"names":["--capability"],"action":"append","default":[]},
+    {"names":["--scheduler"],"choices":["none","slurm"],"default":"none"},
+    {"names":["--scratch-root"]}
    ],"children":[],"groups":[]},
   {"path":["backend", "target", "list"],"description":"",
    "arguments":[
@@ -299,6 +302,10 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
     {"names":["name"]}
    ],"children":[],"groups":[]},
+  {"path":["backend", "target", "approve"],"description":"",
+   "arguments":[{"names":["-h","--help"],"action":"help","help":"show this help message and exit"},{"names":["--repo"],"default":"SUPPRESS"},{"names":["--pretty"],"action":"store_true","default":"SUPPRESS"},{"names":["name"]}],"children":[],"groups":[]},
+  {"path":["backend", "target", "revoke"],"description":"",
+   "arguments":[{"names":["-h","--help"],"action":"help","help":"show this help message and exit"},{"names":["--repo"],"default":"SUPPRESS"},{"names":["--pretty"],"action":"store_true","default":"SUPPRESS"},{"names":["name"]}],"children":[],"groups":[]},
   {"path":["backend", "target", "status"],"description":"",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
