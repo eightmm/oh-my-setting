@@ -1157,6 +1157,7 @@ fn main() {
             .mode(0o700)
             .create(&root)
             .unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
         let status = Command::new(std::env::current_exe().unwrap())
             .args(std::env::args_os().skip(1))
             .env("OMS_PANEL_CORE_FIXTURE", &root)

@@ -22,6 +22,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("tests")).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
         fs::write(root.join("lib.sh"), "# Parse records.\nparseRecord() {\n  printf '%s' 'alpha record'\n}\nparse_again() {\n  parseRecord\n}\n").unwrap();
         fs::write(
             root.join("tests/test-lib.sh"),

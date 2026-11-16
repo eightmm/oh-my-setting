@@ -1490,6 +1490,7 @@ fn main() {
             .mode(0o700)
             .create(&base)
             .unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
         let _guard = RootGuard(base.clone());
         let state = base.join("state");
         let worktrees = base.join("wt");

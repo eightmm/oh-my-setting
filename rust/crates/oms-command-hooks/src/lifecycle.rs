@@ -1464,6 +1464,7 @@ mod tests {
             let p = std::env::temp_dir()
                 .join(format!("oms-hooks-unit-{label}-{}-{n}", std::process::id()));
             fs::create_dir_all(&p).expect("mkdir temp");
+            let p = fs::canonicalize(&p).expect("canonicalize temp");
             Self(p)
         }
     }

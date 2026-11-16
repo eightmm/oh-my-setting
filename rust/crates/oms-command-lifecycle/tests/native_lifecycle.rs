@@ -168,6 +168,7 @@ fn native_configuration_and_services() {
     if std::env::var_os("OMS_LIFECYCLE_FIXTURE").is_none() {
         let root = std::env::temp_dir().join(format!("oms-native-test-{}", std::process::id()));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
         let fixture = Fixture(root);
         let git = Command::new("sh")
             .args(["-c", "command -v git"])

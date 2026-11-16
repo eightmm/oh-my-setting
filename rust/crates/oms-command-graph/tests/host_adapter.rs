@@ -24,6 +24,7 @@ impl TempDir {
             std::env::temp_dir().join(format!("oms-graph-{prefix}-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).expect("create temp dir");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("chmod temp dir");
+        let path = fs::canonicalize(&path).expect("canonicalize temp dir");
         Self { path }
     }
 

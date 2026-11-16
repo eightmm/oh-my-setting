@@ -20,6 +20,7 @@ impl TempDir {
             std::env::temp_dir().join(format!("oms-hooks-{prefix}-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).expect("mkdir temp");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("chmod temp");
+        let path = fs::canonicalize(&path).expect("canonicalize temp");
         Self(path)
     }
 
