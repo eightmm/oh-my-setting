@@ -6,6 +6,8 @@ use regex::Regex;
 use serde_json::json;
 use std::sync::OnceLock;
 
+mod polyglot;
+
 pub use oms_graph_shell::ParseResult as GraphResult;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14,6 +16,10 @@ pub enum Selection {
     Shell,
     Markdown,
     Config,
+    Rust,
+    JavaScript,
+    Go,
+    Cpp,
     UnsupportedNotebook,
     Unknown,
 }
@@ -25,6 +31,10 @@ impl Selection {
             Self::Shell => Some(("shell", 8)),
             Self::Markdown => Some(("markdown", 2)),
             Self::Config => Some(("config", 1)),
+            Self::Rust => Some(("rust", 1)),
+            Self::JavaScript => Some(("javascript", 1)),
+            Self::Go => Some(("go", 1)),
+            Self::Cpp => Some(("cpp", 1)),
             Self::UnsupportedNotebook | Self::Unknown => None,
         }
     }
@@ -36,6 +46,16 @@ pub fn select(path: &str) -> Selection {
         (&[".py"][..], Selection::Python),
         (&[".sh", ".bash"][..], Selection::Shell),
         (&[".md", ".markdown"][..], Selection::Markdown),
+        (&[".rs"][..], Selection::Rust),
+        (
+            &[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"][..],
+            Selection::JavaScript,
+        ),
+        (&[".go"][..], Selection::Go),
+        (
+            &[".c", ".h", ".cc", ".cpp", ".hpp", ".cu", ".cuh"][..],
+            Selection::Cpp,
+        ),
         (&[".json", ".yaml", ".yml", ".toml"][..], Selection::Config),
         (&[".ipynb"][..], Selection::UnsupportedNotebook),
     ] {
@@ -105,6 +125,9 @@ pub fn parse<P: Parser + ?Sized>(
         }
         Selection::Markdown => Ok(document(path, text, digest, true)),
         Selection::Config => Ok(document(path, text, digest, false)),
+        selection @ (Selection::Rust | Selection::JavaScript | Selection::Go | Selection::Cpp) => {
+            Ok(polyglot::parse(selection, path, text, digest))
+        }
         other => Err(Error::Unsupported(other)),
     }
 }

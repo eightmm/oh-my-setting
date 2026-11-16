@@ -41,6 +41,10 @@ pub fn run_with_writer(
         .map(|_| options.integer("count", 1, 1, 1_000_000))
         .transpose()?;
     let follow = options.has("watch") || (logging && options.has("follow"));
+    // Only a watcher that will wait between refreshes listens for wakeups.
+    let wake = (follow || terminal.is_some())
+        .then(|| crate::wakeup::Wakeup::bind(repo))
+        .flatten();
     let room = commands::room(options).unwrap_or_default();
     let mut read = attention::load(repo, &room);
     let mut previous: Option<Value> = None;
@@ -107,12 +111,13 @@ pub fn run_with_writer(
                 break;
             }
             if let Some(terminal) = &mut terminal {
-                let keys = terminal.wait(
+                let (keys, woken) = terminal.wait_woken(
                     deadline
                         .saturating_duration_since(Instant::now())
                         .min(Duration::from_millis(100)),
+                    wake.as_ref(),
                 )?;
-                let mut refresh = false;
+                let mut refresh = woken;
                 let mut changed = false;
                 let mut calls_key: Option<(String, bool)> = None;
                 let mut calls: Vec<Value> = Vec::new();
@@ -230,8 +235,12 @@ pub fn run_with_writer(
                     draw(output, &frame, interactive, &mut last_frame, true)?;
                     output.flush().map_err(Error::new)?;
                 }
-            } else {
-                std::thread::sleep(Duration::from_millis(100));
+            } else if crate::wakeup::wait(
+                wake.as_ref(),
+                deadline.saturating_duration_since(Instant::now()),
+                interrupted,
+            ) {
+                break;
             }
         }
     }

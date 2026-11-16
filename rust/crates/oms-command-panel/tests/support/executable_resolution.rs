@@ -287,7 +287,18 @@ fn resolution_cases(cases: &[&str]) {
             std::os::unix::fs::symlink(&path_dir, &alias).unwrap();
             child.env("PATH", alias);
         }
-        let output = child.output().unwrap();
+        // A sibling test forking while the probe binary was just written holds
+        // it open for writing; exec then fails briefly with ETXTBSY.
+        let mut busy = 0;
+        let output = loop {
+            match child.output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && busy < 100 => {
+                    busy += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.unwrap(),
+            }
+        };
         assert!(
             output.status.success(),
             "{case}: {}{}",

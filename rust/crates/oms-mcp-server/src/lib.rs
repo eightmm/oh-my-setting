@@ -7,6 +7,7 @@
 #[macro_use]
 pub mod value;
 mod command;
+mod extra;
 pub use command::{Captured, CommandExecutor, CommandRequest, SubprocessExecutor};
 mod peer;
 mod storage;
@@ -470,6 +471,10 @@ impl<'a> Server<'a> {
                         "oms_peer_start" => self.start_peer(args),
                         "oms_peer_result" => self.peer_result(args),
                         "oms_peer_operations" => self.peer_operations(args),
+                        "oms_memory_recall" => self.memory_recall(tool, args),
+                        "oms_state_compact" => self.state_compact(tool, args),
+                        "oms_failure_diagnose" => self.failure_diagnose(args),
+                        "oms_symbol_slice" => self.symbol_slice(args),
                         _ => self.run_tool(tool, args),
                     };
                     match output {

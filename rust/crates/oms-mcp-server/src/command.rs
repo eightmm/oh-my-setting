@@ -347,7 +347,11 @@ impl Server<'_> {
             }
             argv.push(value.into());
         }
-        let proc = self.command(&argv, &repo, Duration::from_secs(30))?;
+        self.run_argv(tool, &argv, &repo)
+    }
+    /// Run one fixed argv and bound its output like every command-backed tool.
+    pub(crate) fn run_argv(&self, tool: &Value, argv: &[String], repo: &Path) -> ToolResult {
+        let proc = self.command(argv, repo, Duration::from_secs(30))?;
         let count = if proc.code == 0 {
             proc.stdout_chars
         } else {

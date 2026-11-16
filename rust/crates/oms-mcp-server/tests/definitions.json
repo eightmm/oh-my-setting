@@ -753,5 +753,141 @@
       "idempotentHint": true,
       "openWorldHint": false
     }
+  },
+  {
+    "name": "oms_memory_recall",
+    "description": "Recall shared project memory notes ranked for a query (agent-memory recall). Read-only; returns bounded JSON.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository whose harness state to read (default: the server's working directory)."
+        },
+        "query": {
+          "type": "string",
+          "description": "Free-text query to recall memory for; must not begin with '-'."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum notes to return (default 10)."
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "oms_symbol_slice",
+    "description": "Surgical read-only code slice from one repository file, numbered, at most 250 lines. Give symbol to get a matching definition and its block, or start_line/end_line for an explicit range. Runs in-process: rejects traversal, symlinks, hard links, private state and secret-bearing files.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository whose harness state to read (default: the server's working directory)."
+        },
+        "path": {
+          "type": "string",
+          "description": "Repository-relative file path."
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Identifier whose definition (fn, struct, class, def, function, shell function, ...) to slice. Excludes start_line/end_line."
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "First line of an explicit range (default 1)."
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Last line of an explicit range; clamped to 250 lines from start_line."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "oms_failure_diagnose",
+    "description": "Diagnose a failure: classify error text into the canonical failure taxonomy (text, optional exit), check whether a command already failed in the fail ledger (cmd), or list recent ledger fingerprints when neither is given. One bounded read-only call; returns JSON {mode, exit, output}.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository whose harness state to read (default: the server's working directory)."
+        },
+        "text": {
+          "type": "string",
+          "description": "Error output to classify; takes precedence over cmd."
+        },
+        "cmd": {
+          "type": "string",
+          "description": "Command line to look up in the fail ledger; must not begin with '-'."
+        },
+        "exit": {
+          "type": "integer",
+          "minimum": -255,
+          "maximum": 255,
+          "description": "Exit status to classify together with text."
+        }
+      },
+      "required": []
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "oms_state_compact",
+    "description": "Retention plan for aged harness state (oms gc). Dry run by default: reports what would be reclaimed. Only apply=true removes aged state, so request it only when asked.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository whose harness state to read (default: the server's working directory)."
+        },
+        "apply": {
+          "type": "boolean",
+          "description": "true to apply the compaction; default false is a read-only plan."
+        },
+        "keep_recent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650,
+          "description": "Retention window in days (oms gc --days); state newer than this is kept. Default 30."
+        }
+      },
+      "required": []
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   }
 ]

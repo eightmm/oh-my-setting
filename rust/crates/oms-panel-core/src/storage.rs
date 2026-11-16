@@ -217,3 +217,37 @@ impl Transaction<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn identical_json_write_preserves_file_identity() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "oms-panel-write-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::open(&root).unwrap();
+        let tx = store
+            .transaction("snapshot-test", Duration::from_secs(2))
+            .unwrap();
+        let path = Path::new(".oms/panel-state/snapshot.json");
+        let value = serde_json::json!({"status": "ready"});
+        tx.write_json(path, &value, false, MAX_STATE).unwrap();
+        let before = std::fs::metadata(root.join(path)).unwrap();
+        tx.write_json(path, &value, false, MAX_STATE).unwrap();
+        let after = std::fs::metadata(root.join(path)).unwrap();
+        assert_eq!(
+            (before.ino(), before.mtime(), before.mtime_nsec()),
+            (after.ino(), after.mtime(), after.mtime_nsec())
+        );
+        drop(tx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

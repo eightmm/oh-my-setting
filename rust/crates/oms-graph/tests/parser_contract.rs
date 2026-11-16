@@ -167,3 +167,43 @@ fn canonical_reference_corpus() {
         );
     }
 }
+
+#[test]
+fn polyglot_tokens_are_iterative_and_extract_basic_declarations() {
+    for (path, source, symbol, imported) in [
+        (
+            "app.ts",
+            "import x from './dep'; export class Widget {}",
+            "Widget",
+            "./dep",
+        ),
+        (
+            "app.go",
+            "package app\nimport (\n \"example/dep\"\n)\ntype Thing struct {}",
+            "Thing",
+            "example/dep",
+        ),
+        (
+            "app.cpp",
+            "#include \"dep.h\"\nnamespace demo {}",
+            "demo",
+            "dep.h",
+        ),
+    ] {
+        let result = parse(path, source, "d", &mut Fake::default()).unwrap();
+        assert!(result.nodes.iter().any(|n| n["name"] == symbol));
+        assert!(result.refs.iter().any(|r| r["value"] == imported));
+    }
+    let source = format!(
+        "{}pub fn deep() {{}}{}",
+        "{".repeat(100_000),
+        "}".repeat(100_000)
+    );
+    assert!(
+        parse("deep.rs", &source, "d", &mut Fake::default())
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n["name"] == "deep")
+    );
+}

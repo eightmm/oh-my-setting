@@ -7,6 +7,7 @@ mod claims;
 pub mod deps;
 mod failures;
 mod gc;
+mod gpu;
 pub mod helpers;
 pub mod inventory;
 pub mod job_metrics;

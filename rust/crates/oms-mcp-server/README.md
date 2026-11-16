@@ -1,6 +1,6 @@
 # Native MCP component
 
-This crate implements the persistent stdio server and all 27 tools from
+This crate implements the persistent stdio server and all 31 tools from
 `oms-mcp-server.py`. It is an unintegrated
 component, **not a Python retirement or installation claim**. Root workspace,
 lockfile, CLI routing, provider configuration, packaging and lifecycle changes
@@ -61,7 +61,7 @@ or cancellation grants. No latency, physical-disk or HPC performance claim is ma
 | `initialize` | Supported session revision or 2025-06-18 fallback; lines 2018–2038 |
 | `ping` | Revision-dependent complete discriminator; lines 2039–2040 |
 | `tools/list` | Stable full/core definitions, cache hints; lines 2041–2045 |
-| `tools/call` | All 27 tools remain callable in both discovery profiles; lines 2112–2180 |
+| `tools/call` | All 31 tools remain callable in both discovery profiles; lines 2112–2180 |
 | `resources/list`, `resources/read` | Exact versioned graph template, MIME and CSP metadata; lines 2046–2063 and 914–941 |
 | `tasks/get` | Opt-in modern capability check, live/terminal snapshot and embedded final result; lines 2064–2111 and 1786–1826 |
 | `tasks/update` | Canonical refusal: no outstanding input requests; same handle branch |
@@ -127,6 +127,10 @@ module during development, never by a production subprocess or build script.
 | `oms_execution_graph_status` | `graph exec status --json` | 720–726 |
 | `oms_execution_graph_route` | `graph exec route --json --run RUN` | 727–745 |
 | `oms_execution_graph_events` | `graph exec events --json --limit 40 --run RUN` | 746–767 |
+| `oms_memory_recall` | `agent-memory recall --json --limit N QUERY` (native addition) | n/a |
+| `oms_symbol_slice` | In-process bounded numbered slice; no spawn, no scrubber crate (local fail-closed secret screen) | n/a |
+| `oms_failure_diagnose` | One of `runtime failure classify`, `fail-ledger check --cmd CMD`, `fail-ledger list --json --limit 10` (native addition) | n/a |
+| `oms_state_compact` | `gc --dry-run\|--apply [--days N]`; `keep_recent` is the retention window in days (native addition) | n/a |
 
 The table anchors identify canonical definitions. Execution handlers are at
 852–1000, 1105–1290, 1292–1753 and 1857–1929; `tool_definitions` starts at 771.
@@ -298,7 +302,7 @@ crate; all three frozen-corpus tests pass with the reconstructed producer.
 
 The three new compiled scenarios cover the 70 frozen exchanges, raw peer paths
 and lossless value/metadata/graph behavior. Existing scenarios retain the prior
-27-tool, profile, protocol, receipt, output, cancellation and argv coverage.
+31-tool, profile, protocol, receipt, output, cancellation and argv coverage.
 Only expectations whose canonical behavior changed from the former native
 parser refusal were corrected, using frozen reference evidence first.
 Reference metadata and local API checks supplement the existing suites; no

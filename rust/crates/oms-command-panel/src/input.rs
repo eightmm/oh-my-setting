@@ -244,25 +244,40 @@ impl TerminalInput {
         Ok(Some(guard))
     }
     pub fn wait(&mut self, duration: Duration) -> Result<Vec<Key>> {
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+        self.wait_woken(duration, None).map(|(keys, _)| keys)
+    }
+    /// Like [`Self::wait`], also polling the wakeup socket; the flag is true
+    /// when a producer woke the watcher (the datagram burst is consumed).
+    pub fn wait_woken(
+        &mut self,
+        duration: Duration,
+        wake: Option<&crate::wakeup::Wakeup>,
+    ) -> Result<(Vec<Key>, bool)> {
+        use rustix::event::{PollFd, PollFlags, poll};
         require(
             rustix::termios::tcgetpgrp(&self.file).map_err(Error::new)?
                 == rustix::process::getpgrp(),
             "terminal foreground ownership changed",
         )?;
         let duration = duration.min(Duration::from_millis(100));
-        let timeout = Timespec {
-            tv_sec: duration.as_secs() as _,
-            tv_nsec: duration.subsec_nanos() as _,
-        };
-        let mut descriptors = [PollFd::new(&self.file, PollFlags::IN)];
-        let count = match poll(&mut descriptors, Some(&timeout)) {
-            Ok(v) => v,
-            Err(rustix::io::Errno::INTR) => return Ok(vec![]),
+        let timeout = crate::wakeup::timespec(duration);
+        let wake_fd = wake.map(|w| w.fd());
+        let mut descriptors = vec![PollFd::new(&self.file, PollFlags::IN)];
+        if let Some(fd) = &wake_fd {
+            descriptors.push(PollFd::new(fd, PollFlags::IN));
+        }
+        match poll(&mut descriptors, Some(&timeout)) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => return Ok((vec![], false)),
             Err(e) => return Err(Error::new(e)),
-        };
+        }
+        let readable = descriptors[0].revents().contains(PollFlags::IN);
+        let wake_ready = descriptors
+            .get(1)
+            .is_some_and(|d| d.revents().contains(PollFlags::IN));
+        let woken = wake_ready && wake.is_some_and(|w| w.drain_burst());
         let mut output = Vec::new();
-        if count > 0 {
+        if readable {
             let mut data = [0; 4096];
             match self.file.read(&mut data) {
                 Ok(0) => output.push(Key::Eof),
@@ -278,7 +293,7 @@ impl TerminalInput {
         if let Some(key) = self.decoder.expire() {
             output.push(key);
         }
-        Ok(output)
+        Ok((output, woken))
     }
 }
 impl Drop for TerminalInput {

@@ -491,7 +491,7 @@ fn discovery_protocols() {
     let listed = c.call("tools/list", json!({"_meta":modern()}));
     let golden: Value = serde_json::from_str(include_str!("definitions.json")).unwrap();
     assert_eq!(listed["result"]["tools"], golden);
-    assert_eq!(golden.as_array().unwrap().len(), 27);
+    assert_eq!(golden.as_array().unwrap().len(), 31);
     assert_eq!(listed["result"]["ttlMs"], 300000);
     let d = c.call("server/discover", json!({}));
     assert_eq!(
@@ -2308,6 +2308,261 @@ fn fake_oms() {
     std::io::stdout().flush().unwrap();
     std::process::exit(cfg["exit"].as_i64().unwrap_or(0) as i32);
 }
+fn new_command_tools() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    let mut c = Client::new(&source, &repo, true, false, false);
+    good(&c.tool("oms_memory_recall", json!({"query":"cache layout"})));
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "agent-memory",
+            "recall",
+            "--json",
+            "--limit",
+            "10",
+            "cache layout"
+        ])
+    );
+    good(&c.tool("oms_memory_recall", json!({"query":"x","limit":3})));
+    assert_eq!(record(&source)["argv"][4], "3");
+    for args in [
+        json!({}),
+        json!({"query":""}),
+        json!({"query":"--all-repos"}),
+        json!({"query":"q","limit":0}),
+        json!({"query":"q","limit":51}),
+        json!({"query":7}),
+    ] {
+        bad(&c.tool("oms_memory_recall", args), "error:");
+    }
+    good(&c.tool("oms_state_compact", json!({})));
+    assert_eq!(record(&source)["argv"], json!(["gc", "--dry-run"]));
+    good(&c.tool("oms_state_compact", json!({"apply":true,"keep_recent":7})));
+    assert_eq!(
+        record(&source)["argv"],
+        json!(["gc", "--apply", "--days", "7"])
+    );
+    bad(
+        &c.tool("oms_state_compact", json!({"apply":"yes"})),
+        "boolean",
+    );
+    bad(
+        &c.tool("oms_state_compact", json!({"keep_recent":0})),
+        "keep_recent",
+    );
+    fixture_settings(&source, json!({"stdout":"{\"code\":\"x\"}"}));
+    let r = c.tool("oms_failure_diagnose", json!({"text":"boom","exit":3}));
+    good(&r);
+    assert_eq!(
+        record(&source)["argv"],
+        json!(["runtime", "failure", "classify", "--exit=3", "--", "boom"])
+    );
+    assert_eq!(payload(&r)["mode"], "classify");
+    assert_eq!(payload(&r)["output"]["code"], "x");
+    fixture_settings(&source, json!({"stdout":"seen before","exit":3}));
+    let r = c.tool("oms_failure_diagnose", json!({"cmd":"cargo test"}));
+    good(&r);
+    assert_eq!(
+        record(&source)["argv"],
+        json!(["fail-ledger", "check", "--cmd", "cargo test"])
+    );
+    assert_eq!(payload(&r)["exit"], 3);
+    assert_eq!(payload(&r)["output"], "seen before");
+    fixture_settings(&source, json!({"stdout":"[]"}));
+    good(&c.tool("oms_failure_diagnose", json!({})));
+    assert_eq!(
+        record(&source)["argv"],
+        json!(["fail-ledger", "list", "--json", "--limit", "10"])
+    );
+    bad(
+        &c.tool("oms_failure_diagnose", json!({"cmd":"--help"})),
+        "cannot begin",
+    );
+    fixture_settings(&source, json!({"stdout":"nope","exit":1,"stderr":"broken"}));
+    bad(&c.tool("oms_failure_diagnose", json!({"text":"t"})), "nope");
+}
+fn symbol_slice() {
+    use std::os::unix::fs::symlink;
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    let write = |name: &str, body: &[u8]| {
+        let p = repo.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "src/a.rs",
+        b"// fn commented() {}\nuse x;\n\npub struct Plain;\n\nimpl Plain {\n    fn run(&self) -> char {\n        let c = '{';\n        if true {\n            return c;\n        }\n        '}'\n    }\n}\n\nfn tail() {}\n",
+    );
+    write(
+        "tool.py",
+        b"import os\n\nclass Box:\n    def get(self):\n        return {1: 2}\n\n    def put(self):\n        pass\n\nx = 1\n",
+    );
+    write(
+        "run.sh",
+        b"#!/bin/sh\nhelper() {\n  echo \"}\"\n}\nhelper\n",
+    );
+    let big: String = (1..=400).map(|n| format!("line {n}\n")).collect();
+    write("big.txt", big.as_bytes());
+    let huge = format!("fn huge() {{\n{}}}\n", "    x;\n".repeat(300));
+    write("huge.rs", huge.as_bytes());
+    let mut c = Client::new(&source, &repo, true, false, false);
+    let range = |r: &Value| {
+        let p = payload(r);
+        (
+            p["start_line"].as_u64().unwrap(),
+            p["end_line"].as_u64().unwrap(),
+        )
+    };
+    let r = c.tool(
+        "oms_symbol_slice",
+        json!({"path":"src/a.rs","symbol":"run"}),
+    );
+    good(&r);
+    assert_eq!(range(&r), (7, 13), "char-literal braces do not unbalance");
+    assert_eq!(payload(&r)["total_lines"], 16);
+    assert_eq!(payload(&r)["truncated"], false);
+    assert_eq!(
+        payload(&r)["lines"][0],
+        "     7:     fn run(&self) -> char {"
+    );
+    for (path, symbol, expected) in [
+        ("src/a.rs", "Plain", (4, 4)),
+        ("src/a.rs", "tail", (16, 16)),
+        ("tool.py", "Box", (3, 8)),
+        ("tool.py", "get", (4, 5)),
+        ("run.sh", "helper", (2, 4)),
+    ] {
+        let r = c.tool("oms_symbol_slice", json!({"path":path,"symbol":symbol}));
+        good(&r);
+        assert_eq!(range(&r), expected, "{path} {symbol}");
+    }
+    let r = c.tool(
+        "oms_symbol_slice",
+        json!({"path":"huge.rs","symbol":"huge"}),
+    );
+    good(&r);
+    assert_eq!(range(&r), (1, 250));
+    assert_eq!(payload(&r)["truncated"], true);
+    assert_eq!(payload(&r)["lines"].as_array().unwrap().len(), 250);
+    for (args, expected) in [
+        (json!({"path":"big.txt"}), (1, 250)),
+        (
+            json!({"path":"big.txt","start_line":10,"end_line":5000}),
+            (10, 259),
+        ),
+        (json!({"path":"big.txt","start_line":390}), (390, 400)),
+        (
+            json!({"path":"big.txt","start_line":2,"end_line":3}),
+            (2, 3),
+        ),
+    ] {
+        let r = c.tool("oms_symbol_slice", args.clone());
+        good(&r);
+        assert_eq!(range(&r), expected, "{args}");
+    }
+    for (args, part) in [
+        (json!({"path":"big.txt","start_line":401}), "beyond"),
+        (
+            json!({"path":"big.txt","start_line":9,"end_line":8}),
+            "precedes",
+        ),
+        (
+            json!({"path":"big.txt","symbol":"a","start_line":1}),
+            "excludes",
+        ),
+        (json!({"path":"big.txt","symbol":"a b"}), "identifier"),
+        (
+            json!({"path":"src/a.rs","symbol":"commented"}),
+            "no definition",
+        ),
+        (
+            json!({"path":"src/a.rs","symbol":"absent"}),
+            "no definition",
+        ),
+        (json!({"path":"big.txt","start_line":0}), "start_line"),
+        (json!({}), "path must"),
+        (json!({"path":"../escape"}), "path must"),
+        (json!({"path":"/etc/hosts"}), "path must"),
+        (json!({"path":"src//a.rs"}), "path must"),
+        (json!({"path":"src/./a.rs"}), "path must"),
+        (json!({"path":"src\\a.rs"}), "path must"),
+        (json!({"path":"missing.rs"}), "cannot read"),
+        (json!({"path":"src"}), "cannot read"),
+    ] {
+        bad(&c.tool("oms_symbol_slice", args.clone()), part);
+    }
+    // Links never resolve: neither a symlinked file, a symlinked directory
+    // nor a second hard link to a regular file.
+    symlink(repo.join("src/a.rs"), repo.join("link.rs")).unwrap();
+    symlink(repo.join("src"), repo.join("dir")).unwrap();
+    std::fs::hard_link(repo.join("tool.py"), repo.join("hard.py")).unwrap();
+    for path in ["link.rs", "dir/a.rs", "hard.py", "tool.py"] {
+        bad(
+            &c.tool("oms_symbol_slice", json!({"path":path})),
+            "cannot read",
+        );
+    }
+    for path in [
+        ".env",
+        "a/.env.local",
+        ".git/config",
+        ".oms/state.json",
+        "k/id_rsa",
+        "x.pem",
+    ] {
+        bad(
+            &c.tool("oms_symbol_slice", json!({"path":path})),
+            "private or secret",
+        );
+    }
+    // Secret-shaped content withholds the whole file, wherever the range is.
+    let leaked = ["gh", "p_", &"a".repeat(36)].concat();
+    write("tok.txt", format!("clean\n{leaked}\n").as_bytes());
+    let header = ["-----BE", "GIN PRIV", "ATE KEY-----"].concat();
+    write("blk.txt", format!("{header}\nbody\nbody\nend\n").as_bytes());
+    for (path, args) in [
+        (
+            "tok.txt",
+            json!({"path":"tok.txt","start_line":1,"end_line":1}),
+        ),
+        ("blk.txt", json!({"path":"blk.txt","start_line":3})),
+    ] {
+        let r = c.tool("oms_symbol_slice", args);
+        bad(&r, "secret-shaped");
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains(&leaked) && !text.contains("body"), "{path}");
+    }
+    let assignment = ["pass", "word = \"", "hunter2hunter2", "\""].concat();
+    write("cfg.txt", format!("a\n{assignment}\nb\n").as_bytes());
+    good(&c.tool("oms_symbol_slice", json!({"path":"cfg.txt","start_line":3})));
+    bad(
+        &c.tool("oms_symbol_slice", json!({"path":"cfg.txt","start_line":1})),
+        "assignment",
+    );
+    write("bin.dat", b"ab\0cd");
+    bad(
+        &c.tool("oms_symbol_slice", json!({"path":"bin.dat"})),
+        "binary",
+    );
+    write("empty.txt", b"");
+    bad(
+        &c.tool("oms_symbol_slice", json!({"path":"empty.txt"})),
+        "empty",
+    );
+    write("large.txt", &vec![b'a'; 2 * 1024 * 1024 + 1]);
+    bad(
+        &c.tool("oms_symbol_slice", json!({"path":"large.txt"})),
+        "cannot read",
+    );
+    assert!(
+        !source.join("last-call.json").exists(),
+        "symbol slices must not spawn oms"
+    );
+}
 fn command_interruption() {
     let t = Temp::new();
     let source = t.source();
@@ -2455,7 +2710,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 27] = [
+    let cases: [(&str, fn()); 29] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -2470,6 +2725,8 @@ fn main() {
         ("discovery_protocols", discovery_protocols),
         ("transport_bounds", transport_bounds),
         ("fixed_argv", fixed_argv),
+        ("new_command_tools", new_command_tools),
+        ("symbol_slice", symbol_slice),
         ("output_bounds", output_bounds),
         ("graph_render", graph_render),
         ("peer_reading", peer_reading),

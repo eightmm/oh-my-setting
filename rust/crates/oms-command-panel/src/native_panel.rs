@@ -520,6 +520,16 @@ fn split_panel(
             ]),
             stop,
         )?;
+        // Cosmetic and best effort: a refused option never blocks the launch.
+        let status = hud_status_right(prefix, repo);
+        for (option, value) in [("status-right-length", "90"), ("status-right", &status)] {
+            let _ = tmux_quiet(
+                services,
+                repo,
+                &["set-option", "-t", &format!("={session}:"), option, value],
+                stop,
+            );
+        }
         terminals::tmux(
             services,
             repo,
@@ -2036,6 +2046,29 @@ fn new_uuid() -> String {
     )
 }
 
+/// tmux `status-right` for a managed session: the live OMS HUD, refreshed by
+/// tmux's own `status-interval`, with plain `oms` when the HUD cannot run.
+/// tmux expands `#` and `%` (and balances parentheses) inside `#( )`, so a repo
+/// path containing them is not interpolated at all.
+fn hud_status_right(prefix: &[String], repo: &Path) -> String {
+    const FALLBACK: &str = "oms";
+    let repo = repo.to_string_lossy();
+    if repo.contains(['#', '%', '(', ')', '\n', '\r'])
+        || prefix
+            .iter()
+            .any(|p| p.contains(['#', '%', '(', ')', '\n', '\r']))
+    {
+        return FALLBACK.into();
+    }
+    let program = prefix
+        .iter()
+        .map(|p| crate::commands::shell_quote(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let repo = crate::commands::shell_quote(&repo);
+    format!("#({program} hud --tmux --repo {repo} 2>/dev/null || printf {FALLBACK})")
+}
+
 #[cfg(test)]
 pub(crate) fn test_entry_prefix(source: &Path) -> Result<Vec<String>> {
     entry_prefix(source)
@@ -2052,4 +2085,30 @@ pub(crate) fn test_entry_matches(repo: &Path, prefix: &[String]) -> bool {
     let command = format!("{command} panel --repo {repo_arg}");
     match_panel_command(&command, repo) == Some(false)
         && match_panel_command(&format!("{command} --watch"), repo) == Some(true)
+}
+
+#[cfg(test)]
+mod hud_status {
+    use super::hud_status_right;
+    use std::path::Path;
+
+    #[test]
+    fn hud_status_runs_the_entry_with_a_plain_fallback() {
+        let prefix = vec!["/opt/oms bin/oms".to_string()];
+        assert_eq!(
+            hud_status_right(&prefix, Path::new("/work/it's")),
+            "#('/opt/oms bin/oms' hud --tmux --repo '/work/it'\\''s' 2>/dev/null || printf oms)"
+        );
+    }
+
+    #[test]
+    fn hud_status_never_interpolates_tmux_metacharacters() {
+        for repo in ["/w/a#b", "/w/50%", "/w/(x)", "/w/a\nb"] {
+            assert_eq!(hud_status_right(&["oms".into()], Path::new(repo)), "oms");
+        }
+        assert_eq!(
+            hud_status_right(&["/o/#oms".into()], Path::new("/w")),
+            "oms"
+        );
+    }
 }

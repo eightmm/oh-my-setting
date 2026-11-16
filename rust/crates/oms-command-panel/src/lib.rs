@@ -14,12 +14,14 @@ pub mod reader;
 pub mod recommend;
 pub mod render;
 pub mod usage;
+pub mod wakeup;
 pub mod watch;
 
 pub use oms_panel_core::{Error, Result, Services};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+pub use wakeup::notify_wakeup;
 
 pub type Output = (i32, Vec<u8>, Vec<u8>);
 
