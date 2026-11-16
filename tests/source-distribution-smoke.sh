@@ -152,7 +152,7 @@ for command in agent-call peer-ask peer-review peer-delegate plan-run; do
   grep -Fq 'max' <<< "$help" || fail "$command help omits max effort"
   grep -Fq 'ultra' <<< "$help" || fail "$command help omits ultra effort"
 done
-OMS_NATIVE_OUTCOME=absent bash "$ROOT/scripts/oms" output-digest -- \
+OMS_NATIVE_OUTCOME=absent bash "$ROOT/scripts/oms" output-digest --no-store -- \
   bash "$ROOT/scripts/install-skills.sh" --help >/dev/null ||
   fail "scripts/oms leaked OMS_NATIVE_OUTCOME into native child process"
 if grep -Fq 'oms run-capsule' "$ROOT/scripts/init.sh"; then

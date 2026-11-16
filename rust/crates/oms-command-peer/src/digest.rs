@@ -56,7 +56,7 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             context.cwd,
             args.command.clone(),
             None,
-            31_536_000,
+            86_400,
             true,
         )
         .map_err(|e| Error::new(125, e.message))?;

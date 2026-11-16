@@ -228,8 +228,13 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     let mut request = Request::new(job.argv);
     request.cwd = Some(std::fs::canonicalize(job.cwd).map_err(|e| e.to_string())?);
     request.stdin = job.stdin;
-    request.remove_environment = job
-        .remove_environment
+    let mut remove_environment = job.remove_environment;
+    for key in ["OMS_NATIVE_OUTCOME", "OMS_NATIVE_DISPATCHED"] {
+        if !remove_environment.iter().any(|v| v == key) {
+            remove_environment.push(OsString::from(key));
+        }
+    }
+    request.remove_environment = remove_environment
         .into_iter()
         .filter(|name| !job.environment.iter().any(|(key, _)| key == name))
         .collect();
