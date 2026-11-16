@@ -34,24 +34,17 @@ pub enum Navigation {
     Help,
     List,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PythonRequirement {
-    Required,
-    NotRequired,
-}
-
 pub struct LegacyCommand {
     pub source: Discovery,
     pub args: Vec<OsString>,
     pub tool: OsString,
     pub target: PathBuf,
-    pub python: PythonRequirement,
     pub replace_process: bool,
 }
 impl LegacyCommand {
     /// This returns a checked script path only. The owner must establish its
-    /// Bash 5 and optional Python runtime contract before executing it. No
-    /// lifecycle producer is implemented by a fallback in this library.
+    /// Bash 5 contract before executing it. No lifecycle producer is
+    /// implemented by a fallback in this library.
     pub fn checked_target(&self) -> Result<PathBuf, Error> {
         self.source.check()?;
         let mut name = self.tool.clone();
@@ -77,7 +70,6 @@ pub enum Route {
     Legacy {
         args: Vec<OsString>,
         tool: OsString,
-        python: PythonRequirement,
         replace_process: bool,
     },
 }
@@ -124,7 +116,6 @@ impl Prepared {
         let Route::Legacy {
             args,
             tool,
-            python,
             replace_process,
         } = self.route
         else {
@@ -138,7 +129,6 @@ impl Prepared {
             args,
             tool,
             target,
-            python,
             replace_process,
         };
         command.checked_target()?;
@@ -270,20 +260,10 @@ fn legacy(args: &[OsString]) -> Result<Route, Error> {
         .first()
         .ok_or_else(|| Error::integrity("missing legacy tool"))?
         .clone();
-    let python = if matches!(tool.as_bytes(), b"doctor" | b"uninstall")
-        || args[1..]
-            .iter()
-            .any(|a| matches!(a.as_bytes(), b"-h" | b"--help"))
-    {
-        PythonRequirement::NotRequired
-    } else {
-        PythonRequirement::Required
-    };
     let replace_process = matches!(tool.as_bytes(), b"panel" | b"harness");
     Ok(Route::Legacy {
         args: args[1..].to_vec(),
         tool,
-        python,
         replace_process,
     })
 }

@@ -1060,6 +1060,7 @@ pub(crate) fn run(
                 );
             }
         }
+        crate::payload::repair_cache(&repair_paths, flag)?;
         let mut repair = options.clone();
         repair.tool = "install".into();
         repair.flags.remove("--repair");

@@ -221,3 +221,37 @@ fn secret_only_does_not_charge_machine_hits() {
     assert!(oms_scrub::scan_secret(&input, &[]).unwrap().is_empty());
     assert_eq!(scan(&input, &[]), Err(Error::TooManyHits));
 }
+
+/// Self-review gate: every regular tracked file that can enter diff or prompt
+/// context passes the outbound scanner. Env files and `.github/` (CI
+/// indirections, not literal secrets) are excluded as in the shell gate.
+#[test]
+fn scrubber_passes_tracked_repository_sources() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let listed = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--", "."])
+        .args([":(exclude).env*", ":(exclude,glob).github/**"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for name in listed.stdout.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+        let name = std::str::from_utf8(name).unwrap();
+        let path = root.join(name);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        checked += 1;
+        match scan(&std::fs::read(&path).unwrap(), &[]) {
+            Ok(hits) if hits.is_empty() => {}
+            result => failures.push(format!("{name}: {result:?}")),
+        }
+    }
+    assert!(checked > 0);
+    assert!(failures.is_empty(), "{failures:#?}");
+}

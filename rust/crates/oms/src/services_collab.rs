@@ -933,6 +933,10 @@ impl HookHostServices for HookHost {
         )
         .map(|_| ())
     }
+
+    fn check_python_syntax(&self, path: &Path, source: &[u8]) -> Option<bool> {
+        crate::check_python_syntax_with_companion(path, source)
+    }
 }
 
 // ------------------------------------------------------------------ lifecycle

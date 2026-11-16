@@ -249,33 +249,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             .is_some_and(|v| v >= 5),
         "Bash 5.0 or newer is required",
     )?;
-    let mut body = format!("OMS: {version} ({commit})\nOS: {os}\nBash: {bash}\n");
-    let python = process(
-        c.cwd,
-        vec!["python3".into(), "--version".into()],
-        None,
-        Duration::from_secs(5),
-        c.interrupted,
-        &[],
-    )
-    .ok()
-    .filter(|r| r.code == 0)
-    .and_then(|r| {
-        let text = String::from_utf8_lossy(&r.stdout);
-        let version = text.trim().strip_prefix("Python ")?;
-        let pieces: Vec<_> = version.split('.').collect();
-        if pieces.len() >= 2
-            && pieces[..2]
-                .iter()
-                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-        {
-            Some(format!("{}.{}", pieces[0], pieces[1]))
-        } else {
-            None
-        }
-    })
-    .unwrap_or_else(|| "unavailable".into());
-    body += &format!("Python: {python}\n");
+    let mut body = format!("OMS: {version} ({commit})\nOS: {os}\nBash: {bash}\nPython: retired\n");
     if o.has("from-failure") {
         let row = c.services.failure_report(c.cwd, o.get("from-failure"))?;
         for (label, key) in [

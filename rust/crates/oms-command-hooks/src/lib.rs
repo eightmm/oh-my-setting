@@ -69,6 +69,10 @@ pub trait HostServices: Send + Sync {
         _next: &str,
     ) {
     }
+
+    fn check_python_syntax(&self, _path: &Path, _source: &[u8]) -> Option<bool> {
+        None
+    }
 }
 
 /// Fail-closed default host adapter when no packaged host supplies `HostServices`.

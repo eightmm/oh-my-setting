@@ -2,7 +2,6 @@ use crate::{Output, common::*, shell};
 use serde_json::json;
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     path::{Component, Path},
     time::Duration,
 };
@@ -149,34 +148,19 @@ fn problem(path: &Path, cwd: &Path, ctx: &Context<'_>) -> Option<String> {
                 )
             });
     }
-    let argv = if kind == "bash" {
-        let shell = env_path("BASH")
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| "bash".into());
-        vec![shell.into_os_string(), "-n".into(), path.as_os_str().into()]
-    } else {
-        // AST is the language oracle; Python runs only for a Python edit, in
-        // isolated mode, with an explicit interpreter and no project imports.
-        let interpreter =
-            env_path("OMS_PYTHON").or_else(|| executable(std::ffi::OsStr::new("python3")))?;
-        vec![
-            interpreter.into_os_string(),
-            "-I".into(),
-            "-B".into(),
-            "-c".into(),
-            OsString::from(
-                "import ast,sys\ntry:\n ast.parse(sys.stdin.buffer.read(), filename=sys.argv[1])\nexcept SyntaxError as e:\n print('python: %s (line %s)' % (e.msg,e.lineno)); sys.exit(1)\nexcept (ValueError,RecursionError):\n pass",
-            ),
-            path.as_os_str().into(),
-        ]
-    };
+    if kind == "python" {
+        return match ctx.host.check_python_syntax(path, &raw) {
+            Some(false) => Some("python: syntax error".into()),
+            _ => None,
+        };
+    }
+    let shell = env_path("BASH")
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| "bash".into());
+    let argv = vec![shell.into_os_string(), "-n".into(), path.as_os_str().into()];
     let p = invocation(argv, Some(raw), cwd, Duration::from_secs(3), 64 * 1024, ctx).ok()?;
     if !p.complete || p.code == 0 {
         return None;
-    }
-    if kind == "python" {
-        let s = String::from_utf8_lossy(&p.stdout).trim().to_owned();
-        return (!s.is_empty()).then_some(s);
     }
     let shown = path.strip_prefix(cwd).unwrap_or(path).to_string_lossy();
     let detail =

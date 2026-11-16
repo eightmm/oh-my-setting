@@ -690,6 +690,9 @@ impl oms_command_landing::Services for ControlServices<'_> {
             }
         }
     }
+    fn check_python_syntax(&self, path: &Path, source: &[u8]) -> Option<bool> {
+        crate::check_python_syntax_with_companion(path, source)
+    }
 }
 
 impl oms_command_state::HostServices for ControlServices<'_> {

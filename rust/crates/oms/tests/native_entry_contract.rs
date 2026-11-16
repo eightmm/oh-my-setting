@@ -1395,44 +1395,50 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
             b"",
         );
     }
-    for (child, depth, expected) in [
-        ("1", "0", 75),
-        ("0", "1", 75),
-        ("0", "2", 75),
-        ("0", "", 75),
-        ("0", "bad", 75),
-        ("0", "0", 0),
+    // Child restrictions are native: selection owns every child invocation and
+    // dispatch reaches the native room-membership refusal, never Python.
+    let refusal =
+        "error: worker attachment reads require an admitted room repository and participant\n";
+    for (child, depth) in [
+        ("1", "0"),
+        ("0", "1"),
+        ("0", "2"),
+        ("0", ""),
+        ("0", "bad"),
+        ("0", "0"),
     ] {
-        for mode in ["--oms-select", "--oms-dispatch"] {
-            if expected == 0 && mode == "--oms-dispatch" {
-                continue;
-            }
-            exact(
-                f.private(&bin, mode)
-                    .args(["input", "attachment", "missing", "--full"])
-                    .env("OMS_HARNESS_CHILD", child)
-                    .env("OMS_HARNESS_DELEGATE_DEPTH", depth)
-                    .output()
-                    .unwrap(),
-                expected,
-                b"",
-                b"",
+        let run = |mode: &str| {
+            f.private(&bin, mode)
+                .args(["input", "attachment", "missing", "--full"])
+                .env("OMS_HARNESS_CHILD", child)
+                .env("OMS_HARNESS_DELEGATE_DEPTH", depth)
+                .output()
+                .unwrap()
+        };
+        exact(run("--oms-select"), 0, b"", b"");
+        if (child, depth) != ("0", "0") {
+            let out = run("--oms-dispatch");
+            assert_eq!(out.status.code(), Some(2), "{child}/{depth}");
+            assert!(out.stdout.is_empty());
+            assert!(
+                String::from_utf8_lossy(&out.stderr).starts_with(refusal),
+                "{child}/{depth}: {}",
+                String::from_utf8_lossy(&out.stderr)
             );
         }
     }
     assert_eq!(files(&data), before);
-    assert!(!f.0.join("preflight").exists());
     exact(
         f.public(&bin)
             .args(["input", "attachment", "missing", "--full"])
             .env("OMS_HARNESS_CHILD", "1")
             .output()
             .unwrap(),
-        1,
+        2,
         b"",
-        b"error: OMS requires Python 3.11+; reinstall to provision the managed runtime\n",
+        format!("{refusal}hint: run `oms input --help` for usage\n").as_bytes(),
     );
-    assert!(f.0.join("preflight").is_file());
+    assert!(!f.0.join("preflight").exists());
     assert_eq!(files(&data), before);
 }
 
@@ -2120,6 +2126,54 @@ fn frontdoor_routes_navigation_and_native_commands_without_python() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(!out.stdout.is_empty(), "{argv:?} stdout empty");
+    }
+    assert!(!f.0.join("preflight").exists());
+}
+
+#[test]
+fn child_input_runs_natively_with_child_restrictions() {
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    let data = f.0.join("data");
+    std::fs::write(data.join("source.txt"), b"child view\n").unwrap();
+    let parent = f
+        .public(&bin)
+        .args(["input", "attach", "file", "source.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        parent.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&parent.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&parent.stdout).unwrap();
+    let id = record["id"].as_str().unwrap();
+    for (key, value) in [
+        ("OMS_HARNESS_CHILD", "1"),
+        ("OMS_HARNESS_DELEGATE_DEPTH", "1"),
+    ] {
+        exact(
+            f.public(&bin)
+                .args(["input", "attachments"])
+                .env(key, value)
+                .output()
+                .unwrap(),
+            2,
+            b"",
+            b"error: workers may retrieve only explicitly addressed attachment IDs; queue inspection is parent-only\nhint: run `oms input --help` for usage\n",
+        );
+        // Addressed retrieval reaches the native room-membership check.
+        exact(
+            f.public(&bin)
+                .args(["input", "attachment", id, "--full"])
+                .env(key, value)
+                .output()
+                .unwrap(),
+            2,
+            b"",
+            b"error: worker attachment reads require an admitted room repository and participant\nhint: run `oms input --help` for usage\n",
+        );
     }
     assert!(!f.0.join("preflight").exists());
 }

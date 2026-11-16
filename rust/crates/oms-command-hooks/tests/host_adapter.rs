@@ -925,3 +925,90 @@ fn panel_safe_point_reads_activity_once_and_keeps_noop_hook_parity() {
         );
     }
 }
+
+struct SyntaxHost {
+    verdict: Option<bool>,
+    seen: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+}
+
+impl HostServices for SyntaxHost {
+    fn check_python_syntax(&self, path: &Path, source: &[u8]) -> Option<bool> {
+        self.seen
+            .lock()
+            .expect("lock seen")
+            .push((path.to_path_buf(), source.to_vec()));
+        self.verdict
+    }
+}
+
+#[test]
+fn syntax_guard_checks_python_through_the_host_parser() {
+    let tmp = TempDir::new("syntax");
+    let repo = git_repo(&tmp);
+    fs::create_dir(repo.join(".oms")).expect("mkdir .oms");
+    let file = repo.join("bad.py");
+    fs::write(&file, b"def broken(:\n").expect("write py");
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {"file_path": file},
+        "cwd": repo,
+    })
+    .to_string();
+    let cancel = AtomicBool::new(false);
+    for (verdict, reported) in [(Some(false), true), (Some(true), false), (None, false)] {
+        let host = SyntaxHost {
+            verdict,
+            seen: Mutex::default(),
+        };
+        let (code, stdout, stderr) = run_with_services(
+            "syntax-guard-hook",
+            &[],
+            payload.as_bytes(),
+            &repo,
+            tmp.path(),
+            &cancel,
+            &host,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let out = String::from_utf8_lossy(&stdout);
+        assert_eq!(
+            out.contains("bad.py does not parse after this Write — python: syntax error"),
+            reported,
+            "{verdict:?}: {out}"
+        );
+        let seen = host.seen.lock().expect("lock seen").clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].1, b"def broken(:\n");
+        assert!(seen[0].0.ends_with("bad.py"));
+    }
+}
+
+#[test]
+fn codex_usage_config_refuses_python_notifier_scripts() {
+    let tmp = TempDir::new("config-py");
+    let cfg = tmp.path().join("config.toml");
+    fs::write(&cfg, b"model = \"m\"\n").expect("write config");
+    let cancel = AtomicBool::new(false);
+    for action in ["install", "check"] {
+        let (code, stdout, stderr) = run_hook(
+            "codex-usage-config",
+            &argv(&[
+                action,
+                cfg.to_str().unwrap(),
+                "--notify-script",
+                "codex_turn_notify.py",
+            ]),
+            &[],
+            tmp.path(),
+            tmp.path(),
+            &cancel,
+        );
+        assert_ne!(code, 0, "{action}: {}", String::from_utf8_lossy(&stdout));
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("Python notifier scripts are retired"),
+            "{action}: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert_eq!(fs::read(&cfg).expect("read config"), b"model = \"m\"\n");
+    }
+}

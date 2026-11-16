@@ -377,25 +377,36 @@ pub fn full_scope(run: &V, sha: &str) -> Result<&'static str> {
             "unnamed or duplicate CI job",
         )?;
     }
-    let mut required: Vec<String> = [
-        "lint",
-        "affected_plan",
-        "gate",
-        "native (ubuntu-latest, copy)",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    // Accept either the legacy sharded matrix or the streamlined pure-Rust workflow.
+    let mut sharded_required: Vec<String> = ["lint", "gate", "native (ubuntu-latest, copy)"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     for lane in 1..=4 {
         for family in ["focused", "scripts-smoke", "operator-tools"] {
-            required.push(format!("{family} ({lane}/4)"));
+            sharded_required.push(format!("{family} ({lane}/4)"));
         }
     }
-    if required
+    let streamlined_required: Vec<String> =
+        ["lint", "focused", "gate", "native (ubuntu-latest, copy)"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    let matched_required = if sharded_required
         .iter()
         .all(|n| names.get(n).is_some_and(|c| c == "success"))
     {
-        let optional=regex::Regex::new(r"^(?:python311|native \((?:macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks)$").unwrap();
+        Some(&sharded_required)
+    } else if streamlined_required
+        .iter()
+        .all(|n| names.get(n).is_some_and(|c| c == "success"))
+    {
+        Some(&streamlined_required)
+    } else {
+        None
+    };
+    if let Some(required) = matched_required {
+        let optional = regex::Regex::new(r"^(?:python311|native \((?:macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks|rust \((?:ubuntu-24\.04|macos-latest)\))$").unwrap();
         require(
             names.iter().all(|(name, value)| {
                 required.contains(name)
@@ -1012,4 +1023,96 @@ pub fn comparison(
         ),
         ("jobs", V::Arr(rows)),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn run(jobs: &[(&str, &str)]) -> V {
+        let jobs: Vec<String> = jobs
+            .iter()
+            .map(|(n, c)| format!("{{\"name\":\"{n}\",\"conclusion\":\"{c}\"}}"))
+            .collect();
+        V::parse(
+            format!(
+                "{{\"headSha\":\"{SHA}\",\"status\":\"completed\",\"conclusion\":\"success\",\"jobs\":[{}]}}",
+                jobs.join(",")
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn pure_rust() -> Vec<(String, &'static str)> {
+        let mut jobs: Vec<(String, &str)> = ["lint", "native (ubuntu-latest, copy)", "gate"]
+            .iter()
+            .map(|n| (n.to_string(), "success"))
+            .collect();
+        for lane in 1..=4 {
+            for family in ["focused", "scripts-smoke", "operator-tools"] {
+                jobs.push((format!("{family} ({lane}/4)"), "success"));
+            }
+        }
+        jobs
+    }
+
+    fn scope(jobs: &[(String, &str)]) -> Result<&'static str> {
+        let borrowed: Vec<(&str, &str)> = jobs.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+        full_scope(&run(&borrowed), SHA)
+    }
+
+    #[test]
+    fn full_scope_accepts_pure_rust_runs_without_python() {
+        let jobs = pure_rust();
+        assert_eq!(scope(&jobs).unwrap(), "full");
+        for extra in [
+            ("affected_plan", "success"),
+            ("python311", "success"),
+            ("python311", "skipped"),
+        ] {
+            let mut with = jobs.clone();
+            with.push((extra.0.into(), extra.1));
+            assert_eq!(scope(&with).unwrap(), "full", "{extra:?}");
+        }
+        for bad in [
+            ("affected_plan", "failure"),
+            ("affected_plan", "skipped"),
+            ("python311", "failure"),
+            ("extra", "skipped"),
+        ] {
+            let mut with = jobs.clone();
+            with.push((bad.0.into(), bad.1));
+            assert!(scope(&with).is_err(), "{bad:?}");
+        }
+        let mut missing = jobs.clone();
+        missing.retain(|(n, _)| n != "operator-tools (4/4)");
+        assert!(scope(&missing).is_err());
+        let mut duplicate = jobs.clone();
+        duplicate.push(("gate".into(), "success"));
+        assert!(scope(&duplicate).is_err());
+        assert!(scope(&[]).is_err());
+        let affected = [
+            ("lint".to_string(), "skipped"),
+            ("affected_plan".into(), "success"),
+            ("gate".into(), "success"),
+        ];
+        assert_eq!(scope(&affected).unwrap(), "affected");
+        assert!(scope(&affected[..1]).is_err());
+
+        let streamlined = [
+            ("affected_plan".to_string(), "success"),
+            ("lint".into(), "success"),
+            ("focused".into(), "success"),
+            ("native (ubuntu-latest, copy)".into(), "success"),
+            ("native (macos-latest, auto)".into(), "skipped"),
+            ("rust (ubuntu-24.04)".into(), "success"),
+            ("rust (macos-latest)".into(), "success"),
+            ("affected checks".into(), "skipped"),
+            ("gate".into(), "success"),
+        ];
+        assert_eq!(scope(&streamlined).unwrap(), "full");
+    }
 }

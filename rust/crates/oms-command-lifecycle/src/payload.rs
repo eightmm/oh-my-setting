@@ -214,6 +214,34 @@ fn install_files(dir: &Path, files: &[(&str, &Path)], tx: &mut Transaction) -> R
     Ok(())
 }
 
+/// Quarantine an invalid or dangling `rust/target/oms-native/<rev>` entry so
+/// `doctor --repair` can re-stage a clean payload without weakening `install`.
+pub(crate) fn repair_cache(paths: &Paths, flag: &AtomicBool) -> Result<()> {
+    let Ok(revision) = r::git(&paths.source, &["rev-parse", "HEAD"], flag) else {
+        return Ok(());
+    };
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return r::fail("invalid source revision for native build");
+    }
+    let dir = paths.source.join("rust/target/oms-native").join(&revision);
+    if fs::symlink_metadata(&dir).is_ok() && verify(paths, flag).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine = paths
+            .source
+            .join("rust/target/oms-native")
+            .join(format!(".broken-{revision}-{}-{nanos}", std::process::id()));
+        fs::rename(&dir, &quarantine)?;
+    }
+    Ok(())
+}
+
 /// Stage a complete build through the same target journal as installed files.
 /// A present invalid cache is terminal; a build never repairs it implicitly.
 pub(crate) fn stage(paths: &Paths, tx: &mut Transaction, flag: &AtomicBool) -> Result<()> {

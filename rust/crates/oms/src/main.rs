@@ -1078,7 +1078,7 @@ fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
     validate_staged_payload(root, commit, true).map(|_| ())
 }
 
-fn sibling_companion(name: &str) -> Option<PathBuf> {
+pub(crate) fn sibling_companion(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let exe = std::env::current_exe()
         .and_then(std::fs::canonicalize)
@@ -1089,6 +1089,17 @@ fn sibling_companion(name: &str) -> Option<PathBuf> {
         && meta.permissions().mode() & 0o111 != 0
         && meta.permissions().mode() & 0o002 == 0)
         .then_some(path)
+}
+
+pub(crate) fn check_python_syntax_with_companion(path: &Path, source: &[u8]) -> Option<bool> {
+    let helper = sibling_companion("oms-graph-python-helper")?;
+    oms_command_graph::check_python_syntax(
+        &helper,
+        path,
+        source,
+        std::time::Duration::from_secs(10),
+    )
+    .ok()
 }
 
 struct McpExecutor {
@@ -1152,13 +1163,7 @@ fn owns_invocation(argv: &[OsString]) -> bool {
         "runtime" | "mcp-server" | "agent-supervisor" => true,
         "artifact-index" => oms_command_telemetry::owns(local),
         "agent-role" => oms_command_agent_role::owns(local),
-        "input" => {
-            // Native input lacks sealed-room receipt verification. Keep
-            // every child invocation on the canonical legacy guard path.
-            let child = std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1")
-                || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| v != "0");
-            !child && oms_command_input::owns(local)
-        }
+        "input" => oms_command_input::owns(local),
         "agent-events" => {
             oms_command_operations::owns_events(local) || oms_command_attempt_bundle::owns(local)
         }

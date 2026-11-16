@@ -513,6 +513,71 @@ esac
         fs::read_link(home.join(".local/bin/python3")).unwrap(),
         PathBuf::from("foreign-runtime")
     );
+    // A tampered native cache: bare install refuses it in place; doctor --repair
+    // moves it aside (dangling symlinks too) before reinstalling.
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=fixture"])
+            .arg("-c")
+            .arg(format!("user.email=fixture@{}", "example.invalid"))
+            .args(args)
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["commit", "-q", "--allow-empty", "-m", "fixture"]);
+    let revision = git(&["rev-parse", "HEAD"]);
+    let native = source.join("rust/target/oms-native");
+    let cached = native.join(&revision);
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(&cached)
+        .unwrap();
+    fs::write(cached.join("manifest.json"), b"{}").unwrap();
+    fs::write(cached.join("oms"), b"tampered").unwrap();
+    let quarantined = || -> Vec<PathBuf> {
+        let prefix = format!(".broken-{revision}-");
+        fs::read_dir(&native)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&prefix)
+            })
+            .collect()
+    };
+    let bare = call("install", &[], &source, &host);
+    assert_eq!(bare.0, 2);
+    assert!(String::from_utf8_lossy(&bare.2).contains("native payload/source proof failed"));
+    assert_eq!(fs::read(cached.join("oms")).unwrap(), b"tampered");
+    assert!(quarantined().is_empty());
+    let repaired = call("doctor", &["--repair"], &source, &host);
+    assert_ne!(repaired.0, 0);
+    assert!(String::from_utf8_lossy(&repaired.2).contains("cargo unavailable"));
+    assert!(fs::symlink_metadata(&cached).is_err());
+    let moved = quarantined();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(fs::read(moved[0].join("oms")).unwrap(), b"tampered");
+    symlink("missing-target", &cached).unwrap();
+    assert_ne!(call("doctor", &["--repair"], &source, &host).0, 0);
+    assert!(fs::symlink_metadata(&cached).is_err());
+    let moved = quarantined();
+    assert_eq!(moved.len(), 2);
+    assert!(
+        moved
+            .iter()
+            .any(|p| fs::symlink_metadata(p).unwrap().file_type().is_symlink())
+    );
     // Exercise every unavailable method: none may silently certify native work.
     let missing: &dyn Services = &UnavailableServices;
     let flag = AtomicBool::new(false);

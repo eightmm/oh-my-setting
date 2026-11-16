@@ -132,6 +132,9 @@ pub trait Services {
     ) -> Result<V> {
         crate::ci::comparison(repo, branch, sha, interrupted)
     }
+    fn check_python_syntax(&self, _path: &Path, _source: &[u8]) -> Option<bool> {
+        None
+    }
 }
 pub struct Unavailable;
 impl Services for Unavailable {}

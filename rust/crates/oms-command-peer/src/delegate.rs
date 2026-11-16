@@ -462,7 +462,13 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 ("patch", patch.to_string_lossy().into_owned().into()),
                 (
                     "worktree",
-                    worktree.path.to_string_lossy().into_owned().into(),
+                    worktree
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                        .into(),
                 ),
             ]),
             ..Default::default()

@@ -504,7 +504,7 @@ fn report_dry_run_degrades_without_python() {
     let (code, out, err) = iso.run("report", &repo, &[&base[..], &["--dry-run"]].concat());
     assert_eq!(code, 0, "{err}");
     assert!(out.starts_with("Title: t\n"), "{out}");
-    assert!(out.contains("Python: unavailable\n"), "{out}");
+    assert!(out.contains("Python: retired\n"), "{out}");
     assert!(
         !out.contains("issues/new"),
         "dry run must not build a URL: {out}"

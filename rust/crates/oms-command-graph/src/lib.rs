@@ -78,6 +78,35 @@ pub trait HostServices: Send + Sync {
     }
 }
 
+/// Native Python syntax check through the packaged parser helper (an absolute
+/// libexec path; never searched on PATH). `Ok(false)` means the source does not
+/// parse. `Err` means no verdict: helper unavailable, timeout, oversized or
+/// non-UTF-8 source. A leading UTF-8 BOM is accepted, as CPython does for bytes.
+pub fn check_python_syntax(
+    helper: &Path,
+    path: &Path,
+    source: &[u8],
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    let source = source.strip_prefix(b"\xef\xbb\xbf").unwrap_or(source);
+    let text = std::str::from_utf8(source)
+        .map_err(|_| Error::new("Python source is not UTF-8; syntax was not checked"))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "source.py".into());
+    let fail = |e: oms_graph_python::Error| Error::new(format!("python syntax check: {e}"));
+    let mut session = oms_graph_python::Session::start(
+        helper,
+        oms_graph_python::Options {
+            max_bytes: text.len().max(oms_graph_python::DEFAULT_MAX_BYTES),
+            timeout,
+        },
+    )
+    .map_err(fail)?;
+    Ok(session.parse(&name, text, "").map_err(fail)?.syntax_valid)
+}
+
 /// Fail-closed default host adapter when no packaged host supplies `HostServices`.
 pub struct NoHostServices;
 
@@ -210,5 +239,43 @@ pub fn run_with_host(
             vec![],
             format!("graph: {}\n", error.message).into_bytes(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn python_syntax_check_uses_the_packaged_helper() {
+        let second = Duration::from_secs(30);
+        let file = Path::new("module.py");
+        assert!(check_python_syntax(Path::new("helper"), file, b"x = 1\n", second).is_err());
+        let helper = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("oms-graph-python-helper");
+        if !helper.is_file() {
+            assert!(check_python_syntax(&helper, file, b"x = 1\n", second).is_err());
+            return;
+        }
+        for (source, valid) in [
+            (&b"x = 1\n"[..], true),
+            (b"", true),
+            (b"\xef\xbb\xbfx = 1\n", true),
+            (b"def broken(:\n", false),
+            (b"\xef\xbb\xbf\xef\xbb\xbfx = 1\n", false),
+        ] {
+            assert_eq!(
+                check_python_syntax(&helper, file, source, second).unwrap(),
+                valid,
+                "{source:?}"
+            );
+        }
+        assert!(check_python_syntax(&helper, file, b"x = '\xff'\n", second).is_err());
+        assert!(check_python_syntax(&helper, file, b"x = 1\n", Duration::ZERO).is_err());
     }
 }

@@ -3130,6 +3130,9 @@ impl oms_command_hooks::HostServices for RuntimeServices<'_> {
         });
         Ok(())
     }
+    fn check_python_syntax(&self, path: &Path, source: &[u8]) -> Option<bool> {
+        crate::check_python_syntax_with_companion(path, source)
+    }
     // `record_hook_failure` stays the no-op default on purpose: every caller
     // appends the same `hook` row to the fail-ledger itself immediately after
     // this callback, and a second row would double its count (a hook failure

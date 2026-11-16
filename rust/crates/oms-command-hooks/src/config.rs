@@ -315,20 +315,16 @@ fn usage(
     let mut notifier = Block::usage("notify", &[]);
     if let Some(script) = notify {
         let target = absolute(ctx.cwd, Path::new(script));
-        let command = if Path::new(script).extension().is_some_and(|ext| ext == "py") {
-            let interpreter = env_path("OMS_PYTHON")
-                .or_else(|| executable(std::ffi::OsStr::new("python3")))
-                .ok_or("Python notifier interpreter unavailable")?;
-            vec![
-                interpreter.to_string_lossy().into_owned(),
-                target.to_string_lossy().into_owned(),
-            ]
-        } else {
-            vec![
-                target.to_string_lossy().into_owned(),
-                "codex-turn-notify".into(),
-            ]
-        };
+        if Path::new(script)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+        {
+            return Err("Python notifier scripts are retired".into());
+        }
+        let command = vec![
+            target.to_string_lossy().into_owned(),
+            "codex-turn-notify".into(),
+        ];
         notifier.lines = vec![format!(
             "notify = {}",
             serde_json::to_string(&command).map_err(|_| "invalid notifier path")?

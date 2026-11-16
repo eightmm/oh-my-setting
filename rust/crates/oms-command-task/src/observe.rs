@@ -286,7 +286,7 @@ pub fn fingerprint(
     runners: &[String],
     mut probe: impl FnMut(&str) -> Option<String>,
 ) -> Result<Fingerprint> {
-    let mut wanted = vec!["python3", "bash", "git"];
+    let mut wanted = vec!["bash", "git"];
     for runner in runners {
         for tool in match runner.as_str() {
             "pytest" => &["pytest"][..],

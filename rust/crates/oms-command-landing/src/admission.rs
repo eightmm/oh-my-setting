@@ -439,23 +439,12 @@ pub(crate) fn admit(
                 }
             } else if file.ends_with(".py") {
                 let bytes = storage::read(&scratch.path, Path::new(file), false)?;
-                let result = crate::git::process(
-                    &scratch.path,
-                    vec![
-                        "python3".into(),
-                        "-I".into(),
-                        "-B".into(),
-                        "-c".into(),
-                        "import sys; compile(sys.stdin.buffer.read(), sys.argv[1], 'exec')".into(),
-                        file.into(),
-                    ],
-                    Some(&bytes),
-                    Duration::from_secs(30),
-                    c.interrupted,
-                    &[],
-                )?;
-                syntax &= result.code == 0;
-                logs.extend(result.stderr);
+                if let Some(valid) = c.services.check_python_syntax(Path::new(file), &bytes) {
+                    syntax &= valid;
+                    if !valid {
+                        logs.extend(format!("{file}: python syntax error\n").into_bytes());
+                    }
+                }
             } else if file.ends_with(".json") {
                 syntax &= V::parse(&storage::read(&scratch.path, Path::new(file), false)?).is_ok();
             }
