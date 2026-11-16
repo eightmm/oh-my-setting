@@ -2301,17 +2301,28 @@ mod bridge_route_tests {
             assert!(err.message.contains("sandbox backend"), "{}", err.message);
             return;
         }
+        let probe_bin = std::env::temp_dir().join(format!("oms-sbx-bin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&probe_bin);
+        fs::create_dir_all(&probe_bin).unwrap();
+        let claude_stub = probe_bin.join("claude");
+        fs::write(&claude_stub, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&claude_stub, fs::Permissions::from_mode(0o755)).unwrap();
         let out = Command::new(std::env::current_exe().unwrap())
+            .env_clear()
             .args([
                 "--exact",
                 "providers::bridge_route_tests::adaptive_routing_prefers_healthy_low_latency_accounts_and_strict_sandbox",
             ])
+            .env("HOME", &probe_bin)
+            .env("PATH", &probe_bin)
+            .env("TMPDIR", std::env::temp_dir())
             .env("SANDBOX_STRICT_PROBE", "1")
             .env("OMS_WORKER_SANDBOX", "strict")
             .env("OMS_BWRAP_BIN", "/nonexistent-oms-bwrap-bin")
             .env("OMS_SANDBOX_EXEC_BIN", "/nonexistent-oms-sandbox-exec")
             .output()
             .unwrap();
+        let _ = fs::remove_dir_all(&probe_bin);
         assert!(
             out.status.success(),
             "{}\n{}",
