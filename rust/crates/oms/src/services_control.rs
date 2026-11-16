@@ -787,14 +787,22 @@ impl oms_command_landing::Services for ControlServices<'_> {
                 }
             }
             if !active && let Ok((_, rows)) = oms_command_operations::load_projection(&canonical) {
+                let now_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
                 active = rows.iter().any(|row| {
                     let state = row.get("state").text().unwrap_or("");
                     let role = row.get("refs").get("panel_role").text().unwrap_or("");
                     let aid = row.get("attempt_id").text().unwrap_or("");
-                    !matches!(
-                        state,
-                        "done" | "failed" | "cancelled" | "timed_out" | "abandoned"
-                    ) && row.get("tool").text() == Some("peer-delegate")
+                    let fresh =
+                        oms_command_operations::projection::stamp(row.get("last_heartbeat_at"))
+                            .or_else(|| {
+                                oms_command_operations::projection::stamp(row.get("updated_at"))
+                            })
+                            .is_some_and(|ts| now_epoch.saturating_sub(ts) <= 300);
+                    matches!(state, "starting" | "working" | "verifying")
+                        && fresh
+                        && row.get("tool").text() == Some("peer-delegate")
                         && matches!(role, "worker" | "delegate")
                         && !aid.is_empty()
                         && aid != self_attempt
@@ -2528,6 +2536,20 @@ mod tests {
             Err(oms_lock::Error::Busy)
         ));
         drop(pub_guard);
+        let events_dir = canonical.join(".oms/lifecycle");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        let review_events = concat!(
+            "{\"actor\":{\"kind\":\"owner\",\"name\":\"agent-events\"},\"attempt_id\":\"att_review1\",\"base_sha\":\"0123456789abcdef0123456789abcdef01234567\",\"event_id\":\"aevt_1\",\"event_type\":\"attempt.created\",\"from_state\":null,\"provider\":\"claude\",\"refs\":{\"panel_role\":\"worker\"},\"run_id\":\"run_1\",\"schema\":1,\"seq\":1,\"task_id\":\"t1\",\"to_state\":\"queued\",\"tool\":\"peer-delegate\",\"ts\":\"2999-01-01T00:00:00Z\"}\n",
+            "{\"actor\":{\"kind\":\"owner\",\"name\":\"provider-router\"},\"attempt_id\":\"att_review1\",\"event_id\":\"aevt_2\",\"event_type\":\"attempt.state_changed\",\"from_state\":\"queued\",\"idempotency_key\":\"k1\",\"schema\":1,\"seq\":2,\"to_state\":\"starting\",\"ts\":\"2999-01-01T00:00:00Z\"}\n",
+            "{\"actor\":{\"kind\":\"owner\",\"name\":\"provider-router\"},\"attempt_id\":\"att_review1\",\"event_id\":\"aevt_3\",\"event_type\":\"attempt.state_changed\",\"from_state\":\"starting\",\"idempotency_key\":\"k2\",\"schema\":1,\"seq\":3,\"to_state\":\"working\",\"ts\":\"2999-01-01T00:00:00Z\"}\n",
+            "{\"actor\":{\"kind\":\"owner\",\"name\":\"provider-router\"},\"attempt_id\":\"att_review1\",\"event_id\":\"aevt_4\",\"event_type\":\"attempt.state_changed\",\"from_state\":\"working\",\"idempotency_key\":\"k3\",\"schema\":1,\"seq\":4,\"to_state\":\"review\",\"ts\":\"2999-01-01T00:00:00Z\"}\n",
+            "{\"actor\":{\"kind\":\"owner\",\"name\":\"agent-events\"},\"attempt_id\":\"att_stale1\",\"base_sha\":\"0123456789abcdef0123456789abcdef01234567\",\"event_id\":\"aevt_5\",\"event_type\":\"attempt.created\",\"from_state\":null,\"provider\":\"codex\",\"refs\":{\"panel_role\":\"delegate\"},\"run_id\":\"run_2\",\"schema\":1,\"seq\":1,\"task_id\":\"t2\",\"to_state\":\"queued\",\"tool\":\"peer-delegate\",\"ts\":\"2026-01-01T00:00:00Z\"}\n",
+            "{\"actor\":{\"kind\":\"owner\",\"name\":\"provider-router\"},\"attempt_id\":\"att_stale1\",\"event_id\":\"aevt_6\",\"event_type\":\"attempt.state_changed\",\"from_state\":\"queued\",\"idempotency_key\":\"k4\",\"schema\":1,\"seq\":2,\"to_state\":\"starting\",\"ts\":\"2026-01-01T00:00:00Z\"}\n",
+            "{\"actor\":{\"kind\":\"owner\",\"name\":\"provider-router\"},\"attempt_id\":\"att_stale1\",\"event_id\":\"aevt_7\",\"event_type\":\"attempt.state_changed\",\"from_state\":\"starting\",\"idempotency_key\":\"k5\",\"schema\":1,\"seq\":3,\"to_state\":\"working\",\"ts\":\"2026-01-01T00:00:00Z\"}\n",
+        );
+        std::fs::write(events_dir.join("events.jsonl"), review_events).unwrap();
+        let (_, projected_rows) = oms_command_operations::load_projection(&canonical).unwrap();
+        assert_eq!(projected_rows.len(), 2);
         assert!(
             oms_command_landing::Services::wait_siblings(
                 &control,
