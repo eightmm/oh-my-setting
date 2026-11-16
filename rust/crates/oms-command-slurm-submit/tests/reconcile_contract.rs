@@ -973,7 +973,8 @@ fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
         &[],
     );
     assert_eq!(self_steal.code, 2, "{}{}", self_steal.out, self_steal.err);
-    f.set("sacct", "889|job.sh|COMPLETED|0:0|oms-key=other0000000\n");
+    f.set("squeue", "889|RUNNING|job.sh|oms-key=other0000000\n");
+    f.set("sacct", "889|job.sh|COMPLETED|0:0|custom\n");
     let foreign_tag = f.run(
         &[
             "reconcile",
@@ -992,6 +993,7 @@ fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
         foreign_tag.out, foreign_tag.err
     );
     assert_eq!(json_field(&foreign_tag.out, "state"), "unknown");
+    f.set("squeue", "");
     f.set("sacct", "888|job.sh|COMPLETED|0:0|custom\n");
     let adopt_ok = f.run(
         &[
@@ -1013,4 +1015,44 @@ fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
         adopt_ok.out
     );
     assert!(f.ledger().contains("\"adopted\": true"));
+
+    // Caller-supplied oms-key=<own short> must be accepted (not treated as foreign) on --adopt-job.
+    marker = f.root.join("queued-owntag");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let own_short = short_of("cell-owntag");
+    let own_lost = f.run(
+        &[
+            "--key",
+            "cell-owntag",
+            "--",
+            "sbatch",
+            "--comment",
+            &format!("oms-key={own_short}"),
+            "plain.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(own_lost.code, 130);
+    f.set(
+        "sacct",
+        &format!("890|job.sh|COMPLETED|0:0|oms-key={own_short}\n"),
+    );
+    let own_adopt = f.run(
+        &[
+            "reconcile",
+            "--key",
+            "cell-owntag",
+            "--job-id",
+            "890",
+            "--adopt-job",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(own_adopt.code, 0, "{}{}", own_adopt.out, own_adopt.err);
+    assert_eq!(json_field(&own_adopt.out, "state"), "succeeded");
+    assert!(own_adopt.out.contains("\"adopted\": true"));
 }

@@ -484,6 +484,7 @@ struct Target {
     job_id: Option<String>,
     cluster_name: Option<String>,
     short: Option<String>,
+    adopt_short: Option<String>,
     start: String,
     provenance: Vec<(&'static str, Value)>,
 }
@@ -510,20 +511,21 @@ fn cluster_from_intent_args(intent: &Json) -> Option<String> {
         _ => None,
     }
 }
+fn key_short(key_source: Option<&str>, key: &OsStr) -> String {
+    if key_source == Some("custom") {
+        ledger::digest(key.as_bytes())[..12].to_owned()
+    } else {
+        String::from_utf8_lossy(key.as_bytes())
+            .chars()
+            .take(12)
+            .collect()
+    }
+}
 fn intent_short(intent: &Json, key: &OsStr) -> Option<String> {
     if f(intent, "tag") == Some(&Json::Bool(false)) {
         return None;
     }
-    Some(
-        if text_of(intent, "key_source").as_deref() == Some("custom") {
-            ledger::digest(key.as_bytes())[..12].to_owned()
-        } else {
-            String::from_utf8_lossy(key.as_bytes())
-                .chars()
-                .take(12)
-                .collect()
-        },
-    )
+    Some(key_short(text_of(intent, "key_source").as_deref(), key))
 }
 fn build_target(rows: &[Json], key: &OsStr, row: &Json) -> Result<Target, String> {
     let attempt = f(row, "attempt");
@@ -536,6 +538,7 @@ fn build_target(rows: &[Json], key: &OsStr, row: &Json) -> Result<Target, String
         kind(r, "submitted") && ledger::identity(f(r, "attempt")).ok().as_ref() == Some(&wanted)
     });
     let short = intent.and_then(|i| intent_short(i, key));
+    let adopt_short = intent.map(|i| key_short(text_of(i, "key_source").as_deref(), key));
     let cluster_name = submitted
         .and_then(|s| text_of(s, "cluster_name"))
         .filter(|c| crate::safe_cluster(c))
@@ -560,6 +563,7 @@ fn build_target(rows: &[Json], key: &OsStr, row: &Json) -> Result<Target, String
         job_id: submitted.and_then(|s| text_of(s, "job_id")),
         cluster_name,
         short,
+        adopt_short,
         start: window(&text_of(intent.unwrap_or(row), "ts").unwrap_or_default()),
         provenance,
     })
@@ -924,7 +928,7 @@ pub(crate) fn run(
             } else if options.adopt_job {
                 Matcher::AdoptJob {
                     id,
-                    expected_short: short_opt,
+                    expected_short: found.as_ref().and_then(|t| t.adopt_short.as_deref()),
                 }
             } else if let Some(short) = short_opt {
                 if ambiguous_tag {
@@ -997,25 +1001,25 @@ pub(crate) fn run(
         };
     let squeue = query("OMS_SLURM_SQUEUE_BIN", "squeue", &squeue_args, parse_squeue)?;
     let sacct = query("OMS_SLURM_SACCT_BIN", "sacct", &sacct_args, parse_sacct)?;
-    let mut verdict = resolve(&squeue, &sacct, &matcher);
-    let foreign_tag_rejected = matches!(
+    let foreign_tag_veto = matches!(
         &matcher,
         Matcher::AdoptJob { id, expected_short }
-            if verdict.class == Class::Unknown
-                && [&squeue, &sacct].into_iter().any(|q| {
-                    matches!(
-                        q,
-                        Query::Rows(entries)
-                            if entries.iter().any(|e| {
-                                e.base == *id && has_foreign_tag(&e.text, *expected_short)
-                            })
-                    )
-                })
+            if [&squeue, &sacct].into_iter().any(|q| {
+                matches!(
+                    q,
+                    Query::Rows(entries)
+                        if entries.iter().any(|e| {
+                            e.base == *id && has_foreign_tag(&e.text, *expected_short)
+                        })
+                )
+            })
     );
-    if foreign_tag_rejected {
-        verdict.reason =
-            "scheduler job carries a foreign oms-key tag and cannot be adopted by --key".into();
-    } else if ambiguous_tag && !options.adopt_job && verdict.class == Class::Unknown {
+    let mut verdict = if foreign_tag_veto {
+        unknown("scheduler job carries a foreign oms-key tag and cannot be adopted by --key")
+    } else {
+        resolve(&squeue, &sacct, &matcher)
+    };
+    if !foreign_tag_veto && ambiguous_tag && !options.adopt_job && verdict.class == Class::Unknown {
         verdict.reason = if options.job_id.is_empty() {
             "multiple unresolved tagged attempts share this key tag; pass --key, --job-id and --adopt-job after verifying by hand".into()
         } else {

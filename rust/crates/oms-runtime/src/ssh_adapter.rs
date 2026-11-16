@@ -950,24 +950,36 @@ read_cpg() {
 }
 check_orphan_cpg() {
   cpg_verdict="none"
-  if [ -n "$m_bid" ] && [ -n "$cur_bid" ] && [ "$m_bid" != "unknown" ] && [ "$cur_bid" != "unknown" ] && [ "$m_bid" = "$cur_bid" ] && [ ! -f "$op_dir/reaped.done" ] && [ -n "$cpgid" ] && pg_live "$cpgid"; then
-    if pid_live "$cpgid"; then
-      cur_cpg_ls=$(LC_ALL=C ps -p "$cpgid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
-      if [ -z "$cpg_ls" ] || [ -z "$cur_cpg_ls" ]; then
-        cpg_verdict="unverifiable"
-      elif [ "$(norm "$cpg_ls")" = "$(norm "$cur_cpg_ls")" ]; then
-        cpg_verdict="verified"
-      fi
-    elif [ -z "$m_tag" ] || [ ! -d /proc ] || [ ! -r "/proc/$$/environ" ]; then
+  [ ! -f "$op_dir/reaped.done" ] && [ -n "$cpgid" ] && pg_live "$cpgid" || return 0
+  if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" = "unknown" ] || [ "$cur_bid" = "unknown" ]; then
+    cpg_verdict="unverifiable"
+    return 0
+  fi
+  [ "$m_bid" = "$cur_bid" ] || return 0
+  if pid_live "$cpgid"; then
+    cur_cpg_ls=$(LC_ALL=C ps -p "$cpgid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+    if [ -z "$cpg_ls" ] || [ -z "$cur_cpg_ls" ]; then
       cpg_verdict="unverifiable"
-    else
-      pg_pids=$(LC_ALL=C ps -A -o pid=,pgid=,stat= 2>/dev/null | awk -v g="$cpgid" '$2 == g && $3 !~ /^Z/ {print $1}' || true)
-      for p in $pg_pids; do
-        if [ -r "/proc/$p/environ" ] && tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -Fxq -- "OMS_REMOTE_OP_TAG=$m_tag"; then
+    elif [ "$(norm "$cpg_ls")" = "$(norm "$cur_cpg_ls")" ]; then
+      cpg_verdict="verified"
+    fi
+  elif [ -z "$m_tag" ] || [ ! -d /proc ] || [ ! -r "/proc/$$/environ" ]; then
+    cpg_verdict="unverifiable"
+  else
+    pg_pids=$(LC_ALL=C ps -A -o pid=,pgid=,stat= 2>/dev/null | awk -v g="$cpgid" '$2 == g && $3 !~ /^Z/ {print $1}' || true)
+    unreadable_env=0
+    for p in $pg_pids; do
+      if dd if="/proc/$p/environ" bs=1 count=1 >/dev/null 2>&1; then
+        if tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -Fxq -- "OMS_REMOTE_OP_TAG=$m_tag"; then
           cpg_verdict="verified"
           break
         fi
-      done
+      elif [ -d "/proc/$p" ]; then
+        unreadable_env=1
+      fi
+    done
+    if [ "$cpg_verdict" != "verified" ] && [ "$unreadable_env" = 1 ]; then
+      cpg_verdict="unverifiable"
     fi
   fi
 }
@@ -4252,6 +4264,85 @@ exec sh -c "$last"
                 .success();
             assert!(!alive, "pid {pid} survived dead-runner cancel");
         }
+
+        // 6b-bis. When boot_id is "unknown" while orphan group lives, reconcile must return
+        //         state=unknown (75) rather than prematurely finalizing state=lost (1).
+        std::fs::write(
+            root.join("drop_active"),
+            remote.join("unkbid.ready").to_str().unwrap(),
+        )
+        .unwrap();
+        let launch_unk = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-unknown-boot",
+                "--",
+                "sh",
+                "-c",
+                ": > unkbid.ready; exec sleep 30",
+            ],
+            &root,
+        );
+        assert_eq!(launch_unk.code, 75);
+        let mut unk_meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(state_dir.join("op-unknown-boot/meta.json")).unwrap(),
+        )
+        .unwrap();
+        let unk_runner_pid = unk_meta["pid"].as_i64().unwrap();
+        let unk_cpid: i32 = std::fs::read_to_string(state_dir.join("op-unknown-boot/child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        unk_meta["boot_id"] = serde_json::Value::String("unknown".into());
+        std::fs::write(
+            state_dir.join("op-unknown-boot/meta.json"),
+            format!("{}\n", serde_json::to_string(&unk_meta).unwrap()),
+        )
+        .unwrap();
+        let _ = Command::new("kill")
+            .args(["-KILL", &unk_runner_pid.to_string()])
+            .status();
+        for _ in 0..50 {
+            let r_alive = Command::new("kill")
+                .args(["-0", &unk_runner_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !r_alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let rec_unk = invoke(
+            &[
+                "reconcile",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-unknown-boot",
+            ],
+            &root,
+        );
+        assert_eq!(rec_unk.code, 75);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&rec_unk.stdout).unwrap()["state"],
+            "unknown"
+        );
+        let _ = Command::new("kill")
+            .args(["-KILL", &unk_cpid.to_string()])
+            .status();
 
         // 6b & 7. On Linux (/proc available):
         //   - When both runner.sh and child leader die, OMS_REMOTE_OP_TAG proves PGID ownership

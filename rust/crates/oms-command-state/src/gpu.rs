@@ -178,15 +178,28 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static GPU_TEST_SEQ: AtomicU64 = AtomicU64::new(0);
 
     struct Fixture(PathBuf);
     impl Fixture {
         fn new(script: &str) -> Self {
-            let root = std::env::temp_dir().join(format!("oms-gpu-test-{}", std::process::id()));
+            let seq = GPU_TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+            let root =
+                std::env::temp_dir().join(format!("oms-gpu-test-{}-{seq}", std::process::id()));
             std::fs::create_dir_all(&root).unwrap();
+            let src = root.join("nvidia-smi.src");
             let bin = root.join("nvidia-smi");
-            std::fs::write(&bin, script).unwrap();
+            std::fs::write(&src, script).unwrap();
+            assert!(
+                std::process::Command::new("cp")
+                    .arg(&src)
+                    .arg(&bin)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             Self(root)
         }

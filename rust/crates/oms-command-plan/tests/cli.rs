@@ -6,8 +6,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::SystemTime;
+
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct Tmp(PathBuf);
 impl Tmp {
@@ -16,7 +18,8 @@ impl Tmp {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let d = std::env::temp_dir().join(format!("oms-plan-cli-{}-{n}", std::process::id()));
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("oms-plan-cli-{}-{seq}-{n}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
         Self(fs::canonicalize(d).unwrap())
     }
