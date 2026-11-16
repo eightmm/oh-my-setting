@@ -23,6 +23,7 @@ build_dir="$(oms_smoke_native_build_dir "$ROOT")" ||
 for mode in symlink copy; do
   case_dir="$TMP/mode-$mode"
   mkdir -p "$case_dir/remote" "$case_dir/checkout" "$case_dir/home/.local/bin" "$case_dir/bin" "$case_dir/locks"
+  ln -sf "$BASH" "$case_dir/bin/bash"
   for tool in node uv gh ntn codex; do
     cat > "$case_dir/bin/$tool" <<'EOF'
 #!/usr/bin/env bash

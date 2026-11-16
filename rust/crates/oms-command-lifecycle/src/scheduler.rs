@@ -80,20 +80,22 @@ pub(crate) fn apply(
     let units = paths.config.parent().unwrap().join("systemd/user");
     let existing_units = r::exists(&units.join(format!("oh-my-setting-{name}.service")))
         || r::exists(&units.join(format!("oh-my-setting-{name}.timer")));
-    let systemd = remove && existing_units
-        || method == "systemd"
-        || method == "auto"
-            && cron_file.is_none()
-            && r::find("systemctl", &paths.cwd).is_some()
-            && std::env::var_os("XDG_RUNTIME_DIR").is_some()
-            && invoke(
-                paths,
-                "systemctl",
-                &["--user", "show-environment"],
-                None,
-                flag,
-            )
-            .is_ok_and(|o| o.0 == 0);
+    let user_manager_ready = r::find("systemctl", &paths.cwd).is_some()
+        && (method == "systemd"
+            || std::env::var_os("XDG_RUNTIME_DIR").is_some()
+                && invoke(
+                    paths,
+                    "systemctl",
+                    &["--user", "show-environment"],
+                    None,
+                    flag,
+                )
+                .is_ok_and(|o| o.0 == 0));
+    let systemd = if remove {
+        method == "systemd" || (method != "cron" && existing_units)
+    } else {
+        method == "systemd" || (method == "auto" && cron_file.is_none() && user_manager_ready)
+    };
     if options.preview() {
         return Ok(r::text(format!(
             "would {} {name} {} trigger",
@@ -119,22 +121,29 @@ pub(crate) fn apply(
                 }
             }
         }
-        tx.effect(crate::effects::Effect::systemd(&paths.cwd, name)?)?;
+        if !remove || user_manager_ready {
+            tx.effect(crate::effects::Effect::systemd(&paths.cwd, name)?)?;
+        }
         if remove {
-            let result = invoke(
-                paths,
-                "systemctl",
-                &[
-                    "--user",
-                    "disable",
-                    "--now",
-                    &format!("oh-my-setting-{name}.timer"),
-                ],
-                None,
-                flag,
-            )?;
-            if result.0 != 0 {
-                return r::fail("could not disable the owned user timer");
+            if user_manager_ready && (r::exists(&timer) || method == "systemd") {
+                let result = invoke(
+                    paths,
+                    "systemctl",
+                    &[
+                        "--user",
+                        "disable",
+                        "--now",
+                        &format!("oh-my-setting-{name}.timer"),
+                    ],
+                    None,
+                    flag,
+                )?;
+                if result.0 != 0 {
+                    let stderr = String::from_utf8_lossy(&result.2).to_lowercase();
+                    if !stderr.contains("not exist") && !stderr.contains("not loaded") {
+                        return r::fail("could not disable the owned user timer");
+                    }
+                }
             }
             tx.remove(&service)?;
             tx.remove(&timer)?;
@@ -155,7 +164,9 @@ pub(crate) fn apply(
             tx.write(&service,format!("# oh-my-setting native lifecycle\n[Unit]\nDescription=oh-my-setting {name}\n[Service]\nType=oneshot\nExecStart=\"{command_path}\" {arguments}\n").as_bytes(),0o600)?;
             tx.write(&timer,format!("# oh-my-setting native lifecycle\n[Unit]\nDescription=oh-my-setting {name}\n[Timer]\nOnCalendar={}\nPersistent=true\n[Install]\nWantedBy=timers.target\n",if tick{"hourly"}else{"daily"}).as_bytes(),0o600)?;
         }
-        if invoke(paths, "systemctl", &["--user", "daemon-reload"], None, flag)?.0 != 0 {
+        if (!remove || user_manager_ready)
+            && invoke(paths, "systemctl", &["--user", "daemon-reload"], None, flag)?.0 != 0
+        {
             return r::fail("user manager reload failed; unit file transaction rolls back");
         }
         if !remove
@@ -176,7 +187,9 @@ pub(crate) fn apply(
             return r::fail("user timer activation failed; unit file transaction rolls back");
         }
     }
-    if !systemd || remove {
+    if (!systemd || remove)
+        && (!remove || cron_file.is_some() || r::find("crontab", &paths.cwd).is_some())
+    {
         let old = if let Some(file) = &cron_file {
             if r::exists(file) {
                 String::from_utf8(r::read(file, r::LIMIT)?)
@@ -214,8 +227,10 @@ pub(crate) fn apply(
         };
         let new = block(&legacy, name, &replacement)?;
         if let Some(file) = cron_file {
-            tx.write(&file, new.as_bytes(), 0o600)?;
-        } else {
+            if !(remove && !r::exists(&file) && new.is_empty()) {
+                tx.write(&file, new.as_bytes(), 0o600)?;
+            }
+        } else if !(remove && new == old) {
             let before = crate::effects::cron(&paths.cwd)?;
             if before.as_deref().unwrap_or(&[]) != old.as_bytes() {
                 return r::fail("crontab changed before publication");

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
 # Overrides can add a Windows signal, never hide the host identity.
@@ -15,6 +14,28 @@ case "$(uname -s):${OSTYPE:-}" in
     exit 1
     ;;
 esac
+
+# Bash 5 floor (matches install.sh): re-exec under the first usable Bash 5 so
+# macOS callers with /bin/bash ahead of Homebrew still reach Bash 5 hooks.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+  oms_bash_found=""
+  if [ -z "${OMS_BASH_REEXEC:-}" ]; then
+    for oms_bash_candidate in \
+      ${OMS_BASH_CANDIDATES-${OMS_BASH:-} ${HOMEBREW_PREFIX:+$HOMEBREW_PREFIX/bin/bash} /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"}; do
+      case "$oms_bash_candidate" in /*) ;; *) continue ;; esac
+      [ -f "$oms_bash_candidate" ] && [ -x "$oms_bash_candidate" ] || continue
+      "$oms_bash_candidate" -c '[ "${BASH_VERSINFO[0]}" -ge 5 ]' >/dev/null 2>&1 || continue
+      oms_bash_found="$oms_bash_candidate"
+      break
+    done
+  fi
+  if [ -n "$oms_bash_found" ] && [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    OMS_BASH_REEXEC=1 exec "$oms_bash_found" "${BASH_SOURCE[0]}" "$@"
+  fi
+  echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2
+  exit 1
+fi
+unset OMS_BASH_REEXEC
 
 # One stable entrypoint so any agent CLI (Codex, Claude Code, Antigravity)
 # can invoke harness tools by name without memorizing script paths.
@@ -126,7 +147,7 @@ EOF_USAGE
 case "${1:-}" in
   "")
     if [ -t 0 ] && [ -t 1 ]; then
-      exec bash "$SCRIPTS_DIR/panel.sh"
+      exec "$BASH" "$SCRIPTS_DIR/panel.sh"
     fi
     usage
     exit 0
@@ -156,8 +177,8 @@ if [ ! -f "$TARGET" ]; then
   exit 2
 fi
 if [ "$TOOL" = panel ] || [ "$TOOL" = harness ]; then
-  exec bash "$TARGET" "$@"
+  exec "$BASH" "$TARGET" "$@"
 fi
 RC=0
-bash "$TARGET" "$@" || RC=$?
+"$BASH" "$TARGET" "$@" || RC=$?
 exit "$RC"

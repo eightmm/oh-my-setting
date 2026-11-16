@@ -129,15 +129,13 @@ jobs:
         timeout-minutes: 5
         run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
       - name: Rust workspace checks and tests
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           cargo +1.99.1 fmt --manifest-path rust/Cargo.toml --all -- --check
-          cargo +1.99.1 check --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
           cargo +1.99.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
           cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
           cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --doc --locked --offline
           cargo +1.99.1 fmt --manifest-path rust/crates/oms-migrate/Cargo.toml --all -- --check
-          cargo +1.99.1 check --manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline
           cargo +1.99.1 clippy --manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline -- -D warnings
           cargo +1.99.1 test --manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline
           cargo +1.99.1 test --manifest-path rust/crates/oms-migrate/Cargo.toml --doc --locked --offline

@@ -61,3 +61,12 @@ rust-version = "1.99.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.package.sha2]
+opt-level = 2

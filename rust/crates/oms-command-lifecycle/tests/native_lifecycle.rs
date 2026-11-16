@@ -144,6 +144,27 @@ fn native_only(value: &Value) {
 
 #[test]
 fn native_configuration_and_services() {
+    if let Some(root) =
+        std::env::var_os("OMS_LIFECYCLE_SYSTEMD_UNINSTALL_FIXTURE").map(PathBuf::from)
+    {
+        let source = root.join("source");
+        let host = NativeServices::default();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(&source)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        fs::write(source.join("VERSION"), "1.0.0\n").unwrap();
+        fs::create_dir(source.join("rules")).unwrap();
+        fs::write(source.join("rules/global-AGENTS.md"), "managed rules\n").unwrap();
+        write(&source.join("skills.manifest.json"), &json!({"skills":[]}));
+        success(call("uninstall", &["--yes"], &source, &host));
+        return;
+    }
     if std::env::var_os("OMS_LIFECYCLE_FIXTURE").is_none() {
         let root = std::env::temp_dir().join(format!("oms-native-test-{}", std::process::id()));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
@@ -153,12 +174,10 @@ fn native_configuration_and_services() {
             .output()
             .unwrap();
         assert!(git.status.success());
+        let git_bin = String::from_utf8(git.stdout).unwrap();
+        let git_bin = git_bin.trim();
         fs::create_dir(fixture.0.join("bin")).unwrap();
-        symlink(
-            String::from_utf8(git.stdout).unwrap().trim(),
-            fixture.0.join("bin/git"),
-        )
-        .unwrap();
+        symlink(git_bin, fixture.0.join("bin/git")).unwrap();
         let codex = fixture.0.join("bin/codex");
         // Removal records state so a later inventory proves the plugin is gone;
         // only shell builtins are available on this PATH.
@@ -223,6 +242,73 @@ esac
             "{}\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
+        );
+        let systemd_root = fixture.0.join("systemd-uninstall");
+        for dir in [
+            "bin", "home", "source", "config", "data", "state", "runtime",
+        ] {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(systemd_root.join(dir))
+                .unwrap();
+        }
+        symlink(git_bin, systemd_root.join("bin/git")).unwrap();
+        let systemctl = systemd_root.join("bin/systemctl");
+        fs::write(
+            &systemctl,
+            br#"#!/bin/sh
+case "${1:-} ${2:-}" in
+  '--user show-environment') exit 0 ;;
+  '--user disable')
+    printf 'Failed to disable unit: Unit file %s does not exist.\n' "${4:-}" >&2
+    exit 1 ;;
+  *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+        let crontab = systemd_root.join("bin/crontab");
+        fs::write(
+            &crontab,
+            br#"#!/bin/sh
+case "${1:-}" in
+  -l)
+    printf 'no crontab for fixture\n' >&2
+    exit 1 ;;
+  -) exit 99 ;;
+  *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&crontab, fs::Permissions::from_mode(0o700)).unwrap();
+        let systemd_out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native_configuration_and_services",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", systemd_root.join("bin"))
+            .env("HOME", systemd_root.join("home"))
+            .env("XDG_CONFIG_HOME", systemd_root.join("config"))
+            .env("XDG_DATA_HOME", systemd_root.join("data"))
+            .env("XDG_STATE_HOME", systemd_root.join("state"))
+            .env("XDG_RUNTIME_DIR", systemd_root.join("runtime"))
+            .env("TMPDIR", &systemd_root)
+            .env("OMS_LIFECYCLE_SYSTEMD_UNINSTALL_FIXTURE", &systemd_root)
+            .output()
+            .unwrap();
+        if !systemd_out.stderr.is_empty() {
+            eprint!("{}", String::from_utf8_lossy(&systemd_out.stderr));
+        }
+        assert!(
+            systemd_out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&systemd_out.stdout),
+            String::from_utf8_lossy(&systemd_out.stderr)
         );
         return;
     }

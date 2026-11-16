@@ -1,8 +1,10 @@
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT: AtomicUsize = AtomicUsize::new(0);
+static OMS_DIGEST: OnceLock<String> = OnceLock::new();
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -26,10 +28,12 @@ impl Fixture {
         let dir = root.join("rust/target/oms-native").join(revision);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_oms"), dir.join("oms")).unwrap();
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(std::fs::read(dir.join("oms")).unwrap())
-        );
+        let digest = OMS_DIGEST.get_or_init(|| {
+            format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(env!("CARGO_BIN_EXE_oms")).unwrap())
+            )
+        });
         std::fs::write(dir.join("manifest.json"), format!("{{\"schema\":1,\"source_commit\":\"{revision}\",\"artifacts\":{{\"oms\":\"{digest}\"}}}}" )).unwrap();
         std::fs::write(dir.join("oms.sha256"), format!("{digest}\n")).unwrap();
         std::fs::create_dir(root.join("scripts")).unwrap();
