@@ -561,6 +561,11 @@ esac
         &home.join(".claude.json"),
         &json!({"custom":true,"mcpServers":{"oh-my-setting":{"command":"python3","args":[source.join("scripts/oms-mcp-server.py")]}}}),
     );
+    let legacy_toml = format!(
+        "{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"python3\"\nargs = [\"{}\"]\n",
+        source.join("scripts/oms-mcp-server.py").display()
+    );
+    fs::write(&codex_config, &legacy_toml).unwrap();
     success(call("install-mcp", &["--remove"], &source, &host));
     assert_eq!(read(&home.join(".claude.json"))["custom"], true);
     assert!(
@@ -568,6 +573,50 @@ esac
             .get("oh-my-setting")
             .is_none()
     );
+    let cleaned_toml = fs::read_to_string(&codex_config).unwrap();
+    assert!(!cleaned_toml.contains("mcp_servers"));
+    assert!(cleaned_toml.contains(custom));
+    fs::write(
+        &codex_config,
+        format!("{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"custom-mcp\"\nargs = []\n"),
+    )
+    .unwrap();
+    let refused_mcp = call("install-mcp", &["--remove"], &source, &host);
+    assert_ne!(refused_mcp.0, 0);
+    assert!(
+        String::from_utf8_lossy(&refused_mcp.2)
+            .contains("an unmanaged TOML table already occupies this registration")
+    );
+    fs::write(&codex_config, custom).unwrap();
+    write(
+        &source.join("plugins/antigravity/plugin.json"),
+        &json!({"name":"oh-my-setting","version":"0.0.0","description":"oms-mcp"}),
+    );
+    let agy_plugin = home.join(".gemini/config/plugins/oh-my-setting");
+    let legacy_python = root.join("data/oh-my-setting/python-runtime/launchers/3.12.15/python3");
+    write(
+        &agy_plugin.join("plugin.json"),
+        &json!({"name":"oh-my-setting","version":"0.7.0","description":"oms-mcp"}),
+    );
+    write(
+        &agy_plugin.join("mcp_config.json"),
+        &json!({"mcpServers":{"oh-my-setting":{"command":legacy_python,"args":[source.join("scripts/oms-mcp-server.py")]}}}),
+    );
+    success(call("install-agy-plugin", &["--remove"], &source, &host));
+    assert!(!agy_plugin.exists());
+    write(
+        &agy_plugin.join("plugin.json"),
+        &json!({"name":"other","version":"0.7.0","description":"oms-mcp"}),
+    );
+    write(
+        &agy_plugin.join("mcp_config.json"),
+        &json!({"mcpServers":{"oh-my-setting":{"command":legacy_python,"args":[source.join("scripts/oms-mcp-server.py")]}}}),
+    );
+    assert_ne!(
+        call("install-agy-plugin", &["--remove"], &source, &host).0,
+        0
+    );
+    fs::remove_dir_all(&agy_plugin).unwrap();
     write(
         &source.join("config/capability-profiles.json"),
         &json!({"schema":1,"profiles":{"core":{

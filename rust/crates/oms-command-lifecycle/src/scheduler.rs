@@ -56,6 +56,111 @@ fn block(raw: &str, name: &str, replacement: &str) -> Result<String> {
     }
     Ok(result)
 }
+/// Accepts native units marked with `# oh-my-setting native lifecycle` as well
+/// as legacy shell-era OMS systemd units pointing strictly at this checkout.
+fn owned_systemd_unit(raw: &str, timer: bool, paths: &Paths, tick: bool) -> bool {
+    if raw.contains("# oh-my-setting native lifecycle") {
+        return true;
+    }
+    if timer {
+        let mut has_calendar = false;
+        let mut has_wanted = false;
+        for line in raw.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
+            match l {
+                "[Unit]" | "[Timer]" | "[Install]" | "Persistent=true" => {}
+                "WantedBy=timers.target" => has_wanted = true,
+                _ if l.starts_with("RandomizedDelaySec=") => {}
+                "Description=Run oh-my-setting auto-update daily"
+                | "Description=oh-my-setting autoupdate"
+                    if !tick => {}
+                "OnCalendar=daily" if !tick => has_calendar = true,
+                "Description=Run oh-my-setting tick hourly" | "Description=oh-my-setting tick"
+                    if tick => {}
+                "OnCalendar=hourly" if tick => has_calendar = true,
+                _ => return false,
+            }
+        }
+        return has_calendar && has_wanted;
+    }
+    let expected_script = paths.source.join(if tick {
+        "scripts/tick.sh"
+    } else {
+        "scripts/auto-update.sh"
+    });
+    let mut exec_count = 0usize;
+    for line in raw.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        if matches!(l, "[Unit]" | "[Service]" | "Type=oneshot") {
+            continue;
+        }
+        if !tick
+            && matches!(
+                l,
+                "Description=oh-my-setting auto-update" | "Description=oh-my-setting autoupdate"
+            )
+            || tick && l == "Description=oh-my-setting tick"
+        {
+            continue;
+        }
+        if let Some(rest) = l.strip_prefix("Environment=") {
+            let inner = rest
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(rest);
+            let Some((var, _)) = inner.split_once('=') else {
+                return false;
+            };
+            if var != "PATH" && !var.starts_with("OH_MY_SETTING_") && !var.starts_with("OMS_") {
+                return false;
+            }
+            continue;
+        }
+        if let Some(cmd) = l.strip_prefix("ExecStart=") {
+            exec_count += 1;
+            let Some(words) = crate::integrations::command_words(cmd) else {
+                return false;
+            };
+            let arg_ok = |arg: &str| {
+                if tick {
+                    arg == "run"
+                } else {
+                    matches!(arg, "apply" | "check")
+                }
+            };
+            let valid = match words
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                [script, arg] => std::path::Path::new(script) == expected_script && arg_ok(arg),
+                [bash, script, arg] => {
+                    (*bash == "bash"
+                        || std::path::Path::new(bash)
+                            .file_name()
+                            .is_some_and(|n| n == "bash"))
+                        && std::path::Path::new(script) == expected_script
+                        && arg_ok(arg)
+                }
+                _ => false,
+            };
+            if !valid {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    exec_count == 1
+}
+
 pub(crate) fn apply(
     paths: &Paths,
     options: &Options,
@@ -113,10 +218,10 @@ pub(crate) fn apply(
         let dir = paths.config.parent().unwrap().join("systemd/user");
         let service = dir.join(format!("oh-my-setting-{name}.service"));
         let timer = dir.join(format!("oh-my-setting-{name}.timer"));
-        for path in [&service, &timer] {
+        for (path, is_timer) in [(&service, false), (&timer, true)] {
             if r::exists(path) {
                 let raw = r::read(path, r::LIMIT)?;
-                if !String::from_utf8_lossy(&raw).contains("# oh-my-setting native lifecycle") {
+                if !owned_systemd_unit(&String::from_utf8_lossy(&raw), is_timer, paths, tick) {
                     return r::fail("refusing takeover of an unmanaged scheduler unit");
                 }
             }
@@ -330,4 +435,79 @@ fn retire_legacy_tick(raw: &str, paths: &Paths) -> Result<String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_paths(source: &str) -> Paths {
+        Paths {
+            home: PathBuf::from("/tmp/home"),
+            source: PathBuf::from(source),
+            receipt: PathBuf::from("/tmp/receipt"),
+            config: PathBuf::from("/tmp/config"),
+            state: PathBuf::from("/tmp/state"),
+            data: PathBuf::from("/tmp/data"),
+            cwd: PathBuf::from("/tmp"),
+        }
+    }
+
+    #[test]
+    fn owned_systemd_unit_accepts_legacy_oms_units_and_rejects_foreign_units() {
+        let paths = test_paths("/opt/oms-checkout");
+        let legacy_auto_service = concat!(
+            "[Unit]\nDescription=oh-my-setting auto-update\n\n",
+            "[Service]\nType=oneshot\nEnvironment=OH_MY_SETTING_MCP=1\n",
+            "ExecStart=\"/usr/bin/bash\" \"/opt/oms-checkout/scripts/auto-update.sh\" apply\n",
+        );
+        let legacy_auto_timer = concat!(
+            "[Unit]\nDescription=Run oh-my-setting auto-update daily\n\n",
+            "[Timer]\nOnCalendar=daily\nPersistent=true\nRandomizedDelaySec=30m\n\n",
+            "[Install]\nWantedBy=timers.target\n",
+        );
+        let legacy_tick_service = concat!(
+            "[Unit]\nDescription=oh-my-setting tick\n[Service]\nType=oneshot\n",
+            "Environment=PATH=/usr/bin:/bin\n",
+            "ExecStart=\"/opt/oms-checkout/scripts/tick.sh\" run\n",
+        );
+        let legacy_tick_timer = concat!(
+            "[Unit]\nDescription=Run oh-my-setting tick hourly\n[Timer]\n",
+            "OnCalendar=hourly\nPersistent=true\nRandomizedDelaySec=10m\n",
+            "[Install]\nWantedBy=timers.target\n",
+        );
+        assert!(owned_systemd_unit(
+            legacy_auto_service,
+            false,
+            &paths,
+            false
+        ));
+        assert!(owned_systemd_unit(legacy_auto_timer, true, &paths, false));
+        assert!(owned_systemd_unit(legacy_tick_service, false, &paths, true));
+        assert!(owned_systemd_unit(legacy_tick_timer, true, &paths, true));
+        assert!(owned_systemd_unit(
+            "# oh-my-setting native lifecycle\n[Unit]\n",
+            false,
+            &paths,
+            false
+        ));
+        assert!(!owned_systemd_unit(
+            "[Service]\nExecStart=\"/usr/bin/custom\" run\n",
+            false,
+            &paths,
+            false
+        ));
+        assert!(!owned_systemd_unit(
+            "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\nExecStart=\"/opt/oms-checkout/scripts/tick.sh\" run\n",
+            false,
+            &paths,
+            true
+        ));
+        assert!(!owned_systemd_unit(
+            "[Unit]\nDescription=other\n[Timer]\nOnCalendar=daily\n[Install]\nWantedBy=timers.target\n",
+            true,
+            &paths,
+            false
+        ));
+    }
 }

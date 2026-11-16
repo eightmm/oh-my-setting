@@ -419,14 +419,82 @@ fn defaults(paths: &Paths, value: &mut Value, remove: bool, auto_compact: bool) 
     }
     Ok(())
 }
+/// Recognizes OMS-owned MCP registrations across Claude `.claude.json`, Codex
+/// `config.toml`, and legacy Antigravity `mcp_config.json` manifests.
+pub(crate) fn owned_mcp_entry(current: &Value, paths: &Paths, executable: &Path) -> Result<bool> {
+    let Some(obj) = current.as_object() else {
+        return Ok(false);
+    };
+    if !obj
+        .keys()
+        .all(|k| matches!(k.as_str(), "command" | "args" | "type"))
+        || !obj.get("type").is_none_or(|v| v == "stdio")
+    {
+        return Ok(false);
+    }
+    let command = obj.get("command").and_then(Value::as_str).unwrap_or("");
+    let args = obj
+        .get("args")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
+    let native =
+        command == executable.to_string_lossy() && args.as_deref() == Some(&["mcp-server"]);
+    let cmd_path = Path::new(command);
+    let runtime_dir = paths.data.join("python-runtime");
+    let runtime_python = cmd_path.is_absolute()
+        && cmd_path.starts_with(&runtime_dir)
+        && cmd_path
+            .file_name()
+            .is_some_and(|n| n == "python" || n == "python3");
+    let legacy = (command == "python3" || runtime_python)
+        && args.as_ref().is_some_and(|a| {
+            a.len() == 1
+                && ["oms-mcp-server.py", "mcp-server.py"]
+                    .iter()
+                    .any(|name| Path::new(a[0]) == paths.source.join("scripts").join(name))
+        });
+    let cached = if args.as_deref() == Some(&["mcp-server"]) {
+        paths
+            .load()?
+            .and_then(|row| {
+                let revision = row["native"]["revision"].as_str()?;
+                if revision.len() != 40
+                    || !revision
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
+                    return None;
+                }
+                let root = crate::receipt::owner(&row).ok()?;
+                Some(
+                    root.join("rust/target/oms-native")
+                        .join(revision)
+                        .join("oms")
+                        == cmd_path,
+                )
+            })
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    Ok(native || legacy || cached)
+}
+
 /// A dedicated managed block leaves all user TOML byte-for-byte intact. If a
-/// same-named user table exists outside that block, installation refuses it.
-fn toml_block(raw: &str, block: &str, table: &str) -> Result<String> {
+/// same-named user table exists outside that block, installation refuses it
+/// unless it is an unambiguous OMS-owned registration from an earlier version.
+fn toml_block(
+    raw: &str,
+    block: &str,
+    table: &str,
+    paths: &Paths,
+    executable: &Path,
+) -> Result<String> {
     let begin = "# BEGIN oh-my-setting native";
     let end = "# END oh-my-setting native";
     let a = raw.match_indices(begin).collect::<Vec<_>>();
     let b = raw.match_indices(end).collect::<Vec<_>>();
-    let base = match (a.as_slice(), b.as_slice()) {
+    let mut base = match (a.as_slice(), b.as_slice()) {
         ([], []) => raw.to_owned(),
         ([(a, _)], [(b, _)]) if a < b => {
             let finish = b + end.len();
@@ -434,7 +502,59 @@ fn toml_block(raw: &str, block: &str, table: &str) -> Result<String> {
         }
         _ => return r::fail("malformed native TOML ownership block"),
     };
-    let parsed = crate::config::toml(base.as_bytes())?;
+    let mut parsed = crate::config::toml(base.as_bytes())?;
+    if a.is_empty()
+        && b.is_empty()
+        && let Some(entry) = parsed
+            .get("mcp_servers")
+            .and_then(|m| m.get("oh-my-setting"))
+        && owned_mcp_entry(entry, paths, executable)?
+    {
+        let mut lines = base
+            .split_inclusive('\n')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let positions = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                matches!(
+                    l.trim(),
+                    "[mcp_servers.oh-my-setting]"
+                        | "[mcp_servers.\"oh-my-setting\"]"
+                        | "[mcp_servers.'oh-my-setting']"
+                )
+            })
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        if positions.len() != 1 {
+            return r::fail("an unmanaged TOML table already occupies this registration");
+        }
+        let h = positions[0];
+        let section_end = lines[h + 1..]
+            .iter()
+            .position(|l| {
+                let s = l.trim_start();
+                s.starts_with('[')
+                    || s.starts_with("# >>>")
+                    || s.starts_with("# <<<")
+                    || s.starts_with("# BEGIN")
+                    || s.starts_with("# END")
+            })
+            .map_or(lines.len(), |offset| h + 1 + offset);
+        let last_kv = (h..section_end)
+            .rfind(|&i| !lines[i].trim().is_empty())
+            .unwrap_or(h);
+        if lines[h + 1..=last_kv]
+            .iter()
+            .any(|l| l.trim_start().starts_with('#'))
+        {
+            return r::fail("an unmanaged TOML table already occupies this registration");
+        }
+        lines.drain(h..=last_kv);
+        base = lines.concat();
+        parsed = crate::config::toml(base.as_bytes())?;
+    }
     if base.lines().any(|s| s.trim() == table)
         || parsed["mcp_servers"].get("oh-my-setting").is_some()
     {
@@ -465,47 +585,10 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
     let servers = value["mcpServers"]
         .as_object_mut()
         .ok_or_else(|| r::Error(2, "invalid MCP server table".into()))?;
-    if let Some(current) = servers.get("oh-my-setting") {
-        let command = current["command"].as_str().unwrap_or("");
-        let args = current["args"]
-            .as_array()
-            .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
-        let native =
-            command == executable.to_string_lossy() && args.as_deref() == Some(&["mcp-server"]);
-        let legacy = command == "python3"
-            && args.as_ref().is_some_and(|a| {
-                a.len() == 1
-                    && ["oms-mcp-server.py", "mcp-server.py"]
-                        .iter()
-                        .any(|name| Path::new(a[0]) == paths.source.join("scripts").join(name))
-            });
-        let cached = if args.as_deref() == Some(&["mcp-server"]) {
-            paths
-                .load()?
-                .and_then(|row| {
-                    let revision = row["native"]["revision"].as_str()?;
-                    if revision.len() != 40
-                        || !revision
-                            .bytes()
-                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-                    {
-                        return None;
-                    }
-                    let root = crate::receipt::owner(&row).ok()?;
-                    Some(
-                        root.join("rust/target/oms-native")
-                            .join(revision)
-                            .join("oms")
-                            == Path::new(command),
-                    )
-                })
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        if !native && !legacy && !cached {
-            return r::fail("refusing takeover of an unmanaged MCP registration");
-        }
+    if let Some(current) = servers.get("oh-my-setting")
+        && !owned_mcp_entry(current, paths, &executable)?
+    {
+        return r::fail("refusing takeover of an unmanaged MCP registration");
     }
     if options.has("--remove") {
         servers.remove("oh-my-setting");
@@ -533,7 +616,7 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
         )
     };
     let mut expected = crate::config::toml(raw.as_bytes())?;
-    let body = toml_block(&raw, &block, section)?;
+    let body = toml_block(&raw, &block, section, paths, &executable)?;
     let candidate = crate::config::toml(body.as_bytes())?;
     if options.has("--remove") {
         if let Some(servers) = expected
