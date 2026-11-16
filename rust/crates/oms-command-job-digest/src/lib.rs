@@ -72,11 +72,28 @@ fn number(s: &OsStr) -> Option<u64> {
         s.parse().ok()
     }
 }
+fn resolve_executable(name: &str, repo: &Path) -> Option<PathBuf> {
+    let base = if repo.is_absolute() {
+        None
+    } else {
+        std::env::current_dir().ok().map(|cwd| cwd.join(repo))
+    };
+    let repo_abs = base.as_deref().unwrap_or(repo);
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|p| {
+            if p.is_absolute() {
+                p.join(name)
+            } else {
+                repo_abs.join(p).join(name)
+            }
+        })
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
 fn executable(name: &str, repo: &Path) -> bool {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|p| {
-        let p = if p.is_absolute() { p } else { repo.join(p) };
-        fs::metadata(p.join(name)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    })
+    resolve_executable(name, repo).is_some()
 }
 fn query(
     name: &str,
@@ -114,7 +131,8 @@ fn query(
     {
         return (1, vec![], vec![]);
     }
-    let mut child = match Command::new(name)
+    let program = resolve_executable(name, repo).unwrap_or_else(|| PathBuf::from(name));
+    let mut child = match Command::new(program)
         .args(args)
         .current_dir(repo)
         .stdin(Stdio::null())
