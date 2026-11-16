@@ -2565,7 +2565,9 @@ mod tests {
         assert!(!none.supports_detach());
         assert!(none.detach_command("journal", &[], dir.path()).is_err());
         let host = HookHost {
-            native: sh("printf '%s' \"$*\" > detached.txt; sleep 1"),
+            native: sh(
+                "printf '%s' \"$*\" > detached.txt.tmp && mv -f detached.txt.tmp detached.txt; sleep 1",
+            ),
             detach_worker,
         };
         assert!(host.supports_detach());
