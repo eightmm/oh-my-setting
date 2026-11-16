@@ -1011,14 +1011,29 @@ fn list_inherits_locale_and_deduplicates_without_option_injection() {
         .filter(|r| r.status.success())
         .map(|r| String::from_utf8_lossy(&r.stdout).into_owned())
         .unwrap_or_default();
+    let is_non_c = |locale: &&str| {
+        !matches!(*locale, "C" | "POSIX") && !locale.to_ascii_lowercase().starts_with("c.")
+    };
+    let is_utf8 = |locale: &&str| {
+        let lower = locale.to_ascii_lowercase();
+        lower.ends_with(".utf-8") || lower.ends_with(".utf8")
+    };
     let non_c = available
         .lines()
-        .find(|locale| locale.starts_with("en_US") || locale.starts_with("en_GB"))
+        .find(|locale| {
+            is_utf8(locale) && (locale.starts_with("en_US") || locale.starts_with("en_GB"))
+        })
         .or_else(|| {
-            available.lines().find(|locale| {
-                !matches!(*locale, "C" | "POSIX") && !locale.to_ascii_lowercase().starts_with("c.")
-            })
-        });
+            available
+                .lines()
+                .find(|locale| is_utf8(locale) && is_non_c(locale))
+        })
+        .or_else(|| {
+            available
+                .lines()
+                .find(|locale| locale.starts_with("en_US") || locale.starts_with("en_GB"))
+        })
+        .or_else(|| available.lines().find(is_non_c));
     let mut tested = vec!["C"];
     if let Some(locale) = non_c {
         tested.push(locale);
@@ -1026,22 +1041,6 @@ fn list_inherits_locale_and_deduplicates_without_option_injection() {
         eprintln!("SKIP non-C locale parity: host locale -a exposes no non-C locale");
     }
     for locale in tested {
-        let mut canonical = Command::new("sort")
-            .arg("-u")
-            .env("LC_ALL", locale)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        use std::io::Write;
-        canonical
-            .stdin
-            .take()
-            .unwrap()
-            .write_all((names.join("\n") + "\n").as_bytes())
-            .unwrap();
-        let expected = canonical.wait_with_output().unwrap();
-        assert!(expected.status.success());
         for environment in [
             vec![("LC_ALL", Some(locale))],
             vec![
@@ -1055,6 +1054,28 @@ fn list_inherits_locale_and_deduplicates_without_option_injection() {
                 ("LANG", Some(locale)),
             ],
         ] {
+            let mut canonical = Command::new("sort");
+            canonical
+                .arg("-u")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            for (name, value) in &environment {
+                if let Some(value) = value {
+                    canonical.env(name, value);
+                } else {
+                    canonical.env_remove(name);
+                }
+            }
+            let mut canonical = canonical.spawn().unwrap();
+            use std::io::Write;
+            canonical
+                .stdin
+                .take()
+                .unwrap()
+                .write_all((names.join("\n") + "\n").as_bytes())
+                .unwrap();
+            let expected = canonical.wait_with_output().unwrap();
+            assert!(expected.status.success());
             let result = f.call_env(
                 &["list".into()],
                 false,
