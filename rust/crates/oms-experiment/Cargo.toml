@@ -1,0 +1,14 @@
+[package]
+name = "oms-experiment"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+oms-context = { path = "../oms-context" }
+oms-json = { path = "../oms-json" }
+sha2 = "=0.10.9"
+unicode-general-category = "=0.6.0"
+
+[lints.rust]
+unsafe_code = "forbid"

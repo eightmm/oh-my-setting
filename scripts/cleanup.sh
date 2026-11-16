@@ -1,92 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DRY_RUN=1
-# shellcheck source=scripts/lib/agent-install-state.sh
-. "$ROOT/scripts/lib/agent-install-state.sh"
-# shellcheck source=scripts/lib/harness-residue.sh
-. "$ROOT/scripts/lib/harness-residue.sh"
+# Native OMS entrypoint for cleanup.
 
-usage() {
-  cat <<'EOF'
-Usage: cleanup.sh [--dry-run|--apply] [-h|--help]
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
-Clean safe oh-my-setting install leftovers. Default is --dry-run.
-Removes known oh-my-setting legacy symlinks and backup skill symlinks, and the
-dead harness worktrees proven disposable below; never removes other regular
-files, third-party plugins or user caches. A dead cached worktree whose only
-extra content is recognised regenerable trees (venvs, node_modules, tool
-caches) is removed after a no-follow scan binds every link target and refuses
-nested Git data.
-
-Dead harness temp dirs holding work are kept ("kept with work"), except a
-delegate worktree whose run finished (a failed one needs an owner decision or
-age) and whose uncommitted files equal, byte for byte, the patch the run
-preserved (raw bytes compared with that patch applied to HEAD; no index row is
-needed, a present indexed digest must match); the proof is read again just before removal.
-Scratch worktrees with uncommitted files and HEADs on no ref stay kept. Every
-kept line names the missing proof.
-
-Also reports, read-only in both modes, local oms/* branches grouped as safe to
-delete, landed by equivalent commits, still unique, or in use by a worktree,
-with the delete commands printed for you to run; it never deletes a branch.
-EOF
-}
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --dry-run)
-      DRY_RUN=1
-      shift
-      ;;
-    --apply)
-      DRY_RUN=0
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "error: unknown option: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-  esac
-done
-
-[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || [ "$DRY_RUN" -eq 1 ] || {
-  echo "error: a harness child cannot mutate OMS host lifecycle authority" >&2
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for cleanup; stage with cargo or run oms doctor --repair" >&2
   exit 2
-}
-
-printf '# oh-my-setting cleanup\n\n'
-if [ "$DRY_RUN" -eq 1 ]; then
-  printf 'mode: dry-run\n\n'
-else
-  printf 'mode: apply\n\n'
 fi
-
-oms_ops_cleanup_legacy_links "$DRY_RUN"
-
-repo_dir=""
-if git -C "$PWD" rev-parse --git-dir >/dev/null 2>&1; then
-  repo_dir="$PWD"
-fi
-oms_harness_cleanup_residue "$repo_dir" "$DRY_RUN"
-
-# Report only, in both modes: leftover oms/* work branches and the commands a
-# person may run. Nothing here deletes a branch.
-if [ -n "$repo_dir" ]; then
-  python3 -I -B "$ROOT/scripts/lib/branch_sweep.py" "$repo_dir" || true
-fi
-
-if [ "$DRY_RUN" -eq 1 ]; then
-  total=$((OMS_OPS_WOULD_REMOVE + OMS_HARNESS_RESIDUE_WOULD_REMOVE))
-  printf '\ncleanup: %s removable item(s) found, %s kept with work\n' "$total" "${OMS_HARNESS_RESIDUE_KEPT:-0}"
-else
-  total=$((OMS_OPS_REMOVED + OMS_HARNESS_RESIDUE_REMOVED))
-  printf '\ncleanup: removed %s item(s), %s kept with work\n' "$total" "${OMS_HARNESS_RESIDUE_KEPT:-0}"
-  "$ROOT/scripts/skill-doctor.sh"
-fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "cleanup" "$@" || exit $?
+echo "error: native payload unavailable for cleanup (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

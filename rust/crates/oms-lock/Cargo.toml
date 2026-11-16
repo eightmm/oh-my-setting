@@ -1,0 +1,16 @@
+[package]
+name = "oms-lock"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[[test]]
+name = "ps_fixture"
+path = "tests/ps_fixture.rs"
+harness = false

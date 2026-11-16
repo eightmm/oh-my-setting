@@ -1,0 +1,14 @@
+[package]
+name = "oms-work-inspect"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+oms-context = { path = "../oms-context" }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+unicode-general-category = "=0.6.0"
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }

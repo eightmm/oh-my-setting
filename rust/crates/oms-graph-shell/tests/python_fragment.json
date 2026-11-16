@@ -1,0 +1,89 @@
+{
+  "nodes": [
+    {
+      "id": "module:tests/example.sh",
+      "kind": "module",
+      "name": "example.sh",
+      "path": "tests/example.sh",
+      "language": "python",
+      "source_digest": "digest",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "symbol:tests/example.sh::nested",
+      "kind": "function",
+      "name": "nested",
+      "path": "tests/example.sh",
+      "language": "python",
+      "source_digest": "digest",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "def nested()",
+        "end_line": 4,
+        "qualname": "nested",
+        "line": 3
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:tests/example.sh",
+      "target": "module:tests/example.sh",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/example.sh",
+        "source_digest": "digest"
+      }
+    },
+    {
+      "source": "file:tests/example.sh",
+      "target": "symbol:tests/example.sh::nested",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/example.sh",
+        "source_digest": "digest",
+        "line": 3
+      }
+    }
+  ],
+  "refs": [
+    {
+      "from": "file:tests/example.sh",
+      "relation": "imports",
+      "kind": "module",
+      "value": "panel_metrics",
+      "line": 1,
+      "binding": "panel_metrics"
+    },
+    {
+      "from": "file:tests/example.sh",
+      "relation": "imports",
+      "kind": "module",
+      "value": "oms_graph.project.build",
+      "line": 1,
+      "binding": "build"
+    },
+    {
+      "from": "file:tests/example.sh",
+      "relation": "imports",
+      "kind": "module",
+      "value": "oms_runtime.common",
+      "line": 2,
+      "binding": "canon",
+      "imported": "canonical_json"
+    },
+    {
+      "from": "symbol:tests/example.sh::nested",
+      "relation": "imports",
+      "kind": "module",
+      "value": "ignored",
+      "line": 4,
+      "binding": "ignored"
+    }
+  ]
+}

@@ -1,40 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Per-repo literature notes and identifier checks: add/list/verify/export over
-# .oms/literature.jsonl. Offline unless `verify --online` is given; then only
-# the DOI or arXiv id is sent to Crossref or the arXiv API. No full-text RAG.
+# Native OMS entrypoint for cite.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/agent-memory-common.sh
-. "$ROOT/scripts/lib/agent-memory-common.sh"
-
-usage() {
-  cat <<'EOF'
-Usage: cite.sh add --id ID [--title T] [--year Y] [--claim C] [--locator L]
-       cite.sh list [--json]
-       cite.sh verify [--id ID] [--online]
-       cite.sh export --bibtex
-
-ID is a DOI (10.x/y, doi:..., https://doi.org/...) or an arXiv id (2101.00001,
-arxiv:..., hep-th/9901001). Notes go to .oms/literature.jsonl (append-only; the
-last row for an id wins). Statuses: unverified, verified, mismatch, not-found,
-invalid-id.
-
-verify      Offline it only checks identifier syntax. --online asks Crossref
-            (DOI) or arXiv for the record and compares title and year; the
-            identifier is the only thing sent. A failed lookup stays
-            unverified. OMS_CITE_CROSSREF_URL / OMS_CITE_ARXIV_URL override
-            the endpoints. Exit 1 unless every checked row is verified.
-export      BibTeX @misc entries; the note field carries the OMS status.
-
-A verified id proves the reference exists and matches title and year. It does
-not prove the claim recorded next to it is supported by the paper.
-EOF
-}
-
-case "${1:-}" in
-  ""|-h|--help) usage; [ -n "${1:-}" ] && exit 0 || exit 2 ;;
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
 esac
-command -v python3 >/dev/null 2>&1 || { echo "error: python3 is required" >&2; exit 2; }
-exec python3 -I "$ROOT/scripts/lib/literature.py" --root "$(oms_repo_root "$PWD")" "$@"
+
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for cite; stage with cargo or run oms doctor --repair" >&2
+  exit 2
+fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "cite" "$@" || exit $?
+echo "error: native payload unavailable for cite (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

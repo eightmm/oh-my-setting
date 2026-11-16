@@ -1,0 +1,749 @@
+{
+  "data_hex": "61fff09f98807879207879207879207879207879207879207879207879207879207879207879207879200a09225c",
+  "cases": [
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae"
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "content": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+        "end": 48,
+        "has_more": false
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "limit": 4
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "content": "a�",
+        "end": 4,
+        "has_more": true,
+        "next_read_arguments": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "offset": 4,
+          "limit": 4
+        }
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "offset": 4,
+        "limit": 4
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 4,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "content": "😀",
+        "end": 8,
+        "has_more": true,
+        "next_read_arguments": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "offset": 8,
+          "limit": 4
+        }
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "offset": 8,
+        "limit": 7
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 8,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "content": "xy xy x",
+        "end": 15,
+        "has_more": true,
+        "next_read_arguments": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "offset": 15,
+          "limit": 7
+        }
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": true,
+        "limit": 4
+      },
+      "payload": {
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "representation": "compact-v1",
+        "read_base": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "compact": true
+        },
+        "content": "a�",
+        "end": 4,
+        "has_more": true,
+        "next_read": {
+          "offset": 4,
+          "limit": 4
+        }
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "query": "xy"
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "matches": [
+          {
+            "offset": 8,
+            "end": 10,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          },
+          {
+            "offset": 11,
+            "end": 13,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          },
+          {
+            "offset": 14,
+            "end": 16,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          },
+          {
+            "offset": 17,
+            "end": 19,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          },
+          {
+            "offset": 20,
+            "end": 22,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          },
+          {
+            "offset": 23,
+            "end": 25,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          },
+          {
+            "offset": 26,
+            "end": 28,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          },
+          {
+            "offset": 29,
+            "end": 31,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          }
+        ],
+        "end": 31,
+        "has_more": true,
+        "next_search_arguments": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "offset": 31,
+          "query": "xy"
+        }
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": true,
+        "query": "xy"
+      },
+      "payload": {
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "representation": "compact-v1",
+        "read_base": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "compact": true
+        },
+        "matches": [
+          {
+            "offset": 8,
+            "end": 10,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          },
+          {
+            "offset": 11,
+            "end": 13,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          },
+          {
+            "offset": 14,
+            "end": 16,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          },
+          {
+            "offset": 17,
+            "end": 19,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          },
+          {
+            "offset": 20,
+            "end": 22,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          },
+          {
+            "offset": 23,
+            "end": 25,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          },
+          {
+            "offset": 26,
+            "end": 28,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          },
+          {
+            "offset": 29,
+            "end": 31,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_offset": 0
+          }
+        ],
+        "end": 31,
+        "has_more": true,
+        "next_search": {
+          "offset": 31,
+          "query": "xy"
+        }
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "query": "not-found",
+        "offset": 4
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 4,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "matches": [],
+        "end": 4,
+        "has_more": false
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "query": "a"
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "matches": [
+          {
+            "offset": 0,
+            "end": 1,
+            "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+            "read_arguments": {
+              "repo": "/repo",
+              "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+              "offset": 0
+            }
+          }
+        ],
+        "end": 1,
+        "has_more": false
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": true,
+        "queries": [
+          "missing",
+          "xy",
+          "a"
+        ]
+      },
+      "payload": {
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "representation": "compact-v1",
+        "read_base": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "compact": true
+        },
+        "searches": [
+          {
+            "query": "missing",
+            "matches": [],
+            "end": 0,
+            "has_more": false
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              },
+              {
+                "offset": 11,
+                "end": 13,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              },
+              {
+                "offset": 14,
+                "end": 16,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              },
+              {
+                "offset": 17,
+                "end": 19,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 19,
+            "has_more": true,
+            "next_search": {
+              "offset": 19,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "a",
+            "matches": [
+              {
+                "offset": 0,
+                "end": 1,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 1,
+            "has_more": false
+          }
+        ],
+        "has_more": true
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": true,
+        "queries": [
+          "xy",
+          "xy",
+          "xy",
+          "xy",
+          "xy",
+          "xy",
+          "xy",
+          "xy"
+        ]
+      },
+      "payload": {
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 0,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "representation": "compact-v1",
+        "read_base": {
+          "repo": "/repo",
+          "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+          "compact": true
+        },
+        "searches": [
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          },
+          {
+            "query": "xy",
+            "matches": [
+              {
+                "offset": 8,
+                "end": 10,
+                "context": "a�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+                "read_offset": 0
+              }
+            ],
+            "end": 10,
+            "has_more": true,
+            "next_search": {
+              "offset": 10,
+              "query": "xy"
+            }
+          }
+        ],
+        "has_more": true
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "offset": 1
+      },
+      "payload": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "capture_sha256": "8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9",
+        "capture_bytes": 46,
+        "content_bytes": 48,
+        "offset": 1,
+        "encoding": "utf-8 (invalid bytes replaced)",
+        "provenance": "stored redacted capture; not verification evidence",
+        "content": "�😀xy xy xy xy xy xy xy xy xy xy xy xy \n\t\"\\",
+        "end": 48,
+        "has_more": false
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "offset": 2
+      },
+      "error": {
+        "code": "invalid_range",
+        "message": "offset must be a UTF-8 boundary within the capture text"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "offset": 9999
+      },
+      "error": {
+        "code": "invalid_range",
+        "message": "offset must be a UTF-8 boundary within the capture text"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "limit": 3
+      },
+      "error": {
+        "code": "invalid_range",
+        "message": "limit must be an integer from 4 to 16384"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "offset": true
+      },
+      "error": {
+        "code": "invalid_range",
+        "message": "offset must be an integer from 0 to 201326592"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": 1
+      },
+      "error": {
+        "code": "invalid_representation",
+        "message": "compact must be a boolean"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "query": ""
+      },
+      "error": {
+        "code": "invalid_query",
+        "message": "each query requires 1-256 UTF-8 bytes"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "query": "a",
+        "limit": 4
+      },
+      "error": {
+        "code": "invalid_query",
+        "message": "query cannot accompany limit"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": true,
+        "queries": []
+      },
+      "error": {
+        "code": "invalid_query",
+        "message": "queries requires compact=true and 1-8 literals; no query or limit"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": false,
+        "queries": [
+          "a"
+        ]
+      },
+      "error": {
+        "code": "invalid_query",
+        "message": "queries requires compact=true and 1-8 literals; no query or limit"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "compact": true,
+        "queries": [
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a"
+        ]
+      },
+      "error": {
+        "code": "invalid_query",
+        "message": "queries requires compact=true and 1-8 literals; no query or limit"
+      }
+    },
+    {
+      "arguments": {
+        "capture_ref": "output:20250102T030405Z-42.log:8fe123e0a8aad4264ed6decd06d641827e8361524adac3f84da1de11da5864e9:2bf3578f31f2d8f743e04f9ef64e159e60dbaef1b3f85e8e57dbc43dbdf5a5ae",
+        "query": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+      },
+      "error": {
+        "code": "invalid_query",
+        "message": "each query requires 1-256 UTF-8 bytes"
+      }
+    }
+  ]
+}

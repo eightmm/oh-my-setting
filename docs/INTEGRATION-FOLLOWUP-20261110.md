@@ -55,7 +55,7 @@ PR 준비 때 원격 main을 다시 읽었고, 열린 PR이 45개에서 25개로
 
 **관측:** 파일 의존성이 명시된 binding에서 해당 파일을 그대로 두고 criterion ID를 유지한 채
 요구사항 문장을 바꾸면 `verified`가 남을 수 있었다.
-원인은 [evidence.py](../scripts/lib/oms_runtime/evidence.py)의 binding에 기준 내용 식별자가 없고,
+원인은 `evidence.py`의 binding에 기준 내용 식별자가 없고,
 파일별 freshness 경로가 해당 의존성만 검사하기 때문이다.
 
 - [ ] 표시용으로 잘리기 전의 실제 criterion statement를 fingerprint한다.
@@ -65,9 +65,9 @@ PR 준비 때 원격 main을 다시 읽었고, 열린 PR이 45개에서 25개로
 - [ ] 긴 statement의 표시 한도 이후 변경도 canonical fixture에서 확인한다.
 - [ ] Markdown 표기 정리 과정에서 요구사항의 음수 부호·CLI flag 같은 의미 있는 문자를 지우지 않는다.
 
-주요 위치: [projection.py](../scripts/lib/oms_runtime/projection.py),
-[evidence.py](../scripts/lib/oms_runtime/evidence.py),
-[runtime fixture](../tests/runtime_test_base.py).
+주요 위치: `projection.py`,
+`evidence.py`,
+`runtime fixture`.
 다른 task gate의 authority를 새롭게 부여하는 변경으로 확대하지 않는다.
 
 ### F02a — finding을 해당 수정의 검증 receipt에 연결
@@ -83,7 +83,7 @@ PR 준비 때 원격 main을 다시 읽었고, 열린 PR이 45개에서 25개로
 - [ ] 같은 HEAD라도 미커밋 tracked 변경을 검증한 scope를 그 commit의 증거로 인정하지 않는다.
 - [ ] 올바르게 연결된 정상 후속 검증은 통과하고 기존 `fixed` 기록은 읽을 수 있다.
 
-주요 위치: [review_findings.py](../scripts/lib/review_findings.py),
+주요 위치: `review_findings.py`,
 [peer-review.sh](../scripts/peer-review.sh), 기존 review smoke fixture.
 
 ### F00 — CI fixture의 현재 디렉터리와 Git 상태 격리
@@ -97,7 +97,7 @@ detached worktree에서는 같은 결함이 가려질 수 있으므로 재현 �
 - [ ] ci-status fixture는 자기 저장소·HEAD·upstream과 일치하는 응답을 명시한다.
 - [ ] 단독·연속 실행이 같은 결과를 내고 실제 실패 상태를 검사하는 assertion을 유지한다.
 
-주요 위치: [scripts-smoke.sh](../tests/scripts-smoke.sh).
+주요 위치: `scripts-smoke.sh`.
 제품 ci-status 동작을 테스트에 맞춰 바꾸지 않는다.
 
 ### F06a — seed 재실행 집계: 기존 #87 우선
@@ -140,12 +140,12 @@ ranked search는 context compiler의 자동 선택 경로에 연결되지 않았
 4. inspector가 실제 주입한 동일 pack을 설명하게 한다. 별도 추천 화면을 사실처럼 표시하지 않는다.
 5. skill 안내는 기존 명령과 연결하고 새 verb/상시 모델 호출을 기본으로 추가하지 않는다.
 
-주요 위치: [peer-common.sh](../scripts/lib/peer-common.sh),
-[agent_memory_review.py](../scripts/lib/agent_memory_review.py),
-[context.py](../scripts/lib/oms_runtime/context.py),
-[context_pack.py](../scripts/lib/oms_runtime/context_pack.py),
-[context_inspect.py](../scripts/lib/oms_runtime/context_inspect.py),
-[ranked.py](../scripts/lib/oms_graph/project/ranked.py).
+주요 위치: `peer-common.sh`,
+`agent_memory_review.py`,
+`context.py`,
+`context_pack.py`,
+`context_inspect.py`,
+`ranked.py`.
 
 완료 기준: task path 변경 시 관련 기억 선택이 바뀌고 범위 밖/retired/redacted 기록이 섞이지 않는다.
 동일 budget의 고정 fixture에서 필요한 근거 포함률과 선택 지연을 비교한다.
@@ -153,7 +153,7 @@ bytes를 provider 청구 token·비용으로 변환해 성과를 주장하지 �
 
 ### F04 — task 중심 inspector와 복귀 요약
 
-재사용: [work_inspect.py](../scripts/lib/oms_runtime/work_inspect.py),
+재사용: `work_inspect.py`,
 기존 evidence matrix·next explanation·brief, panel의 현재 탐색 구조.
 
 1. 선택한 task에서 criterion, blocker, finding, CI, run과 해당 native 세션을 조회한다.
@@ -169,8 +169,8 @@ bytes를 provider 청구 token·비용으로 변환해 성과를 주장하지 �
 ### F05 — provider capability, 알림 전달과 복구 상태
 
 재사용: [현재 coverage](TERMINAL-PANEL.md),
-[panel_workspaces.py](../scripts/lib/panel_workspaces.py),
-[panel_chats.py](../scripts/lib/panel_chats.py), [panel_watch.py](../scripts/lib/panel_watch.py).
+`panel_workspaces.py`,
+`panel_chats.py`, `panel_watch.py`.
 
 - [ ] launch/observe/resume/steer/stop/approval/usage 지원을 provider별로 분리한다.
 - [ ] foreground running, background-only waiting, input-ready, approval-needed를 명시적 신호로 구분한다.
@@ -191,8 +191,8 @@ live 검증이 없는 provider는 fixture-only/unknown 표시를 유지한다.
 [#89](https://github.com/eightmm/oh-my-setting/pull/89),
 [#90](https://github.com/eightmm/oh-my-setting/pull/90),
 [#106](https://github.com/eightmm/oh-my-setting/pull/106)의 source·split rationale·entity kind.
-주요 위치: [run_claims.py](../scripts/lib/run_claims.py),
-[run_ledger_metrics.py](../scripts/lib/run_ledger_metrics.py), run capsule·ledger entry point.
+주요 위치: `run_claims.py`,
+`run_ledger_metrics.py`, run capsule·ledger entry point.
 
 1. code/config/data/split/metric contract/seed identity를 run과 함께 보존한다.
 2. group claim은 실제 선택한 run·seed 목록과 집계 규칙을 가리킨다.
@@ -228,8 +228,8 @@ SBDD 프로젝트에서 protein/complex·데이터 출처·split 근거를 명�
 ledger/backend 기록 실패를 `released`로 계산하는 계약이 실제 소비와 일치하는지,
 `gpu_hours`·`final_evals`의 미확인 값을 어떻게 유지하는지 확인한다.
 
-주요 위치: [experiment_contract.py](../scripts/lib/oms_runtime/experiment_contract.py),
-[experiment_run.py](../scripts/lib/oms_runtime/experiment_run.py),
+주요 위치: `experiment_contract.py`,
+`experiment_run.py`,
 [run-reconcile.sh](../scripts/run-reconcile.sh), #75의 사용량 reader.
 완료 기준: budget 1에서 동시 두 시작이 둘 다 admitted되지 않고, 실패·재시도·requeue가 사용량을 부풀리지 않는다.
 fake scheduler·고정 accounting 응답으로 검증한다. 자동 kill 정책이나 실제 cluster 설정은 이 작업에 포함하지 않는다.

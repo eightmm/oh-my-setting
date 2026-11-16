@@ -1,0 +1,22 @@
+[package]
+name = "oms-command-memory"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+oms-context = { path = "../oms-context" }
+oms-json = { path = "../oms-json" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-scrub = { path = "../oms-scrub" }
+unicode-normalization = "=0.1.26"
+regex = "=1.13.1"
+sha2 = "=0.10.9"
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+
+[lints.rust]
+unsafe_code = "forbid"

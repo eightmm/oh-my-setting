@@ -1,0 +1,21 @@
+Attempt post-mortem bundle: attempt1
+Observation only: recorded facts and pointers, no commands, prompts, answers or tool output. Never verification, approval or a statement of cause.
+provider/tool: claude/delegate  run/task: run1/task1
+
+Lifecycle [.oms/lifecycle/events.jsonl]: state=failed terminal=True reason=verification_failed events=4 longest_gap_s=1
+  #1 2026-01-01T00:00:00Z attempt.created -->queued 
+  #2 2026-01-01T00:00:01Z attempt.state_changed queued->starting 
+  #3 2026-01-01T00:00:02Z attempt.state_changed starting->working 
+  #4 2026-01-01T00:00:03Z attempt.state_changed working->failed verification_failed
+
+Artifact-index rows [.oms/artifacts/index.jsonl]: 2
+  event_id=artifact1 ts=2026-01-01T00:00:01Z kind=delegate provider=claude exit=1 linked_by=attempt_id selected_model=model1
+    result_lint: no-test
+  event_id=artifact2 ts=2026-01-01T00:00:02Z kind=patch-admit exit=0 linked_by=answers parent_event_id
+    review: {"seat_verdicts": ["reject"], "seats": 1}
+
+Fail-ledger rows [.oms/failures.jsonl]: 1 (rows stamped inside the attempt's time window; the ledger records no attempt id, so these may belong to other work)
+  line=1 ts=2026-01-01T00:00:01Z kind=cmd exit=1 fingerprint=abc123
+
+Transcript timeline [--transcript]: steps=1 errors=1 pending=0 first_error_step=1 steps_after=0
+  1 Bash error duration_ms=2000 arg_bytes=29 result_bytes=14 FIRST ERROR

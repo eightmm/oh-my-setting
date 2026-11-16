@@ -1,0 +1,230 @@
+Usage: agent-plan.sh [--repo PATH] [--file PATH] <command> [options]
+
+Commands:
+  contract-propose --id ID --summary TEXT [--scope-paths CSV] [--decision-artifact REPO_REL] [--json]
+  contract-accept --id ID --version N [--json]  Parent-only acceptance.
+  contract-list [--json] | contract-show --id ID [--json]
+  refresh-contracts --task ID [--json]  Parent-only pin refresh.
+  snapshot-decision --decision-artifact REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Parent-only capture of fresh reviewed raw
+                                     bytes (at most 64 KiB) into the immutable
+                                     private .oms/plan/decision-artifacts-v1/SHA
+                                     catalog. No task or approval changes.
+                                     Prints snapshot_path, sha256, created JSON;
+                                     exits 0 on success, 2 on refusal/error.
+  init   --goal TEXT [--accept CMD]  Create/replace the plan with a goal and an
+                                     optional goal-level acceptance command —
+                                     the executable definition of done.
+  ensure-lineage                     Parent-only, idempotently mint the
+                                     immutable plan_id for a legacy plan before
+                                     plan-scoped evidence is produced.
+  retire [--check]                   Inspect whether the exact active plan can
+                                     be retired; default is read-only and prints
+                                     its SHA-256 CAS token.
+         --apply --expected-plan-sha256 SHA256
+         --disposition completed-external|superseded --reason TEXT
+                                     Preserve the exact plan bytes in a
+                                     content-addressed archive and append a
+                                     typed retirement receipt. Active worker
+                                     authority vetoes every disposition.
+                                     completed-external runs a fresh acceptance
+                                     against one clean committed HEAD; the
+                                     other dispositions never claim completion.
+  apply-proposal --proposal FILE --expected-proposal-sha256 SHA256
+         --expected-plan-sha256 absent|SHA256
+         [--goal TEXT --accept CMD] --allowed-envelope "p1,p2"
+         [--accept-files "path1,path2"]
+         [--max-tasks N]
+                                     Atomically create/append every task in a
+                                     reviewed proposal. The plan CAS, proposal
+                                     digest, scope envelope, dependencies, and
+                                     duplicate definitions are checked under
+                                     the plan lock. Exact replay is idempotent.
+  add    --id ID --title TEXT        Add a task (state: ready).
+         [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
+         [--resources CSV] [--contracts CSV] [--priority I32]
+         [--assignment '{"provider":"claude","workload":"routine"}']
+         [--verify CMD] [--role NAME] [--discovered-from TASK_ID]
+                                     --discovered-from records work found while
+                                     doing TASK_ID (must exist): the new task
+                                     carries a discovered_from link, TASK_ID
+                                     does not depend on it and keeps its state.
+                                     With it, --id may be omitted: a short
+                                     collision-checked id is generated.
+  claim  --id ID --provider NAME [--ttl SECONDS]   Claim a ready task for a worker.
+  start  --id ID [--lease-id TOKEN]  Mark a claimed task running.
+  touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
+                                     claimed_at so a live worker is not reclaimed.
+  review --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
+                                     Move a claimed/running task to review.
+  repair --id ID [--lease-id TOKEN] [--artifact PATH]
+                                     Re-enter a reviewed task under the same
+                                     lease for one explicitly bounded repair.
+                                     Prior artifact/patch evidence is retained
+                                     until a new review replaces it. --artifact
+                                     stores the failed gate output for recovery.
+  land   --id ID --lease-id TOKEN    Fence the exact admitted review receipt.
+  finish --id ID --expected-landing-receipt-sha256 SHA [--refreeze-acceptance]
+                                     Complete a landing-fenced task. With
+                                     --refreeze-acceptance (patch-land
+                                     forwards operator verifier-change
+                                     consent), acceptance-manifest entries
+                                     the fenced patch itself modified are
+                                     recomputed from the landed tree; all
+                                     other entries keep their frozen hashes,
+                                     and each refreeze appends a typed row.
+         --id ID --landed-commit SHA  Complete reviewed work integrated by
+                                     commit. Requires an exact-SHA oms land
+                                     receipt with passed gate/push/CI and
+                                     reachability from its local target ref,
+                                     the task's current lease when one is
+                                     given, and, for a task with allowed
+                                     paths, a landed range (previous pushed
+                                     receipt..SHA) that touches them.
+                                     --artifact/--patch supply evidence a
+                                     review lacked. Typed patch-land remains
+                                     the default for single patches.
+  amend --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
+        [--allowed "p1,p2"] [--verify CMD] --reason TEXT
+                                     Parent-only amendment of an inactive task.
+  cancel --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
+         --expected-state ready|blocked --expected-lease-id TOKEN|none
+         --operator-consent cancel --reason TEXT
+         --decision-artifact REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Parent-only cancellation of an inactive
+                                     ready/blocked task. Preserves task evidence;
+                                     cancelled is closed, never verified or a
+                                     dependency-satisfying state.
+  cancel --all-inactive --expected-plan-sha256 SHA --operator-consent cancel
+         --reason TEXT --decision-artifact REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Cancel unleased ready/blocked tasks in one write.
+  relocate-decision --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
+         --operator-consent relocate-decision --reason TEXT
+         --decision-artifact NEW_REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Parent-only proactive move of one valid
+                                     cancelled task's decision file pointer. The
+                                     old file must still match its bound digest.
+                                     Moves only the receipt's path to a
+                                     different no-link regular file whose bytes hash
+                                     to the digest ALREADY bound there (SHA must
+                                     equal it); the digest, task, state, lease and
+                                     archives stay unchanged. Appends a typed row to
+                                     .oms/plan/cancel-decision-relocations.jsonl.
+  accept-research|approve-main-research|accept-main-research|satisfy --id ID --lease-id TOKEN --expected-state STATE
+         --expected-plan-sha256 SHA256 --expected-task-sha256 SHA256
+         --completion-bundle REPO_RELATIVE_FILE
+         --expected-completion-bundle-sha256 SHA256
+         approve-main-research also requires --approve-reviewed-bundle (desktop
+         main step 1; prints an approval path and SHA-256)
+         accept-main-research [--main-review-approval PATH
+         --expected-main-review-approval-sha256 SHA256] (both together; required
+         for desktop mains, omitted by a native panel main bound to its room)
+                                     Parent-reviewed local completion with exact
+                                     owner, obligations, immutable provenance,
+                                     source and executed verifier bindings.
+                                     No code landing is attributed to this task.
+  lint-verify --verify CMD --allowed "p1,p2"
+                                     Lint a verify/acceptance command against
+                                     the admission floor: content reads of
+                                     allowed paths print typed
+                                     floor_incompatible_verifier lines and
+                                     exit 2. The same module the admission
+                                     gate loads — the two cannot drift.
+         --expected-review-patch PATH --expected-review-patch-sha256 SHA256
+         --expected-review-verify CMD --expected-review-lease-id TOKEN
+         --expected-review-executor-id ID
+         --expected-review-executor-soul-sha256 SHA256
+  finish --id ID [--lease-id TOKEN] [--artifact PATH] [--patch PATH]
+         --expected-landing-receipt-sha256 SHA256
+                                     Mark the exact landed receipt done. The
+                                     receipt is checked atomically under the
+                                     plan lock before the transition.
+  block  --id ID --reason TEXT       Mark a task blocked.
+  release --id ID                    Requeue a claimed/running/review task to ready (worker died).
+  recover-lease --id ID --lease-id TOKEN --expected-state STATE
+                [--markers-dir PATH] [--check]
+                                     Atomically requeue only the exact current
+                                     claimed/running state+lease when no live
+                                     exact worker marker exists. --check runs
+                                     the same locked predicate without saving.
+                                     Drift exits 3.
+  recover-owner --owner-id ID [--markers-dir PATH] [--json]
+                                     Requeue only claimed/running leases owned
+                                     by one autopilot run. Exact live worker
+                                     markers and unproven running tasks remain
+                                     held; review/landing evidence is untouched.
+  reclaim [--ttl SECONDS] [--include-running] [--include-review]
+                                     Requeue claimed tasks whose TTL since
+                                     claimed_at expired, unless exact live or
+                                     unproven worker evidence vetoes recovery.
+                                     A numeric per-task ttl wins over --ttl
+                                     (default 3600). running needs the opt-in
+                                     flag. review holds a finished artifact
+                                     awaiting a reviewer, so it is only
+                                     reclaimed with --include-review, ages from
+                                     its updated timestamp, and defaults to a
+                                     longer TTL (86400) unless --ttl is given;
+                                     its artifact/patch fields are kept.
+  reopen --id ID                     Return a blocked task to ready.
+  show   --id ID                     Print one task as JSON.
+  evidence-snapshot --id ID          Print one task plus its immutable plan_id
+                                     for a plan-scoped evidence producer.
+  list   [--state STATE] [--json]    List tasks (optionally by state); --json
+                                     emits every task's `show` view at once.
+  ready  [--json] [--limit N]        Print ids actionable now (deps done), in
+                                     claim order; --json adds title, allowed,
+                                     verify, depends, why_ready (schema 1).
+  discovered [--json]                Read-only: tasks recorded with add
+                                     --discovered-from, grouped by parent.
+  retro  [--json]                    Read-only: what took more than one try
+                                     (cycles, repairs, amendments), blocked and
+                                     cancelled tasks with their reasons, where
+                                     a drive parked and how acceptance ran.
+                                     Counts of recorded rows; not evidence.
+                                     Run it before retire.
+  status [--json]                    Typed plan snapshot or human summary.
+  accept [--reuse-pass RUN_ID]        Reuse a matching pass only when PROJECT.md
+                                     declares Acceptance reuse: same-run; otherwise
+                                     run fresh. Reuse expires after ten minutes.
+                                     Run the stored acceptance command from the
+                                     repo root (outside the plan lock), append
+                                     one row to .oms/plan/progress.jsonl, and
+                                     exit 0 on pass / 3 on fail.
+  brief  --id ID                     Print a paste-able work brief for a task.
+  next   [--provider NAME] [--claim] [--ttl SECONDS]
+                                     Print the brief for the next actionable
+                                     task; with --claim --provider, atomically
+                                     claim it first (pull-work primitive).
+         [--json]                    Emit the selected task as JSON for safe
+                                     composition by another harness command.
+
+State: ready -> claimed -> running -> review -> landing -> done. An explicit
+repair moves review -> claimed without minting a lease. Any -> blocked (block);
+blocked -> ready (reopen); claimed/running/review -> ready (release).
+Parent cancellation moves an inactive ready/blocked task to cancelled with
+the exact plan/task and decision-artifact digests. Cancelled tasks are closed,
+not verified, and never satisfy dependencies. Before saving cancellation it
+durably captures the freshly read reviewed decision bytes. Historical validation
+can resolve that exact digest from the private catalog when the original file
+changes or is removed; unsafe paths, links and permissions still fail closed.
+snapshot-decision can preserve authentic historical versions without loading or
+editing broken plan history. A stored version never authorizes a new cancel.
+For legacy plans without a snapshot, to restore historical bytes at a
+shared decision path, keep its current bound bytes valid while copying them to
+a new path and relocating every active task that references it. The destination
+must match the bound digest. Restore the historical bytes only after all moves.
+Without an exact snapshot, changed old bytes still fail closed.
+Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
+
+A claim whose last heartbeat (claimed_at, refreshed by touch) is older than
+OMS_PLAN_CLAIM_TTL seconds (default 3600; a numeric per-task --ttl wins) is a
+recovery candidate only if no exact task+current lease marker is live or
+unproven. Eligible claims read as EXPIRED in list/status/brief and show's
+claim_expired; ready/next offer them again, and next --claim mints a new lease
+to fence the old holder. Reclaim uses the same worker protection, including
+opted-in running tasks. Reads never write or renew claims; reclaim (and
+plan-run's pre-flight call to it) frees the stored row.

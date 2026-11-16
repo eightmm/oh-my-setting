@@ -1,0 +1,22 @@
+[package]
+name = "oms-command-plan"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+oms-context = { path = "../oms-context" }
+oms-json = { path = "../oms-json" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-lock = { path = "../oms-lock" }
+oms-scrub = { path = "../oms-scrub" }
+oms-contract-markdown = { path = "../oms-contract-markdown" }
+oms-work-inspect = { path = "../oms-work-inspect" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+regex = "=1.13.1"
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
+unicode-general-category = "=0.6.0"
+sha2 = "=0.10.9"
+
+[lints.rust]
+unsafe_code = "forbid"

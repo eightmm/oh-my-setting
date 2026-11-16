@@ -1,0 +1,22 @@
+role                   read_only belt      tools   mcp  delegate-default
+advisor                true      read      4       off  read
+analysis-worker        true      read      4       off  read
+architect              true      read      4       off  read
+builder                false     default   default on   write
+critic                 true      read      4       off  read
+decision-advisor       true      read      4       off  read
+documenter             false     default   default on   write
+implementation-worker  false     default   default on   write
+integrator             false     default   default on   write
+patch-reviewer         true      read      4       off  read
+performance-engineer   false     default   default on   write
+refactorer             false     default   default on   write
+release-engineer       true      read      4       off  read
+repo-auditor           true      read      4       off  read
+researcher             true      read+web  6       off  read
+reviewer               true      read      4       off  read
+scholar                true      read      4       off  read
+security-auditor       true      read      4       off  read
+test-designer          true      read      4       off  read
+verifier               true      read      4       off  read
+belt/tools/mcp: claude launch at the contract's own access; delegate-default is the access peer-delegate.sh --role gives a bundled role when no access flag is passed (read for read-only roles; OMS_DELEGATE_ROLE_WRITE=1 restores write)

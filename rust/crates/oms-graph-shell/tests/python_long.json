@@ -1,0 +1,37 @@
+{
+  "nodes": [
+    {
+      "id": "module:tests/example.sh",
+      "kind": "module",
+      "name": "example.sh",
+      "path": "tests/example.sh",
+      "language": "python",
+      "source_digest": "digest",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:tests/example.sh",
+      "target": "module:tests/example.sh",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/example.sh",
+        "source_digest": "digest"
+      }
+    }
+  ],
+  "refs": [
+    {
+      "from": "file:tests/example.sh",
+      "relation": "imports",
+      "kind": "module",
+      "value": "panel_metrics",
+      "line": 2,
+      "binding": "panel_metrics"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+[package]
+name = "oms-command-attempt-bundle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+oms-context = { path = "../oms-context" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+oms-json = { path = "../oms-json" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-context-source = { path = "../oms-context-source" }
+oms-scrub = { path = "../oms-scrub" }
+regex = "=1.13.1"
+unicode-general-category = "=0.6.0"

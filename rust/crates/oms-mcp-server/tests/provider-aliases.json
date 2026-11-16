@@ -1,0 +1,108 @@
+[
+  {
+    "input": "agy",
+    "expected": [
+      "antigravity"
+    ]
+  },
+  {
+    "input": "cursor-agent",
+    "expected": [
+      "cursor"
+    ]
+  },
+  {
+    "input": "grok-build",
+    "expected": [
+      "grok"
+    ]
+  },
+  {
+    "input": "gemini-cli",
+    "expected": [
+      "gemini"
+    ]
+  },
+  {
+    "input": "qwen-code",
+    "expected": [
+      "qwen"
+    ]
+  },
+  {
+    "input": "opencode2",
+    "expected": [
+      "opencode"
+    ]
+  },
+  {
+    "input": "dsh",
+    "expected": [
+      "deepseek"
+    ]
+  },
+  {
+    "input": "deepseek-harness",
+    "expected": [
+      "deepseek"
+    ]
+  },
+  {
+    "input": "mistral-vibe",
+    "expected": [
+      "vibe"
+    ]
+  },
+  {
+    "input": "github-copilot",
+    "expected": [
+      "copilot"
+    ]
+  },
+  {
+    "input": "factory-droid",
+    "expected": [
+      "droid"
+    ]
+  },
+  {
+    "input": "kiro-cli",
+    "expected": [
+      "kiro"
+    ]
+  },
+  {
+    "input": "cn",
+    "expected": [
+      "continue"
+    ]
+  },
+  {
+    "input": "codex,claude,antigravity,cursor,grok,gemini,qwen,opencode,deepseek,vibe,pi,copilot,droid,aider,muse,kimi,kiro,continue,goose,cline,kilo,openhands,auggie",
+    "expected": [
+      "codex",
+      "claude",
+      "antigravity",
+      "cursor",
+      "grok",
+      "gemini",
+      "qwen",
+      "opencode",
+      "deepseek",
+      "vibe",
+      "pi",
+      "copilot",
+      "droid",
+      "aider",
+      "muse",
+      "kimi",
+      "kiro",
+      "continue",
+      "goose",
+      "cline",
+      "kilo",
+      "openhands",
+      "auggie"
+    ]
+  }
+]

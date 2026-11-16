@@ -1,0 +1,84 @@
+{
+  "fixture_schema": 1,
+  "reference": {
+    "commit": "74f87f654a314961420be2aa8ab6dfc1999151e1",
+    "source": "scripts/lib/oms_runtime/context_inspect.py",
+    "source_sha256": "1b3bad09517f4f6abd1269481b95986ffb62e84c811e6dfb4555691663742da8",
+    "entrypoint": "read_manifest",
+    "arguments": {}
+  },
+  "cases": [
+    {
+      "name": "valid-object-is-decoded-without-manifest-validation",
+      "input_hex": "7b226e6573746564223a7b2276616c7565223a317d2c226c6162656c73223a5b226f6b225d2c226e756c6c61626c65223a6e756c6c7d",
+      "expected": {
+        "nested": {
+          "value": 1
+        },
+        "labels": [
+          "ok"
+        ],
+        "nullable": null
+      }
+    },
+    {
+      "name": "valid-scalar-integer",
+      "input_hex": "31",
+      "expected": 1
+    },
+    {
+      "name": "valid-array",
+      "input_hex": "5b747275652c6e756c6c2c226f6b225d",
+      "expected": [
+        true,
+        null,
+        "ok"
+      ]
+    },
+    {
+      "name": "valid-null",
+      "input_hex": "6e756c6c",
+      "expected": null
+    },
+    {
+      "name": "duplicate-top-level-json-key",
+      "input_hex": "7b22736368656d61223a312c22736368656d61223a317d",
+      "expected_error": "invalid context manifest: duplicate JSON key"
+    },
+    {
+      "name": "duplicate-nested-json-key",
+      "input_hex": "7b226f75746572223a7b2276616c7565223a312c2276616c7565223a327d7d",
+      "expected_error": "invalid context manifest: duplicate JSON key"
+    },
+    {
+      "name": "nonfinite-nan",
+      "input_hex": "7b2278223a4e614e7d",
+      "expected_error": "invalid context manifest: non-finite JSON value"
+    },
+    {
+      "name": "nonfinite-positive-infinity",
+      "input_hex": "7b2278223a496e66696e6974797d",
+      "expected_error": "invalid context manifest: non-finite JSON value"
+    },
+    {
+      "name": "nonfinite-negative-infinity",
+      "input_hex": "7b2278223a2d496e66696e6974797d",
+      "expected_error": "invalid context manifest: non-finite JSON value"
+    },
+    {
+      "name": "invalid-utf8",
+      "input_hex": "ff",
+      "expected_error": "cannot read a valid repo-local context manifest"
+    },
+    {
+      "name": "trailing-garbage",
+      "input_hex": "7b7d78",
+      "expected_error": "cannot read a valid repo-local context manifest"
+    },
+    {
+      "name": "invalid-json-syntax",
+      "input_hex": "7b696e76616c69647d",
+      "expected_error": "cannot read a valid repo-local context manifest"
+    }
+  ]
+}

@@ -1,75 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Fetch and fast-forward the shared checkout only between canonical snapshots.
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-# shellcheck source=scripts/lib/agent-memory-common.sh
-. "$ROOT/scripts/lib/agent-memory-common.sh"
-# shellcheck source=scripts/lib/canonical-sync.sh
-. "$ROOT/scripts/lib/canonical-sync.sh"
+# Native OMS entrypoint for sync-shared.
 
-usage() {
-  cat <<'EOF'
-Usage: oms sync-shared [--repo PATH] [--remote NAME] [--target BRANCH]
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
-Refresh the canonical shared checkout (defaults: current repo, origin, main).
-Live calls defer sync with exit 75; retry after they finish. New calls wait up
-to five seconds for sync, then refuse safely if it is still busy. Dirty,
-detached and diverged checkouts are refused without a merge; refusals include
-a read-only inspection command.
-This operation does not push, gate, install or create a landing receipt.
-EOF
-}
-fail() { echo "error: $*" >&2; exit 2; }
-REPO="$PWD" REMOTE=origin TARGET=main
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --repo|--remote|--target)
-      [ "$#" -ge 2 ] || fail "$1 requires a value"
-      case "$1" in --repo) REPO="$2" ;; --remote) REMOTE="$2" ;; --target) TARGET="$2" ;; esac
-      shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) fail "unknown argument: $1" ;;
-  esac
-done
-case "$REMOTE" in ""|-*|*[!A-Za-z0-9._-]*) fail 'invalid remote name' ;; esac
-git check-ref-format "refs/heads/$TARGET" >/dev/null || fail 'invalid target branch'
-REPO="$(oms_state_root "$REPO")" || fail 'cannot resolve shared checkout'
-REPO="${REPO//$'\r'/}"
-REPO="$(cd "$REPO" && pwd -P)" || fail 'cannot resolve physical shared checkout'
-
-sync_clean() {
-  local status
-  status="$(git --no-optional-locks -C "$REPO" status --porcelain --untracked-files=all)" || return 2
-  [ -z "$status" ] || {
-    printf 'next: git --no-optional-locks -C %q status --short\n' "$REPO" >&2
-    echo 'error: dirty shared checkout; sync refused' >&2
-    return 2
-  }
-}
-
-sync_checkout() {
-  local ref="refs/remotes/$REMOTE/$TARGET"
-  oms_git_assert_safe_execution_config "$REPO" || return 2
-  oms_git_assert_plain_index "$REPO" || return 2
-  # Any local branch may track the target; only a fast-forward to the fetched target is applied.
-  git -C "$REPO" symbolic-ref --quiet HEAD >/dev/null || {
-    printf 'next: git -C %q log --oneline -1 --decorate\n' "$REPO" >&2
-    echo 'error: detached shared checkout; sync refused' >&2
-    return 2
-  }
-  sync_clean || return $?
-  git -C "$REPO" -c maintenance.auto=false -c gc.auto=0 -c fetch.writeCommitGraph=false fetch --no-tags -- "$REMOTE" "+refs/heads/$TARGET:$ref" || return $?
-  git -C "$REPO" merge-base --is-ancestor HEAD "$ref" || {
-    printf 'next: git -C %q log --oneline --left-right %q...HEAD\n' "$REPO" "$ref" >&2
-    echo 'error: shared checkout is ahead or diverged; sync refused' >&2
-    return 2
-  }
-  sync_clean || return $?
-  git -C "$REPO" merge --ff-only "$ref"
-}
-
-oms_canonical_sync_prepare "$REPO"
-[ ! -L "$REPO/.oms/.gitignore" ] || fail 'symbolic .oms/.gitignore; sync refused'
-agent_memory_ensure_oms_ignore_for_path "$REPO/.oms/locks/canonical-sync" || exit 2
-oms_canonical_sync_gate "$REPO" oms_canonical_sync_if_idle "$REPO" sync_checkout
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for sync-shared; stage with cargo or run oms doctor --repair" >&2
+  exit 2
+fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "sync-shared" "$@" || exit $?
+echo "error: native payload unavailable for sync-shared (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

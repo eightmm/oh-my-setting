@@ -1,0 +1,34 @@
+[package]
+name = "oms-command-graph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+
+[dependencies]
+oms-graph = { path = "../oms-graph" }
+oms-graph-python = { path = "../oms-graph-python" }
+oms-graph-resolve = { path = "../oms-graph-resolve" }
+oms-graph-shell = { path = "../oms-graph-shell" }
+oms-command-plan = { path = "../oms-command-plan" }
+oms-command-task = { path = "../oms-command-task" }
+oms-command-operations = { path = "../oms-command-operations" }
+oms-context = { path = "../oms-context" }
+oms-context-source = { path = "../oms-context-source" }
+oms-runtime = { path = "../oms-runtime" }
+oms-command-journal = { path = "../oms-command-journal" }
+oms-json = { path = "../oms-json" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-scrub = { path = "../oms-scrub" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+regex = "=1.13.1"
+sha2 = "=0.10.9"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
+rusqlite = { version = "=0.32.1", features = ["bundled", "serialize"] }
+
+[lints.rust]
+unsafe_code = "forbid"

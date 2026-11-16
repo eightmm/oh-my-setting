@@ -1,0 +1,15 @@
+[package]
+name = "oms-command-experiment"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+oms-context = { path = "../oms-context" }
+oms-experiment = { path = "../oms-experiment" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[target.'cfg(unix)'.dependencies]
+users = { version = "=0.11.0", default-features = false }

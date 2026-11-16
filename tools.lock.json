@@ -1,9 +1,6 @@
 {
   "schema": 2,
   "updated_at": "2026-10-20",
-  "python": {
-    "version": "3.12.15"
-  },
   "node": {
     "version": "24.22.0",
     "platforms": {

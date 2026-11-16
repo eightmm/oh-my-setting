@@ -1,0 +1,599 @@
+[
+  {
+    "path": "empty.md",
+    "text": "",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:empty.md",
+          "kind": "document",
+          "name": "empty.md",
+          "path": "empty.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": []
+    }
+  },
+  {
+    "path": "a.md",
+    "text": "# heading\n\nFirst line\n# heading\nsecond sentence. More\n\nignored",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:a.md",
+          "kind": "document",
+          "name": "a.md",
+          "path": "a.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "First line second sentence.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": []
+    }
+  },
+  {
+    "path": "a.md",
+    "text": "```\ninside\n~~~\n---\n<!-- comment\nend",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:a.md",
+          "kind": "document",
+          "name": "a.md",
+          "path": "a.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "inside end",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": []
+    }
+  },
+  {
+    "path": "/a\\b.json",
+    "text": "not json",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "config:a/b.json",
+          "kind": "config",
+          "name": "a\\b.json",
+          "path": "/a/b.json",
+          "language": "config",
+          "source_digest": "d",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": []
+    }
+  },
+  {
+    "path": "a.yaml",
+    "text": "",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "config:a.yaml",
+          "kind": "config",
+          "name": "a.yaml",
+          "path": "a.yaml",
+          "language": "config",
+          "source_digest": "d",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": []
+    }
+  },
+  {
+    "path": "refs.md",
+    "text": "x/a /a/b .a/b $a/b \\a/b -a/b \u00e9a/b (a/b), a/b.; a/b",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:refs.md",
+          "kind": "document",
+          "name": "refs.md",
+          "path": "refs.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:refs.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "x/a",
+          "line": 1
+        },
+        {
+          "from": "document:refs.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 1
+        },
+        {
+          "from": "document:refs.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 1
+        },
+        {
+          "from": "document:refs.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 1
+        },
+        {
+          "from": "document:refs.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 1
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\na/b.\na/b\n",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\r\na/b.\r\na/b\r\n",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\ra/b.\ra/b\r",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\u000ba/b.\u000ba/b\u000b",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\fa/b.\fa/b\f",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\u0085a/b.\u0085a/b\u0085",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\u001ca/b.\u001ca/b\u001c",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\u001da/b.\u001da/b\u001d",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\u001ea/b.\u001ea/b\u001e",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\u2028a/b.\u2028a/b\u2028",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "lines.md",
+    "text": "# head\u2029a/b.\u2029a/b\u2029",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:lines.md",
+          "kind": "document",
+          "name": "lines.md",
+          "path": "lines.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "a/b.",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 2
+        },
+        {
+          "from": "document:lines.md",
+          "relation": "references",
+          "kind": "path",
+          "value": "a/b",
+          "line": 3
+        }
+      ]
+    }
+  },
+  {
+    "path": "long.md",
+    "text": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+    "digest": "d",
+    "expected": {
+      "nodes": [
+        {
+          "id": "document:long.md",
+          "kind": "document",
+          "name": "long.md",
+          "path": "long.md",
+          "language": "markdown",
+          "source_digest": "d",
+          "summary": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9...",
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": []
+    }
+  }
+]

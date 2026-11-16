@@ -1,0 +1,77 @@
+Usage: thread.sh new     [--id ID] [--topic TEXT] [--live] [--repo PATH]
+       thread.sh append  [--id ID] --role ROLE (--text TEXT | --text-file F)
+                               [--provider P] [--model M] [--artifact PATH]
+       thread.sh context [--id ID] [--max-bytes N] [--turns N] [--notes-only] [--require-open]
+       thread.sh show    [--id ID] [--json]
+       thread.sh list    [--all] [--stale] [--stale-ttl SECONDS] [--json]
+       thread.sh stats   [--stale-ttl SECONDS] [--json]
+       thread.sh current
+       thread.sh close   [--id ID] [--summary TEXT]
+       thread.sh close   --stale [--stale-ttl SECONDS] [--apply] [--summary TEXT]
+       thread.sh updates [--id ID] [--after CURSOR] [--wait 0..30] [--json]
+       thread.sh ack     [--id ID] --after CURSOR --consumer SESSION
+
+A shared conversation any agent CLI can join. Turns live in
+.oms/threads/<id>.jsonl (append-only); `context` renders the recent turns for
+injection into a peer prompt, so the next provider answers with everything the
+previous ones already said.
+
+Commands:
+new      Create a thread and make it current. Prints the thread id.
+append   Add one turn. Roles: question, answer, note, decision, summary.
+context  Print the recent transcript, oldest first, within the byte budget.
+show     Print the full thread (or --json for the raw rows).
+list     Open threads, newest first; --all includes closed ones, --stale keeps
+         only the abandoned ones and prints the close command for each.
+stats    Mechanical counts over every thread, open and closed: follow-up
+         questions, multi-provider threads, recorded answer quality.
+current  Print the active thread id, or exit 1 when there is none.
+close    Mark a thread closed; --stale previews, --apply closes stale non-room threads.
+updates  Read new complete turns in order; retain the returned opaque cursor.
+         --max-bytes/--turns bound each page; has_more means continue paging.
+ack      Explicitly record consumption, not agreement or permission, in this log.
+
+Options:
+  --repo PATH     Repo holding the state (default: PWD, git-root anchored).
+  --id ID         Thread id (default: the current thread).
+  --topic TEXT    What the thread is about (new).
+  --role ROLE     Turn role (append).
+  --text TEXT     Turn text (append).
+  --text-file F   Read turn text from a file (append).
+  --provider P    Provider that produced the turn (append).
+  --model M       Model that produced the turn (append).
+  --artifact PATH Full-output artifact for this turn (append).
+  --quality Q     ok, thin, empty, or blocked: whether the peer actually
+                  answered (append); blocked means the CLI printed only its own
+                  reason for doing nothing (denied tool, no login). Non-ok turns
+                  are marked in context and show.
+  --summary TEXT  Closing summary (close).
+  --max-bytes N   Context byte budget (default: 6000).
+  --turns N       Context turn limit (default: 12).
+  --all           list: include closed threads.
+  --live          new: opt this conversation into existing prompt/edit hooks.
+  --notes-only    context: human/coordinator notes and decisions, not answers
+                  or provider failure notes; useful between council rounds.
+  --require-open  context: reject a closed thread before another model call.
+                  Without this flag, closed history stays readable.
+  --after CURSOR   updates/ack: cursor from a previous updates response.
+  --wait SECONDS   updates: bounded wait for a change (default 0, maximum 30).
+  --consumer NAME  ack: caller's session identifier, not an authenticated identity.
+  --room-event JSON append: typed room metadata; validated under the thread lock.
+  --stale         list or close: select stale open threads.
+  --apply         close --stale: close eligible threads after a locked recheck.
+  --json          Machine-readable output (show, list, stats).
+  -h, --help      Show help.
+
+A stale current pointer expires after OMS_THREAD_CURRENT_TTL seconds
+(default 86400), and a pointer written under a different active task is not
+reused, so a new consult never silently joins last week's — or another task's —
+conversation.
+
+An open thread that is not current counts as stale once its last valid turn is
+older than OMS_THREAD_STALE_TTL seconds (default 259200, three days).
+On list, stats and close --stale, --stale-ttl overrides that value with a
+nonnegative signed 64-bit integer number of seconds. Turns
+whose timestamp will not parse leave the thread `unknown`, never stale.
+Staleness is advisory; close --stale previews the list unless --apply is given.
+Apply excludes room logs and checks staleness again under each thread lock.

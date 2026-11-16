@@ -1,155 +1,25 @@
 #!/usr/bin/env bash
-[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || exit 0
 set -euo pipefail
 
-# UserPromptSubmit hook: journal and live state-aware hints. Native skill
-# matching owns ordinary routing; OMS_SKILL_HINTS=1 enables bounded keyword
-# suggestions from skills.manifest.json. Fail-open: never block a prompt.
-#
-# Automatic task recording is opt-in with OMS_AUTO_TASK=1.
-# OMS_SKILL_ROUTER_OFF=1 skips the routing helper (including context/peer/relay
-# hints and turn-start tracking). Journal/daily-state work and state hints run
-# first; OMS_STATE_HINTS=0 disables the hints. OMS_LESSON_CAPTURE=1 queues a
-# correction-shaped sentence for memory review. Claude Code installs this directly;
-# Codex installs it through the repo-local oh-my-setting plugin.
+# Native OMS entrypoint for skill-router.
 
-# A harness child is not the user's prompt: it ticks no journal, prints no hint
-# and records no row, so it exits before any Python starts.
-[ "${OMS_HARNESS_CHILD:-0}" = 1 ] && exit 0
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    exit 0
+    ;;
+esac
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/work-journal.sh
-. "$ROOT/scripts/lib/work-journal.sh"
-
-payload="$(cat 2>/dev/null || true)"
-state_repo=""
-if command -v python3 >/dev/null 2>&1; then
-  state_repo="$(OMS_HOOK_PAYLOAD="$payload" python3 -X utf8 "$ROOT/scripts/lib/hook_repo.py" \
-    2>/dev/null | tr -d '\r')" || state_repo=""
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  exit 0
 fi
-
-# Rollover/catch-up on each top-level agent prompt. This stays independent of
-# skill routing (which users may disable): local materialization runs first.
-# Deferred Stop publishing and periodic maintenance own network work. On the first
-# prompt of a local day it also prints a bounded journal digest — hook stdout
-# becomes agent context, which is what makes the journal self-referencing.
-if [ -n "$state_repo" ] && git -C "$state_repo" rev-parse --git-dir >/dev/null 2>&1; then
-  work_journal_prompt_tick "$state_repo" resolved
-fi
-
-# OMS_LESSON_CAPTURE=1: keep one bounded sentence of a prompt that reads like a
-# correction ("no, use X instead") as a candidate for `oms agent-memory review`.
-# Off by default — it stores a fragment of what the person typed. Adopted repos
-# only, scanned before it is kept, never printed, never promoted on its own.
-if [ "${OMS_LESSON_CAPTURE:-0}" = 1 ] && [ -n "$state_repo" ] && [ -d "$state_repo/.oms" ]; then
-  printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/agent_memory_review.py" \
-    capture --repo "$state_repo" >/dev/null 2>&1 || true
-fi
-
-# State-conditional hints: inject the one thing native skill matching cannot
-# know — this repo's harness state. A stale claimed task outranks a repeated
-# unresolved failure; one line, at most
-# once per local day per repo, adopted repos only. The day marker lives under
-# .oms/hooks/, the subtree already treated as live-session state.
-# OMS_STATE_HINTS=0 disables. Fail-open.
-state_hint() {
-  local repo="$1"
-  local day marker task failures
-  day="$(date +%Y-%m-%d)"
-  marker="$repo/.oms/hooks/state-hint.$day"
-  [ -e "$marker" ] && return 0
-  mkdir -p "$repo/.oms/hooks" 2>/dev/null || return 0
-  : > "$marker" 2>/dev/null || return 0
-  find "$repo/.oms/hooks" -maxdepth 1 -name 'state-hint.*' \
-    ! -name "state-hint.$day" -delete 2>/dev/null || true
-  task="$(cd "$repo" && bash "$ROOT/scripts/agent-task.sh" status --json 2>/dev/null || true)"
-  failures="$(cd "$repo" && bash "$ROOT/scripts/fail-ledger.sh" list --json 2>/dev/null || true)"
-  OMS_SH_TASK="$task" OMS_SH_FAILURES="$failures" \
-    OMS_SH_PLAN="$repo/.oms/plan/tasks.json" \
-    OMS_SH_PROGRESS="$repo/.oms/plan/progress.jsonl" \
-    python3 -X utf8 -I -B - <<'PY' 2>/dev/null || true
-import json, os
-
-def load(name):
-    try:
-        return json.loads(os.environ.get(name) or "{}")
-    except ValueError:
-        return {}
-
-task = load("OMS_SH_TASK")
-if task.get("present") and task.get("status") == "active" and task.get("stale"):
-    print(
-        "[oms] stale active task %s — read `oms agent-task status` before new"
-        " work; the oms-agent-harness skill covers resume/handoff."
-        % (task.get("task_id") or "?")
-    )
-    raise SystemExit(0)
-# A parked goal outranks generic failure counts: the driver already digested
-# its failure into one reason and one next command.
-try:
-    with open(os.environ.get("OMS_SH_PLAN", ""), encoding="utf-8") as fh:
-        plan = json.load(fh)
-except (OSError, ValueError):
-    plan = {}
-if plan.get("accept"):
-    last_terminal = None
-    try:
-        with open(os.environ.get("OMS_SH_PROGRESS", ""), encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if row.get("kind") == "terminal":
-                    last_terminal = row
-    except OSError:
-        pass
-    if last_terminal and last_terminal.get("status") == "park":
-        outer = os.path.join(os.path.dirname(os.environ.get("OMS_SH_PLAN", "")),
-                             "autopilot-run.json")
-        # The receipt itself is validated by autopilot status. Here it is only
-        # a routing discriminator: direct the parent to the outer contract
-        # without exposing recovery commands as an end-user procedure.
-        if os.path.isfile(outer) and not os.path.islink(outer):
-            print(
-                "[oms] autopilot parked (%s) — parent agent: inspect and resume"
-                " the validated autopilot receipt internally."
-                % (last_terminal.get("reason") or "?")
-            )
-            raise SystemExit(0)
-        print(
-            "[oms] goal parked (%s) — parent agent: inspect the plan state and"
-            " resume it internally."
-            % (last_terminal.get("reason") or "?")
-        )
-        raise SystemExit(0)
-failures = load("OMS_SH_FAILURES")
-# The ledger owns expiry, recurrence and stale-commit classification.
-rows = [f for f in failures.get("failures", [])
-        if f.get("actionable") is True]
-if len(rows) >= 2:
-    print(
-        "[oms] %d actionable fail-ledger rows here — run `oms fail-ledger"
-        " list` before retrying anything that already failed."
-        % len(rows)
-    )
-    raise SystemExit(0)
-
-PY
-}
-
-if [ "${OMS_STATE_HINTS:-1}" = "1" ] &&
-  [ -n "$state_repo" ] && [ -d "$state_repo/.oms" ]; then
-  state_hint "$state_repo" || true
-fi
-
-[ "${OMS_SKILL_ROUTER_OFF:-0}" = "1" ] && exit 0
-
-MANIFEST="$ROOT/skills.manifest.json"
-HELPER="$ROOT/scripts/lib/hook_state.py"
-[ -f "$HELPER" ] || exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
-
-# The helper owns routing state and fail-opens on malformed hook payloads.
-OMS_HOOK_PAYLOAD="$payload" OMS_HOOK_RESOLVED_REPO="$state_repo" \
-  python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$HELPER" route --manifest "$MANIFEST" || exit 0
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route hook "$ROOT" "skill-router" "$@" || exit 0
+exit 0

@@ -1,185 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Named, reusable role profiles shared by the three agent CLIs. A role is a
-# small markdown file describing how a worker should act (a reviewer, a
-# refactorer, a test-writer). It is DATA, not an orchestrator: the owning agent
-# picks a role and injects it into a delegated worker's brief
-# (peer-delegate.sh --role NAME) or an agent-plan task's role field.
-# Repo roles live in .oms/roles/<name>.md; a global fallback lives under
-# ~/.oh-my-setting/local/roles so a role can be reused across repos. Bundled
-# provider-neutral defaults under ROOT/roles are the final fallback.
+# Native OMS entrypoint for agent-role.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/agent-memory-common.sh
-. "$ROOT/scripts/lib/agent-memory-common.sh"
-
-REPO="$PWD"
-NAME=""
-SCOPE="project"
-ACTION=""
-PROVIDER=""
-SURFACE_JSON=0
-
-usage() {
-  cat <<'EOF'
-Usage: agent-role.sh [options] <list|show|path|resolve|init>
-
-Manage named worker role profiles (.oms/roles/<name>.md; global fallback
-~/.oh-my-setting/local/roles/<name>.md; bundled fallback ROOT/roles). Roles are
-injected into a delegated worker brief with peer-delegate.sh --role NAME.
-
-Options:
-  --repo PATH   Repo for project-scoped roles (default: PWD, git-root anchored).
-  --name NAME   Role name ([A-Za-z0-9._-]+). Required for show/path/resolve/init.
-  --provider P  claude or codex; required for render.
-  --global      Use the global role store instead of the repo; resolve/show
-                fall back only to bundled roles.
-  --json        With surface: print JSON instead of the table.
-  -h, --help    Show help.
-
-Commands:
-  surface   Read-only report per bundled role: read_only, tool belt, tool
-            count, MCP on/off (from config/role-contracts.json).
-  list      List available role names (repo, global, bundled; deduped).
-  show      Print the resolved role file (repo, then global, then bundled).
-  path      Print where a role file lives for the chosen scope (may not exist).
-  resolve   Print the first existing role file path (repo, global, bundled);
-            exit 3 if none. Used by peer-delegate.sh --role.
-  init      Create a starter role file at the chosen scope if missing.
-  render    Print a provider-native subagent definition for the resolved role
-            to stdout (--provider claude: .claude/agents/<name>.md format;
-            --provider codex: .codex/agents/<name>.toml format). Name is
-            oms-<role>; model/effort come from config/panel-routing.json.
-            Read-only roles get read-only tools/sandbox; only bundled write
-            roles get edit access. Writes nothing and installs nothing.
-EOF
-}
-
-fail() { echo "error: $*" >&2; exit 2; }
-
-roles_dir_project() {
-  local repo
-  repo="$(oms_repo_root "$1")" || return 1
-  printf '%s/.oms/roles\n' "$repo"
-}
-
-roles_dir_global() {
-  printf '%s\n' "${OH_MY_SETTING_ROLES_DIR:-$HOME/.oh-my-setting/local/roles}"
-}
-
-roles_dir_bundled() {
-  printf '%s/roles\n' "$ROOT"
-}
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
-    --name) [ "$#" -ge 2 ] || fail "--name requires a value"; NAME="$2"; shift 2 ;;
-    --global) SCOPE="global"; shift ;;
-    -h|--help) usage; exit 0 ;;
-    --provider) [ "$#" -ge 2 ] || fail "--provider requires claude or codex"; PROVIDER="$2"; shift 2 ;;
-    list|show|path|resolve|init|render|surface) ACTION="$1"; shift ;;
-    --json) SURFACE_JSON=1; shift ;;
-    *) fail "unknown argument: $1" ;;
-  esac
-done
-
-ACTION="${ACTION:-list}"
-
-case "$ACTION" in
-  show|path|resolve|init|render)
-    [ -n "$NAME" ] || fail "$ACTION requires --name"
-    case "$NAME" in
-      *[!A-Za-z0-9._-]*|"") fail "--name must match [A-Za-z0-9._-]+" ;;
-    esac
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
     ;;
 esac
 
-if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] &&
-   [ "$SCOPE" = global ] && [ "$ACTION" = init ]; then
-  fail "a harness child cannot mutate parent-owned host or global state; return the request to the parent agent"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for agent-role; stage with cargo or run oms doctor --repair" >&2
+  exit 2
 fi
-
-if [ "$ACTION" = surface ]; then
-  command -v python3 >/dev/null 2>&1 || fail "surface needs python3"
-  if [ "$SURFACE_JSON" = 1 ]; then
-    exec python3 -I "$ROOT/scripts/lib/role_contracts.py" --surface-json
-  fi
-  exec python3 -I "$ROOT/scripts/lib/role_contracts.py" --surface
-fi
-
-proj_dir="$(roles_dir_project "$REPO" 2>/dev/null || true)"
-glob_dir="$(roles_dir_global)"
-bundled_dir="$(roles_dir_bundled)"
-
-case "$ACTION" in
-  list)
-    {
-      [ -d "$proj_dir" ] && find "$proj_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
-      [ -d "$glob_dir" ] && find "$glob_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
-      [ -d "$bundled_dir" ] && find "$bundled_dir" -maxdepth 1 -type f -name '*.md' 2>/dev/null
-      true
-    } | while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      b="$(basename "$f")"
-      printf '%s\n' "${b%.md}"
-    done | sort -u
-    ;;
-  path)
-    if [ "$SCOPE" = "global" ]; then
-      printf '%s/%s.md\n' "$glob_dir" "$NAME"
-    else
-      [ -n "$proj_dir" ] || fail "could not resolve repo for project scope"
-      printf '%s/%s.md\n' "$proj_dir" "$NAME"
-    fi
-    ;;
-  resolve|show|render)
-    if [ "$ACTION" = render ]; then
-      case "$PROVIDER" in
-        claude|codex) ;;
-        *) fail "render requires --provider claude|codex" ;;
-      esac
-    fi
-    resolved=""
-    [ "$SCOPE" != global ] && [ -n "$proj_dir" ] && [ -f "$proj_dir/$NAME.md" ] && resolved="$proj_dir/$NAME.md"
-    [ -z "$resolved" ] && [ -f "$glob_dir/$NAME.md" ] && resolved="$glob_dir/$NAME.md"
-    [ -z "$resolved" ] && [ -f "$bundled_dir/$NAME.md" ] && resolved="$bundled_dir/$NAME.md"
-    [ -n "$resolved" ] || {
-      echo "error: no role '$NAME' (looked in $proj_dir, $glob_dir, and $bundled_dir)" >&2
-      exit 3
-    }
-    if [ "$ACTION" = "resolve" ]; then
-      printf '%s\n' "$resolved"
-    elif [ "$ACTION" = "render" ]; then
-      render_args=(--provider "$PROVIDER" --role "$NAME" --file "$resolved")
-      [ "$resolved" = "$bundled_dir/$NAME.md" ] && render_args+=(--bundled)
-      python3 "$ROOT/scripts/lib/agent_role_render.py" "${render_args[@]}"
-    else
-      cat "$resolved"
-    fi
-    ;;
-  init)
-    if [ "$SCOPE" = "global" ]; then
-      dir="$glob_dir"
-    else
-      [ -n "$proj_dir" ] || fail "could not resolve repo for project scope"
-      dir="$proj_dir"
-      agent_memory_ensure_oms_ignore_for_path "$dir" 2>/dev/null || true
-    fi
-    target="$dir/$NAME.md"
-    [ -e "$target" ] && fail "role already exists: $target"
-    mkdir -p "$dir"
-    {
-      printf '# Role: %s\n\n' "$NAME"
-      printf 'You are acting as the "%s" role for this task.\n\n' "$NAME"
-      printf '## Mandate\n\n- Describe what this role does and does not do.\n\n'
-      printf '## Rules\n\n- One actionable rule per line.\n\n'
-      printf '## Output\n\n- State what the role must produce.\n'
-    } > "$target"
-    echo "role: created $target"
-    ;;
-  *)
-    fail "unknown command: $ACTION"
-    ;;
-esac
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "agent-role" "$@" || exit $?
+echo "error: native payload unavailable for agent-role (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

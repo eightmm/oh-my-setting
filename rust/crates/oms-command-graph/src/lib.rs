@@ -1,0 +1,281 @@
+#![forbid(unsafe_code)]
+//! Native structural and execution graph command adapters.
+mod cli;
+pub mod execution;
+pub mod notebook;
+pub mod project;
+mod util;
+
+pub use util::{GroupResolverGuard, with_group_resolver};
+
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub type CommandResult = (i32, Vec<u8>, Vec<u8>);
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+pub struct Error {
+    pub code: i32,
+    pub message: String,
+}
+impl Error {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            code: 2,
+            message: message.into(),
+        }
+    }
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Error {}
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::new(e.to_string())
+    }
+}
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Self::new(e.to_string())
+    }
+}
+impl From<oms_command_plan::Error> for Error {
+    fn from(e: oms_command_plan::Error) -> Self {
+        Self {
+            code: e.code,
+            message: e.message,
+        }
+    }
+}
+
+pub fn owns(_: &[OsString]) -> bool {
+    true
+}
+
+/// Host adapters for packaged data paths and native OMS tool invocations.
+pub trait HostServices: Send + Sync {
+    fn install_root(&self) -> Option<&Path> {
+        None
+    }
+
+    fn invoke_command(
+        &self,
+        tool: &str,
+        _args: &[OsString],
+        _cwd: &Path,
+        _env: &[(String, String)],
+        _timeout: Option<std::time::Duration>,
+        _cancel: &AtomicBool,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool)> {
+        Err(Error::new(format!(
+            "tool capability '{tool}' requires its canonical host adapter"
+        )))
+    }
+}
+
+/// Native Python syntax check through the packaged parser helper (an absolute
+/// libexec path; never searched on PATH). `Ok(false)` means the source does not
+/// parse. `Err` means no verdict: helper unavailable, timeout, oversized or
+/// non-UTF-8 source. A leading UTF-8 BOM is accepted, as CPython does for bytes.
+pub fn check_python_syntax(
+    helper: &Path,
+    path: &Path,
+    source: &[u8],
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    let source = source.strip_prefix(b"\xef\xbb\xbf").unwrap_or(source);
+    let text = std::str::from_utf8(source)
+        .map_err(|_| Error::new("Python source is not UTF-8; syntax was not checked"))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "source.py".into());
+    let fail = |e: oms_graph_python::Error| Error::new(format!("python syntax check: {e}"));
+    let mut session = oms_graph_python::Session::start(
+        helper,
+        oms_graph_python::Options {
+            max_bytes: text.len().max(oms_graph_python::DEFAULT_MAX_BYTES),
+            timeout,
+        },
+    )
+    .map_err(fail)?;
+    Ok(session.parse(&name, text, "").map_err(fail)?.syntax_valid)
+}
+
+/// Fail-closed default host adapter when no packaged host supplies `HostServices`.
+pub struct NoHostServices;
+
+impl HostServices for NoHostServices {}
+
+pub fn run(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> CommandResult {
+    run_with_helper(args, cwd, interrupted, None)
+}
+
+/// `python_helper` is an absolute packaged libexec path. No helper is searched
+/// for on PATH. The explicit argument takes precedence over install metadata.
+pub fn run_with_helper(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    python_helper: Option<&Path>,
+) -> CommandResult {
+    run_with_runtime_services(args, cwd, interrupted, python_helper, None)
+}
+
+/// Supply the host's canonical runtime producers for context bundles. Missing
+/// projections refuse through the runtime service boundary.
+pub fn run_with_runtime_services(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    python_helper: Option<&Path>,
+    runtime_services: Option<&dyn oms_runtime::Services>,
+) -> CommandResult {
+    run_with_services(
+        args,
+        cwd,
+        interrupted,
+        python_helper,
+        runtime_services,
+        &oms_command_plan::UnavailableServices,
+    )
+}
+
+/// Plan services must support concurrent graph work; the parent retains the
+/// lifecycle, room and approval producers that verify plan projections.
+pub fn run_with_services(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    python_helper: Option<&Path>,
+    runtime_services: Option<&dyn oms_runtime::Services>,
+    plan_services: &(dyn oms_command_plan::Services + Sync),
+) -> CommandResult {
+    run_with_host(
+        args,
+        cwd,
+        interrupted,
+        python_helper,
+        runtime_services,
+        plan_services,
+        &NoHostServices,
+    )
+}
+
+/// Execute graph commands with explicit host data-root and tool-invocation adapters.
+pub fn run_with_host(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    python_helper: Option<&Path>,
+    runtime_services: Option<&dyn oms_runtime::Services>,
+    plan_services: &(dyn oms_command_plan::Services + Sync),
+    host: &dyn HostServices,
+) -> CommandResult {
+    let args = match cli::parse(args) {
+        Ok(v) => v,
+        Err(result) => return result,
+    };
+    if interrupted.load(Ordering::SeqCst) {
+        return (130, vec![], b"graph: interrupted\n".to_vec());
+    }
+    let groups = runtime_services
+        .and_then(|s| s.group_resolver())
+        .or_else(|| plan_services.group_membership_resolver());
+    let _groups_guard = util::with_group_resolver(groups);
+    let work = || -> Result<CommandResult> {
+        if std::env::var_os("OMS_HARNESS_CHILD").as_deref() == Some(std::ffi::OsStr::new("1"))
+            && (!args.text("html_fragment").is_empty()
+                || (args.group == "project"
+                    && (args.action == "context"
+                        || (args.action == "benchmark" && args.list("compare").is_empty())))
+                || (args.group == "exec"
+                    && matches!(args.action.as_str(), "run" | "resume" | "decide" | "commit")))
+        {
+            return Err(Error::new(
+                "a harness child may only use read-only graph actions",
+            ));
+        }
+        let cwd = std::fs::canonicalize(cwd)?;
+        let raw = args.text("repo");
+        let selected = if raw.is_empty() {
+            cwd.clone()
+        } else {
+            util::at(&cwd, raw)
+        };
+        let repo = util::repo_root(&selected, interrupted)?;
+        match args.group.as_str() {
+            "project" => project::dispatch(
+                &args,
+                &repo,
+                &cwd,
+                interrupted,
+                python_helper,
+                runtime_services,
+                host,
+            ),
+            "exec" => execution::dispatch(
+                &args,
+                &repo,
+                &cwd,
+                interrupted,
+                python_helper,
+                runtime_services,
+                plan_services,
+                host,
+            ),
+            _ => Err(Error::new("unknown graph group")),
+        }
+    };
+    match work() {
+        Ok(result) => result,
+        Err(error) => (
+            error.code,
+            vec![],
+            format!("graph: {}\n", error.message).into_bytes(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn python_syntax_check_uses_the_packaged_helper() {
+        let second = Duration::from_secs(30);
+        let file = Path::new("module.py");
+        assert!(check_python_syntax(Path::new("helper"), file, b"x = 1\n", second).is_err());
+        let helper = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("oms-graph-python-helper");
+        if !helper.is_file() {
+            assert!(check_python_syntax(&helper, file, b"x = 1\n", second).is_err());
+            return;
+        }
+        for (source, valid) in [
+            (&b"x = 1\n"[..], true),
+            (b"", true),
+            (b"\xef\xbb\xbfx = 1\n", true),
+            (b"def broken(:\n", false),
+            (b"\xef\xbb\xbf\xef\xbb\xbfx = 1\n", false),
+        ] {
+            assert_eq!(
+                check_python_syntax(&helper, file, source, second).unwrap(),
+                valid,
+                "{source:?}"
+            );
+        }
+        assert!(check_python_syntax(&helper, file, b"x = '\xff'\n", second).is_err());
+        assert!(check_python_syntax(&helper, file, b"x = 1\n", Duration::ZERO).is_err());
+    }
+}

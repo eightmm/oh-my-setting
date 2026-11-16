@@ -1,0 +1,272 @@
+[
+  {
+    "name": "oms_inbox",
+    "arguments": {},
+    "argv": [
+      "inbox",
+      "--json"
+    ]
+  },
+  {
+    "name": "oms_repo_state",
+    "arguments": {},
+    "argv": [
+      "state",
+      "--json"
+    ]
+  },
+  {
+    "name": "oms_agent_operations",
+    "arguments": {},
+    "argv": [
+      "agent-events",
+      "list",
+      "--json",
+      "--limit",
+      "40"
+    ]
+  },
+  {
+    "name": "oms_approvals",
+    "arguments": {},
+    "argv": [
+      "approval-inbox",
+      "list",
+      "--pending",
+      "--json"
+    ]
+  },
+  {
+    "name": "oms_task_state",
+    "arguments": {},
+    "argv": [
+      "agent-task",
+      "status",
+      "--json"
+    ]
+  },
+  {
+    "name": "oms_fail_ledger",
+    "arguments": {},
+    "argv": [
+      "fail-ledger",
+      "list",
+      "--json",
+      "--limit",
+      "30"
+    ]
+  },
+  {
+    "name": "oms_handoffs",
+    "arguments": {},
+    "argv": [
+      "session-handoff",
+      "list",
+      "--json",
+      "--limit",
+      "40"
+    ]
+  },
+  {
+    "name": "oms_handoff_show",
+    "arguments": {
+      "file": "digest.md"
+    },
+    "argv": [
+      "session-handoff",
+      "show",
+      "digest.md"
+    ]
+  },
+  {
+    "name": "oms_journal",
+    "arguments": {},
+    "argv": [
+      "journal",
+      "show",
+      "--json"
+    ]
+  },
+  {
+    "name": "oms_runtime_release",
+    "arguments": {},
+    "argv": [
+      "runtime",
+      "release",
+      "status"
+    ]
+  },
+  {
+    "name": "oms_runtime_profile",
+    "arguments": {},
+    "argv": [
+      "runtime",
+      "profile",
+      "current"
+    ]
+  },
+  {
+    "name": "oms_runtime_failures",
+    "arguments": {},
+    "argv": [
+      "runtime",
+      "failure",
+      "catalog"
+    ]
+  },
+  {
+    "name": "oms_project_graph_map",
+    "arguments": {},
+    "argv": [
+      "graph",
+      "project",
+      "map",
+      "--json"
+    ]
+  },
+  {
+    "name": "oms_project_graph_query",
+    "arguments": {
+      "query": "alpha entry"
+    },
+    "argv": [
+      "graph",
+      "project",
+      "find",
+      "--json",
+      "--limit",
+      "40",
+      "alpha entry"
+    ]
+  },
+  {
+    "name": "oms_project_graph_api",
+    "arguments": {
+      "path": "src/a.py"
+    },
+    "argv": [
+      "graph",
+      "project",
+      "api",
+      "--json",
+      "--limit",
+      "120",
+      "src/a.py"
+    ]
+  },
+  {
+    "name": "oms_project_graph_search",
+    "arguments": {
+      "query": "alpha entry"
+    },
+    "argv": [
+      "graph",
+      "project",
+      "search",
+      "--json",
+      "--limit",
+      "80",
+      "alpha entry"
+    ]
+  },
+  {
+    "name": "oms_project_graph_symbol",
+    "arguments": {
+      "name": "alpha_entry"
+    },
+    "argv": [
+      "graph",
+      "project",
+      "symbol",
+      "--json",
+      "--limit",
+      "40",
+      "alpha_entry"
+    ]
+  },
+  {
+    "name": "oms_project_graph_trace",
+    "arguments": {
+      "node": "symbol:a.py::f"
+    },
+    "argv": [
+      "graph",
+      "project",
+      "trace",
+      "--json",
+      "--depth",
+      "2",
+      "--direction",
+      "out",
+      "symbol:a.py::f"
+    ]
+  },
+  {
+    "name": "oms_project_graph_blast",
+    "arguments": {},
+    "argv": [
+      "graph",
+      "project",
+      "blast",
+      "--json",
+      "--limit",
+      "120"
+    ]
+  },
+  {
+    "name": "oms_project_graph_affected",
+    "arguments": {
+      "base": "HEAD~1"
+    },
+    "argv": [
+      "graph",
+      "project",
+      "affected",
+      "--head",
+      "HEAD",
+      "--json",
+      "--base",
+      "HEAD~1"
+    ]
+  },
+  {
+    "name": "oms_execution_graph_status",
+    "arguments": {},
+    "argv": [
+      "graph",
+      "exec",
+      "status",
+      "--json"
+    ]
+  },
+  {
+    "name": "oms_execution_graph_route",
+    "arguments": {
+      "run": "run:one"
+    },
+    "argv": [
+      "graph",
+      "exec",
+      "route",
+      "--json",
+      "--run",
+      "run:one"
+    ]
+  },
+  {
+    "name": "oms_execution_graph_events",
+    "arguments": {
+      "run": "run:one"
+    },
+    "argv": [
+      "graph",
+      "exec",
+      "events",
+      "--json",
+      "--limit",
+      "40",
+      "--run",
+      "run:one"
+    ]
+  }
+]

@@ -49,6 +49,8 @@ case "$BASH" in
   *) OMS_BASH="$(command -v "$BASH" 2>/dev/null || printf '%s' "$BASH")" ;;
 esac
 export OMS_BASH
+# The native installer takes this same argv once the checkout is selected.
+install_original_args=("$@")
 
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
@@ -60,7 +62,7 @@ GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 # every install writes the local-only snapshot unless explicitly opted out.
 GENERATE_MACHINE="${OH_MY_SETTING_GENERATE_MACHINE:-auto}"
 # Tool installation is capability-scoped: a fresh install provides the core
-# runtime (Bash, Git, Python, one coding-agent provider) and records a private
+# runtime (Bash, Git, Node, one coding-agent provider) and records a private
 # capability receipt; optional capabilities (council, github, notion, research,
 # hpc, container, remote) install only when selected, and --full remains the
 # explicit compatibility path with the historical all-tools footprint. Missing
@@ -100,9 +102,8 @@ Options:
   --profile NAME      Add a capability profile to the default core install:
                       council, github, notion, research, hpc, container,
                       remote, or full. Repeatable. Fresh default: core (Bash,
-                      Git, Python, one coding-agent provider, no service
-                      logins); everything else reports as unavailable until
-                      selected.
+                      Git, one coding-agent provider, no service logins);
+                      everything else reports as unavailable until selected.
   --primary-provider NAME  codex, claude, or agy for the core provider
                       (default auto: reuse an installed one, else codex).
   --full              Explicit compatibility install: the historical all-tools
@@ -311,29 +312,32 @@ export OH_MY_SETTING_PROFILE="$PROFILE"
 # nothing. With no checkout to read (the curl-pipe form before a first
 # install) there is nothing to derive a plan from, and it says so.
 if [ "$PLAN_ONLY" = 1 ]; then
-  plan_root="" plan_checkout=present
-  if [ -f "$DEST/scripts/install-plan.sh" ]; then
+  plan_root=""
+  if [ -f "$DEST/scripts/lib/platform.sh" ]; then
     plan_root="$DEST"
   else
     plan_source="${BASH_SOURCE[0]:-}"
     if [ -n "$plan_source" ] && plan_dir="$(cd "$(dirname "$plan_source")" 2>/dev/null && pwd -P)" &&
-       [ -f "$plan_dir/scripts/install-plan.sh" ]; then
-      plan_root="$plan_dir" plan_checkout=entry
+       [ -f "$plan_dir/scripts/lib/platform.sh" ]; then
+      plan_root="$plan_dir"
     fi
   fi
   if [ -z "$plan_root" ]; then
     echo "install plan for $DEST (home $HOME): nothing is written by this command"
     echo "checkout: not-previewed: $DEST does not exist yet; it would be cloned from $REPO_URL at $REF"
-    echo "plan: not-previewed: every later step is derived from the checkout's own scripts, and there is no checkout to read; after cloning, run $DEST/install.sh --plan"
+    echo "plan: not-previewed: every later step is derived from the checkout itself, and there is no checkout to read; after cloning, run $DEST/install.sh --plan"
     exit 0
   fi
   export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT" OH_MY_SETTING_CONNECT_SERVICES="$CONNECT_SERVICES"
   export OH_MY_SETTING_GENERATE_MACHINE="$GENERATE_MACHINE" OH_MY_SETTING_GENERATE_SLURM="$GENERATE_SLURM"
   export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE" OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
   export OH_MY_SETTING_PEER_PERMISSIONS="$PEER_PERMISSIONS"
-  export OMS_PLAN_CHECKOUT="$plan_checkout" OMS_PLAN_DEST="$DEST" OMS_PLAN_TOOLS_FULL="$TOOLS_FULL"
-  export OMS_PLAN_CAPABILITIES="$CAPABILITY_PROFILES" OMS_PLAN_PRIMARY_PROVIDER="$PRIMARY_PROVIDER"
-  exec "$OMS_BASH" "$plan_root/scripts/install-plan.sh" --install
+  # shellcheck disable=SC1091
+  . "$plan_root/scripts/lib/platform.sh"
+  oms_bash_enter
+  oms_native_route strict "$plan_root" install --plan "${install_original_args[@]}" || exit $?
+  echo "error: native payload unavailable for --plan; install cargo 1.99.1 or verify $plan_root" >&2
+  exit 2
 fi
 export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"
 export OH_MY_SETTING_INSTALL_TOOLS="$INSTALL_TOOLS"
@@ -802,10 +806,10 @@ run_as_root() {
 # and gzip that locked tool archives need; install only what is missing.
 install_system_packages_if_missing() {
   local missing=() package
-  # A musl libc host (Alpine) cannot run the pinned glibc uv, Python or Node;
+  # A musl libc host (Alpine) cannot run the pinned glibc uv or Node;
   # stop before installing anything instead of leaving half an install.
   if [ "$(uname -s)" = Linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
-    echo "error: musl-based Linux (such as Alpine) is not supported: the pinned uv, Python and Node builds need glibc; use a glibc distribution or container" >&2
+    echo "error: musl-based Linux (such as Alpine) is not supported: the pinned uv and Node builds need glibc; use a glibc distribution or container" >&2
     exit 1
   fi
   for package in "$@"; do
@@ -847,102 +851,6 @@ install_system_packages_if_missing() {
     echo "error: ${missing[*]} required; install manually and rerun" >&2
     exit 1
   fi
-}
-
-load_user_tool_paths() {
-  local locked_node=""
-  local managed_node_bin=""
-
-  export PATH="$HOME/.local/bin:$PATH"
-  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-
-  if [ -x "$DEST/scripts/lib/tool-lock.py" ] && [ -f "$DEST/tools.lock.json" ]; then
-    locked_node="$(python3 "$DEST/scripts/lib/tool-lock.py" \
-      --lock "$DEST/tools.lock.json" get node.version | tr -d '\r')"
-    managed_node_bin="$NVM_DIR/versions/node/v$locked_node/bin"
-    if [ -x "$managed_node_bin/node" ] &&
-       [ "$("$managed_node_bin/node" --version 2>/dev/null | tr -d '\r')" = "v$locked_node" ]; then
-      export PATH="$managed_node_bin:$PATH"
-    fi
-  fi
-  if [ -f "$DEST/scripts/lib/python-runtime.sh" ]; then
-    # shellcheck disable=SC1091
-    . "$DEST/scripts/lib/python-runtime.sh"
-    oms_python_runtime_activate "$DEST"
-  fi
-}
-
-ensure_python3() {
-  unset -f python python3 2>/dev/null || true
-  local candidate=""
-  local uv_interp=""
-  local shim="$HOME/.local/bin/python3"
-
-  export PATH="$HOME/.local/bin:$PATH"
-  if command -v python3 >/dev/null 2>&1 &&
-     env -u PYTHONHOME -u PYTHONPATH python3 -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-    return 0
-  fi
-  # uv-only machines (fresh workstations, cluster accounts) carry a managed
-  # CPython without exposing any python3 command. Adopt it through a managed
-  # shim only as the bootstrap interpreter: once the OMS runtime exists the
-  # shim is repointed at it, because `uv python find` depends on the cwd.
-  if [ -z "$candidate" ] && command -v uv >/dev/null 2>&1; then
-    uv_interp="$(uv python find 2>/dev/null | tr -d '\r' || true)"
-    if [ -z "$uv_interp" ]; then
-      uv python install >/dev/null 2>&1 || true
-      uv_interp="$(uv python find 2>/dev/null | tr -d '\r' || true)"
-    fi
-    if [ -n "$uv_interp" ] &&
-       env -u PYTHONHOME -u PYTHONPATH "$uv_interp" -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-      candidate=uv
-    fi
-  fi
-
-  # Missing or older system Python (including Ubuntu 20.04/22.04 and macOS
-  # Command Line Tools): build the pinned OMS runtime and expose it.
-  if [ -z "$candidate" ]; then
-    # shellcheck disable=SC1091
-    . "$DEST/scripts/lib/file-lock.sh"
-    # shellcheck disable=SC1091
-    . "$DEST/scripts/lib/python-runtime.sh"
-    if oms_python_runtime_bootstrap "$DEST"; then
-      candidate=runtime
-    fi
-  fi
-
-  if [ -z "$candidate" ]; then
-    echo "error: no Python 3.11+ 'python3' and the pinned uv could not build one; see the error above" >&2
-    exit 1
-  fi
-
-  # A shim we wrote whose interpreter has since moved is repairable, and
-  # refusing it would mean no reinstall can ever fix what an install created.
-  # Anything else at that path is the user's launcher and stays untouched.
-  if [ -e "$shim" ] || [ -L "$shim" ]; then
-    if oms_install_python_shim_owned "$shim"; then
-      rm -f "$shim"
-      echo "replacing stale managed python3 shim: $shim"
-    else
-      echo "error: refusing to replace existing Python launcher: $shim" >&2
-      exit 1
-    fi
-  fi
-  mkdir -p "$HOME/.local/bin"
-  case "$candidate" in
-    uv)
-      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
-        'exec "$(uv python find)" "$@"' > "$shim"
-      ;;
-    runtime)
-      {
-        printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting'
-        oms_install_python_shim_runtime_line "$(oms_python_runtime_root)"
-      } > "$shim"
-      ;;
-  esac
-  chmod +x "$shim"
-  echo "python3 shim: $shim -> $candidate"
 }
 
 install_system_packages_if_missing git tar gzip find
@@ -997,77 +905,6 @@ else
   git -C "$DEST" checkout --detach "$target"
 fi
 
-# Continue from the updated checkout so old piped/local installers do not run stale logic.
-if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
-  export OH_MY_SETTING_REEXECED=1
-  if grep -Fq 'OMS_INSTALL_LIFECYCLE_PROTOCOL=1' "$DEST/install.sh"; then
-    exec "$OMS_BASH" "$DEST/install.sh"
-  fi
-  # An older selected ref cannot adopt the lock. Keep it in this parent while
-  # the old installer runs as a child, then release it on our EXIT trap.
-  "$OMS_BASH" "$DEST/install.sh"
-  exit $?
-fi
-
-# One failure past this point can leave a partial install: tools present but
-# targets unlinked, or hooks half-registered. The installer is idempotent and
-# doctor relinks from the receipt, so a crash should name that recovery path
-# instead of ending with only the failing tool's error.
-install_failed() {
-  local code="$1"
-
-  [ "$code" -ne 0 ] || return 0
-  {
-    echo "error: install failed (exit $code)"
-    echo "recover: rerun this installer, or run $DEST/scripts/doctor.sh --repair to fix links from the receipt"
-  } >&2
-}
-install_lifecycle_exit() {
-  local code=$?
-
-  trap - EXIT HUP INT TERM
-  install_failed "$code"
-  oms_install_lifecycle_lock_release
-  exit "$code"
-}
-trap install_lifecycle_exit EXIT
-
-# shellcheck disable=SC1091
-. "$DEST/scripts/lib/platform.sh"
-oms_bash_enter
-ensure_python3
-
-# From here onward, OMS code runs under its exact uv-managed interpreter.
-# A host Python (or an existing uv interpreter exposed by ensure_python3) is
-# only a bootstrap for validating the lock and creating this private runtime.
-"$DEST/scripts/python-runtime.sh" ensure
-# shellcheck disable=SC1091
-. "$DEST/scripts/lib/python-runtime.sh"
-oms_python_runtime_activate "$DEST"
-# A shim written by an earlier install (or by the uv adoption above) resolves
-# `uv python find` from the caller's cwd; converge it onto the runtime launcher.
-if oms_install_python_shim_repoint "$HOME/.local/bin/python3" "$(oms_python_runtime_root)"; then
-  echo "python3 shim: $HOME/.local/bin/python3 -> runtime"
-fi
-
-oms_python_precompile "$DEST"
-
-if [ "$TOOLS_FULL" -eq 1 ]; then
-  # Explicit compatibility: the historical all-tools council footprint.
-  "$DEST/scripts/install-tools.sh"
-  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
-else
-  install_profile_args=(--apply --primary-provider "$PRIMARY_PROVIDER")
-  for _capability in "${_capability_list[@]}"; do
-    install_profile_args+=(--profile "$_capability")
-  done
-  "$DEST/scripts/install-profile.sh" "${install_profile_args[@]}"
-  # A core install treats absent optional CLIs as unavailable capabilities,
-  # not as a broken install; the capability receipt records what was chosen.
-  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
-fi
-load_user_tool_paths
-
 case "$CODEX_PLUGIN" in
   auto)
     if command -v codex >/dev/null 2>&1; then
@@ -1083,109 +920,19 @@ case "$CODEX_PLUGIN" in
     ;;
 esac
 export OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
-
-"$DEST/scripts/link.sh"
-
-case "$CONNECT_SERVICES" in
-  auto|required)
-    connect_args=("--$CONNECT_SERVICES")
-    if [ -n "$NOTION_DATA_SOURCE_ID" ]; then
-      connect_args+=(--data-source-id "$NOTION_DATA_SOURCE_ID")
-    fi
-    "$DEST/scripts/connect-services.sh" "${connect_args[@]}"
-    ;;
-  0)
-    if [ -n "$NOTION_DATA_SOURCE_ID" ]; then
-      "$DEST/scripts/journal.sh" configure \
-        --data-source-id "$NOTION_DATA_SOURCE_ID" --no-validate
-    fi
-    echo "skipping GitHub/Notion connection: OH_MY_SETTING_CONNECT_SERVICES=0"
-    ;;
-esac
-
-# Claude Code skill-router/turn-guard hooks and main/subagent HUDs. Additive
-# settings.json merge; Claude-only, non-fatal on failure.
-if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ]; then
-  "$DEST/scripts/install-claude-hooks.sh" ||
-    echo "warning: claude settings registration failed (install continues)" >&2
+if [ "$TOOLS_FULL" -eq 1 ]; then
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-1}"
 else
-  echo "skipping claude hooks/HUD: OH_MY_SETTING_CLAUDE_HOOKS=0"
+  export OH_MY_SETTING_REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 fi
 
-if [ "$CODEX_PLUGIN" = "1" ]; then
-  "$DEST/scripts/install-codex-plugin.sh"
-else
-  echo "skipping codex plugin registration: OH_MY_SETTING_CODEX_PLUGIN=0"
+# Native-first: stage and execute the native installer from the checked-out revision.
+if [ -f "$DEST/scripts/lib/platform.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$DEST/scripts/lib/platform.sh"
+  oms_bash_enter
+  oms_native_route strict "$DEST" install "${install_original_args[@]}" || exit $?
 fi
 
-# Harness-state MCP server: claude and codex register it directly,
-# antigravity receives it through the agy plugin. Non-fatal on failure; a
-# missing CLI is a note, not an error.
-"$DEST/scripts/install-mcp.sh" ||
-  echo "warning: MCP server registration failed (install continues)" >&2
-"$DEST/scripts/install-agy-plugin.sh" ||
-  echo "warning: antigravity plugin import failed (install continues)" >&2
-
-if [ "$PEER_PERMISSIONS" = 1 ] && command -v agy >/dev/null 2>&1; then
-  "$DEST/scripts/provider-permissions.sh" --apply --profile delegate --allow-toolchains ||
-    echo 'warning: permission grant failed; run oms provider-permissions --apply --profile delegate --allow-toolchains' >&2
-fi
-
-if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v sinfo >/dev/null 2>&1; }; then
-  "$DEST/scripts/generate-slurm-reference.sh"
-fi
-
-if [ "$GENERATE_MACHINE" != "0" ]; then
-  "$DEST/scripts/write-machine-snapshot.sh"
-fi
-
-"$DEST/scripts/doctor.sh"
-
-if [ "$AUTO_UPDATE" = "1" ]; then
-  "$DEST/scripts/install-autoupdate.sh"
-elif [ "$AUTO_UPDATE" = "0" ]; then
-  echo "skipping auto-update trigger: OH_MY_SETTING_AUTO_UPDATE=0"
-else
-  echo "error: OH_MY_SETTING_AUTO_UPDATE must be 0 or 1" >&2
-  exit 2
-fi
-
-prompt_star_repo() {
-  if [ "$STAR_PROMPT" = "0" ]; then
-    return 0
-  fi
-
-  cat <<'EOF'
-
-If oh-my-setting helped, please consider starring the repo:
-  gh api --method PUT /user/starred/eightmm/oh-my-setting
-EOF
-
-  if ! command -v gh >/dev/null 2>&1; then
-    return 0
-  fi
-
-  if ! gh auth status >/dev/null 2>&1; then
-    echo "note: gh not authenticated; run 'gh auth login' to star with one command"
-    return 0
-  fi
-
-  if [ ! -r /dev/tty ]; then
-    return 0
-  fi
-
-  printf 'Star it now with gh? [y/N] ' >/dev/tty
-  IFS= read -r answer </dev/tty || return 0
-
-  case "$answer" in
-    y|Y|yes|YES|Yes)
-      if gh api --method PUT /user/starred/eightmm/oh-my-setting >/dev/null; then
-        echo "ok: starred eightmm/oh-my-setting"
-      else
-        echo "warning: failed to star repo with gh api; you can run it manually later" >&2
-      fi
-      ;;
-  esac
-}
-
-prompt_star_repo
+echo "error: native installer unavailable in $DEST (install cargo 1.99.1 and rerun)" >&2
+exit 2

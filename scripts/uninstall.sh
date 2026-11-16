@@ -1,262 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-# A PATH Bash 3.2 re-enters the recorded Bash 5; children (tick.sh) need it too.
-if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
-  if [ -f "$ROOT/scripts/lib/install-contract.sh" ]; then
-    # shellcheck source=scripts/lib/install-contract.sh
-    . "$ROOT/scripts/lib/install-contract.sh"
-    if oms_bash_reexec="$(oms_install_bash_interpreter 2>/dev/null)"; then
-      exec "$oms_bash_reexec" "${BASH_SOURCE[0]}" "$@"
-    fi
-  fi
-elif [ -f "$ROOT/scripts/lib/platform.sh" ]; then
-  # shellcheck source=scripts/lib/platform.sh
-  . "$ROOT/scripts/lib/platform.sh"
-  oms_bash_enter
-fi
-# The TOML helpers need the interpreter that wrote the config; a host python3
-# older than 3.11 has no parser and stopped the uninstall.
-if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
-  # shellcheck source=scripts/lib/python-runtime.sh
-  . "$ROOT/scripts/lib/python-runtime.sh"
-  oms_python_runtime_activate_if_present
-fi
-DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
-ASSUME_YES="${OH_MY_SETTING_ASSUME_YES:-0}"
-PURGE="${OH_MY_SETTING_PURGE:-0}"
-PURGE_DIRTY="${OH_MY_SETTING_PURGE_DIRTY:-0}"
+# Native OMS entrypoint for uninstall.
 
-usage() {
-  cat <<'EOF'
-Usage: uninstall.sh [--yes] [--purge] [--purge-dirty] [--dry-run] [-h|--help]
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
-Remove oh-my-setting managed links/copies (and restore backups when available). With
---purge also delete the oh-my-setting checkout directory itself.
-Registered Claude and Codex homes, logins and sessions stay. Claude cleanup
-removes only account-owned integration effects; ambiguous ownership stops before
-global cleanup, unlink or purge. For Codex, only recorded shared links
-still pointing to main-home or OMS-managed targets are removed.
-Directory identity must match the receipt. Changed entries and platforms lacking
-safe directory-relative unlink keep their links and report why.
-The cleanup summary counts removed and retained links, reasons and retained
-receipt rows. The account registry stays; retained state includes remove/repair
-guidance. --dry-run reports the projected counts without writing account state.
-
-Options:
-  --yes       Assume yes for confirmation prompts.
-  --purge     Also delete the checkout directory after unlinking.
-  --purge-dirty
-              With --purge, explicitly allow deletion of tracked or untracked
-              checkout changes. Ignored runtime state is unaffected.
-  --dry-run   Preview actions without making changes.
-
-Environment:
-  OH_MY_SETTING_ASSUME_YES=1  Same as --yes.
-  OH_MY_SETTING_PURGE=1       Same as --purge.
-  OH_MY_SETTING_PURGE_DIRTY=1 Same as --purge-dirty.
-  OH_MY_SETTING_DRY_RUN=1     Same as --dry-run.
-EOF
-}
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --yes|-y) ASSUME_YES=1; shift ;;
-    --purge) PURGE=1; shift ;;
-    --purge-dirty) PURGE_DIRTY=1; shift ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *)
-      echo "error: unknown option: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-  esac
-done
-
-if [ "$PURGE_DIRTY" = 1 ] && [ "$PURGE" != 1 ]; then
-  echo "error: --purge-dirty requires --purge" >&2
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for uninstall; stage with cargo or run oms doctor --repair" >&2
   exit 2
 fi
-
-[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || [ "$DRY_RUN" = 1 ] || {
-  echo "error: a harness child cannot mutate OMS host lifecycle authority" >&2
-  exit 2
-}
-
-confirm() {
-  local prompt="$1"
-  if [ "$ASSUME_YES" = "1" ]; then
-    return 0
-  fi
-  # Readable permissions are not a terminal: without a controlling tty (CI,
-  # containers, agent shells) opening /dev/tty fails, and the read below would
-  # silently answer no.
-  if ! { : </dev/tty; } 2>/dev/null; then
-    echo "error: $prompt (no tty; rerun with --yes)" >&2
-    exit 1
-  fi
-  printf '%s [y/N] ' "$prompt" >/dev/tty
-  local answer
-  IFS= read -r answer </dev/tty || answer=""
-  case "$answer" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-refuse_unsafe_purge_root() {
-  # ROOT is physical, so HOME must be too: a symlinked HOME would otherwise
-  # slip past the comparison. A ROOT that contains HOME is refused as well.
-  local home_physical
-  home_physical="$(cd "$HOME" 2>/dev/null && pwd -P)" || home_physical="$HOME"
-  case "$ROOT" in
-    "$HOME"|"$home_physical"|/|"")
-      echo "error: refusing to purge $ROOT" >&2
-      exit 1
-      ;;
-  esac
-  case "$home_physical/" in
-    "$ROOT"/*)
-      echo "error: refusing to purge $ROOT" >&2
-      exit 1
-      ;;
-  esac
-}
-
-if [ "$PURGE" = "1" ]; then
-  refuse_unsafe_purge_root
-fi
-
-# Preserve the standalone unsafe-purge guard before loading repo helpers: the
-# guard must still protect a copied script whose checkout is incomplete.
-# shellcheck source=scripts/lib/install-contract.sh
-. "$ROOT/scripts/lib/install-contract.sh"
-# shellcheck source=scripts/lib/install-lifecycle-lock.sh
-. "$ROOT/scripts/lib/install-lifecycle-lock.sh"
-uninstall_lifecycle_exit() {
-  local code=$?
-
-  trap - EXIT HUP INT TERM
-  oms_install_lifecycle_lock_release
-  exit "$code"
-}
-if [ "$DRY_RUN" != 1 ]; then
-  trap uninstall_lifecycle_exit EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  oms_install_lifecycle_lock_acquire uninstall || exit $?
-fi
-oms_install_require_owner "$ROOT" "uninstall" || exit 1
-
-# Purge is the only uninstall mode that destroys the checkout itself. Resolve
-# the complete dirty set before removing any integration so refusal is atomic:
-# a protected local file must not leave the installation half-unlinked.
-if [ "$PURGE" = 1 ] && [ "$PURGE_DIRTY" != 1 ] &&
-   { [ -e "$ROOT/.git" ] || [ -L "$ROOT/.git" ]; }; then
-  purge_dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all 2>/dev/null)" || {
-    echo "error: cannot inspect checkout before purge: $ROOT" >&2
-    exit 1
-  }
-  if [ -n "$purge_dirty" ]; then
-    echo "error: refusing to purge a dirty checkout: $ROOT" >&2
-    printf '%s\n' "$purge_dirty" | sed -n '1,20p' >&2
-    echo "error: preserve the files, or rerun with --purge --purge-dirty" >&2
-    exit 1
-  fi
-fi
-
-# Ask before removing anything, so a refused or impossible confirmation leaves
-# every integration in place.
-purge_confirmed=0
-if [ "$PURGE" = "1" ]; then
-  if confirm "Delete checkout directory $ROOT?"; then
-    purge_confirmed=1
-  fi
-fi
-
-removal_failed=0
-run_removal() {  # LABEL COMMAND...
-  local label="$1"
-  shift
-  if "$@"; then
-    return 0
-  fi
-  echo "error: failed to remove $label" >&2
-  removal_failed=1
-  return 0
-}
-
-if [ "$DRY_RUN" = 1 ]; then
-  run_removal "Codex account shared links" \
-    python3 "$ROOT/scripts/lib/provider_accounts.py" cleanup --root "$ROOT" --dry-run
-else
-  run_removal "Codex account shared links" \
-    python3 "$ROOT/scripts/lib/provider_accounts.py" cleanup --root "$ROOT"
-fi
-if [ "$removal_failed" -ne 0 ]; then
-  echo "error: account cleanup incomplete; uninstall stopped before global cleanup, unlink or purge" >&2
-  exit 1
-fi
-run_removal "the auto-update trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
-  "$ROOT/scripts/uninstall-autoupdate.sh"
-run_removal "the tick trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
-  "$ROOT/scripts/tick.sh" uninstall
-if [ "$DRY_RUN" = "1" ]; then
-  echo "would remove claude oh-my-setting hooks/HUD from ~/.claude/settings.json"
-  echo "would remove codex oh-my-setting plugin"
-  echo "would unregister the oh-my-setting MCP server from claude and codex"
-  echo "would uninstall the antigravity oh-my-setting plugin"
-  echo "would revoke only Antigravity permissions added by oh-my-setting"
-else
-  run_removal "Claude hooks and HUD" "$ROOT/scripts/install-claude-hooks.sh" --remove
-  run_removal "the Codex plugin" "$ROOT/scripts/install-codex-plugin.sh" --remove
-  run_removal "MCP registrations" "$ROOT/scripts/install-mcp.sh" --remove
-  run_removal "the Antigravity plugin" "$ROOT/scripts/install-agy-plugin.sh" --remove
-  run_removal "managed Antigravity permissions" \
-    "$ROOT/scripts/provider-permissions.sh" --remove
-fi
-if [ "$removal_failed" -ne 0 ]; then
-  echo "error: uninstall stopped before unlink or purge; fix the errors above and retry" >&2
-  exit 1
-fi
-
-# Work Journal owns configuration outside the checkout. Remove it before
-# unlinking the recovery command or receipt, so a failure leaves the install
-# fully retryable and honors the same mutation boundary as other integrations.
-if [ "$purge_confirmed" = "1" ]; then
-  if [ "$DRY_RUN" = "1" ]; then
-    echo "would remove managed Work Journal configuration"
-  elif ! "$ROOT/scripts/journal.sh" disconnect --managed >/dev/null; then
-    echo "error: managed Work Journal configuration was not removed" >&2
-    echo "error: uninstall stopped before unlink or purge; fix the error above and retry" >&2
-    exit 1
-  fi
-fi
-
-OH_MY_SETTING_DRY_RUN="$DRY_RUN" "$ROOT/scripts/unlink.sh"
-
-if [ "$PURGE" != "1" ]; then
-  echo "uninstall: managed targets removed; checkout kept at $ROOT"
-  echo "rerun with --purge to delete the checkout."
-  exit 0
-fi
-
-if [ "$purge_confirmed" != "1" ]; then
-  echo "purge: aborted; checkout kept at $ROOT"
-  exit 0
-fi
-
-if [ "$DRY_RUN" = "1" ]; then
-  echo "would remove $ROOT"
-  exit 0
-fi
-
-# Defensive: refuse to purge the user's $HOME or unrelated paths.
-refuse_unsafe_purge_root
-
-cd /
-rm -rf "$ROOT"
-echo "purged $ROOT"
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "recover" "$ROOT" "uninstall" "$@" || exit $?
+echo "error: native payload unavailable for uninstall (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

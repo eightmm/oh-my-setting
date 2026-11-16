@@ -1,0 +1,19 @@
+Usage: oms run-reconcile scan [--ledger FILE] [--job ID]
+       oms run-reconcile apply [--ledger FILE] [--job ID] [--memory] [--agent NAME]
+       oms run-reconcile list [N]
+       oms run-reconcile usage [--experiment ID] [--job ID] [--ledger FILE] [--json]
+
+scan prints tracked job ids and current Slurm state.
+apply records finished jobs once per job id and submission timestamp, with
+accounting fields, requeues, array-task outcomes, allocated usage and digest.
+PREEMPTED/NODE_FAIL still in squeue is REQUEUED and remains pending.
+--memory asks the injected native memory service for a compact note.
+Queries never submit, cancel or requeue. Each query has a 30-second deadline
+(parent Context.query_timeout may select another positive budget).
+list shows the last N physical reconcile lines (default 10; zero is empty).
+usage sums recorded allocation rows only, with optional experiment/job filters.
+GPU utilization and memory efficiency stay unknown.
+OMS_SACCT_CMD and OMS_SQUEUE_CMD override read-only query executables.
+OMS_RECONCILE_FILE defaults to .oms/runs/reconcile.jsonl.
+OMS_RECONCILE_DIGEST_DIR defaults to .oms/runs/reconcile.
+Job ids come from docs/EXPERIMENTS.jsonl unless --ledger or --job selects them.

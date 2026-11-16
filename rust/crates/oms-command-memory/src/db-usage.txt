@@ -1,0 +1,32 @@
+usage: agent-memory-db.py [-h] --db DB --shared SHARED --pins PINS
+                          [--failures FAILURES] [--repo REPO] [--query QUERY]
+                          [--agent AGENT] [--limit LIMIT] [--json]
+                          [--include-stale] [--include-superseded]
+                          [--target TARGET] [--operation OPERATION]
+                          [--view VIEW] [--apply] [--target-path TARGET_PATH]
+                          [--scoped {keep,drop}] [--handoffs HANDOFFS]
+                          {sync,search,recall,health,rebuild,validate,context,redact}
+
+positional arguments:
+  {sync,search,recall,health,rebuild,validate,context,redact}
+
+options:
+  -h, --help            show this help message and exit
+  --db DB
+  --shared SHARED
+  --pins PINS
+  --failures FAILURES
+  --repo REPO
+  --query QUERY
+  --agent AGENT
+  --limit LIMIT
+  --json
+  --include-stale
+  --include-superseded
+  --target TARGET
+  --operation OPERATION
+  --view VIEW
+  --apply
+  --target-path TARGET_PATH
+  --scoped {keep,drop}
+  --handoffs HANDOFFS

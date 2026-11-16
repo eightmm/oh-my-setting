@@ -1,89 +1,25 @@
 #!/usr/bin/env bash
-[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || exit 0
 set -euo pipefail
 
-# Stop finalizes the Work Journal and enforces explicitly configured session
-# budgets. Answer wording never blocks delivery.
+# Native OMS entrypoint for turn-guard.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER="$ROOT/scripts/lib/hook_state.py"
-
-[ "${OMS_HARNESS_CHILD:-0}" != "1" ] || exit 0
-[ -f "$HELPER" ] || exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
-
-payload="$(cat)"
-# An explicit state override must match the prompt's budget writer and journal
-# tick. Keep the normal payload-based Stop path when no override is configured.
-if [ -n "${OMS_STATE_REPO:-}" ]; then
-  OMS_HOOK_RESOLVED_REPO="$(OMS_HOOK_PAYLOAD="$payload" python3 -X utf8 "$ROOT/scripts/lib/hook_repo.py" \
-    2>/dev/null | tr -d '\r')" || OMS_HOOK_RESOLVED_REPO=""
-  export OMS_HOOK_RESOLVED_REPO
-fi
-guard_out=""
-guard_rc=0
-if [ "${OMS_TURN_GUARD_OFF:-0}" != "1" ] && {
-  [ "${OMS_SESSION_BUDGET_TURNS:-0}" != "0" ] ||
-  [ "${OMS_SESSION_BUDGET_HOURS:-0}" != "0" ];
-}; then
-  guard_out="$(printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$HELPER" guard 2>/dev/null)" || guard_rc=$?
-fi
-
-# The journal must not record a blocked answer as finished. Parse the guard
-# verdict instead of substring-matching its serialization, so a formatting
-# change in the emitter cannot silently turn blocked turns into finished ones;
-# malformed output fails open, exactly like the guard itself. A parsed verdict
-# is still forwarded as the helper's own bytes: the block protocol belongs to
-# the emitter, not to this reader.
-decision=""
-unguarded=""
-if [ "$guard_rc" -ne 0 ]; then
-  unguarded="helper exit $guard_rc"
-elif [ -n "$guard_out" ]; then
-  verdict="$(printf '%s' "$guard_out" | python3 -X utf8 -I -B -c '
-import json, sys
-raw = sys.stdin.read().strip()
-try:
-    parsed = json.loads(raw)
-except ValueError:
-    parsed = None
-if isinstance(parsed, dict):
-    print("ok:" + str(parsed.get("decision", "")))
-else:
-    print("invalid")
-' 2>/dev/null || true)"
-  case "$verdict" in
-  ok:*)
-    decision="${verdict#ok:}"
-    printf '%s\n' "$guard_out"
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    exit 0
     ;;
-  *) unguarded="unreadable verdict" ;;
-  esac
-fi
+esac
 
-# Fail-open is deliberate, silence is not: a turn the guard never judged says
-# so, on the one channel the Stop protocol reserves for notices. Exclusive with
-# the verdict above, so stdout never carries two JSON documents.
-[ -z "$unguarded" ] ||
-  printf '{"systemMessage": "oh-my-setting turn guard: unavailable (%s); this turn was not checked."}\n' \
-    "$unguarded"
-
-[ "$decision" != "block" ] || exit 0
-
-# The other CLI's next prompt shows this turn's completion card. The same pass
-# prints the state repo, so stdout lands here, never in the Stop protocol.
-repo="$(printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$HELPER" relay 2>/dev/null || true)"
-
-# shellcheck source=scripts/lib/work-journal.sh
-. "$ROOT/scripts/lib/work-journal.sh"
-if ! work_journal_enabled && [ "${OMS_CI_TICK:-1}" != "1" ]; then
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
   exit 0
 fi
-repo="${repo//$'\r'/}"
-[ -n "$repo" ] || exit 0
-git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || exit 0
-
-work_journal_finish "$repo" resolved
-work_journal_defer_finish "$repo"
-
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route hook "$ROOT" "turn-guard" "$@" || exit 0
 exit 0

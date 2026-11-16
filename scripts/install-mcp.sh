@@ -1,219 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Register the oms state-and-peer MCP server with the MCP-capable provider CLIs
-# (Claude Code and Codex; Antigravity receives it through the agy plugin).
-# The server exposes one repository's harness state — task packet,
-# fail-ledger, handoff digests, Work Journal — so every MCP client reads the
-# same state without per-CLI hook code. Idempotent: an existing registration
-# pointing at this checkout is left alone, anything else is replaced.
-# A missing CLI is a note while registering. Removal fails closed because it
-# cannot prove a provider-local registration is absent without that provider.
+# Native OMS entrypoint for install-mcp.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-SERVER="$ROOT/scripts/oms-mcp-server.py"
-NAME="oh-my-setting"
-REMOVE=0
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
-usage() {
-  cat <<'EOF'
-Usage: install-mcp.sh [--remove]
-
-Register (or with --remove, unregister) the oh-my-setting state-and-peer MCP
-server for Claude Code and Codex. State tools read local harness data;
-oms_peer_start launches an external peer call and writes .oms artifacts.
-OH_MY_SETTING_MCP=0 skips registration.
-EOF
-}
-
-fail() { echo "error: $*" >&2; exit 2; }
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --remove) REMOVE=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) fail "unknown argument: $1" ;;
-  esac
-done
-
-if [ "${OH_MY_SETTING_MCP:-1}" != "1" ] && [ "$REMOVE" != "1" ]; then
-  echo "mcp: skipped (OH_MY_SETTING_MCP=0)"
-  exit 0
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for install-mcp; stage with cargo or run oms doctor --repair" >&2
+  exit 2
 fi
-if [ "$REMOVE" != "1" ]; then
-  command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-  [ -f "$SERVER" ] || fail "oms-mcp-server.py not found under $ROOT"
-fi
-
-# Provider management CLIs run unattended here — update.sh reaches this from
-# auto-update's cron chain — so a call must never wait on a prompt (stdin
-# closed) or run unbounded (timeout where coreutils provides one; the agy
-# plugin installer set this pattern). A timeout's exit 124 lands in the same
-# failure branches as any other nonzero status.
-provider_cmd() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 120 "$@" </dev/null
-  else
-    "$@" </dev/null
-  fi
-}
-
-mcp_registration_state() {  # CLI
-  local cli="$1"
-  local out
-
-  if out="$(provider_cmd "$cli" mcp get "$NAME" 2>&1)"; then
-    return 0
-  fi
-  case "$out" in
-    *"No MCP server named"*"$NAME"*) return 1 ;;
-  esac
-  return 2
-}
-
-# Without the CLI, removal may still prove there is nothing to remove: the
-# CLI's own user config has no entry under our name (a core install that
-# never had this provider). Anything unreadable or present still fails.
-claude_config_lacks_registration() {
-  local config="$HOME/.claude.json"
-  [ -e "$config" ] || return 0
-  python3 - "$config" "$NAME" <<'PY'
-import json, sys
-try:
-    servers = json.load(open(sys.argv[1], encoding="utf-8")).get("mcpServers") or {}
-except Exception:
-    raise SystemExit(1)
-raise SystemExit(1 if not isinstance(servers, dict) or sys.argv[2] in servers else 0)
-PY
-}
-
-codex_config_lacks_registration() {
-  local config="${CODEX_HOME:-$HOME/.codex}/config.toml"
-  [ -e "$config" ] || return 0
-  ! grep -Eq "^[[:space:]]*\[mcp_servers\.(\"$NAME\"|'$NAME'|$NAME)[]. ]" "$config"
-}
-
-register_claude() {
-  command -v claude >/dev/null 2>&1 || {
-    if [ "$REMOVE" = "1" ]; then
-      if claude_config_lacks_registration; then
-        echo "mcp: claude CLI absent and its config holds no $NAME registration"
-        return 0
-      fi
-      echo "error: claude CLI is required to inspect and remove its MCP registration" >&2
-      return 1
-    fi
-    echo "mcp: note: claude CLI absent; skipped"
-    return 0
-  }
-  if [ "$REMOVE" = "1" ]; then
-    local state=0
-    mcp_registration_state claude || state=$?
-    case "$state" in
-      0)
-        if provider_cmd claude mcp remove -s user "$NAME" >/dev/null 2>&1; then
-          echo "mcp: claude registration removed"
-          return 0
-        fi
-        echo "error: could not remove the claude MCP registration" >&2
-        return 1
-        ;;
-      1)
-        echo "mcp: claude registration already absent"
-        return 0
-        ;;
-      *)
-        echo "error: could not inspect the claude MCP registration" >&2
-        return 1
-        ;;
-    esac
-  fi
-  local current state=0
-  current="$(provider_cmd claude mcp get "$NAME" 2>&1)" || state=$?
-  if [ "$state" -ne 0 ]; then
-    case "$current" in
-      *"No MCP server named"*"$NAME"*) ;;
-      *) echo "error: could not inspect the claude MCP registration" >&2; return 1 ;;
-    esac
-  elif printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
-    echo "mcp: claude already registered"
-    return 0
-  fi
-  if [ "$state" = 0 ]; then
-    if ! provider_cmd claude mcp remove -s user "$NAME" >/dev/null 2>&1; then
-      echo "error: could not remove the claude MCP registration; re-run scripts/install-mcp.sh" >&2
-      return 1
-    fi
-  fi
-  if provider_cmd claude mcp add -s user "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
-    echo "mcp: claude registered ($NAME)"
-  else
-    echo "error: could not register the MCP server with claude; re-run scripts/install-mcp.sh" >&2
-    return 1
-  fi
-}
-
-register_codex() {
-  command -v codex >/dev/null 2>&1 || {
-    if [ "$REMOVE" = "1" ]; then
-      if codex_config_lacks_registration; then
-        echo "mcp: codex CLI absent and its config holds no $NAME registration"
-        return 0
-      fi
-      echo "error: codex CLI is required to inspect and remove its MCP registration" >&2
-      return 1
-    fi
-    echo "mcp: note: codex CLI absent; skipped"
-    return 0
-  }
-  if [ "$REMOVE" = "1" ]; then
-    local state=0
-    mcp_registration_state codex || state=$?
-    case "$state" in
-      0)
-        if provider_cmd codex mcp remove "$NAME" >/dev/null 2>&1; then
-          echo "mcp: codex registration removed"
-          return 0
-        fi
-        echo "error: could not remove the codex MCP registration" >&2
-        return 1
-        ;;
-      1)
-        echo "mcp: codex registration already absent"
-        return 0
-        ;;
-      *)
-        echo "error: could not inspect the codex MCP registration" >&2
-        return 1
-        ;;
-    esac
-  fi
-  local current state=0
-  current="$(provider_cmd codex mcp get "$NAME" 2>&1)" || state=$?
-  if [ "$state" -ne 0 ]; then
-    case "$current" in
-      *"No MCP server named"*"$NAME"*) ;;
-      *) echo "error: could not inspect the codex MCP registration" >&2; return 1 ;;
-    esac
-  elif printf '%s' "$current" | grep -F "$SERVER" > /dev/null; then
-    echo "mcp: codex already registered"
-    return 0
-  fi
-  if [ "$state" = 0 ]; then
-    if ! provider_cmd codex mcp remove "$NAME" >/dev/null 2>&1; then
-      echo "error: could not remove the codex MCP registration; re-run scripts/install-mcp.sh" >&2
-      return 1
-    fi
-  fi
-  if provider_cmd codex mcp add "$NAME" -- python3 "$SERVER" >/dev/null 2>&1; then
-    echo "mcp: codex registered ($NAME)"
-  else
-    echo "error: could not register the MCP server with codex; re-run scripts/install-mcp.sh" >&2
-    return 1
-  fi
-}
-
-status=0
-register_claude || status=1
-register_codex || status=1
-exit "$status"
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "install-mcp" "$@" || exit $?
+echo "error: native payload unavailable for install-mcp (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

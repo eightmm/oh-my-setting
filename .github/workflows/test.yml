@@ -8,131 +8,20 @@ on:
   schedule:
     - cron: '23 3 * * 1'
 
-# Least privilege: this workflow only reads the repo.
 permissions:
   contents: read
 
-# Replace obsolete runs only within the same event; a scheduled/manual full
-# check must not cancel the push run that a landing is waiting for.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Split from smoke on purpose: check.sh stops at the first failing stage, so
-  # running lint in the same job would let one shellcheck nit hide every test
-  # result. Twenty seconds of runner time buys an independent red/green.
-  lint:
-    needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    # apt has hung this job for an hour before timing anything out (observed
-    # 2026-08-18: "install shellcheck" stalled 60+ minutes and held a release
-    # base hostage until a manual cancel+rerun). Fail the step fast instead —
-    # a rerun of a 5-minute failure is cheap; a silent hour is not.
-    steps:
-      - uses: actions/checkout@v7
-      - name: install shellcheck
-        timeout-minutes: 5
-        # Pinned release binary, digest-verified: three apt-mirror stalls in
-        # one day (2026-08-19) each cost a 5-minute timeout and a manual
-        # rerun. The GitHub release download shares no fate with the apt
-        # mirrors, and the pin keeps lint results reproducible.
-        run: |
-          curl -sSL -o /tmp/shellcheck.tar.xz \
-            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
-          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tar.xz" | sha256sum -c -
-          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
-          sudo install /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
-          shellcheck --version
-      - name: lint
-        timeout-minutes: 15
-        run: bash scripts/check.sh --lint-only
-
-  # Focused suites stay serial WITHIN a lane — load-sensitive process tests
-  # must not compete for one runner's CPU — but the lanes are separate VMs,
-  # like the smoke shards below, because one serial pass had grown past
-  # twenty minutes of wall clock. The partition is positional
-  # (check.sh --focused-lane), so a newly registered stage lands in a lane
-  # automatically and the lane union is provably the whole focused list
-  # (source-distribution-smoke pins that invariant). runtime-core and
-  # install-profile are registered focused stages, so they are no longer
-  # repeated here as extra steps. operator-tools is registered too but left out
-  # here (--without-operator-tools, position kept): operator_shard runs it.
-  focused:
-    needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full'
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [1, 2, 3, 4]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 85
-    name: focused (${{ matrix.lane }}/4)
-    steps:
-      - uses: actions/checkout@v7
-      - name: focused suites
-        timeout-minutes: 75
-        run: bash scripts/check.sh --focused-only --without-operator-tools --focused-lane "${{ matrix.lane }}/4"
-
-  # operator-tools was one 1773 s stage inside focused lane 2 and set the run's
-  # wall clock (run 42950293025). tests/operator-tools-smoke.sh --shard I/N
-  # places whole sections and dispatch-results cases by measured weight;
-  # --self-check (run by every shard) proves the shards cover each section
-  # once. Job names are install evidence like the matrices above.
-  operator_shard:
-    needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full'
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 70
-    name: operator-tools (${{ matrix.shard }}/4)
-    steps:
-      - uses: actions/checkout@v7
-      - name: operator-tools shard
-        timeout-minutes: 60
-        run: bash scripts/check.sh --operator-only --shard "${{ matrix.shard }}/4"
-
-  # scripts-smoke is the dominant wall-clock cost. Native matrix children get
-  # separate runners instead of four process trees racing on one VM. The
-  # partition is deterministic and cost-weighted ("# smoke-weight:" lines in
-  # scripts-smoke.sh, refreshed from the smoke-timing lines these jobs print),
-  # so one slow test no longer stretches its shard. Job names are install
-  # evidence: scripts/lib/ci-query.py reads a full selection from them.
-  smoke_shard:
-    needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full'
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 70
-    name: scripts-smoke (${{ matrix.shard }}/4)
-    steps:
-      - uses: actions/checkout@v7
-      - name: smoke shard
-        timeout-minutes: 60
-        env:
-          OMS_SMOKE_TIMINGS: "1"
-          OMS_SMOKE_TIMING_LIMIT: "25"
-        run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
-
-  # Select once here and publish the plan; GitHub exposes job outputs only when
-  # a job ends, so narrow verification runs in affected_verify while
-  # affected_operator starts right after this selection.
   affected_plan:
     runs-on: ubuntu-24.04
-    timeout-minutes: 16
+    timeout-minutes: 10
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       native: ${{ steps.plan.outputs.native }}
-      python: ${{ steps.plan.outputs.python }}
-      operator: ${{ steps.plan.outputs.operator }}
       rust: ${{ steps.rust_scope.outputs.required }}
     steps:
       - uses: actions/checkout@v7
@@ -156,7 +45,6 @@ jobs:
                   required=true ;;
                 *)
                   name="${path##*/}"
-                  # A leading dot alone is not a filename extension.
                   case "${name#.}" in
                     *.) required=true ;;
                     *.*) ;;
@@ -169,7 +57,7 @@ jobs:
           printf 'required=%s\n' "$required" >> "$GITHUB_OUTPUT"
       - name: select affected changes
         id: plan
-        timeout-minutes: 10
+        timeout-minutes: 5
         env:
           EVENT_NAME: ${{ github.event_name }}
           DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -180,97 +68,47 @@ jobs:
               --changed-from "$DIFF_BASE" --changed-to HEAD \
               --ci-output "$GITHUB_OUTPUT"
           else
-            printf 'mode=full\nnative=true\npython=true\n' >> "$GITHUB_OUTPUT"
-            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-              printf '\n### OMS verification selection\n\nFull check: scheduled/manual run or unavailable base revision.\n' >> "$GITHUB_STEP_SUMMARY"
-            fi
+            printf 'mode=full\nnative=true\npython=false\noperator=\n' >> "$GITHUB_OUTPUT"
           fi
 
-  # Narrow verification of an affected plan, in parallel with affected_operator.
-  # Re-selecting must reproduce the published plan, or the run fails closed.
-  affected_verify:
+  lint:
     needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'affected'
+    if: needs.affected_plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
-    timeout-minutes: 105
-    name: affected checks
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: prepare lazy shellcheck
+      - name: install shellcheck
         timeout-minutes: 5
         run: |
-          # Selection and narrow verification still run once. Full selections
-          # never execute this launcher; parallel narrow lint installs once.
-          cat > "$RUNNER_TEMP/oms-shellcheck" <<'SH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          cache="$RUNNER_TEMP/oms-shellcheck-cache"
-          exec 9> "$RUNNER_TEMP/oms-shellcheck.lock"
-          flock 9
-          [ ! -f "$cache/failed" ] || exit 1
-          if [ ! -x "$cache/shellcheck-v0.10.0/shellcheck" ]; then
-            mkdir -p "$cache"
-            if ! (
-              curl -fsSL --max-time 60 --retry 1 -o "$cache/archive.tar.xz" \
-                https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz &&
-              echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  $cache/archive.tar.xz" | sha256sum -c - &&
-              tar -xJf "$cache/archive.tar.xz" -C "$cache"
-            ); then
-              touch "$cache/failed"
-              exit 1
-            fi
-          fi
-          flock -u 9
-          exec 9>&-
-          exec "$cache/shellcheck-v0.10.0/shellcheck" "$@"
-          SH
-          chmod +x "$RUNNER_TEMP/oms-shellcheck"
-          echo "OMS_SHELLCHECK_BIN=$RUNNER_TEMP/oms-shellcheck" >> "$GITHUB_ENV"
-      - name: verify affected changes
-        timeout-minutes: 90
-        env:
-          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          PLAN_MODE: ${{ needs.affected_plan.outputs.mode }}
-          PLAN_NATIVE: ${{ needs.affected_plan.outputs.native }}
-          PLAN_PYTHON: ${{ needs.affected_plan.outputs.python }}
-          PLAN_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
-          OMS_TEST_CALL_TIMEOUT: "240"
+          curl -sSL -o /tmp/shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+          shellcheck --version
+      - name: install pinned Rust toolchain
+        timeout-minutes: 5
         run: |
-          bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD \
-            --ci-output "$RUNNER_TEMP/verify-output"
-          expected="$(printf 'mode=%s\nnative=%s\npython=%s\noperator=%s\n' "$PLAN_MODE" "$PLAN_NATIVE" "$PLAN_PYTHON" "$PLAN_OPERATOR")"
-          if [ "$(cat "$RUNNER_TEMP/verify-output")" != "$expected" ]; then
-            echo "affected selection changed between plan and verification" >&2
-            echo "planned:" >&2; printf '%s\n' "$expected" >&2
-            echo "verified:" >&2; cat "$RUNNER_TEMP/verify-output" >&2
-            exit 1
-          fi
+          rustup toolchain install 1.99.1 --profile minimal
+      - name: fetch locked Rust dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+      - name: lint
+        timeout-minutes: 10
+        run: bash scripts/check.sh --lint-only
 
-  # Exercise the same install -> update -> uninstall contract on every
-  # supported host and ownership mode. Linux auto is already a focused stage;
-  # do not run the same fixture twice on a full gate. Keep Linux copy and the
-  # native macOS leg for native-risk changes and weekly/manual runs.
-  # The matrix omits those hosts only when the plan explicitly permits it.
-  install_e2e:
+  rust:
     needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.native == 'true'
+    if: needs.affected_plan.outputs.rust == 'true' || needs.affected_plan.outputs.mode == 'full'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.affected_plan.outputs.native == 'true' && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 100
-    name: native (${{ matrix.os }}, ${{ matrix.link_mode }})
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
       - name: Bash 5 on macOS
         if: runner.os == 'macOS'
         timeout-minutes: 10
@@ -281,163 +119,160 @@ jobs:
           fi
           echo "$prefix/bin" >> "$GITHUB_PATH"
           "$prefix/bin/bash" --version | head -n 1
-      - name: install / update / uninstall lifecycle
-        timeout-minutes: 30
-        env:
-          OH_MY_SETTING_LINK_MODE: ${{ matrix.link_mode }}
-        run: bash tests/install-lifecycle-smoke.sh
-
-      # Reuse the native host and interpreter. Each check still reports a
-      # failure if another check failed; cancellation must stop obsolete work.
-      - name: BSD userland fixtures
-        timeout-minutes: 20
-        if: ${{ !cancelled() && runner.os == 'macOS' }}
-        run: bash tests/bsd-portability-smoke.sh
-
-  # Exercise the minimum supported Python, including the stdlib TOML parser.
-  python311:
-    needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.python == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 55
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-      - name: Python 3.11 compatibility
-        timeout-minutes: 45
+      - name: install pinned Rust toolchain
+        timeout-minutes: 5
         run: |
-          bash scripts/check-python.sh
-          bash tests/runtime-core-smoke.sh
-          bash tests/install-profile-smoke.sh
-          bash tests/codex-hud-config-smoke.sh
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustc +1.99.1 --version
+          cargo +1.99.1 --version
+      - name: fetch locked Rust dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+      - name: Rust workspace checks and tests
+        timeout-minutes: 30
+        run: |
+          cargo +1.99.1 fmt --manifest-path rust/Cargo.toml --all -- --check
+          cargo +1.99.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
+          cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
+          cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --doc --locked --offline
+          cargo +1.99.1 fmt --manifest-path rust/crates/oms-migrate/Cargo.toml --all -- --check
+          cargo +1.99.1 clippy --manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline -- -D warnings
+          cargo +1.99.1 test --manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline
+          cargo +1.99.1 test --manifest-path rust/crates/oms-migrate/Cargo.toml --doc --locked --offline
+          cargo +1.99.1 run --manifest-path rust/crates/oms-migrate/Cargo.toml --locked --offline -- check --repo .
 
-  # The legacy footprint guard must also run when Python-bearing source or
-  # configuration changes. Rust-only path selection would miss new dependencies.
-  rust:
+  focused:
     needs: affected_plan
-    if: needs.affected_plan.outputs.rust == 'true'
+    if: needs.affected_plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: install pinned Rust toolchain
         timeout-minutes: 5
-        run: |
-          rustup toolchain install 1.85.1 --profile minimal --component rustfmt --component clippy
-          rustc +1.85.1 --version
-          cargo +1.85.1 --version
-      - name: Rust migration foundation
-        timeout-minutes: 10
-        run: |
-          cargo +1.85.1 fmt --manifest-path rust/Cargo.toml --all -- --check
-          cargo +1.85.1 check --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
-          cargo +1.85.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
-          cargo +1.85.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
-          cargo +1.85.1 run --manifest-path rust/Cargo.toml --locked --offline -p oms-migrate -- check --repo .
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: fetch locked Rust dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+      - name: focused smoke suites
+        timeout-minutes: 15
+        run: bash scripts/check.sh --focused-only
 
-  # The affected selection defers operator-tools here: run 40167526634 spent
-  # 1956 s in affected_plan with the suite competing against the other
-  # selected stages on one 4 vCPU runner, versus about 605 s when run alone.
-  affected_operator:
+  install_e2e:
     needs: affected_plan
-    if: needs.affected_plan.outputs.mode == 'affected' && needs.affected_plan.outputs.operator != ''
-    runs-on: ubuntu-24.04
-    timeout-minutes: 85
-    name: operator-tools (affected)
+    if: needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.native == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.affected_plan.outputs.native == 'true' && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    name: native (${{ matrix.os }}, ${{ matrix.link_mode }})
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
-      - name: operator-tools
-        timeout-minutes: 75
-        env:
-          OPERATOR: ${{ needs.affected_plan.outputs.operator }}
-          OMS_TEST_CALL_TIMEOUT: "240"
+      - name: Bash 5 on macOS
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
         run: |
-          if [ "$OPERATOR" = all ]; then
-            bash tests/operator-tools-smoke.sh --jobs 4
-          else
-            bash tests/operator-tools-smoke.sh --section "$OPERATOR"
+          prefix="$(brew --prefix)"
+          if ! "$prefix/bin/bash" -c "[ \${BASH_VERSINFO[0]} -ge 5 ]" 2>/dev/null; then
+            brew install bash
           fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/bash" --version | head -n 1
+      - name: install pinned Rust toolchain
+        timeout-minutes: 5
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: fetch locked Rust dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+      - name: stage native binaries
+        timeout-minutes: 10
+        run: |
+          . scripts/lib/platform.sh
+          oms_native_stage .
+      - name: install / update / uninstall lifecycle
+        timeout-minutes: 10
+        env:
+          OH_MY_SETTING_LINK_MODE: ${{ matrix.link_mode }}
+        run: bash tests/install-lifecycle-smoke.sh
+      - name: BSD userland fixtures
+        timeout-minutes: 10
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        run: bash tests/bsd-portability-smoke.sh
 
-  # Branch protection can target this fixed name. Only plan-authorized skips
-  # are accepted; missing, failed, and cancelled required jobs fail closed.
+  affected_verify:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'affected'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    name: affected checks
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: install pinned Rust toolchain
+        timeout-minutes: 5
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: fetch locked Rust dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+      - name: verify affected changes
+        timeout-minutes: 15
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD
+
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, operator_shard, affected_plan, affected_verify, affected_operator, install_e2e, python311, rust]
+    needs: [affected_plan, lint, rust, focused, install_e2e, affected_verify]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: require every verification job
         timeout-minutes: 5
         env:
-          LINT_RESULT: ${{ needs.lint.result }}
-          FOCUSED_RESULT: ${{ needs.focused.result }}
-          SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
-          OPERATOR_SHARD_RESULT: ${{ needs.operator_shard.result }}
           AFFECTED_PLAN_RESULT: ${{ needs.affected_plan.result }}
-          AFFECTED_VERIFY_RESULT: ${{ needs.affected_verify.result }}
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
           AFFECTED_NATIVE: ${{ needs.affected_plan.outputs.native }}
-          AFFECTED_PYTHON: ${{ needs.affected_plan.outputs.python }}
           AFFECTED_RUST: ${{ needs.affected_plan.outputs.rust }}
-          AFFECTED_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
-          AFFECTED_OPERATOR_RESULT: ${{ needs.affected_operator.result }}
-          INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
-          PYTHON311_RESULT: ${{ needs.python311.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
           RUST_RESULT: ${{ needs.rust.result }}
+          FOCUSED_RESULT: ${{ needs.focused.result }}
+          INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
+          AFFECTED_VERIFY_RESULT: ${{ needs.affected_verify.result }}
         run: |
           status=0
           [ "$AFFECTED_PLAN_RESULT" = success ] || status=1
           case "$AFFECTED_MODE" in
-            affected)
-              expected=skipped
-              ;;
             full)
-              expected=success
+              [ "$LINT_RESULT" = success ] || status=1
+              [ "$RUST_RESULT" = success ] || status=1
+              [ "$FOCUSED_RESULT" = success ] || status=1
+              [ "$INSTALL_E2E_RESULT" = success ] || status=1
+              [ "$AFFECTED_VERIFY_RESULT" = skipped ] || status=1
               ;;
-            *) expected=invalid; status=1 ;;
-          esac
-          for result in \
-            "$LINT_RESULT" \
-            "$FOCUSED_RESULT" \
-            "$SMOKE_SHARD_RESULT" \
-            "$OPERATOR_SHARD_RESULT"; do
-            if [ "$result" != "$expected" ]; then
-              echo "required job result: $result (expected $expected)" >&2
-              status=1
-            fi
-          done
-          verify_expected=skipped
-          [ "$AFFECTED_MODE" != affected ] || verify_expected=success
-          [ "$AFFECTED_VERIFY_RESULT" = "$verify_expected" ] || status=1
-          operator_expected=skipped
-          if [ "$AFFECTED_MODE" = affected ] && [ -n "$AFFECTED_OPERATOR" ]; then
-            operator_expected=success
-          fi
-          [ "$AFFECTED_OPERATOR_RESULT" = "$operator_expected" ] || status=1
-          case "$AFFECTED_NATIVE" in
-            true) native_expected=success; install_expected=success ;;
-            false)
-              native_expected=skipped
-              install_expected="$expected"
+            affected)
+              [ "$LINT_RESULT" = skipped ] || status=1
+              [ "$FOCUSED_RESULT" = skipped ] || status=1
+              [ "$AFFECTED_VERIFY_RESULT" = success ] || status=1
+              if [ "$AFFECTED_NATIVE" = true ]; then
+                [ "$INSTALL_E2E_RESULT" = success ] || status=1
+              else
+                [ "$INSTALL_E2E_RESULT" = skipped ] || status=1
+              fi
+              if [ "$AFFECTED_RUST" = true ]; then
+                [ "$RUST_RESULT" = success ] || status=1
+              else
+                [ "$RUST_RESULT" = skipped ] || status=1
+              fi
               ;;
-            *) native_expected=invalid; install_expected=invalid; status=1 ;;
+            *) status=1 ;;
           esac
-          [ "$INSTALL_E2E_RESULT" = "$install_expected" ] || status=1
-          case "$AFFECTED_PYTHON" in
-            true) python_expected=success ;;
-            false) python_expected="$expected" ;;
-            *) python_expected=invalid; status=1 ;;
-          esac
-          [ "$PYTHON311_RESULT" = "$python_expected" ] || status=1
-          case "$AFFECTED_RUST" in
-            true) rust_expected=success ;;
-            false) rust_expected=skipped ;;
-            *) rust_expected=invalid; status=1 ;;
-          esac
-          [ "$RUST_RESULT" = "$rust_expected" ] || status=1
-          if [ "$status" -ne 0 ]; then
-            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT operator_shards=$OPERATOR_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT rust=$RUST_RESULT/$AFFECTED_RUST" >&2
-          fi
+          [ "$status" -eq 0 ] || {
+            echo "gate failed: mode=$AFFECTED_MODE plan=$AFFECTED_PLAN_RESULT lint=$LINT_RESULT rust=$RUST_RESULT focused=$FOCUSED_RESULT e2e=$INSTALL_E2E_RESULT verify=$AFFECTED_VERIFY_RESULT" >&2
+          }
           exit "$status"

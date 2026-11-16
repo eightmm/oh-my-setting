@@ -1,0 +1,66 @@
+Usage: agent-task.sh [options] [path|init|show|context|status|update|append|verify|rotate|close]
+
+Maintain the active handoff packet shared by Codex, Claude Code, and
+Antigravity. Project task defaults to REPO/.oms/task/current.md.
+
+Options:
+  --repo PATH       Project repo/directory. Default: PWD.
+  --file PATH       Explicit task file path.
+  --agent NAME      Agent label for appended notes. Default: agent.
+  --goal TEXT       init/update: replace Goal.
+  --constraint TEXT update: append a Constraints bullet. A bullet of the form
+                    "allowed_paths: src/, README.md" or
+                    "forbidden_paths: secrets/, *.lock" is read by
+                    change-guard.sh --from-task to scope live edits
+                    (deny beats allow).
+  --done TEXT       update: append a Done Criteria bullet.
+  --verify CMD      init/update: replace Verify.
+  --loop-attempts N init/update: set Loop State attempts.
+  --loop-max N      init/update: set Loop State max_attempts.
+  --diff-budget N   init/update: set Loop State diff_budget_lines.
+  --verify-level L  init/update: set Loop State verification_level.
+  --if-unchanged-sha256 HASH
+                    close: archive only if the packet matches this lowercase SHA-256.
+  --reason TEXT     close: close a task whose verification is missing or stale,
+                    recording why. Required for that case.
+  --replace-goal REASON
+                    init/rotate/update: parent-only consent to replace the goal
+                    of a task that is still being pursued. Without it a
+                    different goal is refused; with it the Decisions section of
+                    the new packet records the replaced task id and REASON.
+  --skip-verify-run REASON
+                    verify: do not run the stored command and record why.
+                    The task remains active and is not marked verified.
+  --last-failure T  update: append a Last Failure bullet.
+  --verification T  update: append a Verification bullet.
+  --hypothesis T    update: append a Current State hypothesis bullet.
+  --result T        update: append a Current State result bullet.
+  --decision TEXT   update: append a Decisions bullet (capped at 100 chars).
+  --decision-reason TEXT  update: why, with --decision (one line, 110 chars).
+  --rejected TEXT   update: the alternative turned down, with --decision (one
+                    line, 60 chars). `session-handoff capture` carries the
+                    newest Decisions bullets into the digest.
+  --state TEXT      init/update: replace Current State.
+  --next TEXT       init/update: replace Next Step.
+  --source-session HASH
+                    init/update/rotate: hash-only source session id
+                    (16-64 lowercase hexadecimal characters).
+  --text TEXT       append: append a Current State bullet.
+  --stdin           Read append text from stdin.
+  --dedupe-key HASH  append: idempotent note key (64 lowercase hex).
+  -h, --help        Show help.
+
+Commands:
+  path              Print resolved task file path.
+  init              Create the task file if missing and apply provided fields.
+  show              Print task file if it exists. Default.
+  context           Print provider context view.
+  status            Print task lifecycle metadata (--json for machines; the
+                    JSON carries `lifecycle`: pursuing|paused|achieved|unmet|
+                    budget-limited|unknown plus its evidence, read-only).
+  update            Apply section updates.
+  append            Append --text/--stdin to Current State.
+  verify            Mark the current task verified; --verification may record
+                    the evidence first.
+  rotate            Archive the current task and initialize a new active task.
+  close             Archive current.md under .oms/task/archive/ and remove it.

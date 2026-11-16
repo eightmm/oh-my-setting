@@ -1,63 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Classify a repo as ml or general so templates and verify contracts match.
+# Native OMS entrypoint for detect-project-style.
 
-DIR="${1:-$PWD}"
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
-if [ "$#" -gt 1 ]; then
-  echo "error: too many arguments" >&2
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for detect-project-style; stage with cargo or run oms doctor --repair" >&2
   exit 2
 fi
-
-exists_ml_entry() {
-  local pattern
-  for pattern in train.py pretrain.py finetune.py infer.py inference.py; do
-    if find "$DIR" -maxdepth 3 \( \
-        -name ".git" -o -name ".venv" -o -name "node_modules" -o \
-        -name "__pycache__" -o -name "tmp" -o -name "backups" \
-      \) -prune -o -name "$pattern" -print -quit | grep . > /dev/null; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-has_python_ml_import() {
-  local pattern='(^|[[:space:];])(from|import)[[:space:]]+(torch|tensorflow|jax|sklearn|pytorch_lightning|lightning)([.[:space:],]|$)'
-
-  # One implementation: the rg fast path disagreed with this one on depth,
-  # hidden files, and gitignore, so style detection depended on whether rg
-  # was on PATH (codex vendors one). CI runs find-only; find is the contract.
-  find "$DIR" -maxdepth 3 \( \
-    -name ".git" -o -name ".venv" -o -name "node_modules" -o \
-    -name "__pycache__" -o -name "tmp" -o -name "backups" \
-  \) -prune -o -type f -name '*.py' \
-    -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep . > /dev/null
-}
-
-has_ml_dependency() {
-  local pattern="(^|[\"'[:space:]-])(torch|tensorflow|jax|scikit-learn|pytorch-lightning|lightning)(\\[[^]]+\\])?([\"'[:space:]]*([<>=~!:]|$)|[\"'])"
-
-  # Same single-implementation rule as has_python_ml_import above.
-  find "$DIR" -maxdepth 3 \( \
-    -name ".git" -o -name ".venv" -o -name "node_modules" -o \
-    -name "__pycache__" -o -name "tmp" -o -name "backups" \
-  \) -prune -o -type f \( \
-    -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'setup.cfg' -o \
-    -name 'setup.py' -o -name 'environment*.yaml' -o -name 'environment*.yml' -o \
-    -name 'Pipfile' -o -name 'poetry.lock' -o -name 'uv.lock' \
-  \) -exec grep -Eq "$pattern" {} \; -print -quit 2>/dev/null | grep . > /dev/null
-}
-
-style="general"
-
-# Shell harnesses often quote ML commands as fixtures. Only executable ML entry
-# names, Python imports, and dependency declarations count as strong signals.
-if exists_ml_entry; then
-  style="ml"
-elif has_python_ml_import || has_ml_dependency; then
-  style="ml"
-fi
-
-echo "$style"
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "detect-project-style" "$@" || exit $?
+echo "error: native payload unavailable for detect-project-style (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

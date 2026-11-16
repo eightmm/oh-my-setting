@@ -1,0 +1,3077 @@
+//! Frozen schema-1 autopilot contracts and exact proposal approval boundaries.
+use crate::cli::Args;
+use crate::planning::{self, envelope, invoke};
+use crate::storage::{ACTIVE, Context, MAX_FILE, PROGRESS, RECEIPT};
+use crate::{Error, Output, Result, require, value, verify};
+use oms_command_plan::{Action, Request};
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+pub const STAGES: &[&str] = &[
+    "proposing",
+    "proposal-review",
+    "approved",
+    "driving",
+    "reviewing",
+    "publishing",
+    "parked",
+    "done",
+];
+pub fn immutable_view(row: &Value) -> Value {
+    let mut row = row.clone();
+    if let Some(map) = row.as_object_mut() {
+        for key in ["stage", "updated", "proposal", "branch", "diagnostic"] {
+            map.remove(key);
+        }
+    }
+    row
+}
+pub fn valid_transition(before: &str, after: &str) -> bool {
+    match before {
+        "proposing" => ["proposing", "proposal-review", "parked"].contains(&after),
+        "proposal-review" => ["proposal-review", "approved", "parked"].contains(&after),
+        "approved" => ["proposal-review", "approved", "driving", "parked"].contains(&after),
+        "driving" => [
+            "proposing",
+            "proposal-review",
+            "approved",
+            "driving",
+            "reviewing",
+            "parked",
+        ]
+        .contains(&after),
+        "reviewing" => [
+            "proposal-review",
+            "approved",
+            "reviewing",
+            "publishing",
+            "done",
+            "parked",
+        ]
+        .contains(&after),
+        "publishing" => [
+            "proposal-review",
+            "approved",
+            "publishing",
+            "done",
+            "parked",
+        ]
+        .contains(&after),
+        "parked" => [
+            "parked",
+            "proposing",
+            "proposal-review",
+            "approved",
+            "driving",
+            "reviewing",
+            "publishing",
+        ]
+        .contains(&after),
+        "done" => after == "done",
+        _ => false,
+    }
+}
+pub fn validate(row: &Value) -> Result<()> {
+    value::keys(
+        row,
+        &[
+            "schema",
+            "kind",
+            "stage",
+            "repo",
+            "spec_sha256",
+            "providers",
+            "routing",
+            "contract",
+            "proposal",
+            "branch",
+            "owner_id",
+            "updated",
+        ],
+        &["diagnostic"],
+    )?;
+    require(
+        row["schema"].as_u64() == Some(1)
+            && row["kind"] == "autopilot-run"
+            && STAGES.contains(&value::text(row, "stage")),
+        "outer receipt does not match schema 1",
+    )?;
+    require(
+        Path::new(value::text(row, "repo")).is_absolute()
+            && value::digest(value::text(row, "spec_sha256")),
+        "invalid receipt repository/spec binding",
+    )?;
+    let owner = value::text(row, "owner_id");
+    require(
+        owner.is_empty() || valid_owner_id(owner),
+        "invalid autopilot owner id",
+    )?;
+    value::keys(&row["providers"], &["planner", "worker", "reviewer"], &[])?;
+    value::keys(
+        &row["routing"],
+        &["provider_timeout", "planner", "worker", "reviewer"],
+        &[],
+    )?;
+    verify::duration(value::text(&row["routing"], "provider_timeout"))?;
+    for role in ["planner", "worker", "reviewer"] {
+        require(
+            ["codex", "claude", "antigravity"].contains(&value::text(&row["providers"], role)),
+            "invalid provider binding",
+        )?;
+        let route = &row["routing"][role];
+        value::keys(
+            route,
+            &["model", "fallback_model", "reasoning_effort", "timeout"],
+            &[],
+        )?;
+        for field in ["model", "fallback_model"] {
+            require(route[field].is_string(), "route model must be text")?;
+            verify::model(value::text(route, field))?;
+        }
+        verify::effort(value::text(route, "reasoning_effort"))?;
+        verify::duration(value::text(route, "timeout"))?;
+    }
+    let contract = &row["contract"];
+    value::keys(
+        contract,
+        &[
+            "allowed",
+            "base",
+            "base_sha",
+            "remote",
+            "max_cycles",
+            "initial_tasks",
+            "replan_tasks",
+            "auto_repair",
+            "retry_known",
+            "review_mode",
+            "draft_pr",
+            "allow_verifier_change",
+            "allow_floor_change",
+            "collaboration",
+        ],
+        &[],
+    )?;
+    let allowed = envelope(value::text(contract, "allowed"))?;
+    require(!allowed.is_empty(), "run envelope cannot be empty")?;
+    require(
+        regex::Regex::new(r"^[A-Za-z0-9._/-]+$")
+            .unwrap()
+            .is_match(value::text(contract, "base"))
+            && !value::text(contract, "base").starts_with('-')
+            && !value::text(contract, "base").contains("..")
+            && value::id(value::text(contract, "remote"), 160)
+            && value::commit(value::text(contract, "base_sha")),
+        "invalid review base/remote binding",
+    )?;
+    let codex_model_re =
+        regex::Regex::new(r"^gpt-([0-9]+)(?:\.[0-9]+)?-(?:astra|sol|terra|luna)$").unwrap();
+    value::integer(&contract["max_cycles"], 1, 10, "max cycles")?;
+    value::integer(&contract["initial_tasks"], 1, 12, "initial tasks")?;
+    value::integer(&contract["replan_tasks"], 1, 2, "replan tasks")?;
+    for field in [
+        "auto_repair",
+        "retry_known",
+        "draft_pr",
+        "allow_verifier_change",
+    ] {
+        require(contract[field].is_boolean(), "run flag must be a boolean")?;
+    }
+    require(
+        contract["allow_floor_change"].is_string(),
+        "floor consent must be text",
+    )?;
+    if !value::text(contract, "allow_floor_change").is_empty() {
+        verify::reason(value::text(contract, "allow_floor_change"))?;
+    }
+    require(
+        ["shadow", "gate", "off"].contains(&value::text(contract, "review_mode"))
+            && ["off", "auto"].contains(&value::text(contract, "collaboration")),
+        "invalid review/collaboration mode",
+    )?;
+    if contract["collaboration"] == "auto" {
+        require(
+            contract["review_mode"] == "gate"
+                && row["providers"]["worker"] != row["providers"]["reviewer"],
+            "auto collaboration requires gated independent review",
+        )?;
+        for role in ["planner", "worker", "reviewer"] {
+            let provider = value::text(&row["providers"], role);
+            require(
+                ["codex", "claude"].contains(&provider),
+                "auto collaboration requires codex/claude transports",
+            )?;
+            if provider == "codex" {
+                for field in ["model", "fallback_model"] {
+                    let model = value::text(&row["routing"][role], field);
+                    if field == "model" || !model.is_empty() {
+                        require(
+                            codex_model_re
+                                .captures(model)
+                                .and_then(|c| c[1].parse::<u64>().ok())
+                                .is_some_and(|n| n >= 6),
+                            "auto collaboration requires GPT-6 or newer Codex routes",
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    value::keys(&row["proposal"], &["path", "sha256"], &[])?;
+    let path = value::text(&row["proposal"], "path");
+    let hash = value::text(&row["proposal"], "sha256");
+    require(
+        row["proposal"]["path"].is_string()
+            && row["proposal"]["sha256"].is_string()
+            && path.is_empty() == hash.is_empty()
+            && (path.is_empty() || Path::new(path).is_absolute() && value::digest(hash)),
+        "invalid proposal binding",
+    )?;
+    require(
+        row["stage"] != "proposing" || path.is_empty(),
+        "proposing receipt cannot bind a proposal",
+    )?;
+    require(
+        row["stage"] != "proposal-review" || !path.is_empty(),
+        "proposal-review receipt lacks a proposal",
+    )?;
+    let branch = format!("oms/autopilot-{}", &value::text(row, "spec_sha256")[..12]);
+    require(
+        value::text(row, "branch") == branch
+            || value::text(row, "branch")
+                .strip_prefix(&format!("{branch}-r"))
+                .is_some_and(|s| {
+                    !s.starts_with('0') && !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+                }),
+        "branch is outside deterministic autopilot lineage",
+    )?;
+    require(
+        regex::Regex::new(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+            .unwrap()
+            .is_match(value::text(row, "updated"))
+            && chrono::DateTime::parse_from_rfc3339(value::text(row, "updated")).is_ok(),
+        "invalid receipt timestamp",
+    )?;
+    if let Some(diagnostic) = row.get("diagnostic") {
+        require(
+            row["stage"] == "parked",
+            "diagnostic is allowed only on parked receipts",
+        )?;
+        value::keys(
+            diagnostic,
+            &[
+                "phase",
+                "reason_code",
+                "reason",
+                "semantic_verdict",
+                "evidence_path",
+            ],
+            &[],
+        )?;
+        for (key, limit) in [
+            ("phase", 48),
+            ("reason_code", 96),
+            ("reason", 240),
+            ("semantic_verdict", 32),
+            ("evidence_path", 1024),
+        ] {
+            require(
+                diagnostic[key].is_string()
+                    && value::text(diagnostic, key).chars().count() <= limit
+                    && value::clean_text(value::text(diagnostic, key)),
+                "invalid diagnostic text",
+            )?;
+        }
+        require(
+            [
+                "unknown",
+                "pass",
+                "fail",
+                "incomplete",
+                "advisory-fail",
+                "advisory-incomplete",
+                "skipped",
+            ]
+            .contains(&value::text(diagnostic, "semantic_verdict")),
+            "invalid diagnostic semantic verdict",
+        )?;
+    }
+    Ok(())
+}
+fn base(ctx: &Context<'_>, remote: &str, branch: &str) -> Result<String> {
+    require(
+        !branch.starts_with('-') && !branch.contains("..") && value::id(remote, 160),
+        "invalid base or remote",
+    )?;
+    for reference in [
+        format!("refs/remotes/{remote}/{branch}"),
+        format!("refs/heads/{branch}"),
+    ] {
+        if let Ok(commit) = ctx.git(&["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
+            && value::commit(&commit)
+        {
+            return Ok(commit);
+        }
+    }
+    Err(Error::new(
+        2,
+        "cannot resolve review base to a local commit",
+    ))
+}
+pub(crate) fn live(ctx: &Context<'_>, row: &Value) -> Result<()> {
+    validate(row)?;
+    require(
+        std::fs::canonicalize(value::text(row, "repo"))
+            .ok()
+            .as_ref()
+            == Some(&ctx.repo),
+        "outer receipt belongs to a different execution repository",
+    )?;
+    require(
+        value::hash(ctx.source.read("PROJECT.md", MAX_FILE)?) == value::text(row, "spec_sha256"),
+        "PROJECT.md differs from frozen outer receipt",
+    )?;
+    let contract = &row["contract"];
+    require(
+        base(
+            ctx,
+            value::text(contract, "remote"),
+            value::text(contract, "base"),
+        )? == value::text(contract, "base_sha"),
+        "bound base ref moved",
+    )?;
+    let current = ctx
+        .git(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .unwrap_or_default();
+    let initial = ["proposing", "proposal-review", "parked"].contains(&value::text(row, "stage"));
+    require(
+        current == value::text(row, "branch")
+            || initial
+                && (current == value::text(contract, "base")
+                    || current.is_empty()
+                        && ctx.git(&["rev-parse", "HEAD"])? == value::text(contract, "base_sha")),
+        "current branch differs from outer receipt",
+    )?;
+    let path = value::text(&row["proposal"], "path");
+    if !path.is_empty() {
+        require(
+            Path::new(path).parent() == Some(ctx.state.join(".oms/plan").as_path()),
+            "approved proposal is outside private plan directory",
+        )?;
+        require(
+            value::hash(ctx.store.read(path, MAX_FILE)?) == value::text(&row["proposal"], "sha256"),
+            "approved proposal digest changed",
+        )?;
+    }
+    Ok(())
+}
+pub const APPROVED_STAGES: &[&str] = &["approved", "driving", "reviewing", "publishing"];
+pub const APPROVALS: &str = ".oms/plan/autopilot-approvals.jsonl";
+pub const WAKE_RESUME_ENV: &str = "OMS_AUTOPILOT_WAKE_RESUME";
+pub const APPROVAL_MAX_AGE_ENV: &str = "OMS_TICK_AUTOPILOT_MAX_AGE_DAYS";
+pub const APPROVAL_MAX_AGE_DAYS: i64 = 7;
+const RECEIPT_LIMIT: usize = 64 * 1024;
+
+/// A schema-valid `.oms/plan/autopilot-run.json` read from its canonical location.
+#[derive(Clone, Debug)]
+pub struct CheckedReceipt {
+    pub path: PathBuf,
+    pub row: Value,
+    /// SHA-256 of the receipt bytes: it moves on every stage transition.
+    pub sha256: String,
+}
+
+/// Read-only. `Ok(None)` only when the receipt file is absent; a symlinked
+/// location, a non-regular or oversized file, or an invalid row is an error.
+pub fn load_checked_receipt(repo: &Path) -> Result<Option<CheckedReceipt>> {
+    let root = std::fs::canonicalize(repo)
+        .map_err(|_| Error::new(2, "autopilot receipt repository is unavailable"))?;
+    let plan = root.join(".oms/plan");
+    let path = plan.join("autopilot-run.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Error::new(2, "outer receipt cannot be inspected")),
+        Ok(_) => {}
+    }
+    require(
+        std::fs::canonicalize(&plan).ok().as_ref() == Some(&plan),
+        "outer receipt directory escapes the physical repository",
+    )?;
+    require(
+        std::fs::canonicalize(&path).ok().as_ref() == Some(&path),
+        "outer receipt path is not canonical",
+    )?;
+    require(
+        std::fs::symlink_metadata(&plan).is_ok_and(|m| m.is_dir()),
+        "outer receipt directory must be a regular directory",
+    )?;
+    let raw = oms_safe_fs::Root::open(&plan)
+        .and_then(|r| {
+            r.read_path(
+                Path::new("autopilot-run.json"),
+                RECEIPT_LIMIT,
+                oms_safe_fs::Policy::manifest(),
+            )
+        })
+        .map_err(|_| Error::new(2, "outer receipt must be owned, bounded and regular"))?;
+    let row = value::parse(&raw)?;
+    validate(&row)?;
+    Ok(Some(CheckedReceipt {
+        path,
+        row,
+        sha256: value::hash(&raw),
+    }))
+}
+
+fn compact_sorted(v: &Value, out: &mut String) {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(key.clone()).to_string());
+                out.push(':');
+                compact_sorted(&map[key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                compact_sorted(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// SHA-256 of the frozen fields (sorted, compact, UTF-8): ordinary progress
+/// (stage, branch, proposal, updated, diagnostic) never changes it.
+pub fn contract_digest(row: &Value) -> String {
+    let mut text = String::new();
+    compact_sorted(&immutable_view(row), &mut text);
+    value::hash(text)
+}
+
+/// The argv `oms autopilot` prints for this receipt's own continuation.
+pub fn continuation_argv(row: &Value) -> Vec<String> {
+    let text = |v: &Value, key: &str| value::text(v, key).to_owned();
+    let (providers, routing, contract) = (&row["providers"], &row["routing"], &row["contract"]);
+    let mut argv: Vec<String> = ["oms", "autopilot", "--repo"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain([text(row, "repo")])
+        .collect();
+    let mut put = |name: &str, v: String| {
+        argv.push(format!("--{name}"));
+        argv.push(v);
+    };
+    put("planner", text(providers, "planner"));
+    put("worker", text(providers, "worker"));
+    put("reviewer", text(providers, "reviewer"));
+    put("allowed", text(contract, "allowed"));
+    put("base", text(contract, "base"));
+    put("remote", text(contract, "remote"));
+    put("max-cycles", contract["max_cycles"].to_string());
+    put("initial-tasks", contract["initial_tasks"].to_string());
+    put("replan-tasks", contract["replan_tasks"].to_string());
+    put("provider-timeout", text(routing, "provider_timeout"));
+    for role in ["planner", "worker", "reviewer"] {
+        put(&format!("{role}-timeout"), text(&routing[role], "timeout"));
+    }
+    for role in ["planner", "worker", "reviewer"] {
+        put(
+            &format!("{role}-reasoning-effort"),
+            text(&routing[role], "reasoning_effort"),
+        );
+    }
+    put("review-mode", text(contract, "review_mode"));
+    put("collaboration", text(contract, "collaboration"));
+    for role in ["planner", "worker", "reviewer"] {
+        if !value::text(&routing[role], "model").is_empty() {
+            put(&format!("{role}-model"), text(&routing[role], "model"));
+        }
+        if !value::text(&routing[role], "fallback_model").is_empty() {
+            put(
+                &format!("{role}-fallback-model"),
+                text(&routing[role], "fallback_model"),
+            );
+        }
+    }
+    for (flag, key) in [
+        ("auto-repair", "auto_repair"),
+        ("retry-known", "retry_known"),
+        ("draft-pr", "draft_pr"),
+        ("allow-verifier-change", "allow_verifier_change"),
+    ] {
+        if contract[key] == true {
+            argv.push(format!("--{flag}"));
+        }
+    }
+    if !value::text(contract, "allow_floor_change").is_empty() {
+        argv.push("--allow-floor-change".into());
+        argv.push(text(contract, "allow_floor_change"));
+    }
+    argv.push(
+        if row["stage"] == "proposing" {
+            "propose"
+        } else {
+            "run"
+        }
+        .into(),
+    );
+    let proposal = &row["proposal"];
+    if !value::text(proposal, "path").is_empty() {
+        argv.extend([
+            "--proposal".into(),
+            text(proposal, "path"),
+            "--expected-proposal-sha256".into(),
+            text(proposal, "sha256"),
+        ]);
+    }
+    argv
+}
+
+/// The continuation argv only when it is an approved
+/// `run --proposal FILE --expected-proposal-sha256 SHA` (never `propose`).
+pub fn approved_continuation(row: &Value) -> Option<Vec<String>> {
+    let argv = continuation_argv(row);
+    let proposal = &row["proposal"];
+    let path = value::text(proposal, "path");
+    let tail = [
+        "run",
+        "--proposal",
+        path,
+        "--expected-proposal-sha256",
+        value::text(proposal, "sha256"),
+    ];
+    (argv.len() >= 5
+        && argv[..2] == ["oms", "autopilot"]
+        && !path.is_empty()
+        && argv[argv.len() - 5..].iter().map(String::as_str).eq(tail))
+    .then_some(argv)
+}
+
+/// Why this receipt may not be resumed headlessly ("" when it may): the stage
+/// refusals, the digest gate every resume passes (`live`, which also refuses a
+/// receipt bound to another checkout), then the controller lock. Rust
+/// drives hold `.oms/plan/autopilot-controller` for the whole run, so held or
+/// unprovable counts as a live claimant. Only the controller lock is touched, and released at once.
+pub fn reentry_refusal(
+    repo: &Path,
+    receipt: &CheckedReceipt,
+    services: &dyn crate::Services,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> Result<String> {
+    let row = &receipt.row;
+    match value::text(row, "stage") {
+        "done" => return Ok("the run is complete; archive-done owns it".into()),
+        "proposal-review" => {
+            return Ok("a proposal awaits parent review; re-entry cannot supply the approval — review it and run the printed continuation".into());
+        }
+        "parked" => {
+            return Ok(
+                "the run is parked for an operator decision; resolve the park reason or abandon"
+                    .into(),
+            );
+        }
+        _ => {}
+    }
+    let root = std::fs::canonicalize(repo)
+        .map_err(|_| Error::new(2, "autopilot receipt repository is unavailable"))?;
+    let ctx = Context::new(root.clone(), root.clone(), services, interrupted)?;
+    if let Err(e) = live(&ctx, row) {
+        return Ok(format!("digest gate: {}", e.message));
+    }
+    // `probe` never proves a lock that exists free, so take the lock and drop it at once:
+    // the controller holds it for its whole run, hence busy is a live claimant.
+    let lock = oms_lock::Settings::from_env()
+        .and_then(|s| oms_lock::Lock::for_file(&root.join(".oms/plan/autopilot-controller"), s));
+    match lock.and_then(|l| l.try_acquire().map(drop)) {
+        Ok(()) => Ok(legacy_claim_refusal(&root.join(".oms/plan"), row, 0)),
+        Err(oms_lock::Error::Busy) => Ok("this run is already held by a live session (autopilot controller); a second entry would drive the contract twice".into()),
+        Err(_) => Ok("this run has an unproven session claim; inspect or retire that claim before re-entry".into()),
+    }
+}
+
+fn pid_alive(pid: i32) -> std::result::Result<bool, ()> {
+    let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+        return Err(());
+    };
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) | Err(rustix::io::Errno::PERM) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(_) => Err(()),
+    }
+}
+
+fn legacy_claim_refusal(plan: &Path, row: &Value, self_pid: u32) -> String {
+    const UNPROVEN: &str = "this run has an unproven legacy session claim; inspect or retire that claim before re-entry";
+    let ledger = plan.join("autopilot-reentries.jsonl");
+    match std::fs::symlink_metadata(&ledger) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return String::new(),
+        Err(_) => return UNPROVEN.into(),
+        Ok(_) => {}
+    }
+    let Ok(raw) = oms_safe_fs::Root::open(plan).and_then(|r| {
+        r.read_path(
+            Path::new("autopilot-reentries.jsonl"),
+            crate::storage::MAX_LEDGER,
+            oms_safe_fs::Policy::manifest(),
+        )
+    }) else {
+        return UNPROVEN.into();
+    };
+    if !raw.is_empty() && !raw.ends_with(b"\n") {
+        return UNPROVEN.into();
+    }
+    let Ok(text) = std::str::from_utf8(&raw) else {
+        return UNPROVEN.into();
+    };
+    let (spec_sha, branch, owner_id) = (
+        value::text(row, "spec_sha256"),
+        value::text(row, "branch"),
+        value::text(row, "owner_id"),
+    );
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = value::parse(line.as_bytes()) else {
+            return UNPROVEN.into();
+        };
+        if !entry.is_object() || entry.get("schema").and_then(Value::as_i64) != Some(1) {
+            return UNPROVEN.into();
+        }
+        let Some(kind) = entry.get("kind").and_then(Value::as_str) else {
+            return UNPROVEN.into();
+        };
+        match kind {
+            "autopilot-reentry" => {
+                if !entry
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+                    || !entry
+                        .get("receipt_sha256")
+                        .and_then(Value::as_str)
+                        .is_some_and(value::digest)
+                    || !entry.get("owner_id").is_some_and(Value::is_string)
+                    || !entry.get("session").is_some_and(Value::is_string)
+                    || !entry
+                        .get("outcome")
+                        .and_then(Value::as_str)
+                        .is_some_and(|o| ["would-resume", "would-refuse"].contains(&o))
+                    || !entry.get("reason").is_some_and(Value::is_string)
+                    || entry.get("claim_pid").is_some()
+                {
+                    return UNPROVEN.into();
+                }
+                continue;
+            }
+            "autopilot-reentry-requeue" => {
+                if !entry
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+                    || !entry
+                        .get("owner_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(valid_owner_id)
+                    || !entry.get("recovery").is_some_and(Value::is_object)
+                    || entry.get("claim_pid").is_some()
+                {
+                    return UNPROVEN.into();
+                }
+                continue;
+            }
+            "autopilot-reenter" | "autopilot-drive-claim" | "autopilot-reenter-requeue" => {}
+            _ => return UNPROVEN.into(),
+        }
+        let (Some(claim_spec), Some(claim_branch)) = (
+            entry
+                .get("spec_sha256")
+                .and_then(Value::as_str)
+                .filter(|s| value::digest(s)),
+            entry.get("branch").and_then(Value::as_str),
+        ) else {
+            return UNPROVEN.into();
+        };
+        if kind == "autopilot-reenter"
+            && !entry
+                .get("disposition")
+                .and_then(Value::as_str)
+                .is_some_and(|d| ["refused", "resumed"].contains(&d))
+        {
+            return UNPROVEN.into();
+        }
+        let is_claim = kind == "autopilot-drive-claim"
+            || (kind == "autopilot-reenter" && entry["disposition"] == "resumed");
+        if !is_claim || claim_spec != spec_sha || claim_branch != branch {
+            continue;
+        }
+        let claim_owner = entry.get("owner_id").and_then(Value::as_str);
+        if !owner_id.is_empty() && claim_owner != Some(owner_id) {
+            if claim_owner.is_some_and(valid_owner_id) {
+                continue;
+            }
+            return UNPROVEN.into();
+        }
+        let Some(pid) = entry
+            .get("claim_pid")
+            .and_then(Value::as_i64)
+            .filter(|&p| p > 0 && p <= 0x7FFF_FFFF)
+        else {
+            return UNPROVEN.into();
+        };
+        if self_pid != 0 && pid as u32 == self_pid {
+            continue;
+        }
+        match pid_alive(pid as i32) {
+            Ok(true) => {
+                return format!(
+                    "this run is already held by a live session (pid {pid}, {kind}); a second entry would drive the contract twice"
+                );
+            }
+            Ok(false) => continue,
+            Err(()) => return UNPROVEN.into(),
+        }
+    }
+    String::new()
+}
+
+fn approval_stamp(text: &str) -> Option<i64> {
+    (text.len() == 20)
+        .then(|| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%SZ").ok())
+        .flatten()
+        .map(|t| t.and_utc().timestamp())
+}
+
+fn valid_owner_id(owner: &str) -> bool {
+    owner.strip_prefix("owner_").is_some_and(|s| {
+        s.len() == 32
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+/// (epoch, source) of the latest recorded approval of this contract; `None`
+/// when never recorded. Observation only: it records WHEN a person last ran
+/// the approved continuation, never authority. Rows written before `source`
+/// existed carry `ts` and count as a person's run.
+pub fn approval_time(repo: &Path, row: &Value) -> Result<Option<(i64, String)>> {
+    let unreadable = || Error::new(2, "approval ledger is unreadable");
+    let plan = std::fs::canonicalize(repo)
+        .map_err(|_| unreadable())?
+        .join(".oms/plan");
+    let name = Path::new(APPROVALS).file_name().unwrap();
+    match std::fs::symlink_metadata(plan.join(name)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(unreadable()),
+        Ok(_) => {}
+    }
+    let raw = oms_safe_fs::Root::open(&plan)
+        .and_then(|r| r.read_path(Path::new(name), MAX_FILE, oms_safe_fs::Policy::manifest()))
+        .map_err(|_| unreadable())?;
+    if !raw.is_empty() && !raw.ends_with(b"\n") {
+        return Err(unreadable());
+    }
+    let (spec, owner) = (
+        value::text(row, "spec_sha256"),
+        value::text(row, "owner_id"),
+    );
+    let mut latest: Option<(String, i64, String)> = None;
+    for line in std::str::from_utf8(&raw).map_err(|_| unreadable())?.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = value::parse(line.as_bytes()).map_err(|_| unreadable())?;
+        let at = ["at", "ts"]
+            .iter()
+            .find_map(|k| entry.get(*k).and_then(Value::as_str));
+        let source = entry.get("source").map_or(Some("run"), Value::as_str);
+        let (Some(at), Some(source), Some(epoch)) = (at, source, at.and_then(approval_stamp))
+        else {
+            return Err(unreadable());
+        };
+        if entry["schema"] != 1
+            || entry["kind"] != "autopilot-approval"
+            || !["run", "wake"].contains(&source)
+        {
+            return Err(unreadable());
+        }
+        let Some(entry_spec) = entry.get("spec_sha256").and_then(Value::as_str) else {
+            return Err(unreadable());
+        };
+        if !value::digest(entry_spec) {
+            return Err(unreadable());
+        }
+        let Some(entry_owner) = entry.get("owner_id").and_then(Value::as_str) else {
+            return Err(unreadable());
+        };
+        if !entry_owner.is_empty() && !valid_owner_id(entry_owner) {
+            return Err(unreadable());
+        }
+        if entry_spec == spec
+            && entry_owner == owner
+            && latest.as_ref().is_none_or(|(old, ..)| at > old.as_str())
+        {
+            latest = Some((at.to_owned(), epoch, source.to_owned()));
+        }
+    }
+    Ok(latest.map(|(_, epoch, source)| (epoch, source)))
+}
+
+/// `OMS_TICK_AUTOPILOT_MAX_AGE_DAYS` as given: digits are the limit (0 disables), anything else the default.
+pub fn approval_limit_days(raw: Option<&str>) -> i64 {
+    raw.map(str::trim)
+        .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(APPROVAL_MAX_AGE_DAYS)
+}
+
+/// "" when the approval may be resumed, else why not. An approval with no
+/// recorded time is not refused (its clock starts at the first headless
+/// resume); an unreadable approval ledger is.
+pub fn stale_approval(repo: &Path, row: &Value, now: i64, limit_raw: Option<&str>) -> String {
+    let limit = approval_limit_days(limit_raw);
+    if limit <= 0 {
+        return String::new();
+    }
+    match approval_time(repo, row) {
+        Err(e) => format!("{}; the approval age cannot be judged", e.message),
+        Ok(None) => String::new(),
+        Ok(Some((at, _))) if now - at <= limit.saturating_mul(86400) => String::new(),
+        Ok(Some((at, source))) => format!(
+            "autopilot approval is {}d old (approved {} by {}; limit {limit}d)",
+            (now - at) / 86400,
+            chrono::DateTime::from_timestamp(at, 0)
+                .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_default(),
+            if source == "run" {
+                "a person's run"
+            } else {
+                "its first headless resume"
+            },
+        ),
+    }
+}
+
+/// Record when an `approved` write happened. A person's run always records; a
+/// wake-launched run records only when none exists (or the ledger cannot be
+/// read), so unattended resumes never extend an approval and a contract that
+/// predates the record starts its clock at its first headless resume.
+fn note_approval(ctx: &Context<'_>, row: &Value, wake: bool) -> Result<()> {
+    if wake && !matches!(approval_time(&ctx.state, row), Ok(None)) {
+        return Ok(());
+    }
+    ctx.append(
+        APPROVALS,
+        &json!({"schema": 1, "kind": "autopilot-approval", "at": row["updated"], "source": if wake { "wake" } else { "run" }, "owner_id": row["owner_id"], "spec_sha256": row["spec_sha256"], "branch": row["branch"], "proposal_sha256": row["proposal"]["sha256"]}),
+    )
+}
+fn save(ctx: &Context<'_>, row: &mut Value, old: Option<&[u8]>) -> Result<Vec<u8>> {
+    row["updated"] = value::now().into();
+    validate(row)?;
+    if let Some(old) = old {
+        let before = value::parse(old)?;
+        require(
+            immutable_view(&before) == immutable_view(row),
+            "outer receipt immutable contract changed; abandon before binding a new contract",
+        )?;
+        require(
+            valid_transition(value::text(&before, "stage"), value::text(row, "stage")),
+            "outer receipt stage transition is invalid",
+        )?;
+        require(
+            before["branch"] == row["branch"],
+            "outer receipt branch changed",
+        )?;
+        if before["proposal"] != row["proposal"] {
+            require(
+                before["stage"] == "proposing" && row["stage"] == "proposal-review"
+                    || ["driving", "parked"].contains(&value::text(&before, "stage"))
+                        && row["stage"] == "proposing"
+                        && row["proposal"] == json!({"path": "", "sha256": ""}),
+                "outer receipt proposal transition is invalid",
+            )?;
+        }
+    }
+    let raw = value::pretty(row)?;
+    ctx.store.mutate(
+        RECEIPT,
+        Some(old.unwrap_or_default()),
+        &raw,
+        64 * 1024,
+        true,
+    )?;
+    Ok(raw)
+}
+fn park(
+    ctx: &Context<'_>,
+    row: &mut Value,
+    raw: &[u8],
+    reason: &str,
+    mut out: Output,
+) -> Result<Output> {
+    row["stage"] = "parked".into();
+    row["diagnostic"] = json!({"phase": "autopilot", "reason_code": reason, "reason": reason, "semantic_verdict": "unknown", "evidence_path": ""});
+    save(ctx, row, Some(raw))?;
+    let _lock = ctx.lock(PROGRESS)?;
+    ctx.append(PROGRESS, &json!({"schema": 1, "kind": "terminal", "ts": value::now(), "run_id": value::text(row, "owner_id"), "status": "park", "reason": reason, "base_sha": ctx.git(&["rev-parse", "HEAD"])?, "receipt": value::hash(value::canonical(row)?)}))?;
+    out.code = 3;
+    out.stderr.extend_from_slice(format!("autopilot: parked reason={reason}; inspect the receipt and abandon before changing its contract\n").as_bytes());
+    Ok(out)
+}
+fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
+    let spec = planning::contract(ctx)?;
+    spec.confirmed()?;
+    let planner = ctx
+        .services
+        .normalize_provider(args.get("planner", "claude")?)?;
+    let worker = ctx
+        .services
+        .normalize_provider(args.get("worker", "codex")?)?;
+    let reviewer = ctx.services.normalize_provider(args.get(
+        "reviewer",
+        if worker == "codex" { "claude" } else { "codex" },
+    )?)?;
+    let provider_timeout = args.get("provider-timeout", "5m")?;
+    let mut routing = json!({"provider_timeout": provider_timeout});
+    for (role, default) in [("planner", "15m"), ("worker", "30m"), ("reviewer", "20m")] {
+        routing[role] = json!({"model": args.text(&format!("{role}-model"))?, "fallback_model": args.text(&format!("{role}-fallback-model"))?, "reasoning_effort": args.get(&format!("{role}-reasoning-effort"), "auto")?, "timeout": args.get(&format!("{role}-timeout"), if args.has("provider-timeout") { provider_timeout } else { default })?});
+    }
+    if args.get("collaboration", "off")? == "auto" {
+        for (role, provider) in [
+            ("planner", &planner),
+            ("worker", &worker),
+            ("reviewer", &reviewer),
+        ] {
+            if value::text(&routing[role], "model").is_empty() {
+                let assignment = json!({"provider": provider, "model": "", "fallback_model": value::text(&routing[role], "fallback_model"), "reasoning_effort": value::text(&routing[role], "reasoning_effort"), "workload": "standard"});
+                let resolved =
+                    ctx.services
+                        .resolve_route(&ctx.repo, &assignment, role, ctx.interrupted)?;
+                require(
+                    &resolved.provider == provider,
+                    "model resolver changed frozen provider",
+                )?;
+                routing[role]["model"] = resolved.primary.into();
+                routing[role]["fallback_model"] = resolved.fallback.into();
+                routing[role]["reasoning_effort"] = resolved.effort.into();
+            }
+        }
+    }
+    let allowed = if args.has("allowed") {
+        envelope(args.required("allowed")?)?
+    } else {
+        spec.allowed.clone()
+    };
+    require(
+        !allowed.is_empty(),
+        "autopilot needs an immutable --allowed envelope or PROJECT.md Scope",
+    )?;
+    let branch = args.get("base", "")?.to_owned();
+    let branch = if branch.is_empty() {
+        ctx.git(&["symbolic-ref", "--quiet", "--short", "HEAD"])?
+    } else {
+        branch
+    };
+    require(
+        args.action != "run" || args.has("base"),
+        "--base is required for a new run",
+    )?;
+    let remote = args.get("remote", "origin")?;
+    let review_mode = args.get(
+        "review-mode",
+        if args.flag("draft-pr") {
+            "gate"
+        } else {
+            "shadow"
+        },
+    )?;
+    let row = json!({"schema": 1, "kind": "autopilot-run", "stage": "proposing", "repo": ctx.repo, "spec_sha256": spec.sha256, "providers": {"planner": planner, "worker": worker, "reviewer": reviewer}, "routing": routing, "contract": {"allowed": allowed.join(","), "base": branch, "base_sha": base(ctx, remote, &branch)?, "remote": remote, "max_cycles": args.number("max-cycles", 10, 1, 10)?, "initial_tasks": args.number("initial-tasks", 6, 1, 12)?, "replan_tasks": args.number("replan-tasks", 2, 1, 2)?, "auto_repair": args.flag("auto-repair"), "retry_known": args.flag("retry-known"), "review_mode": review_mode, "draft_pr": args.flag("draft-pr"), "allow_verifier_change": args.flag("allow-verifier-change"), "allow_floor_change": args.text("allow-floor-change")?, "collaboration": args.get("collaboration", "off")?}, "proposal": {"path": "", "sha256": ""}, "branch": format!("oms/autopilot-{}", &spec.sha256[..12]), "owner_id": value::random("owner_")?, "updated": value::now()});
+    validate(&row)?;
+    Ok(row)
+}
+fn options_match(args: &Args, row: &Value) -> Result<()> {
+    for role in ["planner", "worker", "reviewer"] {
+        if args.has(role) {
+            require(
+                args.text(role)? == value::text(&row["providers"], role),
+                format!("frozen {role} differs; abandon the run before changing it"),
+            )?;
+        }
+        for (option, field) in [
+            ("model", "model"),
+            ("fallback-model", "fallback_model"),
+            ("reasoning-effort", "reasoning_effort"),
+            ("timeout", "timeout"),
+        ] {
+            let key = format!("{role}-{option}");
+            if args.has(&key) {
+                require(
+                    args.text(&key)? == value::text(&row["routing"][role], field),
+                    format!("frozen {key} differs"),
+                )?;
+            }
+        }
+    }
+    for (option, key) in [
+        ("base", "base"),
+        ("remote", "remote"),
+        ("review-mode", "review_mode"),
+        ("collaboration", "collaboration"),
+        ("allow-floor-change", "allow_floor_change"),
+    ] {
+        if args.has(option) {
+            require(
+                args.text(option)? == value::text(&row["contract"], key),
+                format!("frozen {option} differs"),
+            )?;
+        }
+    }
+    if args.has("allowed") {
+        require(
+            envelope(args.required("allowed")?)?
+                == envelope(value::text(&row["contract"], "allowed"))?,
+            "frozen allowed envelope differs",
+        )?;
+    }
+    for (option, key) in [
+        ("max-cycles", "max_cycles"),
+        ("initial-tasks", "initial_tasks"),
+        ("replan-tasks", "replan_tasks"),
+    ] {
+        if args.has(option) {
+            require(
+                args.required(option)?.parse::<u64>().ok() == row["contract"][key].as_u64(),
+                format!("frozen {option} differs"),
+            )?;
+        }
+    }
+    for (option, key) in [
+        ("auto-repair", "auto_repair"),
+        ("retry-known", "retry_known"),
+        ("allow-verifier-change", "allow_verifier_change"),
+        ("draft-pr", "draft_pr"),
+    ] {
+        if args.flag(option) {
+            require(
+                row["contract"][key] == true,
+                format!("cannot add {option} to a frozen contract"),
+            )?;
+        }
+    }
+    if args.has("provider-timeout") {
+        require(
+            args.text("provider-timeout")? == value::text(&row["routing"], "provider_timeout"),
+            "frozen provider timeout differs",
+        )?;
+    }
+    Ok(())
+}
+fn propose_args(args: &Args, row: &Value, remainder: bool) -> Args {
+    let mut planning = Args::default();
+    planning.set("to", value::text(&row["providers"], "planner"));
+    planning.set("worker-provider", value::text(&row["providers"], "worker"));
+    planning.set(
+        "collaboration",
+        value::text(&row["contract"], "collaboration"),
+    );
+    planning.set("allowed", value::text(&row["contract"], "allowed"));
+    planning.set(
+        "max-tasks",
+        row["contract"][if remainder {
+            "replan_tasks"
+        } else {
+            "initial_tasks"
+        }]
+        .to_string(),
+    );
+    for (option, field) in [
+        ("model", "model"),
+        ("fallback-model", "fallback_model"),
+        ("reasoning-effort", "reasoning_effort"),
+        ("provider-timeout", "timeout"),
+    ] {
+        let text = value::text(&row["routing"]["planner"], field);
+        if !text.is_empty() {
+            planning.set(option, text);
+        }
+    }
+    if remainder {
+        planning.set("id-prefix", "r1-");
+    }
+    if args.flag("discover") && !remainder {
+        planning.flags.insert("discover".into());
+    }
+    if row["contract"]["allow_verifier_change"] == true {
+        planning.flags.insert("allow-verifier-change".into());
+    }
+    planning
+}
+fn propose(
+    ctx: &Context<'_>,
+    args: &Args,
+    row: &mut Value,
+    raw: &[u8],
+    remainder: bool,
+) -> Result<Output> {
+    let planning = propose_args(args, row, remainder);
+    let mut out = planning::execute(ctx, &planning)?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if args.flag("discover")
+        && !remainder
+        && text
+            .lines()
+            .any(|line| line == "plan-from-spec: no proposal; no eligible discovery candidates")
+    {
+        let predecessor = value::hash(raw);
+        ctx.store.publish_once(
+            format!(".oms/plan/autopilot-run.{predecessor}.json"),
+            raw,
+            64 * 1024,
+        )?;
+        let record = json!({"schema": 1, "kind": "autopilot-discovery-retire", "predecessor": predecessor, "owner_id": row["owner_id"], "spec_sha256": row["spec_sha256"], "reason": "discovery-no-eligible-work", "updated": value::now()});
+        ctx.store.publish_once(
+            format!(".oms/plan/autopilot-run.{predecessor}.discovery-retired.json"),
+            &value::pretty(&record)?,
+            64 * 1024,
+        )?;
+        ctx.store.remove(RECEIPT, raw, None)?;
+        return Ok(out);
+    }
+    let path = text
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("plan-from-spec: proposed ")
+                .and_then(|line| line.split_once(" -> ").map(|(_, path)| path))
+        })
+        .ok_or_else(|| Error::new(3, "planner returned no durable proposal"))?;
+    let bytes = ctx.store.read(path, MAX_FILE)?;
+    row["stage"] = "proposal-review".into();
+    row["proposal"] = json!({"path": path, "sha256": value::hash(&bytes)});
+    save(ctx, row, Some(raw))?;
+    out.code = 4;
+    out.stdout.extend_from_slice(format!("autopilot: parent review required\noms autopilot run --proposal {path} --expected-proposal-sha256 {}\n", value::hash(bytes)).as_bytes());
+    Ok(out)
+}
+fn assert_scope(ctx: &Context<'_>, row: &Value) -> Result<()> {
+    let base = value::text(&row["contract"], "base_sha");
+    ctx.plan()?.git().ancestor(base, "HEAD")?;
+    let allowed = envelope(value::text(&row["contract"], "allowed"))?;
+    let allowed = allowed.iter().map(String::as_str).collect::<Vec<_>>();
+    let raw = ctx.plan()?.git().run(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        base,
+        "HEAD",
+        "--",
+    ])?;
+    for path in raw.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let path =
+            std::str::from_utf8(path).map_err(|_| Error::new(3, "changed path is not UTF-8"))?;
+        require(
+            oms_contract_markdown::scope::matches_any(path, &allowed)
+                .map_err(|e| Error::new(3, e.to_string()))?,
+            "work branch changed paths outside immutable envelope",
+        )?;
+    }
+    Ok(())
+}
+fn drive_result(ctx: &Context<'_>, run: &str, output: &Output) -> Result<Value> {
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|_| Error::new(3, "goal-drive returned non-text terminal evidence"))?;
+    let lines = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let terminal_lines = lines
+        .iter()
+        .filter(|line| line.starts_with("goal-drive: terminal-v1 "))
+        .collect::<Vec<_>>();
+    require(
+        terminal_lines.len() == 1 && lines.last() == terminal_lines.first().copied(),
+        "goal-drive terminal must be its single final canonical line",
+    )?;
+    let rows = ctx.rows(PROGRESS)?;
+    let row = rows
+        .into_iter()
+        .rev()
+        .find(|row| row["kind"] == "terminal" && value::text(row, "run_id") == run)
+        .ok_or_else(|| Error::new(3, "goal-drive lacks its exact durable terminal row"))?;
+    let receipt = value::text(&row, "receipt");
+    let status = value::text(&row, "status");
+    let reason = value::text(&row, "reason");
+    require(
+        value::digest(receipt) && ["park", "done"].contains(&status) && value::id(reason, 128),
+        "goal-drive terminal row is malformed",
+    )?;
+    let expected = format!(
+        "goal-drive: terminal-v1 run={run} receipt={receipt} status={status} reason={reason}"
+    );
+    require(
+        lines.last().copied() == Some(expected.as_str())
+            && (output.code == 0) == (status == "done"),
+        "goal-drive result differs from durable terminal evidence",
+    )?;
+    Ok(row)
+}
+fn preflight_dead_owner_recovery(ctx: &Context<'_>, row: &Value) -> Result<()> {
+    let owner = value::text(row, "owner_id");
+    require(
+        valid_owner_id(owner),
+        "recover-owner requires valid --owner-id",
+    )?;
+    let _ = ctx.plan()?.load()?;
+    let names = ctx.store.names(".oms/delegations", 4096, true)?;
+    for name in names {
+        if name.as_encoded_bytes().ends_with(b".json") {
+            let raw = ctx.store.read(
+                std::path::Path::new(".oms/delegations").join(name),
+                64 * 1024,
+            )?;
+            oms_command_plan::json::parse(&raw)?.object()?;
+        }
+    }
+    Ok(())
+}
+fn recover_dead_owner(ctx: &Context<'_>, row: &Value) -> Result<Value> {
+    let recovered = ctx.action(
+        &Request::new(Action::RecoverOwner)
+            .with("owner-id", value::text(row, "owner_id"))
+            .flag("json"),
+    )?;
+    require(recovered.code == 0, "dead-owner lease recovery failed")?;
+    value::parse(&recovered.stdout)
+}
+fn commit_reenter(ctx: &Context<'_>, row: &Value, mut record: Value) -> Result<()> {
+    let recovery = recover_dead_owner(ctx, row)?;
+    let ts = value::now();
+    record["updated"] = ts.clone().into();
+    ctx.append(".oms/plan/autopilot-reentries.jsonl", &record)?;
+    ctx.append(
+        ".oms/plan/autopilot-reentries.jsonl",
+        &json!({
+            "schema": 1,
+            "kind": "autopilot-reenter-requeue",
+            "spec_sha256": row["spec_sha256"],
+            "branch": row["branch"],
+            "owner_id": row["owner_id"],
+            "recovery": recovery,
+            "updated": ts,
+        }),
+    )
+}
+pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    let old = ctx.store.optional(RECEIPT, 64 * 1024)?;
+    if args.action == "status" {
+        let receipt = old.as_ref().map(|r| value::parse(r)).transpose()?;
+        let rows = ctx.rows(PROGRESS)?;
+        return Output::json(
+            &json!({"receipt": receipt, "plan": ctx.plan_value()?, "terminal": rows.iter().rev().find(|r| value::text(r, "kind") == "terminal")}),
+        );
+    }
+    ctx.parent()?;
+    // One controller owns the entire foreground run. Receipt writes still use
+    // exact byte CAS; a killed owner releases this lock, never its spent cycles.
+    let _owner = ctx.lock(".oms/plan/autopilot-controller")?;
+    let _receipt = ctx.lock(RECEIPT)?;
+    let mut raw = ctx.store.optional(RECEIPT, 64 * 1024)?;
+    let mut row = raw.as_ref().map(|r| value::parse(r)).transpose()?;
+    let resuming_existing = row.is_some();
+    if args.action == "abandon" {
+        let reason = args.required("reason")?;
+        verify::reason(reason)?;
+        require(
+            reason.chars().count() <= 400,
+            "abandon reason exceeds 400 characters",
+        )?;
+        let old = raw
+            .as_ref()
+            .ok_or_else(|| Error::new(2, "no live autopilot receipt to abandon"))?;
+        let row = row.as_ref().unwrap();
+        validate(row)?;
+        require(
+            row["stage"] != "done",
+            "done receipts are archived, not abandoned",
+        )?;
+        let hash = value::hash(old);
+        let path = format!(".oms/plan/autopilot-run.{hash}.json");
+        ctx.store.publish_once(&path, old, 64 * 1024)?;
+        let record = json!({"schema": 1, "kind": "autopilot-abandon", "predecessor": hash, "stage_at_abandon": row["stage"], "spec_sha256": row["spec_sha256"], "branch": row["branch"], "reason": reason, "updated": value::now()});
+        ctx.store.publish_once(
+            format!(".oms/plan/autopilot-run.{hash}.abandoned.json"),
+            &value::pretty(&record)?,
+            64 * 1024,
+        )?;
+        ctx.store.remove(RECEIPT, old, None)?;
+        return Ok(Output::text(format!(
+            "autopilot: abandoned {hash}; unfinished tasks remain on the plan; inspect oms agent-plan retire --check and explicit cancellation requirements"
+        )));
+    }
+    let mut reenter_record = None;
+    if ["shadow", "reenter"].contains(&args.action.as_str()) {
+        let Some(bound) = row.as_ref() else {
+            return if args.action == "shadow" {
+                Ok(Output::default())
+            } else {
+                Err(Error::new(3, "no live autopilot receipt"))
+            };
+        };
+        let judgment = live(ctx, bound)
+            .and_then(|_| {
+                require(
+                    !["proposal-review", "parked", "done"].contains(&value::text(bound, "stage")),
+                    "reentry cannot supply parent approval, reset a park or resume done work",
+                )
+            })
+            .and_then(|_| {
+                let claim = legacy_claim_refusal(
+                    &ctx.state.join(".oms/plan"),
+                    bound,
+                    if args.action == "reenter" {
+                        std::process::id()
+                    } else {
+                        0
+                    },
+                );
+                require(claim.is_empty(), claim)
+            });
+        if args.action == "shadow" {
+            let record = json!({"schema": 1, "kind": "autopilot-shadow", "ts": value::now(), "receipt_sha256": value::hash(raw.as_ref().unwrap()), "owner_id": bound["owner_id"], "session": args.text("session")?, "outcome": if judgment.is_ok() { "would-resume" } else { "would-refuse" }, "reason": judgment.as_ref().err().map(|e| e.message.as_str()).unwrap_or("")});
+            ctx.append(".oms/plan/autopilot-shadow.jsonl", &record)?;
+            return Output::json(&record);
+        }
+        judgment?;
+        let mut record = json!({
+            "schema": 1,
+            "kind": "autopilot-reenter",
+            "predecessor": value::hash(raw.as_ref().unwrap()),
+            "stage_at_reentry": bound["stage"],
+            "spec_sha256": bound["spec_sha256"],
+            "branch": bound["branch"],
+            "owner_id": bound["owner_id"],
+            "disposition": "resumed",
+            "claim_pid": std::process::id(),
+            "updated": "",
+        });
+        let reason = args.text("reason")?;
+        if !reason.is_empty() {
+            verify::reason(reason)?;
+            record["reason"] = reason.into();
+        }
+        let session = args.text("session")?;
+        if !session.is_empty() {
+            record["session"] = session.into();
+        }
+        reenter_record = Some(record);
+    }
+    if row.is_none() {
+        require(
+            args.action == "propose" || args.action == "run",
+            "autopilot action requires a live receipt",
+        )?;
+        let mut fresh = fresh(ctx, args)?;
+        let claim = legacy_claim_refusal(&ctx.state.join(".oms/plan"), &fresh, std::process::id());
+        require(claim.is_empty(), claim)?;
+        if args.action == "run" && (args.has("proposal") || args.has("expected-proposal-sha256")) {
+            let expected = args.required("expected-proposal-sha256")?;
+            require(value::digest(expected), "invalid expected proposal SHA-256")?;
+            let reviewed = ctx.bytes(&args.path("proposal", &ctx.repo), MAX_FILE)?;
+            require(
+                value::hash(&reviewed) == expected,
+                "proposal bytes changed after review",
+            )?;
+            planning::scan(&reviewed)?;
+            let proposal = value::parse(&reviewed)?;
+            let spec = planning::contract(ctx)?;
+            planning::validate(ctx, &proposal, &spec, 12)?;
+            require(
+                envelope(value::text(&fresh["contract"], "allowed"))?
+                    == planning::strings(&proposal["allowed_envelope"])?,
+                "reviewed proposal differs from frozen envelope",
+            )?;
+            let snapshot = format!(".oms/plan/approved-proposal-{expected}.json");
+            ctx.store.publish_once(&snapshot, &reviewed, MAX_FILE)?;
+            fresh["stage"] = "proposal-review".into();
+            fresh["proposal"] = json!({"path": ctx.state.join(snapshot), "sha256": expected});
+        }
+        let written = save(ctx, &mut fresh, None)?;
+        row = Some(fresh);
+        raw = Some(written);
+    }
+    let mut row = row.unwrap();
+    let mut raw = raw.unwrap();
+    let mut owned = Context::new(
+        ctx.repo.clone(),
+        ctx.state.clone(),
+        ctx.services,
+        ctx.interrupted,
+    )?;
+    owned.owner_id = value::text(&row, "owner_id").to_owned();
+    let ctx = &owned;
+    live(ctx, &row)?;
+    options_match(args, &row)?;
+    let claim = legacy_claim_refusal(&ctx.state.join(".oms/plan"), &row, std::process::id());
+    require(claim.is_empty(), claim)?;
+    require(
+        !value::text(&row, "owner_id").is_empty(),
+        "legacy receipt lacks lifetime owner identity; retire it before starting a native drive",
+    )?;
+    require(
+        row["stage"] != "parked",
+        "autopilot receipt is parked; an operator decision is open; abandon before a new contract",
+    )?;
+    if row["stage"] == "done" {
+        return Ok(Output::text("autopilot: done (acceptance passed)"));
+    }
+    if args.action == "propose" || row["stage"] == "proposing" {
+        require(
+            !args.has("proposal")
+                && !args.has("expected-proposal-sha256")
+                && row["stage"] == "proposing",
+            "a reviewed proposal cannot be silently replaced; abandon the receipt first",
+        )?;
+        let reservations = ctx.rows(".oms/plan/autopilot-replans.jsonl")?;
+        let remainder = reservations
+            .iter()
+            .any(|r| r["owner_id"] == row["owner_id"]);
+        let work_branch = value::text(&row, "branch");
+        let current = ctx
+            .git(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .unwrap_or_default();
+        ctx.clean()?;
+        if current == work_branch {
+            assert_scope(ctx, &row)?;
+        } else {
+            require(
+                ctx.git(&["rev-parse", "HEAD"])? == value::text(&row["contract"], "base_sha"),
+                "base checkout moved before proposal",
+            )?;
+        }
+        let planning_args = propose_args(args, &row, remainder);
+        if reenter_record.is_some() {
+            planning::preflight_propose(ctx, &planning_args)?;
+        }
+        if let Some(record) = reenter_record.take() {
+            commit_reenter(ctx, &row, record)?;
+        }
+        return propose(ctx, args, &mut row, &raw, remainder);
+    }
+    let pending_apply = if args.has("proposal") || args.has("expected-proposal-sha256") {
+        require(
+            args.has("proposal") && args.has("expected-proposal-sha256"),
+            "proposal path and reviewed SHA-256 are required together",
+        )?;
+        let expected = args.required("expected-proposal-sha256")?;
+        require(value::digest(expected), "invalid expected proposal SHA-256")?;
+        let supplied = args.path("proposal", &ctx.repo);
+        let supplied = if supplied.is_absolute() {
+            supplied
+        } else {
+            ctx.repo.join(supplied)
+        };
+        let frozen = value::text(&row["proposal"], "path");
+        require(
+            expected == value::text(&row["proposal"], "sha256")
+                && value::hash(ctx.bytes(&supplied, MAX_FILE)?) == expected,
+            "proposal differs from the exact parent-reviewed binding",
+        )?;
+        let mut apply_args = Args::default();
+        apply_args.set("apply", frozen);
+        apply_args.set("expected-proposal-sha256", expected);
+        let reviewed = value::parse(&ctx.store.read(frozen, MAX_FILE)?)?;
+        if reenter_record.is_some() {
+            let plan = ctx.plan_value()?;
+            let tasks = reviewed["tasks"]
+                .as_array()
+                .ok_or_else(|| Error::new(3, "proposal tasks must be an array"))?;
+            require(
+                !tasks.is_empty()
+                    && !plan["project_contract"].is_null()
+                    && tasks.iter().all(|t| {
+                        t.get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| !id.is_empty() && plan["tasks"][id].is_object())
+                    }),
+                "reentry requires the reviewed proposal to already be applied",
+            )?;
+        }
+        let cap = if value::text(&reviewed, "id_prefix") == "r1-" {
+            "replan_tasks"
+        } else {
+            "initial_tasks"
+        };
+        apply_args.set("max-tasks", row["contract"][cap].to_string());
+        apply_args.set("allowed", value::text(&row["contract"], "allowed"));
+        apply_args.set(
+            "collaboration",
+            value::text(&row["contract"], "collaboration"),
+        );
+        apply_args.set("worker-provider", value::text(&row["providers"], "worker"));
+        Some(apply_args)
+    } else {
+        None
+    };
+    if pending_apply.is_none() {
+        require(
+            row["stage"] != "proposal-review",
+            "parent proposal review required; pass --proposal and --expected-proposal-sha256",
+        )?;
+    }
+    let base_branch = value::text(&row["contract"], "base").to_owned();
+    let work_branch = value::text(&row, "branch").to_owned();
+    let current = ctx
+        .git(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .unwrap_or_default();
+    ctx.clean()?;
+    if current != work_branch {
+        require(
+            current == base_branch || current.is_empty(),
+            "refusing work branch switch from an unrelated checkout",
+        )?;
+        require(
+            ctx.git(&["rev-parse", "HEAD"])? == value::text(&row["contract"], "base_sha"),
+            "base checkout moved before work branch switch",
+        )?;
+        require(
+            ctx.git(&[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{work_branch}"),
+            ])
+            .is_err(),
+            "work branch already exists; switch to it before resuming",
+        )?;
+    } else {
+        assert_scope(ctx, &row)?;
+    }
+    if reenter_record.is_some() || resuming_existing {
+        preflight_dead_owner_recovery(ctx, &row)?;
+    }
+    let applied_proposal = pending_apply.is_some();
+    if let Some(apply_args) = pending_apply {
+        planning::apply(ctx, &apply_args)?;
+    }
+    if let Some(record) = reenter_record.take() {
+        commit_reenter(ctx, &row, record)?;
+    } else if resuming_existing && ctx.plan()?.load()?.raw.is_some() {
+        let recovery = recover_dead_owner(ctx, &row)?;
+        if recovery["recovered"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
+            ctx.append(
+                ".oms/plan/autopilot-reentries.jsonl",
+                &json!({
+                    "schema": 1,
+                    "kind": "autopilot-reenter-requeue",
+                    "spec_sha256": row["spec_sha256"],
+                    "branch": row["branch"],
+                    "owner_id": row["owner_id"],
+                    "recovery": recovery,
+                    "updated": value::now(),
+                }),
+            )?;
+        }
+    }
+    if applied_proposal {
+        row["stage"] = "approved".into();
+        raw = save(ctx, &mut row, Some(&raw))?;
+        let wake = std::env::var_os(WAKE_RESUME_ENV).is_some_and(|v| v == "1");
+        note_approval(ctx, &row, wake)?;
+    }
+    if current != work_branch {
+        ctx.git(&["switch", "-c", &work_branch])?;
+        ctx.clean()?;
+        assert_scope(ctx, &row)?;
+    }
+    if matches!(value::text(&row, "stage"), "reviewing" | "publishing") {
+        row["stage"] = "approved".into();
+        raw = save(ctx, &mut row, Some(&raw))?;
+    }
+    row["stage"] = "driving".into();
+    raw = save(ctx, &mut row, Some(&raw))?;
+    if args.action == "reenter" && !(args.has("proposal") || args.has("expected-proposal-sha256")) {
+        let wake = std::env::var_os(WAKE_RESUME_ENV).is_some_and(|v| v == "1");
+        note_approval(ctx, &row, wake)?;
+    }
+    let mut drive = Args::default();
+    let drive_run = value::random("goal-")?;
+    drive.set("run-id", &drive_run);
+    drive.set("to", value::text(&row["providers"], "worker"));
+    drive.set("max-cycles", row["contract"]["max_cycles"].to_string());
+    drive.set("contract-id", value::text(&row, "owner_id"));
+    drive.set("expected-ref", format!("refs/heads/{work_branch}"));
+    for (option, field) in [
+        ("model", "model"),
+        ("fallback-model", "fallback_model"),
+        ("reasoning-effort", "reasoning_effort"),
+        ("provider-timeout", "timeout"),
+    ] {
+        let text = value::text(&row["routing"]["worker"], field);
+        if !text.is_empty() {
+            drive.set(option, text);
+        }
+    }
+    for (flag, field) in [
+        ("auto-repair", "auto_repair"),
+        ("retry-known", "retry_known"),
+        ("allow-verifier-change", "allow_verifier_change"),
+    ] {
+        if row["contract"][field] == true {
+            drive.flags.insert(flag.into());
+        }
+    }
+    if !value::text(&row["contract"], "allow_floor_change").is_empty() {
+        drive.set(
+            "allow-floor-change",
+            value::text(&row["contract"], "allow_floor_change"),
+        );
+    }
+    let mut output = crate::goal::execute(ctx, &drive)?;
+    let terminal = match drive_result(ctx, &drive_run, &output) {
+        Ok(row) => row,
+        Err(_) => return park(ctx, &mut row, &raw, "goal-drive-result-invalid", output),
+    };
+    if output.code != 0 {
+        let reason = value::text(&terminal, "reason");
+        let plan = ctx.plan_value()?;
+        let all_done = plan["tasks"]
+            .as_object()
+            .is_some_and(|t| t.values().all(|t| value::text(t, "state") == "done"));
+        let replan_used = plan["tasks"]
+            .as_object()
+            .is_some_and(|t| t.keys().any(|id| id.starts_with("r1-")));
+        if reason == "tasks-exhausted" && all_done && !replan_used {
+            let reservations = ctx.rows(".oms/plan/autopilot-replans.jsonl")?;
+            let matching = reservations
+                .iter()
+                .filter(|r| r["owner_id"] == row["owner_id"])
+                .collect::<Vec<_>>();
+            require(
+                matching.len() <= 1,
+                "replan reservation ledger is ambiguous",
+            )?;
+            if matching.is_empty() {
+                ctx.append(".oms/plan/autopilot-replans.jsonl", &json!({"schema": 1, "kind": "autopilot-replan-reserved", "owner_id": row["owner_id"], "proposal_sha256": row["proposal"]["sha256"], "ts": value::now()}))?;
+            } else {
+                require(
+                    matching[0]["proposal_sha256"] == row["proposal"]["sha256"],
+                    "sole remainder reservation already belongs to a different tranche",
+                )?;
+            }
+            row["stage"] = "proposing".into();
+            row["proposal"] = json!({"path": "", "sha256": ""});
+            raw = save(ctx, &mut row, Some(&raw))?;
+            let next = propose(ctx, args, &mut row, &raw, true)?;
+            output.append(next);
+            return Ok(output);
+        }
+        return park(
+            ctx,
+            &mut row,
+            &raw,
+            if replan_used && reason == "tasks-exhausted" {
+                "replan-budget-used"
+            } else {
+                reason
+            },
+            output,
+        );
+    }
+    if terminal["status"] != "done" || terminal["reason"] != "acceptance-pass" {
+        return park(ctx, &mut row, &raw, "goal-drive-result-invalid", output);
+    }
+    live(ctx, &row)?;
+    ctx.clean()?;
+    assert_scope(ctx, &row)?;
+    let final_head = ctx.git(&["rev-parse", "HEAD"])?;
+    let final_tree = ctx.git(&["rev-parse", "HEAD^{tree}"])?;
+    let final_plan = ctx.store.read(ACTIVE, 8 * MAX_FILE)?;
+    let acceptance = ctx.action(&Request::new(Action::Accept))?;
+    if acceptance.code != 0 {
+        output.append(acceptance);
+        return park(ctx, &mut row, &raw, "final-acceptance-failed", output);
+    }
+    row["stage"] = "reviewing".into();
+    raw = save(ctx, &mut row, Some(&raw))?;
+    let plan = ctx.plan_value()?;
+    let accept = value::text(&plan, "accept");
+    let reviewer = value::text(&row["providers"], "reviewer").to_owned();
+    let mode = value::text(&row["contract"], "review_mode").to_owned();
+    if mode != "off" {
+        let writers = plan["tasks"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|t| value::text(t, "state") == "done")
+            .map(|t| value::text(t, "provider"))
+            .collect::<std::collections::BTreeSet<_>>();
+        if mode == "gate" && writers.contains(reviewer.as_str()) {
+            return park(ctx, &mut row, &raw, "reviewer-authored-task", output);
+        }
+        let mut review = vec![
+            "--repo".into(),
+            ctx.repo.as_os_str().to_owned(),
+            "--base".into(),
+            value::text(&row["contract"], "base_sha").into(),
+            "--providers".into(),
+            reviewer.into(),
+            "--gate".into(),
+            "--verify".into(),
+            accept.into(),
+        ];
+        for (option, field) in [
+            ("model", "model"),
+            ("fallback-model", "fallback_model"),
+            ("reasoning-effort", "reasoning_effort"),
+        ] {
+            let text = value::text(&row["routing"]["reviewer"], field);
+            if !text.is_empty() {
+                review.push(format!("--{option}").into());
+                review.push(text.into());
+            }
+        }
+        let checked = invoke(
+            ctx,
+            "peer-review",
+            review,
+            verify::duration(value::text(&row["routing"]["reviewer"], "timeout"))?,
+        )?;
+        let failed = checked.code != 0;
+        output.append(checked);
+        if failed && mode == "gate" {
+            return park(ctx, &mut row, &raw, "semantic-review-failed", output);
+        }
+        if failed {
+            output
+                .stderr
+                .extend_from_slice(b"autopilot: semantic review: advisory fail\n");
+            output.code = 0;
+        }
+    }
+    let final_acceptance = ctx.action(&Request::new(Action::Accept))?;
+    if final_acceptance.code != 0 {
+        output.append(final_acceptance);
+        return park(ctx, &mut row, &raw, "post-review-acceptance-failed", output);
+    }
+    ctx.clean()?;
+    live(ctx, &row)?;
+    assert_scope(ctx, &row)?;
+    require(
+        ctx.git(&["rev-parse", "HEAD"])? == final_head
+            && ctx.git(&["rev-parse", "HEAD^{tree}"])? == final_tree
+            && ctx.store.read(ACTIVE, 8 * MAX_FILE)? == final_plan,
+        "final snapshot changed during semantic review",
+    )?;
+    if row["contract"]["draft_pr"] == true {
+        row["stage"] = "publishing".into();
+        raw = save(ctx, &mut row, Some(&raw))?;
+        let prepared = invoke(
+            ctx,
+            "draft-pr",
+            vec![
+                "prepare".into(),
+                "--repo".into(),
+                ctx.repo.as_os_str().to_owned(),
+                "--remote".into(),
+                value::text(&row["contract"], "remote").into(),
+                "--base".into(),
+                base_branch.into(),
+                "--verify".into(),
+                accept.into(),
+                "--expected-head".into(),
+                final_head.clone().into(),
+                "--expected-tree".into(),
+                final_tree.into(),
+                "--expected-base-sha".into(),
+                value::text(&row["contract"], "base_sha").into(),
+                "--expected-spec-sha256".into(),
+                value::text(&row, "spec_sha256").into(),
+            ],
+            Duration::from_secs(1800),
+        )?;
+        if prepared.code != 0 {
+            output.append(prepared);
+            return park(ctx, &mut row, &raw, "draft-prepare-failed", output);
+        }
+        let text = String::from_utf8_lossy(&prepared.stdout);
+        let intent = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("intent: "))
+            .next_back()
+            .ok_or_else(|| Error::new(3, "draft-pr prepare returned no publication intent"))?
+            .to_owned();
+        output.append(prepared);
+        ctx.clean()?;
+        require(
+            ctx.git(&["rev-parse", "HEAD"])? == final_head,
+            "HEAD changed before publication",
+        )?;
+        let published = invoke(
+            ctx,
+            "draft-pr",
+            vec![
+                "publish".into(),
+                "--repo".into(),
+                ctx.repo.as_os_str().to_owned(),
+                "--intent".into(),
+                intent.into(),
+            ],
+            Duration::from_secs(1800),
+        )?;
+        if published.code != 0 {
+            output.append(published);
+            return park(ctx, &mut row, &raw, "draft-publish-failed", output);
+        }
+        output.append(published);
+    }
+    row["stage"] = "done".into();
+    save(ctx, &mut row, Some(&raw))?;
+    let _ = ctx.services.observe_journal(
+        crate::services::JournalEvent {
+            repo: &ctx.repo,
+            source_kind: "autopilot",
+            source_path: &ctx.state.join(RECEIPT),
+            source_id: value::text(&row, "owner_id"),
+            outcome: "done",
+            verification: "passed",
+        },
+        ctx.interrupted,
+    );
+    output.append(Output::text("autopilot: done (acceptance passed)"));
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Args;
+    use std::process::Command;
+    use std::sync::atomic::AtomicBool;
+
+    const PYTHON_DIGEST: &str = "688c60bcc4a9fa5049bfaed2666c2601688f4ac152c8308a910aaf6039018e48";
+
+    fn route(model: &str, timeout: &str) -> Value {
+        json!({"model": model, "fallback_model": "", "reasoning_effort": "auto", "timeout": timeout})
+    }
+    fn fixture(repo: &str, spec: &str, base_sha: &str, plan: &str) -> Value {
+        let proposal = "c".repeat(64);
+        json!({"schema": 1, "kind": "autopilot-run", "stage": "approved", "repo": repo, "spec_sha256": spec,
+            "providers": {"planner": "claude", "worker": "codex", "reviewer": "claude"},
+            "routing": {"provider_timeout": "5m", "planner": route("", "15m"), "worker": route("gpt-6-sol", "30m"), "reviewer": route("", "20m")},
+            "contract": {"allowed": "src,docs/é", "base": "main", "base_sha": base_sha, "remote": "origin", "max_cycles": 10, "initial_tasks": 6, "replan_tasks": 2, "auto_repair": false, "retry_known": false, "review_mode": "shadow", "draft_pr": false, "allow_verifier_change": false, "allow_floor_change": "", "collaboration": "off"},
+            "proposal": {"path": format!("{plan}/approved-proposal-{proposal}.json"), "sha256": proposal},
+            "branch": format!("oms/autopilot-{}", &spec[..12]), "owner_id": format!("owner_{}", "1".repeat(32)), "updated": "2026-01-02T03:04:05Z"})
+    }
+    fn sample() -> Value {
+        fixture(
+            "/work/repo",
+            &"a".repeat(64),
+            &"b".repeat(40),
+            "/work/repo/.oms/plan",
+        )
+    }
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            let path = std::env::temp_dir().join(value::random("oms-receipt-").unwrap());
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(path.join(".oms/plan"))
+                .unwrap();
+            Self(std::fs::canonicalize(path).unwrap())
+        }
+        fn plan(&self, name: &str) -> PathBuf {
+            self.0.join(".oms/plan").join(name)
+        }
+        fn write_receipt(&self, row: &Value) {
+            std::fs::write(self.plan("autopilot-run.json"), value::pretty(row).unwrap()).unwrap();
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+    /// Mode 0600: a group-writable file would need a host account proof the test has none of.
+    fn private(path: &Path, body: &[u8]) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        file.write_all(body).unwrap();
+    }
+    /// A git checkout whose receipt passes `live`: bound repo, spec, base ref, work branch and proposal.
+    fn live_fixture() -> (Dir, Value) {
+        let dir = Dir::new();
+        git(&dir.0, &["init", "--quiet", "-b", "main"]);
+        private(&dir.0.join("PROJECT.md"), b"# spec\n");
+        git(&dir.0, &["add", "PROJECT.md"]);
+        git(&dir.0, &["commit", "--quiet", "-m", "init"]);
+        let spec = value::hash(std::fs::read(dir.0.join("PROJECT.md")).unwrap());
+        let base = git(&dir.0, &["rev-parse", "HEAD"]);
+        let plan = dir.0.join(".oms/plan");
+        let mut row = fixture(
+            dir.0.to_str().unwrap(),
+            &spec,
+            &base,
+            plan.to_str().unwrap(),
+        );
+        let body = b"{}\n";
+        let digest = value::hash(body);
+        private(&plan.join(format!("approved-proposal-{digest}.json")), body);
+        row["proposal"] = json!({"path": plan.join(format!("approved-proposal-{digest}.json")), "sha256": digest});
+        git(
+            &dir.0,
+            &["switch", "--quiet", "-c", value::text(&row, "branch")],
+        );
+        dir.write_receipt(&row);
+        (dir, row)
+    }
+
+    #[test]
+    fn contract_digest_matches_python_and_ignores_progress() {
+        let mut row = sample();
+        assert_eq!(contract_digest(&row), PYTHON_DIGEST);
+        row["stage"] = "driving".into();
+        row["updated"] = "2027-01-01T00:00:00Z".into();
+        row["branch"] = "oms/autopilot-aaaaaaaaaaaa-r2".into();
+        row["proposal"] = json!({"path": "", "sha256": ""});
+        assert_eq!(contract_digest(&row), PYTHON_DIGEST);
+        row["contract"]["max_cycles"] = 9.into();
+        assert_ne!(contract_digest(&row), PYTHON_DIGEST);
+    }
+
+    #[test]
+    fn continuation_argv_round_trips_through_the_native_cli() {
+        let mut row = sample();
+        row["contract"]["auto_repair"] = true.into();
+        row["contract"]["allow_floor_change"] = "reviewed".into();
+        row["routing"]["worker"]["fallback_model"] = "gpt-6-luna".into();
+        validate(&row).unwrap();
+        let argv = approved_continuation(&row).expect("approved run");
+        assert_eq!(argv[..3], ["oms", "autopilot", "--repo"]);
+        let raw: Vec<_> = argv[2..].iter().map(std::ffi::OsString::from).collect();
+        let args = Args::parse("autopilot", &raw).unwrap();
+        assert_eq!(args.action, "run");
+        options_match(&args, &row).unwrap();
+        assert!(args.flag("auto-repair"));
+        assert_eq!(args.text("worker-fallback-model").unwrap(), "gpt-6-luna");
+        assert_eq!(
+            args.required("expected-proposal-sha256").unwrap(),
+            "c".repeat(64)
+        );
+        row["stage"] = "proposing".into();
+        row["proposal"] = json!({"path": "", "sha256": ""});
+        assert!(approved_continuation(&row).is_none());
+        assert_eq!(
+            continuation_argv(&row).last().map(String::as_str),
+            Some("propose")
+        );
+    }
+
+    #[test]
+    fn checked_receipt_requires_a_canonical_valid_file() {
+        let dir = Dir::new();
+        assert!(load_checked_receipt(&dir.0).unwrap().is_none());
+        let row = sample();
+        dir.write_receipt(&row);
+        let loaded = load_checked_receipt(&dir.0).unwrap().unwrap();
+        assert_eq!(loaded.row, row);
+        assert_eq!(loaded.sha256, value::hash(value::pretty(&row).unwrap()));
+        let mut bad = row.clone();
+        bad["stage"] = "bogus".into();
+        dir.write_receipt(&bad);
+        assert!(load_checked_receipt(&dir.0).is_err());
+        std::fs::write(
+            dir.plan("autopilot-run.json"),
+            vec![b' '; RECEIPT_LIMIT + 1],
+        )
+        .unwrap();
+        assert!(load_checked_receipt(&dir.0).is_err());
+        std::fs::remove_file(dir.plan("autopilot-run.json")).unwrap();
+        let other = Dir::new();
+        other.write_receipt(&row);
+        std::os::unix::fs::symlink(
+            other.plan("autopilot-run.json"),
+            dir.plan("autopilot-run.json"),
+        )
+        .unwrap();
+        assert!(
+            load_checked_receipt(&dir.0).is_err(),
+            "symlinked receipt must refuse"
+        );
+    }
+
+    #[test]
+    fn checked_receipt_refuses_a_symlinked_plan_directory() {
+        let dir = Dir::new();
+        let other = Dir::new();
+        other.write_receipt(&sample());
+        std::fs::remove_dir_all(dir.0.join(".oms/plan")).unwrap();
+        std::os::unix::fs::symlink(other.0.join(".oms/plan"), dir.0.join(".oms/plan")).unwrap();
+        assert!(load_checked_receipt(&dir.0).is_err());
+    }
+
+    fn approval(at_key: &str, at: &str, source: Option<&str>, row: &Value) -> String {
+        let mut line = json!({"schema": 1, "kind": "autopilot-approval", at_key: at, "spec_sha256": row["spec_sha256"], "owner_id": row["owner_id"]});
+        if let Some(source) = source {
+            line["source"] = source.into();
+        }
+        format!("{line}\n")
+    }
+
+    #[test]
+    fn stale_approval_judges_the_latest_matching_row() {
+        let dir = Dir::new();
+        let row = sample();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            stale_approval(&dir.0, &row, now, None),
+            "",
+            "never recorded is not refused"
+        );
+        let mut other = row.clone();
+        other["owner_id"] = format!("owner_{}", "2".repeat(32)).into();
+        let ledger = [
+            approval("at", "2026-02-01T00:00:00Z", Some("run"), &row),
+            approval("ts", "2026-02-10T00:00:00Z", None, &row),
+            approval("at", "2026-02-28T00:00:00Z", Some("run"), &other),
+        ]
+        .concat();
+        std::fs::write(dir.plan("autopilot-approvals.jsonl"), ledger).unwrap();
+        assert_eq!(
+            approval_time(&dir.0, &row).unwrap().map(|(_, s)| s),
+            Some("run".into())
+        );
+        let text = stale_approval(&dir.0, &row, now, None);
+        assert!(text.starts_with("autopilot approval is 19d old (approved 2026-02-10T00:00:00Z by a person's run; limit 7d)"), "{text}");
+        assert_eq!(
+            stale_approval(&dir.0, &row, now, Some("0")),
+            "",
+            "0 disables"
+        );
+        assert_eq!(stale_approval(&dir.0, &row, now, Some("30")), "");
+        let edge = chrono::DateTime::parse_from_rfc3339("2026-02-17T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            stale_approval(&dir.0, &row, edge, None),
+            "",
+            "exactly the limit is not stale"
+        );
+        assert_ne!(stale_approval(&dir.0, &row, edge + 1, None), "");
+        assert_eq!(approval_limit_days(Some("x")), 7);
+        assert_eq!(approval_limit_days(Some("")), 7);
+        assert_eq!(approval_limit_days(Some(" 3 ")), 3);
+        std::fs::write(
+            dir.plan("autopilot-approvals.jsonl"),
+            approval("at", "2026-02-10T00:00:00Z", Some("bogus"), &row),
+        )
+        .unwrap();
+        assert!(
+            stale_approval(&dir.0, &row, now, None).ends_with("the approval age cannot be judged")
+        );
+        std::fs::write(dir.plan("autopilot-approvals.jsonl"), "{\n").unwrap();
+        assert!(stale_approval(&dir.0, &row, now, None).contains("cannot be judged"));
+        std::fs::write(
+            dir.plan("autopilot-approvals.jsonl"),
+            approval("at", "2026-02-10T00:00:00Z", Some("wake"), &row),
+        )
+        .unwrap();
+        assert!(stale_approval(&dir.0, &row, now, None).contains("its first headless resume"));
+        for bad_identity in [
+            json!({"schema":1,"kind":"autopilot-approval","at":"2026-02-10T00:00:00Z","source":"run","owner_id":row["owner_id"]}),
+            json!({"schema":1,"kind":"autopilot-approval","at":"2026-02-10T00:00:00Z","source":"run","spec_sha256":row["spec_sha256"]}),
+            json!({"schema":1,"kind":"autopilot-approval","at":"2026-02-10T00:00:00Z","source":"run","spec_sha256":"short","owner_id":row["owner_id"]}),
+            json!({"schema":1,"kind":"autopilot-approval","at":"2026-02-10T00:00:00Z","source":"run","spec_sha256":row["spec_sha256"],"owner_id":null}),
+            json!({"schema":1,"kind":"autopilot-approval","at":"2026-02-10T00:00:00Z","source":"run","spec_sha256":row["spec_sha256"],"owner_id":"bogus"}),
+        ] {
+            std::fs::write(
+                dir.plan("autopilot-approvals.jsonl"),
+                format!("{bad_identity}\n"),
+            )
+            .unwrap();
+            assert!(
+                stale_approval(&dir.0, &row, now, None)
+                    .ends_with("the approval age cannot be judged"),
+                "malformed identity must fail closed: {bad_identity}"
+            );
+        }
+        let valid_row = approval("at", "2026-02-10T00:00:00Z", Some("run"), &row);
+        let unterminated = valid_row.trim_end_matches('\n');
+        std::fs::write(dir.plan("autopilot-approvals.jsonl"), unterminated).unwrap();
+        assert!(
+            approval_time(&dir.0, &row).is_err(),
+            "unterminated trailing approval row must be rejected"
+        );
+        assert!(
+            stale_approval(&dir.0, &row, now, None).ends_with("the approval age cannot be judged"),
+            "unterminated trailing approval row must fail age gate closed"
+        );
+    }
+
+    #[test]
+    fn a_wake_resume_never_extends_an_approval() {
+        let (dir, row) = live_fixture();
+        let stop = AtomicBool::new(false);
+        let services = crate::LocalServices::new(&stop);
+        let ctx = Context::new(dir.0.clone(), dir.0.clone(), &services, &stop).unwrap();
+        let rows = || {
+            std::fs::read_to_string(dir.plan("autopilot-approvals.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap())
+                .collect::<Vec<_>>()
+        };
+        // A contract with no record starts its clock at its first headless resume.
+        note_approval(&ctx, &row, true).unwrap();
+        let first = rows();
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            (first[0]["source"].as_str(), first[0]["at"].as_str()),
+            (Some("wake"), Some("2026-01-02T03:04:05Z"))
+        );
+        note_approval(&ctx, &row, true).unwrap();
+        assert_eq!(rows().len(), 1, "later unattended resumes record nothing");
+        // A person's run always records, and then judges the age.
+        let mut later = row.clone();
+        later["updated"] = "2026-01-09T00:00:00Z".into();
+        note_approval(&ctx, &later, false).unwrap();
+        assert_eq!(rows().len(), 2);
+        assert_eq!(
+            approval_time(&dir.0, &row).unwrap().map(|(_, s)| s),
+            Some("run".into())
+        );
+        note_approval(&ctx, &later, true).unwrap();
+        assert_eq!(rows().len(), 2, "a wake never extends a person's approval");
+        // An unreadable ledger is not extended by a wake either.
+        std::fs::write(dir.plan("autopilot-approvals.jsonl"), "{\n").unwrap();
+        note_approval(&ctx, &later, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.plan("autopilot-approvals.jsonl")).unwrap(),
+            "{\n"
+        );
+    }
+
+    #[test]
+    fn reentry_refusal_orders_stage_digest_gate_and_controller_lock() {
+        let (dir, mut row) = live_fixture();
+        let stop = AtomicBool::new(false);
+        let services = crate::LocalServices::new(&stop);
+        let check = |row: &Value| {
+            dir.write_receipt(row);
+            let receipt = load_checked_receipt(&dir.0).unwrap().unwrap();
+            reentry_refusal(&dir.0, &receipt, &services, &stop).unwrap()
+        };
+        assert_eq!(check(&row), "");
+        for (stage, text) in [
+            ("done", "complete"),
+            ("proposal-review", "awaits parent review"),
+            ("parked", "parked for an operator"),
+        ] {
+            let mut staged = row.clone();
+            staged["stage"] = stage.into();
+            assert!(check(&staged).contains(text), "{stage}");
+        }
+        let mut moved = row.clone();
+        moved["contract"]["base_sha"] = "d".repeat(40).into();
+        assert!(
+            check(&moved).starts_with("digest gate: "),
+            "base mismatch must refuse"
+        );
+        let mut foreign = row.clone();
+        foreign["repo"] = "/work/elsewhere".into();
+        assert!(check(&foreign).contains("different execution repository"));
+        let lock = oms_lock::Lock::for_file(
+            &dir.0.join(".oms/plan/autopilot-controller"),
+            oms_lock::Settings::from_env().unwrap(),
+        )
+        .unwrap();
+        let guard = lock.try_acquire().unwrap();
+        assert!(check(&row).contains("already held by a live session"));
+        drop(guard);
+        assert_eq!(check(&row), "");
+        row["stage"] = "driving".into();
+        assert_eq!(check(&row), "", "any approved stage may be reentered");
+        let ledger = dir.plan("autopilot-reentries.jsonl");
+        let write_ledger = |body: &[u8]| {
+            let _ = std::fs::remove_file(&ledger);
+            private(&ledger, body);
+        };
+        let audit = json!({
+            "schema": 1,
+            "kind": "autopilot-reenter",
+            "ts": "2026-02-10T00:00:00Z",
+            "receipt_sha256": "e".repeat(64),
+            "spec_sha256": row["spec_sha256"],
+            "branch": row["branch"],
+            "owner_id": row["owner_id"],
+            "disposition": "refused",
+            "session": "",
+            "reason": "",
+        });
+        write_ledger(format!("{audit}\n").as_bytes());
+        assert_eq!(check(&row), "", "native reentry audit row is not a claim");
+        let requeue = json!({
+            "schema": 1,
+            "kind": "autopilot-reenter-requeue",
+            "spec_sha256": row["spec_sha256"],
+            "branch": row["branch"],
+            "owner_id": row["owner_id"],
+            "recovery": {"recovered": 0},
+            "updated": "2026-02-10T00:00:01Z",
+        });
+        write_ledger(format!("{audit}\n{requeue}\n").as_bytes());
+        assert_eq!(
+            check(&row),
+            "",
+            "native reentry-requeue row is not a legacy claim"
+        );
+        let legacy_refused_audit = json!({
+            "schema": 1,
+            "kind": "autopilot-reentry",
+            "ts": "2026-02-10T00:00:00Z",
+            "receipt_sha256": "e".repeat(64),
+            "owner_id": row["owner_id"],
+            "session": "",
+            "outcome": "would-refuse",
+            "reason": "reentry refused",
+        });
+        write_ledger(format!("{legacy_refused_audit}\n").as_bytes());
+        assert_eq!(
+            check(&row),
+            "",
+            "pre-change native refused reentry audit row is not a claim"
+        );
+        let legacy_resumed_audit = json!({
+            "schema": 1,
+            "kind": "autopilot-reentry",
+            "ts": "2026-02-10T00:00:01Z",
+            "receipt_sha256": "e".repeat(64),
+            "owner_id": row["owner_id"],
+            "session": "sess-1",
+            "outcome": "would-resume",
+            "reason": "",
+        });
+        let legacy_requeue_audit = json!({
+            "schema": 1,
+            "kind": "autopilot-reentry-requeue",
+            "ts": "2026-02-10T00:00:02Z",
+            "owner_id": row["owner_id"],
+            "recovery": {"recovered": 0},
+        });
+        write_ledger(format!("{legacy_resumed_audit}\n{legacy_requeue_audit}\n").as_bytes());
+        assert_eq!(
+            check(&row),
+            "",
+            "pre-change native resumed/requeue audit rows are not claims"
+        );
+        let legacy_unknown = json!({
+            "schema": 1,
+            "kind": "autopilot-reentry",
+            "owner_id": row["owner_id"],
+        });
+        write_ledger(format!("{legacy_unknown}\n").as_bytes());
+        assert!(check(&row).contains("unproven legacy session claim"));
+        let mut child = Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        assert!(child.wait().unwrap().success());
+        let dead_claim = json!({
+            "schema": 1,
+            "kind": "autopilot-drive-claim",
+            "spec_sha256": row["spec_sha256"],
+            "branch": row["branch"],
+            "owner_id": row["owner_id"],
+            "claim_pid": dead_pid,
+        });
+        write_ledger(format!("{dead_claim}\n").as_bytes());
+        assert_eq!(check(&row), "", "dead legacy claim does not block reentry");
+        let unproven_claim = json!({
+            "schema": 1,
+            "kind": "autopilot-drive-claim",
+            "spec_sha256": row["spec_sha256"],
+            "branch": row["branch"],
+            "owner_id": row["owner_id"],
+        });
+        write_ledger(format!("{unproven_claim}\n").as_bytes());
+        assert!(check(&row).contains("unproven legacy session claim"));
+        let unterminated = format!("{dead_claim}");
+        write_ledger(unterminated.as_bytes());
+        assert!(check(&row).contains("unproven legacy session claim"));
+        let live_claim = json!({
+            "schema": 1,
+            "kind": "autopilot-drive-claim",
+            "spec_sha256": row["spec_sha256"],
+            "branch": row["branch"],
+            "owner_id": row["owner_id"],
+            "claim_pid": std::process::id(),
+        });
+        write_ledger(format!("{live_claim}\n").as_bytes());
+        let refused = check(&row);
+        assert!(
+            refused.contains("already held by a live session") && refused.contains("pid"),
+            "live legacy claim must block reentry: {refused}"
+        );
+    }
+
+    #[test]
+    fn reenter_records_fresh_approval_for_a_person() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, row) = live_fixture();
+        std::fs::set_permissions(dir.0.join(".oms"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(
+            dir.0.join(".oms/plan"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            dir.plan("autopilot-run.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        std::fs::write(dir.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+        let old_ts = "2020-01-01T00:00:00Z";
+        let old_entry = json!({
+            "schema": 1,
+            "kind": "autopilot-approval",
+            "at": old_ts,
+            "contract_digest": contract_digest(&row),
+            "spec_sha256": row["spec_sha256"],
+            "owner_id": row["owner_id"],
+            "proposal_sha256": row["proposal"]["sha256"],
+            "source": "wake",
+        });
+        private(
+            &dir.plan("autopilot-approvals.jsonl"),
+            format!("{old_entry}\n").as_bytes(),
+        );
+        let unix_now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+        };
+        let now = unix_now();
+        assert!(!stale_approval(&dir.0, &row, now, None).is_empty());
+
+        struct Host;
+        impl oms_command_plan::Services for Host {
+            fn group_membership_resolver(
+                &self,
+            ) -> Option<oms_command_plan::services::GroupResolver> {
+                fn resolve(
+                    gid: u32,
+                ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership>
+                {
+                    let uid = rustix::process::getuid().as_raw();
+                    Ok(oms_command_plan::services::GroupMembership {
+                        gid,
+                        explicit_member_uids: vec![uid],
+                        primary_member_uids: vec![uid],
+                    })
+                }
+                Some(resolve)
+            }
+        }
+        impl crate::Services for Host {
+            fn state_repository(&self, work: &Path, _: &AtomicBool) -> Result<PathBuf> {
+                Ok(work.to_owned())
+            }
+        }
+        let stop = AtomicBool::new(false);
+        let services = Host;
+        let ctx = Context::new(dir.0.clone(), dir.0.clone(), &services, &stop).unwrap();
+        let before_receipt = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let before_approvals = std::fs::read(dir.plan("autopilot-approvals.jsonl")).unwrap();
+        let bad_args = Args::parse(
+            "autopilot",
+            &["reenter".into(), "--max-cycles".into(), "1".into()],
+        )
+        .unwrap();
+        let Err(bad_err) = execute(&ctx, &bad_args) else {
+            panic!("mismatched option must refuse");
+        };
+        assert!(
+            bad_err.message.contains("frozen"),
+            "mismatched option must refuse: {}",
+            bad_err.message
+        );
+        assert!(
+            !dir.plan("autopilot-reentries.jsonl").exists(),
+            "refused reenter must not create or mutate autopilot-reentries.jsonl"
+        );
+        assert_eq!(
+            std::fs::read(dir.plan("autopilot-run.json")).unwrap(),
+            before_receipt
+        );
+        assert_eq!(
+            std::fs::read(dir.plan("autopilot-approvals.jsonl")).unwrap(),
+            before_approvals
+        );
+        let loaded = load_checked_receipt(&dir.0).unwrap().unwrap();
+        assert_eq!(
+            reentry_refusal(&dir.0, &loaded, &services, &stop).unwrap(),
+            ""
+        );
+
+        let args = Args::parse("autopilot", &["reenter".into()]).unwrap();
+        let outcome = execute(&ctx, &args).map(|o| o.code);
+
+        let after = unix_now();
+        let (epoch, source) = approval_time(&dir.0, &row)
+            .unwrap()
+            .expect("reenter must record a fresh approval");
+        assert!(
+            epoch >= now - 5 && epoch <= after + 5,
+            "expected fresh approval, execute returned {outcome:?}"
+        );
+        assert_eq!(source, "run");
+        assert_eq!(stale_approval(&dir.0, &row, after, None), "");
+
+        // A second native reentry after native audit + requeue rows succeeds cleanly.
+        let before_second_count = std::fs::read_to_string(dir.plan("autopilot-approvals.jsonl"))
+            .unwrap()
+            .lines()
+            .count();
+        let second = execute(&ctx, &args).map(|o| o.code);
+        let after_second = unix_now();
+        let second_rows = std::fs::read_to_string(dir.plan("autopilot-approvals.jsonl")).unwrap();
+        assert!(
+            second_rows.lines().count() == before_second_count + 1,
+            "second reentry must pass audit/requeue scan and record approval: {second:?}"
+        );
+        let _ = after_second;
+
+        // Verify written ledger entries use Python-compatible reentry kinds so legacy tools accept them.
+        let written_ledger =
+            std::fs::read_to_string(dir.plan("autopilot-reentries.jsonl")).unwrap();
+        let kinds: Vec<String> = written_ledger
+            .lines()
+            .map(|l| {
+                value::parse(l.as_bytes()).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert!(kinds.contains(&"autopilot-reenter".to_owned()), "{kinds:?}");
+        assert!(
+            kinds.contains(&"autopilot-reenter-requeue".to_owned()),
+            "{kinds:?}"
+        );
+        // Simulate an already-exited own claim (e.g. re-written by another PID) and a live foreign claim.
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let foreign = ChildGuard(Command::new("sleep").arg("30").spawn().unwrap());
+        let ledger = dir.plan("autopilot-reentries.jsonl");
+        let mut ledger_bytes = std::fs::read(&ledger).unwrap();
+        let live_claim = json!({
+            "schema": 1,
+            "kind": "autopilot-drive-claim",
+            "spec_sha256": row["spec_sha256"],
+            "branch": row["branch"],
+            "owner_id": row["owner_id"],
+            "claim_pid": foreign.0.id(),
+        });
+        ledger_bytes.extend_from_slice(format!("{live_claim}\n").as_bytes());
+        std::fs::write(&ledger, &ledger_bytes).unwrap();
+        let before_receipt = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let before_approvals = std::fs::read(dir.plan("autopilot-approvals.jsonl")).unwrap();
+
+        let loaded = load_checked_receipt(&dir.0).unwrap().unwrap();
+        let readonly_refusal = reentry_refusal(&dir.0, &loaded, &services, &stop).unwrap();
+        assert!(
+            readonly_refusal.contains("already held by a live session"),
+            "live legacy claim must refuse readonly check: {readonly_refusal}"
+        );
+
+        let refused_reenter = execute(&ctx, &args);
+        assert!(
+            refused_reenter
+                .as_ref()
+                .is_err_and(|e| e.message.contains("already held by a live session")),
+            "live legacy claim must refuse reenter"
+        );
+        assert_eq!(
+            std::fs::read(&ledger).unwrap(),
+            ledger_bytes,
+            "refused reenter must not mutate autopilot-reentries.jsonl"
+        );
+
+        let argv: Vec<std::ffi::OsString> = approved_continuation(&row)
+            .unwrap()
+            .into_iter()
+            .skip(2)
+            .map(std::ffi::OsString::from)
+            .collect();
+        let run_args = Args::parse("autopilot", &argv).unwrap();
+        let refused_run = execute(&ctx, &run_args);
+        assert!(
+            refused_run
+                .as_ref()
+                .is_err_and(|e| e.message.contains("already held by a live session")),
+            "live legacy claim must also refuse wake-launched run"
+        );
+        assert_eq!(
+            std::fs::read(dir.plan("autopilot-run.json")).unwrap(),
+            before_receipt
+        );
+        assert_eq!(
+            std::fs::read(dir.plan("autopilot-approvals.jsonl")).unwrap(),
+            before_approvals
+        );
+
+        // Dirty or out-of-scope proposing re-entry must refuse before RecoverOwner or ledger writes.
+        let p_dir = Dir::new();
+        std::fs::set_permissions(p_dir.0.join(".oms"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(
+            p_dir.0.join(".oms/plan"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        git(&p_dir.0, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(p_dir.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+        std::fs::create_dir_all(p_dir.0.join("src")).unwrap();
+        std::fs::set_permissions(p_dir.0.join("src"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::create_dir_all(p_dir.0.join("tests")).unwrap();
+        std::fs::set_permissions(
+            p_dir.0.join("tests"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        private(
+            &p_dir.0.join("PROJECT.md"),
+            b"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: proposing check\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Scope\n- Scope defaults: src\n## Acceptance\n- Native checks pass\n",
+        );
+        private(&p_dir.0.join("tests/check.sh"), b"exit 0\n");
+        private(&p_dir.0.join("src/lib.rs"), b"pub fn ok() {}\n");
+        git(&p_dir.0, &["add", "PROJECT.md", "tests", "src"]);
+        git(&p_dir.0, &["commit", "--quiet", "-m", "init"]);
+        let p_spec = value::hash(std::fs::read(p_dir.0.join("PROJECT.md")).unwrap());
+        let p_base = git(&p_dir.0, &["rev-parse", "HEAD"]);
+        let mut p_row = fixture(
+            p_dir.0.to_str().unwrap(),
+            &p_spec,
+            &p_base,
+            p_dir.0.join(".oms/plan").to_str().unwrap(),
+        );
+        p_row["stage"] = "proposing".into();
+        p_row["proposal"] = json!({"path": "", "sha256": ""});
+        p_row["contract"]["allowed"] = "src".into();
+        git(
+            &p_dir.0,
+            &["switch", "--quiet", "-c", value::text(&p_row, "branch")],
+        );
+        private(
+            &p_dir.plan("autopilot-run.json"),
+            &value::pretty(&p_row).unwrap(),
+        );
+        let p_before_receipt = std::fs::read(p_dir.plan("autopilot-run.json")).unwrap();
+        let p_ctx = Context::new(p_dir.0.clone(), p_dir.0.clone(), &services, &stop).unwrap();
+        private(&p_dir.0.join("dirty.txt"), b"untracked\n");
+        let Err(dirty_err) = execute(&p_ctx, &args) else {
+            panic!("dirty proposing checkout must refuse");
+        };
+        assert!(
+            dirty_err.message.contains("working tree must be clean"),
+            "{}",
+            dirty_err.message
+        );
+        assert!(!p_dir.plan("autopilot-reentries.jsonl").exists());
+        assert_eq!(
+            std::fs::read(p_dir.plan("autopilot-run.json")).unwrap(),
+            p_before_receipt
+        );
+        std::fs::remove_file(p_dir.0.join("dirty.txt")).unwrap();
+        private(&p_dir.0.join("outside.txt"), b"out of scope\n");
+        git(&p_dir.0, &["add", "outside.txt"]);
+        git(&p_dir.0, &["commit", "--quiet", "-m", "outside"]);
+        let Err(scope_err) = execute(&p_ctx, &args) else {
+            panic!("out-of-scope proposing checkout must refuse");
+        };
+        assert!(
+            scope_err.message.contains("outside immutable envelope"),
+            "{}",
+            scope_err.message
+        );
+        assert!(!p_dir.plan("autopilot-reentries.jsonl").exists());
+        assert_eq!(
+            std::fs::read(p_dir.plan("autopilot-run.json")).unwrap(),
+            p_before_receipt
+        );
+
+        // Proposing re-entry whose planner prompt triggers outbound scan must refuse before RecoverOwner or ledger writes.
+        let s_dir = Dir::new();
+        std::fs::set_permissions(s_dir.0.join(".oms"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(
+            s_dir.0.join(".oms/plan"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        git(&s_dir.0, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(s_dir.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+        std::fs::create_dir_all(s_dir.0.join("src")).unwrap();
+        std::fs::set_permissions(s_dir.0.join("src"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::create_dir_all(s_dir.0.join("tests")).unwrap();
+        std::fs::set_permissions(
+            s_dir.0.join("tests"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        private(
+            &s_dir.0.join("PROJECT.md"),
+            b"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: proposing scan check\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Scope\n- Scope defaults: src\n## Acceptance\n- Native checks pass\n",
+        );
+        private(&s_dir.0.join("tests/check.sh"), b"exit 0\n");
+        private(&s_dir.0.join("src/lib.rs"), b"pub fn ok() {}\n");
+        git(&s_dir.0, &["add", "PROJECT.md", "tests", "src"]);
+        git(&s_dir.0, &["commit", "--quiet", "-m", "init"]);
+        let s_spec = value::hash(std::fs::read(s_dir.0.join("PROJECT.md")).unwrap());
+        let s_base = git(&s_dir.0, &["rev-parse", "HEAD"]);
+        let mut s_row = fixture(
+            s_dir.0.to_str().unwrap(),
+            &s_spec,
+            &s_base,
+            s_dir.0.join(".oms/plan").to_str().unwrap(),
+        );
+        s_row["stage"] = "proposing".into();
+        s_row["proposal"] = json!({"path": "", "sha256": ""});
+        s_row["contract"]["allowed"] = "src".into();
+        git(
+            &s_dir.0,
+            &["switch", "--quiet", "-c", value::text(&s_row, "branch")],
+        );
+        private(
+            &s_dir.plan("autopilot-run.json"),
+            &value::pretty(&s_row).unwrap(),
+        );
+        let sensitive = concat!("gh", "p_abcdefghijklmnopqrstuvwxyz012345");
+        let seeded_plan = json!({
+            "schema": 1,
+            "kind": "agent-plan",
+            "goal": "proposing scan check",
+            "acceptance": "Native checks pass",
+            "acceptance_files": ["tests/check.sh"],
+            "allowed_envelope": ["src"],
+            "tasks": {
+                "t1": {
+                    "id": "t1",
+                    "title": format!("handle {sensitive}"),
+                    "state": "claimed",
+                    "allowed": ["src"],
+                    "verify": "bash tests/check.sh",
+                    "depends": [],
+                    "autopilot_owner_id": s_row["owner_id"],
+                }
+            }
+        });
+        private(
+            &s_dir.plan("tasks.json"),
+            &serde_json::to_vec_pretty(&seeded_plan).unwrap(),
+        );
+        let s_plan_before = std::fs::read(s_dir.plan("tasks.json")).unwrap();
+        let s_receipt_before = std::fs::read(s_dir.plan("autopilot-run.json")).unwrap();
+        let s_ctx = Context::new(s_dir.0.clone(), s_dir.0.clone(), &services, &stop).unwrap();
+        let Err(scan_err) = execute(&s_ctx, &args) else {
+            panic!("proposing re-entry with sensitive plan must refuse");
+        };
+        assert!(
+            scan_err
+                .message
+                .contains("outbound context contains sensitive-looking content"),
+            "{}",
+            scan_err.message
+        );
+        assert_eq!(
+            std::fs::read(s_dir.plan("tasks.json")).unwrap(),
+            s_plan_before
+        );
+        assert!(!s_dir.plan("autopilot-reentries.jsonl").exists());
+        assert_eq!(
+            std::fs::read(s_dir.plan("autopilot-run.json")).unwrap(),
+            s_receipt_before
+        );
+
+        // Conflicting proposal replay must fail before RecoverOwner or writing reentry records.
+        let r_dir = Dir::new();
+        std::fs::set_permissions(r_dir.0.join(".oms"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(
+            r_dir.0.join(".oms/plan"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        git(&r_dir.0, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(r_dir.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+        std::fs::create_dir_all(r_dir.0.join("src")).unwrap();
+        std::fs::set_permissions(r_dir.0.join("src"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::create_dir_all(r_dir.0.join("tests")).unwrap();
+        std::fs::set_permissions(
+            r_dir.0.join("tests"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        private(
+            &r_dir.0.join("PROJECT.md"),
+            b"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: replay conflict\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Scope\n- Scope defaults: src,tests/ok.sh\n## Acceptance\n- Native checks pass\n",
+        );
+        private(&r_dir.0.join("tests/check.sh"), b"exit 0\n");
+        private(&r_dir.0.join("tests/ok.sh"), b"exit 0\n");
+        private(&r_dir.0.join("src/lib.rs"), b"pub fn ok() {}\n");
+        git(&r_dir.0, &["add", "PROJECT.md", "tests", "src"]);
+        git(&r_dir.0, &["commit", "--quiet", "-m", "init"]);
+        let r_spec = value::hash(std::fs::read(r_dir.0.join("PROJECT.md")).unwrap());
+        let r_base = git(&r_dir.0, &["rev-parse", "HEAD"]);
+        let r_plan = r_dir.0.join(".oms/plan");
+        let mut r_row = fixture(
+            r_dir.0.to_str().unwrap(),
+            &r_spec,
+            &r_base,
+            r_plan.to_str().unwrap(),
+        );
+        r_row["stage"] = "driving".into();
+        r_row["contract"]["allowed"] = "src,tests/ok.sh".into();
+        let proposal = json!({
+            "schema": 1,
+            "kind": "agent-plan-proposal",
+            "spec_sha256": r_spec,
+            "plan_sha256": "absent",
+            "base_sha": r_base,
+            "id_prefix": "",
+            "allowed_envelope": ["src", "tests/ok.sh"],
+            "acceptance_files": ["tests/check.sh"],
+            "tasks": [
+                {"id": "t1", "title": "first", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []},
+            ],
+        });
+        let raw_prop = value::pretty(&proposal).unwrap();
+        let prop_digest = value::hash(&raw_prop);
+        let prop_path = r_plan.join(format!("approved-proposal-{prop_digest}.json"));
+        private(&prop_path, &raw_prop);
+        r_row["proposal"] = json!({"path": prop_path, "sha256": prop_digest});
+        let r_ctx = Context::new(r_dir.0.clone(), r_dir.0.clone(), &services, &stop).unwrap();
+        let mut apply_args = Args::default();
+        apply_args.set("apply", prop_path.to_str().unwrap());
+        apply_args.set("expected-proposal-sha256", &prop_digest);
+        apply_args.set("allowed", "src,tests/ok.sh");
+        crate::planning::apply(&r_ctx, &apply_args).unwrap();
+        let mut plan_doc: Value =
+            serde_json::from_slice(&std::fs::read(r_dir.plan("tasks.json")).unwrap()).unwrap();
+        plan_doc["tasks"]["t1"]["title"] = "mutated".into();
+        plan_doc["tasks"]["t1"]["state"] = "claimed".into();
+        plan_doc["tasks"]["t1"]["autopilot_owner_id"] = r_row["owner_id"].clone();
+        std::fs::write(
+            r_dir.plan("tasks.json"),
+            serde_json::to_vec_pretty(&plan_doc).unwrap(),
+        )
+        .unwrap();
+        let plan_before = std::fs::read(r_dir.plan("tasks.json")).unwrap();
+        git(
+            &r_dir.0,
+            &["switch", "--quiet", "-c", value::text(&r_row, "branch")],
+        );
+        private(
+            &r_dir.plan("autopilot-run.json"),
+            &value::pretty(&r_row).unwrap(),
+        );
+        let r_before_receipt = std::fs::read(r_dir.plan("autopilot-run.json")).unwrap();
+        let replay_args = Args::parse(
+            "autopilot",
+            &[
+                "reenter".into(),
+                "--proposal".into(),
+                prop_path.as_os_str().to_owned(),
+                "--expected-proposal-sha256".into(),
+                prop_digest.into(),
+            ],
+        )
+        .unwrap();
+        let Err(replay_err) = execute(&r_ctx, &replay_args) else {
+            panic!("conflicting proposal replay must refuse");
+        };
+        assert!(
+            replay_err
+                .message
+                .contains("existing task does not match reviewed proposal"),
+            "{}",
+            replay_err.message
+        );
+        assert_eq!(
+            std::fs::read(r_dir.plan("tasks.json")).unwrap(),
+            plan_before
+        );
+        assert!(!r_dir.plan("autopilot-reentries.jsonl").exists());
+        assert_eq!(
+            std::fs::read(r_dir.plan("autopilot-run.json")).unwrap(),
+            r_before_receipt
+        );
+    }
+
+    #[test]
+    fn wake_continuation_resumes_after_proposal_applied_and_head_moves() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Host;
+        impl oms_command_plan::Services for Host {
+            fn group_membership_resolver(
+                &self,
+            ) -> Option<oms_command_plan::services::GroupResolver> {
+                fn resolve(
+                    gid: u32,
+                ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership>
+                {
+                    let uid = rustix::process::getuid().as_raw();
+                    Ok(oms_command_plan::services::GroupMembership {
+                        gid,
+                        explicit_member_uids: vec![uid],
+                        primary_member_uids: vec![uid],
+                    })
+                }
+                Some(resolve)
+            }
+        }
+        impl crate::Services for Host {
+            fn state_repository(&self, work: &Path, _: &AtomicBool) -> Result<PathBuf> {
+                Ok(work.to_owned())
+            }
+        }
+        let dir = Dir::new();
+        std::fs::set_permissions(dir.0.join(".oms"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(
+            dir.0.join(".oms/plan"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        git(&dir.0, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(dir.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+        std::fs::create_dir_all(dir.0.join("src")).unwrap();
+        std::fs::set_permissions(dir.0.join("src"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::create_dir_all(dir.0.join("tests")).unwrap();
+        std::fs::set_permissions(dir.0.join("tests"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        private(
+            &dir.0.join("PROJECT.md"),
+            b"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: test replay\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Scope\n- Scope defaults: src,tests/ok.sh\n## Acceptance\n- Native checks pass\n",
+        );
+        private(&dir.0.join("tests/check.sh"), b"exit 0\n");
+        private(&dir.0.join("tests/ok.sh"), b"exit 0\n");
+        private(&dir.0.join("src/lib.rs"), b"pub fn ok() {}\n");
+        git(&dir.0, &["add", "PROJECT.md", "tests", "src"]);
+        git(&dir.0, &["commit", "--quiet", "-m", "init"]);
+
+        let spec = value::hash(std::fs::read(dir.0.join("PROJECT.md")).unwrap());
+        let base = git(&dir.0, &["rev-parse", "HEAD"]);
+        let plan_dir = dir.0.join(".oms/plan");
+        let mut row = fixture(
+            dir.0.to_str().unwrap(),
+            &spec,
+            &base,
+            plan_dir.to_str().unwrap(),
+        );
+        row["contract"]["allowed"] = "src,tests/ok.sh".into();
+        let proposal = json!({
+            "schema": 1,
+            "kind": "agent-plan-proposal",
+            "spec_sha256": spec,
+            "plan_sha256": "absent",
+            "base_sha": base,
+            "id_prefix": "",
+            "allowed_envelope": ["src", "tests/ok.sh"],
+            "acceptance_files": ["tests/check.sh"],
+            "tasks": [
+                {"id": "t1", "title": "first", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []},
+                {"id": "t2", "title": "second", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": ["t1"]},
+            ],
+        });
+        let raw_prop = value::pretty(&proposal).unwrap();
+        let prop_digest = value::hash(&raw_prop);
+        let prop_path = plan_dir.join(format!("approved-proposal-{prop_digest}.json"));
+        private(&prop_path, &raw_prop);
+        row["proposal"] = json!({"path": prop_path, "sha256": prop_digest});
+
+        let stop = AtomicBool::new(false);
+        let services = Host;
+        let ctx = Context::new(dir.0.clone(), dir.0.clone(), &services, &stop).unwrap();
+
+        row["stage"] = "proposal-review".into();
+        dir.write_receipt(&row);
+        std::fs::set_permissions(
+            dir.plan("autopilot-run.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let receipt_before = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        std::fs::create_dir_all(dir.0.join(".oms/delegations")).unwrap();
+        std::fs::set_permissions(
+            dir.0.join(".oms/delegations"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        private(&dir.0.join(".oms/delegations/bad.json"), b"{");
+        let bad_argv: Vec<std::ffi::OsString> = approved_continuation(&row)
+            .unwrap()
+            .into_iter()
+            .skip(2)
+            .map(std::ffi::OsString::from)
+            .collect();
+        let bad_run = Args::parse("autopilot", &bad_argv).unwrap();
+        assert!(execute(&ctx, &bad_run).is_err());
+        assert!(!dir.plan("tasks.json").exists());
+        assert_eq!(
+            std::fs::read(dir.plan("autopilot-run.json")).unwrap(),
+            receipt_before
+        );
+        std::fs::remove_file(dir.0.join(".oms/delegations/bad.json")).unwrap();
+        std::fs::remove_file(dir.plan("autopilot-run.json")).unwrap();
+
+        let mut apply_args = Args::default();
+        apply_args.set("apply", prop_path.to_str().unwrap());
+        apply_args.set("expected-proposal-sha256", &prop_digest);
+        apply_args.set("allowed", "src,tests/ok.sh");
+        crate::planning::apply(&ctx, &apply_args).unwrap();
+        let mut prior = Context::new(dir.0.clone(), dir.0.clone(), &services, &stop).unwrap();
+        prior.owner_id = value::text(&row, "owner_id").to_owned();
+        prior
+            .action(
+                &Request::new(Action::Claim)
+                    .with("id", "t1")
+                    .with("provider", "codex"),
+            )
+            .unwrap();
+        assert_eq!(ctx.plan_value().unwrap()["tasks"]["t1"]["state"], "claimed");
+
+        git(
+            &dir.0,
+            &["switch", "--quiet", "-c", value::text(&row, "branch")],
+        );
+        private(&dir.0.join("src/work.rs"), b"pub fn moved() {}\n");
+        git(&dir.0, &["add", "src/work.rs"]);
+        git(&dir.0, &["commit", "--quiet", "-m", "advance"]);
+        assert_ne!(git(&dir.0, &["rev-parse", "HEAD"]), base);
+
+        row["stage"] = "reviewing".into();
+        dir.write_receipt(&row);
+        std::fs::set_permissions(
+            dir.plan("autopilot-run.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        let argv: Vec<std::ffi::OsString> = approved_continuation(&row)
+            .unwrap()
+            .into_iter()
+            .skip(2)
+            .map(std::ffi::OsString::from)
+            .collect();
+        let run_args = Args::parse("autopilot", &argv).unwrap();
+        let _ = execute(&ctx, &run_args);
+        let after_wake = load_checked_receipt(&dir.0).unwrap().unwrap().row;
+        assert_eq!(after_wake["stage"], "driving");
+        assert_eq!(ctx.plan_value().unwrap()["tasks"]["t1"]["state"], "ready");
+        let reentries = std::fs::read_to_string(dir.plan("autopilot-reentries.jsonl")).unwrap();
+        assert!(
+            reentries.lines().any(|line| {
+                let entry: Value = serde_json::from_str(line).unwrap();
+                entry["kind"] == "autopilot-reenter-requeue"
+                    && entry["recovery"]["recovered"] == json!(["t1"])
+            }),
+            "expected dead-owner task recovery on wake run: {reentries}"
+        );
+
+        // Plain reenter without --proposal also steps publishing -> approved -> driving cleanly.
+        let mut publishing = after_wake;
+        publishing["stage"] = "publishing".into();
+        let _ = std::fs::remove_file(dir.plan("autopilot-run.json"));
+        private(
+            &dir.plan("autopilot-run.json"),
+            &value::pretty(&publishing).unwrap(),
+        );
+        let reenter_args = Args::parse("autopilot", &["reenter".into()]).unwrap();
+        let _ = execute(&ctx, &reenter_args);
+        let after_reenter = load_checked_receipt(&dir.0).unwrap().unwrap().row;
+        assert_eq!(after_reenter["stage"], "driving");
+
+        // On replay (all proposal tasks already exist), an external dependency that is not
+        // verified_done must still be rejected consistently with oms-command-plan.
+        let external_unfinished_replay = json!({
+            "schema": 1,
+            "kind": "agent-plan-proposal",
+            "spec_sha256": spec,
+            "plan_sha256": "absent",
+            "base_sha": base,
+            "id_prefix": "",
+            "allowed_envelope": ["src", "tests/ok.sh"],
+            "acceptance_files": ["tests/check.sh"],
+            "tasks": [
+                {"id": "t2", "title": "second", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": ["t1"]},
+            ],
+        });
+        let contract = crate::planning::contract(&ctx).unwrap();
+        let err = crate::planning::validate(&ctx, &external_unfinished_replay, &contract, 12)
+            .unwrap_err();
+        assert!(
+            err.message
+                .contains("proposal depends on unknown/later or unfinished existing task"),
+            "unexpected replay dependency error: {}",
+            err.message
+        );
+    }
+}

@@ -1,0 +1,719 @@
+[
+  {
+    "name": "basic",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-inspection",
+      "validation": "recorded-metadata-only",
+      "sources_current": null,
+      "bundle_verified": false,
+      "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
+      "phase": "implementation",
+      "generated_at": "2026-11-09T00:00:00Z",
+      "budget": {
+        "bytes": 1000,
+        "used_bytes": 140,
+        "remaining_bytes": 860,
+        "source_payload_bytes": 100,
+        "framing_bytes": 40
+      },
+      "debt": {
+        "reported": 0,
+        "reported_sufficient": true,
+        "missing_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "truncated_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      },
+      "targets": {
+        "total": 1,
+        "items": [
+          "src.py"
+        ],
+        "omitted": 0
+      },
+      "sources": {
+        "total": 1,
+        "items": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": 0
+      },
+      "omissions": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "repeated_source_digests": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expected": "OMS context inspection (recorded metadata)\nPhase: implementation; recorded at: 2026-11-09T00:00:00Z\n\nRequired context debt (recorded): 0\nRecorded sufficient: yes\nMissing or incomplete required sources: 0 total; 0 shown; 0 not shown\nTruncated required sources (subset above): 0 total; 0 shown; 0 not shown\n\nCurrent sources: not checked (use --verify-current to read selected sources)\n\nRecorded byte budget (not tokens)\n  Used 140 B / 1000 B; remaining 860 B\n  Source payload 100 B; framing 40 B\n\nTargets: 1 total; 1 shown; 0 not shown\n  - src.py\nSelected sources (largest recorded payload first): 1 total; 1 shown; 0 not shown\n  - src.py\n    100 B selected / 100 B original; full; 0 B omitted\n    Reason: direct target\n    Source SHA-256: 09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8\nSelected payload can include the compiler's truncation marker.\n\nOmitted sources: 0 total; 0 shown; 0 not shown\n\nRepeated full-source hashes (candidates only): 0 total; 0 shown; 0 not shown\nSame source hash does not prove the selected slices duplicate one another.\n\nRecorded bundle SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRecorded contract digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nThis is an OMS context pack, not the provider's full context.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "debt",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-inspection",
+      "validation": "recorded-metadata-only",
+      "sources_current": null,
+      "bundle_verified": false,
+      "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
+      "phase": "implementation",
+      "generated_at": "2026-11-09T00:00:00Z",
+      "budget": {
+        "bytes": 1000,
+        "used_bytes": 140,
+        "remaining_bytes": 860,
+        "source_payload_bytes": 75,
+        "framing_bytes": 65
+      },
+      "debt": {
+        "reported": 2,
+        "reported_sufficient": false,
+        "missing_required": {
+          "total": 2,
+          "items": [
+            "src.py",
+            "required.md"
+          ],
+          "omitted": 0
+        },
+        "truncated_required": {
+          "total": 1,
+          "items": [
+            "src.py"
+          ],
+          "omitted": 0
+        }
+      },
+      "targets": {
+        "total": 1,
+        "items": [
+          "src.py"
+        ],
+        "omitted": 0
+      },
+      "sources": {
+        "total": 1,
+        "items": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "bytes_before": 100,
+            "bytes_selected": 75,
+            "omitted_bytes": 60,
+            "selection": "head",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": 0
+      },
+      "omissions": {
+        "total": 1,
+        "items": [
+          {
+            "path": "required.md",
+            "reason": "not available",
+            "bytes": null
+          }
+        ],
+        "omitted": 0
+      },
+      "repeated_source_digests": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expected": "OMS context inspection (recorded metadata)\nPhase: implementation; recorded at: 2026-11-09T00:00:00Z\n\nRequired context debt (recorded): 2\nRecorded sufficient: no\nMissing or incomplete required sources: 2 total; 2 shown; 0 not shown\n  - src.py\n  - required.md\nTruncated required sources (subset above): 1 total; 1 shown; 0 not shown\n  - src.py\n\nCurrent sources: not checked (use --verify-current to read selected sources)\n\nRecorded byte budget (not tokens)\n  Used 140 B / 1000 B; remaining 860 B\n  Source payload 75 B; framing 65 B\n\nTargets: 1 total; 1 shown; 0 not shown\n  - src.py\nSelected sources (largest recorded payload first): 1 total; 1 shown; 0 not shown\n  - src.py\n    75 B selected / 100 B original; head; 60 B omitted\n    Reason: direct target\n    Source SHA-256: 09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8\nSelected payload can include the compiler's truncation marker.\n\nOmitted sources: 1 total; 1 shown; 0 not shown\n  - required.md (size unreported)\n    Reason: not available\n\nRepeated full-source hashes (candidates only): 0 total; 0 shown; 0 not shown\nSame source hash does not prove the selected slices duplicate one another.\n\nRecorded bundle SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRecorded contract digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nThis is an OMS context pack, not the provider's full context.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "limits",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-inspection",
+      "validation": "recorded-metadata-only",
+      "sources_current": null,
+      "bundle_verified": false,
+      "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
+      "phase": "implementation",
+      "generated_at": "2026-11-09T00:00:00Z",
+      "budget": {
+        "bytes": 1000,
+        "used_bytes": 500,
+        "remaining_bytes": 500,
+        "source_payload_bytes": 400,
+        "framing_bytes": 100
+      },
+      "debt": {
+        "reported": 0,
+        "reported_sufficient": true,
+        "missing_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "truncated_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      },
+      "targets": {
+        "total": 1,
+        "items": [
+          "src.py"
+        ],
+        "omitted": 0
+      },
+      "sources": {
+        "total": 3,
+        "items": [
+          {
+            "path": "third.py",
+            "reason": "direct target",
+            "bytes_before": 200,
+            "bytes_selected": 200,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "983a71da81783dfb18f7617e411156a9b2655f48a769a001b7f88d4dfee2cb7b"
+          }
+        ],
+        "omitted": 2
+      },
+      "omissions": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "repeated_source_digests": {
+        "total": 1,
+        "items": [
+          {
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8",
+            "paths": {
+              "total": 2,
+              "items": [
+                "other.py"
+              ],
+              "omitted": 1
+            }
+          }
+        ],
+        "omitted": 0
+      },
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expected": "OMS context inspection (recorded metadata)\nPhase: implementation; recorded at: 2026-11-09T00:00:00Z\n\nRequired context debt (recorded): 0\nRecorded sufficient: yes\nMissing or incomplete required sources: 0 total; 0 shown; 0 not shown\nTruncated required sources (subset above): 0 total; 0 shown; 0 not shown\n\nCurrent sources: not checked (use --verify-current to read selected sources)\n\nRecorded byte budget (not tokens)\n  Used 500 B / 1000 B; remaining 500 B\n  Source payload 400 B; framing 100 B\n\nTargets: 1 total; 1 shown; 0 not shown\n  - src.py\nSelected sources (largest recorded payload first): 3 total; 1 shown; 2 not shown\n  - third.py\n    200 B selected / 200 B original; full; 0 B omitted\n    Reason: direct target\n    Source SHA-256: 983a71da81783dfb18f7617e411156a9b2655f48a769a001b7f88d4dfee2cb7b\nSelected payload can include the compiler's truncation marker.\n\nOmitted sources: 0 total; 0 shown; 0 not shown\n\nRepeated full-source hashes (candidates only): 1 total; 1 shown; 0 not shown\n  SHA-256: 09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8\n  Paths: 2 total; 1 shown; 1 not shown\n    - other.py\nSame source hash does not prove the selected slices duplicate one another.\n\nRecorded bundle SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRecorded contract digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nThis is an OMS context pack, not the provider's full context.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "empty",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-inspection",
+      "validation": "recorded-metadata-only",
+      "sources_current": null,
+      "bundle_verified": false,
+      "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
+      "phase": "implementation",
+      "generated_at": "2026-11-09T00:00:00Z",
+      "budget": {
+        "bytes": 1000,
+        "used_bytes": 0,
+        "remaining_bytes": 1000,
+        "source_payload_bytes": 0,
+        "framing_bytes": 0
+      },
+      "debt": {
+        "reported": 0,
+        "reported_sufficient": true,
+        "missing_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "truncated_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      },
+      "targets": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "sources": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "omissions": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "repeated_source_digests": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_state_digest": null
+    },
+    "expected": "OMS context inspection (recorded metadata)\nPhase: implementation; recorded at: 2026-11-09T00:00:00Z\n\nRequired context debt (recorded): 0\nRecorded sufficient: yes\nMissing or incomplete required sources: 0 total; 0 shown; 0 not shown\nTruncated required sources (subset above): 0 total; 0 shown; 0 not shown\n\nCurrent sources: not checked (use --verify-current to read selected sources)\n\nRecorded byte budget (not tokens)\n  Used 0 B / 1000 B; remaining 1000 B\n  Source payload 0 B; framing 0 B\n\nTargets: 0 total; 0 shown; 0 not shown\nSelected sources (largest recorded payload first): 0 total; 0 shown; 0 not shown\nSelected payload can include the compiler's truncation marker.\n\nOmitted sources: 0 total; 0 shown; 0 not shown\n\nRepeated full-source hashes (candidates only): 0 total; 0 shown; 0 not shown\nSame source hash does not prove the selected slices duplicate one another.\n\nRecorded bundle SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRecorded contract digest: unavailable\nThis is an OMS context pack, not the provider's full context.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "unicode",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-inspection",
+      "validation": "recorded-metadata-only",
+      "sources_current": null,
+      "bundle_verified": false,
+      "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
+      "phase": "\t\u001c\u200b\ue000\u0378",
+      "generated_at": "2026-11-09T00:00:00Z",
+      "budget": {
+        "bytes": 1000,
+        "used_bytes": 140,
+        "remaining_bytes": 860,
+        "source_payload_bytes": 100,
+        "framing_bytes": 40
+      },
+      "debt": {
+        "reported": 0,
+        "reported_sufficient": true,
+        "missing_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "truncated_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      },
+      "targets": {
+        "total": 1,
+        "items": [
+          "\uc790\ub8cc/\uac80\ud1a0e\u0301.py"
+        ],
+        "omitted": 0
+      },
+      "sources": {
+        "total": 1,
+        "items": [
+          {
+            "path": "\uc790\ub8cc/\uac80\ud1a0e\u0301.py",
+            "reason": "\ud55c\uae00?[31m??\u2028\u2029?\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00",
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": 0
+      },
+      "omissions": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "repeated_source_digests": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expected": "OMS context inspection (recorded metadata)\nPhase:   ???; recorded at: 2026-11-09T00:00:00Z\n\nRequired context debt (recorded): 0\nRecorded sufficient: yes\nMissing or incomplete required sources: 0 total; 0 shown; 0 not shown\nTruncated required sources (subset above): 0 total; 0 shown; 0 not shown\n\nCurrent sources: not checked (use --verify-current to read selected sources)\n\nRecorded byte budget (not tokens)\n  Used 140 B / 1000 B; remaining 860 B\n  Source payload 100 B; framing 40 B\n\nTargets: 1 total; 1 shown; 0 not shown\n  - \uc790\ub8cc/\uac80\ud1a0e\u0301.py\nSelected sources (largest recorded payload first): 1 total; 1 shown; 0 not shown\n  - \uc790\ub8cc/\uac80\ud1a0e\u0301.py\n    100 B selected / 100 B original; full; 0 B omitted\n    Reason: \ud55c\uae00?[31m??  ?\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00\uac00... [label shortened]\n    Source SHA-256: 09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8\nSelected payload can include the compiler's truncation marker.\n\nOmitted sources: 0 total; 0 shown; 0 not shown\n\nRepeated full-source hashes (candidates only): 0 total; 0 shown; 0 not shown\nSame source hash does not prove the selected slices duplicate one another.\n\nRecorded bundle SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRecorded contract digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nThis is an OMS context pack, not the provider's full context.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "comparison",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-comparison",
+      "validation": "recorded-metadata-only",
+      "recorded_scope_matches": false,
+      "scope_mismatch_reasons": [
+        "different-phase",
+        "different-targets",
+        "different-contract-state"
+      ],
+      "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+      "delta": {
+        "budget_bytes": 0,
+        "selected_bytes": 40,
+        "remaining_bytes": -40,
+        "context_debt": 0
+      },
+      "added": {
+        "total": 1,
+        "items": [
+          "added.py"
+        ],
+        "omitted": 0
+      },
+      "removed": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "changed": {
+        "total": 1,
+        "items": [
+          {
+            "path": "src.py",
+            "changed_fields": [
+              "reason"
+            ]
+          }
+        ],
+        "omitted": 0
+      }
+    },
+    "expected": "OMS context comparison (recorded metadata; right minus left)\n\nRecorded scope: different or unknown; do not infer a winning run.\n  - different workflow phases\n  - different target sets\n  - different recorded contract states\n\nRecorded deltas (right - left)\n  Budget: +0 B\n  Used: +40 B\n  Remaining: -40 B\n  Required context debt: +0\n\nAdded selected sources: 1 total; 1 shown; 0 not shown\n  - added.py\nRemoved selected sources: 0 total; 0 shown; 0 not shown\nChanged selected-source metadata: 1 total; 1 shown; 0 not shown\n  - src.py\n    Fields: reason\nZero deltas do not prove identical packs, quality or current validity.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "reverse",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-comparison",
+      "validation": "recorded-metadata-only",
+      "recorded_scope_matches": false,
+      "scope_mismatch_reasons": [
+        "different-phase",
+        "different-targets",
+        "different-contract-state"
+      ],
+      "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+      "delta": {
+        "budget_bytes": 0,
+        "selected_bytes": -40,
+        "remaining_bytes": 40,
+        "context_debt": 0
+      },
+      "added": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "removed": {
+        "total": 1,
+        "items": [
+          "added.py"
+        ],
+        "omitted": 0
+      },
+      "changed": {
+        "total": 1,
+        "items": [
+          {
+            "path": "src.py",
+            "changed_fields": [
+              "reason"
+            ]
+          }
+        ],
+        "omitted": 0
+      }
+    },
+    "expected": "OMS context comparison (recorded metadata; right minus left)\n\nRecorded scope: different or unknown; do not infer a winning run.\n  - different workflow phases\n  - different target sets\n  - different recorded contract states\n\nRecorded deltas (right - left)\n  Budget: +0 B\n  Used: -40 B\n  Remaining: +40 B\n  Required context debt: +0\n\nAdded selected sources: 0 total; 0 shown; 0 not shown\nRemoved selected sources: 1 total; 1 shown; 0 not shown\n  - added.py\nChanged selected-source metadata: 1 total; 1 shown; 0 not shown\n  - src.py\n    Fields: reason\nZero deltas do not prove identical packs, quality or current validity.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "equal",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-comparison",
+      "validation": "recorded-metadata-only",
+      "recorded_scope_matches": true,
+      "scope_mismatch_reasons": [],
+      "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+      "delta": {
+        "budget_bytes": 0,
+        "selected_bytes": 0,
+        "remaining_bytes": 0,
+        "context_debt": 0
+      },
+      "added": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "removed": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "changed": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      }
+    },
+    "expected": "OMS context comparison (recorded metadata; right minus left)\n\nRecorded scope: matches; current task/repository identity is not verified.\n\nRecorded deltas (right - left)\n  Budget: +0 B\n  Used: +0 B\n  Remaining: +0 B\n  Required context debt: +0\n\nAdded selected sources: 0 total; 0 shown; 0 not shown\nRemoved selected sources: 0 total; 0 shown; 0 not shown\nChanged selected-source metadata: 0 total; 0 shown; 0 not shown\nZero deltas do not prove identical packs, quality or current validity.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "legacy",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-comparison",
+      "validation": "recorded-metadata-only",
+      "recorded_scope_matches": false,
+      "scope_mismatch_reasons": [
+        "contract-identity-unavailable"
+      ],
+      "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+      "delta": {
+        "budget_bytes": 0,
+        "selected_bytes": 0,
+        "remaining_bytes": 0,
+        "context_debt": 0
+      },
+      "added": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "removed": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "changed": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      }
+    },
+    "expected": "OMS context comparison (recorded metadata; right minus left)\n\nRecorded scope: different or unknown; do not infer a winning run.\n  - contract identity unavailable\n\nRecorded deltas (right - left)\n  Budget: +0 B\n  Used: +0 B\n  Remaining: +0 B\n  Required context debt: +0\n\nAdded selected sources: 0 total; 0 shown; 0 not shown\nRemoved selected sources: 0 total; 0 shown; 0 not shown\nChanged selected-source metadata: 0 total; 0 shown; 0 not shown\nZero deltas do not prove identical packs, quality or current validity.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "compare_limit",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-comparison",
+      "validation": "recorded-metadata-only",
+      "recorded_scope_matches": false,
+      "scope_mismatch_reasons": [
+        "different-targets"
+      ],
+      "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+      "delta": {
+        "budget_bytes": 0,
+        "selected_bytes": 260,
+        "remaining_bytes": -260,
+        "context_debt": 0
+      },
+      "added": {
+        "total": 3,
+        "items": [
+          "b.py"
+        ],
+        "omitted": 2
+      },
+      "removed": {
+        "total": 1,
+        "items": [
+          "left.py"
+        ],
+        "omitted": 0
+      },
+      "changed": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      }
+    },
+    "expected": "OMS context comparison (recorded metadata; right minus left)\n\nRecorded scope: different or unknown; do not infer a winning run.\n  - different target sets\n\nRecorded deltas (right - left)\n  Budget: +0 B\n  Used: +260 B\n  Remaining: -260 B\n  Required context debt: +0\n\nAdded selected sources: 3 total; 1 shown; 2 not shown\n  - b.py\nRemoved selected sources: 1 total; 1 shown; 0 not shown\n  - left.py\nChanged selected-source metadata: 0 total; 0 shown; 0 not shown\nZero deltas do not prove identical packs, quality or current validity.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "current",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-inspection",
+      "validation": "recorded-metadata-only",
+      "sources_current": {
+        "unchanged": 1,
+        "changed": 2,
+        "missing": 1,
+        "unreadable": 3,
+        "changed_paths": {
+          "total": 2,
+          "items": [
+            "at-limit"
+          ],
+          "omitted": 1
+        },
+        "missing_paths": {
+          "total": 1,
+          "items": [
+            "missing"
+          ],
+          "omitted": 0
+        }
+      },
+      "bundle_verified": false,
+      "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
+      "phase": "implementation",
+      "generated_at": "2026-11-09T00:00:00Z",
+      "budget": {
+        "bytes": 1000,
+        "used_bytes": 140,
+        "remaining_bytes": 860,
+        "source_payload_bytes": 100,
+        "framing_bytes": 40
+      },
+      "debt": {
+        "reported": 0,
+        "reported_sufficient": true,
+        "missing_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "truncated_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      },
+      "targets": {
+        "total": 1,
+        "items": [
+          "src.py"
+        ],
+        "omitted": 0
+      },
+      "sources": {
+        "total": 1,
+        "items": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": 0
+      },
+      "omissions": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "repeated_source_digests": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expected": "OMS context inspection (recorded metadata)\nPhase: implementation; recorded at: 2026-11-09T00:00:00Z\n\nRequired context debt (recorded): 0\nRecorded sufficient: yes\nMissing or incomplete required sources: 0 total; 0 shown; 0 not shown\nTruncated required sources (subset above): 0 total; 0 shown; 0 not shown\n\nCurrent sources (read-time): 7 selected; 1 unchanged; 2 changed; 1 missing; 3 unreadable\nChanged source paths: 2 total; 1 shown; 1 not shown\n  - at-limit\nMissing source paths: 1 total; 1 shown; 0 not shown\n  - missing\nRead-time hashes are not an atomic snapshot or a validation of the bundle.\n\nRecorded byte budget (not tokens)\n  Used 140 B / 1000 B; remaining 860 B\n  Source payload 100 B; framing 40 B\n\nTargets: 1 total; 1 shown; 0 not shown\n  - src.py\nSelected sources (largest recorded payload first): 1 total; 1 shown; 0 not shown\n  - src.py\n    100 B selected / 100 B original; full; 0 B omitted\n    Reason: direct target\n    Source SHA-256: 09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8\nSelected payload can include the compiler's truncation marker.\n\nOmitted sources: 0 total; 0 shown; 0 not shown\n\nRepeated full-source hashes (candidates only): 0 total; 0 shown; 0 not shown\nSame source hash does not prove the selected slices duplicate one another.\n\nRecorded bundle SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRecorded contract digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nThis is an OMS context pack, not the provider's full context.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  },
+  {
+    "name": "edge",
+    "projection": {
+      "schema": 1,
+      "kind": "oms-context-inspection",
+      "validation": "recorded-metadata-only",
+      "sources_current": null,
+      "bundle_verified": false,
+      "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
+      "phase": "implementation",
+      "generated_at": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "budget": {
+        "bytes": 1000,
+        "used_bytes": 140,
+        "remaining_bytes": 860,
+        "source_payload_bytes": 100,
+        "framing_bytes": 40
+      },
+      "debt": {
+        "reported": 0,
+        "reported_sufficient": true,
+        "missing_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "truncated_required": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      },
+      "targets": {
+        "total": 1,
+        "items": [
+          "src.py"
+        ],
+        "omitted": 0
+      },
+      "sources": {
+        "total": 1,
+        "items": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": 0
+      },
+      "omissions": {
+        "total": 1,
+        "items": [
+          {
+            "path": "",
+            "reason": "",
+            "bytes": 0
+          }
+        ],
+        "omitted": 0
+      },
+      "repeated_source_digests": {
+        "total": 0,
+        "items": [],
+        "omitted": 0
+      },
+      "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expected": "OMS context inspection (recorded metadata)\nPhase: implementation; recorded at: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nRequired context debt (recorded): 0\nRecorded sufficient: yes\nMissing or incomplete required sources: 0 total; 0 shown; 0 not shown\nTruncated required sources (subset above): 0 total; 0 shown; 0 not shown\n\nCurrent sources: not checked (use --verify-current to read selected sources)\n\nRecorded byte budget (not tokens)\n  Used 140 B / 1000 B; remaining 860 B\n  Source payload 100 B; framing 40 B\n\nTargets: 1 total; 1 shown; 0 not shown\n  - src.py\nSelected sources (largest recorded payload first): 1 total; 1 shown; 0 not shown\n  - src.py\n    100 B selected / 100 B original; full; 0 B omitted\n    Reason: direct target\n    Source SHA-256: 09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8\nSelected payload can include the compiler's truncation marker.\n\nOmitted sources: 1 total; 1 shown; 0 not shown\n  - (empty) (size 0 B)\n    Reason: (empty)\n\nRepeated full-source hashes (candidates only): 0 total; 0 shown; 0 not shown\nSame source hash does not prove the selected slices duplicate one another.\n\nRecorded bundle SHA-256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRecorded contract digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nThis is an OMS context pack, not the provider's full context.\n\nRead-only view; no bundle verification or acceptance judgment.\nNo token, quota or billing savings are inferred.\nLong labels are marked; use JSON for full metadata. Metadata may be private."
+  }
+]

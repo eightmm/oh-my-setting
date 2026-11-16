@@ -1,0 +1,1064 @@
+[
+  {
+    "path": "tests/example.sh",
+    "text": "case $path in\n  scripts/check.sh|scripts/lib/tool.py) bash scripts/run.sh ;;\nesac\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/run.sh",
+          "line": 2,
+          "variable": false
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "bash",
+          "line": 2,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "case $path in\n  'scripts/check.sh'|scripts/lib/tool.py) : ;;\nesac\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/check.sh",
+          "line": 2,
+          "variable": false
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/lib/tool.py",
+          "line": 2,
+          "variable": false
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "case $path in\n  $(scripts/check.sh)|scripts/lib/tool.py) : ;;\nesac\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/check.sh",
+          "line": 2,
+          "variable": false
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/lib/tool.py",
+          "line": 2,
+          "variable": false
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "scripts",
+          "line": 2,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "case $path in\n  scripts/check.sh|\\\n    scripts/lib/tool.py) : ;;\nesac\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/check.sh",
+          "line": 2,
+          "variable": false
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/lib/tool.py",
+          "line": 3,
+          "variable": false
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "scripts/check.sh|scripts/lib/tool.py) : ;;\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/check.sh",
+          "line": 1,
+          "variable": false
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/lib/tool.py",
+          "line": 1,
+          "variable": false
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "case x in\n  x)\n    (\n      scripts/real.sh)\n    ;;\n esac\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "x",
+          "line": 1,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/real.sh",
+          "line": 4,
+          "variable": false
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "case x in\n  x) : ;; esac\n (\n  scripts/real.sh)\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "x",
+          "line": 1,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/real.sh",
+          "line": 4,
+          "variable": false
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "case x in\n  x) case y in\n    scripts/check.sh) : ;;\n  esac ;;\nesac\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "x",
+          "line": 1,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/check.sh",
+          "line": 3,
+          "variable": false
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "case x in\n  x)\n    printf 'case esac'\n    scripts/check.sh)\n    ;;\nesac\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "x",
+          "line": 1,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "printf",
+          "line": 3,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "path",
+          "value": "scripts/check.sh",
+          "line": 4,
+          "variable": false
+        }
+      ]
+    }
+  },
+  {
+    "path": "scripts/lib/tool.sh",
+    "text": "# Summary. Other words\nrun() {\n echo \"$OMS_MODE\"\n source \"$ROOT/scripts/lib/a.sh\"\n env -n helper\n}\necho end\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "module:scripts/lib/tool.sh",
+          "kind": "module",
+          "name": "tool.sh",
+          "path": "scripts/lib/tool.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "symbol:scripts/lib/tool.sh::run",
+          "kind": "function",
+          "name": "run",
+          "path": "scripts/lib/tool.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": "Summary.",
+          "crux": null,
+          "metadata": {
+            "signature": "run()",
+            "end_line": 6,
+            "qualname": "run",
+            "line": 2
+          }
+        },
+        {
+          "id": "env:OMS_MODE",
+          "kind": "env",
+          "name": "OMS_MODE",
+          "language": "env",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:scripts/lib/tool.sh",
+          "target": "module:scripts/lib/tool.sh",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "scripts/lib/tool.sh",
+            "source_digest": "digest"
+          }
+        },
+        {
+          "source": "file:scripts/lib/tool.sh",
+          "target": "symbol:scripts/lib/tool.sh::run",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "scripts/lib/tool.sh",
+            "source_digest": "digest",
+            "line": 2
+          }
+        },
+        {
+          "source": "symbol:scripts/lib/tool.sh::run",
+          "target": "env:OMS_MODE",
+          "relation": "reads_env",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "scripts/lib/tool.sh",
+            "source_digest": "digest",
+            "line": 3
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "file:scripts/lib/tool.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 3,
+          "shell_bare": true
+        },
+        {
+          "from": "symbol:scripts/lib/tool.sh::run",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 3,
+          "shell_bare": true
+        },
+        {
+          "from": "file:scripts/lib/tool.sh",
+          "relation": "imports",
+          "kind": "path",
+          "value": "scripts/lib/a.sh",
+          "line": 4,
+          "variable": true,
+          "shell_include": true
+        },
+        {
+          "from": "symbol:scripts/lib/tool.sh::run",
+          "relation": "imports",
+          "kind": "path",
+          "value": "scripts/lib/a.sh",
+          "line": 4,
+          "variable": true,
+          "shell_include": true
+        },
+        {
+          "from": "file:scripts/lib/tool.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "helper",
+          "line": 5,
+          "shell_bare": true
+        },
+        {
+          "from": "symbol:scripts/lib/tool.sh::run",
+          "relation": "calls",
+          "kind": "name",
+          "value": "helper",
+          "line": 5,
+          "shell_bare": true
+        },
+        {
+          "from": "file:scripts/lib/tool.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 7,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "# comment\necho '$OMS_MODE' \"$CODEX_MODE\" # $OMS_OTHER\ncat <<EOF\nimport ignored\nEOF\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "env:CODEX_MODE",
+          "kind": "env",
+          "name": "CODEX_MODE",
+          "language": "env",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:tests/example.sh",
+          "target": "env:CODEX_MODE",
+          "relation": "reads_env",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 2
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "cat",
+          "line": 3,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "run() {\n  python3 - <<'PY'\nimport panel_metrics, oms_graph.project.build as build\nfrom oms_runtime.common import canonical_json as canon\ndef nested():\n    import ignored\nPY\n}\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "symbol:tests/example.sh::run",
+          "kind": "function",
+          "name": "run",
+          "path": "tests/example.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "run()",
+            "end_line": 8,
+            "qualname": "run",
+            "line": 1
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:tests/example.sh",
+          "target": "symbol:tests/example.sh::run",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 1
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "module",
+          "value": "panel_metrics",
+          "line": 3,
+          "binding": "panel_metrics",
+          "heredoc_python": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "imports",
+          "kind": "module",
+          "value": "panel_metrics",
+          "line": 3,
+          "binding": "panel_metrics",
+          "heredoc_python": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "module",
+          "value": "oms_graph.project.build",
+          "line": 3,
+          "binding": "build",
+          "heredoc_python": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "imports",
+          "kind": "module",
+          "value": "oms_graph.project.build",
+          "line": 3,
+          "binding": "build",
+          "heredoc_python": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "module",
+          "value": "oms_runtime.common",
+          "line": 4,
+          "binding": "canon",
+          "imported": "canonical_json",
+          "heredoc_python": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "imports",
+          "kind": "module",
+          "value": "oms_runtime.common",
+          "line": 4,
+          "binding": "canon",
+          "imported": "canonical_json",
+          "heredoc_python": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "python3 - <<-'PY'\n\timport panel_metrics\nPY\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 1,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "module",
+          "value": "panel_metrics",
+          "line": 2,
+          "binding": "panel_metrics",
+          "heredoc_python": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "python3 <<PY\ninvalid syntax !!!\nPY\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 1,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": []
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\necho after\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "line": 1,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 3,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "run() {\n echo \"$OMS_X\"\n}\nrun() {\n helper\n}\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "symbol:tests/example.sh::run",
+          "kind": "function",
+          "name": "run",
+          "path": "tests/example.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "run()",
+            "end_line": 3,
+            "qualname": "run",
+            "line": 1
+          }
+        },
+        {
+          "id": "env:OMS_X",
+          "kind": "env",
+          "name": "OMS_X",
+          "language": "env",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "symbol:tests/example.sh::run",
+          "kind": "function",
+          "name": "run",
+          "path": "tests/example.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "run()",
+            "end_line": 6,
+            "qualname": "run",
+            "line": 4
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:tests/example.sh",
+          "target": "symbol:tests/example.sh::run",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 1
+          }
+        },
+        {
+          "source": "symbol:tests/example.sh::run",
+          "target": "env:OMS_X",
+          "relation": "reads_env",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 2
+          }
+        },
+        {
+          "source": "file:tests/example.sh",
+          "target": "symbol:tests/example.sh::run",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 4
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "helper",
+          "line": 5,
+          "shell_bare": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "calls",
+          "kind": "name",
+          "value": "helper",
+          "line": 5,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "source \"a/b.sh\" extra\nsource \"$ROOT/scripts/lib/../tool.sh\"\n. ./a/b.sh\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "path",
+          "value": "a/b.sh",
+          "line": 1,
+          "variable": false,
+          "shell_include": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "path",
+          "value": "scripts/tool.sh",
+          "line": 2,
+          "variable": true,
+          "shell_include": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "path",
+          "value": "a/b.sh",
+          "line": 3,
+          "variable": false,
+          "shell_include": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "echo \"abc # $OMS_X\" # $OMS_Y\n'foo'\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "env:OMS_X",
+          "kind": "env",
+          "name": "OMS_X",
+          "language": "env",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:tests/example.sh",
+          "target": "env:OMS_X",
+          "relation": "reads_env",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 1
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "echo",
+          "line": 1,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "python3 - <<'PY'\nimport x\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 1,
+          "shell_bare": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "# Overview for example.com/a/b.\nf() {\n}\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "symbol:tests/example.sh::f",
+          "kind": "function",
+          "name": "f",
+          "path": "tests/example.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": "Overview for example.com/a/b.",
+          "crux": null,
+          "metadata": {
+            "signature": "f()",
+            "end_line": 3,
+            "qualname": "f",
+            "line": 2
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:tests/example.sh",
+          "target": "symbol:tests/example.sh::f",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 2
+          }
+        }
+      ],
+      "refs": []
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "# Hello! Next.\nf() {\n}\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "symbol:tests/example.sh::f",
+          "kind": "function",
+          "name": "f",
+          "path": "tests/example.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": "Hello!",
+          "crux": null,
+          "metadata": {
+            "signature": "f()",
+            "end_line": 3,
+            "qualname": "f",
+            "line": 2
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:tests/example.sh",
+          "target": "symbol:tests/example.sh::f",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 2
+          }
+        }
+      ],
+      "refs": []
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "run() {\npython3 - <<PY\nimport os\nprint(os.environ[\"OMS_MODE\"])\ndef nested():\n    return os.getenv(\"CODEX_MODE\")\nPY\n}\n",
+    "expected": {
+      "nodes": [
+        {
+          "id": "symbol:tests/example.sh::run",
+          "kind": "function",
+          "name": "run",
+          "path": "tests/example.sh",
+          "language": "shell",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "run()",
+            "end_line": 8,
+            "qualname": "run",
+            "line": 1
+          }
+        },
+        {
+          "id": "env:OMS_MODE",
+          "kind": "env",
+          "name": "OMS_MODE",
+          "language": "env",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "env:CODEX_MODE",
+          "kind": "env",
+          "name": "CODEX_MODE",
+          "language": "env",
+          "source_digest": "digest",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:tests/example.sh",
+          "target": "symbol:tests/example.sh::run",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 1
+          }
+        },
+        {
+          "source": "symbol:tests/example.sh::run",
+          "target": "env:OMS_MODE",
+          "relation": "reads_env",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 4
+          }
+        },
+        {
+          "source": "symbol:tests/example.sh::run",
+          "target": "env:CODEX_MODE",
+          "relation": "reads_env",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/example.sh",
+            "source_digest": "digest",
+            "line": 6
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "module",
+          "value": "os",
+          "line": 3,
+          "binding": "os",
+          "heredoc_python": true
+        },
+        {
+          "from": "symbol:tests/example.sh::run",
+          "relation": "imports",
+          "kind": "module",
+          "value": "os",
+          "line": 3,
+          "binding": "os",
+          "heredoc_python": true
+        }
+      ]
+    }
+  },
+  {
+    "path": "tests/example.sh",
+    "text": "python3 - <<'PY'\n#xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nimport panel_metrics\nPY\n",
+    "expected": {
+      "nodes": [],
+      "edges": [],
+      "refs": [
+        {
+          "from": "file:tests/example.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 1,
+          "shell_bare": true
+        },
+        {
+          "from": "file:tests/example.sh",
+          "relation": "imports",
+          "kind": "module",
+          "value": "panel_metrics",
+          "line": 3,
+          "binding": "panel_metrics",
+          "heredoc_python": true
+        }
+      ]
+    }
+  }
+]

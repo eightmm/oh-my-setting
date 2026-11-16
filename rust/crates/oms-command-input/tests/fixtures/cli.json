@@ -1,0 +1,1306 @@
+[
+  {
+    "args": [
+      "attach",
+      "file",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "-h"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--repo"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--json=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --json: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--help=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument -h/--help: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --source {browser,chat,text}\n  --origin ORIGIN\n  --text TEXT\n  --text-file TEXT_FILE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "-h"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --source {browser,chat,text}\n  --origin ORIGIN\n  --text TEXT\n  --text-file TEXT_FILE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--repo"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--json=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --json: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--help=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument -h/--help: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n  --full       return the full bounded snapshot instead of its first 8 KiB\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachment",
+      "-h"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n  --full       return the full bounded snapshot instead of its first 8 KiB\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachment",
+      "--repo"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\noms input attachment: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "--json=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\noms input attachment: error: argument --json: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "--help=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\noms input attachment: error: argument -h/--help: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attachments",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attachments [-h] [--repo REPO] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachments",
+      "-h"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attachments [-h] [--repo REPO] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachments",
+      "--repo"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachments [-h] [--repo REPO] [--json]\noms input attachments: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attachments",
+      "--json=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachments [-h] [--repo REPO] [--json]\noms input attachments: error: argument --json: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attachments",
+      "--help=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachments [-h] [--repo REPO] [--json]\noms input attachments: error: argument -h/--help: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: the following arguments are required: path\n"
+  },
+  {
+    "args": [
+      "attachment"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\noms input attachment: error: the following arguments are required: id\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: the following arguments are required: --source, --origin\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--start-line"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --start-line: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--end-line",
+      "--json"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --end-line: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--start-line=bad"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --start-line: invalid int value: 'bad'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--end-line",
+      "1.5"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --end-line: invalid int value: '1.5'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--wat"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --wat\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--wat"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: the following arguments are required: path\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "extra"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: extra\n"
+  },
+  {
+    "args": [
+      "attachments",
+      "extra"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: extra\n"
+  },
+  {
+    "args": [
+      "attachments",
+      "--full"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --full\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "x",
+      "--full=x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\noms input attachment: error: argument --full: ignored explicit argument 'x'\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "x",
+      "--text",
+      "paragraph"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --text paragraph\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "x",
+      "--fuzz"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --fuzz\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--source",
+      "text"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --source text\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --source: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "other"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --source: invalid choice: 'other' (choose from browser, chat, text)\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: the following arguments are required: --origin\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: one of the arguments --text --text-file is required\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text-file"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text-file: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text",
+      "a",
+      "--text-file",
+      "b"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text-file: not allowed with argument --text\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--text-file",
+      "b",
+      "--text",
+      "a"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text: not allowed with argument --text-file\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--te",
+      "a"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: ambiguous option: --te could match --text, --text-file\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text",
+      "a",
+      "--bad"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --bad\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--repo",
+      "--help"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--unknown",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--json=yes"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --json: ignored explicit argument 'yes'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--start-line="
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --start-line: invalid int value: ''\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--start-line",
+      "--bogus"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --start-line: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--help",
+      "source.txt"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "--repo=unused",
+      "attach",
+      "--json",
+      "file",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "--repo",
+      "unused",
+      "file",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachment",
+      "--help",
+      "id"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n  --full       return the full bounded snapshot instead of its first 8 KiB\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachments",
+      "--repo=unused",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attachments [-h] [--repo REPO] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "-hfoo"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "-hh"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "-h=foo"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument -h/--help: ignored explicit argument 'foo'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--rep"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--re="
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: the following arguments are required: path\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--start=bad"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --start-line: invalid int value: 'bad'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--end-line=-x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --end-line: invalid int value: '-x'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "x",
+      "--j=x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --json: ignored explicit argument 'x'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "x",
+      "--sta=bad"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --start-line: invalid int value: 'bad'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "x",
+      "--end=bad"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --end-line: invalid int value: 'bad'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "x",
+      "--helpful"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --helpful\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "x",
+      "--f"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --f\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "x",
+      "-hx"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachment",
+      "id",
+      "--f=x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\noms input attachment: error: argument --full: ignored explicit argument 'x'\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "id",
+      "-hfoo"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n  --full       return the full bounded snapshot instead of its first 8 KiB\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attachment",
+      "id",
+      "--text=paragraph"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --text=paragraph\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "id",
+      "--re"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\noms input attachment: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text",
+      "--json"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text",
+      "-x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text",
+      "--"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text",
+      "--help"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: argument --text: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "--repo",
+      "--help",
+      "file"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach [-h] [--repo REPO] [--json]\n                        {file,selection,terminal} ...\noms input attach: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "--repo",
+      "--help",
+      "attach",
+      "file"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: argument --repo: expected one argument\n"
+  },
+  {
+    "args": [
+      "attach",
+      "--json",
+      "file",
+      "x",
+      "--full"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --full\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "source.txt",
+      "--start-line",
+      "-x y"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: argument --start-line: invalid int value: '-x y'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "file",
+      "--repo",
+      "--unknown value"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\noms input attach file: error: the following arguments are required: path\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--source",
+      "text",
+      "--origin",
+      "note",
+      "--text",
+      "--unknown value",
+      "--extra"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --extra\n"
+  },
+  {
+    "args": [
+      "attach",
+      "selection",
+      "--t=a b"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\noms input attach selection: error: ambiguous option: --t=a b could match --text, --text-file\n"
+  },
+  {
+    "args": [
+      "attachment",
+      "--unknown value",
+      "--extra"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --extra\n"
+  },
+  {
+    "args": [
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\n\nCapture source-aware attachments and edit local steer/next inputs before\nexplicit room delivery.\n\npositional arguments:\n  {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "-h"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\n\nCapture source-aware attachments and edit local steer/next inputs before\nexplicit room delivery.\n\npositional arguments:\n  {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach [-h] [--repo REPO] [--json]\n                        {file,selection,terminal} ...\n\npositional arguments:\n  {file,selection,terminal}\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "attach",
+      "terminal",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input attach terminal [-h] [--repo REPO] [--json] --pane PANE\n                                 [--lines LINES]\n\noptions:\n  -h, --help     show this help message and exit\n  --repo REPO\n  --json         JSON output (default)\n  --pane PANE\n  --lines LINES\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "add",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input add [-h] [--repo REPO] [--json] --room ROOM --from SENDER\n                     --to TO [--mode {steer,next}]\n                     (--text TEXT | --text-file TEXT_FILE)\n                     [--attachment ATTACHMENT]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --room ROOM\n  --from SENDER\n  --to TO\n  --mode {steer,next}\n  --text TEXT\n  --text-file TEXT_FILE\n  --attachment ATTACHMENT\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "edit",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input edit [-h] [--repo REPO] [--json]\n                      [--text TEXT | --text-file TEXT_FILE]\n                      [--mode {steer,next}] [--attachment ATTACHMENT]\n                      [--clear-attachments]\n                      id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --text TEXT\n  --text-file TEXT_FILE\n  --mode {steer,next}\n  --attachment ATTACHMENT\n                        replace the entire attachment list\n  --clear-attachments\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "move",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input move [-h] [--repo REPO] [--json] [--before BEFORE] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help       show this help message and exit\n  --repo REPO\n  --json           JSON output (default)\n  --before BEFORE  queued item ID; omit to move to the end\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "list",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input list [-h] [--repo REPO] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "show",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input show [-h] [--repo REPO] [--json] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "preview",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input preview [-h] [--repo REPO] [--json] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "cancel",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input cancel [-h] [--repo REPO] [--json] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "deliver",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input deliver [-h] [--repo REPO] [--json] [--apply] [--at-boundary]\n                         [--expected-sha256 EXPECTED_SHA256]\n                         id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --apply               persist a message; otherwise preview only\n  --at-boundary         explicit next-task boundary assertion\n  --expected-sha256 EXPECTED_SHA256\n                        require this exact previewed payload\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "reconcile",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input reconcile [-h] [--repo REPO] [--json] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "feedback",
+      "--help"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input feedback [-h] [--repo REPO] [--json] --batch BATCH --room\n                          ROOM --from SENDER --to TO [--mode {steer,next}]\n\noptions:\n  -h, --help           show this help message and exit\n  --repo REPO\n  --json               JSON output (default)\n  --batch BATCH        exact imported artifact-view feedback batch SHA-256\n  --room ROOM\n  --from SENDER\n  --to TO\n  --mode {steer,next}\n",
+    "stderr": ""
+  },
+  {
+    "args": [
+      "bogus"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: argument action: invalid choice: 'bogus' (choose from attach, attachment, attachments, add, edit, move, list, show, preview, cancel, deliver, reconcile, feedback)\n"
+  },
+  {
+    "args": [
+      "attach"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach [-h] [--repo REPO] [--json]\n                        {file,selection,terminal} ...\noms input attach: error: the following arguments are required: attachment_kind\n"
+  },
+  {
+    "args": [
+      "attach",
+      "x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach [-h] [--repo REPO] [--json]\n                        {file,selection,terminal} ...\noms input attach: error: argument attachment_kind: invalid choice: 'x' (choose from file, selection, terminal)\n"
+  },
+  {
+    "args": [
+      "attach",
+      "terminal"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach terminal [-h] [--repo REPO] [--json] --pane PANE\n                                 [--lines LINES]\noms input attach terminal: error: the following arguments are required: --pane\n"
+  },
+  {
+    "args": [
+      "attach",
+      "terminal",
+      "--pane",
+      "%1",
+      "--lines",
+      "x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach terminal [-h] [--repo REPO] [--json] --pane PANE\n                                 [--lines LINES]\noms input attach terminal: error: argument --lines: invalid int value: 'x'\n"
+  },
+  {
+    "args": [
+      "attach",
+      "terminal",
+      "--pane"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input attach terminal [-h] [--repo REPO] [--json] --pane PANE\n                                 [--lines LINES]\noms input attach terminal: error: argument --pane: expected one argument\n"
+  },
+  {
+    "args": [
+      "add"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input add [-h] [--repo REPO] [--json] --room ROOM --from SENDER\n                     --to TO [--mode {steer,next}]\n                     (--text TEXT | --text-file TEXT_FILE)\n                     [--attachment ATTACHMENT]\noms input add: error: the following arguments are required: --room, --from, --to\n"
+  },
+  {
+    "args": [
+      "add",
+      "--room",
+      "r",
+      "--from",
+      "a",
+      "--to",
+      "b"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input add [-h] [--repo REPO] [--json] --room ROOM --from SENDER\n                     --to TO [--mode {steer,next}]\n                     (--text TEXT | --text-file TEXT_FILE)\n                     [--attachment ATTACHMENT]\noms input add: error: one of the arguments --text --text-file is required\n"
+  },
+  {
+    "args": [
+      "add",
+      "--room",
+      "r",
+      "--from",
+      "a",
+      "--to",
+      "b",
+      "--text",
+      "t",
+      "--text-file",
+      "f"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input add [-h] [--repo REPO] [--json] --room ROOM --from SENDER\n                     --to TO [--mode {steer,next}]\n                     (--text TEXT | --text-file TEXT_FILE)\n                     [--attachment ATTACHMENT]\noms input add: error: argument --text-file: not allowed with argument --text\n"
+  },
+  {
+    "args": [
+      "add",
+      "--room",
+      "r",
+      "--from",
+      "a",
+      "--to",
+      "b",
+      "--mode",
+      "x",
+      "--text",
+      "t"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input add [-h] [--repo REPO] [--json] --room ROOM --from SENDER\n                     --to TO [--mode {steer,next}]\n                     (--text TEXT | --text-file TEXT_FILE)\n                     [--attachment ATTACHMENT]\noms input add: error: argument --mode: invalid choice: 'x' (choose from steer, next)\n"
+  },
+  {
+    "args": [
+      "add",
+      "--room",
+      "r",
+      "--from",
+      "a",
+      "--to",
+      "b",
+      "--text",
+      "t",
+      "--attachment"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input add [-h] [--repo REPO] [--json] --room ROOM --from SENDER\n                     --to TO [--mode {steer,next}]\n                     (--text TEXT | --text-file TEXT_FILE)\n                     [--attachment ATTACHMENT]\noms input add: error: argument --attachment: expected one argument\n"
+  },
+  {
+    "args": [
+      "edit"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input edit [-h] [--repo REPO] [--json]\n                      [--text TEXT | --text-file TEXT_FILE]\n                      [--mode {steer,next}] [--attachment ATTACHMENT]\n                      [--clear-attachments]\n                      id\noms input edit: error: the following arguments are required: id\n"
+  },
+  {
+    "args": [
+      "edit",
+      "i",
+      "--text",
+      "a",
+      "--text-file",
+      "b"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input edit [-h] [--repo REPO] [--json]\n                      [--text TEXT | --text-file TEXT_FILE]\n                      [--mode {steer,next}] [--attachment ATTACHMENT]\n                      [--clear-attachments]\n                      id\noms input edit: error: argument --text-file: not allowed with argument --text\n"
+  },
+  {
+    "args": [
+      "edit",
+      "i",
+      "--mode",
+      "x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input edit [-h] [--repo REPO] [--json]\n                      [--text TEXT | --text-file TEXT_FILE]\n                      [--mode {steer,next}] [--attachment ATTACHMENT]\n                      [--clear-attachments]\n                      id\noms input edit: error: argument --mode: invalid choice: 'x' (choose from steer, next)\n"
+  },
+  {
+    "args": [
+      "move",
+      "a",
+      "--before"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input move [-h] [--repo REPO] [--json] [--before BEFORE] id\noms input move: error: argument --before: expected one argument\n"
+  },
+  {
+    "args": [
+      "show"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input show [-h] [--repo REPO] [--json] id\noms input show: error: the following arguments are required: id\n"
+  },
+  {
+    "args": [
+      "show",
+      "a",
+      "b"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: b\n"
+  },
+  {
+    "args": [
+      "deliver",
+      "i",
+      "--apply=1"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input deliver [-h] [--repo REPO] [--json] [--apply] [--at-boundary]\n                         [--expected-sha256 EXPECTED_SHA256]\n                         id\noms input deliver: error: argument --apply: ignored explicit argument '1'\n"
+  },
+  {
+    "args": [
+      "deliver",
+      "i",
+      "--a"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input deliver [-h] [--repo REPO] [--json] [--apply] [--at-boundary]\n                         [--expected-sha256 EXPECTED_SHA256]\n                         id\noms input deliver: error: ambiguous option: --a could match --apply, --at-boundary\n"
+  },
+  {
+    "args": [
+      "feedback"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input feedback [-h] [--repo REPO] [--json] --batch BATCH --room\n                          ROOM --from SENDER --to TO [--mode {steer,next}]\noms input feedback: error: the following arguments are required: --batch, --room, --from, --to\n"
+  },
+  {
+    "args": [
+      "feedback",
+      "--batch",
+      "h",
+      "--room",
+      "r",
+      "--from",
+      "a"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input feedback [-h] [--repo REPO] [--json] --batch BATCH --room\n                          ROOM --from SENDER --to TO [--mode {steer,next}]\noms input feedback: error: the following arguments are required: --to\n"
+  },
+  {
+    "args": [
+      "list",
+      "--text",
+      "x"
+    ],
+    "exit": 2,
+    "stdout": "",
+    "stderr": "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\noms input: error: unrecognized arguments: --text x\n"
+  },
+  {
+    "args": [
+      "cancel",
+      "--help",
+      "x"
+    ],
+    "exit": 0,
+    "stdout": "usage: oms input cancel [-h] [--repo REPO] [--json] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n",
+    "stderr": ""
+  }
+]

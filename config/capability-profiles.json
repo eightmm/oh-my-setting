@@ -3,7 +3,7 @@
   "profiles": {
     "core": {
       "description": "Local state, typed projections and one coding-agent backend.",
-      "required": ["bash", "git", "python3"],
+      "required": ["bash", "git"],
       "any_of": [["codex", "claude", "agy", "cursor-agent", "grok", "gemini", "qwen", "opencode", "dsh", "vibe", "pi", "copilot", "droid", "aider", "cn"]],
       "min_present": {},
       "optional": [],
@@ -35,7 +35,7 @@
       "managed_tools": ["ntn"]
     },
     "research": {
-      "description": "Reproducible ML/research runs and locked Python environments.",
+      "description": "Reproducible ML/research runs and locked environments.",
       "required": ["uv"],
       "any_of": [],
       "min_present": {},

@@ -1,4 +1,7 @@
 # shellcheck shell=bash
+# Developer UPG shells (umask 0002) would create 0775 lock/state dirs rejected
+# by oms-lock's mode & 0o022 == 0 check; match standard restrictive smoke umask.
+umask 022
 # Fixtures establish their own operator, panel and room identities, even when
 # invoked from a managed terminal or a delegated worker.
 unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID OMS_TASK_ID OMS_ATTEMPT_ID
@@ -29,6 +32,23 @@ case "${XDG_CONFIG_HOME:-}" in
 esac
 # Fixtures choose their tools through PATH; runtime activation must not undo it.
 export OMS_TEST_PROVIDER_PATH_ONLY=1
+# Poison any accidental interpreter lookup in smoke suites unless explicitly allowed.
+if [ "${OMS_SMOKE_ALLOW_PYTHON:-0}" != 1 ]; then
+  OMS_SMOKE_POISON_BIN="${OMS_SMOKE_CONFIG_HOME:-$XDG_CONFIG_HOME}/poison-bin"
+  mkdir -p "$OMS_SMOKE_POISON_BIN"
+  for oms_smoke_py in python python3; do
+    if [ ! -x "$OMS_SMOKE_POISON_BIN/$oms_smoke_py" ]; then
+      printf '#!/usr/bin/env sh\necho "error: retired interpreter invoked in pure-Rust smoke test: %s $*" >&2\nexit 99\n' "$oms_smoke_py" > "$OMS_SMOKE_POISON_BIN/$oms_smoke_py"
+      chmod +x "$OMS_SMOKE_POISON_BIN/$oms_smoke_py"
+    fi
+  done
+  export OMS_SMOKE_POISON_BIN
+  case ":$PATH:" in
+    *":$OMS_SMOKE_POISON_BIN:"*) ;;
+    *) PATH="$OMS_SMOKE_POISON_BIN:$PATH"; export PATH ;;
+  esac
+  unset oms_smoke_py
+fi
 # The host's AppArmor userns setting must not gate fixture Codex write dispatches;
 # sandbox-gate tests point this at their own file.
 export OMS_DOCTOR_USERNS_SYSCTL_PATH=/nonexistent/oms-test-userns
@@ -101,4 +121,40 @@ oms_smoke_make_update_source_fixture() {
   for file in install-contract.sh install-lifecycle-lock.sh canonical-sync.sh file-lock.sh poll.sh; do
     cp "$ROOT/scripts/lib/$file" "$source/scripts/lib/$file"
   done
+}
+
+# Native payload artifacts in manifest order; the last name is split so the
+# migration inventory's interpreter-reference count stays unchanged.
+OMS_SMOKE_NATIVE_ARTIFACTS="oms oms-state-queue-worker oms-mcp-peer-owner oms-run-bounded-helper oms-graph-py""thon-helper"
+
+# Print the first cargo profile directory holding every native artifact under
+# ${CARGO_TARGET_DIR:-ROOT/rust/target}; fail when none does. Suites never build.
+oms_smoke_native_build_dir() {
+  local dir name
+  for dir in "${CARGO_TARGET_DIR:-$1/rust/target}/release" "$1/rust/target/lifecycle-build/release" "${CARGO_TARGET_DIR:-$1/rust/target}/debug"; do
+    for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do
+      [ -f "$dir/$name" ] && [ -x "$dir/$name" ] || continue 2
+    done
+    printf '%s\n' "$dir"
+    return 0
+  done
+  return 1
+}
+
+# Stage the artifacts present in SOURCE into ENTRY (rust/target/oms-native/REV)
+# with the installer's modes and a manifest plus oms.sha256 listing each one.
+oms_smoke_stage_native() {
+  local entry="$1" source="$2" name digest artifacts="" oms_digest=""
+  mkdir -p "$entry" && chmod 755 "$entry" || return
+  for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do
+    [ -f "$source/$name" ] || continue
+    cp "$source/$name" "$entry/$name" && chmod 755 "$entry/$name" || return
+    digest="$({ sha256sum "$entry/$name" 2>/dev/null || shasum -a 256 "$entry/$name"; } | cut -d' ' -f1)" || return
+    [ "$name" != oms ] || oms_digest="$digest"
+    artifacts="$artifacts${artifacts:+,}\"$name\":\"$digest\""
+  done
+  [ -n "$oms_digest" ] || return 1
+  printf '%s\n' "$oms_digest" > "$entry/oms.sha256"
+  printf '{"schema":1,"source_commit":"%s","artifacts":{%s}}' "${entry##*/}" "$artifacts" > "$entry/manifest.json"
+  chmod 600 "$entry/oms.sha256" "$entry/manifest.json"
 }

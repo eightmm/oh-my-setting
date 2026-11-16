@@ -1,0 +1,107 @@
+Usage: agent-memory.sh [options] COMMAND [TEXT]
+
+Maintain harness-owned memory shared by Codex, Claude Code, and Antigravity.
+Project memory defaults to REPO/.oms/memory/shared.md. Global memory defaults to
+~/.oh-my-setting/local/agent-memory.md.
+
+Files:
+  shared.md   Human-readable source log; not sent to providers by default.
+              Append-only: correct a note by appending another, never by
+              editing or trimming it. The worker-authority guard enforces this.
+  pins.md     Short high-signal notes always eligible for provider context.
+              Append-only, same contract.
+  summary.md  Compact recent notes generated from shared.md; regenerated in
+              place by `compact`, so it is derived state, not a record.
+  memory.sqlite3
+              Derived project index for exact search and ranked FTS recall.
+              Existing Markdown logs are imported automatically and remain the
+              append-only source of truth.
+
+Options:
+  --repo PATH       Project repo/directory for project memory. Default: PWD.
+  --global          Use global harness memory instead of project memory.
+  --file PATH       Use an explicit shared memory source file (except redact).
+  --agent NAME      Agent label for appended notes / search author filter.
+  --text TEXT       Note text for append/pin; query for search/recall.
+  --stdin           Read append/pin note from stdin.
+  --full            context: emit full source tail instead of compact view.
+  --limit N         Limit search/recall results. Search is unlimited by default;
+                    recall defaults to 20.
+  --json            search/recall: emit JSONL with provenance metadata;
+                    health: emit one schema-1 diagnostic object;
+                    sources: emit one schema-1 inventory object.
+  --source-file PATH
+                    append: cite a tracked file from the current project HEAD.
+                    Cited notes stay out of compact provider context and are
+                    revalidated whenever they are searched or recalled.
+  --source-line N   append: 1-based line paired with --source-file.
+  --paths GLOB[,GLOB]
+                    append: scope the note to repository-relative paths (`**`
+                    crosses directories). A scoped note stays out of the
+                    compact summary and out of injected recall unless the work's
+                    paths match; plain recall and search still find it.
+  --target PATH[,PATH]
+                    recall: the paths being worked on. Notes scoped to a
+                    matching path rank first; notes scoped elsewhere are left out.
+  --id ID           supersede/retire/redact: target event_id from search/recall JSON.
+  --apply           redact: remove the text. Without it redact only reports.
+  --reason TEXT     retire: reason for retirement.
+  --all-repos       recall: rank the query in every repository registered with
+                    `oms tick`, read-only (each index as last synchronized; no
+                    recall receipt). --limit is per repository (default 5).
+  --include-superseded search/recall: include superseded and retired notes, marked.
+  --include-stale   search/recall: include cited notes whose source can no
+                    longer be verified. Default recall omits them.
+  -h, --help        Show help.
+
+Commands:
+  path              Print the resolved memory file path.
+  db-path           Print the derived SQLite database path without creating it.
+  show              Print source memory if it exists. Default.
+  context           Print provider context view (compact by default).
+  init              Create the source memory file if missing.
+  append            Append a source note and refresh summary.md.
+  pin               Append a short note to pins.md.
+  supersede         Append a replacement note linked to --id.
+  retire            Append a retirement record linked to --id.
+  redact            Remove the text of the entry --id from shared.md or pins.md
+                    and leave a fixed tombstone under its ID, then drop and
+                    rebuild summary.md and the index. The one declared
+                    exception to append-only, for text that should never have
+                    been recorded. Dry run unless --apply; parent only.
+                    Copies elsewhere (provider transcripts, handoffs, backups)
+                    are not touched.
+  sources           List the instruction and memory files each provider CLI
+                    keeps for this repository: names, sizes, counts and times
+                    only. No file is opened and nothing is written.
+  promote --id ID --global [--apply]
+                    Copy one project note to global memory (a dry run without
+                    --apply; parent only). The text is rescanned after machine
+                    paths are normalized; the copy cites the event ID only.
+  graduate --id ID --to AGENTS.md|PROJECT.md
+                    Print, as a diff, how the note would read in a checked-in
+                    document. Never writes; retire the note after the edit lands.
+  compact           Regenerate summary.md from source memory.
+  search PATTERN    Print memory + pins entries matching PATTERN (case-
+                    insensitive substring over header and body) from SQLite;
+                    --agent filters by the entry's author.
+  recall QUERY      Rank memory + pins with local SQLite FTS; --agent filters
+                    by author. No model call or embedding download is used.
+  health            Diagnose source/index consistency without creating,
+                    synchronizing, repairing, or otherwise changing either.
+  rebuild           Recreate the derived database from the Markdown sources.
+  import --from serena|PATH [--apply --select N,N|--all] [--json]
+                    List candidate lines from Markdown memory written elsewhere
+                    (a file, a directory, or .serena/memories); dry run unless
+                    --apply, which appends the chosen ones as kind=imported.
+  hygiene [--cold-days N] [--limit N] [--json]
+                    Read-only report: notes never recalled (or not for N days,
+                    default 30), notes already worded in AGENTS.md/CLAUDE.md, and
+                    a Claude auto-memory index longer than its load cap
+                    (OMS_MEMORY_INDEX_CAP_LINES/_BYTES override; 0 turns off).
+                    Never edits, retires or synchronizes anything.
+  review [--kind task-close|distill|imported|correction] [--json]
+         [--accept ID | --retire ID --reason TEXT | --reject ID]
+                    List notes that reached shared memory unread (task-close
+                    promotions, journal distillation, imports) and captured
+                    corrections; accept or turn one down. Project memory only.

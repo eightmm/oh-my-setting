@@ -1,33 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Show which version of a third-party package this project pins and has
-# installed, with the documentation URLs the package itself declares. Reads
-# root lockfiles and installed metadata only: nothing is fetched, imported
-# or run, and nothing is written.
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Native OMS entrypoint for deps.
 
-case "${1:-}" in
-  ""|-h|--help)
-    cat <<'EOF'
-Usage: oms deps show NAME [--repo PATH] [--json]
-
-Print a card for one third-party package: the version each root lockfile
-pins (requirements*.txt, constraints*.txt, uv.lock, poetry.lock, pdm.lock,
-Pipfile.lock, environment*.yml, package-lock.json, Cargo.lock), the range
-pyproject.toml declares, and for Python the installed version, location and
-declared URLs from the package's own METADATA in ./.venv, ./venv,
-VIRTUAL_ENV or CONDA_PREFIX.
-
-Read-only. No interpreter of the project is started, no package is imported
-and no URL is fetched; URLs are shown as the package declared them, without
-credentials or query strings. Exit 0 when something was found, 1 when
-nothing was, 2 on a bad request.
-EOF
-    [ -n "${1:-}" ] || exit 2
-    exit 0
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
     ;;
 esac
 
-export PYTHONDONTWRITEBYTECODE=1
-exec python3 -I "$ROOT/scripts/lib/deps_card.py" "$@"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for deps; stage with cargo or run oms doctor --repair" >&2
+  exit 2
+fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "deps" "$@" || exit $?
+echo "error: native payload unavailable for deps (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

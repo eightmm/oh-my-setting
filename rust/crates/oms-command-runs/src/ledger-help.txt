@@ -1,0 +1,27 @@
+Usage: oms run-ledger [options] -- <command...>
+       oms run-ledger list [--json] [N]
+       oms run-ledger top --metric KEY [--min|--max] [--by-group] [--mixed] [--all] [--file PATH] [N]
+       oms run-ledger table [--metric KEY] [--format md|tsv|tex] [--min|--max] [--mixed] [--all] [--file PATH]
+
+Run a command and append to docs/EXPERIMENTS.jsonl; preserve its output and exit.
+--note TEXT, --file PATH, --metrics PATH, --seed N, --group LABEL
+--no-gate requires --reason TEXT when executable scripts/check.sh applies.
+The default pre-flight is bash scripts/check.sh fast; ml-smoke is selected
+when only that dispatch exists. OMS_RUN_LEDGER_CHECK_MODE selects either.
+OMS_RUN_LEDGER_GATE=0 and OMS_RUN_LEDGER_GATE_REASON provide the same override.
+Gate decisions: passed, skipped (recorded reason), recorded, none.
+Commands and notes are recorded verbatim; sensitive-looking content warns.
+Metrics keep at most 50 finite scalar fields, 200 characters per key/string,
+with string controls removed. OMS_METRICS_MAX_BYTES defaults to 65536.
+A metric-contract.json beside the ledger records direction and evaluation
+provenance. top ranks finite numeric successful runs; --all includes failures.
+--mixed overrides contract/data filters with a warning; distinct input scopes
+never pool seed groups. --by-group reports mean, stdev and bootstrap ci95.
+One-seed groups are unranked. Replicate reruns retain the last qualifying row.
+table prints md, tsv or tex with 4 significant digits; without --metric it
+prints each declared metric. Final-split counts are advisory only.
+list defaults to 10 physical lines; --json emits a schema-1 runs object.
+Empty rankings exit 3; incomparable rankings exit 4; usage errors exit 2.
+Research launches durably append a started row and a final row sharing an id.
+Captured capsule companions retain their pre-command identity and contract.
+sbatch stdout streams live; only unqualified local job ids are recorded.

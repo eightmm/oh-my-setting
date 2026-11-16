@@ -1,0 +1,13 @@
+[package]
+name = "oms-failure"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+oms-json = { path = "../oms-json" }
+regex = "=1.13.1"
+unicode-general-category = "=0.6.0"
+
+[lints.rust]
+unsafe_code = "forbid"

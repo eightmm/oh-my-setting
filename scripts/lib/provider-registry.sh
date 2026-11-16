@@ -187,10 +187,11 @@ oms_provider_run_bounded() { # SECONDS OUTPUT COMMAND...
     timeout --kill-after=1 "$seconds" "$@" > "$output" 2>&1
   elif command -v gtimeout >/dev/null 2>&1 && gtimeout --version >/dev/null 2>&1; then
     gtimeout --kill-after=1 "$seconds" "$@" > "$output" 2>&1
+  elif [ -n "${OMS_NATIVE_BINARY:-}" ] && [ -x "${OMS_NATIVE_BINARY%/*}/oms-run-bounded-helper" ]; then
+    helper="${OMS_NATIVE_BINARY%/*}/oms-run-bounded-helper"
+    "$helper" "${seconds}s" 1s provider-probe "$@" > "$output" 2>&1
   else
-    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/run-bounded.py"
-    command -v python3 >/dev/null 2>&1 && [ -f "$helper" ] || return 127
-    python3 "$helper" "${seconds}s" 1s provider-probe "$@" > "$output" 2>&1
+    "$@" > "$output" 2>&1
   fi
 }
 

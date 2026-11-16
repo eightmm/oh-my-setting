@@ -1,0 +1,55 @@
+[package]
+name = "oms"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+oms-bootstrap = { path = "../oms-bootstrap" }
+oms-command-autonomy = { path = "../oms-command-autonomy" }
+oms-command-graph = { path = "../oms-command-graph" }
+oms-command-hooks = { path = "../oms-command-hooks" }
+oms-command-journal = { path = "../oms-command-journal" }
+oms-command-landing = { path = "../oms-command-landing" }
+oms-command-lifecycle = { path = "../oms-command-lifecycle" }
+oms-command-panel = { path = "../oms-command-panel" }
+oms-command-peer = { path = "../oms-command-peer" }
+oms-command-plan = { path = "../oms-command-plan" }
+oms-command-providers-skills = { path = "../oms-command-providers-skills" }
+oms-command-room = { path = "../oms-command-room" }
+oms-command-runs = { path = "../oms-command-runs" }
+oms-command-slurm-submit = { path = "../oms-command-slurm-submit" }
+oms-command-state = { path = "../oms-command-state" }
+oms-command-task = { path = "../oms-command-task" }
+oms-lock = { path = "../oms-lock" }
+oms-mcp-server = { path = "../oms-mcp-server" }
+oms-panel-core = { path = "../oms-panel-core" }
+oms-reference = { path = "../oms-reference" }
+oms-runtime = { path = "../oms-runtime" }
+oms-supervisor = { path = "../oms-supervisor" }
+oms-command-agent-role = { path = "../oms-command-agent-role" }
+oms-command-attempt-bundle = { path = "../oms-command-attempt-bundle" }
+oms-command-experiment = { path = "../oms-command-experiment" }
+oms-command-input = { path = "../oms-command-input" }
+oms-command-job-digest = { path = "../oms-command-job-digest" }
+oms-command-memory = { path = "../oms-command-memory" }
+oms-command-operations = { path = "../oms-command-operations" }
+oms-command-slurm-lint = { path = "../oms-command-slurm-lint" }
+oms-command-telemetry = { path = "../oms-command-telemetry" }
+oms-command-failure = { path = "../oms-command-failure" }
+oms-context = { path = "../oms-context" }
+oms-context-report = { path = "../oms-context-report" }
+oms-context-source = { path = "../oms-context-source" }
+oms-json = { path = "../oms-json" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"
+signal-hook = { version = "=0.3.18", default-features = false }
+users = { version = "=0.11.0", default-features = false }
+rustix = { version = "=1.1.6", features = ["fs"] }
+unicode-general-category = "=0.6.0"
+[dev-dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["signal", "fs"] }

@@ -28,48 +28,22 @@
 - During development, run affected checks; do not run a full gate for every
   edit or local commit. For committed ranges use `scripts/check.sh --affected`
   with `--changed-from BASE --changed-to HEAD`: docs use reference checks
-  only, alone or beside code; a test-only change runs only its tests (a
-  smoke file, one operator section, the changed `test_*` functions of
-  `tests/scripts-smoke.sh`, or that file whole when a helper changed);
-  positive graph evidence selects tests for source; critical/uncertain changes
+  only, alone or beside code; critical/uncertain changes
   (`scripts/lib/critical-paths.sh`: lifecycle, hooks/guards, scrubber,
-  permission policy, selector, workflows) use full coverage, and
-  `OMS_AFFECTED_FULL=1` forces it. Skill/template/role prose uses its bounded contract
-  suite (role edits add the role-injection invariant); executable templates and permission policy stay broad.
+  permission policy, selector, workflows, core Rust crates) use full coverage,
+  and `OMS_AFFECTED_FULL=1` forces it. Skill/template/role prose uses its
+  bounded contract suite (`skill-manifest`); executable templates stay broad.
 - Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
   and pushes only while HEAD and the tracked tree remain unchanged, without a
-  duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`:
-  a full selection runs lint and the quick lane, never CI's full lanes, plus
-  operator-tools when tier-routing inputs change, with every registry provider
-  CLI hidden from PATH.
-  Installation needs successful CI for that same SHA plus full proof. The
-  default proof is a CI run whose jobs executed the full selection for exactly
-  that SHA: the push run when it was full, otherwise a dispatched `test.yml`
-  run (`gh workflow run test.yml --ref TARGET`, always the full selection;
-  `oms land --ci-full` dispatches it once, plain `oms land --wait` only waits
-  for one). The option is a full local gate
-  (`--gate 'bash scripts/check.sh --parallel'`). Affected-only gates and runs
-  push but never install; the receipt's `update.authority` names the proof.
-  Direct pushes keep the full hook unless the destination requires CI's
-  risk-based `gate`; only then may local quick feedback replace it. Workflow
-  presence alone is not branch protection.
-- CI scopes PRs and main pushes alike. Full selections keep Linux lint, focused,
-  smoke, operator-tools (4 shards) and copy lifecycle coverage. Core lifecycle changes (install, update,
-  uninstall, link, doctor, Python runtime, platform/install/lock libraries,
-  workflows) and weekly/manual runs cover native macOS lifecycle with Homebrew
-  Bash 5 and BSD userland fixtures; every changed Python file and every full
-  selection run Python 3.11 compatibility.
-  Only plan-authorized skips pass the stable
-  gate. CI remains authoritative. Smoke shards and focused lanes balance by
-  measured cost (`# smoke-weight:` lines, focused registration order, operator
-  `SECTIONS`/`DISPATCH_SECONDS` weights); refresh from CI timings. Focused
-  lanes skip operator-tools (`--without-operator-tools`, position kept); the
-  `operator-tools (I/4)` jobs run it via `check.sh --operator-only --shard`.
-- CI runs Python 3.11; a developer machine may default to newer. Before
-  pushing, run changed Python and the targeted tests once with 3.11 first on
-  PATH. Known difference: with `parse_known_args`, argparse hands positional
-  words that follow an option back as unknown.
+  duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`.
+  Installation needs successful CI for that same SHA plus full proof (`gate`
+  + `lint` + `focused` + `native (ubuntu-latest, copy)`, with optional
+  `rust (ubuntu-24.04)` / `rust (macos-latest)` / `native (macos-latest, auto)`).
+- CI scopes PRs and main pushes alike using pure-Rust jobs (Linux lint, Rust
+  fmt/clippy/tests on Ubuntu and macOS, pure-Bash focused E2E suites, and
+  copy/macOS install lifecycle tests) with pinned Rust `1.99.1`.
+  Only plan-authorized skips pass the stable gate. CI remains authoritative.
 - Every tracked file passes the outbound scrubber
-  (`test_scrubber_passes_harness_sources`): in fixtures, split key-shaped
+  (`scrubber_passes_tracked_repository_sources`): in fixtures, split key-shaped
   strings and literal home paths across quotes, and avoid identifiers that read
   as a credential assignment.

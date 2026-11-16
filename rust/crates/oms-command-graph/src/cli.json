@@ -1,0 +1,3274 @@
+{
+  "prog": "oms graph",
+  "help": "usage: oms graph [-h] [--repo REPO] [--pretty] [--version] {project,exec} ...\n\nProject graph and execution graph over the existing OMS control plane.\n\npositional arguments:\n  {project,exec}\n    project       structural code graph: build, query, blast radius, context\n                  packs\n    exec          advanced opt-in execution graph; ordinary work uses existing\n                  plans/autopilot\n\noptions:\n  -h, --help      show this help message and exit\n  --repo REPO     project repository or directory; later values override\n                  earlier ones\n  --pretty        pretty-print JSON\n  --version       show program's version number and exit\n",
+  "usage": "usage: oms graph [-h] [--repo REPO] [--pretty] [--version] {project,exec} ...\n",
+  "options": [
+    {
+      "names": [
+        "-h",
+        "--help"
+      ],
+      "dest": "help",
+      "default": null,
+      "required": false,
+      "nargs": 0,
+      "type": "str",
+      "action": "help",
+      "choices": [],
+      "mutex": null
+    },
+    {
+      "names": [
+        "--repo"
+      ],
+      "dest": "repo",
+      "default": ".",
+      "required": false,
+      "nargs": null,
+      "type": "str",
+      "action": "store",
+      "choices": [],
+      "mutex": null
+    },
+    {
+      "names": [
+        "--pretty"
+      ],
+      "dest": "pretty",
+      "default": false,
+      "required": false,
+      "nargs": 0,
+      "type": "str",
+      "action": "flag",
+      "choices": [],
+      "mutex": null
+    },
+    {
+      "names": [
+        "--version"
+      ],
+      "dest": "version",
+      "default": null,
+      "required": false,
+      "nargs": 0,
+      "type": "str",
+      "action": "version",
+      "choices": [],
+      "mutex": null
+    }
+  ],
+  "children": {
+    "project": {
+      "prog": "oms graph project",
+      "help": "usage: oms graph project [-h] [--repo REPO] [--pretty]\n                         {build,ensure,check,map,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n                         ...\n\nStructural code graph over --repo. State lives in <repo>/.oms/project-graph/\nunless OMS_PROJECT_GRAPH_STATE names an absolute directory to use instead.\nReaders build or refresh it themselves unless --no-refresh or\nOMS_GRAPH_AUTOBUILD=0 says otherwise.\n\npositional arguments:\n  {build,ensure,check,map,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n    api                 signatures and summaries for one indexed file, without\n                        bodies\n    search              exhaustive case-insensitive literal search grouped by\n                        graph symbol\n    symbol              one symbol's definitions, graph references and\n                        unlinked text matches, in separate zones\n    coupling            paths that change together in Git history;\n                        structural=no marks coupling the parsers cannot see\n    unreferenced        symbols with no incoming graph edge; review\n                        candidates, not proof of dead code\n    affected            fail-open affected-test plan for an exact Git range\n    impact              one orientation brief for a Git range: affected tests,\n                        dependents, co-change partners left out, CODEOWNERS\n\n    benchmark           opt-in history recall snapshots and comparison\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n",
+      "usage": "usage: oms graph project [-h] [--repo REPO] [--pretty]\n                         {build,ensure,check,map,find,api,search,symbol,neighbors,trace,blast,coupling,unreferenced,affected,impact,context,benchmark}\n                         ...\n",
+      "options": [
+        {
+          "names": [
+            "-h",
+            "--help"
+          ],
+          "dest": "help",
+          "default": null,
+          "required": false,
+          "nargs": 0,
+          "type": "str",
+          "action": "help",
+          "choices": [],
+          "mutex": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "dest": "repo",
+          "default": null,
+          "required": false,
+          "nargs": null,
+          "type": "str",
+          "action": "store",
+          "choices": [],
+          "mutex": null
+        },
+        {
+          "names": [
+            "--pretty"
+          ],
+          "dest": "pretty",
+          "default": null,
+          "required": false,
+          "nargs": 0,
+          "type": "str",
+          "action": "flag",
+          "choices": [],
+          "mutex": null
+        }
+      ],
+      "children": {
+        "build": {
+          "prog": "oms graph project build",
+          "help": "usage: oms graph project build [-h] [--repo REPO] [--pretty] [--force]\n                               [--include INCLUDE] [--exclude EXCLUDE]\n                               [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --force\n  --include INCLUDE\n  --exclude EXCLUDE\n  --max-bytes MAX_BYTES\n  --json\n",
+          "usage": "usage: oms graph project build [-h] [--repo REPO] [--pretty] [--force]\n                               [--include INCLUDE] [--exclude EXCLUDE]\n                               [--max-bytes MAX_BYTES] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--force"
+              ],
+              "dest": "force",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--include"
+              ],
+              "dest": "include",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--exclude"
+              ],
+              "dest": "exclude",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-bytes"
+              ],
+              "dest": "max_bytes",
+              "default": 2097152,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "ensure": {
+          "prog": "oms graph project ensure",
+          "help": "usage: oms graph project ensure [-h] [--repo REPO] [--pretty]\n                                [--max-files MAX_FILES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --max-files MAX_FILES\n  --json\n",
+          "usage": "usage: oms graph project ensure [-h] [--repo REPO] [--pretty]\n                                [--max-files MAX_FILES] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-files"
+              ],
+              "dest": "max_files",
+              "default": 20000,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "check": {
+          "prog": "oms graph project check",
+          "help": "usage: oms graph project check [-h] [--repo REPO] [--pretty] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO  project repository or directory; later values override earlier\n               ones\n  --pretty     pretty-print JSON\n  --json\n",
+          "usage": "usage: oms graph project check [-h] [--repo REPO] [--pretty] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "map": {
+          "prog": "oms graph project map",
+          "help": "usage: oms graph project map [-h] [--repo REPO] [--pretty] [--include-tests]\n                             [--limit LIMIT] [--depth DEPTH] [--json]\n                             [--brief] [--signatures] [--task TASK]\n                             [--max-bytes MAX_BYTES] [--max-files MAX_FILES]\n                             [--entry-path PATH]\n                             [--html-fragment ABSOLUTE_PATH | --ui-model]\n                             [--no-refresh]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --include-tests       keep test files in the overview (dropped by default)\n  --limit LIMIT         maximum nodes in a visual output (1-200)\n  --depth DEPTH         neighbor depth in the HTML overview (0-4)\n  --json\n  --brief               print the cached orientation brief (not combinable\n                        with --json or visual outputs)\n  --signatures          with --task: the files ranked for the task as\n                        extracted signatures, inside --max-bytes (no bodies,\n                        nothing written)\n  --task TASK           task text ranked the same way as `context` (requires\n                        --signatures)\n  --max-bytes MAX_BYTES\n                        byte budget of the signature text (256-262144)\n  --max-files MAX_FILES\n                        ranked files considered by --signatures (1-200)\n  --entry-path PATH     with --signatures: anchor to an exact repo-relative\n                        file; repeatable\n  --html-fragment ABSOLUTE_PATH\n                        write a bounded interactive HTML fragment for an agent\n                        UI\n  --ui-model            emit the bounded graph data consumed by an MCP Apps\n                        renderer\n  --no-refresh          read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project map [-h] [--repo REPO] [--pretty] [--include-tests]\n                             [--limit LIMIT] [--depth DEPTH] [--json]\n                             [--brief] [--signatures] [--task TASK]\n                             [--max-bytes MAX_BYTES] [--max-files MAX_FILES]\n                             [--entry-path PATH]\n                             [--html-fragment ABSOLUTE_PATH | --ui-model]\n                             [--no-refresh]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--include-tests"
+              ],
+              "dest": "include_tests",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 100,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--depth"
+              ],
+              "dest": "depth",
+              "default": 2,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--brief"
+              ],
+              "dest": "brief",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--signatures"
+              ],
+              "dest": "signatures",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--task"
+              ],
+              "dest": "task",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-bytes"
+              ],
+              "dest": "max_bytes",
+              "default": 8192,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-files"
+              ],
+              "dest": "max_files",
+              "default": 12,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--entry-path"
+              ],
+              "dest": "entry_path",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--html-fragment"
+              ],
+              "dest": "html_fragment",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": 0
+            },
+            {
+              "names": [
+                "--ui-model"
+              ],
+              "dest": "ui_model",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": 0
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "find": {
+          "prog": "oms graph project find",
+          "help": "usage: oms graph project find [-h] [--repo REPO] [--pretty] [--kind KIND]\n                              [--limit LIMIT] [--include-tests] [--json]\n                              [--no-refresh]\n                              query\n\npositional arguments:\n  query\n\noptions:\n  -h, --help       show this help message and exit\n  --repo REPO      project repository or directory; later values override\n                   earlier ones\n  --pretty         pretty-print JSON\n  --kind KIND\n  --limit LIMIT\n  --include-tests  rank test files too (dropped by default unless --kind test)\n  --json\n  --no-refresh     read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project find [-h] [--repo REPO] [--pretty] [--kind KIND]\n                              [--limit LIMIT] [--include-tests] [--json]\n                              [--no-refresh]\n                              query\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "query",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--kind"
+              ],
+              "dest": "kind",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 20,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--include-tests"
+              ],
+              "dest": "include_tests",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "api": {
+          "prog": "oms graph project api",
+          "help": "usage: oms graph project api [-h] [--repo REPO] [--pretty] [--limit LIMIT]\n                             [--json] [--no-refresh]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help     show this help message and exit\n  --repo REPO    project repository or directory; later values override\n                 earlier ones\n  --pretty       pretty-print JSON\n  --limit LIMIT\n  --json\n  --no-refresh   read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project api [-h] [--repo REPO] [--pretty] [--limit LIMIT]\n                             [--json] [--no-refresh]\n                             path\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "path",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 500,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "search": {
+          "prog": "oms graph project search",
+          "help": "usage: oms graph project search [-h] [--repo REPO] [--pretty] [--limit LIMIT]\n                                [--ranked] [--json] [--no-refresh]\n                                query\n\npositional arguments:\n  query\n\noptions:\n  -h, --help     show this help message and exit\n  --repo REPO    project repository or directory; later values override\n                 earlier ones\n  --pretty       pretty-print JSON\n  --limit LIMIT\n  --ranked       treat the query as words and rank the symbol blocks about\n                 them (BM25 over bodies, comments and identifiers)\n  --json\n  --no-refresh   read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project search [-h] [--repo REPO] [--pretty] [--limit LIMIT]\n                                [--ranked] [--json] [--no-refresh]\n                                query\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "query",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 200,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--ranked"
+              ],
+              "dest": "ranked",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "symbol": {
+          "prog": "oms graph project symbol",
+          "help": "usage: oms graph project symbol [-h] [--repo REPO] [--pretty] [--limit N]\n                                [--json]\n                                name\n\npositional arguments:\n  name         symbol name, qualified name or node id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO  project repository or directory; later values override earlier\n               ones\n  --pretty     pretty-print JSON\n  --limit N    keep at most N rows per zone (1-500); the rest is counted in\n               omitted\n  --json\n",
+          "usage": "usage: oms graph project symbol [-h] [--repo REPO] [--pretty] [--limit N]\n                                [--json]\n                                name\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "name",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 40,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "neighbors": {
+          "prog": "oms graph project neighbors",
+          "help": "usage: oms graph project neighbors [-h] [--repo REPO] [--pretty]\n                                   [--relation RELATION]\n                                   [--direction {in,out,both}] [--json]\n                                   [--no-refresh]\n                                   node\n\npositional arguments:\n  node\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --relation RELATION\n  --direction {in,out,both}\n  --json\n  --no-refresh          read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project neighbors [-h] [--repo REPO] [--pretty]\n                                   [--relation RELATION]\n                                   [--direction {in,out,both}] [--json]\n                                   [--no-refresh]\n                                   node\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "node",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--relation"
+              ],
+              "dest": "relation",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--direction"
+              ],
+              "dest": "direction",
+              "default": "both",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [
+                "in",
+                "out",
+                "both"
+              ],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "trace": {
+          "prog": "oms graph project trace",
+          "help": "usage: oms graph project trace [-h] [--repo REPO] [--pretty]\n                               [--direction {in,out}] [--depth DEPTH] [--json]\n                               [--no-refresh]\n                               node\n\npositional arguments:\n  node\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --direction {in,out}\n  --depth DEPTH\n  --json\n  --no-refresh          read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project trace [-h] [--repo REPO] [--pretty]\n                               [--direction {in,out}] [--depth DEPTH] [--json]\n                               [--no-refresh]\n                               node\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "node",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--direction"
+              ],
+              "dest": "direction",
+              "default": "out",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [
+                "in",
+                "out"
+              ],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--depth"
+              ],
+              "dest": "depth",
+              "default": 2,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "blast": {
+          "prog": "oms graph project blast",
+          "help": "usage: oms graph project blast [-h] [--repo REPO] [--pretty] [--base BASE]\n                               [--path PATH] [--depth DEPTH] [--limit N]\n                               [--json] [--no-refresh]\n\noptions:\n  -h, --help     show this help message and exit\n  --repo REPO    project repository or directory; later values override\n                 earlier ones\n  --pretty       pretty-print JSON\n  --base BASE\n  --path PATH\n  --depth DEPTH\n  --limit N      keep at most N dependents, files, tests per list in JSON (0 =\n                 all; the text view is never cut)\n  --json\n  --no-refresh   read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project blast [-h] [--repo REPO] [--pretty] [--base BASE]\n                               [--path PATH] [--depth DEPTH] [--limit N]\n                               [--json] [--no-refresh]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--base"
+              ],
+              "dest": "base",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--path"
+              ],
+              "dest": "path",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--depth"
+              ],
+              "dest": "depth",
+              "default": 3,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 0,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "coupling": {
+          "prog": "oms graph project coupling",
+          "help": "usage: oms graph project coupling [-h] [--repo REPO] [--pretty] [--path PATH]\n                                  [--commits COMMITS]\n                                  [--max-changeset MAX_CHANGESET]\n                                  [--min-shared MIN_SHARED]\n                                  [--min-degree MIN_DEGREE] [--limit LIMIT]\n                                  [--json] [--no-refresh]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --path PATH           keep pairs touching this path (repeatable)\n  --commits COMMITS     history window, newest first\n  --max-changeset MAX_CHANGESET\n                        skip commits touching more files than this\n  --min-shared MIN_SHARED\n                        minimum commits a pair shared\n  --min-degree MIN_DEGREE\n                        minimum coupling degree, percent of average revisions\n  --limit LIMIT\n  --json\n  --no-refresh          read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project coupling [-h] [--repo REPO] [--pretty] [--path PATH]\n                                  [--commits COMMITS]\n                                  [--max-changeset MAX_CHANGESET]\n                                  [--min-shared MIN_SHARED]\n                                  [--min-degree MIN_DEGREE] [--limit LIMIT]\n                                  [--json] [--no-refresh]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--path"
+              ],
+              "dest": "path",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--commits"
+              ],
+              "dest": "commits",
+              "default": 500,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-changeset"
+              ],
+              "dest": "max_changeset",
+              "default": 50,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--min-shared"
+              ],
+              "dest": "min_shared",
+              "default": 5,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--min-degree"
+              ],
+              "dest": "min_degree",
+              "default": 30,
+              "required": false,
+              "nargs": null,
+              "type": "float",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 40,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "unreferenced": {
+          "prog": "oms graph project unreferenced",
+          "help": "usage: oms graph project unreferenced [-h] [--repo REPO] [--pretty]\n                                      [--limit LIMIT] [--include-tests]\n                                      [--json] [--no-refresh]\n\noptions:\n  -h, --help       show this help message and exit\n  --repo REPO      project repository or directory; later values override\n                   earlier ones\n  --pretty         pretty-print JSON\n  --limit LIMIT    0 = all\n  --include-tests\n  --json\n  --no-refresh     read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project unreferenced [-h] [--repo REPO] [--pretty]\n                                      [--limit LIMIT] [--include-tests]\n                                      [--json] [--no-refresh]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 100,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--include-tests"
+              ],
+              "dest": "include_tests",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "affected": {
+          "prog": "oms graph project affected",
+          "help": "usage: oms graph project affected [-h] [--repo REPO] [--pretty] --base BASE\n                                  [--head HEAD] [--depth DEPTH]\n                                  [--guard GUARD] [--runnable RUNNABLE]\n                                  [--json] [--no-refresh]\n\noptions:\n  -h, --help           show this help message and exit\n  --repo REPO          project repository or directory; later values override\n                       earlier ones\n  --pretty             pretty-print JSON\n  --base BASE\n  --head HEAD\n  --depth DEPTH        reverse dependency depth; 0 follows the complete\n                       closure\n  --guard GUARD        additional always-full path glob\n  --runnable RUNNABLE  additional runnable test path glob\n  --json\n  --no-refresh         read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project affected [-h] [--repo REPO] [--pretty] --base BASE\n                                  [--head HEAD] [--depth DEPTH]\n                                  [--guard GUARD] [--runnable RUNNABLE]\n                                  [--json] [--no-refresh]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--base"
+              ],
+              "dest": "base",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--head"
+              ],
+              "dest": "head",
+              "default": "HEAD",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--depth"
+              ],
+              "dest": "depth",
+              "default": 0,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--guard"
+              ],
+              "dest": "guard",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--runnable"
+              ],
+              "dest": "runnable",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "impact": {
+          "prog": "oms graph project impact",
+          "help": "usage: oms graph project impact [-h] [--repo REPO] [--pretty] --base BASE\n                                [--head HEAD] [--depth DEPTH]\n                                [--commits COMMITS] [--limit N] [--json]\n\noptions:\n  -h, --help         show this help message and exit\n  --repo REPO        project repository or directory; later values override\n                     earlier ones\n  --pretty           pretty-print JSON\n  --base BASE\n  --head HEAD\n  --depth DEPTH      reverse dependency depth for the dependents list\n  --commits COMMITS  history window for co-change, newest first\n  --limit N          keep at most N rows per list (1-500); the rest is counted\n                     in omitted\n  --json\n",
+          "usage": "usage: oms graph project impact [-h] [--repo REPO] [--pretty] --base BASE\n                                [--head HEAD] [--depth DEPTH]\n                                [--commits COMMITS] [--limit N] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--base"
+              ],
+              "dest": "base",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--head"
+              ],
+              "dest": "head",
+              "default": "HEAD",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--depth"
+              ],
+              "dest": "depth",
+              "default": 3,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--commits"
+              ],
+              "dest": "commits",
+              "default": 500,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 20,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "context": {
+          "prog": "oms graph project context",
+          "help": "usage: oms graph project context [-h] [--repo REPO] [--pretty] --task TASK\n                                 [--entry-path PATH] [--max-files MAX_FILES]\n                                 [--bundle] [--base BASE] [--json]\n                                 [--html-fragment ABSOLUTE_PATH | --ui-model]\n                                 [--no-refresh]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --task TASK\n  --entry-path PATH     anchor context to an exact repo-relative file;\n                        repeatable, no query translation\n  --max-files MAX_FILES\n  --bundle\n  --base BASE\n  --json\n  --html-fragment ABSOLUTE_PATH\n                        write the task-oriented graph as an interactive HTML\n                        fragment\n  --ui-model            emit the bounded task graph data consumed by an MCP\n                        Apps renderer\n  --no-refresh          read the graph as it stands; never build or refresh it\n",
+          "usage": "usage: oms graph project context [-h] [--repo REPO] [--pretty] --task TASK\n                                 [--entry-path PATH] [--max-files MAX_FILES]\n                                 [--bundle] [--base BASE] [--json]\n                                 [--html-fragment ABSOLUTE_PATH | --ui-model]\n                                 [--no-refresh]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--task"
+              ],
+              "dest": "task",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--entry-path"
+              ],
+              "dest": "entry_path",
+              "default": [],
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "append",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-files"
+              ],
+              "dest": "max_files",
+              "default": 12,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--bundle"
+              ],
+              "dest": "bundle",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--base"
+              ],
+              "dest": "base",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--html-fragment"
+              ],
+              "dest": "html_fragment",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": 0
+            },
+            {
+              "names": [
+                "--ui-model"
+              ],
+              "dest": "ui_model",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": 0
+            },
+            {
+              "names": [
+                "--no-refresh"
+              ],
+              "dest": "no_refresh",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "benchmark": {
+          "prog": "oms graph project benchmark",
+          "usage": "usage: oms graph project benchmark [-h] [--repo REPO] [--count COUNT] [--revision REVISION] [--output FILE] [--snapshot FILE] [--compare LEFT RIGHT] [--pretty]\n",
+          "help": "usage: oms graph project benchmark [-h] [--repo REPO] [--count COUNT] [--revision REVISION] [--output FILE] [--snapshot FILE] [--compare LEFT RIGHT] [--pretty]\n\nOpt-in history recall@8 over fix parent trees. Write --output or a content-free --snapshot.\n--compare runs no benchmark; exits 1 for incomparable snapshots or regressions.\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": ".",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--count"
+              ],
+              "dest": "count",
+              "default": 60,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--revision"
+              ],
+              "dest": "revision",
+              "default": "HEAD",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--output"
+              ],
+              "dest": "output",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--snapshot"
+              ],
+              "dest": "snapshot",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--compare"
+              ],
+              "dest": "compare",
+              "default": null,
+              "required": false,
+              "nargs": 2,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": false,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        }
+      }
+    },
+    "exec": {
+      "prog": "oms graph exec",
+      "help": "usage: oms graph exec [-h] [--repo REPO] [--pretty]\n                      {validate,render,route,run,resume,decide,status,events,test,commit}\n                      ...\n\npositional arguments:\n  {validate,render,route,run,resume,decide,status,events,test,commit}\n    commit              commit exactly the landed patch of a bound task\n                        (parent-only)\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n",
+      "usage": "usage: oms graph exec [-h] [--repo REPO] [--pretty]\n                      {validate,render,route,run,resume,decide,status,events,test,commit}\n                      ...\n",
+      "options": [
+        {
+          "names": [
+            "-h",
+            "--help"
+          ],
+          "dest": "help",
+          "default": null,
+          "required": false,
+          "nargs": 0,
+          "type": "str",
+          "action": "help",
+          "choices": [],
+          "mutex": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "dest": "repo",
+          "default": null,
+          "required": false,
+          "nargs": null,
+          "type": "str",
+          "action": "store",
+          "choices": [],
+          "mutex": null
+        },
+        {
+          "names": [
+            "--pretty"
+          ],
+          "dest": "pretty",
+          "default": null,
+          "required": false,
+          "nargs": 0,
+          "type": "str",
+          "action": "flag",
+          "choices": [],
+          "mutex": null
+        }
+      ],
+      "children": {
+        "validate": {
+          "prog": "oms graph exec validate",
+          "help": "usage: oms graph exec validate [-h] [--repo REPO] [--pretty] [--json] spec\n\npositional arguments:\n  spec\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO  project repository or directory; later values override earlier\n               ones\n  --pretty     pretty-print JSON\n  --json\n",
+          "usage": "usage: oms graph exec validate [-h] [--repo REPO] [--pretty] [--json] spec\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "spec",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "render": {
+          "prog": "oms graph exec render",
+          "help": "usage: oms graph exec render [-h] [--repo REPO] [--pretty]\n                             [--mermaid | --html-fragment ABSOLUTE_PATH]\n                             spec\n\npositional arguments:\n  spec\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --mermaid\n  --html-fragment ABSOLUTE_PATH\n                        write an interactive HTML fragment for an agent UI\n",
+          "usage": "usage: oms graph exec render [-h] [--repo REPO] [--pretty]\n                             [--mermaid | --html-fragment ABSOLUTE_PATH]\n                             spec\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "spec",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--mermaid"
+              ],
+              "dest": "mermaid",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": 0
+            },
+            {
+              "names": [
+                "--html-fragment"
+              ],
+              "dest": "html_fragment",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": 0
+            }
+          ],
+          "children": {}
+        },
+        "route": {
+          "prog": "oms graph exec route",
+          "help": "usage: oms graph exec route [-h] [--repo REPO] [--pretty] [--run RUN]\n                            [--facts FACTS] [--outcomes OUTCOMES] [--json]\n                            [spec]\n\npositional arguments:\n  spec\n\noptions:\n  -h, --help           show this help message and exit\n  --repo REPO          project repository or directory; later values override\n                       earlier ones\n  --pretty             pretty-print JSON\n  --run RUN\n  --facts FACTS\n  --outcomes OUTCOMES\n  --json\n",
+          "usage": "usage: oms graph exec route [-h] [--repo REPO] [--pretty] [--run RUN]\n                            [--facts FACTS] [--outcomes OUTCOMES] [--json]\n                            [spec]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "spec",
+              "default": "",
+              "required": false,
+              "nargs": "?",
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--run"
+              ],
+              "dest": "run",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--facts"
+              ],
+              "dest": "facts",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--outcomes"
+              ],
+              "dest": "outcomes",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "run": {
+          "prog": "oms graph exec run",
+          "help": "usage: oms graph exec run [-h] [--repo REPO] [--pretty] --worker WORKER\n                          [--model MODEL]\n                          [--reasoning-effort REASONING_EFFORT]\n                          [--max-steps MAX_STEPS] [--jobs JOBS] [--goal GOAL]\n                          [--run RUN] [--dry-run] [--json]\n                          spec\n\npositional arguments:\n  spec\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --worker WORKER\n  --model MODEL\n  --reasoning-effort REASONING_EFFORT\n  --max-steps MAX_STEPS\n  --jobs JOBS\n  --goal GOAL\n  --run RUN\n  --dry-run\n  --json\n",
+          "usage": "usage: oms graph exec run [-h] [--repo REPO] [--pretty] --worker WORKER\n                          [--model MODEL]\n                          [--reasoning-effort REASONING_EFFORT]\n                          [--max-steps MAX_STEPS] [--jobs JOBS] [--goal GOAL]\n                          [--run RUN] [--dry-run] [--json]\n                          spec\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "spec",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--worker"
+              ],
+              "dest": "worker",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--model"
+              ],
+              "dest": "model",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--reasoning-effort"
+              ],
+              "dest": "reasoning_effort",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-steps"
+              ],
+              "dest": "max_steps",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--jobs"
+              ],
+              "dest": "jobs",
+              "default": 1,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--goal"
+              ],
+              "dest": "goal",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--run"
+              ],
+              "dest": "run",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--dry-run"
+              ],
+              "dest": "dry_run",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "resume": {
+          "prog": "oms graph exec resume",
+          "help": "usage: oms graph exec resume [-h] [--repo REPO] [--pretty] --run RUN --worker\n                             WORKER [--model MODEL]\n                             [--reasoning-effort REASONING_EFFORT]\n                             [--max-steps MAX_STEPS] [--jobs JOBS]\n                             [--goal GOAL] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --run RUN\n  --worker WORKER\n  --model MODEL\n  --reasoning-effort REASONING_EFFORT\n  --max-steps MAX_STEPS\n  --jobs JOBS\n  --goal GOAL\n  --json\n",
+          "usage": "usage: oms graph exec resume [-h] [--repo REPO] [--pretty] --run RUN --worker\n                             WORKER [--model MODEL]\n                             [--reasoning-effort REASONING_EFFORT]\n                             [--max-steps MAX_STEPS] [--jobs JOBS]\n                             [--goal GOAL] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--run"
+              ],
+              "dest": "run",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--worker"
+              ],
+              "dest": "worker",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--model"
+              ],
+              "dest": "model",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--reasoning-effort"
+              ],
+              "dest": "reasoning_effort",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--max-steps"
+              ],
+              "dest": "max_steps",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--jobs"
+              ],
+              "dest": "jobs",
+              "default": 1,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--goal"
+              ],
+              "dest": "goal",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "decide": {
+          "prog": "oms graph exec decide",
+          "help": "usage: oms graph exec decide [-h] [--repo REPO] [--pretty] --run RUN --node\n                             NODE --outcome OUTCOME [--note NOTE] [--json]\n\noptions:\n  -h, --help         show this help message and exit\n  --repo REPO        project repository or directory; later values override\n                     earlier ones\n  --pretty           pretty-print JSON\n  --run RUN\n  --node NODE\n  --outcome OUTCOME\n  --note NOTE\n  --json\n",
+          "usage": "usage: oms graph exec decide [-h] [--repo REPO] [--pretty] --run RUN --node\n                             NODE --outcome OUTCOME [--note NOTE] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--run"
+              ],
+              "dest": "run",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--node"
+              ],
+              "dest": "node",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--outcome"
+              ],
+              "dest": "outcome",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--note"
+              ],
+              "dest": "note",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "status": {
+          "prog": "oms graph exec status",
+          "help": "usage: oms graph exec status [-h] [--repo REPO] [--pretty] [--run RUN]\n                             [--json]\n                             [--mermaid | --html-fragment ABSOLUTE_PATH]\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory; later values override\n                        earlier ones\n  --pretty              pretty-print JSON\n  --run RUN\n  --json\n  --mermaid\n  --html-fragment ABSOLUTE_PATH\n                        write the live execution graph as an interactive HTML\n                        fragment\n",
+          "usage": "usage: oms graph exec status [-h] [--repo REPO] [--pretty] [--run RUN]\n                             [--json]\n                             [--mermaid | --html-fragment ABSOLUTE_PATH]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--run"
+              ],
+              "dest": "run",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--mermaid"
+              ],
+              "dest": "mermaid",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": 0
+            },
+            {
+              "names": [
+                "--html-fragment"
+              ],
+              "dest": "html_fragment",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": 0
+            }
+          ],
+          "children": {}
+        },
+        "events": {
+          "prog": "oms graph exec events",
+          "help": "usage: oms graph exec events [-h] [--repo REPO] [--pretty] --run RUN\n                             [--limit LIMIT] [--json]\n\noptions:\n  -h, --help     show this help message and exit\n  --repo REPO    project repository or directory; later values override\n                 earlier ones\n  --pretty       pretty-print JSON\n  --run RUN\n  --limit LIMIT\n  --json\n",
+          "usage": "usage: oms graph exec events [-h] [--repo REPO] [--pretty] --run RUN\n                             [--limit LIMIT] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--run"
+              ],
+              "dest": "run",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--limit"
+              ],
+              "dest": "limit",
+              "default": 50,
+              "required": false,
+              "nargs": null,
+              "type": "int",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "test": {
+          "prog": "oms graph exec test",
+          "help": "usage: oms graph exec test [-h] [--repo REPO] [--pretty] [--json] path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO  project repository or directory; later values override earlier\n               ones\n  --pretty     pretty-print JSON\n  --json\n",
+          "usage": "usage: oms graph exec test [-h] [--repo REPO] [--pretty] [--json] path\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [],
+              "dest": "path",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        },
+        "commit": {
+          "prog": "oms graph exec commit",
+          "help": "usage: oms graph exec commit [-h] [--repo REPO] [--pretty] --binding BINDING\n                             [--run RUN] [--message MESSAGE] [--json]\n\noptions:\n  -h, --help         show this help message and exit\n  --repo REPO        project repository or directory; later values override\n                     earlier ones\n  --pretty           pretty-print JSON\n  --binding BINDING\n  --run RUN\n  --message MESSAGE\n  --json\n",
+          "usage": "usage: oms graph exec commit [-h] [--repo REPO] [--pretty] --binding BINDING\n                             [--run RUN] [--message MESSAGE] [--json]\n",
+          "options": [
+            {
+              "names": [
+                "-h",
+                "--help"
+              ],
+              "dest": "help",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "help",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--repo"
+              ],
+              "dest": "repo",
+              "default": null,
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--pretty"
+              ],
+              "dest": "pretty",
+              "default": null,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--binding"
+              ],
+              "dest": "binding",
+              "default": null,
+              "required": true,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--run"
+              ],
+              "dest": "run",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--message"
+              ],
+              "dest": "message",
+              "default": "",
+              "required": false,
+              "nargs": null,
+              "type": "str",
+              "action": "store",
+              "choices": [],
+              "mutex": null
+            },
+            {
+              "names": [
+                "--json"
+              ],
+              "dest": "json",
+              "default": false,
+              "required": false,
+              "nargs": 0,
+              "type": "str",
+              "action": "flag",
+              "choices": [],
+              "mutex": null
+            }
+          ],
+          "children": {}
+        }
+      }
+    }
+  }
+}

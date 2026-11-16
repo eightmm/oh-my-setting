@@ -1,0 +1,4 @@
+{"schema": 1, "event_id": "event1", "attempt_id": "attempt1", "seq": 1, "ts": "2026-01-01T00:00:00Z", "event_type": "attempt.created", "from_state": null, "to_state": "queued", "provider": "claude", "tool": "delegate", "run_id": "run1", "task_id": "task1", "refs": {"panel_room_participant": "participant1"}}
+{"schema": 1, "event_id": "event2", "attempt_id": "attempt1", "seq": 2, "ts": "2026-01-01T00:00:01Z", "event_type": "attempt.state_changed", "from_state": "queued", "to_state": "starting"}
+{"schema": 1, "event_id": "event3", "attempt_id": "attempt1", "seq": 3, "ts": "2026-01-01T00:00:02Z", "event_type": "attempt.state_changed", "from_state": "starting", "to_state": "working"}
+{"schema": 1, "event_id": "event4", "attempt_id": "attempt1", "seq": 4, "ts": "2026-01-01T00:00:03Z", "event_type": "attempt.state_changed", "from_state": "working", "to_state": "failed", "reason_code": "verification_failed"}

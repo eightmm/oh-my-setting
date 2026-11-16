@@ -1,0 +1,95 @@
+Usage: artifact-index.sh [options] [list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|salvage|prune|import] [N]
+
+Inspect the harness artifact index. Provider artifacts still live under
+.oms/artifacts/; this index is a compact JSONL lookup table.
+
+Commands:
+  --json         list/latest/failures/unresolved/telemetry: emit schema-1 JSON.
+  list [N]       Show the last N rows (default 20).
+  latest         Show the most recent row.
+  latest-run     Show a compact summary for the most recent run id.
+  failures [N]   Show the last N non-zero-exit rows.
+  unresolved [N] Show the last N failures without a resolution event. Each row
+                 is followed by the exact resolve command that clears it, and
+                 by `superseded-by: evt_X` when the failed patch's exact bytes
+                 were later admitted or landed, or `recovered-by: evt_X` when
+                 an exit-124 failure's provider and kind later succeeded. The
+                 annotations are advisory — nothing is resolved for you.
+  telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
+                 over the retained window (default 1000). This does not infer
+                 semantic task success.
+  --by KEY       telemetry: group routed operations by day, model, provider,
+                 task, role or effort and print calls, provider-reported tokens,
+                 complete input/cached/output reports and provider-reported
+                 cost per group. `-` means no call reported the value, `N+?`
+                 that only some did; nothing is priced from tokens. Days are
+                 UTC. `--by role` (recorded on delegate rows; others are
+                 `unknown`) adds cache-read share, delegations whose patch a
+                 later patch-admit/patch-land accepted, tokens per admitted
+                 result and tokens on delegations not admitted, and warns
+                 when a group's share is under OMS_TELEMETRY_CACHE_MIN_PCT
+                 (80) with >= OMS_TELEMETRY_CACHE_MIN_REQUESTS (10) usage
+                 reports. `--by effort` groups by the reasoning effort the row recorded
+                 (`unrecorded` when it did not; never defaulted), and `--by
+                 role` adds an effort column once any row recorded one.
+                 Reported values only: never approval evidence.
+  --waste [--top N]
+                 telemetry: a read-only "where did tokens go to waste" view
+                 (default top 10 per category), each line naming the record to
+                 open and a share of its total: delegate tokens never admitted;
+                 delegations of one brief digest or task that all failed; a
+                 model change between consecutive hook telemetry rows of one
+                 session; hook-injected bytes per session; the largest
+                 output-digest captures. Only data already recorded is used.
+                 Reported values, never approval evidence. A category that is
+                 absent or `not recorded` means the data was not recorded,
+                 not that nothing was wasted. Not combined with --by.
+  --since WHEN, --until WHEN
+                 telemetry: keep only rows whose own time is in the range
+                 before applying N. WHEN is YYYY-MM-DD (the whole UTC day) or
+                 an ISO-8601 time. The index is pruned, so this covers
+                 retained rows only.
+  resolve        Resolve the failed outcomes selected by --event-id, which may
+                 be repeated to clear a triaged batch in one locked call.
+  resolve-superseded
+                 Resolve every unresolved failure whose exact patch bytes were
+                 later admitted or landed by the same provider — the mechanical
+                 half of the triage annotation, written for you. Deliberately
+                 narrower than the advisory `superseded-by` line: a winner from
+                 a different provider, and every failure the bytes do not
+                 answer (timeout, auth, missing binary), stays in the queue for
+                 a human. Idempotent; add --dry-run to list without writing.
+  resolve-recovered
+                 Resolve every unresolved exit-124 failure with a strictly
+                 later exit-0 row from the same provider and kind. This records
+                 that the provider seat answered again; it does not treat a
+                 later answer as semantic success for any other failure class.
+                 Idempotent; add --dry-run to list without writing.
+  validate       Validate schema, lineage ids, paths, and references.
+  migrate        Idempotently upgrade legacy rows and recover unique basenames.
+  salvage        Plan structural-corruption recovery without writing. Add
+                 --apply to quarantine the exact raw index and atomically
+                 replace it with complete JSON-object rows plus one receipt.
+  prune [N]      Keep only the most recent N rows (default 1000); the index is
+                 append-only, so prune it when it grows. Add --files to delete
+                 unreferenced regular files under REPO/.oms/artifacts, or
+                 --stale to drop rows whose artifact/patch no longer exists —
+                 what `validate` reports and nothing else could repair, since
+                 editing .oms by hand is not allowed.
+
+Options:
+  --repo PATH    Repo/directory. Default: PWD.
+  --file PATH    Index path. Default: REPO/.oms/artifacts/index.jsonl.
+  --event-id ID  Failed outcome event to resolve. Repeatable; each id is
+                 validated and resolved on its own, repeats are collapsed.
+  --reason TEXT  Optional bounded, non-sensitive resolution note. One reason
+                 covers every --event-id in the call.
+  --files        With prune, delete orphaned artifact/patch files.
+  --stale        With prune, drop index rows referencing deleted files. Age is
+                 not the question here, so this ignores --keep.
+  --dry-run      With prune, print row/file changes without changing them. With
+                 resolve-superseded or resolve-recovered, list the resolutions
+                 it would append.
+  --apply        With salvage, explicitly apply the planned recovery. Agent-only;
+                 normal views and writers remain strict on corrupt input.
+  -h, --help     Show help.

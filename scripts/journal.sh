@@ -1,179 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Normalize the optional leading repo selector before authorization and routing
-# inspect the command in $1. The shifted command path then keeps its normal
-# child guard, lock, and --repo parsing.
-case "${1:-}" in
-  --repo)
-    if [ "$#" -ge 3 ] && [ -n "$2" ]; then
-      repo_prefix="$2"
-      command_name="$3"
-      shift 3
-      set -- "$command_name" --repo "$repo_prefix" "$@"
-    fi
-    ;;
-  --repo=*)
-    repo_prefix="${1#--repo=}"
-    if [ "$#" -ge 2 ] && [ -n "$repo_prefix" ]; then
-      command_name="$2"
-      shift 2
-      set -- "$command_name" --repo "$repo_prefix" "$@"
-    fi
+# Native OMS entrypoint for journal.
+
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
     ;;
 esac
 
-# Read (show), inspect, rebuild, configure, or explicitly sync the local-first
-# Work Journal. `show --today|--week|--blockers|--recent N [--json]` is the
-# agent read path over the derived summaries and event index.
-# `show --grep TEXT [--kind K]... [--limit N] [--json]` is a bounded read-only
-# search over what OMS recorded under .oms (journal, handoffs, threads,
-# dispatch transcripts, panel results); see scripts/lib/recorded_search.py.
-# `show --decisions [--since DATE]` lists recorded decisions; `resolve EVENT_ID
-# --how TEXT` records a blocker as resolved (parent only).
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-PYTHON_ENTRY="$ROOT/scripts/lib/work_journal.py"
-
-if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
-  case "${1:-}" in
-    configure|disconnect|sync|resolve)
-      echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
-      exit 2
-      ;;
-  esac
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for journal; stage with cargo or run oms doctor --repair" >&2
+  exit 2
 fi
-
-# A managed disconnect without python3 (an install that failed before its
-# runtime) has nothing to remove when no config file exists; the path mirrors
-# work_journal_config_path.
-if [ "${1:-}" = disconnect ] && ! command -v python3 >/dev/null 2>&1; then
-  config="${OMS_WORK_JOURNAL_CONFIG:-}"
-  config="${config/#\~/$HOME}"
-  if [ -z "$config" ] && [ -n "${XDG_CONFIG_HOME:-}" ]; then
-    config="$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
-  fi
-  config="${config:-$HOME/.config/oh-my-setting/work-journal.json}"
-  if [ ! -e "$config" ] && [ ! -L "$config" ]; then
-    echo "not configured"
-    exit 0
-  fi
-fi
-
-case "${1:-}" in
-  status|show|resolve|rebuild|seal|sync|distill|identity|materialize|tick|observe)
-    command_name="$1"
-    repo="."
-    previous=""
-    for argument in "$@"; do
-      if [ "$previous" = "--repo" ]; then
-        repo="$argument"
-        previous=""
-        continue
-      fi
-      case "$argument" in
-        --repo) previous="--repo" ;;
-        --repo=*) repo="${argument#--repo=}" ;;
-      esac
-    done
-    # shellcheck source=scripts/lib/work-journal.sh
-    . "$ROOT/scripts/lib/work-journal.sh"
-    repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
-    repo="${repo//$'\r'/}"
-    repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
-    if [ "$command_name" = "show" ]; then
-      # `show --grep` only reads: it takes no journal lock and creates nothing,
-      # so it never goes through the admission path below.
-      for argument in "$@"; do
-        case "$argument" in
-          --grep|--grep=*)
-            shift
-            exec python3 "$ROOT/scripts/lib/recorded_search.py" "$@"
-            ;;
-        esac
-      done
-    fi
-    if [ "$command_name" = "sync" ]; then
-      shift
-      force_args=""
-      today_args=""
-      recent_days=""
-      # The bounds are the caller's: a session hook wants a couple of summaries
-      # and a two-second budget, the operator's repair has to be able to finish.
-      # Refusing them here made the flags unreachable through the front door.
-      bound_args=""
-      while [ "$#" -gt 0 ]; do
-        case "$1" in
-          --repo)
-            [ "$#" -ge 2 ] || {
-              echo "error: --repo requires a value" >&2
-              exit 2
-            }
-            shift 2
-            ;;
-          --repo=*) shift ;;
-          --force)
-            force_args="--force"
-            shift
-            ;;
-          --today)
-            today_args="--today"
-            shift
-            ;;
-          --recent-days)
-            [ "$#" -ge 2 ] || {
-              echo "error: --recent-days requires a value" >&2
-              exit 2
-            }
-            case "$2" in
-              ''|0|*[!0-9]*)
-                echo "error: --recent-days requires a positive integer" >&2
-                exit 2
-                ;;
-            esac
-            recent_days="$2"
-            shift 2
-            ;;
-          --budget|--max-per-tick)
-            [ "$#" -ge 2 ] || {
-              echo "error: $1 requires a value" >&2
-              exit 2
-            }
-            case "$2" in
-              ''|*[!0-9.]*)
-                echo "error: $1 requires a number" >&2
-                exit 2
-                ;;
-            esac
-            bound_args="${bound_args:+$bound_args }$1 $2"
-            shift 2
-            ;;
-          -h|--help) exec python3 "$PYTHON_ENTRY" sync --help ;;
-          *)
-            echo "error: unrecognized sync argument: $1" >&2
-            exit 2
-            ;;
-        esac
-      done
-      if [ -n "$today_args" ] && [ -n "$recent_days" ]; then
-        echo "error: --today and --recent-days cannot be used together" >&2
-        exit 2
-      fi
-      work_journal_call_local "$repo" materialize --repo "$repo"
-      set --
-      [ -z "$force_args" ] || set -- "$@" "$force_args"
-      [ -z "$today_args" ] || set -- "$@" "$today_args"
-      [ -z "$recent_days" ] || set -- "$@" --recent-days "$recent_days"
-      # Word-split on purpose: each element is a flag or its numeric value,
-      # both already validated above.
-      # shellcheck disable=SC2086
-      [ -z "$bound_args" ] || set -- "$@" $bound_args
-      work_journal_sync "$repo" "$@"
-      exit $?
-    fi
-    work_journal_call_local "$repo" "$@"
-    ;;
-  *)
-    exec python3 "$ROOT/scripts/lib/cached-main.py" "$PYTHON_ENTRY" "$@"
-    ;;
-esac
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "journal" "$@" || exit $?
+echo "error: native payload unavailable for journal (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

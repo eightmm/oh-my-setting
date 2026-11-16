@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: preparation plus bounded legacy decision-proof recovery; native production cutover has not started.
+Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: pure-Rust Phase A/B complete on `oms/autopilot-1e704d0e275f` (native front-door cutover, `oms-command-graph` / SQLite / panel storage optimizations, `GroupResolver` fixes, M6 legacy Python runtime deleted in `fc74f67e`, and v2 native capabilities B1-B6 through `b09bd84d`, 2026-11-16); PR-gated release via `oms land --pr` and live CI remain.
 
 ## Decision and completion boundary
 
@@ -19,11 +19,11 @@ platform bootstrap may download, verify, and execute the native binary; it
 must not contain OMS state logic or provision Python.
 
 Rust is the default for all OMS code, including CLI and panel implementation.
-The important shared core moves completely to Rust first: state, plans/tasks,
-evidence, authority/approvals, locks, execution/admission, context and graph.
-CLI, panel, MCP and provider adapters use those same core APIs and canonical
-records. TypeScript may serve presentation when useful. This priority changes
-work order without narrowing the complete migration boundary.
+TypeScript is permitted for presentation when useful. The important shared core
+moves completely to Rust first: state, plans/tasks, evidence, authority/approvals,
+locks, execution/admission, context and graph. CLI, panel, MCP and provider
+adapters use those same core APIs and canonical records. This priority changes
+the work order, not the complete migration boundary or acceptance criteria.
 
 This boundary concerns OMS itself. A user's Python project, an explicitly
 requested project test command, or an independently installed provider may use
@@ -43,18 +43,61 @@ legacy implementation during transition; they are not the target runtime design.
 - A checked [legacy Python inventory](../migration/python-inventory.tsv),
   preventing unreviewed growth in the measured footprint.
 - Frozen [context projection vectors](../migration/contracts/README.md) for the
-  first native feature; they are reference data, not completed Rust parity tests.
+  first native feature, now replayed by native library tests.
 - The migration order, compatibility obligations, retirement criteria, and final
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-Preparation does not switch `oms`, MCP, hooks, installation, or state writers to
-Rust. The initial workspace contains a migration tool rather than empty
-production crates. Create the shared core and native command entry point when
-the first real feature is implemented.
+The workspace now also contains eighteen implemented native core libraries: context
+validation/session-byte input, descriptor-relative filesystem reads, domain JSON
+encodings, output selection, Shell graph extraction, context text reports,
+injection/session/timeline projections, task/project Markdown contracts,
+deterministic failure taxonomy, work projections with lossless timestamp
+handling, bounded read-only ledger/transcript acquisition, native Python graph
+extraction through a persistent private helper, retained-output validation,
+acquisition, paging and search, graph parser selection with
+Config/Markdown extraction and shared-helper Python/Shell routing, ordered graph
+resolution, experiment validation/normalization/digests, and bounded secret
+scanning with retained-output redaction, plus the canonical lock protocol. Eight
+command libraries connect failure, experiment, telemetry, role, input, attempt,
+job and static Slurm features; MCP transport/peer ownership is a separate adapter. A standalone native
+`oms runtime context-inspect` binary handles manifest inspection, comparison,
+current-file verification, injections, session reports and timelines. These
+products have scoped native tests and independent review; they remain local
+integration work until release.
+The native compiler floor is 1.99.1; the preparation inventory tool separately
+retains its 1.85 minimum. Lossless raw Read-label handling and the descriptor-backed
+capture read producer and projection adapter are implemented. Experiment template/validate/compare, normal/grouped artifact telemetry, role
+commands, parent input attachments and attempt bundles now have locally reviewed
+native handlers. The production workspace has 28 packages; the separately locked development
+checker makes 29 packages in total. Public routing now
+selects native context/failure/experiment modes under runtime, normal/grouped
+artifact-index telemetry, all agent-role modes, parent input attachments,
+agent-events attempt-bundle reads, job-digest and all static slurm-lint arguments.
+Other modes retain their
+explicit transitional selection. Notebook parsing and graph pipeline consumers
+remain in progress. The lock library is registered but has no public writer
+cutover. Partial routing does not retire any of the 82 whole public tools.
 
-The inspected production baseline is commit
-`74f87f654a314961420be2aa8ab6dfc1999151e1`. Rebase implementation slices onto the
+Parent runtime probes verified SIGINT delivered on the real transcript read
+syscall returns exit 130 with empty stdout, actual socket rejection, and readable
+capture acceptance across file owners. A host-built native CLI failed the
+Ubuntu 20.04 runtime probe on newer glibc requirements. A subsequent floor-native
+build of exact baseline `9a5fcafa347a11f28dbb9111d073c4296c2e07c1` passed CLI
+help, session, timeline, NSS root expansion and child denial in an Ubuntu 20.04
+image with Python and PATH tools absent; the production helper passed a framed
+parse. Required glibc maxima were 2.17 for the CLI and 2.16 for the helper.
+These are baseline artifacts, not release binaries; the final changed artifacts
+must repeat this proof. The host kernel was newer than the Ubuntu 20.04 kernel.
+Darwin target checks do not establish native macOS runtime compatibility.
+No installed command, MCP transport, hook, lifecycle operation or state writer
+has switched to Rust, and no legacy source domain has yet been deleted.
+Library counts and local commits do not satisfy M1 or M6 retirement gates.
+
+The frozen context comparison baseline is commit
+`74f87f654a314961420be2aa8ab6dfc1999151e1`. The installed production entry
+advanced separately to `c9919a1021dfb610a5a0d71b3d733d752e9bdd13` after full CI
+43407339809; that plan-proof bootstrap does not deploy the native migration. Rebase implementation slices onto the
 then-current main and record the actual comparison revision. In particular,
 [PR #216](https://github.com/eightmm/oh-my-setting/pull/216) and
 [PR #220](https://github.com/eightmm/oh-my-setting/pull/220) change output
@@ -62,6 +105,181 @@ processing contracts. They are not dependencies of this preparation change;
 their accepted behavior must be incorporated before that domain's parity baseline
 is frozen. Do not recreate an older digest implementation in Rust and call the
 lost behavior a performance improvement.
+
+## Current context evidence (2026-11-13)
+
+[PR #223](https://github.com/eightmm/oh-my-setting/pull/223) is frozen at
+`32f8517653d5c6cb41e6d7f40a6dcaee66e739e6`; its production reference is
+`74f87f654a314961420be2aa8ab6dfc1999151e1`. The
+[handoff](RUST-CONTEXT-HANDOFF.md) and [corpus guide](../migration/contracts/README.md)
+remain unchanged verification inputs. Local native tests now consume all 40
+inspection, 12 comparison and 12 raw-read cases, preserving per-case arguments,
+JSON types, expected-null presence and verbatim hex input bytes. The source digest
+and all three corpus blobs were independently checked. Native binary tests also
+exercise the 39 inspection and 11 comparison cases representable as CLI options;
+the two Boolean JSON-limit cases belong to the native typed boundary.
+
+| Public context-inspect surface | Local implementation evidence | Retirement status |
+|---|---|---|
+| Manifest, --limit, JSON | Native 40-case library corpus and 39 applicable binary cases | Native-comparable; Python retained |
+| --compare | Native 12-case library corpus and 11 applicable binary cases | Native-comparable; Python retained |
+| --verify-current | Existing native current-source status/path tests | Native-comparable; filesystem gaps remain |
+| --format text, --pretty | Existing native report and public binary cases | Frozen 27-method CLI comparison passed at ec0ace7f; broader gaps remain |
+| --injections, --session-hash | Native acquisition/projection and binary cases | Frozen 27-method CLI comparison passed at ec0ace7f; broader gaps remain |
+| --session, --timeline | Native acquisition/projection, child denial and binary cases | Frozen 27-method CLI comparison passed at ec0ace7f; broader gaps remain |
+| Invalid combinations and child policy | Native parser/binary cases; transcript denial precedes sensitive reads | Native-comparable; no whole-command retirement |
+
+Native-comparable identifies implemented native paths and scoped matching tests;
+it does not mean every public combination or installation path is accepted.
+The separate frozen reference and candidate suites each passed all 27 methods
+for candidate source f9d5f37ecb5c5ad5ee67d6feef67cbe24bd95aac and executable
+SHA-256 bf9230867f6efb4b01d250f75d001a5d981ecc5ff7e10eb33a029a0a375522e3.
+Native corpus validation order was subsequently corrected in 11a80f48; the exact
+64-case corpus remains unchanged. Neither earlier comparison nor earlier host
+proof establishes the newest artifact: repeat the candidate comparison after
+integration from the unchanged reference checkout. Its guard is not relaxed.
+The actual 27-package locked workspace passed formatting, check, Clippy, tests
+and inventory verification at de3e4ef7; all 29 packages passed at ec0ace7f before
+the checker was isolated. External locked versions, sources and checksums were
+preserved.
+
+The parent repeated both frozen-reference commands against exact source ec0ace7f
+with Python 3.11: all 27 reference methods passed in 2.420 seconds, and all 27
+candidate methods passed in 44.934 seconds. The dev ELF SHA-256 was
+93f6a2272c71e425b4eec5833ced8c16852b7e3793f578e1c08e8c43cd129061.
+Canonical retained output-digest logs are 20261113T093001Z-927046 and
+20261113T093004Z-928990, with full decoded stdout/stderr, exit and unchanged-input
+checks. The slow debug wrapper result establishes compatibility for those cases,
+not speedup, current installations, interpreter absence or final-artifact proof.
+
+Existing source/symlink/rendered-copy fixtures with Python hidden are additional
+regression evidence. They do not substitute for actual disposable installations,
+inspection of the older copied-dispatcher receipt bootstrap, a Python-free host,
+or dependency/build-helper audit on the exact current artifact. All remain
+required. No production context Python implementation or temporary comparison
+runner has been removed. The 34-line inventory reduction here is only PR #223's
+replacement of duplicate Python test methods with shared corpus replay.
+
+## Native MCP and static Slurm components (2026-11-13)
+
+The native MCP component was admitted in ffea0093 after independent whole-change
+review of its complete 536,167-byte patch. Its 20 compiled scenarios and two helper
+tests cover 126 protocol exchanges, 70 parser exchanges, fixed tool/peer argv,
+lossless values and raw paths. The existing native 64-case context corpus passed
+with the additive parser API. Default context/session/experiment depth stays 1024;
+MCP freezes the CPython 3.12.15 reference at 9997 containers, rejecting 9998.
+The explicit API caps the budget at 16384. Frozen 3.11 extreme-depth behavior
+differs; no simultaneous parity claim is made for those conflicting limits.
+
+Parent source checks resolved the review's positional-anchor and absolute-repo
+questions: canonical validation uses re.fullmatch, and canonical repository
+selection already permits absolute paths. The recorded PID-reuse/orphan-owner
+limitations remain explicit M4 process-ownership work. Fixed downstream OMS calls
+may still run Python/Bash; M5 must replace those consumers before MCP retirement.
+
+Static Slurm lint/preview/template was admitted in dde4cedf with 20 native tests
+and independent whole-change review. Existing tests now cover the repaired empty
+QOS and Unicode day-field cases with canonical red/green evidence. It reads one
+consistent script/snapshot, never executes the script or invokes Slurm. Raw OS
+labels are preserved; the legacy interpreter's locale-dependent encoding errors
+are not claimed equivalent across all locales.
+
+Both packages are registered in the 28-package locked production workspace;
+the separate development checker keeps the combined count at 29. Existing
+external versions, sources and checksums are preserved; approved num-bigint 0.4.6
+and shlex 1.3.0 add their num-integer 0.1.47 dependency.
+
+The public source dispatcher now selects the admitted Slurm handler before
+Python activation when a validated current-revision native payload is staged.
+Both `oms slurm-lint` and the existing `oms slurm-lint.sh` spelling own every
+leaf argument, including malformed input, with no legacy retry after dispatch.
+Lint, preview and template keep their output, status and usage hints. Relative
+script/explicit snapshot paths and OH_MY_SETTING_SLURM_REF use the caller
+directory; the default local/slurm.md and templates/slurm-job.sh use the
+validated checkout. Unvalidated standalone source metadata is rejected.
+The existing native-entry suite covers these public paths with the interpreter
+blocked, raw path labels, empty/zero requests, equal limits, child invocations,
+inert selection and unchanged input files. These handlers write no files or
+records: concurrent calls and interruption add no partial state.
+
+Exact-artifact Slurm installation/packaging, native MCP entry/owner packaging
+and direct legacy consumers (including scripts/slurm-submit.sh) remain pending.
+Missing current payloads retain transitional legacy selection; this routing
+does not retire the direct scripts/slurm-lint.sh implementation.
+
+Two inert native MCP corpus paths add four conservative Python-reference lines:
+parser-reference.json (3) and value-reference.json (1). Native tests deserialize
+them without invoking Python. M5 owns these data references until equivalent
+corpus replacement or an exact reviewed data-only classifier refinement.
+The measured baseline is now 348 Python source files / 178,361 lines and 206
+reference paths / 5,036 lines: 554 rows. No executable source was retired, no
+blanket Rust exemption was added, and no Python-free installation is claimed.
+
+## Native scope and byte-storage core (2026-11-13)
+
+Two shared-core slices extend existing packages without adding dependencies,
+changing operational writers, or activating public commands:
+
+- `oms-contract-markdown::scope` implements normalized declarations, bounded
+  Unicode-aware patterns, deny-first classification, raw-path matching and
+  conservative overlap. Its borrowed `changed_line` helper preserves exact input
+  bytes for future streaming CLI consumers. All 18 package tests and Clippy
+  passed after integration. Exactly two malformed glob/glob comparisons become
+  conservative conflicts: `src/[z-a]` or `src/[[:bogus:]]` against `docs/*`
+  return true natively where the frozen Python baseline returns false. Unknown
+  declarations must remain unknown; consumers must validate stored rules and
+  preserve legacy partial stdout when a later streamed line fails. The batch
+  classification API itself returns no partial result.
+- `oms-safe-fs::Root` adds bounded no-follow byte reads and atomic mutation with
+  explicit prepublication, uncertain-publication and published failure phases.
+  An ancestor or leaf disappearing after observation returns an error even
+  when initial absence would be allowed. Thirty-one package tests and Clippy
+  passed. Replacement permissions retain ordinary and sticky bits but strip
+  setuid/setgid, an intentional security refinement from the frozen reference.
+  Failed permission copying retains restrictive creation permissions, following
+  the existing best-effort behavior.
+
+Consumers must hold the canonical external lock for mutation, rebase benign
+logical root aliases, verify any required permission postcondition, and
+reconcile uncertain publication from durable state. An unchanged retry does not
+perform a new fsync and cannot establish durability after an earlier error.
+Mutation errors must be interpreted with their phase and fresh durable state;
+`Missing` from a failed write probe is still a refusal, not permission to treat
+the input as empty or blindly retry. Adapters must also bound untrusted path
+depth before acquiring one descriptor per component.
+The generic byte API imposes no manifest-owner policy; each domain adapter must
+supply its existing owner and encoding contract. Scope declarations and byte
+storage remain reusable core APIs, not independent operational state owners.
+
+The owner inspected the cumulative patches, obtained independent security gates,
+admitted the exact bytes and reran focused tests after integration. These are
+Linux nonprivileged component checks. Foreign-owner privileged branches,
+macOS/WSL2, NFS fault injection and power-loss behavior remain unproven. The
+panel's automatic Antigravity review returned quota exhaustion without a verdict;
+manual gates are recorded separately and do not imply automatic acceptance.
+No Python source or whole public tool is retired by these additive components.
+No disk-I/O reduction or HPC speedup has been measured for these slices.
+
+## HPC I/O work
+
+The target includes busy XFS HDD storage shared over NFS to Slurm nodes. No
+particular OMS hotspot was measured on that system. Prefer one snapshot/read per
+command for derived reports, streaming bounded log/metrics processing and
+immutable configuration reuse; avoid extra small-file metadata probes. Mutable
+authority, approvals, delivery receipts and locks must still be revalidated at
+action boundaries, with existing durability and crash guarantees retained.
+
+A local unoptimized 41,288,816-byte debug artifact produced matching public and
+private outputs for failure catalog and 100/12,000-row injection/session fixtures.
+Two warm elapsed observations per case showed roughly half a second of extra
+public-entry time. These observations do not isolate disk cost or prove an NFS
+speedup. The worker could not collect syscall counts because ptrace was refused;
+zero syscall fields in its raw records are placeholders, not measurements.
+Source inspection identifies three executable hashing passes in the transitional
+entry. Removing checks is not an authorized optimization. Native job-digest is now integrated at the public entry and uses one-pass log
+and metric processing with cancellation. Those functional checks do not establish
+physical disk savings; syscall measurements and actual HPC performance remain
+pending.
 
 ## Target architecture
 
@@ -72,6 +290,20 @@ lost behavior a performance improvement.
 | MCP and provider adapters | Transport, provider-specific framing, capability projection | Reuse the core; no separate interpretation of domain state |
 | Storage and supervision | Files, locks, journals, admission, children, recovery | Explicit ownership and platform behavior; one active writer per domain |
 | Development and distribution | Inventory, tests, evaluation, packaging, lifecycle | Rust-owned implementation; no interpreter bootstrap |
+
+The Python graph parser has one containment exception at the OS adapter boundary:
+a caller may start a private native parser worker once and reuse it for its graph
+session. The shared transformation core receives that session as a capability;
+individual transformations do not spawn CLI commands. The helper is a private
+libexec artifact, never a second PATH entry. Malformed source that aborts the
+third-party parser must produce an infrastructure error without aborting OMS.
+The adapter must bound framing, drain pipes, own cancellation/timeouts, and reap
+its child; crashes cannot silently become empty successful graphs. This design
+was selected after repeated malformed-input stack-abort reproductions and source
+inspection found recursive helpers outside Ruff's optional stack-growth guards.
+Implementation, portable resource guarantees and packaging remain subject to
+independent review and runtime verification. A source-only design decision does
+not establish M3 completion.
 
 These are logical boundaries, not a requirement to create five crates now.
 Start with the smallest useful package structure and extract packages when a real
@@ -93,7 +325,7 @@ The current [dispatcher](../scripts/oms) performs Python runtime checks before
 most Bash command entry points. A native feature is complete only when its
 public execution path also bypasses that Python startup. Appending a Rust helper
 behind the existing Python preflight is an interim bridge, not the target path.
-The [MCP server](../scripts/oms-mcp-server.py) is persistent but launches tool
+The `MCP server` is persistent but launches tool
 subprocesses; measure those boundaries separately from server startup.
 
 ### State, bytes, and locks
@@ -101,14 +333,14 @@ subprocesses; measure those boundaries separately from server startup.
 - Preserve each digest's original byte contract, including encoding, escaping,
   separators, key ordering, numeric bounds, and rejection of non-finite values.
   Do not substitute one generic canonical-JSON serializer for every domain.
-  [Agent event bytes](../scripts/lib/agent-events.py) use compact UTF-8 JSON,
+  `Agent event bytes` use compact UTF-8 JSON,
   while its projection cache uses ASCII escaping and the
-  [supervisor encoding](../scripts/lib/dispatch_supervisor.py) retains spaces.
+  `supervisor encoding` retains spaces.
 - Preserve physical repository identity, descriptor-relative reads, link and
   ownership checks, atomic updates, size limits, and change-during-read failures.
   A read failure must remain unknown/error rather than an empty success.
 - Use one lock authority for a state domain. The
-  [runtime lock bridge](../scripts/lib/oms_runtime/common.py) deliberately invokes
+  `runtime lock bridge` deliberately invokes
   [the canonical lock protocol](../scripts/lib/file-lock.sh); its comments record
   stale-holder and release bugs from a previous duplicate implementation.
   A generic Rust mutex or `flock` call is not an equivalent replacement.
@@ -124,7 +356,7 @@ subprocesses; measure those boundaries separately from server startup.
 
 Port launch, admission, cancellation, timeout, descendant cleanup, signal-derived
 exit codes, and reaping as one ownership contract. The
-[Linux supervisor](../scripts/lib/dispatch_supervisor.py) establishes a subreaper
+`Linux supervisor` establishes a subreaper
 before spawning and reports completion only after adopted children are reaped.
 Its platform-specific guarantee must remain explicit; a portable process API
 alone does not supply it. Dropping a handle is not a cancellation protocol.
@@ -144,15 +376,15 @@ already received a semantic audit.
 
 | Domain and current anchors | Required Rust result | Retirement evidence |
 |---|---|---|
-| CLI: [dispatcher](../scripts/oms), [runtime wrapper](../scripts/runtime.sh), [core](../scripts/lib/oms_core.py) | Native routing and shared argument/output contracts | Public migrated commands run without interpreter lookup; wrappers and Python preflight removed after complete coverage |
-| Context/output: [inspector](../scripts/lib/oms_runtime/context_inspect.py), [digest](../scripts/lib/output_digest.py) | Same bounds, errors, omission/retrieval semantics, and byte rules | Shared fixtures match; optimized accepted Python baseline compared; obsolete Python implementations deleted |
-| Work/evidence: [projection](../scripts/lib/oms_runtime/projection.py), [work CLI](../scripts/lib/oms_runtime/work_cli.py), [events](../scripts/lib/agent-events.py) | One interpretation of task, plan, failure, evidence, and freshness | Canonical-state tests pass; internal Python/Bash query bridges removed without independent state readers drifting |
-| Graph/source analysis: [graph package](../scripts/lib/oms_graph/), [Python parser](../scripts/lib/oms_graph/project/parsers/python.py) | Rust parser and graph pipeline, including Python input support | Symbol/import/call/scope/span and invalid-syntax fixtures match; no Python subprocess or embedded interpreter |
-| Evaluation/experiments: [harness](../scripts/lib/codex_harness.py), [experiment modules](../scripts/lib/oms_runtime/experiment.py), [harness regression](../tests/harness-eval-smoke.sh) | Rust scenarios, grading, budgets, measurements, and reports | Baselines retain their meaning; evaluator and test helper Python deleted; requested external experiment commands remain explicit |
-| State/admission: [runtime common](../scripts/lib/oms_runtime/common.py), [file locks](../scripts/lib/file-lock.sh), [inputs](../scripts/lib/oms_inputs/) | Rust storage and a single protocol/owner per domain | Contention, stale recovery, interruption, and corruption tests pass before writer switch; old lock holders and writers removed |
-| Supervisor/panel: [attempt runner](../scripts/lib/attempt-runner.py), [supervisor](../scripts/lib/dispatch_supervisor.py), [terminal panel](../scripts/lib/terminal_panel.py) | Rust process lifecycle, queue coordination, and panel behavior | No orphan or duplicate work under cancellation/restart; OS-specific guarantees preserved; old launch/control path removed |
-| MCP/hooks/providers: [MCP server](../scripts/oms-mcp-server.py), [hook state](../scripts/lib/hook_state.py), [provider registry](../scripts/lib/provider-registry.sh) | Native transport, hook handlers, provider adapters | Shared protocol/security fixtures pass for every supported provider; Python handlers and substantive Bash glue retired |
-| Lifecycle: [installer](../install.sh), [update](../scripts/update.sh), [uninstall](../scripts/uninstall.sh), [Python runtime manager](../scripts/python-runtime.sh) | Native install/update/repair/uninstall and verified artifacts | Clean-host install/upgrade/rollback/uninstall pass; Python installation/shims/precompile logic retired through ownership-aware cleanup |
+| CLI: [dispatcher](../scripts/oms), [runtime wrapper](../scripts/runtime.sh), `core` | Native routing and shared argument/output contracts | Public migrated commands run without interpreter lookup; wrappers and Python preflight removed after complete coverage |
+| Context/output: `inspector`, `digest` | Same bounds, errors, omission/retrieval semantics, and byte rules | Shared fixtures match; optimized accepted Python baseline compared; obsolete Python implementations deleted |
+| Work/evidence: `projection`, `work CLI`, `events` | One interpretation of task, plan, failure, evidence, and freshness | Canonical-state tests pass; internal Python/Bash query bridges removed without independent state readers drifting |
+| Graph/source analysis: `graph package`, `Python parser` | Rust parser and graph pipeline, including Python input support | Symbol/import/call/scope/span and invalid-syntax fixtures match; no Python subprocess or embedded interpreter |
+| Evaluation/experiments: `harness`, `experiment modules`, `harness regression` | Rust scenarios, grading, budgets, measurements, and reports | Baselines retain their meaning; evaluator and test helper Python deleted; requested external experiment commands remain explicit |
+| State/admission: `runtime common`, [file locks](../scripts/lib/file-lock.sh), `inputs` | Rust storage and a single protocol/owner per domain | Contention, stale recovery, interruption, and corruption tests pass before writer switch; old lock holders and writers removed |
+| Supervisor/panel: `attempt runner`, `supervisor`, `terminal panel` | Rust process lifecycle, queue coordination, and panel behavior | No orphan or duplicate work under cancellation/restart; OS-specific guarantees preserved; old launch/control path removed |
+| MCP/hooks/providers: `MCP server`, `hook state`, [provider registry](../scripts/lib/provider-registry.sh) | Native transport, hook handlers, provider adapters | Shared protocol/security fixtures pass for every supported provider; Python handlers and substantive Bash glue retired |
+| Lifecycle: [installer](../install.sh), [update](../scripts/update.sh), [uninstall](../scripts/uninstall.sh), `Python runtime manager` | Native install/update/repair/uninstall and verified artifacts | Clean-host install/upgrade/rollback/uninstall pass; Python installation/shims/precompile logic retired through ownership-aware cleanup |
 | Tests/templates/CI: [tests](../tests/), [templates](../templates/), [workflow](../.github/workflows/test.yml) | Rust-owned checks, fixture drivers, generated executable helpers, and release tasks | Source build, test, evaluation, package generation, and installed fixtures work without Python; remaining executable Python and invocation sites removed |
 
 Preserve inert Python example/source data required to test Python-project support.
@@ -169,7 +401,7 @@ tests and inventory check pass on the reviewed commit. M0 is not a runtime port.
 ### M1 — First native command
 
 Create the shared core and native CLI with `context-inspect` as the first bounded
-slice. Use the existing [context tests](../tests/test_context_inspect.py) as the
+slice. Use the existing `context tests` as the
 contract source and the initial [projection vectors](../migration/contracts/context-inspect-v1.json)
 as a seed. Wire the vectors into the native tests and extend the existing coverage
 rather than duplicating a second full test suite. Cover strict JSON, path safety, bounds,
@@ -195,7 +427,7 @@ duplicate readers. A smaller lossy response is not equivalent to a complete one.
 ### M3 — Parsers, evaluation, and development tools
 
 Select a Rust parser for the required Python grammar after running the existing
-[parser corpus](../tests/test_oms_graph_parsers.py); a parser dependency is a
+`parser corpus`; a parser dependency is a
 reviewed decision, not an assumed drop-in replacement for `ast`.
 Cover import resolution, binding/shadowing, decorators, async definitions,
 signatures, docstrings, locations, Unicode, and invalid syntax. Port graph,
@@ -263,41 +495,168 @@ do not hide executable paths behind broad exclusions or remove Python-project
 support to satisfy the counter. Dynamic and transitive requirements still need
 the clean-host evidence below.
 
-### Temporary decision-proof recovery footprint (2026-11-13)
+### Temporary recovery footprint (2026-11-12)
 
-Migration supervision encountered archived cancellations that pin different
-historical versions at the same decision path. Overwriting that path to repair
-one version would invalidate another. The bounded legacy compatibility repair
-adds parent-only `oms agent-plan snapshot-decision --decision-artifact PATH
---expected-decision-artifact-sha256 SHA`. It captures fresh raw bytes (at most
-64 KiB), returns JSON `snapshot_path`, `sha256`, `created` with exit 0, and refuses
-unsafe or mismatched input with exit 2. It changes no task, approval or receipt.
+The reviewed preparation baseline includes a bounded legacy recovery change:
+`oms agent-plan relocate-decision` moves a valid cancelled task's decision-file
+pointer to a separate copy of the already-bound bytes. It keeps parent authority,
+plan/task compare-and-set, link safety, live-worker checks, receipt digests and
+archived plans intact. Keep the old path valid until every active reference has
+moved; restore its historical bytes afterward. The command help gives the full
+required arguments. Changed old bytes still fail closed.
 
-New cancellations capture the fresh reviewed source durably before saving the
-plan. Historical validation may resolve only its exact pinned digest from the
-private 0700/0600 `.oms/plan/decision-artifacts-v1/<sha256>` catalog if the source
-changed or its final leaf is missing. Unsafe ancestors, links, ownership, modes,
-oversize or corrupt bytes remain errors. A stale snapshot cannot authorize a new
-cancellation. Legacy records without an authentic snapshot still refuse changed
-bytes. Existing parent-only relocation preserves CAS, live-worker and original
-task/lease evidence while moving a still-valid active decision pointer.
+This adds 78 physical Python lines in
+`agent_plan_core.py` (2202 to 2280) and four
+Python-reference lines in the existing
+`cancellation smoke fixture` (1047 to 1051).
+The inventory has been reconciled to those measured values, with no new paths.
+M4 owns retirement of this temporary growth: equivalent native cancellation,
+relocation, archive validation, contention and crash-recovery coverage must pass
+before deleting the legacy engine and its interpreter-dependent fixture driver.
+This recovery work remains preparation for the complete migration.
 
-Publication uses an exclusive temporary file, fsync, exclusive link, temporary
-unlink, exact readback and directory fsync. A crash between link and unlink leaves
-two links and fails closed; orphan cleanup is not automatic. A later-refused
-cancellation can leave a non-authoritative valid blob. Cache invalidation tracks
-only referenced original and exact digest paths, including missing leaves; no
-catalog scan or cached mutation authority is added. Retirement validation uses
-the declared physical repository even when invoked from another directory.
+### Temporary immutable decision proof footprint (2026-11-13)
 
-The measured baseline becomes 348 Python source files / 178,366 physical lines
-and 194 conservative reference paths / 4,788 lines: 542 rows. The new source
-`scripts/lib/plan_decisions.py` has 220 lines; existing cancellation, retirement,
-cache and canonical fixtures also grow. This explicit temporary increase is owned
-by M4, not a permanent Python backend or a native migration result. Remove it
-when native cancellation, immutable proof/relocation/archive validation, cache
-invalidation, contention and crash recovery replace these consumers and tests.
-The inventory guard remains unchanged and is never auto-refreshed by CI.
+Legacy archived cancellations can pin different historical bytes at the same
+decision path. Restoring one version in place would break another. The bounded
+compatibility repair adds parent-only `oms agent-plan snapshot-decision` with
+an exact reviewed SHA-256, exit 0/2 and JSON `snapshot_path`, `sha256`, `created`.
+It captures fresh raw bytes, at most 64 KiB, in private
+`.oms/plan/decision-artifacts-v1/<sha256>` storage. It does not cancel a task,
+grant approval, change pinned digests or rewrite history.
+
+New cancellations always read the declared source afresh and capture it durably
+before saving the plan. Historical validation may use only an exact immutable
+snapshot when the original changes or its final leaf is missing; unsafe
+ancestors, links, permissions, ownership, corrupt bytes or incomplete publication
+still refuse. A cancellation refused after capture can leave a valid blob with
+no authority. A crash between publication and temporary-link removal leaves two
+links and refuses further use; recovery is not automatic deletion. Legacy
+records without a valid snapshot still refuse changed original bytes.
+
+The cache tracks only validated referenced original paths and exact blob paths,
+including missing leaves; unrelated catalog entries are not scanned on hits.
+Mutations retain fresh validation. Retirement validation now receives the
+declared physical repository explicitly, including state-verify from another CWD.
+
+This adds the 220-line `scripts/lib/plan_decisions.py` helper and changes existing
+physical Python lines: agent_plan_core 2280 to 2284, panel_cache 745 to 752,
+plan-retire 970 to 979. Python-reference counts change in agent-plan 32 to 33
+and scripts-smoke 1051 to 1056. The measured baseline is 348 Python source
+files / 178,361 lines and 204 reference paths / 5,032 lines, 552 rows total.
+This is an explicit temporary increase, not retirement or a zero-inventory result.
+M4 / RUST-STATE owns removal: native plan cancellation, immutable proof capture,
+archive validation, cache invalidation, contention and crash fixtures must
+replace this helper and its Python consumers before deletion. No live evidence
+repair or deployment is implied by these local checks.
+
+### Native fixture footprint (2026-11-13)
+
+The first native Shell graph corpus adds five inert JSON fixture paths under
+`rust/crates/oms-graph-shell/tests/`: `fixtures.json`, `python_env.json`,
+`python_fragment.json`, `python_long.json` and `python_other.json`. Together they
+contain 31 conservatively counted Python-reference lines (24, 2, 2, 1 and 2).
+Native tests deserialize these source/expected-result records; they never execute
+the embedded Python text. Their exact projections were compared with the legacy
+parser. This is required Python-project input coverage owned by M3, not an
+additional interpreter invocation. Keep the records until the corresponding
+native corpus is replaced or a reviewed data-only classifier refinement proves
+those exact files inert; do not exclude `rust/` wholesale.
+
+The native Python parser adds three further reference rows: its workspace
+member (1 line), its Cargo manifest (8 lines naming native parser dependencies
+and helper targets), and its 149-case JSON corpus (149 lines). The corpus is
+deserialized by native tests; embedded Python source is parsed by the native
+helper and never executed. M3 owns these 158 reference lines. Retain them until
+the corpus is replaced or an M3/M6 classifier review proves these exact
+dependency names and fixture records inert; no blanket Rust-tree exemption is
+permitted. The helper is private and packaging must exclude its test fixture
+binary. No Python interpreter or per-transform process fallback was added.
+
+The graph facade adds one further reference row: its Cargo dependency on the
+native Python parser (1 line). M3 owns this inert dependency-name reference until
+a reviewed exact-path classifier refinement or dependency replacement removes
+it. This is not an interpreter invocation.
+
+The graph resolver adds one further inert native JSON corpus row containing 37
+Python-reference lines. Native tests deserialize graph records and expected
+edges; no embedded source is executed. M3 owns this coverage until equivalent
+corpus replacement or a reviewed exact-path data classifier removes the row.
+
+Before the immutable decision-proof repair above, the measured executable
+footprint was 347 Python source files and 178,121 physical lines, including the
+bounded 29-line M5 transition below. The conservative reference inventory rises from the original
+194 paths / 4,782 lines to 204 paths / 5,026 lines for the Shell corpus and native
+Python-parser names/data. That preparation baseline had 551 rows; the decision-proof repair above raises
+it explicitly to 552. No legacy
+deletion or M6 zero result is claimed. Future retirement batches must lower the
+baseline again.
+
+### Temporary native-entry lifecycle footprint (2026-11-13)
+
+The context command can now enter its staged native payload before Python
+activation through source, symlink and rendered-copy entries. The trusted owner
+stages an exact-revision manifest and fixed-size checksum; corruption fails
+before executable dispatch. An absent current-revision payload keeps the
+transitional legacy selection. This is not installed deployment or retirement.
+
+Reversible copies add 29 physical lines to existing
+`managed-target.py` (246 to 275), with no new
+Python source path. The optional schema-1 source hash keeps rendered copies
+recognizable by older ownership readers. Existing shell/fixture reference rows
+increase by 17 lines: install-contract 15 to 18, link 1 to 2, and lifecycle smoke
+83 to 96. The install contract also contains temporary validator code for safe
+native-cache quarantine; validator execution failure is distinct from a proven
+invalid payload. Foreign or uninspectable content remains in place.
+
+M5 owns removing this transition code after native installation, ownership,
+repair, rollback and equivalent fixtures are accepted. The parent adjusts these
+measured rows explicitly; CI never regenerates its own budget. This lifecycle transition kept the preparation inventory at 551 rows; the
+decision-proof repair above raises it explicitly to 552. No Python deletion or M6 zero result is claimed.
+
+The demonstrated legacy defect and temporary repair remain explicit native-port requirements:
+
+- `Artifact indexing` truncates the task goal with
+  `cut -c1-200`; splitting a valid UTF-8 character can create a lone surrogate
+  that the `index writer` cannot encode.
+  An ASCII task header is the temporary operational workaround. M2/M4 must
+  preserve the byte bound at a UTF-8 boundary and verify durable review receipts
+  for non-ASCII goals.
+- `Retirement validation`, when reached through
+  [state-verify](../scripts/state-verify.sh) from another working directory, can
+  resolve archived decision paths against CWD rather than the supplied repository.
+  The temporary repair above passes the declared repository explicitly and tests
+  that invocation; M4 must preserve it in the native replacement.
+
+## Frozen verifier boundary
+
+The inventory checker has its own workspace and lockfile at
+`rust/crates/oms-migrate`. Its std-only sources and explicit targets can be bound
+as acceptance inputs without freezing the mutable production Cargo manifest,
+lockfile, CLI router or inventory budget. Existing CLI behavior and all six
+checker tests are retained, including the Rust 1.85 minimum; root CI runs the
+standalone package separately within its existing Rust job. No new CI job or
+matrix is added.
+
+A complete migration acceptance still needs the whole functional and platform
+criteria below. In particular, literal markers inside native Rust dependency
+names and inert parser corpora are not executable programs. Any final exception
+must bind the exact reviewed data or literal dependency lines, retain those
+fixtures and Python-project support, reject arbitrary remaining executable
+references, and remain distinct from the checker's unchanged strict
+`--require-zero` result. Never freeze an unreachable lexical target and then
+weaken its checker during a live campaign.
+
+The proposed complete-migration verifier permits at most twelve existing data
+rows (231 conservative marker lines): nine native JSON fixture files and the
+literal marker lines in three native Cargo manifests. It requires the exact
+path, row kind and count, plus a frozen SHA-256 of each raw JSON file or literal
+TOML marker-line sequence. Every source row and every other reference refuses.
+Changed fixture bytes, substituted dependency lines and extra invocations also
+refuse. This preserves the existing parser/MCP oracles and dependency names;
+it does not add a blanket Rust-tree exemption or change inventory CLI semantics.
+The current tree still has 348 executable Python sources, so this proposed
+zero-executable condition remains unmet.
 
 ## Verification and final acceptance
 
@@ -352,3 +711,100 @@ temporary dependencies, and exact retirement criteria. Merge bounded changes
 through the existing repository rather than maintaining a long-lived rewrite
 branch. Completion means removed dependencies and proven native behavior, not
 the number of Rust files added.
+
+## Wave 3–4 native cutover and storage/graph/panel optimizations (2026-11-15)
+
+The Wave 3–4 integration cut public `oms` entry points over to the release native
+binaries while preserving reversible shell fallbacks until M6 physical deletion:
+
+- **Front-door & install lifecycle**: `scripts/lib/platform.sh` executes the
+  verified native `oms` binary directly without leaking
+  `OMS_NATIVE_DISPATCHED=1` into child invocations, and
+  `scripts/lib/install-contract.sh` validates the 6-binary native cache
+  (`oms` + companions) atomically.
+- **Project graph engine, SQLite read paths & `GroupResolver`**:
+  `oms-command-graph` threads host `GroupResolver` across `Store::open` calls
+  and `std::thread::scope` workers so standard group-writable (`0775`,
+  `umask 0002`) repositories verify cleanly under host group membership proof
+  and fail closed without it. Incremental discovery avoids directory walks when
+  file metadata matches the manifest, SQLite sidecar (`index.sqlite3`)
+  accelerates `symbol`/`api`/`neighbors`/`trace` read queries with parity against
+  `graph.json`, and `oms-mcp-server` caches loaded graphs in-process.
+- **Write amplification & file-sprawl reductions**:
+  - `oms state --json` runs read-only on unadopted repositories (`oms_created=false`,
+    zero `.oms/` files written) instead of implicitly initializing journal/state files.
+  - `oms-command-plan`, `oms-command-operations`, and `oms-command-graph`
+    consolidate transient JSON sidecars/WAL churn into bounded SQLite storage
+    and skip identical-byte rewrites.
+  - `oms room updates --after <cursor>` performs incremental byte-offset tail
+    reads across `room-bench.jsonl`, while `oms-command-peer`,
+    `oms-command-hooks`, `oms-command-journal`, `oms-command-runs`, and
+    `oms-command-telemetry` reuse repository snapshots, compiled `Regex` caches,
+    and single-pass JSONL readers.
+- **Legacy Python caller audit**: scanning all `298` Python files under
+  `scripts/` (`205` top-level scripts plus `93` submodules; `348` total tracked
+  `.py` files including docs, templates, and tests) showed `0` zero-caller
+  files eligible for early `git rm`; every script remains referenced by reversible
+  fallback guards, host helpers, or test suites until the M6 retirement gate.
+
+### Release binary benchmark measurements
+
+Measured in disposable temp clones against `cargo +1.99.1 --release --locked --offline`
+staged native binaries with poisoned `python`/`python3` shims (`exit 99`) first
+on `PATH` and ambient harness/room env vars cleared (single run for cold/warm/incremental
+builds; 3-run median for read queries and `oms state`):
+
+| Operation | Measured Latency (ms) | Scope / Parity Verification |
+| --- | --- | --- |
+| `oms state --json` (unadopted repo) | `706.81` median (`[1028.32, 556.78, 706.81]`) | `exit=0`, `.oms/` not created (`oms_created=false`) |
+| `oms state --json` (adopted repo) | `601.17` median (`[601.17, 653.37, 395.24]`) | `exit=0`, native surface status |
+| `oms graph project build` (cold) | `16062.97` | `files=846`, `nodes=12228`, `edges=137294`, `parsed=846`, `cached=0` |
+| `oms graph project build` (warm) | `4235.53` | `files=846`, `nodes=12228`, `edges=137294`, `parsed=0`, `cached=846` |
+| `oms graph project build` (1-file change) | `3607.34` | `files=846`, `parsed=1`, `cached=845` |
+| `oms graph project symbol` (`index.sqlite3` vs JSON) | `1480.13` vs `2493.56` (`1.68x`) | `index.sqlite3=89214976` B, `graph.json=46890861` B; JSON parity verified |
+| `oms graph project trace --no-refresh` (`index.sqlite3` vs JSON) | `38.67` vs `803.76` (`20.79x`) | Sub-40 ms SQLite traversal; JSON parity verified |
+| `oms room show` vs `room updates --after` (50 msgs, 5 tail) | `48.28` vs `45.38` (`1.06x`) | `room-bench.jsonl=15595` B; 5 exact tail turns returned |
+
+## M6 Pure-Rust Cutover
+
+Step A2 permanently retired the legacy Python runtime and shell wrapper stack:
+
+- **Deleted legacy surfaces**: removed `346` tracked `.py` files (`scripts/**/*.py`, `tests/**/*.py`, docs helpers/examples), `76` retired Python-dependent smoke/operator test files, and `16` obsolete `scripts/lib/*.sh` helpers; retained `templates/ml_smoke.py` and `templates/ml_resume_smoke.py` solely as project-template fixtures (`oms-migrate` `python-source`).
+- **Pure-Bash + native trampolines**: collapsed `scripts/*.sh` wrappers (`scripts/check.sh` excepted) into lightweight native trampolines dispatching through `scripts/oms`, added `docs/examples/remote-adapter.sh`, streamlined `.github/workflows/test.yml` (zero `setup-python`, Ubuntu/macOS pure-Rust & pure-Bash gates), and updated `payload.rs` frontdoor wrappers to route `doctor --repair` / `uninstall` cache recovery through `scripts/oms`.
+- **Poisoned-Python E2E verification**: injected failing `python` and `python3` (`exit 99`) shims first on `PATH` inside `tests/lib/smoke-env.sh`; verified `bash scripts/check.sh --lint-only`, all `9` retained focused smoke suites (`bash scripts/check.sh --focused-only`), and all modified Rust workspace crate test suites (`oms`, `oms-command-lifecycle`, `oms-command-peer`, `oms-command-runs`, `oms-command-task`, `oms-command-autonomy`) with zero failures.
+
+
+## Phase B Native Capabilities & Dogfooding Verification (2026-11-16)
+
+Phase A/B is complete on `oms/autopilot-1e704d0e275f` (pure-Rust runtime; legacy Python runtime deleted in `fc74f67e`). Release through `oms land --pr` and live CI remain.
+
+### v2 native capabilities (`e22a6c0a..b09bd84d`)
+
+- **B1 Polyglot graph + SQLite file cache**: `oms-graph/src/polyglot.rs` parses Rust (`.rs`, `Cargo.toml` crate/workspace DAG, `#[test]` / `#[tokio::test]`), TypeScript/JS (`.ts`, `.tsx`, `.js`), Go (`.go`) and C/C++/CUDA (`.c`, `.cpp`, `.cu`). `oms-command-graph` stores per-file cache entries in `.oms/project-graph/cache.sqlite3` (`WAL`, `VERSION=10`) with zero JSON shard files under `.oms/project-graph/cache/`.
+- **B2 CAS + FTS5 cold archive and native GPU monitor**: `oms-command-state/src/archive.rs` manages `.oms/archive.sqlite3` (`WAL`, `0600`, SHA-256 content-addressed `blobs`, `entries`, FTS5 `entries_fts`) via `oms state compact`, `oms state archive list|show|search|stats` and `oms gc --apply`. `oms state gpu-status|gpu-wait` provides native GPU inspection.
+- **B3 Warm Cargo slots, graph context, interactive loop**: `oms-command-peer` provides `acquire_cargo_slot` caching (`OMS_CARGO_SLOT_CACHE`), `--graph-context` injection from `oms-command-graph`, `--interactive` NDJSON multi-turn delegation in one isolated worktree, and panel visibility (`panel_alias`, `panel_role`, `panel_room_id`, `parent_attempt_id`) for direct `peer-delegate`, `peer-review` and `consult`.
+- **B4 Kernel worker sandbox**: `oms-supervisor/src/sandbox.rs` wraps delegated worker commands in Linux `bwrap` or macOS `sandbox-exec` (`OMS_WORKER_SANDBOX=auto|strict|off`).
+- **B5 Native MCP tools, `<2ms` panel wakeup, tri-provider HUD**: `oms-mcp-server` adds `oms_memory_recall`, `oms_symbol_slice`, `oms_failure_diagnose` and `oms_state_compact`. `oms-command-panel` listens on `<repo>/.oms/panel-state/wakeup.sock` (`rustix::event::poll`) while `oms` root commands emit non-blocking wakeup datagrams. `oms hud` (`scripts/hud.sh`; `83` total public CLI entrypoints) and tri-provider statusline defaults (`agy-statusline`, `claude-statusline`, Codex 6-item HUD with reversible bare `["model"]` replacement) are wired across `oms-command-hooks`, `oms-command-lifecycle` and `oms doctor`.
+- **B6 Adaptive seat routing, native SSH bundle adapter, worktree-first / PR-gated integration**: `oms-command-peer` tracks per-account latency/cooldowns (`select_account_adaptive`); `oms runtime ssh-adapter` provides `ControlMaster` + a single `git bundle` + schema-1 attestation; `oms-failure` classifies CUDA OOM fragmentation/peak and NCCL watchdog timeouts; `oms land --pr` / `--local-merge`, `pre-merge-commit` and protected-branch Bash guards enforce verified PR integration onto `main`.
+
+### Dogfooding measurements at `b09bd84d`
+
+Host: Linux workstation with a 96 GiB CUDA GPU. The Wave 3-4 baselines come from the benchmark table above.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `oms graph project build --force --repo . --json` (cold) | `1.21s` real (`0.87s` user, `0.18s` sys); was `16.06s` | `files=947`, `parsed=947`, `cached=0`, `nodes=9548`, `edges=14010` |
+| `oms graph project build --repo . --json` (warm) | `1.04s` real (`0.72s` user, `0.15s` sys); was `4.24s` | `files=947`, `parsed=0`, `cached=947`, `nodes=9548`, `edges=14010` |
+| Graph cache layout | legacy `.oms/project-graph/cache/` absent | single `.oms/project-graph/cache.sqlite3` (`0600`, `11M`) |
+| `oms state compact --repo . --json` | `.oms/` files `81,835` -> `81,726` | `archived=110` stale handoffs, `kept=21`, `bytes_freed=998145` |
+| `.oms/archive.sqlite3` | `db_bytes=2695168` (`2.6M`, `0600`) | `entries=110`, `blobs=110`, `dedup_bytes=998145`; `oms state archive search "review" --limit 5` returned ranked FTS5 excerpts |
+| `oms hud --repo .` and `oms hud --tmux --repo .` | `oh-my-setting \| oms/autopilot-1e704d0e2… \| oms F16` | smoke check |
+| `oms state gpu-status --json` | local 96 GiB CUDA GPU detected (`available=true`, `12675 / 97887 MiB`) | smoke check |
+
+## Multi-Agent & Multi-Host Extensions (Stages B–F, PR #225 -> PR #224)
+
+Added pure-Rust (`#![forbid(unsafe_code)]`, Rust `1.99.1`, zero new external dependencies) opt-in scheduling, verification, remote recovery, Slurm reconciliation, and multi-repo coordination on top of the existing runtime/plan/autonomy/slurm/landing core per [Multi-Agent · Multi-Host Plan](MULTI-AGENT-MULTI-HOST-PLAN.md):
+
+- **Local DAG parallel execution & contract versioning (`oms-command-plan`, `oms-command-autonomy`)**: DAG cycle/dependency validation, `--resources`/`--priority`/`--max-writers`/`--max-review-backlog` backpressure, stale-lease `.oms/plan/late-results.jsonl` preservation, versioned contract registry (`contracts.rs`), singleton controller-locked `std::thread::scope` parallel runner (`parallel.rs`), and detached worktree `--no-ff` combined verification (`verify_combined`) with pre/post target drift checks.
+- **Explicit target approval, snapshots & durable remote ops (`oms-runtime`, `oms`)**: `execution_approved: false` default bound to target identity fingerprints (`targets.rs`), immutable checkout/lockfile `exec-snapshot` (`exec_snapshot.rs`), top-level `oms runtime ssh-adapter` / `exec-snapshot` dispatch (`main.rs`), `.oms/runtime/remote-ops/<op_id>.json` ledger with `--op-id` deduplication, `reconcile`/`cancel` (`hostname`/`boot_id`/`pid`/`lstart` fencing), and streaming SHA-256 atomic `collect` (`ssh_adapter.rs`).
+- **Slurm reconciliation & multi-repo coordination (`oms-command-slurm-submit`, `oms-command-landing`)**: submission provenance (`--task-id`/`--attempt-id`/`--exec-snapshot`) and `slurm-submit reconcile` (`reconcile.rs`), plus `land --check-manifest`/`--execute-manifest` topological verification and `partial-hold` (exit `3`) semantics (`manifest.rs`). All 10 failure scenarios in `MULTI-AGENT-MULTI-HOST-PLAN.md` §13 are verified with deterministic fake-binary/temp-repo fixtures; live multi-cluster/GPU hardware execution remains separate from fixture verification.

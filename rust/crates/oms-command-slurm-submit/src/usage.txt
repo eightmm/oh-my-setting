@@ -1,0 +1,50 @@
+Usage: slurm-submit.sh [--key KEY] [--dry-run] [--force-resubmit --reason TEXT] -- sbatch ARGS... SCRIPT
+       slurm-submit.sh reconcile (--key KEY | --job-id ID) [--adopt-job] [--repo PATH] [--json]
+
+Run `sbatch ARGS... SCRIPT` once per request key and record it in
+.oms/slurm-submits.jsonl (append-only, under the repo file lock).
+
+Default key: sha256 over the job script's content digest, the sbatch
+arguments in order, the repo-relative working directory and the current
+commit (HEAD). --key supplies your own (for example a sweep cell id);
+SCRIPT is then optional (--wrap jobs).
+
+Rows: `intent` (key, time, script path and digest, argument digest; raw
+arguments only when they pass the sensitive scan) is written before sbatch
+runs; then `submitted` (job id) or `failed` (exit code). A failed submission
+does not block a retry.
+
+A repeat of a submitted key prints the earlier job id and time and how to
+check it (oms run-reconcile list), runs nothing, and exits 3. An intent with
+no result (OMS died, or a concurrent submit is running) prints `unknown: an
+earlier submission with this key may have gone through` and exits 3. Both can
+be overridden with --force-resubmit --reason TEXT (recorded).
+
+Unless a comment is already set (command line or #SBATCH --comment), sbatch
+gets `--comment oms-key=<12 chars>` so an unknown attempt can be found with
+squeue/sacct.
+
+--dry-run prints the key and what would run; nothing is run or written.
+oms slurm-lint runs first as advice; its warnings never block.
+
+Duplicate detection inside this repository's .oms only: not exactly-once
+across machines or clones.
+
+Exit: 0 submitted (or dry run), 3 refused as duplicate/unknown, 2 usage,
+otherwise sbatch's own exit status (3 is reported as 1).
+
+Optional provenance: --task-id ID, --attempt-id ID, --exec-snapshot SHA256 (or
+OMS_TASK_ID, OMS_ATTEMPT_ID, OMS_EXEC_SNAPSHOT_SHA256) are recorded on the
+intent row. --idempotency-key is an alias of --key; both must agree.
+OMS_SLURM_SBATCH_BIN replaces a bare `sbatch` executable.
+
+reconcile asks squeue (OMS_SLURM_SQUEUE_BIN) and sacct (OMS_SLURM_SACCT_BIN)
+about one key (matched by job id, or by the oms-key=<12 chars> comment) and,
+when a job is found for an attempt without a recorded job id, appends a
+`submitted` row (reconciled) so a repeat submit is refused as a duplicate.
+Terminal states append a `reconciled` row. Output state and exit:
+active/succeeded 0; failed, oom, timeout, preempted, cancelled 1; unknown 75
+(no match, failed query, ambiguous or unrecognised state). Unknown is never
+"absent": do not resubmit without --force-resubmit after checking by hand.
+With --key KEY --job-id ID, --adopt-job explicitly recovers an untagged or
+ambiguous attempt onto that key's active attempt without duplicating work.

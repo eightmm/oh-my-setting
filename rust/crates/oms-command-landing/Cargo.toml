@@ -1,0 +1,27 @@
+[package]
+name = "oms-command-landing"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+
+[dependencies]
+oms-reference = { path = "../oms-reference" }
+oms-command-plan = { path = "../oms-command-plan" }
+oms-command-task = { path = "../oms-command-task" }
+oms-command-operations = { path = "../oms-command-operations" }
+oms-supervisor = { path = "../oms-supervisor" }
+oms-contract-markdown = { path = "../oms-contract-markdown" }
+oms-work-inspect = { path = "../oms-work-inspect" }
+oms-context = { path = "../oms-context" }
+oms-json = { path = "../oms-json" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-scrub = { path = "../oms-scrub" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+regex = "=1.13.1"
+sha2 = "=0.10.9"
+rustix = { version = "=1.1.6", features = ["fs", "process", "pipe", "system"] }
+
+[lints.rust]
+unsafe_code = "forbid"

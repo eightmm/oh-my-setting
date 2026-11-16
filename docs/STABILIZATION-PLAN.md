@@ -92,7 +92,7 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 
 원인은 block writer가 cancellation receipt를 남긴 채 상태를 바꾸고, reader는
 그 조합을 거부하는 것이다. 관련 구현은
-[agent_plan_core.py](../scripts/lib/agent_plan_core.py)의 `block` 분기와
+`agent_plan_core.py`의 `block` 분기와
 `validate_cancellation()`이다.
 
 **최소 수정:** cancelled task에 대한 block을 저장 전에 거부한다. 취소 task를
@@ -106,7 +106,7 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 - [x] cancellation receipt와 decision artifact가 보존된다.
 - [x] 기존 claim/lease 및 완료 task 전환의 의미가 유지된다.
 
-**검증 위치:** [scripts-smoke.sh](../tests/scripts-smoke.sh)의
+**검증 위치:** `scripts-smoke.sh`의
 `test_agent_plan_cancellation_is_closed_not_verified_and_cas_fenced`에 위 assertion을
 추가한다. 실제 에이전트 없이 canonical CLI를 사용한다.
 
@@ -133,9 +133,9 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 - [x] 실제 provider 설치 여부, caller 환경, 개인 HOME에 따라 결과가 달라지지 않는다.
 - [x] 기존 실패 lane을 해당 수정 SHA에서 다시 확인한다. 문서 PR의 green과 구분한다.
 
-**검증 위치:** [auto_review.py](../tests/operator/auto_review.py),
-[fixtures.py](../tests/operator/fixtures.py),
-[provider_fixture.py](../tests/operator/provider_fixture.py).
+**검증 위치:** `auto_review.py`,
+`fixtures.py`,
+`provider_fixture.py`.
 가짜 provider를 사용하는 기존 `--section auto-review` 경로를 재사용한다.
 로컬 검토에서는 CI assertion에 도달하기 전에 HOME 경로에 의존하는 다른 assertion이
 실패했으므로, 두 실패를 같은 재현이라고 기록하지 않는다.
@@ -144,7 +144,7 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 
 **관찰:** [core profile](../config/capability-profiles.json)은 gh를 필수로 설치하지
 않는다. [installer](../install.sh)는 자동 업데이트를 기본 활성화하지만,
-[ci-query.py](../scripts/lib/ci-query.py)는 gh로만 CI를 조회한다.
+`ci-query.py`는 gh로만 CI를 조회한다.
 기존 gh가 없는 호스트에서는 새 버전의 자동 적용이 계속 건너뛰어질 수 있다.
 이미 gh가 준비된 호스트는 이 재현 조건에 해당하지 않는다.
 
@@ -162,7 +162,7 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 - [x] gh가 있는 기존 경로와 dirty checkout 보호가 유지된다.
 - [x] 최소 설치에 사용자 GitHub 로그인이나 추가 유료 서비스를 강제하지 않는다.
 
-**검증 위치:** [update-v04-smoke.sh](../tests/update-v04-smoke.sh)의 자동 업데이트
+**검증 위치:** `update-v04-smoke.sh`의 자동 업데이트
 fixture와 [install-profile-smoke.sh](../tests/install-profile-smoke.sh)의 최소 설치 검사.
 없는 바이너리와 가짜 응답을 주입한다. 실제 GitHub 요청·홈 설치는 회귀 테스트에
 필요하지 않다. 현재 update-v04 suite에는 `--only`가 없으므로 존재하지 않는 선택
@@ -170,7 +170,7 @@ fixture와 [install-profile-smoke.sh](../tests/install-profile-smoke.sh)의 최�
 
 ## S4. evidence freshness의 일관성
 
-**관찰:** [evidence.py](../scripts/lib/oms_runtime/evidence.py)의 기본 binding은
+**관찰:** `evidence.py`의 기본 binding은
 `--depends`가 없으면 HEAD만 저장한다. tracked 구현 파일을 깨뜨려도 커밋하지
 않으면 criterion은 verified로 남는 반면, 같은 envelope의 task verification은
 stale이 된다. 현재 확인된 영향은 projection·표시·다음 행동의 불일치다.
@@ -191,17 +191,17 @@ stale이 된다. 현재 확인된 영향은 projection·표시·다음 행동의
 - [x] fingerprint 계산을 envelope당 공유해 evidence 행 수만큼 Git 호출이 늘지 않는다.
 - [x] legacy receipt의 불확실성을 표시하며 별도 landing gate는 그대로 유지한다.
 
-**검증 위치:** [test_oms_runtime_core.py](../tests/test_oms_runtime_core.py)의
+**검증 위치:** `test_oms_runtime_core.py`의
 `test_explicit_binding_and_dependency_staleness`,
 `test_projection_subprocess_cost_does_not_scale_with_evidence_rows` 및 기존
-[RuntimeFixtureBase](../tests/runtime_test_base.py)를 확장한다.
+`RuntimeFixtureBase`를 확장한다.
 임시 Git 저장소의 파일 변경만으로 확인할 수 있다.
 
 ## S5. harness와 model family의 구분
 
-**관찰:** [panel_routing.py](../scripts/lib/panel_routing.py)는 독립 리뷰에서
+**관찰:** `panel_routing.py`는 독립 리뷰에서
 Claude owner를 Anthropic 계열로 먼저 확정한다. 그런데
-[codex_harness.py](../scripts/lib/codex_harness.py)는 Claude UI로 GPT를 실행할 수 있다.
+`codex_harness.py`는 Claude UI로 GPT를 실행할 수 있다.
 `owner=claude`, `owner_model=gpt-6.1-sol`인 함수 호출에서 judged family가 Anthropic이
 되어 같은 GPT reviewer를 선택하는 결과를 재현했다. standalone launcher와 panel
 launcher는 별도 경로이며, 실제 live panel 오심사까지 재현한 것은 아니다.
@@ -220,10 +220,10 @@ launcher는 별도 경로이며, 실제 live panel 오심사까지 재현한 것
 - [x] 사용자가 명시한 same-family 선택은 기존 표시·권한 계약을 보존한다.
 - [x] owner, room identity, 인증 환경을 바꿔 family 오류를 우회하지 않는다.
 
-**검증 위치:** [auto_review.py](../tests/operator/auto_review.py)의
+**검증 위치:** `auto_review.py`의
 `writer-model-independence` case에 Claude harness + GPT의 Main/writer 경로,
 독립 reviewer 부재, 명시적 same-family 선택을 추가한다. 환경 변경이 있으면
-[test_codex_harness.py](../tests/test_codex_harness.py)의 launch 환경 테스트를 재사용한다.
+`test_codex_harness.py`의 launch 환경 테스트를 재사용한다.
 `allocate()`와 가짜 catalog만으로 핵심 판정을 검증할 수 있다.
 
 ## S6. 설치 검증 기준의 공통화
@@ -238,7 +238,7 @@ launcher는 별도 경로이며, 실제 live panel 오심사까지 재현한 것
 | 수동 update | 선택 ref 적용과 link/doctor; 자체 CI 성공 확인 없음 |
 
 **먼저 할 일:** [설치 안내](INSTALL.md), [설치·검증 계약](COMPONENTS.md),
-[ci-query.py](../scripts/lib/ci-query.py), [auto-update.sh](../scripts/auto-update.sh),
+`ci-query.py`, [auto-update.sh](../scripts/auto-update.sh),
 [land.sh](../scripts/land.sh)에서 허용할 검증 근거와 예외를 한 표로 확정한다.
 그다음 대상 SHA·검증 범위·허용 여부·이유를 같은 helper로 계산하고 각 경로에서 사용한다.
 CI success와 full 검증을 같은 의미로 표시하지 않는다.
@@ -257,8 +257,8 @@ GitHub Releases나 새 배포 시스템을 도입하지 않는다. 공개 flag, 
 - [x] 실패·조회 불가·scope 불명확을 검증 성공으로 표시하지 않는다.
 - [x] dirty tree 보호와 기존 rollback·ownership 동작이 유지된다.
 
-**검증 위치:** [land-smoke.sh](../tests/land-smoke.sh),
-[update-v04-smoke.sh](../tests/update-v04-smoke.sh)의 기존 가짜 gh/remote fixtures.
+**검증 위치:** `land-smoke.sh`,
+`update-v04-smoke.sh`의 기존 가짜 gh/remote fixtures.
 순수 판단표를 작은 테스트로 먼저 확인하고, 바뀐 경로의 기존 통합 suite만 실행한다.
 
 ## 과도하지 않은 검증 계획

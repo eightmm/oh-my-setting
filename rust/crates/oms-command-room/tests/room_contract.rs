@@ -1,0 +1,267 @@
+#![forbid(unsafe_code)]
+use std::{
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+static SERIAL: AtomicU64 = AtomicU64::new(0);
+fn clean_env_child(command: &mut Command) -> &mut Command {
+    command.env_clear();
+    for name in ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+}
+const CHILD_ENV: &str = "CONTRACT_CHILD";
+fn isolated(name: &str, body: impl FnOnce()) {
+    if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
+        body();
+        return;
+    }
+    let home = Repo::new();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    let output = clean_env_child(&mut command)
+        .args(["--exact", name, "--nocapture"])
+        .env("HOME", &home.0)
+        .env(CHILD_ENV, name)
+        .output()
+        .unwrap();
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{out}");
+    assert!(out.contains("1 passed;"), "child ran no test: {out}");
+}
+struct Repo(PathBuf);
+impl Repo {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "oms-contract-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        let repo = Self(path.canonicalize().unwrap());
+        repo.git(&["init", "-q"]);
+        repo
+    }
+    fn git(&self, args: &[&str]) {
+        let mut command = Command::new("git");
+        let output = clean_env_child(&mut command)
+            .arg("-C")
+            .arg(&self.0)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fn write(&self, name: &str, body: impl AsRef<[u8]>) {
+        let path = self.0.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+}
+impl Drop for Repo {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+fn args(values: &[&str]) -> Vec<OsString> {
+    values.iter().map(OsString::from).collect()
+}
+static STOP: AtomicBool = AtomicBool::new(false);
+use oms_command_room::{
+    LocalServices, Services, run_with_services,
+    value::{Value, parse},
+};
+struct EmptyOperations;
+impl oms_command_room::OperationsRead for EmptyOperations {
+    fn attempts(&self) -> &[oms_command_room::Attempt] {
+        &[]
+    }
+    fn check(&self) -> oms_command_room::Result<()> {
+        Ok(())
+    }
+}
+struct FixtureServices;
+impl Services for FixtureServices {
+    fn state_repository(&self, path: &Path) -> oms_command_room::Result<PathBuf> {
+        LocalServices.state_repository(path)
+    }
+    fn canonical_provider(&self, provider: &str) -> oms_command_room::Result<String> {
+        LocalServices.canonical_provider(provider)
+    }
+    fn operations<'a>(
+        &'a self,
+        _: &Path,
+    ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
+        Ok(Box::new(EmptyOperations))
+    }
+}
+fn run(repo: &Repo, values: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
+    run_with_services(&args(values), &repo.0, &STOP, &FixtureServices)
+}
+fn success(output: (i32, Vec<u8>, Vec<u8>)) -> Value {
+    assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+    parse(&output.1, 1024 * 1024).unwrap()
+}
+#[test]
+fn ownership_help_and_resolution() {
+    isolated("ownership_help_and_resolution", || {
+        let repo = Repo::new();
+        assert!(oms_command_room::owns(&args(&["--invalid"])));
+        let help = run(&repo, &["--help"]);
+        assert_eq!(help.0, 0);
+        assert!(String::from_utf8_lossy(&help.1).contains("--after"));
+        repo.write("nested/file", "fixture");
+        assert_eq!(
+            LocalServices
+                .state_repository(&repo.0.join("nested"))
+                .unwrap(),
+            repo.0
+        );
+        assert!(
+            LocalServices
+                .state_repository(&repo.0.join("absent"))
+                .is_err()
+        );
+        assert!(
+            LocalServices
+                .state_repository(&repo.0.join("nested/file"))
+                .is_err()
+        );
+        let managed = repo.0.join("oh-my-setting-scratch.fixture/wt-fixture");
+        fs::create_dir_all(&managed).unwrap();
+        let mut command = Command::new("git");
+        assert!(
+            clean_env_child(&mut command)
+                .arg("-C")
+                .arg(&managed)
+                .args(["init", "-q"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            LocalServices
+                .state_repository(&managed)
+                .unwrap_err()
+                .message
+                .contains("managed scratch")
+        );
+    });
+}
+#[test]
+fn room_lifecycle_and_cursor() {
+    isolated("room_lifecycle_and_cursor", || {
+        let repo = Repo::new();
+        assert_eq!(
+            success(run(&repo, &["new", "--id", "room-fixture", "--json"]))["id"].as_str(),
+            Some("room-fixture")
+        );
+        for who in ["owner", "reader"] {
+            success(run(
+                &repo,
+                &[
+                    "join",
+                    "--id",
+                    "room-fixture",
+                    "--participant",
+                    who,
+                    "--provider",
+                    "codex",
+                    "--role",
+                    if who == "owner" { "main" } else { "worker" },
+                    "--json",
+                ],
+            ));
+        }
+        let call = |action: &str, more: &[&str]| {
+            let mut values = vec![
+                action,
+                "--id",
+                "room-fixture",
+                "--participant",
+                "reader",
+                "--json",
+            ];
+            values.extend_from_slice(more);
+            run(&repo, &values)
+        };
+        success(call("show", &[]));
+        success(call("scope", &["--owns", "src/**"]));
+        assert_eq!(call("scope", &["--owns", "../escape"]).0, 2);
+        let first = success(call("updates", &[]));
+        let cursor = first["cursor"].as_str().unwrap();
+        assert!(
+            success(call("updates", &["--after", cursor]))["turns"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let sent = success(run(
+            &repo,
+            &[
+                "send",
+                "--id",
+                "room-fixture",
+                "--participant",
+                "owner",
+                "--to",
+                "reader",
+                "--text",
+                "Inspect this change",
+                "--json",
+            ],
+        ));
+        let log = repo.0.join(".oms/threads/room-fixture.jsonl");
+        let before = fs::read(&log).unwrap();
+        let updates = success(call("updates", &["--after", cursor]));
+        assert_eq!(fs::read(&log).unwrap(), before);
+        assert_eq!(success(call("updates", &["--after", cursor])), updates);
+        let turns = updates["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 1);
+        let mid = turns[0]["room_event"]["id"].as_str().unwrap();
+        assert!(!mid.is_empty(), "{sent:?}");
+        let consumed = success(call("ack", &["--message", mid]));
+        assert_eq!(consumed["approval"].as_bool(), Some(false));
+        let acknowledged = fs::read(&log).unwrap();
+        success(call("ack", &["--message", mid]));
+        assert_eq!(fs::read(&log).unwrap(), acknowledged);
+        assert_eq!(call("updates", &["--after", "malformed"]).0, 2);
+        assert_eq!(call("ack", &[]).0, 2);
+        success(call("scope", &["--clear"]));
+    });
+}
+#[test]
+fn missing_services_fail_closed() {
+    isolated("missing_services_fail_closed", || {
+        let repo = Repo::new();
+        assert!(LocalServices.operations(&repo.0).is_err());
+        assert!(LocalServices.current_claude_session().is_err());
+        assert!(!LocalServices.delivery_available(oms_command_room::App::Codex));
+        assert!(
+            LocalServices
+                .deliver(oms_command_room::DeliveryRequest {
+                    repository: &repo.0,
+                    app: oms_command_room::App::Codex,
+                    text: "fixture",
+                    consumer: None,
+                    allow_wakeup: false
+                })
+                .is_err()
+        );
+    });
+}

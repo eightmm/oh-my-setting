@@ -1,0 +1,40 @@
+[package]
+name = "oms-command-peer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+
+[dependencies]
+oms-runtime = { path = "../oms-runtime" }
+oms-command-graph = { path = "../oms-command-graph" }
+oms-command-plan = { path = "../oms-command-plan" }
+oms-toml = { path = "../oms-toml" }
+oms-command-operations = { path = "../oms-command-operations" }
+oms-command-room = { path = "../oms-command-room" }
+oms-command-attempt-bundle = { path = "../oms-command-attempt-bundle" }
+oms-command-agent-role = { path = "../oms-command-agent-role" }
+oms-command-memory = { path = "../oms-command-memory" }
+oms-command-task = { path = "../oms-command-task" }
+oms-command-failure = { path = "../oms-command-failure" }
+oms-supervisor = { path = "../oms-supervisor" }
+oms-output = { path = "../oms-output" }
+oms-output-capture = { path = "../oms-output-capture" }
+oms-context = { path = "../oms-context" }
+oms-context-session = { path = "../oms-context-session" }
+oms-context-source = { path = "../oms-context-source" }
+oms-contract-markdown = { path = "../oms-contract-markdown" }
+oms-work-inspect = { path = "../oms-work-inspect" }
+oms-json = { path = "../oms-json" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-scrub = { path = "../oms-scrub" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+regex = "=1.13.1"
+sha2 = "=0.10.9"
+rustix = { version = "=1.1.6", features = ["fs", "process", "pipe", "system"] }
+shlex = "=1.3.0"
+unicode-general-category = "=0.6.0"
+
+[lints.rust]
+unsafe_code = "forbid"
