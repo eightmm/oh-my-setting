@@ -18,7 +18,7 @@ GitHub를 사용할 수 없는 환경에서도 로컬 개발·검증·결과 보
 구현 시점의 Rust 공통 코어와 공개 계약에 맞춰 정한다. 미래 기능을 현재 명령처럼 제시하지 않는다.
 
 이번 문서의 채택만으로 원격 명령 실행, GPU 사용, 인증정보 배포, 자동 병합·배포를 허용하지 않는다.
-[Rust 전환 원칙](RUST-MIGRATION.md)과 [기존 control-plane 승인 경계](CONTROL-PLANE-EVOLUTION.md)를 유지한다.
+[기존 control-plane 승인 경계](CONTROL-PLANE-EVOLUTION.md)를 유지한다.
 
 ## 2. 기존 기반을 재사용하는 방법
 
@@ -35,7 +35,7 @@ GitHub를 사용할 수 없는 환경에서도 로컬 개발·검증·결과 보
 | Context·출력 조회·실패 진단 개선 작업 | 병합된 계약을 재사용하고 새로운 병렬 로그·메모리 체계를 중복 생성하지 않음 |
 
 기능과 권한의 기준은 [Components](COMPONENTS.md), [Runtime](OMS-RUNTIME.md),
-[Panel](TERMINAL-PANEL.md), [Rust migration](RUST-MIGRATION.md)이다.
+[Panel](TERMINAL-PANEL.md)이다.
 관측만 허용한 기능을 이번 계획에 포함됐다는 이유로 변경·실행 기능으로 승격하지 않는다.
 
 ## 3. 책임 분리: 판단은 Main, 반복 제어는 Runtime
@@ -294,11 +294,11 @@ Stages A–F는 기존 순수 Rust 코어(`1.99.1`, `#![forbid(unsafe_code)]`, �
 | 단계 | 주요 구현 위치 | 핵심 동작 |
 |---|---|---|
 | A. 기준선·계약 | `oms-command-plan`, `oms-runtime`, `oms-command-autonomy` | 기존 Task/Lease/Target/Slurm/Landing 의미 유지 및 opt-in 확장 |
-| B. 로컬 병렬 실행 | `rust/crates/oms-command-plan/src/{engine,query,proposal}.rs`, `rust/crates/oms-command-autonomy/src/{parallel,planning,services}.rs`, `rust/crates/oms/src/services_control.rs` | DAG cycle/unknown-dep 검증, `--resources`/`--priority`/`--max-writers`/`--max-review-backlog` backpressure, singleton controller lock, non-barrier `std::thread::scope` 병렬 실행(`Services::invoke_concurrent` -> `Scope::ProcessGroup`으로 Linux 다중 스레드 감독) |
-| C. 협업·통합 | `rust/crates/oms-command-plan/src/contracts.rs`, `rust/crates/oms-command-autonomy/src/conflicts.rs` | 버전된 계약(`contract-propose`/`contract-accept`/`refresh-contracts`, `landing` 보호 및 claim 무효화 초기화), stale 계약 gating, `.oms/plan/late-results.jsonl` 격리, `oms plan-run --verify-combined` 및 detached worktree `--no-ff` 통합 재검증(`verify_combined`)·target drift 방어 |
-| D. 원격 준비 | `rust/crates/oms-runtime/src/{targets,exec_snapshot,ssh_adapter,cli_schema,parser,router}.rs`, `rust/crates/oms/src/main.rs` | `execution_approved: false` 기본값, identity fingerprint 결합 `approve`/`revoke`, 불변 `exec-snapshot` 생성·검증, `--target` 생략 시에도 등록된 미승인 호스트 차단 및 `--snapshot` 로컬·원격 checkout 일치 검증 |
-| E. 원격 실행·복구 | `rust/crates/oms-runtime/src/ssh_adapter.rs` | `.oms/runtime/remote-ops/<op_id>.json` durable ledger, `--op-id` 멱등/중복 차단, 16-hex nonce 기반 원격 프레임·bounded `dd`·`STILL_RUNNING` 출력 차단, `reconcile`/`cancel`(대기 루프 `runner.sh`, parent+child `SIGKILL`, `lstart` 미검증 시 `unknown` 보류), symlink 조상 거부·SHA-256 atomic `collect` |
-| F. Slurm·산출물·다중 저장소 | `rust/crates/oms-command-slurm-submit/src/{lib,ledger,reconcile}.rs`, `rust/crates/oms-command-landing/src/{cli,delivery,manifest}.rs` | `slurm-submit` provenance 및 attempt·`-M <cluster>` 단위 `reconcile`(`squeue`/`sacct` 복구·비정상 상태 실패 보존·`unknown` exit 75), `land --check-manifest` / `--execute-manifest` 엄격 `depends_on` 검증, state-root 중복 제거 락, checked-out target drift 방어 및 `partial-hold`(exit 3) |
+| B. 로컬 병렬 실행 | `crates/oms-command-plan/src/{engine,query,proposal}.rs`, `crates/oms-command-autonomy/src/{parallel,planning,services}.rs`, `crates/oms/src/services_control.rs` | DAG cycle/unknown-dep 검증, `--resources`/`--priority`/`--max-writers`/`--max-review-backlog` backpressure, singleton controller lock, non-barrier `std::thread::scope` 병렬 실행(`Services::invoke_concurrent` -> `Scope::ProcessGroup`으로 Linux 다중 스레드 감독) |
+| C. 협업·통합 | `crates/oms-command-plan/src/contracts.rs`, `crates/oms-command-autonomy/src/conflicts.rs` | 버전된 계약(`contract-propose`/`contract-accept`/`refresh-contracts`, `landing` 보호 및 claim 무효화 초기화), stale 계약 gating, `.oms/plan/late-results.jsonl` 격리, `oms plan-run --verify-combined` 및 detached worktree `--no-ff` 통합 재검증(`verify_combined`)·target drift 방어 |
+| D. 원격 준비 | `crates/oms-runtime/src/{targets,exec_snapshot,ssh_adapter,cli_schema,parser,router}.rs`, `crates/oms/src/main.rs` | `execution_approved: false` 기본값, identity fingerprint 결합 `approve`/`revoke`, 불변 `exec-snapshot` 생성·검증, `--target` 생략 시에도 등록된 미승인 호스트 차단 및 `--snapshot` 로컬·원격 checkout 일치 검증 |
+| E. 원격 실행·복구 | `crates/oms-runtime/src/ssh_adapter.rs` | `.oms/runtime/remote-ops/<op_id>.json` durable ledger, `--op-id` 멱등/중복 차단, 16-hex nonce 기반 원격 프레임·bounded `dd`·`STILL_RUNNING` 출력 차단, `reconcile`/`cancel`(대기 루프 `runner.sh`, parent+child `SIGKILL`, `lstart` 미검증 시 `unknown` 보류), symlink 조상 거부·SHA-256 atomic `collect` |
+| F. Slurm·산출물·다중 저장소 | `crates/oms-command-slurm-submit/src/{lib,ledger,reconcile}.rs`, `crates/oms-command-landing/src/{cli,delivery,manifest}.rs` | `slurm-submit` provenance 및 attempt·`-M <cluster>` 단위 `reconcile`(`squeue`/`sacct` 복구·비정상 상태 실패 보존·`unknown` exit 75), `land --check-manifest` / `--execute-manifest` 엄격 `depends_on` 검증, state-root 중복 제거 락, checked-out target drift 방어 및 `partial-hold`(exit 3) |
 
 ### 13절 시나리오별 결정적 검증 매핑 (Fixture / Fault-Injection)
 

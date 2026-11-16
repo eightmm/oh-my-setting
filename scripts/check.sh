@@ -341,7 +341,7 @@ prepare_affected_gate() {
   while IFS= read -r path; do
     case "$path" in
       .github/workflows/*|install.sh|scripts/oms|scripts/lib/platform.sh|scripts/lib/*lock*|\
-      rust/*|tests/*install*|tests/*portability*)
+      Cargo.toml|Cargo.lock|rust-toolchain.toml|crates/*|tests/*install*|tests/*portability*)
         AFFECTED_NATIVE=true ;;
     esac
     case "$path" in
@@ -402,7 +402,7 @@ if [ "$RUN_LINT" = 1 ]; then
     templates/*.sh tests/*.sh tests/lib/*.sh
   stage skill-manifest bash scripts/install-skills.sh
   stage doc-references bash tests/source-distribution-smoke.sh --docs-only
-  stage rust-migration-check cargo +1.99.1 run --manifest-path rust/crates/oms-migrate/Cargo.toml --locked --offline -- check --repo .
+  stage rust-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
 fi
 
 if [ "$RUN_FOCUSED" = 1 ]; then
@@ -419,15 +419,15 @@ fi
 
 if [ "$RUN_RUST" = 1 ]; then
   stage rust-workspace-tests bash -c '
-    cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline &&
-      cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --doc --locked --offline
+    cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline &&
+      cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
   '
 fi
 
 if [ "$RUN_INVARIANTS" = 1 ] || [ "$RUN_QUICK" = 1 ]; then
   stage invariants-skill-manifest bash scripts/install-skills.sh
   stage invariants-doc-references bash tests/source-distribution-smoke.sh --docs-only
-  stage invariants-migration-check cargo +1.99.1 run --manifest-path rust/crates/oms-migrate/Cargo.toml --locked --offline -- check --repo .
+  stage invariants-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
   stage invariants-source-distribution bash tests/source-distribution-smoke.sh
 fi
 

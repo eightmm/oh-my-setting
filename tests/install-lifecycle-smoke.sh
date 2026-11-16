@@ -18,7 +18,7 @@ fail() {
 }
 
 build_dir="$(oms_smoke_native_build_dir "$ROOT")" ||
-  fail "pre-built native artifacts missing in $ROOT/rust/target/{release,debug}"
+  fail "pre-built native artifacts missing in $ROOT/target/{release,debug}"
 
 for mode in symlink copy; do
   case_dir="$TMP/mode-$mode"
@@ -36,7 +36,7 @@ EOF
   git -C "$case_dir/checkout" init -qb main
   git -C "$case_dir/checkout" config user.name oms-test
   git -C "$case_dir/checkout" config user.email test@example.com
-  tar -C "$ROOT" --exclude=.git --exclude=rust/target --exclude=.oms -cf - . | tar -C "$case_dir/checkout" -xf -
+  tar -C "$ROOT" --exclude=.git --exclude=target --exclude=.oms -cf - . | tar -C "$case_dir/checkout" -xf -
   git -C "$case_dir/checkout" add -A
   git -C "$case_dir/checkout" commit -qm "initial v2"
   rev1="$(git -C "$case_dir/checkout" rev-parse HEAD)"
@@ -46,7 +46,7 @@ EOF
   git -C "$case_dir/checkout" push -q origin main
 
   # Stage native binaries directly for rev1 (avoid slow recompilation inside test).
-  oms_smoke_stage_native "$case_dir/checkout/rust/target/oms-native/$rev1" "$build_dir" ||
+  oms_smoke_stage_native "$case_dir/checkout/target/oms-native/$rev1" "$build_dir" ||
     fail "failed staging native binaries for $rev1 ($mode)"
 
   export HOME="$case_dir/home"
@@ -90,8 +90,8 @@ EOF
       fail "installed oms doctor failed ($mode)"
 
     # Corrupt staged executable -> strict command fails; doctor --repair quarantines & recovers.
-    printf 'corrupt\n' > "$case_dir/checkout/rust/target/oms-native/$rev1/oms"
-    chmod +x "$case_dir/checkout/rust/target/oms-native/$rev1/oms"
+    printf 'corrupt\n' > "$case_dir/checkout/target/oms-native/$rev1/oms"
+    chmod +x "$case_dir/checkout/target/oms-native/$rev1/oms"
     corrupt_rc=0
     "$HOME/.local/bin/oms" list >/dev/null 2>&1 || corrupt_rc=$?
     [ "$corrupt_rc" -eq 2 ] || fail "corrupted oms list did not fail with exit 2 (got $corrupt_rc)"
@@ -99,15 +99,15 @@ EOF
     # Put a fast cargo shim on PATH only during repair so cargo builds instantly by copying build_dir.
     cat > "$case_dir/bin/cargo" <<EOF
 #!/usr/bin/env bash
-mkdir -p "$case_dir/checkout/rust/target/lifecycle-build/release"
-cp -f "$build_dir"/oms* "$case_dir/checkout/rust/target/lifecycle-build/release/"
+mkdir -p "$case_dir/checkout/target/lifecycle-build/release"
+cp -f "$build_dir"/oms* "$case_dir/checkout/target/lifecycle-build/release/"
 EOF
     chmod +x "$case_dir/bin/cargo"
     OMS_NATIVE_NO_AUTO_STAGE=0 "$HOME/.local/bin/oms" doctor --repair --no-model-doctor >/dev/null ||
       fail "doctor --repair failed ($mode)"
     "$HOME/.local/bin/oms" list >/dev/null || fail "oms list failed after repair ($mode)"
     broken_found=0
-    for broken_dir in "$case_dir/checkout/rust/target/oms-native/.broken-$rev1"-*; do
+    for broken_dir in "$case_dir/checkout/target/oms-native/.broken-$rev1"-*; do
       [ -d "$broken_dir" ] && broken_found=1 && break
     done
     [ "$broken_found" -eq 1 ] ||

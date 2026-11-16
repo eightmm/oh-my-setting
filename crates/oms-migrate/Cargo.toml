@@ -1,0 +1,25 @@
+[package]
+name = "oms-migrate"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "oms-migrate"
+path = "src/main.rs"
+
+[[test]]
+name = "inventory"
+path = "tests/inventory.rs"

@@ -447,7 +447,7 @@ The available Pi launch uses the existing `oms harness pi`
 bridge and requires Pi 0.80.4 or newer (the bridge waits for `agent_settled`)
 and Codex CLI on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
 `--resume` until Pi session ownership can be verified. It has no Codex native hook or
-context/quota reading, but [`scripts/lib/pi-oms-extension.mjs`](../scripts/lib/pi-oms-extension.mjs)
+context/quota reading, but [`pi-oms-extension.mjs`](../crates/oms-command-providers-skills/assets/pi-oms-extension.mjs)
 forwards Pi activity to `hook_state.py` and delivers room mail through its hook context.
 At Pi's exit prompt, `r` starts a fresh Pi main; it does not resume Pi history. The launch uses Pi's documented
 [`--append-system-prompt` argument](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)

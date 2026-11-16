@@ -100,8 +100,8 @@ oms_check_parallel_run() {
   if [ "$running" -ge "$budget" ]; then reap_parallel_slot; fi
   (
     cd "$root"
-    cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline &&
-      cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --doc --locked --offline
+    cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline &&
+      cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
   ) > "$logs/rust-tests.log" 2>&1 &
   pids+=("$!"); names+=(rust-tests)
   total=$((total + 1)); running=$((running + 1))
