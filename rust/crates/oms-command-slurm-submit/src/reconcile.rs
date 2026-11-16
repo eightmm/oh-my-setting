@@ -226,6 +226,10 @@ fn tagged(text: &str, short: &str) -> bool {
 
 pub(crate) enum Matcher<'a> {
     Job(&'a str),
+    TaggedJob {
+        id: &'a str,
+        short: &'a str,
+    },
     Tag {
         short: &'a str,
         excluded_jobs: &'a BTreeSet<String>,
@@ -237,6 +241,7 @@ impl Matcher<'_> {
     fn selects(&self, entry: &Entry) -> bool {
         match self {
             Matcher::Job(id) => entry.base == *id,
+            Matcher::TaggedJob { id, short } => entry.base == *id && tagged(&entry.text, short),
             Matcher::Tag {
                 short,
                 excluded_jobs,
@@ -575,6 +580,24 @@ fn last_reconciled(rows: &[Json], target: &Target) -> Option<(String, String)> {
         })
 }
 
+fn attempt_cluster(rows: &[Json], attempt_id: &[u8]) -> Option<String> {
+    let mut submitted_c = None;
+    let mut intent_c = None;
+    let mut args_c = None;
+    for r in rows {
+        if ledger::identity(f(r, "attempt")).ok().as_deref() != Some(attempt_id) {
+            continue;
+        }
+        if kind(r, "submitted") {
+            submitted_c = text_of(r, "cluster_name").filter(|c| crate::safe_cluster(c));
+        } else if kind(r, "intent") {
+            intent_c = text_of(r, "cluster_name").filter(|c| crate::safe_cluster(c));
+            args_c = cluster_from_intent_args(r);
+        }
+    }
+    submitted_c.or(intent_c).or(args_c)
+}
+
 fn record(
     ledger_path: &Path,
     logical: &Path,
@@ -595,10 +618,20 @@ fn record(
         return Ok(false);
     }
     if old.job_id.is_none()
+        && !target(&rows, &old.key)?.is_some_and(|t| t.attempt_id == old.attempt_id)
+    {
+        return Ok(false);
+    }
+    if old.job_id.is_none()
         && rows.iter().any(|r| {
             kind(r, "submitted")
                 && text_of(r, "job_id").as_deref() == Some(job.as_str())
-                && ledger::identity(f(r, "attempt")).ok().as_ref() != Some(&old.attempt_id)
+                && ledger::identity(f(r, "attempt"))
+                    .ok()
+                    .is_some_and(|other_att| {
+                        other_att != old.attempt_id
+                            && attempt_cluster(&rows, &other_att) == old.cluster_name
+                    })
         })
     {
         return Ok(false);
@@ -652,19 +685,21 @@ fn record(
     Ok(true)
 }
 
-fn submitted_attempt(rows: &[Json], job: &str) -> Option<(OsString, Vec<u8>)> {
-    rows.iter().rev().find_map(|r| {
-        (kind(r, "submitted") && text_of(r, "job_id").as_deref() == Some(job))
-            .then(|| {
-                let key = match f(r, "key") {
-                    Some(Json::String(k)) => OsString::from_vec(k.clone()),
-                    _ => return None,
-                };
-                let attempt_id = ledger::identity(f(r, "attempt")).ok()?;
-                Some((key, attempt_id))
-            })
-            .flatten()
-    })
+fn submitted_attempts(rows: &[Json], job: &str) -> Vec<(OsString, Vec<u8>, Option<String>)> {
+    rows.iter()
+        .rev()
+        .filter_map(|r| {
+            if !(kind(r, "submitted") && text_of(r, "job_id").as_deref() == Some(job)) {
+                return None;
+            }
+            let Json::String(k) = f(r, "key")? else {
+                return None;
+            };
+            let attempt_id = ledger::identity(f(r, "attempt")).ok()?;
+            let clus = attempt_cluster(rows, &attempt_id);
+            Some((OsString::from_vec(k.clone()), attempt_id, clus))
+        })
+        .collect()
 }
 
 fn tag_exclusions(rows: &[Json], target: &Target, short: &str) -> (BTreeSet<String>, bool) {
@@ -674,6 +709,7 @@ fn tag_exclusions(rows: &[Json], target: &Target, short: &str) -> (BTreeSet<Stri
         if let Ok(att) = ledger::identity(f(r, "attempt")) {
             if kind(r, "submitted") {
                 if att != target.attempt_id
+                    && attempt_cluster(rows, &att) == target.cluster_name
                     && let Some(job_id) = text_of(r, "job_id")
                 {
                     excluded_jobs.insert(job_id);
@@ -692,6 +728,9 @@ fn tag_exclusions(rows: &[Json], target: &Target, short: &str) -> (BTreeSet<Stri
             return false;
         };
         if att == target.attempt_id || attempt_has_result.contains(&att) {
+            return false;
+        }
+        if attempt_cluster(rows, &att) != target.cluster_name {
             return false;
         }
         let Some(Json::String(k)) = f(r, "key") else {
@@ -726,25 +765,54 @@ pub(crate) fn run(
     let ledger_path = crate::ledger_path(&base, repository);
     storage::validate_path(&ledger_path).map_err(str::to_owned)?;
     let rows = storage::load(&ledger_path, &base).map_err(str::to_owned)?;
+    let mut require_tag_for_job = false;
     let (key, found) = if !options.job_id.is_empty() {
-        match submitted_attempt(&rows, &options.job_id) {
-            Some((rec_key, rec_att)) => {
-                if !options.key.is_empty() && rec_key != options.key {
-                    return Err("--key does not match the recorded --job-id".into());
-                }
-                let t = target_for_attempt(&rows, &rec_key, &rec_att)?;
-                (Some(rec_key), t)
-            }
-            None if !options.key.is_empty() => {
+        let recorded = submitted_attempts(&rows, &options.job_id);
+        if !options.key.is_empty() {
+            if let Some((rec_key, rec_att, _)) = recorded.iter().find(|(k, _, _)| *k == options.key)
+            {
+                let t = target_for_attempt(&rows, rec_key, rec_att)?;
+                (Some(rec_key.clone()), t)
+            } else {
                 let t = target(&rows, &options.key)?;
-                if let Some(existing_job) = t.as_ref().and_then(|x| x.job_id.as_deref())
+                let Some(t) = t else {
+                    if !recorded.is_empty() {
+                        return Err("--key does not match the recorded --job-id".into());
+                    }
+                    return Err("no submitted or unresolved ledger record for this key".into());
+                };
+                if let Some(existing_job) = t.job_id.as_deref()
                     && existing_job != options.job_id
                 {
                     return Err("--job-id does not match the active submission for --key".into());
                 }
-                (Some(options.key.clone()), t)
+                if recorded
+                    .iter()
+                    .any(|(k, _, c)| k != &options.key && *c == t.cluster_name)
+                {
+                    return Err("--key does not match the recorded --job-id".into());
+                }
+                require_tag_for_job = t.job_id.is_none();
+                (Some(options.key.clone()), Some(t))
             }
-            None => (None, None),
+        } else {
+            let mut distinct = BTreeSet::new();
+            for (k, _, c) in &recorded {
+                distinct.insert((k.clone(), c.clone()));
+            }
+            if distinct.len() > 1 {
+                return Err(
+                    "--job-id matches multiple submissions across keys or clusters; pass --key"
+                        .into(),
+                );
+            }
+            match recorded.first() {
+                Some((rec_key, rec_att, _)) => {
+                    let t = target_for_attempt(&rows, rec_key, rec_att)?;
+                    (Some(rec_key.clone()), t)
+                }
+                None => (None, None),
+            }
         }
     } else {
         let t = target(&rows, &options.key)?;
@@ -758,9 +826,30 @@ pub(crate) fn run(
         .or_else(|| found.as_ref().and_then(|t| t.job_id.clone()));
     let mut excluded_jobs = BTreeSet::new();
     let mut ambiguous_tag = false;
-    let matcher = match (&job, found.as_ref().and_then(|t| t.short.as_deref())) {
-        (Some(id), _) => Matcher::Job(id),
-        (None, Some(short)) => {
+    let mut untagged_for_job = false;
+    let matcher = match (
+        &job,
+        require_tag_for_job,
+        found.as_ref().and_then(|t| t.short.as_deref()),
+    ) {
+        (Some(id), false, _) => Matcher::Job(id),
+        (Some(id), true, Some(short)) => {
+            if let Some(t) = found.as_ref() {
+                let (excl, ambig) = tag_exclusions(&rows, t, short);
+                excluded_jobs = excl;
+                ambiguous_tag = ambig;
+            }
+            if ambiguous_tag || excluded_jobs.contains(id.as_str()) {
+                Matcher::Nothing
+            } else {
+                Matcher::TaggedJob { id, short }
+            }
+        }
+        (Some(_), true, None) => {
+            untagged_for_job = true;
+            Matcher::Nothing
+        }
+        (None, _, Some(short)) => {
             if let Some(t) = found.as_ref() {
                 let (excl, ambig) = tag_exclusions(&rows, t, short);
                 excluded_jobs = excl;
@@ -775,7 +864,7 @@ pub(crate) fn run(
                 }
             }
         }
-        (None, None) => Matcher::Nothing,
+        (None, _, None) => Matcher::Nothing,
     };
     let start = found
         .as_ref()
@@ -823,7 +912,12 @@ pub(crate) fn run(
     let mut verdict = resolve(&squeue, &sacct, &matcher);
     if ambiguous_tag && verdict.class == Class::Unknown {
         verdict.reason =
-            "multiple unresolved tagged attempts share this key tag; pass --job-id".into();
+            "multiple unresolved tagged attempts share this key tag; cannot disambiguate safely"
+                .into();
+    } else if untagged_for_job && verdict.class == Class::Unknown {
+        verdict.reason =
+            "untagged attempt cannot safely adopt an unrecorded --job-id without oms-key verification"
+                .into();
     }
     let recorded = match &found {
         Some(t) if verdict.class != Class::Unknown => {

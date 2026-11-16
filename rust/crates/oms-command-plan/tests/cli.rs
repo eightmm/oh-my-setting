@@ -988,6 +988,10 @@ fn versioned_contracts_gate_scheduling() {
         "--patch",
         "v2.diff",
     ]);
+    let noop = ok(&["refresh-contracts", "--task", "downstream"]);
+    assert!(noop.contains("\"state\": \"review\""), "{noop}");
+    assert!(noop.contains("\"artifact\": \"v2-review.md\""), "{noop}");
+    assert!(noop.contains("\"patch\": \"v2.diff\""), "{noop}");
     ok(&["contract-propose", "--id", "api", "--summary", "v3"]);
     ok(&["contract-accept", "--id", "api", "--version", "3"]);
     let refreshed = ok(&["refresh-contracts", "--task", "downstream"]);
@@ -999,6 +1003,35 @@ fn versioned_contracts_gate_scheduling() {
         refreshed.contains("\"review_lease_id\": \"\""),
         "{refreshed}"
     );
+    ok(&["claim", "--id", "downstream", "--provider", "codex"]);
+    ok(&[
+        "review",
+        "--id",
+        "downstream",
+        "--artifact",
+        "v3-review.md",
+        "--patch",
+        "v3.diff",
+    ]);
+    ok(&[
+        "block",
+        "--id",
+        "downstream",
+        "--reason",
+        "waiting on upstream fixture",
+    ]);
+    ok(&["contract-propose", "--id", "api", "--summary", "v4"]);
+    ok(&["contract-accept", "--id", "api", "--version", "4"]);
+    let blk = ok(&["refresh-contracts", "--task", "downstream"]);
+    assert!(blk.contains("api@v4"), "{blk}");
+    assert!(blk.contains("\"state\": \"blocked\""), "{blk}");
+    assert!(
+        blk.contains("\"reason\": \"waiting on upstream fixture\""),
+        "{blk}"
+    );
+    assert!(blk.contains("\"artifact\": \"\""), "{blk}");
+    assert!(blk.contains("\"patch\": \"\""), "{blk}");
+    assert!(!ok(&["ready"]).contains("downstream"));
     assert_eq!(
         run(&["add", "--id", "bad", "--title", "bad", "--priority", "abc"]).0,
         2

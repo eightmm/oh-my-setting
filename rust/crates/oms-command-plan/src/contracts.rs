@@ -203,7 +203,7 @@ pub(crate) fn refresh(plan: &Plan<'_>, req: &Request, snapshot: &mut Snapshot) -
         .transpose()?
         .unwrap_or_default();
     let mut pins = Vec::new();
-    for reference in refs {
+    for reference in &refs {
         let cid = reference.split('@').next().unwrap_or("");
         require(valid_id(cid), "invalid contract reference")?;
         let accepted = snapshot
@@ -219,14 +219,21 @@ pub(crate) fn refresh(plan: &Plan<'_>, req: &Request, snapshot: &mut Snapshot) -
         )?;
         pins.push(format!("{cid}@v{accepted}"));
     }
-    if matches!(state.as_str(), "claimed" | "running" | "review")
-        || !task.text("lease_id").is_empty()
-        || !task.text("review_lease_id").is_empty()
-        || !task.text("artifact").is_empty()
-        || !task.text("patch").is_empty()
-        || task.opt("panel_accept").is_some()
+    let changed = pins.len() != refs.len() || pins.iter().zip(&refs).any(|(p, r)| p != r);
+    if changed
+        && (matches!(state.as_str(), "claimed" | "running" | "review" | "blocked")
+            || !task.text("lease_id").is_empty()
+            || !task.text("review_lease_id").is_empty()
+            || !task.text("artifact").is_empty()
+            || !task.text("patch").is_empty()
+            || task.opt("panel_accept").is_some())
     {
+        let blocked_reason = (state == "blocked").then(|| task.text("reason").to_owned());
         crate::engine::clear_claim(snapshot, &mut task)?;
+        if let Some(reason) = blocked_reason {
+            task.set("state", string("blocked"))?;
+            task.set("reason", string(&reason))?;
+        }
         for field in [
             "review_lease_id",
             "artifact",

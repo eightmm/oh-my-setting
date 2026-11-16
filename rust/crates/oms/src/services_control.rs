@@ -71,6 +71,7 @@ struct Spawn<'a> {
     merged: bool,
     wall: Duration,
     limit: usize,
+    terminate_grace: Duration,
 }
 impl<'a> Spawn<'a> {
     fn new(scope: Scope, argv: Vec<OsString>, wall: Duration, limit: usize) -> Self {
@@ -83,6 +84,7 @@ impl<'a> Spawn<'a> {
             merged: false,
             wall,
             limit,
+            terminate_grace: Duration::from_secs(2),
         }
     }
     fn cwd(mut self, cwd: &'a Path) -> Self {
@@ -91,6 +93,10 @@ impl<'a> Spawn<'a> {
     }
     fn environment(mut self, environment: Vec<(OsString, OsString)>) -> Self {
         self.environment = environment;
+        self
+    }
+    fn terminate_grace(mut self, grace: Duration) -> Self {
+        self.terminate_grace = grace;
         self
     }
 }
@@ -105,6 +111,7 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
         merged,
         wall,
         limit,
+        terminate_grace,
     } = spawn;
     if interrupted.load(Ordering::Acquire) {
         return Err("interrupted".into());
@@ -129,6 +136,7 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
         Streams::Separate
     };
     request.scope = scope;
+    request.terminate_grace = terminate_grace;
     request.deadline = Some(
         Instant::now()
             .checked_add(wall)
@@ -424,10 +432,12 @@ impl<'a> ControlServices<'a> {
         let mut argv = self.native.clone();
         argv.push(command.tool.clone().into());
         argv.extend(command.args.iter().cloned());
-        let spawn = Spawn::new(scope, argv, command.wall, command.output_limit);
-        let spawn = spawn
+        let mut spawn = Spawn::new(scope, argv, command.wall, command.output_limit)
             .cwd(&command.cwd)
             .environment(command.environment.clone());
+        if scope == Scope::ProcessGroup {
+            spawn = spawn.terminate_grace(Duration::from_secs(4));
+        }
         let child = run_child(spawn, interrupted).map_err(|e| autonomy_error(2, e))?;
         Ok((child.code, child.stdout, child.stderr))
     }
@@ -2947,6 +2957,53 @@ mod tests {
         });
         assert_eq!(a.0, 0);
         assert_eq!(b.0, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invoke_concurrent_timeout_terminates_separate_pgrp_descendants_on_sigterm() {
+        use oms_command_autonomy::{Invocation, Services};
+        let dir = Tmp::new();
+        let pid_file = dir.path().join("grand.pid");
+        let ready_file = dir.path().join("grand.ready");
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut control = ControlServices::new(&stop, dir.path()).unwrap();
+        let script = format!(
+            "g=''; trap 'if [ -n \"$g\" ]; then kill -KILL -\"$g\" 2>/dev/null || kill -KILL \"$g\" 2>/dev/null || true; fi; exit 143' TERM; \
+             setsid /bin/sh -c 'trap \"\" TERM; exec sleep 30' </dev/null >/dev/null 2>&1 & g=$!; \
+             printf '%s\\n' \"$g\" > \"{pid}\"; : > \"{ready}\"; \
+             while kill -0 \"$g\" 2>/dev/null; do sleep 0.05; done; exit 0",
+            pid = pid_file.display(),
+            ready = ready_file.display(),
+        );
+        control.native = sh(&script);
+        let mut inv = Invocation::new("peer-delegate", dir.path(), vec![]);
+        inv.wall = Duration::from_millis(400);
+        let (code, out, err) = control.invoke_concurrent(&inv, &stop).unwrap();
+        assert_eq!(code, 124);
+        assert!(
+            ready_file.exists(),
+            "missing ready file: code={code} out={:?} err={:?}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err),
+        );
+        let gpid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &gpid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !alive,
+            "separate process group descendant {gpid} survived invoke_concurrent SIGTERM cancellation"
+        );
     }
 
     #[test]

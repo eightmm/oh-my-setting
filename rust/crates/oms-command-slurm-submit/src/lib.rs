@@ -341,24 +341,126 @@ pub(crate) fn cluster_from_args(args: &[OsString]) -> Option<String> {
     let mut found = None;
     while i < args.len() {
         let s = args[i].to_str()?;
-        let val = if s == "-M" || s == "--clusters" {
+        if s == "--" || s == "-" || !s.starts_with('-') {
+            break;
+        }
+        if s == "-M" || s == "--clusters" {
             i += 1;
-            args.get(i).and_then(|v| v.to_str())
+            if let Some(c) = args.get(i).and_then(|v| v.to_str())
+                && safe_cluster(c)
+            {
+                found = Some(c.to_owned());
+            }
         } else if let Some(rest) = s.strip_prefix("--clusters=") {
-            Some(rest)
+            if safe_cluster(rest) {
+                found = Some(rest.to_owned());
+            }
         } else if s.len() > 2 && s.starts_with("-M") && !s.starts_with("-M-") {
-            Some(&s[2..])
-        } else {
-            None
-        };
-        if let Some(c) = val
-            && safe_cluster(c)
+            let c = &s[2..];
+            if safe_cluster(c) {
+                found = Some(c.to_owned());
+            }
+        } else if s.starts_with("--") {
+            let takes_value = !s.contains('=')
+                && !matches!(
+                    s,
+                    "--help"
+                        | "--usage"
+                        | "--version"
+                        | "--hold"
+                        | "--parsable"
+                        | "--quiet"
+                        | "--verbose"
+                        | "--wait"
+                        | "--no-kill"
+                        | "--no-requeue"
+                        | "--requeue"
+                        | "--overcommit"
+                        | "--oversubscribe"
+                        | "--exclusive"
+                        | "--spread-job"
+                        | "--contiguous"
+                        | "--ignore-pbs"
+                        | "--test-only"
+                        | "--get-user-env"
+                        | "--use-min-nodes"
+                        | "--whole"
+                        | "--bell"
+                        | "--no-bell"
+                );
+            if takes_value {
+                i += 1;
+            }
+        } else if s.len() == 2
+            && matches!(
+                s,
+                "-A" | "-a"
+                    | "-b"
+                    | "-B"
+                    | "-c"
+                    | "-C"
+                    | "-d"
+                    | "-D"
+                    | "-e"
+                    | "-F"
+                    | "-G"
+                    | "-i"
+                    | "-J"
+                    | "-L"
+                    | "-m"
+                    | "-n"
+                    | "-N"
+                    | "-o"
+                    | "-p"
+                    | "-q"
+                    | "-S"
+                    | "-t"
+                    | "-u"
+                    | "-w"
+                    | "-x"
+            )
         {
-            found = Some(c.to_owned());
+            i += 1;
         }
         i += 1;
     }
     found
+}
+
+fn cluster_in_script(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    let mut found = None;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let trimmed = line.trim_start();
+        let Some(after) = trimmed.strip_prefix("#SBATCH") else {
+            continue;
+        };
+        if !after.starts_with(|c: char| c.is_ascii_whitespace()) {
+            continue;
+        }
+        let tokens: Vec<OsString> = after
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(OsString::from)
+            .collect();
+        if let Some(c) = cluster_from_args(&tokens) {
+            found = Some(c);
+        }
+    }
+    found
+}
+
+fn resolve_cluster_name(args: &[OsString], script: Option<&Path>) -> Option<String> {
+    cluster_from_args(args)
+        .or_else(|| {
+            std::env::var_os("SLURM_CLUSTERS")
+                .and_then(|v| v.to_str().map(str::trim).map(str::to_owned))
+                .filter(|c| safe_cluster(c))
+        })
+        .or_else(|| script.and_then(cluster_in_script))
 }
 
 fn execute(
@@ -450,7 +552,8 @@ fn execute(
     if interrupted.load(Ordering::Relaxed) {
         return Err("interrupted".into());
     }
-    let cluster_name = cluster_from_args(args);
+    let script_abs = script.as_ref().map(|s| caller.join(s));
+    let clus_opt = resolve_cluster_name(args, script_abs.as_deref());
     storage::ensure_ignore(&ledger, &logical, interrupted);
     let attempt = match ledger::begin(
         &ledger,
@@ -462,7 +565,7 @@ fn execute(
             tag,
             store_args,
             args,
-            cluster_name: cluster_name.as_deref(),
+            cluster_name: clus_opt.as_deref(),
             provenance: &options.provenance,
         },
         interrupted,
@@ -514,10 +617,15 @@ fn execute(
         } => {
             // Persist a known answer before further diagnostics, irrespective
             // of a late signal or failure of an output writer.
+            let out_clus = if cluster_name.is_empty() {
+                clus_opt.as_deref().map_or(OsStr::new(""), OsStr::new)
+            } else {
+                cluster_name.as_os_str()
+            };
             let outcome = if code == 0 {
                 Outcome::Submitted {
                     job_id: &job_id,
-                    cluster_name: &cluster_name,
+                    cluster_name: out_clus,
                 }
             } else {
                 Outcome::Failed(code)

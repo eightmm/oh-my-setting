@@ -372,12 +372,11 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             })
             .collect::<Result<Vec<_>>>()?
             .join(" ");
-        let script = if let Some((snap_head, snap_tree)) = &snapshot_pins {
+        let script = if let Some(pins) = &snapshot_pins {
             format!(
-                "cd -- {} && (test \"$(git rev-parse --verify HEAD 2>/dev/null)\" = {} && test \"$(git rev-parse --verify 'HEAD^{{tree}}' 2>/dev/null)\" = {} && test -z \"$(git status --porcelain --untracked-files=no 2>/dev/null)\" || {{ printf 'remote checkout does not match snapshot\\n' >&2; exit 2; }}) && {}",
+                "cd -- {} && ( {} || {{ printf 'remote checkout does not match snapshot\\n' >&2; exit 2; }} ) && {}",
                 remote_path(&remote),
-                quote(snap_head),
-                quote(snap_tree),
+                remote_snapshot_check_sh(pins),
                 command
             )
         } else {
@@ -472,8 +471,14 @@ fn enforce_target_policy(
     let mut exact_approved = false;
     let mut matched_host = false;
     let mut host_approved = false;
+    fn ssh_host_matches(registered: &str, supplied: &str) -> bool {
+        let r_host = registered.rsplit_once('@').map_or(registered, |(_, h)| h);
+        let s_host = supplied.rsplit_once('@').map_or(supplied, |(_, h)| h);
+        registered.eq_ignore_ascii_case(supplied) || r_host.eq_ignore_ascii_case(s_host)
+    }
+
     for (_, row) in entries {
-        if row.text("ssh_alias") == host {
+        if ssh_host_matches(row.text("ssh_alias"), host) {
             matched_host = true;
             let is_ok = crate::targets::approved(row)?;
             if is_ok {
@@ -493,10 +498,12 @@ fn enforce_target_policy(
             "registered remote target is not approved for execution",
         )?;
     } else if matched_host {
-        require(
-            host_approved,
-            "registered SSH host is not approved for execution",
-        )?;
+        if !host_approved {
+            return Err(error("registered SSH host is not approved for execution"));
+        }
+        return Err(error(
+            "remote directory is not registered for this SSH host",
+        ));
     }
     Ok(())
 }
@@ -538,7 +545,46 @@ fn validate_snapshot(repo: &Path, digest: &str) -> Result<crate::value::Value> {
     Ok(value)
 }
 
-fn verify_snapshot_checkouts(repo: &Path, snap: &crate::value::Value) -> Result<(String, String)> {
+struct SnapshotPins {
+    head_sha: String,
+    tree_sha: String,
+    lockfiles: Vec<(String, String)>,
+}
+
+fn lockfile_prefixes(rel: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut acc = String::new();
+    for comp in rel.split('/') {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(comp);
+        out.push(acc.clone());
+    }
+    out
+}
+
+fn remote_snapshot_check_sh(pins: &SnapshotPins) -> String {
+    let mut checks = format!(
+        "test \"$(git rev-parse --verify HEAD 2>/dev/null)\" = {} && test \"$(git rev-parse --verify 'HEAD^{{tree}}' 2>/dev/null)\" = {} && test -z \"$(git status --porcelain --untracked-files=no 2>/dev/null)\"",
+        quote(&pins.head_sha),
+        quote(&pins.tree_sha),
+    );
+    for (rel, expected_sha) in &pins.lockfiles {
+        let prefixes = lockfile_prefixes(rel);
+        for p in &prefixes[..prefixes.len().saturating_sub(1)] {
+            checks.push_str(&format!(" && test ! -L {}", quote(p)));
+        }
+        let qp = quote(rel);
+        let qs = quote(expected_sha);
+        checks.push_str(&format!(
+            " && test -f {qp} && test ! -L {qp} && test \"$(if command -v sha256sum >/dev/null 2>&1; then sha256sum -- {qp} | awk '{{print $1}}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -- {qp} | awk '{{print $1}}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 -- {qp} | awk '{{print $NF}}'; else exit 1; fi)\" = {qs}"
+        ));
+    }
+    checks
+}
+
+fn verify_snapshot_checkouts(repo: &Path, snap: &crate::value::Value) -> Result<SnapshotPins> {
     crate::exec_snapshot::clean(repo)?;
     let head = git(repo, &["rev-parse", "--verify", "HEAD"])?;
     require(
@@ -562,6 +608,7 @@ fn verify_snapshot_checkouts(repo: &Path, snap: &crate::value::Value) -> Result<
         actual_tree == expected_tree,
         "local tree does not match --snapshot",
     )?;
+    let mut lockfiles = Vec::new();
     for (rel_bytes, expected) in snap.get("lockfiles").object()? {
         let rel = std::str::from_utf8(rel_bytes).map_err(error)?;
         require(
@@ -573,13 +620,19 @@ fn verify_snapshot_checkouts(repo: &Path, snap: &crate::value::Value) -> Result<
             "invalid lockfile path in snapshot",
         )?;
         let expected_sha = expected.str()?;
+        validate_sha256_hex(expected_sha, "lockfile SHA256")?;
         let bytes = read_runtime_file(repo, Path::new(rel))?;
         require(
             crate::value::sha(&bytes) == expected_sha,
             format!("local lockfile digest mismatch for {rel}"),
         )?;
+        lockfiles.push((rel.to_owned(), expected_sha.to_owned()));
     }
-    Ok((expected_head, expected_tree))
+    Ok(SnapshotPins {
+        head_sha: expected_head,
+        tree_sha: expected_tree,
+        lockfiles,
+    })
 }
 
 fn validate_op_id(id: &str) -> Result<()> {
@@ -930,7 +983,7 @@ struct DurableExecRequest<'a> {
     remote: &'a str,
     target: Option<&'a str>,
     snapshot: Option<&'a str>,
-    snapshot_pins: Option<(String, String)>,
+    snapshot_pins: Option<SnapshotPins>,
     head_sha: &'a str,
     op_id: &'a str,
     tail: &'a [OsString],
@@ -1070,11 +1123,10 @@ fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
 
     let rd_key = &sha256(req.remote.as_bytes())[..16];
     let tok = new_frame_nonce();
-    let snap_check = if let Some((snap_head, snap_tree)) = &req.snapshot_pins {
+    let snap_check = if let Some(pins) = &req.snapshot_pins {
         format!(
-            "if ! ( cd -- \"$rd\" && test \"$(git rev-parse --verify HEAD 2>/dev/null)\" = {h} && test \"$(git rev-parse --verify 'HEAD^{{tree}}' 2>/dev/null)\" = {t} && test -z \"$(git status --porcelain --untracked-files=no 2>/dev/null)\" ); then printf '__OMS_MARK_%s__ SNAPSHOT_DRIFT 1\\n' {tok}; exit 0; fi",
-            h = quote(snap_head),
-            t = quote(snap_tree),
+            "if ! ( cd -- \"$rd\" && {} ); then printf '__OMS_MARK_%s__ SNAPSHOT_DRIFT 1\\n' {tok}; exit 0; fi",
+            remote_snapshot_check_sh(pins),
             tok = quote(&tok),
         )
     } else {
@@ -1124,10 +1176,21 @@ ls_val=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,
 printf '{{"hostname":"%s","boot_id":"%s","pid":%s,"lstart":"%s","command_sha256":"%s","snapshot":"%s"}}\n' "$hn" "$bid" "$pid" "$ls_val" "$cmd_sha" "$snap_val" >"$op_dir/meta.json.tmp"
 mv -f -- "$op_dir/meta.json.tmp" "$op_dir/meta.json"
 child=""
-trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null || true' TERM
-( cd -- "$rd" && exec sh "$op_dir/cmd.sh" ) >"$op_dir/stdout" 2>"$op_dir/stderr" &
-child=$!
-printf '%s\n' "$child" >"$op_dir/child.pid"
+trap '[ -n "$child" ] && {{ kill -TERM -"$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true; }}' TERM
+cpg_script='pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d " \t\r\n" || true); if [ "$pg" = "$$" ] && [ "$$" -gt 1 ] 2>/dev/null; then printf "%s\n" "$$" >"$3.tmp" && mv -f -- "$3.tmp" "$3"; fi; cd -- "$1" && exec sh "$2"'
+if command -v setsid >/dev/null 2>&1; then
+  setsid sh -c "$cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
+  child=$!
+else
+  trap '' TTIN TTOU TSTP 2>/dev/null || true
+  set -m
+  sh -c "trap - TTIN TTOU TSTP 2>/dev/null || true; $cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
+  child=$!
+  set +m
+  trap - TTIN TTOU TSTP 2>/dev/null || true
+fi
+printf '%s\n' "$child" >"$op_dir/child.pid.tmp"
+mv -f -- "$op_dir/child.pid.tmp" "$op_dir/child.pid"
 set +e
 while :; do
   wait "$child"
@@ -1267,14 +1330,16 @@ fn verify_remote_meta_binding(record: &serde_json::Value, meta: &serde_json::Val
         .get("command_sha256")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let meta_cmd = meta
-        .get("command_sha256")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| error("remote operation metadata missing command_sha256"))?;
-    require(
-        meta_cmd == expected_cmd,
-        "remote operation metadata command_sha256 mismatch",
-    )?;
+    if !expected_cmd.is_empty() {
+        let meta_cmd = meta
+            .get("command_sha256")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| error("remote operation metadata missing command_sha256"))?;
+        require(
+            meta_cmd == expected_cmd,
+            "remote operation metadata command_sha256 mismatch",
+        )?;
+    }
     let expected_snap = record
         .get("snapshot")
         .and_then(|v| v.as_str())
@@ -1453,7 +1518,12 @@ emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
     let cur_hn = fields.get(1).copied().unwrap_or("unknown");
     let cur_bid = fields.get(2).copied().unwrap_or("unknown");
     if let Some(meta) = parse_meta_part(&parsed.parts) {
-        verify_remote_meta_binding(&record, &meta)?;
+        if let Err(e) = verify_remote_meta_binding(&record, &meta) {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            return Err(e);
+        }
         let meta_hn = meta.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
         if !meta_hn.is_empty() && meta_hn != cur_hn {
             record["state"] = "unknown".into();
@@ -1568,12 +1638,24 @@ fn run_cancel(req: CancelRequest<'_>) -> Result<Response> {
     }
 
     let rd_key = &sha256(remote_dir.as_bytes())[..16];
+    let exp_cmd = record
+        .get("command_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let exp_snap = record
+        .get("snapshot")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
     let tok = new_frame_nonce();
     let script = format!(
         r#"set -eu
 rd={rd}
 rd_key={rd_key}
 op_id_arg={op_id}
+exp_cmd={exp_cmd}
+exp_snap={exp_snap}
 grace={grace}
 tok={tok}
 {helpers}
@@ -1587,11 +1669,30 @@ pid_live() {{
     *) return 0 ;;
   esac
 }}
+pg_live() {{
+  g="$1"
+  [ -n "$g" ] && kill -0 -"$g" 2>/dev/null || return 1
+  if command -v ps >/dev/null 2>&1; then
+    alive_pg=$(LC_ALL=C ps -A -o pgid=,stat= 2>/dev/null | awk -v g="$g" '$1 == g && $2 !~ /^Z/ {{print 1; exit}}' || true)
+    [ -n "$alive_pg" ] && return 0
+    ps -A -o pgid= >/dev/null 2>&1 && return 1
+  fi
+  return 0
+}}
 read_host_id
 find_op_dir
 if [ -z "$op_dir" ]; then
   printf '__OMS_MARK_%s__ CANCEL missing|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
   exit 0
+fi
+if [ -f "$op_dir/meta.json" ]; then
+  m_cmd=$(sed -n 's/.*"command_sha256":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+  m_snap=$(sed -n 's/.*"snapshot":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+  if {{ [ -n "$exp_cmd" ] && [ "$m_cmd" != "$exp_cmd" ]; }} || [ "$m_snap" != "$exp_snap" ]; then
+    printf '__OMS_MARK_%s__ CANCEL meta_mismatch|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+    exit 0
+  fi
 fi
 if [ -f "$op_dir/result.json" ]; then
   printf '__OMS_MARK_%s__ CANCEL finished|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
@@ -1638,6 +1739,16 @@ if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" != "$cur_bid" ] || [ "$(no
   emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   exit 0
 fi
+w=0
+while [ ! -f "$op_dir/child.pid" ] && [ ! -f "$op_dir/result.json" ] && pid_live "$m_pid" && [ "$w" -lt 20 ]; do
+  w=$((w + 1))
+  sleep 0.02 2>/dev/null || sleep 1
+done
+w=0
+while [ ! -f "$op_dir/child.pgid" ] && [ ! -f "$op_dir/result.json" ] && pid_live "$m_pid" && [ "$w" -lt 5 ]; do
+  w=$((w + 1))
+  sleep 0.02 2>/dev/null || sleep 1
+done
 cpid=""
 if [ -f "$op_dir/child.pid" ]; then
   cand_cpid=$(tr -d ' \t\r\n' < "$op_dir/child.pid" || true)
@@ -1648,25 +1759,42 @@ if [ -f "$op_dir/child.pid" ]; then
     fi
   fi
 fi
+cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
+cpgid=""
+if [ -f "$op_dir/child.pgid" ]; then
+  cand_pg=$(tr -d ' \t\r\n' < "$op_dir/child.pgid" || true)
+  case "$cand_pg" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$cand_pg" -gt 1 ] 2>/dev/null && [ "$cand_pg" != "$$" ] && [ "$cand_pg" != "$cur_pg" ]; then
+        cpgid="$cand_pg"
+      fi
+      ;;
+  esac
+fi
+all_live() {{
+  if pid_live "$m_pid"; then return 0; fi
+  if [ -n "$cpid" ] && pid_live "$cpid"; then return 0; fi
+  if [ -n "$cpgid" ] && pg_live "$cpgid"; then return 0; fi
+  return 1
+}}
 : > "$op_dir/cancel.req"
+[ -n "$cpgid" ] && kill -TERM -"$cpgid" 2>/dev/null || true
 [ -n "$cpid" ] && kill -TERM "$cpid" 2>/dev/null || true
 kill -TERM "$m_pid" 2>/dev/null || true
 ticks=$((grace * 10))
 i=0
 sig="SIGTERM"
 while [ "$i" -lt "$ticks" ]; do
-  alive_any=0
-  if pid_live "$m_pid"; then alive_any=1; fi
-  if [ -n "$cpid" ] && pid_live "$cpid"; then alive_any=1; fi
-  [ "$alive_any" = 0 ] && break
+  all_live || break
   i=$((i + 1))
   sleep 0.1 2>/dev/null || sleep 1
 done
-still_running=0
-if pid_live "$m_pid"; then still_running=1; fi
-if [ -n "$cpid" ] && pid_live "$cpid"; then still_running=1; fi
-if [ "$still_running" = 1 ]; then
+if all_live; then
   sig="SIGKILL"
+  if [ -n "$cpgid" ]; then
+    kill -KILL -"$cpgid" 2>/dev/null || true
+  fi
   if [ -n "$cpid" ]; then
     if command -v pkill >/dev/null 2>&1; then
       pkill -KILL -P "$cpid" 2>/dev/null || true
@@ -1676,15 +1804,13 @@ if [ "$still_running" = 1 ]; then
   kill -KILL "$m_pid" 2>/dev/null || true
   j=0
   while [ "$j" -lt 20 ]; do
-    alive_any=0
-    if pid_live "$m_pid"; then alive_any=1; fi
-    if [ -n "$cpid" ] && pid_live "$cpid"; then alive_any=1; fi
-    [ "$alive_any" = 0 ] && break
+    all_live || break
     j=$((j + 1))
     sleep 0.1 2>/dev/null || sleep 1
   done
 fi
-if pid_live "$m_pid" || {{ [ -n "$cpid" ] && pid_live "$cpid"; }}; then
+if all_live; then
+  rm -f -- "$op_dir/cancel.req"
   printf '__OMS_MARK_%s__ CANCEL still_alive|%s\n' "$tok" "$sig"
   exit 0
 fi
@@ -1696,6 +1822,8 @@ emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
         rd = remote_path(&remote_dir),
         rd_key = quote(rd_key),
         op_id = quote(req.op_id),
+        exp_cmd = quote(&exp_cmd),
+        exp_snap = quote(&exp_snap),
         grace = req.grace_seconds,
         tok = quote(&tok),
         helpers = REMOTE_SH_HELPERS,
@@ -1726,7 +1854,13 @@ emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
         }
     };
     if let Some(meta) = parse_meta_part(&parsed.parts) {
-        verify_remote_meta_binding(&record, &meta)?;
+        if let Err(e) = verify_remote_meta_binding(&record, &meta) {
+            record["state"] = "unknown".into();
+            record["signal_sent"] = false.into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            return Err(e);
+        }
         record["remote_meta"] = meta;
     }
     if let Some(out_bytes) = parsed.parts.get("stdout") {
@@ -1743,6 +1877,13 @@ emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
     };
     let fields: Vec<&str> = payload.split('|').collect();
     match fields.first().copied().unwrap_or("") {
+        "meta_mismatch" => {
+            record["state"] = "unknown".into();
+            record["signal_sent"] = false.into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            Err(error("remote operation metadata mismatch"))
+        }
         "cancelled" => {
             record["state"] = "cancelled".into();
             record["signal"] = fields.get(1).copied().unwrap_or("SIGTERM").into();
@@ -3326,22 +3467,24 @@ exec sh -c "$last"
 
         let rs = repo.to_str().unwrap();
         let rd = remote.to_str().unwrap();
-        // Omitting --target still blocks unapproved registered host.
-        let omitted = invoke(
-            &[
-                "exec",
-                "--host",
-                "cluster-a",
-                "--repo",
-                rs,
-                "--remote-dir",
-                rd,
-                "--",
-                "true",
-            ],
-            &root,
-        );
-        assert_eq!(omitted.code, 2);
+        // Omitting --target still blocks unapproved registered host (including user@alias).
+        for h in ["cluster-a", "user@cluster-a"] {
+            let omitted = invoke(
+                &[
+                    "exec",
+                    "--host",
+                    h,
+                    "--repo",
+                    rs,
+                    "--remote-dir",
+                    rd,
+                    "--",
+                    "true",
+                ],
+                &root,
+            );
+            assert_eq!(omitted.code, 2, "host {h} was not blocked");
+        }
         assert!(!root.join("args").exists());
 
         row.set("execution_approved", b(true)).unwrap();
@@ -3352,6 +3495,43 @@ exec sh -c "$last"
         )
         .unwrap();
 
+        // Approved host still refuses unregistered --remote-dir when --target is omitted.
+        let wrong_dir = invoke(
+            &[
+                "exec",
+                "--host",
+                "cluster-a",
+                "--repo",
+                rs,
+                "--remote-dir",
+                root.join("other-remote").to_str().unwrap(),
+                "--",
+                "true",
+            ],
+            &root,
+        );
+        assert_eq!(wrong_dir.code, 2);
+        assert!(!root.join("args").exists());
+
+        std::fs::write(repo.join(".gitignore"), "ignored.lock\n").unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(&repo)
+                .args(["add", ".gitignore"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .current_dir(&repo)
+                .args(["commit", "-qm", "gitignore"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(repo.join("ignored.lock"), "v1\n").unwrap();
+        let lf_sha = sha(b"v1\n");
         let head = String::from_utf8(git(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
             .unwrap()
             .trim()
@@ -3364,7 +3544,7 @@ exec sh -c "$last"
             ("schema", number(1)),
             ("head_sha", string(&head)),
             ("tree_sha", string(&tree)),
-            ("lockfiles", empty()),
+            ("lockfiles", object([("ignored.lock", string(&lf_sha))])),
         ]);
         let snap_digest = sha(canonical(&snap).unwrap());
         snap.set("snapshot_sha256", string(&snap_digest)).unwrap();
@@ -3374,7 +3554,7 @@ exec sh -c "$last"
         )
         .unwrap();
 
-        // Sync repo commit to remote so local+remote HEAD match snapshot -> ok.
+        // Sync repo commit to remote so local+remote HEAD match snapshot -> fails until ignored.lock matches.
         let synced = invoke(
             &[
                 "sync-bundle",
@@ -3390,6 +3570,51 @@ exec sh -c "$last"
             &root,
         );
         assert_eq!(synced.code, 0);
+        std::fs::write(remote.join("ignored.lock"), "tampered\n").unwrap();
+        let lf_drift = invoke(
+            &[
+                "exec",
+                "--host",
+                "cluster-a",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--target",
+                "gpu",
+                "--snapshot",
+                &snap_digest,
+                "--",
+                "printf",
+                "should-not-run",
+            ],
+            &root,
+        );
+        assert_eq!(lf_drift.code, 2);
+        let lf_drift_op = invoke(
+            &[
+                "exec",
+                "--host",
+                "cluster-a",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--target",
+                "gpu",
+                "--snapshot",
+                &snap_digest,
+                "--op-id",
+                "op-lf-drift",
+                "--",
+                "printf",
+                "should-not-run",
+            ],
+            &root,
+        );
+        assert_eq!(lf_drift_op.code, 2);
+
+        std::fs::write(remote.join("ignored.lock"), "v1\n").unwrap();
         let ok = invoke(
             &[
                 "exec",
@@ -3454,10 +3679,12 @@ exec sh -c "$last"
             let script = r#"#!/bin/sh
 for last do :; done
 if [ -f "$OMS_TEST_DROP_ACTIVE" ]; then
+  target=$(cat "$OMS_TEST_DROP_ACTIVE" 2>/dev/null || true)
   rm -f "$OMS_TEST_DROP_ACTIVE"
+  [ "$target" = "1" ] && target="$OMS_REMOTE_STATE_DIR/op-sigign/child.pid"
   sh -c "$last" >/dev/null 2>&1 &
   i=0
-  while [ ! -f "$OMS_REMOTE_STATE_DIR/op-sigign/child.pid" ] && [ "$i" -lt 250 ]; do
+  while [ ! -f "$target" ] && [ "$i" -lt 250 ]; do
     i=$((i + 1))
     sleep 0.02 2>/dev/null || sleep 1
   done
@@ -3655,6 +3882,118 @@ exec sh -c "$last"
             &root,
         );
         assert_eq!(mismatch.code, 2);
+
+        // 4. Cancel checks remote meta identity BEFORE creating cancel.req or signaling sleeper.
+        let sleeper_ls = String::from_utf8(
+            Command::new("ps")
+                .args(["-p", &sleeper_pid.to_string(), "-o", "lstart="])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let sleeper_ls: String = sleeper_ls
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "._: +=,-".contains(*c))
+            .collect();
+        std::fs::write(
+            state_dir.join("op-empty-ls/meta.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "hostname": cur_hn,
+                "boot_id": cur_bid,
+                "pid": sleeper_pid,
+                "lstart": sleeper_ls,
+                "command_sha256": sha256(b"exec 'false'"),
+                "snapshot": ""
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let pre_cancel = invoke(
+            &[
+                "cancel",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-empty-ls",
+            ],
+            &root,
+        );
+        assert_eq!(pre_cancel.code, 2);
+        assert!(sleeper.0.as_mut().unwrap().try_wait().unwrap().is_none());
+        assert!(!state_dir.join("op-empty-ls/cancel.req").exists());
+        let op_rec = read_remote_op(&repo, "op-empty-ls").unwrap().unwrap();
+        assert_eq!(op_rec["state"], "unknown");
+        assert_eq!(op_rec["signal_sent"], serde_json::json!(false));
+
+        // 5. Orphaned grandchild in child.pgid surviving parent shell exit is killed on cancel.
+        std::fs::write(
+            root.join("drop_active"),
+            remote.join("grand.ready").to_str().unwrap(),
+        )
+        .unwrap();
+        let launch_grand = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-grand",
+                "--",
+                "sh",
+                "-c",
+                "trap 'exit 0' TERM; (trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\" > grand.pid; : > grand.ready; wait",
+            ],
+            &root,
+        );
+        assert_eq!(launch_grand.code, 75);
+        assert!(state_dir.join("op-grand/child.pgid").exists());
+        let grand_pid: i32 = std::fs::read_to_string(remote.join("grand.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let canceled_grand = invoke(
+            &[
+                "cancel",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-grand",
+                "--grace-seconds",
+                "1",
+            ],
+            &root,
+        );
+        assert_eq!(
+            canceled_grand.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&canceled_grand.stderr)
+        );
+        let vg: serde_json::Value = serde_json::from_slice(&canceled_grand.stdout).unwrap();
+        assert_eq!(vg["state"], "cancelled");
+        assert_eq!(vg["signal"], "SIGKILL");
+        let grand_alive = Command::new("kill")
+            .args(["-0", &grand_pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !grand_alive,
+            "orphaned grandchild {grand_pid} survived cancel"
+        );
     }
 
     #[test]

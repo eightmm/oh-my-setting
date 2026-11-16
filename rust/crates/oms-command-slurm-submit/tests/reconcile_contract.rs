@@ -506,3 +506,217 @@ fn cluster_flag_is_recorded_and_forwarded_to_scheduler_queries() {
         .to_owned();
     assert!(submitted_line.contains("\"cluster_name\": \"h100-clus\""));
 }
+
+#[test]
+fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
+    let f = Fixture::new();
+    std::fs::write(
+        Path::new(&f.repo).join("job.sh"),
+        "#!/bin/sh\n#SBATCH -M sbatch-clus\necho hi\n",
+    )
+    .unwrap();
+
+    // 1. Cluster parser stops at `--` and first positional script, ignoring script args,
+    //    and falls back to #SBATCH -M when CLI/env do not override it.
+    f.script("sbatch", "printf 'Submitted batch job 300\\n'\n");
+    let dir_clus = f.run(&["--key", "cell-dir", "--", "sbatch", "job.sh"], &[]);
+    assert_eq!(dir_clus.code, 0, "{}", dir_clus.err);
+    let dir_sub = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"300\""))
+        .unwrap()
+        .to_owned();
+    assert!(
+        dir_sub.contains("\"cluster_name\": \"sbatch-clus\""),
+        "{dir_sub}"
+    );
+
+    f.script("sbatch", "printf 'Submitted batch job 301\\n'\n");
+    let pos_ignore = f.run(
+        &[
+            "--key", "cell-pos", "--", "sbatch", "-p", "gpu", "job.sh", "-M", "app-fake",
+        ],
+        &[],
+    );
+    assert_eq!(pos_ignore.code, 0, "{}", pos_ignore.err);
+    let pos_sub = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"301\""))
+        .unwrap()
+        .to_owned();
+    assert!(pos_sub.contains("\"cluster_name\": \"\""), "{pos_sub}");
+    assert!(!pos_sub.contains("app-fake"), "{pos_sub}");
+
+    f.script("sbatch", "printf 'Submitted batch job 302\\n'\n");
+    let dd_real = f.run(
+        &[
+            "--key",
+            "cell-dd",
+            "--",
+            "sbatch",
+            "-M",
+            "real-clus",
+            "--",
+            "job.sh",
+            "--clusters",
+            "app-fake-2",
+        ],
+        &[],
+    );
+    assert_eq!(dd_real.code, 0, "{}", dd_real.err);
+    let dd_sub = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"302\""))
+        .unwrap()
+        .to_owned();
+    assert!(
+        dd_sub.contains("\"cluster_name\": \"real-clus\""),
+        "{dd_sub}"
+    );
+    assert!(!dd_sub.contains("app-fake-2"), "{dd_sub}");
+
+    // 2. Late submitted(A) appended after forced B never overrides B's unknown state.
+    let mut att1_intent_line = String::new();
+    let mut marker = f.root.join("queued-k1");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let lost1 = f.run(
+        &[
+            "--key",
+            "cell-force",
+            "--",
+            "sbatch",
+            "-M",
+            "clus-a",
+            "job.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(lost1.code, 130);
+    for line in f.ledger().lines() {
+        if line.contains("\"cell-force\"") && line.contains("\"type\": \"intent\"") {
+            att1_intent_line = line.to_owned();
+        }
+    }
+    let att1 = json_field(&att1_intent_line, "attempt");
+
+    marker = f.root.join("queued-k2");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let lost2 = f.run(
+        &[
+            "--key",
+            "cell-force",
+            "--force-resubmit",
+            "--reason",
+            "new-cluster",
+            "--",
+            "sbatch",
+            "-M",
+            "clus-b",
+            "job.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(lost2.code, 130);
+    // Simulate a late reconcile crash appending submitted(A1) after B already began.
+    {
+        use std::io::Write;
+        let mut lf = std::fs::OpenOptions::new()
+            .append(true)
+            .open(Path::new(&f.repo).join(".oms/slurm-submits.jsonl"))
+            .unwrap();
+        writeln!(
+            lf,
+            "{{\"schema\":1,\"type\":\"submitted\",\"key\":\"cell-force\",\"attempt\":\"{att1}\",\"ts\":\"2026-11-16T00:00:00Z\",\"job_id\":\"77\",\"cluster_name\":\"clus-a\",\"reconciled\":true}}"
+        )
+        .unwrap();
+    }
+    f.set("sacct", "");
+    f.set("squeue", "");
+    let state_b = f.run(&["reconcile", "--key", "cell-force", "--json"], &[]);
+    assert_eq!(state_b.code, 75, "{}{}", state_b.out, state_b.err);
+    assert_eq!(json_field(&state_b.out, "state"), "unknown");
+
+    // 3. Same numeric job_id 77 on clus-a does not block recovery or `--key --job-id` on clus-b.
+    f.script("sbatch", "printf 'Submitted batch job 77\\n'\n");
+    let ca = f.run(
+        &["--key", "cell-ca", "--", "sbatch", "-M", "clus-a", "job.sh"],
+        &[],
+    );
+    assert_eq!(ca.code, 0, "{}", ca.err);
+
+    marker = f.root.join("queued-cb");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let cb = f.run(
+        &["--key", "cell-cb", "--", "sbatch", "-M", "clus-b", "job.sh"],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(cb.code, 130);
+
+    let short_cb = short_of("cell-cb");
+    f.set(
+        "sacct",
+        &format!("77|job.sh|COMPLETED|0:0|oms-key={short_cb}\n"),
+    );
+    let rec_cb = f.run(
+        &["reconcile", "--key", "cell-cb", "--job-id", "77", "--json"],
+        &[],
+    );
+    assert_eq!(rec_cb.code, 0, "{}{}", rec_cb.out, rec_cb.err);
+    assert_eq!(json_field(&rec_cb.out, "state"), "succeeded");
+    assert!(rec_cb.out.contains("\"recorded\": true"), "{}", rec_cb.out);
+    assert!(rec_cb.out.contains("\"recovered\": true"), "{}", rec_cb.out);
+    // Ambiguous unkeyed --job-id 77 across clusters/keys refuses without --key.
+    let ambig = f.run(&["reconcile", "--job-id", "77", "--json"], &[]);
+    assert_eq!(ambig.code, 2);
+
+    // 4. --key + --job-id refuses to adopt a job whose comment lacks matching oms-key.
+    marker = f.root.join("queued-tag");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let lost_t = f.run(
+        &[
+            "--key",
+            "cell-tagcheck",
+            "--",
+            "sbatch",
+            "-M",
+            "clus-b",
+            "job.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(lost_t.code, 130);
+    f.set("sacct", "999|job.sh|COMPLETED|0:0|oms-key=wrongtag0000\n");
+    let rejected = f.run(
+        &[
+            "reconcile",
+            "--key",
+            "cell-tagcheck",
+            "--job-id",
+            "999",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(rejected.code, 75, "{}{}", rejected.out, rejected.err);
+    assert_eq!(json_field(&rejected.out, "state"), "unknown");
+    assert!(
+        rejected.out.contains("\"recorded\": false"),
+        "{}",
+        rejected.out
+    );
+}

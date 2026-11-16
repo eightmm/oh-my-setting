@@ -255,7 +255,26 @@ pub(crate) fn state<'a>(rows: &'a [Json], key: &OsStr) -> Result<State<'a>> {
         }
     }
     let window = &mine[start..];
-    if let Some(row) = window.iter().rev().find(|r| kind(r, "submitted")) {
+    let window_attempts: std::collections::BTreeSet<Vec<u8>> = if start > 0 {
+        window
+            .iter()
+            .filter(|r| kind(r, "intent"))
+            .filter_map(|r| identity(f(r, "attempt")).ok())
+            .collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let in_window = |row: &Json| {
+        start == 0
+            || identity(f(row, "attempt"))
+                .ok()
+                .is_some_and(|att| window_attempts.contains(&att))
+    };
+    if let Some(row) = window
+        .iter()
+        .rev()
+        .find(|r| kind(r, "submitted") && in_window(r))
+    {
         return Ok(State {
             name: "submitted",
             row: Some(row),
@@ -270,7 +289,7 @@ pub(crate) fn state<'a>(rows: &'a [Json], key: &OsStr) -> Result<State<'a>> {
         }
     }
     Ok(State {
-        name: if window.iter().any(|r| kind(r, "failed")) {
+        name: if window.iter().any(|r| kind(r, "failed") && in_window(r)) {
             "failed"
         } else {
             "none"

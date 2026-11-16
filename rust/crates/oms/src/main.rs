@@ -1698,11 +1698,11 @@ fn dispatch_owned(
 }
 fn main() {
     let interrupted = Arc::new(AtomicBool::new(false));
-    if let Err(e) =
-        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&interrupted))
-    {
-        eprintln!("runtime-core: cannot install interrupt handler: {e}\n{HINT}");
-        std::process::exit(2);
+    for sig in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        if let Err(e) = signal_hook::flag::register(sig, Arc::clone(&interrupted)) {
+            eprintln!("runtime-core: cannot install interrupt handler: {e}\n{HINT}");
+            std::process::exit(2);
+        }
     }
     let mut argv: Vec<_> = std::env::args_os().skip(1).collect();
     if argv
