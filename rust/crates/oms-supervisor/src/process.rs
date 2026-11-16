@@ -551,16 +551,18 @@ impl Job {
         }
         #[cfg(target_os = "macos")]
         {
-            // Check kernel group membership first so reaped empty groups finish immediately
-            // even while an asynchronous /bin/ps helper is still running.
+            // On XNU (`bsd/kern/kern_sig.c` `killpg1`), `kill(-pgid, 0)` returns `ESRCH`
+            // once the group no longer exists, and `EPERM` both when an existing group
+            // contains only unreaped zombies (`SZOMB`, `nfound == 0`) and when a member is
+            // un-signalable. Only `ESRCH` short-circuits; `Ok` and `EPERM`/`EACCES` defer
+            // to `/bin/ps` to inspect non-zombie rows.
             match os::test_kill_process_group(self.pid) {
                 Err(Errno::SRCH) => {
                     self.group_probe = None;
                     return Some(true);
                 }
-                Err(Errno::PERM | Errno::ACCESS) => return Some(false),
+                Ok(()) | Err(Errno::PERM | Errno::ACCESS) => {}
                 Err(_) => return None,
-                Ok(()) => {}
             }
             // The helper stays owned across turns; never wait for ps from a
             // payload poll turn or drop a still-running helper on a timeout.
@@ -670,8 +672,10 @@ impl Job {
             elapsed: self.started.elapsed(),
             delivered: result.is_ok(),
         });
+        let ignorable = matches!(result, Ok(()) | Err(Errno::SRCH))
+            || (cfg!(target_os = "macos") && group && matches!(result, Err(Errno::PERM)));
         if let Err(e) = result
-            && e != Errno::SRCH
+            && !ignorable
             && self.error.is_none()
         {
             self.error = Some(format!("owned process signal failed: {e}"));
@@ -1013,14 +1017,14 @@ fn direct_children() -> crate::Result<Vec<Pid>> {
 }
 /// Exclude zombies while the owned leader remains pinned for group signaling.
 pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
-    match os::test_kill_process_group(pid) {
-        Err(Errno::SRCH) => return Some(true),
-        Err(Errno::PERM | Errno::ACCESS) => return Some(false),
-        Err(_) => return None,
-        Ok(()) => {}
-    }
     #[cfg(target_os = "linux")]
     {
+        match os::test_kill_process_group(pid) {
+            Err(Errno::SRCH) => return Some(true),
+            Err(Errno::PERM | Errno::ACCESS) => return Some(false),
+            Err(_) => return None,
+            Ok(()) => {}
+        }
         let group = pid.as_raw_nonzero().get().to_string();
         let entries = std::fs::read_dir("/proc").ok()?;
         for entry in entries {
@@ -1056,6 +1060,11 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
     }
     #[cfg(target_os = "macos")]
     {
+        match os::test_kill_process_group(pid) {
+            Err(Errno::SRCH) => return Some(true),
+            Ok(()) | Err(Errno::PERM | Errno::ACCESS) => {}
+            Err(_) => return None,
+        }
         // Synchronous command-side observations share the bounded producer.
         // Job::observe_group instead retains it and advances without waiting.
         let mut reactor = Reactor::new();
@@ -1248,5 +1257,51 @@ mod tests {
         assert_eq!(completion.exit.map(|e| e.shell_code()), Some(0));
         assert_eq!(completion.stdout.bytes, b"ok");
         assert!(completion.signals.is_empty(), "{:?}", completion.signals);
+    }
+
+    #[test]
+    fn process_group_natural_exit_and_stop_complete_cleanly() {
+        let mut reactor = Reactor::new();
+
+        // 1) Natural exit under Scope::ProcessGroup.
+        let mut natural = Request::new(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf out; exit 3".into(),
+        ]);
+        natural.scope = Scope::ProcessGroup;
+        natural.deadline = Some(Instant::now() + Duration::from_secs(5));
+        let id = reactor.start(natural).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        let done = loop {
+            match reactor.poll(id, Duration::from_millis(50)).unwrap() {
+                Progress::Complete(done) => break done,
+                Progress::Pending(_) => assert!(Instant::now() < until, "natural job timed out"),
+            }
+        };
+        assert!(done.cleanup_complete(), "{done:?}");
+        assert!(done.supervision_error.is_none(), "{done:?}");
+        assert_eq!(done.group_quiescent, Some(true), "{done:?}");
+        assert!(done.leader_reaped, "{done:?}");
+        assert_eq!(done.exit.map(|e| e.shell_code()), Some(3), "{done:?}");
+
+        // 2) Cancelled running child under Scope::ProcessGroup.
+        let mut slow = Request::new(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()]);
+        slow.scope = Scope::ProcessGroup;
+        slow.deadline = Some(Instant::now() + Duration::from_secs(30));
+        let id = reactor.start(slow).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        reactor.stop(id, StopReason::Cancelled).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        let done = loop {
+            match reactor.poll(id, Duration::from_millis(50)).unwrap() {
+                Progress::Complete(done) => break done,
+                Progress::Pending(_) => assert!(Instant::now() < until, "cancelled job timed out"),
+            }
+        };
+        assert!(done.cleanup_complete(), "{done:?}");
+        assert!(done.supervision_error.is_none(), "{done:?}");
+        assert_eq!(done.group_quiescent, Some(true), "{done:?}");
+        assert!(done.leader_reaped, "{done:?}");
     }
 }

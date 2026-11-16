@@ -4138,13 +4138,20 @@ exec sh -c "$last"
         let vg: serde_json::Value = serde_json::from_slice(&canceled_grand.stdout).unwrap();
         assert_eq!(vg["state"], "cancelled");
         assert_eq!(vg["signal"], "SIGKILL");
-        let grand_alive = Command::new("kill")
-            .args(["-0", &grand_pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
+        let mut grand_alive = true;
+        for _ in 0..50 {
+            grand_alive = Command::new("kill")
+                .args(["-0", &grand_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !grand_alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(
             !grand_alive,
             "orphaned grandchild {grand_pid} survived cancel"
@@ -4256,13 +4263,20 @@ exec sh -c "$last"
         assert_eq!(vd["state"], "cancelled");
         assert_eq!(vd["signal"], "SIGKILL");
         for pid in [dead_cpid, dead_grand_pid] {
-            let alive = Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success();
+            let mut alive = true;
+            for _ in 0..50 {
+                alive = Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success();
+                if !alive {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             assert!(!alive, "pid {pid} survived dead-runner cancel");
         }
 
@@ -4453,13 +4467,20 @@ exec sh -c "$last"
             let vd2: serde_json::Value = serde_json::from_slice(&cancel_dead2.stdout).unwrap();
             assert_eq!(vd2["state"], "cancelled");
             assert_eq!(vd2["signal"], "SIGKILL");
-            let dead2_grand_alive = Command::new("kill")
-                .args(["-0", &dead2_grand_pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success();
+            let mut dead2_grand_alive = true;
+            for _ in 0..50 {
+                dead2_grand_alive = Command::new("kill")
+                    .args(["-0", &dead2_grand_pid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success();
+                if !dead2_grand_alive {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             assert!(
                 !dead2_grand_alive,
                 "grandchild {dead2_grand_pid} survived dead-runner+leader cancel"

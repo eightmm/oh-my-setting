@@ -902,6 +902,8 @@ pub fn signal_process_group(owner: &Owner, signal: rustix::process::Signal) -> R
     match rustix::process::kill_process_group(pid, signal) {
         Ok(()) => Ok(true),
         Err(rustix::io::Errno::SRCH) => Ok(false),
+        #[cfg(target_os = "macos")]
+        Err(rustix::io::Errno::PERM) if process_gone(owner) => Ok(false),
         Err(e) => Err(Error::new(e)),
     }
 }

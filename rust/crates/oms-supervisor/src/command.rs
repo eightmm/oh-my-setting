@@ -1182,6 +1182,8 @@ fn stop_orphan_group(
         }
         match rustix::process::kill_process_group(pid, signal) {
             Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            #[cfg(target_os = "macos")]
+            Err(rustix::io::Errno::PERM) => {}
             Err(error) => return Err(format!("cannot signal orphaned supervised group: {error}")),
         }
         let until = Instant::now() + grace;
