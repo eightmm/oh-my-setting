@@ -549,50 +549,53 @@ fn timestamp_grammar_accepts_unpadded_fields_and_rejects_signs() {
 fn raw_unix_path_and_error_labels_keep_original_bytes() {
     use std::os::unix::ffi::OsStringExt;
     let fixture = Scratch::case(b"#SBATCH --time=10\n", Some(b""));
-    let script = OsString::from_vec(b"job-\xff.sh".to_vec());
-    let snapshot = OsString::from_vec(b"snapshot-\xfe.md".to_vec());
-    fs::rename(fixture.0.join("job.sh"), fixture.0.join(&script)).unwrap();
-    fs::rename(fixture.0.join("snapshot.md"), fixture.0.join(&snapshot)).unwrap();
-    let result = run_with_source(
-        &[script.clone(), "--snapshot".into(), snapshot.clone()],
-        &fixture.0,
-        &fixture.0.join("source"),
-        &AtomicBool::new(false),
-    );
-    assert_eq!(result, (0, b"slurm-lint: job-\xff.sh: 0 warning(s); static check, nothing was submitted or run\nnote: preemption: unknown (the snapshot has no QOS table)\n".to_vec(), Vec::new()));
-    let preview = run_with_source(
-        &[
-            "--preview".into(),
-            script.clone(),
-            "--snapshot".into(),
-            snapshot.clone(),
-        ],
-        &fixture.0,
-        &fixture.0.join("source"),
-        &AtomicBool::new(false),
-    );
-    let mut expected = preview_golden(
-        NO_SNAPSHOT,
-        [
-            "0  (no GPU option in the #SBATCH lines)",
-            "10 (0.17 h)",
-            "1  (no --array: one job)",
-            "0.0  (GPUs x wall x tasks, as if every task ran to its limit)",
-            "0",
-        ],
-        NO_QOS,
-    );
-    for (needle, replacement) in [
-        (b"job.sh".as_slice(), script.as_encoded_bytes()),
-        (b"snapshot.md".as_slice(), snapshot.as_encoded_bytes()),
-    ] {
-        let start = expected
-            .windows(needle.len())
-            .position(|part| part == needle)
-            .unwrap();
-        expected.splice(start..start + needle.len(), replacement.iter().copied());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let script = OsString::from_vec(b"job-\xff.sh".to_vec());
+        let snapshot = OsString::from_vec(b"snapshot-\xfe.md".to_vec());
+        fs::rename(fixture.0.join("job.sh"), fixture.0.join(&script)).unwrap();
+        fs::rename(fixture.0.join("snapshot.md"), fixture.0.join(&snapshot)).unwrap();
+        let result = run_with_source(
+            &[script.clone(), "--snapshot".into(), snapshot.clone()],
+            &fixture.0,
+            &fixture.0.join("source"),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(result, (0, b"slurm-lint: job-\xff.sh: 0 warning(s); static check, nothing was submitted or run\nnote: preemption: unknown (the snapshot has no QOS table)\n".to_vec(), Vec::new()));
+        let preview = run_with_source(
+            &[
+                "--preview".into(),
+                script.clone(),
+                "--snapshot".into(),
+                snapshot.clone(),
+            ],
+            &fixture.0,
+            &fixture.0.join("source"),
+            &AtomicBool::new(false),
+        );
+        let mut expected = preview_golden(
+            NO_SNAPSHOT,
+            [
+                "0  (no GPU option in the #SBATCH lines)",
+                "10 (0.17 h)",
+                "1  (no --array: one job)",
+                "0.0  (GPUs x wall x tasks, as if every task ran to its limit)",
+                "0",
+            ],
+            NO_QOS,
+        );
+        for (needle, replacement) in [
+            (b"job.sh".as_slice(), script.as_encoded_bytes()),
+            (b"snapshot.md".as_slice(), snapshot.as_encoded_bytes()),
+        ] {
+            let start = expected
+                .windows(needle.len())
+                .position(|part| part == needle)
+                .unwrap();
+            expected.splice(start..start + needle.len(), replacement.iter().copied());
+        }
+        assert_result(preview, 0, &expected, b"");
     }
-    assert_result(preview, 0, &expected, b"");
     let missing = OsString::from_vec(b"missing-\xfd.sh".to_vec());
     assert_eq!(
         run_with_source(
@@ -621,21 +624,24 @@ fn raw_unix_path_and_error_labels_keep_original_bytes() {
             b"error: unknown argument: --bad-\xfc\n".to_vec()
         )
     );
-    let raw_source = fixture.0.join(OsString::from_vec(b"source-\xfb".to_vec()));
-    fs::rename(fixture.0.join("source"), &raw_source).unwrap();
-    assert_eq!(
-        run_with_source(
-            &args(&["--template"]),
-            &fixture.0,
-            &raw_source,
-            &AtomicBool::new(false)
-        ),
-        (
-            0,
-            b"#!/bin/bash\n# synthetic template\n".to_vec(),
-            Vec::new()
-        )
-    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let raw_source = fixture.0.join(OsString::from_vec(b"source-\xfb".to_vec()));
+        fs::rename(fixture.0.join("source"), &raw_source).unwrap();
+        assert_eq!(
+            run_with_source(
+                &args(&["--template"]),
+                &fixture.0,
+                &raw_source,
+                &AtomicBool::new(false)
+            ),
+            (
+                0,
+                b"#!/bin/bash\n# synthetic template\n".to_vec(),
+                Vec::new()
+            )
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -644,6 +650,11 @@ fn environment_snapshot_bytes_and_source_default_are_resolved_without_global_mut
     use std::os::unix::ffi::OsStringExt;
     const CHILD_ROOT: &str = "OMS_SLURM_LINT_NATIVE_TEST_ROOT";
     const CHILD_MODE: &str = "OMS_SLURM_LINT_NATIVE_TEST_MODE";
+    let expected_ref = if cfg!(target_os = "macos") {
+        OsString::from("snapshot-space.md")
+    } else {
+        OsString::from_vec(b"snapshot-\xfe.md".to_vec())
+    };
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
         let root = PathBuf::from(root);
         assert!(root.starts_with(std::env::temp_dir()));
@@ -655,7 +666,7 @@ fn environment_snapshot_bytes_and_source_default_are_resolved_without_global_mut
         if mode == "raw" {
             assert_eq!(
                 std::env::var_os("OH_MY_SETTING_SLURM_REF").unwrap(),
-                OsString::from_vec(b"snapshot-\xfe.md".to_vec())
+                expected_ref
             );
         } else {
             assert!(
@@ -685,7 +696,7 @@ fn environment_snapshot_bytes_and_source_default_are_resolved_without_global_mut
     let fixture = Scratch::case(b"#SBATCH --time=10\n", None);
     let snapshot =
         b"- QOS default: normal\n## QOS\nName|PreemptMode|MaxWall\nnormal|CANCEL|01:00:00\n";
-    let raw_name = OsString::from_vec(b"snapshot-\xfe.md".to_vec());
+    let raw_name = expected_ref;
     fs::write(fixture.0.join(&raw_name), snapshot).unwrap();
     fs::create_dir_all(fixture.0.join("source/local")).unwrap();
     fs::write(fixture.0.join("source/local/slurm.md"), snapshot).unwrap();

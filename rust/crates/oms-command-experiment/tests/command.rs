@@ -276,7 +276,7 @@ fn file_and_inline_error_origins() {
             .2
             .starts_with(b"runtime-core: expected JSON or a JSON file: ")
     );
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         use std::os::unix::ffi::OsStringExt;
         let raw_name = OsString::from_vec(b"broken-\xff.json".to_vec());
@@ -365,14 +365,18 @@ fn unknown_repo_account_is_a_runtime_error() {
 #[cfg(unix)]
 #[test]
 fn raw_repo_arguments_remain_lossless() {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::ffi::OsStringExt;
     let t = Temp::new();
-    let name = OsString::from_vec(b"repo-\xff".to_vec());
-    fs::create_dir(t.0.join(&name)).unwrap();
-    let mut option = b"--repo=".to_vec();
-    option.extend_from_slice(name.as_bytes());
-    let args = [OsString::from("template"), OsString::from_vec(option)];
-    assert_eq!(run(&args, &t.0, &AtomicBool::new(false)).0, 0);
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsString::from_vec(b"repo-\xff".to_vec());
+        fs::create_dir(t.0.join(&name)).unwrap();
+        let mut option = b"--repo=".to_vec();
+        option.extend_from_slice(name.as_bytes());
+        let args = [OsString::from("template"), OsString::from_vec(option)];
+        assert_eq!(run(&args, &t.0, &AtomicBool::new(false)).0, 0);
+    }
     let missing = OsString::from_vec(b"missing-\xfe".to_vec());
     let args = [
         OsString::from("template"),

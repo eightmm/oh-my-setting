@@ -83,12 +83,20 @@ fn raw_paths_caller_directory_and_read_only_reentrancy() {
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
     let root = Temp::new();
-    let repo = root.0.join(OsString::from_vec(b"repo-\xff".to_vec()));
+    let repo = root.0.join(if cfg!(target_os = "macos") {
+        OsString::from("repo-space dir")
+    } else {
+        OsString::from_vec(b"repo-\xff".to_vec())
+    });
     std::fs::create_dir_all(repo.join(".git/objects")).unwrap();
     std::fs::create_dir_all(repo.join(".git/refs")).unwrap();
     std::fs::write(repo.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
     std::fs::create_dir_all(repo.join("nested")).unwrap();
-    let custom = repo.join(OsString::from_vec(b"index-\xfe.jsonl".to_vec()));
+    let custom = repo.join(if cfg!(target_os = "macos") {
+        OsString::from("index-space.jsonl")
+    } else {
+        OsString::from_vec(b"index-\xfe.jsonl".to_vec())
+    });
     std::fs::write(&custom, b"{\"kind\":\"call\",\"tokens\":7}\n").unwrap();
     let alias = root.0.join("alias");
     symlink(&repo, &alias).unwrap();
@@ -118,18 +126,21 @@ fn raw_paths_caller_directory_and_read_only_reentrancy() {
 
 #[test]
 fn artifact_paths_preserve_raw_bytes_and_external_paths_are_not_metrics() {
-    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
     let root = Temp::new();
-    let raw = root
-        .0
-        .join(".oms/artifacts")
-        .join(OsString::from_vec(b"result-\xff.md".to_vec()));
-    std::fs::write(raw, b"## Output\ntokens used\n19\n").unwrap();
-    root.index(b"{\"kind\":\"call\",\"artifact\":\".oms/artifacts/result-\\udcff.md\"}\n");
-    let result = root.call(&["--json"]);
-    assert_eq!(result.0, 0);
-    assert!(String::from_utf8_lossy(&result.1).contains("\"total\": 19"));
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = root
+            .0
+            .join(".oms/artifacts")
+            .join(OsString::from_vec(b"result-\xff.md".to_vec()));
+        std::fs::write(raw, b"## Output\ntokens used\n19\n").unwrap();
+        root.index(b"{\"kind\":\"call\",\"artifact\":\".oms/artifacts/result-\\udcff.md\"}\n");
+        let result = root.call(&["--json"]);
+        assert_eq!(result.0, 0);
+        assert!(String::from_utf8_lossy(&result.1).contains("\"total\": 19"));
+    }
     let repo = root.0.join("isolated");
     std::fs::create_dir_all(repo.join(".oms/artifacts")).unwrap();
     let external = root.0.join("external.md");

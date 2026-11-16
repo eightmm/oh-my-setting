@@ -15,6 +15,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
         assert!(
             Command::new("git")
                 .args(["init", "-q"])
@@ -1666,7 +1667,6 @@ fn public_experiment_modes_preserve_root_forwarding_and_precedence() {
 #[test]
 fn public_job_digest_routes_all_leaf_arguments_without_python_or_writes() {
     use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
     fn stable_output(bytes: &[u8]) -> Vec<u8> {
         let prefix = b"# Job digest\n\n- generated: ";
         let Some(rest) = bytes.strip_prefix(prefix) else {
@@ -1730,27 +1730,33 @@ fn public_job_digest_routes_all_leaf_arguments_without_python_or_writes() {
         }
         assert_eq!(files(&data), before);
     }
-    let raw = OsString::from_vec(b"raw-\xff.log".to_vec());
-    std::fs::write(data.join(&raw), b"ERROR \xfe\n").unwrap();
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = OsString::from_vec(b"raw-\xff.log".to_vec());
+        std::fs::write(data.join(&raw), b"ERROR \xfe\n").unwrap();
+        let before_raw = files(&data);
+        let (code, expected, error) = oms_command_job_digest::run(
+            std::slice::from_ref(&raw),
+            &data,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        let mut output = f
+            .public(&bin)
+            .args([OsString::from("job-digest"), raw])
+            .output()
+            .unwrap();
+        assert!(
+            output
+                .stdout
+                .windows(b"- log: raw-\xff.log".len())
+                .any(|part| part == b"- log: raw-\xff.log")
+        );
+        output.stdout = stable_output(&output.stdout);
+        exact(output, code, &stable_output(&expected), &error);
+        assert_eq!(files(&data), before_raw);
+    }
     let before = files(&data);
-    let (code, expected, error) = oms_command_job_digest::run(
-        std::slice::from_ref(&raw),
-        &data,
-        &std::sync::atomic::AtomicBool::new(false),
-    );
-    let mut output = f
-        .public(&bin)
-        .args([OsString::from("job-digest"), raw])
-        .output()
-        .unwrap();
-    assert!(
-        output
-            .stdout
-            .windows(b"- log: raw-\xff.log".len())
-            .any(|part| part == b"- log: raw-\xff.log")
-    );
-    output.stdout = stable_output(&output.stdout);
-    exact(output, code, &stable_output(&expected), &error);
     exact(
         f.private(&bin, "--oms-select")
             .args(["job-digest", "123", "missing.log"])
@@ -1800,7 +1806,11 @@ fn public_slurm_lint_preserves_static_modes_source_roots_and_raw_arguments() {
     )
     .unwrap();
     std::fs::write(data.join("empty.sh"), b"").unwrap();
-    let raw = OsString::from_vec(b"job-\xff.sh".to_vec());
+    let raw = if cfg!(target_os = "macos") {
+        OsString::from("job space.sh")
+    } else {
+        OsString::from_vec(b"job-\xff.sh".to_vec())
+    };
     std::fs::copy(data.join("job.sh"), data.join(&raw)).unwrap();
     let before = files(&data);
     let source_before = [files(&f.0.join("templates")), files(&f.0.join("local"))];

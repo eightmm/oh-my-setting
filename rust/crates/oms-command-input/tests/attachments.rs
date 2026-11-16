@@ -458,67 +458,73 @@ fn immutable_tamper_missing_malformed_and_unsafe_state() {
 #[test]
 fn raw_os_source_paths_and_physical_repository_aliases() {
     let f = Fixture::new();
-    let path = OsString::from_vec(b"raw-\xff-\xf0\x9f\x98\x80".to_vec());
-    fs::write(f.0.join(&path), "paragraph\n").unwrap();
-    let result = f.call(
-        &[OsStr::new("attach"), OsStr::new("file"), &path],
-        &[],
-        false,
-    );
-    assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
-    assert!(String::from_utf8_lossy(&result.1).contains("\\udcff"));
-    let record = oms_context::parse_json(&result.1).unwrap();
-    assert_eq!(
-        value(
-            &f.ok(&["attachment", value(&record, "id")]),
-            "source_status"
-        ),
-        "current"
-    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let path = OsString::from_vec(b"raw-\xff-\xf0\x9f\x98\x80".to_vec());
+        fs::write(f.0.join(&path), "paragraph\n").unwrap();
+        let result = f.call(
+            &[OsStr::new("attach"), OsStr::new("file"), &path],
+            &[],
+            false,
+        );
+        assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
+        assert!(String::from_utf8_lossy(&result.1).contains("\\udcff"));
+        let record = oms_context::parse_json(&result.1).unwrap();
+        assert_eq!(
+            value(
+                &f.ok(&["attachment", value(&record, "id")]),
+                "source_status"
+            ),
+            "current"
+        );
+    }
     let alias = f.0.join("alias");
     symlink(&f.0, &alias).unwrap();
     f.ok(&["--repo", alias.to_str().unwrap(), "attachments"]);
-    let raw_repo = f.0.join(OsString::from_vec(b"repo-\xfe".to_vec()));
-    fs::create_dir(&raw_repo).unwrap();
-    assert!(
-        Command::new("git")
-            .args(["init", "-q"])
-            .arg(&raw_repo)
-            .status()
-            .unwrap()
-            .success()
-    );
-    fs::write(raw_repo.join("source"), b"native\n").unwrap();
-    let result = f.call(
-        &[
-            OsStr::new("--repo"),
-            raw_repo.as_os_str(),
-            OsStr::new("attach"),
-            OsStr::new("file"),
-            OsStr::new("source"),
-        ],
-        &[],
-        false,
-    );
-    assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
-    let record = oms_context::parse_json(&result.1).unwrap();
-    assert!(String::from_utf8_lossy(&result.1).contains("\\udcfe"));
-    let result = f.call(
-        &[
-            OsStr::new("attachment"),
-            OsStr::new(value(&record, "id")),
-            OsStr::new("--repo"),
-            raw_repo.as_os_str(),
-        ],
-        &[],
-        false,
-    );
-    assert_eq!(result.0, 0);
-    let mut option = b"--repo=".to_vec();
-    option.extend_from_slice(raw_repo.as_os_str().as_bytes());
-    let option = OsString::from_vec(option);
-    let result = f.call(&[&option, OsStr::new("attachments")], &[], false);
-    assert_eq!(result.0, 0);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let raw_repo = f.0.join(OsString::from_vec(b"repo-\xfe".to_vec()));
+        fs::create_dir(&raw_repo).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .arg(&raw_repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(raw_repo.join("source"), b"native\n").unwrap();
+        let result = f.call(
+            &[
+                OsStr::new("--repo"),
+                raw_repo.as_os_str(),
+                OsStr::new("attach"),
+                OsStr::new("file"),
+                OsStr::new("source"),
+            ],
+            &[],
+            false,
+        );
+        assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
+        let record = oms_context::parse_json(&result.1).unwrap();
+        assert!(String::from_utf8_lossy(&result.1).contains("\\udcfe"));
+        let result = f.call(
+            &[
+                OsStr::new("attachment"),
+                OsStr::new(value(&record, "id")),
+                OsStr::new("--repo"),
+                raw_repo.as_os_str(),
+            ],
+            &[],
+            false,
+        );
+        assert_eq!(result.0, 0);
+        let mut option = b"--repo=".to_vec();
+        option.extend_from_slice(raw_repo.as_os_str().as_bytes());
+        let option = OsString::from_vec(option);
+        let result = f.call(&[&option, OsStr::new("attachments")], &[], false);
+        assert_eq!(result.0, 0);
+    }
 }
 
 #[test]

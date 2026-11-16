@@ -110,7 +110,14 @@ fn raw_log_and_python_constants() {
     use std::os::unix::ffi::OsStringExt;
     let repo = std::env::temp_dir().join(format!("oms-job-raw-{}", std::process::id()));
     fs::create_dir_all(&repo).unwrap();
-    let filename = OsString::from_vec(b"run-\xff.log".to_vec());
+    let (filename, expected_log_line): (OsString, &[u8]) = if cfg!(target_os = "macos") {
+        (OsString::from("run-space.log"), b"- log: run-space.log")
+    } else {
+        (
+            OsString::from_vec(b"run-\xff.log".to_vec()),
+            b"- log: run-\xff.log",
+        )
+    };
     fs::write(
         repo.join(&filename),
         b"ERROR \xff\nTraceback (most recent call last):\n\xfe\n",
@@ -129,8 +136,8 @@ fn raw_log_and_python_constants() {
     let (code, out, _) = run(&args, &repo, &AtomicBool::new(false));
     assert_eq!(code, 0);
     assert!(
-        out.windows(b"- log: run-\xff.log".len())
-            .any(|x| x == b"- log: run-\xff.log")
+        out.windows(expected_log_line.len())
+            .any(|x| x == expected_log_line)
     );
     assert!(out.windows(b"ERROR \xff".len()).any(|x| x == b"ERROR \xff"));
     assert!(

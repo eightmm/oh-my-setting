@@ -633,35 +633,38 @@ fn git_root_non_git_relative_and_raw_path_bytes() {
             .to_vec();
     expected.push(b'\n');
     assert_eq!(path, expected);
-    let raw = f.0.join(OsString::from_vec(b"raw-\xff".to_vec()));
-    fs::create_dir(&raw).unwrap();
-    let args = [
-        "init".into(),
-        "--repo".into(),
-        raw.clone().into_os_string(),
-        "--name".into(),
-        "bytes".into(),
-    ];
-    let result = f.call_os(&args, false, false);
-    assert_eq!(result.0, 0);
-    assert!(result.1.contains(&0xff));
-    let path_args = [
-        "path".into(),
-        "--repo".into(),
-        raw.clone().into_os_string(),
-        "--name".into(),
-        "bytes".into(),
-    ];
-    let result = f.call_os(&path_args, false, false);
-    assert_eq!(result.0, 0);
-    let mut expected = raw
-        .join(".oms/roles/bytes.md")
-        .as_os_str()
-        .as_bytes()
-        .to_vec();
-    expected.push(b'\n');
-    assert_eq!(result.1, expected);
-    assert!(raw.join(".oms/roles/bytes.md").is_file());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let raw = f.0.join(OsString::from_vec(b"raw-\xff".to_vec()));
+        fs::create_dir(&raw).unwrap();
+        let args = [
+            "init".into(),
+            "--repo".into(),
+            raw.clone().into_os_string(),
+            "--name".into(),
+            "bytes".into(),
+        ];
+        let result = f.call_os(&args, false, false);
+        assert_eq!(result.0, 0);
+        assert!(result.1.contains(&0xff));
+        let path_args = [
+            "path".into(),
+            "--repo".into(),
+            raw.clone().into_os_string(),
+            "--name".into(),
+            "bytes".into(),
+        ];
+        let result = f.call_os(&path_args, false, false);
+        assert_eq!(result.0, 0);
+        let mut expected = raw
+            .join(".oms/roles/bytes.md")
+            .as_os_str()
+            .as_bytes()
+            .to_vec();
+        expected.push(b'\n');
+        assert_eq!(result.1, expected);
+        assert!(raw.join(".oms/roles/bytes.md").is_file());
+    }
 }
 
 #[test]
@@ -943,10 +946,13 @@ fn empty_stores_home_fallback_relative_global_and_raw_arguments() {
         0
     );
     assert!(f.0.join("project/local-roles/relative.md").is_file());
-    fs::create_dir_all(f.0.join("project/.oms/roles")).unwrap();
-    let raw = OsString::from_vec(b"raw-\xff.md".to_vec());
-    fs::write(f.0.join("project/.oms/roles").join(raw), b"raw").unwrap();
-    assert_eq!(f.ok(&["list"]), b"raw-\xff\n");
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::create_dir_all(f.0.join("project/.oms/roles")).unwrap();
+        let raw = OsString::from_vec(b"raw-\xff.md".to_vec());
+        fs::write(f.0.join("project/.oms/roles").join(raw), b"raw").unwrap();
+        assert_eq!(f.ok(&["list"]), b"raw-\xff\n");
+    }
     let result = f.call_os(&[OsString::from_vec(b"bad-\xff".to_vec())], false, false);
     assert_eq!(result.0, 2);
     assert_eq!(result.2, b"error: unknown argument: bad-\xff\n");

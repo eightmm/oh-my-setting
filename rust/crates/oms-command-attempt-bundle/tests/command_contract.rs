@@ -300,7 +300,11 @@ fn parsing_help_errors_and_raw_paths() {
         assert!(out.is_empty());
     }
     use std::os::unix::ffi::OsStringExt;
-    let raw = OsString::from_vec(vec![b't', 0x80]);
+    let raw = if cfg!(target_os = "macos") {
+        OsString::from("transcript space.jsonl")
+    } else {
+        OsString::from_vec(vec![b't', 0x80])
+    };
     fs::copy(f.0.join("transcript.jsonl"), f.0.join(&raw)).unwrap();
     let mut a = args(&[
         "show",

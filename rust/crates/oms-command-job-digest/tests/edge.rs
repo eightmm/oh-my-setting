@@ -209,23 +209,34 @@ fn slope_overflow_and_signed_nonfinite_follow_python() {
 
 #[test]
 fn tsv_discovery_preserves_names_and_does_not_follow_directory_links() {
-    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
     let f = Fixture::new();
     let dir = f.0.join("dvc");
     fs::create_dir(&dir).unwrap();
     fs::write(dir.join(".tsv"), "step\tvalue\n1\t2\n").unwrap();
-    let filename = OsString::from_vec(b"loss-\xff.tsv".to_vec());
-    fs::write(dir.join(filename), "step\tvalue\r1\t3\r2\t2\r").unwrap();
-    let (_, out, _) = f.call(&["--metrics", "dvc"]);
-    assert!(
-        out.windows(b"| .tsv | 1 | 1 | 2 |".len())
-            .any(|w| w == b"| .tsv | 1 | 1 | 2 |")
-    );
-    assert!(
-        out.windows(b"| loss-\xff | 2 | 2 | 2 |".len())
-            .any(|w| w == b"| loss-\xff | 2 | 2 | 2 |")
-    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let filename = OsString::from_vec(b"loss-\xff.tsv".to_vec());
+        fs::write(dir.join(filename), "step\tvalue\r1\t3\r2\t2\r").unwrap();
+        let (_, out, _) = f.call(&["--metrics", "dvc"]);
+        assert!(
+            out.windows(b"| .tsv | 1 | 1 | 2 |".len())
+                .any(|w| w == b"| .tsv | 1 | 1 | 2 |")
+        );
+        assert!(
+            out.windows(b"| loss-\xff | 2 | 2 | 2 |".len())
+                .any(|w| w == b"| loss-\xff | 2 | 2 | 2 |")
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (_, out, _) = f.call(&["--metrics", "dvc"]);
+        assert!(
+            out.windows(b"| .tsv | 1 | 1 | 2 |".len())
+                .any(|w| w == b"| .tsv | 1 | 1 | 2 |")
+        );
+    }
     let other = f.0.join("other");
     fs::create_dir(&other).unwrap();
     fs::write(other.join("ignored.tsv"), "step\tvalue\n1\t1\n").unwrap();
@@ -390,7 +401,14 @@ fn unreadable_inputs_preserve_paths_and_failure_boundaries() {
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
-    let name = OsString::from_vec(b"private-\xff.log".to_vec());
+    let (name, needle): (OsString, &[u8]) = if cfg!(target_os = "macos") {
+        (OsString::from("private-space.log"), b"private-space.log")
+    } else {
+        (
+            OsString::from_vec(b"private-\xff.log".to_vec()),
+            b"private-\xff.log",
+        )
+    };
     let file = f.0.join(&name);
     fs::write(&file, b"last\n").unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o0)).unwrap();
@@ -406,10 +424,7 @@ fn unreadable_inputs_preserve_paths_and_failure_boundaries() {
         assert_eq!(code, 1);
         assert!(out.len() <= 512);
         assert!(out.starts_with(b"# Job digest"));
-        assert!(
-            err.windows(b"private-\xff.log".len())
-                .any(|w| w == b"private-\xff.log")
-        );
+        assert!(err.windows(needle.len()).any(|w| w == needle));
         assert!(String::from_utf8_lossy(&err).contains("Permission denied"));
         let args = [OsString::from("--metrics"), name];
         let (code, out, err) = run(&args, &f.0, &AtomicBool::new(false));
@@ -420,10 +435,7 @@ fn unreadable_inputs_preserve_paths_and_failure_boundaries() {
                 .contains("Metrics section failed")
         );
         assert!(String::from_utf8_lossy(&err).contains("PermissionError"));
-        assert!(
-            err.windows(b"private-\xff.log".len())
-                .any(|w| w == b"private-\xff.log")
-        );
+        assert!(err.windows(needle.len()).any(|w| w == needle));
     }
     fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
 }

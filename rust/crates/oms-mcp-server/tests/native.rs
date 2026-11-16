@@ -60,7 +60,7 @@ impl Temp {
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&p).unwrap();
-        Self(p)
+        Self(p.canonicalize().unwrap())
     }
     fn source(&self) -> PathBuf {
         let p = self.0.join("source");
@@ -626,7 +626,11 @@ fn transport_bounds() {
     assert_eq!(serde_json::from_slice::<Value>(&output).unwrap()["id"], 992);
 
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    let raw_repo = t.0.join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec()));
+    let raw_repo = t.0.join(if cfg!(target_os = "macos") {
+        std::ffi::OsString::from("raw-space")
+    } else {
+        std::ffi::OsString::from_vec(b"raw-\xff".to_vec())
+    });
     std::fs::create_dir(&raw_repo).unwrap();
     let alias = repo.join("raw-alias");
     std::os::unix::fs::symlink(&raw_repo, &alias).unwrap();
@@ -670,11 +674,17 @@ fn raw_peer_paths() {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let t = Temp::new();
     let original = t.source();
-    let source =
-        t.0.join(std::ffi::OsString::from_vec(b"source-\xfe".to_vec()));
+    let source = t.0.join(if cfg!(target_os = "macos") {
+        std::ffi::OsString::from("source-space")
+    } else {
+        std::ffi::OsString::from_vec(b"source-\xfe".to_vec())
+    });
     std::fs::rename(original, &source).unwrap();
-    let repo =
-        t.0.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+    let repo = t.0.join(if cfg!(target_os = "macos") {
+        std::ffi::OsString::from("repo-space")
+    } else {
+        std::ffi::OsString::from_vec(b"repo-\xff".to_vec())
+    });
     std::fs::create_dir(&repo).unwrap();
     let mut c = Client::new(&source, &repo, true, true, false);
     for kind in ["consult", "advise", "ask"] {
@@ -1571,7 +1581,11 @@ fn peer_exchange_repo_argv() {
     std::os::unix::fs::symlink(&physical, &alias).unwrap();
     let spaced = repo.join("space λ");
     std::fs::create_dir(&spaced).unwrap();
-    let raw_repo = t.0.join(OsString::from_vec(b"raw-\xff".to_vec()));
+    let raw_repo = t.0.join(if cfg!(target_os = "macos") {
+        OsString::from("repo-space")
+    } else {
+        OsString::from_vec(b"raw-\xff".to_vec())
+    });
     std::fs::create_dir(&raw_repo).unwrap();
     std::os::unix::fs::symlink(&raw_repo, repo.join("raw-alias")).unwrap();
     std::fs::write(repo.join("file"), "fixture").unwrap();
