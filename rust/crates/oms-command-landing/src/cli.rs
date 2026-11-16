@@ -107,8 +107,12 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                 "base",
                 "max",
                 "file",
+                "head-branch",
+                "merge-method",
             ],
             &[
+                "pr",
+                "local-merge",
                 "wait",
                 "ci-full",
                 "no-update",
@@ -202,6 +206,21 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         }
         i += 1;
     }
+    if tool == "land" {
+        require(
+            !(out.has("pr") && out.has("local-merge")),
+            "--pr and --local-merge are mutually exclusive",
+        )?;
+        require(
+            !out.has("local-merge") || out.has("from"),
+            "--local-merge requires --from REF",
+        )?;
+        require(
+            !out.has("merge-method")
+                || ["squash", "merge", "rebase"].contains(&out.get("merge-method")),
+            "--merge-method must be squash, merge or rebase",
+        )?;
+    }
     Ok(out)
 }
 pub(crate) fn usage(tool: &str) -> Option<&'static str> {
@@ -213,7 +232,7 @@ pub(crate) fn usage(tool: &str) -> Option<&'static str> {
             "Usage: oms patch-land [--patch FILE | --plan-task ID] [--repo PATH] [--verify CMD] [--recover] [--request-approval | --approval ID --approval-token GRANT --approval-version N] [--ml] [--allow-verifier-change] [--allow-test-reduction] [--allow-restructure] [--allow-floor-change REASON] [--accept-salvaged] [--accept-encoding-loss]\n"
         }
         "land" => {
-            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n"
+            "Usage: oms land [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD] [--wait] [--ci-wait SECONDS] [--ci-full] [--no-update] [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH] [--sync-shared PATH]\n       oms land --pr [--head-branch NAME] [--merge-method squash|merge|rebase] [land options]\n       oms land --local-merge --from REF [land options]\n       (OMS_LAND_MODE=pr|auto|direct selects the mode when neither --pr nor --local-merge is given)\n       oms land status [--repo PATH] [--json] [--active-exit]\n       oms land notes --from REV --to REV [--repo PATH] [--output NEW_FILE]\n       oms land blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE\n       oms land conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]\n"
         }
         "change-guard" => {
             "Usage: oms change-guard [--repo PATH] [--file PATH] [--allow PATH] [--deny PATH] [--from-task] [--strict] <begin|check|end|status>\n"

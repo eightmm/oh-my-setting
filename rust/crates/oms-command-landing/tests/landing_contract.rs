@@ -3,7 +3,8 @@
 //! that holds only `git` and `bash`, so no `python3`, `OMS_*` or `GIT_*` state leaks in.
 #![forbid(unsafe_code)]
 
-use oms_command_landing::{TOOLS, owns, run, usage};
+use oms_command_landing::services::{Execution, PublicationGuard, Services};
+use oms_command_landing::{TOOLS, V, obj, owns, run, run_with_services, usage};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -129,6 +130,27 @@ impl Isolated {
     }
     /// Run `tool` in a clean child; returns (code, stdout, stderr).
     fn run(&self, tool: &str, cwd: &Path, args: &[&str]) -> (i32, String, String) {
+        self.run_env(tool, cwd, args, &[])
+    }
+    /// Like `run`, with `extra` environment and local-process services (`TestServices`).
+    fn run_with_services(
+        &self,
+        tool: &str,
+        cwd: &Path,
+        args: &[&str],
+        extra: &[(&str, &str)],
+    ) -> (i32, String, String) {
+        let mut env = vec![("OMS_CT_SERVICES", "1")];
+        env.extend_from_slice(extra);
+        self.run_env(tool, cwd, args, &env)
+    }
+    fn run_env(
+        &self,
+        tool: &str,
+        cwd: &Path,
+        args: &[&str],
+        extra: &[(&str, &str)],
+    ) -> (i32, String, String) {
         let out = Command::new(&self.exe)
             .args(["--exact", "child_entry", "--nocapture", "--test-threads=1"])
             .env_clear()
@@ -139,6 +161,7 @@ impl Isolated {
             .env("OMS_CT_TOOL", tool)
             .env("OMS_CT_CWD", cwd)
             .env("OMS_CT_ARGS", args.join(&SEP.to_string()))
+            .envs(extra.iter().copied())
             .current_dir(cwd)
             .output()
             .expect("spawn child");
@@ -194,7 +217,18 @@ fn child_entry() {
         raw.split(SEP).map(OsString::from).collect()
     };
     let flag = AtomicBool::new(false);
-    let (code, out, err) = run(tool.to_str().unwrap(), &args, &cwd, &flag);
+    let (code, out, err) = if std::env::var_os("OMS_CT_SERVICES").is_some() {
+        run_with_services(
+            tool.to_str().unwrap(),
+            &args,
+            &cwd,
+            &cwd,
+            &flag,
+            &TestServices,
+        )
+    } else {
+        run(tool.to_str().unwrap(), &args, &cwd, &flag)
+    };
     let esc = |b: Vec<u8>| {
         String::from_utf8_lossy(&b)
             .replace('\\', "\\\\")
@@ -203,6 +237,49 @@ fn child_entry() {
     println!("CT_CODE={code}");
     println!("CT_OUT={}", esc(out));
     println!("CT_ERR={}", esc(err));
+}
+
+/// Local stand-ins for the parent CLI's authorities: the gate really runs.
+struct TestServices;
+struct NoGuard;
+impl PublicationGuard for NoGuard {}
+impl Services for TestServices {
+    fn supervise(
+        &self,
+        request: &oms_command_landing::services::VerifyRequest,
+        _: &AtomicBool,
+    ) -> oms_command_landing::Result<Execution> {
+        let started = std::time::Instant::now();
+        let out = Command::new(&request.argv[0])
+            .args(&request.argv[1..])
+            .current_dir(&request.cwd)
+            .output()
+            .expect("gate");
+        Ok(Execution {
+            code: out.status.code().unwrap_or(2),
+            stdout: out.stdout,
+            stderr: out.stderr,
+            elapsed: started.elapsed(),
+        })
+    }
+    fn publication_guard(
+        &self,
+        _: &Path,
+        _: &AtomicBool,
+    ) -> oms_command_landing::Result<Box<dyn PublicationGuard + '_>> {
+        Ok(Box::new(NoGuard))
+    }
+    fn wait_siblings(
+        &self,
+        _: &Path,
+        _: std::time::Duration,
+        _: &AtomicBool,
+    ) -> oms_command_landing::Result<()> {
+        Ok(())
+    }
+    fn after_land(&self, _: &Path, _: &V, _: &AtomicBool) -> oms_command_landing::Result<V> {
+        Ok(obj([("rc", 0usize.into())]))
+    }
 }
 
 fn inproc(tool: &str, args: &[&str]) -> (i32, String, String) {
@@ -268,6 +345,21 @@ fn parse_errors_exit_two() {
             "--from-failure requires a value",
         ),
         ("ci-status", vec!["--limit"], "--limit requires a value"),
+        (
+            "land",
+            vec!["--local-merge"],
+            "--local-merge requires --from REF",
+        ),
+        (
+            "land",
+            vec!["--pr", "--local-merge", "--from", "x"],
+            "--pr and --local-merge are mutually exclusive",
+        ),
+        (
+            "land",
+            vec!["--pr", "--merge-method", "octopus"],
+            "--merge-method must be squash, merge or rebase",
+        ),
     ] {
         let (code, out, err) = inproc(tool, &args);
         assert_eq!(code, 2, "{tool} {args:?}: {err}");
@@ -603,4 +695,227 @@ fn change_guard_lifecycle() {
     assert_eq!(code, 0, "{err}");
     let (_, out3, _) = iso.run("change-guard", &repo, &["status"]);
     assert!(out3.starts_with("change-guard: inactive"), "{out3}");
+}
+
+impl Isolated {
+    fn git_out(&self, dir: &Path, args: &[&str]) -> String {
+        let out = self.command(dir).args(args).output().expect("git");
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+    /// Work repo whose `origin` is a local bare repository holding `main`.
+    fn with_remote(&self, name: &str) -> (PathBuf, PathBuf) {
+        let repo = self.repo(name);
+        let bare = self.home.path().join(format!("{name}-remote.git"));
+        self.git(
+            self.home.path(),
+            &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+        );
+        self.git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        self.git(&repo, &["push", "-q", "origin", "main"]);
+        (repo, bare)
+    }
+    fn commit_file(&self, repo: &Path, file: &str) -> String {
+        fs::write(repo.join(file), format!("{file}\n")).expect("write");
+        self.git(repo, &["add", file]);
+        self.git(repo, &["commit", "-q", "-m", &format!("add {file}")]);
+        strip_group_world_write(repo);
+        self.git_out(repo, &["rev-parse", "HEAD"])
+    }
+    /// Fake `gh`: logs argv, answers JSON queries from the bare remote, and
+    /// reports CI as `ci` for the exact `--commit` it is asked about.
+    fn fake_gh(&self, bare: &Path, ci: &str) -> (PathBuf, PathBuf) {
+        let log = self.home.path().join("gh.log");
+        let state = self.home.path().join("gh.pr");
+        let script = self.home.path().join("fake-gh");
+        let body = format!(
+            r#"#!{bash}
+printf '%s\n' "$*" >> '{log}'
+head=; commit=; event=
+args=("$@")
+for ((i = 0; i < ${{#args[@]}}; i++)); do
+  case "${{args[i]}}" in
+    --head) head=${{args[i+1]}} ;;
+    --commit) commit=${{args[i+1]}} ;;
+    --event) event=${{args[i+1]}} ;;
+  esac
+done
+case "$1 $2" in
+  "pr list")
+    if [ -f '{state}' ]; then
+      tip=$(git --git-dir='{bare}' rev-parse "refs/heads/$head")
+      printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s"}}]\n' "$tip"
+    else echo '[]'; fi ;;
+  "pr create") : > '{state}'; echo https://example.invalid/pull/7 ;;
+  "pr merge") ;;
+  "pr view") printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)" ;;
+  "run list")
+    if [ "$event" = pull_request ]; then
+      printf '[{{"databaseId":99,"status":"completed","conclusion":"{ci}","headSha":"%s"}}]\n' "$commit"
+    else echo '[]'; fi ;;
+  *) exit 1 ;;
+esac
+"#,
+            bash = which("bash").display(),
+            log = log.display(),
+            state = state.display(),
+            bare = bare.display(),
+        );
+        fs::write(&script, body).expect("fake gh");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("chmod");
+        (script, log)
+    }
+}
+
+#[test]
+fn land_pr_pushes_feature_branch_and_merges_after_exact_sha_ci() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_remote("pr");
+    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
+    let head = iso.commit_file(&repo, "feat.txt");
+    let main_before = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+    let (gh, log) = iso.fake_gh(&bare, "success");
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &["--pr", "--gate", "true", "--ignore-siblings", "--no-update"],
+        &[("OMS_GH_BIN", gh.to_str().unwrap())],
+    );
+    assert_eq!(r.0, 0, "{r:?}");
+    assert!(r.1.contains("merged PR #7 (squash)"), "{r:?}");
+    assert_eq!(
+        iso.git_out(&bare, &["rev-parse", "refs/heads/main"]),
+        main_before
+    );
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
+    let calls = fs::read_to_string(log).expect("gh log");
+    let create = calls.find("pr create").expect("pr create");
+    let ci = calls
+        .find(&format!("--commit {head} --event pull_request"))
+        .expect("exact-SHA CI query");
+    let merge = calls
+        .find(&format!(
+            "pr merge 7 --repo {} --squash --delete-branch --match-head-commit {head}",
+            bare.to_string_lossy().trim_end_matches(".git")
+        ))
+        .expect("pr merge");
+    assert!(create < ci && ci < merge, "{calls}");
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    for needle in [
+        "\"mode\": \"pr\"",
+        "\"head_branch\": \"feat\"",
+        "\"pr_number\": 7",
+        "\"state\": \"passed\"",
+        "\"state\": \"MERGED\"",
+    ] {
+        assert!(status.contains(needle), "{needle}: {status}");
+    }
+}
+
+#[test]
+fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_remote("prfail");
+    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
+    iso.commit_file(&repo, "feat.txt");
+    let (gh, log) = iso.fake_gh(&bare, "failure");
+    let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
+    let args = ["--pr", "--gate", "true", "--ignore-siblings", "--no-update"];
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 1, "{r:?}");
+    assert!(r.1.contains("CI failure"), "{r:?}");
+    let calls = fs::read_to_string(log).expect("gh log");
+    assert!(
+        calls.contains("pr create") && !calls.contains("pr merge"),
+        "{calls}"
+    );
+    // the target is never a PR head, explicitly or by environment default
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &[&args[..], &["--head-branch", "main"]].concat(),
+        &env,
+    );
+    assert_refused(&r, "PR head branch must differ from the target branch");
+    let r = iso.run_env(
+        "land",
+        &repo,
+        &["--gate", "true"],
+        &[("OMS_LAND_MODE", "sometimes")],
+    );
+    assert_refused(&r, "OMS_LAND_MODE must be pr, auto or direct");
+}
+
+#[test]
+fn land_local_merge_runs_gate_before_the_hooked_merge() {
+    let iso = Isolated::new();
+    let repo = iso.repo("local");
+    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
+    let feat = iso.commit_file(&repo, "feat.txt");
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    iso.commit_file(&repo, "main.txt");
+    let marker = iso.home.path().join("hook.log");
+    let hook = repo.join(".git/hooks/pre-merge-commit");
+    fs::create_dir_all(hook.parent().unwrap()).expect("hooks");
+    fs::write(
+        &hook,
+        format!(
+            "#!{}\n[ \"$OMS_LAND_ACTIVE\" = 1 ] || exit 1\nprintf 'ran %s\\n' \"$OMS_LAND_ACTIVE\" >> '{}'\n",
+            which("bash").display(),
+            marker.display()
+        ),
+    )
+    .expect("hook");
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).expect("chmod");
+    let before = iso.git_out(&repo, &["rev-parse", "main"]);
+    let base = ["--local-merge", "--from", "feat", "--ignore-siblings"];
+    let failed = iso.run_with_services(
+        "land",
+        &repo,
+        &[&base[..], &["--gate", "exit 1"]].concat(),
+        &[],
+    );
+    assert_eq!(failed.0, 1, "{failed:?}");
+    assert_eq!(iso.git_out(&repo, &["rev-parse", "main"]), before);
+    assert!(!marker.exists());
+    let passed = iso.run_with_services(
+        "land",
+        &repo,
+        &[&base[..], &["--gate", "true"]].concat(),
+        &[],
+    );
+    assert_eq!(passed.0, 0, "{passed:?}");
+    assert_eq!(iso.git_out(&repo, &["rev-parse", "main^2"]), feat);
+    assert_eq!(fs::read_to_string(&marker).expect("hook ran"), "ran 1\n");
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    assert!(status.contains("\"mode\": \"local-merge\""), "{status}");
+    assert!(
+        status.contains(&format!("\"merged_from\": \"{feat}\"")),
+        "{status}"
+    );
+    // a branch already merged is refused instead of reported as landed
+    let again = iso.run_with_services(
+        "land",
+        &repo,
+        &["--local-merge", "--from", "feat", "--gate", "true"],
+        &[],
+    );
+    assert_refused(&again, "already contained in HEAD");
+}
+
+#[test]
+fn land_direct_still_gates_then_pushes_the_target() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_remote("direct");
+    let head = iso.commit_file(&repo, "next.txt");
+    let args = ["--gate", "exit 1", "--ignore-siblings", "--ci-wait", "0"];
+    let failed = iso.run_with_services("land", &repo, &args, &[]);
+    assert_eq!(failed.0, 1, "{failed:?}");
+    assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
+    let args = ["--gate", "true", "--ignore-siblings", "--ci-wait", "0"];
+    let pushed = iso.run_with_services("land", &repo, &args, &[]);
+    assert_eq!(pushed.0, 0, "{pushed:?}");
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    assert!(status.contains("\"mode\": \"direct\""), "{status}");
 }

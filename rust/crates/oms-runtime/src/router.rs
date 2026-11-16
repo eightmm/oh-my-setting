@@ -64,6 +64,9 @@ pub fn run(
     services: &dyn Services,
     interrupted: &AtomicBool,
 ) -> Response {
+    if argv.first().and_then(|s| s.to_str()) == Some("ssh-adapter") {
+        return crate::ssh_adapter::run(&argv[1..], cwd, interrupted);
+    }
     let result = (|| {
         let request = crate::parse(argv)?;
         if request.has("help") || request.mode == Mode::Help {
