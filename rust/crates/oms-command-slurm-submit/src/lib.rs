@@ -336,113 +336,171 @@ pub(crate) fn safe_cluster(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-,".contains(&b))
 }
 
-pub(crate) fn cluster_from_args(args: &[OsString]) -> Option<String> {
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum CliTarget {
+    Named(String),
+    Unset,
+    Uncertain,
+}
+
+pub(crate) fn cluster_from_args(args: &[OsString]) -> CliTarget {
     let mut i = 0;
     let mut found = None;
     while i < args.len() {
-        let s = args[i].to_str()?;
+        let Some(s) = args[i].to_str() else {
+            return CliTarget::Uncertain;
+        };
         if s == "--" || s == "-" || !s.starts_with('-') {
             break;
         }
         if s == "-M" || s == "--clusters" {
             i += 1;
-            found = args
+            let Some(val) = args
                 .get(i)
                 .and_then(|v| v.to_str())
                 .filter(|c| safe_cluster(c))
-                .map(str::to_owned);
+            else {
+                return CliTarget::Uncertain;
+            };
+            found = Some(val.to_owned());
         } else if let Some(rest) = s.strip_prefix("--clusters=") {
-            found = safe_cluster(rest).then(|| rest.to_owned());
-        } else if s.len() > 2 && s.starts_with("-M") && !s.starts_with("-M-") {
-            let c = &s[2..];
-            found = safe_cluster(c).then(|| c.to_owned());
-        } else if s.starts_with("--") {
-            let takes_value = !s.contains('=')
-                && matches!(
-                    s,
-                    "--account"
-                        | "--array"
-                        | "--begin"
-                        | "--chdir"
-                        | "--cluster-constraint"
-                        | "--comment"
-                        | "--constraint"
-                        | "--container"
-                        | "--core-spec"
-                        | "--cores-per-socket"
-                        | "--cpu-bind"
-                        | "--cpu-freq"
-                        | "--cpus-per-gpu"
-                        | "--cpus-per-task"
-                        | "--deadline"
-                        | "--delay-boot"
-                        | "--dependency"
-                        | "--distribution"
-                        | "--error"
-                        | "--exclude"
-                        | "--export"
-                        | "--export-file"
-                        | "--extra"
-                        | "--extra-node-info"
-                        | "--gid"
-                        | "--gpu-bind"
-                        | "--gpu-freq"
-                        | "--gpus"
-                        | "--gpus-per-node"
-                        | "--gpus-per-socket"
-                        | "--gpus-per-task"
-                        | "--gres"
-                        | "--gres-flags"
-                        | "--hint"
-                        | "--input"
-                        | "--job-name"
-                        | "--kill-on-invalid-dep"
-                        | "--licenses"
-                        | "--mail-type"
-                        | "--mail-user"
-                        | "--mcs-label"
-                        | "--mem"
-                        | "--mem-bind"
-                        | "--mem-per-cpu"
-                        | "--mem-per-gpu"
-                        | "--mincpus"
-                        | "--network"
-                        | "--nodefile"
-                        | "--nodelist"
-                        | "--nodes"
-                        | "--ntasks"
-                        | "--ntasks-per-core"
-                        | "--ntasks-per-gpu"
-                        | "--ntasks-per-node"
-                        | "--ntasks-per-socket"
-                        | "--open-mode"
-                        | "--output"
-                        | "--partition"
-                        | "--power"
-                        | "--prefer"
-                        | "--priority"
-                        | "--profile"
-                        | "--qos"
-                        | "--reservation"
-                        | "--signal"
-                        | "--sockets-per-node"
-                        | "--switches"
-                        | "--thread-spec"
-                        | "--threads-per-core"
-                        | "--time"
-                        | "--time-min"
-                        | "--tmp"
-                        | "--tres-bind"
-                        | "--tres-per-task"
-                        | "--uid"
-                        | "--wckey"
-                        | "--wrap"
-                );
-            if takes_value {
-                i += 1;
+            if !safe_cluster(rest) {
+                return CliTarget::Uncertain;
             }
-        } else if s.len() == 2
-            && matches!(
+            found = Some(rest.to_owned());
+        } else if s.len() > 2 && s.starts_with("-M") {
+            let c = &s[2..];
+            if !safe_cluster(c) {
+                return CliTarget::Uncertain;
+            }
+            found = Some(c.to_owned());
+        } else if s.starts_with("--") {
+            if s.contains('=') {
+                // Value is inline; consumes no following token.
+            } else if matches!(
+                s,
+                "--account"
+                    | "--acctg-freq"
+                    | "--array"
+                    | "--batch"
+                    | "--bb"
+                    | "--bbf"
+                    | "--bcast"
+                    | "--bcast-exclude"
+                    | "--begin"
+                    | "--chdir"
+                    | "--cluster-constraint"
+                    | "--comment"
+                    | "--constraint"
+                    | "--container"
+                    | "--core-spec"
+                    | "--cores-per-socket"
+                    | "--cpu-bind"
+                    | "--cpu-freq"
+                    | "--cpus-per-gpu"
+                    | "--cpus-per-task"
+                    | "--deadline"
+                    | "--delay-boot"
+                    | "--dependency"
+                    | "--distribution"
+                    | "--error"
+                    | "--exclude"
+                    | "--export"
+                    | "--export-file"
+                    | "--extra"
+                    | "--extra-node-info"
+                    | "--gid"
+                    | "--gpu-bind"
+                    | "--gpu-freq"
+                    | "--gpus"
+                    | "--gpus-per-node"
+                    | "--gpus-per-socket"
+                    | "--gpus-per-task"
+                    | "--gres"
+                    | "--gres-flags"
+                    | "--hint"
+                    | "--input"
+                    | "--job-name"
+                    | "--kill-on-invalid-dep"
+                    | "--licenses"
+                    | "--mail-type"
+                    | "--mail-user"
+                    | "--mcs-label"
+                    | "--mem"
+                    | "--mem-bind"
+                    | "--mem-per-cpu"
+                    | "--mem-per-gpu"
+                    | "--mincpus"
+                    | "--network"
+                    | "--nodefile"
+                    | "--nodelist"
+                    | "--nodes"
+                    | "--ntasks"
+                    | "--ntasks-per-core"
+                    | "--ntasks-per-gpu"
+                    | "--ntasks-per-node"
+                    | "--ntasks-per-socket"
+                    | "--open-mode"
+                    | "--output"
+                    | "--partition"
+                    | "--power"
+                    | "--prefer"
+                    | "--priority"
+                    | "--profile"
+                    | "--qos"
+                    | "--reservation"
+                    | "--signal"
+                    | "--sockets-per-node"
+                    | "--switches"
+                    | "--thread-spec"
+                    | "--threads-per-core"
+                    | "--time"
+                    | "--time-min"
+                    | "--tmp"
+                    | "--tres-bind"
+                    | "--tres-per-task"
+                    | "--uid"
+                    | "--wait-all-nodes"
+                    | "--wckey"
+                    | "--wrap"
+            ) {
+                i += 1;
+                if i >= args.len() {
+                    return CliTarget::Uncertain;
+                }
+            } else if !matches!(
+                s,
+                "--contiguous"
+                    | "--exclusive"
+                    | "--get-user-env"
+                    | "--help"
+                    | "--hold"
+                    | "--ignore-pbs"
+                    | "--kill-on-bad-exit"
+                    | "--nice"
+                    | "--no-bell"
+                    | "--no-kill"
+                    | "--no-requeue"
+                    | "--overcommit"
+                    | "--oversubscribe"
+                    | "--parsable"
+                    | "--propagate"
+                    | "--quiet"
+                    | "--reboot"
+                    | "--requeue"
+                    | "--share"
+                    | "--spread-job"
+                    | "--test-only"
+                    | "--usage"
+                    | "--use-min-nodes"
+                    | "--verbose"
+                    | "--version"
+                    | "--wait"
+            ) {
+                return CliTarget::Uncertain;
+            }
+        } else if s.len() == 2 {
+            if matches!(
                 s,
                 "-A" | "-a"
                     | "-b"
@@ -467,13 +525,21 @@ pub(crate) fn cluster_from_args(args: &[OsString]) -> Option<String> {
                     | "-t"
                     | "-w"
                     | "-x"
-            )
-        {
-            i += 1;
+            ) {
+                i += 1;
+                if i >= args.len() {
+                    return CliTarget::Uncertain;
+                }
+            } else if !matches!(
+                s,
+                "-H" | "-h" | "-I" | "-k" | "-O" | "-Q" | "-s" | "-V" | "-v" | "-W"
+            ) {
+                return CliTarget::Uncertain;
+            }
         }
         i += 1;
     }
-    found
+    found.map_or(CliTarget::Unset, CliTarget::Named)
 }
 
 fn cluster_in_script(path: &Path) -> Option<String> {
@@ -501,25 +567,31 @@ fn cluster_in_script(path: &Path) -> Option<String> {
             .split_whitespace()
             .map(OsString::from)
             .collect();
-        if let Some(c) = cluster_from_args(&tokens) {
-            found = Some(c);
+        match cluster_from_args(&tokens) {
+            CliTarget::Named(c) => found = Some(c),
+            CliTarget::Uncertain => return None,
+            CliTarget::Unset => {}
         }
     }
     found
 }
 
 fn resolve_cluster_name(args: &[OsString], script: Option<&Path>) -> Option<String> {
-    cluster_from_args(args)
-        .or_else(|| {
-            ["SBATCH_CLUSTERS", "SLURM_CLUSTERS"]
-                .into_iter()
-                .find_map(|var| {
-                    std::env::var_os(var)
-                        .and_then(|v| v.to_str().map(str::trim).map(str::to_owned))
-                        .filter(|c| safe_cluster(c))
-                })
-        })
-        .or_else(|| script.and_then(cluster_in_script))
+    match cluster_from_args(args) {
+        CliTarget::Named(c) => Some(c),
+        CliTarget::Uncertain => None,
+        CliTarget::Unset => {
+            for var in ["SBATCH_CLUSTERS", "SLURM_CLUSTERS"] {
+                if let Some(val) = std::env::var_os(var) {
+                    let text = val.to_str().map(str::trim)?;
+                    if !text.is_empty() {
+                        return safe_cluster(text).then(|| text.to_owned());
+                    }
+                }
+            }
+            script.and_then(cluster_in_script)
+        }
+    }
 }
 
 fn execute(

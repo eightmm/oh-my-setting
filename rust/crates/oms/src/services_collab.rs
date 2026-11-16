@@ -225,6 +225,13 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if job.timeout.is_zero() || job.timeout > MAX_WALL || job.limit == 0 || job.limit > MAX_OUTPUT {
         return Err("invalid process limits".into());
     }
+    let allow_whole_tree = !matches!(
+        job.argv
+            .first()
+            .and_then(|a| Path::new(a).file_name())
+            .and_then(|n| n.to_str()),
+        Some("git" | "ssh")
+    );
     let mut request = Request::new(job.argv);
     request.cwd = Some(std::fs::canonicalize(job.cwd).map_err(|e| e.to_string())?);
     request.stdin = job.stdin;
@@ -245,12 +252,19 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
         Streams::Separate
     };
     #[cfg(target_os = "linux")]
-    let (scope, mut reactor) = match Reactor::dedicated() {
-        Ok(dedicated) => (Scope::WholeTree, dedicated),
-        Err(_) => (Scope::ProcessGroup, Reactor::new()),
+    let (scope, mut reactor) = if allow_whole_tree {
+        match Reactor::dedicated() {
+            Ok(dedicated) => (Scope::WholeTree, dedicated),
+            Err(_) => (Scope::ProcessGroup, Reactor::new()),
+        }
+    } else {
+        (Scope::ProcessGroup, Reactor::new())
     };
     #[cfg(not(target_os = "linux"))]
-    let (scope, mut reactor) = (Scope::ProcessGroup, Reactor::new());
+    let (scope, mut reactor) = {
+        let _ = allow_whole_tree;
+        (Scope::ProcessGroup, Reactor::new())
+    };
     request.scope = scope;
     request.deadline = Some(
         Instant::now()

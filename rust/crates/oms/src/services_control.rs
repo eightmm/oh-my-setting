@@ -436,7 +436,7 @@ impl<'a> ControlServices<'a> {
             .cwd(&command.cwd)
             .environment(command.environment.clone());
         if scope == Scope::ProcessGroup {
-            spawn = spawn.terminate_grace(Duration::from_secs(4));
+            spawn = spawn.terminate_grace(Duration::from_secs(5));
         }
         let child = run_child(spawn, interrupted).map_err(|e| autonomy_error(2, e))?;
         Ok((child.code, child.stdout, child.stderr))

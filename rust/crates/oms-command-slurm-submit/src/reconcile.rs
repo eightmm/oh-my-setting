@@ -230,11 +230,27 @@ fn tagged(text: &str, short: &str) -> bool {
     })
 }
 
+fn has_foreign_tag(text: &str, expected_short: Option<&str>) -> bool {
+    let prefix = "oms-key=";
+    text.match_indices(prefix).any(|(at, _)| {
+        let rest = &text[at + prefix.len()..];
+        let found_short: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        !found_short.is_empty() && expected_short != Some(found_short.as_str())
+    })
+}
+
 pub(crate) enum Matcher<'a> {
     Job(&'a str),
     TaggedJob {
         id: &'a str,
         short: &'a str,
+    },
+    AdoptJob {
+        id: &'a str,
+        expected_short: Option<&'a str>,
     },
     Tag {
         short: &'a str,
@@ -248,6 +264,9 @@ impl Matcher<'_> {
         match self {
             Matcher::Job(id) => entry.base == *id,
             Matcher::TaggedJob { id, short } => entry.base == *id && tagged(&entry.text, short),
+            Matcher::AdoptJob { id, expected_short } => {
+                entry.base == *id && !has_foreign_tag(&entry.text, *expected_short)
+            }
             Matcher::Tag {
                 short,
                 excluded_jobs,
@@ -486,7 +505,10 @@ fn cluster_from_intent_args(intent: &Json) -> Option<String> {
             _ => None,
         })
         .collect();
-    crate::cluster_from_args(&os_args)
+    match crate::cluster_from_args(&os_args) {
+        crate::CliTarget::Named(c) => Some(c),
+        _ => None,
+    }
 }
 fn intent_short(intent: &Json, key: &OsStr) -> Option<String> {
     if f(intent, "tag") == Some(&Json::Bool(false)) {
@@ -613,10 +635,17 @@ fn clusters_overlap(a: Option<&str>, b: Option<&str>) -> bool {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    b.split(',')
+    let list_b: Vec<&str> = b
+        .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .any(|part| set_a.contains(part))
+        .collect();
+    if set_a.iter().any(|p| p.eq_ignore_ascii_case("all"))
+        || list_b.iter().any(|p| p.eq_ignore_ascii_case("all"))
+    {
+        return true;
+    }
+    list_b.iter().any(|part| set_a.contains(part))
 }
 
 fn record(
@@ -805,7 +834,9 @@ pub(crate) fn run(
     let (key, found) = if !options.job_id.is_empty() {
         let recorded = submitted_attempts(&rows, &options.job_id);
         if !options.key.is_empty() {
-            if let Some((rec_key, rec_att, _)) = recorded.iter().find(|(k, _, _)| *k == options.key)
+            if !options.adopt_job
+                && let Some((rec_key, rec_att, _)) =
+                    recorded.iter().find(|(k, _, _)| *k == options.key)
             {
                 let t = target_for_attempt(&rows, rec_key, rec_att)?;
                 (Some(rec_key.clone()), t)
@@ -817,15 +848,29 @@ pub(crate) fn run(
                     }
                     return Err("no submitted or unresolved ledger record for this key".into());
                 };
-                if let Some(existing_job) = t.job_id.as_deref()
-                    && existing_job != options.job_id
-                {
-                    return Err("--job-id does not match the active submission for --key".into());
+                if let Some(existing_job) = t.job_id.as_deref() {
+                    if options.adopt_job {
+                        return Err(
+                            "--adopt-job requires an unresolved submission without a recorded job_id"
+                                .into(),
+                        );
+                    }
+                    if existing_job != options.job_id {
+                        return Err(
+                            "--job-id does not match the active submission for --key".into()
+                        );
+                    }
                 }
                 if recorded.iter().any(|(k, _, c)| {
-                    k != &options.key && clusters_overlap(c.as_deref(), t.cluster_name.as_deref())
+                    (k != &options.key || options.adopt_job)
+                        && clusters_overlap(c.as_deref(), t.cluster_name.as_deref())
                 }) {
-                    return Err("--key does not match the recorded --job-id".into());
+                    return Err(if options.adopt_job {
+                        "--job-id already belongs to another submission on an overlapping cluster"
+                    } else {
+                        "--key does not match the recorded --job-id"
+                    }
+                    .into());
                 }
                 require_tag_for_job = t.job_id.is_none();
                 (Some(options.key.clone()), Some(t))
@@ -875,15 +920,12 @@ pub(crate) fn run(
                 ambiguous_tag = ambig;
             }
             if excluded_jobs.contains(id.as_str()) {
-                if options.adopt_job {
-                    return Err(
-                        "--job-id already belongs to another submission on an overlapping cluster"
-                            .into(),
-                    );
-                }
                 Matcher::Nothing
             } else if options.adopt_job {
-                Matcher::Job(id)
+                Matcher::AdoptJob {
+                    id,
+                    expected_short: short_opt,
+                }
             } else if let Some(short) = short_opt {
                 if ambiguous_tag {
                     Matcher::Nothing
@@ -956,7 +998,24 @@ pub(crate) fn run(
     let squeue = query("OMS_SLURM_SQUEUE_BIN", "squeue", &squeue_args, parse_squeue)?;
     let sacct = query("OMS_SLURM_SACCT_BIN", "sacct", &sacct_args, parse_sacct)?;
     let mut verdict = resolve(&squeue, &sacct, &matcher);
-    if ambiguous_tag && !options.adopt_job && verdict.class == Class::Unknown {
+    let foreign_tag_rejected = matches!(
+        &matcher,
+        Matcher::AdoptJob { id, expected_short }
+            if verdict.class == Class::Unknown
+                && [&squeue, &sacct].into_iter().any(|q| {
+                    matches!(
+                        q,
+                        Query::Rows(entries)
+                            if entries.iter().any(|e| {
+                                e.base == *id && has_foreign_tag(&e.text, *expected_short)
+                            })
+                    )
+                })
+    );
+    if foreign_tag_rejected {
+        verdict.reason =
+            "scheduler job carries a foreign oms-key tag and cannot be adopted by --key".into();
+    } else if ambiguous_tag && !options.adopt_job && verdict.class == Class::Unknown {
         verdict.reason = if options.job_id.is_empty() {
             "multiple unresolved tagged attempts share this key tag; pass --key, --job-id and --adopt-job after verifying by hand".into()
         } else {

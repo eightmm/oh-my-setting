@@ -34,6 +34,14 @@ pub struct Native;
 impl Executor for Native {
     fn execute(&self, input: Invocation, interrupted: &AtomicBool) -> Result<Completed> {
         crate::check(interrupted)?;
+        let allow_whole_tree = !matches!(
+            input
+                .argv
+                .first()
+                .and_then(|a| std::path::Path::new(a).file_name())
+                .and_then(|n| n.to_str()),
+            Some("git" | "ssh")
+        );
         let mut request = Request::new(input.argv);
         request.cwd = Some(input.cwd);
         request.stdin = input.input;
@@ -45,12 +53,19 @@ impl Executor for Native {
             Streams::Separate
         };
         #[cfg(target_os = "linux")]
-        let (scope, mut reactor) = match Reactor::dedicated() {
-            Ok(dedicated) => (Scope::WholeTree, dedicated),
-            Err(_) => (Scope::ProcessGroup, Reactor::new()),
+        let (scope, mut reactor) = if allow_whole_tree {
+            match Reactor::dedicated() {
+                Ok(dedicated) => (Scope::WholeTree, dedicated),
+                Err(_) => (Scope::ProcessGroup, Reactor::new()),
+            }
+        } else {
+            (Scope::ProcessGroup, Reactor::new())
         };
         #[cfg(not(target_os = "linux"))]
-        let (scope, mut reactor) = (Scope::ProcessGroup, Reactor::new());
+        let (scope, mut reactor) = {
+            let _ = allow_whole_tree;
+            (Scope::ProcessGroup, Reactor::new())
+        };
         request.scope = scope;
         request.deadline = Some(
             Instant::now()

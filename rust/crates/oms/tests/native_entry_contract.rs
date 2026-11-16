@@ -2328,4 +2328,129 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
         !alive,
         "setsid TERM-ignoring grandchild {grand_pid} survived SIGTERM on native oms"
     );
+
+    // Also verify nested `Scope::ProcessGroup` supervision (`5s` grace, matching
+    // `ControlServices::invoke_with_scope`) cleanly cancels and reaps the child `oms`
+    // and its `WholeTree` detached grandchild via `Reactor::new()`.
+    let grand2_pid_file = f.0.join("grand2.pid");
+    let grand2_ready_file = f.0.join("grand2.ready");
+    let mut request = oms_supervisor::process::Request::new(vec![
+        f.binary().into_os_string(),
+        "--oms-dispatch".into(),
+        f.0.clone().into_os_string(),
+        "1111111111111111111111111111111111111111".into(),
+        "--".into(),
+        "peer-ask".into(),
+        "--providers".into(),
+        "codex".into(),
+        "--model".into(),
+        "gpt-5.4".into(),
+        "--prompt".into(),
+        "ping".into(),
+    ]);
+    request.cwd = Some(f.0.join("data"));
+    request.stdin = Some(Vec::new());
+    request.environment = vec![
+        ("PATH".into(), bin.into_os_string()),
+        ("HOME".into(), f.0.join("home").into_os_string()),
+        (
+            "OH_MY_SETTING_ROLES_DIR".into(),
+            f.0.join("global").into_os_string(),
+        ),
+        (
+            "OMS_PYTHON_RUNTIME_ROOT".into(),
+            f.0.join("missing-python").into_os_string(),
+        ),
+        (
+            "OMS_TEST_PREFLIGHT".into(),
+            f.0.join("preflight").into_os_string(),
+        ),
+        ("OMS_HARNESS_CHILD".into(), "0".into()),
+        ("OMS_HARNESS_DELEGATE_DEPTH".into(), "0".into()),
+        (
+            "OMS_GRAND_PID".into(),
+            grand2_pid_file.clone().into_os_string(),
+        ),
+        (
+            "OMS_GRAND_READY".into(),
+            grand2_ready_file.clone().into_os_string(),
+        ),
+    ];
+    request.remove_environment = [
+        "OMS_ROOM_REPO",
+        "OMS_ROOM_ID",
+        "OMS_ROOM_PARTICIPANT",
+        "OMS_FAIL_LEDGER",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    request.scope = oms_supervisor::process::Scope::ProcessGroup;
+    request.terminate_grace = Duration::from_secs(5);
+    request.deadline = Some(Instant::now() + Duration::from_secs(30));
+
+    let mut reactor = oms_supervisor::process::Reactor::new();
+    let job = reactor.start(request).unwrap();
+    let ready2_deadline = Instant::now() + Duration::from_secs(10);
+    while !grand2_ready_file.exists() {
+        match reactor.poll(job, Duration::from_millis(20)).unwrap() {
+            oms_supervisor::process::Progress::Pending(_) => {}
+            oms_supervisor::process::Progress::Complete(done) => {
+                panic!(
+                    "nested oms exited early: exit={:?} stop={:?} stderr={}",
+                    done.exit,
+                    done.stop,
+                    String::from_utf8_lossy(done.stderr.as_ref().map_or(&[][..], |s| &s.bytes))
+                );
+            }
+        }
+        assert!(
+            Instant::now() < ready2_deadline,
+            "nested codex fixture did not start"
+        );
+    }
+    let grand2_pid: i32 = std::fs::read_to_string(&grand2_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    reactor
+        .stop(job, oms_supervisor::process::StopReason::Cancelled)
+        .unwrap();
+    let cancel2_deadline = Instant::now() + Duration::from_secs(7);
+    let done = loop {
+        match reactor.poll(job, Duration::from_millis(25)).unwrap() {
+            oms_supervisor::process::Progress::Pending(_) => {
+                assert!(
+                    Instant::now() < cancel2_deadline,
+                    "nested oms did not finish cancelling within 5s grace"
+                );
+            }
+            oms_supervisor::process::Progress::Complete(done) => break done,
+        }
+    };
+    assert_eq!(
+        done.stop,
+        Some(oms_supervisor::process::StopReason::Cancelled)
+    );
+    assert!(done.cleanup_complete());
+    std::thread::sleep(Duration::from_millis(50));
+    let alive2 = Command::new("kill")
+        .args(["-0", &grand2_pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        !alive2,
+        "setsid TERM-ignoring grandchild {grand2_pid} survived nested ProcessGroup cancellation"
+    );
 }

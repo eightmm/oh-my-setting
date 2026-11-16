@@ -784,7 +784,59 @@ fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
         .to_owned();
     assert!(sub_903.contains("\"cluster_name\": \"env-c\""), "{sub_903}");
 
-    // 6. Overlapping cluster lists (-M a vs -M a,b) exclude A's job 77 on forced B.
+    // 5b. Two-token --acctg-freq consumes its value so -M remote is parsed, while an
+    //     unrecognized CLI flag makes CLI cluster parsing uncertain (no fallback to #SBATCH -M).
+    std::fs::write(Path::new(&f.repo).join("plain.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    f.script("sbatch", "printf 'Submitted batch job 904\\n'\n");
+    let acctg_ok = f.run(
+        &[
+            "--key",
+            "cell-acctg",
+            "--",
+            "sbatch",
+            "--acctg-freq",
+            "task=30",
+            "-M",
+            "remote",
+            "plain.sh",
+        ],
+        &[],
+    );
+    assert_eq!(acctg_ok.code, 0, "{}", acctg_ok.err);
+    let sub_904 = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"904\""))
+        .unwrap()
+        .to_owned();
+    assert!(
+        sub_904.contains("\"cluster_name\": \"remote\""),
+        "{sub_904}"
+    );
+
+    f.script("sbatch", "printf 'Submitted batch job 905\\n'\n");
+    let unknown_cli = f.run(
+        &[
+            "--key",
+            "cell-unkcli",
+            "--",
+            "sbatch",
+            "--future-unknown-flag",
+            "someval",
+            "body_after.sh",
+        ],
+        &[],
+    );
+    assert_eq!(unknown_cli.code, 0, "{}", unknown_cli.err);
+    let sub_905 = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"905\""))
+        .unwrap()
+        .to_owned();
+    assert!(sub_905.contains("\"cluster_name\": \"\""), "{sub_905}");
+
+    // 6. Overlapping cluster lists (-M a vs -M a,b and -M a vs -M all) exclude A's job on forced B.
     f.script("sbatch", "printf 'Submitted batch job 770\\n'\n");
     let ov1 = f.run(
         &["--key", "cell-ov", "--", "sbatch", "-M", "a", "job.sh"],
@@ -821,8 +873,44 @@ fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
     assert_eq!(ov_rec.code, 75, "{}{}", ov_rec.out, ov_rec.err);
     assert_eq!(json_field(&ov_rec.out, "state"), "unknown");
 
-    // 7. --adopt-job explicitly recovers untagged --comment attempts without stealing owned jobs.
-    std::fs::write(Path::new(&f.repo).join("plain.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    f.script("sbatch", "printf 'Submitted batch job 771\\n'\n");
+    let all1 = f.run(
+        &["--key", "cell-all", "--", "sbatch", "-M", "a", "job.sh"],
+        &[],
+    );
+    assert_eq!(all1.code, 0, "{}", all1.err);
+    marker = f.root.join("queued-all");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let all2 = f.run(
+        &[
+            "--key",
+            "cell-all",
+            "--force-resubmit",
+            "--reason",
+            "overlap-all",
+            "--",
+            "sbatch",
+            "-M",
+            "all",
+            "job.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(all2.code, 130);
+    let short_all = short_of("cell-all");
+    f.set(
+        "sacct",
+        &format!("771|job.sh|COMPLETED|0:0|oms-key={short_all}\n"),
+    );
+    let all_rec = f.run(&["reconcile", "--key", "cell-all", "--json"], &[]);
+    assert_eq!(all_rec.code, 75, "{}{}", all_rec.out, all_rec.err);
+    assert_eq!(json_field(&all_rec.out, "state"), "unknown");
+
+    // 7. --adopt-job explicitly recovers untagged --comment attempts without stealing owned or
+    //    foreign-tagged jobs.
     marker = f.root.join("queued-untag");
     f.script(
         "sbatch",
@@ -872,6 +960,39 @@ fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
         &[],
     );
     assert_eq!(steal_ov.code, 2, "{}{}", steal_ov.out, steal_ov.err);
+    let self_steal = f.run(
+        &[
+            "reconcile",
+            "--key",
+            "cell-ov",
+            "--job-id",
+            "770",
+            "--adopt-job",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(self_steal.code, 2, "{}{}", self_steal.out, self_steal.err);
+    f.set("sacct", "889|job.sh|COMPLETED|0:0|oms-key=other0000000\n");
+    let foreign_tag = f.run(
+        &[
+            "reconcile",
+            "--key",
+            "cell-untag",
+            "--job-id",
+            "889",
+            "--adopt-job",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(
+        foreign_tag.code, 75,
+        "{}{}",
+        foreign_tag.out, foreign_tag.err
+    );
+    assert_eq!(json_field(&foreign_tag.out, "state"), "unknown");
+    f.set("sacct", "888|job.sh|COMPLETED|0:0|custom\n");
     let adopt_ok = f.run(
         &[
             "reconcile",

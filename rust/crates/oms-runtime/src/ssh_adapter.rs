@@ -874,6 +874,26 @@ fn new_frame_nonce() -> String {
 }
 
 const REMOTE_SH_HELPERS: &str = r#"
+norm() { printf '%s' "$1" | awk '{$1=$1;print}'; }
+pid_live() {
+  p="$1"
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null || return 1
+  st=$(LC_ALL=C ps -p "$p" -o stat= 2>/dev/null | tr -d ' \t\r\n' || true)
+  case "$st" in
+    Z*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+pg_live() {
+  g="$1"
+  [ -n "$g" ] && kill -0 -"$g" 2>/dev/null || return 1
+  if command -v ps >/dev/null 2>&1; then
+    alive_pg=$(LC_ALL=C ps -A -o pgid=,stat= 2>/dev/null | awk -v g="$g" '$1 == g && $2 !~ /^Z/ {print 1; exit}' || true)
+    [ -n "$alive_pg" ] && return 0
+    ps -A -o pgid= >/dev/null 2>&1 && return 1
+  fi
+  return 0
+}
 read_host_id() {
   cur_hn=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
   [ -n "$cur_hn" ] || cur_hn='unknown'
@@ -908,6 +928,47 @@ find_op_dir() {
     op_dir="$rd/.git/oms-remote-ops/$op_id_arg"
   elif [ -d "${TMPDIR:-/tmp}/oms-remote-ops-$(id -u)/$rd_key/$op_id_arg" ]; then
     op_dir="${TMPDIR:-/tmp}/oms-remote-ops-$(id -u)/$rd_key/$op_id_arg"
+  fi
+}
+read_cpg() {
+  cpgid=""
+  cpg_ls=""
+  if [ -f "$op_dir/child.pgid" ]; then
+    cand_pg=$(tr -d ' \t\r\n' < "$op_dir/child.pgid" || true)
+    case "$cand_pg" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$cand_pg" -gt 1 ] 2>/dev/null && [ "$cand_pg" != "$$" ] && [ "$cand_pg" != "$cur_pg" ]; then
+          cpgid="$cand_pg"
+        fi
+        ;;
+    esac
+  fi
+  if [ -f "$op_dir/child.lstart" ]; then
+    cpg_ls=$(cat -- "$op_dir/child.lstart" 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+  fi
+}
+check_orphan_cpg() {
+  cpg_verdict="none"
+  if [ -n "$m_bid" ] && [ -n "$cur_bid" ] && [ "$m_bid" != "unknown" ] && [ "$cur_bid" != "unknown" ] && [ "$m_bid" = "$cur_bid" ] && [ ! -f "$op_dir/reaped.done" ] && [ -n "$cpgid" ] && pg_live "$cpgid"; then
+    if pid_live "$cpgid"; then
+      cur_cpg_ls=$(LC_ALL=C ps -p "$cpgid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+      if [ -z "$cpg_ls" ] || [ -z "$cur_cpg_ls" ]; then
+        cpg_verdict="unverifiable"
+      elif [ "$(norm "$cpg_ls")" = "$(norm "$cur_cpg_ls")" ]; then
+        cpg_verdict="verified"
+      fi
+    elif [ -z "$m_tag" ] || [ ! -d /proc ] || [ ! -r "/proc/$$/environ" ]; then
+      cpg_verdict="unverifiable"
+    else
+      pg_pids=$(LC_ALL=C ps -A -o pid=,pgid=,stat= 2>/dev/null | awk -v g="$cpgid" '$2 == g && $3 !~ /^Z/ {print $1}' || true)
+      for p in $pg_pids; do
+        if [ -r "/proc/$p/environ" ] && tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -Fxq -- "OMS_REMOTE_OP_TAG=$m_tag"; then
+          cpg_verdict="verified"
+          break
+        fi
+      done
+    fi
   fi
 }
 "#;
@@ -1098,10 +1159,12 @@ fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
     }
 
     let ts = now()?;
+    let op_tag = new_frame_nonce();
     let mut record = serde_json::json!({
         "schema": 1,
         "action": "exec",
         "op_id": req.op_id,
+        "op_tag": op_tag,
         "state": "intent",
         "host": req.host,
         "port": req.port,
@@ -1161,6 +1224,7 @@ op_dir="$1"
 rd="$2"
 cmd_sha="$3"
 snap_val="$4"
+op_tag="${{5:-}}"
 hn=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
 [ -n "$hn" ] || hn='unknown'
 if [ -r /proc/sys/kernel/random/boot_id ]; then
@@ -1173,10 +1237,11 @@ fi
 [ -n "$bid" ] || bid='unknown'
 pid=$$
 ls_val=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
-printf '{{"hostname":"%s","boot_id":"%s","pid":%s,"lstart":"%s","command_sha256":"%s","snapshot":"%s"}}\n' "$hn" "$bid" "$pid" "$ls_val" "$cmd_sha" "$snap_val" >"$op_dir/meta.json.tmp"
+printf '{{"hostname":"%s","boot_id":"%s","pid":%s,"lstart":"%s","command_sha256":"%s","snapshot":"%s","op_tag":"%s"}}\n' "$hn" "$bid" "$pid" "$ls_val" "$cmd_sha" "$snap_val" "$op_tag" >"$op_dir/meta.json.tmp"
 mv -f -- "$op_dir/meta.json.tmp" "$op_dir/meta.json"
 child=""
 trap '[ -n "$child" ] && {{ kill -TERM -"$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true; }}' TERM
+export OMS_REMOTE_OP_TAG="$op_tag"
 cpg_script='pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d " \t\r\n" || true); if [ "$pg" = "$$" ] && [ "$$" -gt 1 ] 2>/dev/null; then pg_ls=$(LC_ALL=C ps -p $$ -o lstart= 2>/dev/null | tr -cd "A-Za-z0-9._: +=,-" || true); printf "%s\n" "$pg_ls" >"$4.tmp" && mv -f -- "$4.tmp" "$4"; printf "%s\n" "$$" >"$3.tmp" && mv -f -- "$3.tmp" "$3"; fi; cd -- "$1" && exec sh "$2"'
 if command -v setsid >/dev/null 2>&1; then
   setsid sh -c "$cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" "$op_dir/child.lstart" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
@@ -1206,7 +1271,7 @@ fi
 printf '{{"exit_code":%d}}\n' "$rc" >"$op_dir/result.json.tmp"
 mv -f -- "$op_dir/result.json.tmp" "$op_dir/result.json"
 EOF
-nohup sh "$op_dir/runner.sh" "$op_dir" "$rd" {cmd_sha} {snap_val} </dev/null >/dev/null 2>&1 &
+nohup sh "$op_dir/runner.sh" "$op_dir" "$rd" {cmd_sha} {snap_val} {op_tag} </dev/null >/dev/null 2>&1 &
 rpid=$!
 i=0
 while [ ! -f "$op_dir/result.json" ]; do
@@ -1239,6 +1304,7 @@ fi
         cmd = quote(&cmd_script),
         cmd_sha = quote(&command_sha256),
         snap_val = quote(req.snapshot.unwrap_or("")),
+        op_tag = quote(&op_tag),
     );
     let out = build_ssh(req.host, req.port, req.control)
         .arg(format!("sh -lc {}", quote(&remote_script)))
@@ -1348,7 +1414,19 @@ fn verify_remote_meta_binding(record: &serde_json::Value, meta: &serde_json::Val
     require(
         meta_snap == expected_snap,
         "remote operation metadata snapshot mismatch",
-    )
+    )?;
+    let expected_tag = record.get("op_tag").and_then(|v| v.as_str()).unwrap_or("");
+    if !expected_tag.is_empty() {
+        let meta_tag = meta
+            .get("op_tag")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| error("remote operation metadata missing op_tag"))?;
+        require(
+            meta_tag == expected_tag,
+            "remote operation metadata op_tag mismatch",
+        )?;
+    }
+    Ok(())
 }
 
 struct ReconcileRequest<'a> {
@@ -1450,20 +1528,18 @@ if [ -f "$op_dir/result.json" ]; then
   exit 0
 fi
 mpid=""
+m_bid=""
+m_tag=""
 if [ -f "$op_dir/meta.json" ]; then
   mpid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+  m_bid=$(sed -n 's/.*"boot_id":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+  m_tag=$(sed -n 's/.*"op_tag":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
 fi
 alive=0
 cur_ls=""
-if [ -n "$mpid" ] && kill -0 "$mpid" 2>/dev/null; then
-  st=$(LC_ALL=C ps -p "$mpid" -o stat= 2>/dev/null | tr -d ' \t\r\n' || true)
-  case "$st" in
-    Z*) alive=0 ;;
-    *)
-      alive=1
-      cur_ls=$(LC_ALL=C ps -p "$mpid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
-      ;;
-  esac
+if pid_live "$mpid"; then
+  alive=1
+  cur_ls=$(LC_ALL=C ps -p "$mpid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
 fi
 if [ "$alive" = 0 ] && [ -f "$op_dir/result.json" ]; then
   printf '__OMS_MARK_%s__ PROBE result|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
@@ -1473,7 +1549,10 @@ if [ "$alive" = 0 ] && [ -f "$op_dir/result.json" ]; then
   emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   exit 0
 fi
-printf '__OMS_MARK_%s__ PROBE live|%s|%s|%s|%s\n' "$tok" "$cur_hn" "$cur_bid" "$alive" "$cur_ls"
+cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
+read_cpg
+check_orphan_cpg
+printf '__OMS_MARK_%s__ PROBE live|%s|%s|%s|%s|%s\n' "$tok" "$cur_hn" "$cur_bid" "$alive" "$cur_ls" "$cpg_verdict"
 emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
 "#,
         rd = remote_path(&remote_dir),
@@ -1560,6 +1639,7 @@ emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
         "live" => {
             let alive = fields.get(3).copied() == Some("1");
             let cur_ls = fields.get(4).copied().unwrap_or("");
+            let cpg_verdict = fields.get(5).copied().unwrap_or("none");
             let Some(meta) = record.get("remote_meta").and_then(|v| v.as_object()) else {
                 record["state"] = "unknown".into();
                 record["updated_at"] = now()?.into();
@@ -1581,13 +1661,37 @@ emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
             let pid_reused = !meta_ls.is_empty()
                 && !cur_ls.is_empty()
                 && normalize_ws(meta_ls) != normalize_ws(cur_ls);
-            if !alive || rebooted || pid_reused {
+            if rebooted {
                 record["state"] = "lost".into();
                 let ts = now()?;
                 record["updated_at"] = ts.clone().into();
                 record["completed_at"] = ts.into();
                 write_remote_op(req.repo, req.op_id, &record)?;
                 return json_response(1, &record, req.pretty);
+            }
+            if !alive || pid_reused {
+                return match cpg_verdict {
+                    "verified" => {
+                        record["state"] = "running".into();
+                        record["updated_at"] = now()?.into();
+                        write_remote_op(req.repo, req.op_id, &record)?;
+                        json_response(75, &record, req.pretty)
+                    }
+                    "unverifiable" => {
+                        record["state"] = "unknown".into();
+                        record["updated_at"] = now()?.into();
+                        write_remote_op(req.repo, req.op_id, &record)?;
+                        json_response(75, &record, req.pretty)
+                    }
+                    _ => {
+                        record["state"] = "lost".into();
+                        let ts = now()?;
+                        record["updated_at"] = ts.clone().into();
+                        record["completed_at"] = ts.into();
+                        write_remote_op(req.repo, req.op_id, &record)?;
+                        json_response(1, &record, req.pretty)
+                    }
+                };
             }
             record["state"] = "running".into();
             record["updated_at"] = now()?.into();
@@ -1648,6 +1752,11 @@ fn run_cancel(req: CancelRequest<'_>) -> Result<Response> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
+    let exp_tag = record
+        .get("op_tag")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
     let tok = new_frame_nonce();
     let script = format!(
         r#"set -eu
@@ -1656,39 +1765,22 @@ rd_key={rd_key}
 op_id_arg={op_id}
 exp_cmd={exp_cmd}
 exp_snap={exp_snap}
+exp_tag={exp_tag}
 grace={grace}
 tok={tok}
 {helpers}
-norm() {{ printf '%s' "$1" | awk '{{$1=$1;print}}'; }}
-pid_live() {{
-  p="$1"
-  [ -n "$p" ] && kill -0 "$p" 2>/dev/null || return 1
-  st=$(LC_ALL=C ps -p "$p" -o stat= 2>/dev/null | tr -d ' \t\r\n' || true)
-  case "$st" in
-    Z*) return 1 ;;
-    *) return 0 ;;
-  esac
-}}
-pg_live() {{
-  g="$1"
-  [ -n "$g" ] && kill -0 -"$g" 2>/dev/null || return 1
-  if command -v ps >/dev/null 2>&1; then
-    alive_pg=$(LC_ALL=C ps -A -o pgid=,stat= 2>/dev/null | awk -v g="$g" '$1 == g && $2 !~ /^Z/ {{print 1; exit}}' || true)
-    [ -n "$alive_pg" ] && return 0
-    ps -A -o pgid= >/dev/null 2>&1 && return 1
-  fi
-  return 0
-}}
 read_host_id
 find_op_dir
 if [ -z "$op_dir" ]; then
   printf '__OMS_MARK_%s__ CANCEL missing|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
   exit 0
 fi
+m_tag=""
 if [ -f "$op_dir/meta.json" ]; then
   m_cmd=$(sed -n 's/.*"command_sha256":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
   m_snap=$(sed -n 's/.*"snapshot":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
-  if {{ [ -n "$exp_cmd" ] && [ "$m_cmd" != "$exp_cmd" ]; }} || [ "$m_snap" != "$exp_snap" ]; then
+  m_tag=$(sed -n 's/.*"op_tag":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+  if {{ [ -n "$exp_cmd" ] && [ "$m_cmd" != "$exp_cmd" ]; }} || [ "$m_snap" != "$exp_snap" ] || {{ [ -n "$exp_tag" ] && [ "$m_tag" != "$exp_tag" ]; }}; then
     printf '__OMS_MARK_%s__ CANCEL meta_mismatch|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
     emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
     exit 0
@@ -1716,23 +1808,38 @@ if [ -z "$m_hn" ] || [ "$m_hn" != "$cur_hn" ]; then
   exit 0
 fi
 cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
-read_cpg() {{
-  cpgid=""
-  cpg_ls=""
-  if [ -f "$op_dir/child.pgid" ]; then
-    cand_pg=$(tr -d ' \t\r\n' < "$op_dir/child.pgid" || true)
-    case "$cand_pg" in
-      ''|*[!0-9]*) ;;
-      *)
-        if [ "$cand_pg" -gt 1 ] 2>/dev/null && [ "$cand_pg" != "$$" ] && [ "$cand_pg" != "$cur_pg" ]; then
-          cpgid="$cand_pg"
-        fi
-        ;;
-    esac
+reap_orphan_cpg() {{
+  : > "$op_dir/cancel.req"
+  kill -TERM -"$cpgid" 2>/dev/null || true
+  ticks=$((grace * 10))
+  i=0
+  sig="SIGTERM"
+  while [ "$i" -lt "$ticks" ]; do
+    pg_live "$cpgid" || break
+    i=$((i + 1))
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  if pg_live "$cpgid"; then
+    sig="SIGKILL"
+    kill -KILL -"$cpgid" 2>/dev/null || true
+    j=0
+    while [ "$j" -lt 20 ]; do
+      pg_live "$cpgid" || break
+      j=$((j + 1))
+      sleep 0.1 2>/dev/null || sleep 1
+    done
   fi
-  if [ -f "$op_dir/child.lstart" ]; then
-    cpg_ls=$(cat -- "$op_dir/child.lstart" 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+  if pg_live "$cpgid"; then
+    rm -f -- "$op_dir/cancel.req"
+    printf '__OMS_MARK_%s__ CANCEL still_alive|%s\n' "$tok" "$sig"
+  else
+    : > "$op_dir/reaped.done"
+    printf '__OMS_MARK_%s__ CANCEL cancelled|%s\n' "$tok" "$sig"
+    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+    emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+    emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   fi
+  exit 0
 }}
 if [ -z "$m_pid" ] || ! pid_live "$m_pid"; then
   if [ -f "$op_dir/result.json" ]; then
@@ -1743,52 +1850,17 @@ if [ -z "$m_pid" ] || ! pid_live "$m_pid"; then
     emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   else
     read_cpg
-    if [ -n "$m_bid" ] && [ -n "$cur_bid" ] && [ "$m_bid" != "unknown" ] && [ "$cur_bid" != "unknown" ] && [ "$m_bid" = "$cur_bid" ] && [ ! -f "$op_dir/reaped.done" ] && [ -n "$cpgid" ] && pg_live "$cpgid"; then
-      if pid_live "$cpgid"; then
-        cur_cpg_ls=$(LC_ALL=C ps -p "$cpgid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
-        if [ -z "$cpg_ls" ] || [ -z "$cur_cpg_ls" ]; then
-          printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-          emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-          exit 0
-        fi
-        if [ "$(norm "$cpg_ls")" != "$(norm "$cur_cpg_ls")" ]; then
-          printf '__OMS_MARK_%s__ CANCEL lost|exited|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-          emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-          exit 0
-        fi
-      fi
-      : > "$op_dir/cancel.req"
-      kill -TERM -"$cpgid" 2>/dev/null || true
-      ticks=$((grace * 10))
-      i=0
-      sig="SIGTERM"
-      while [ "$i" -lt "$ticks" ]; do
-        pg_live "$cpgid" || break
-        i=$((i + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-      done
-      if pg_live "$cpgid"; then
-        sig="SIGKILL"
-        kill -KILL -"$cpgid" 2>/dev/null || true
-        j=0
-        while [ "$j" -lt 20 ]; do
-          pg_live "$cpgid" || break
-          j=$((j + 1))
-          sleep 0.1 2>/dev/null || sleep 1
-        done
-      fi
-      if pg_live "$cpgid"; then
-        rm -f -- "$op_dir/cancel.req"
-        printf '__OMS_MARK_%s__ CANCEL still_alive|%s\n' "$tok" "$sig"
-      else
-        : > "$op_dir/reaped.done"
-        printf '__OMS_MARK_%s__ CANCEL cancelled|%s\n' "$tok" "$sig"
+    check_orphan_cpg
+    case "$cpg_verdict" in
+      verified)
+        reap_orphan_cpg
+        ;;
+      unverifiable)
+        printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
         emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-        emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-        emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
-      fi
-      exit 0
-    fi
+        exit 0
+        ;;
+    esac
     printf '__OMS_MARK_%s__ CANCEL lost|exited|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
     emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   fi
@@ -1801,6 +1873,20 @@ if [ -z "$m_ls" ] || [ -z "$cur_ls" ]; then
   exit 0
 fi
 if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" != "$cur_bid" ] || [ "$(norm "$m_ls")" != "$(norm "$cur_ls")" ]; then
+  if [ -n "$m_bid" ] && [ "$m_bid" = "$cur_bid" ]; then
+    read_cpg
+    check_orphan_cpg
+    case "$cpg_verdict" in
+      verified)
+        reap_orphan_cpg
+        ;;
+      unverifiable)
+        printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+        emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+        exit 0
+        ;;
+    esac
+  fi
   printf '__OMS_MARK_%s__ CANCEL mismatch|%s|%s|%s\n' "$tok" "$cur_hn" "$cur_bid" "$cur_ls"
   emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   exit 0
@@ -1879,6 +1965,7 @@ emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
         op_id = quote(req.op_id),
         exp_cmd = quote(&exp_cmd),
         exp_snap = quote(&exp_snap),
+        exp_tag = quote(&exp_tag),
         grace = req.grace_seconds,
         tok = quote(&tok),
         helpers = REMOTE_SH_HELPERS,
@@ -4050,8 +4137,8 @@ exec sh -c "$last"
             "orphaned grandchild {grand_pid} survived cancel"
         );
 
-        // 6. When runner.sh crashes/exits early (m_pid dead, no result.json), cancel still
-        //    reaps surviving descendants via validated child.pgid + child.lstart.
+        // 6a. When runner.sh exits early while child leader lives (no result.json),
+        //     reconcile keeps state=running via child.lstart and cancel reaps the group.
         std::fs::write(
             root.join("drop_active"),
             remote.join("dead.ready").to_str().unwrap(),
@@ -4094,11 +4181,7 @@ exec sh -c "$last"
             .parse()
             .unwrap();
         let _ = Command::new("kill")
-            .args([
-                "-KILL",
-                &dead_runner_pid.to_string(),
-                &dead_cpid.to_string(),
-            ])
+            .args(["-KILL", &dead_runner_pid.to_string()])
             .status();
         for _ in 0..50 {
             let r_alive = Command::new("kill")
@@ -4108,19 +4191,34 @@ exec sh -c "$last"
                 .status()
                 .unwrap()
                 .success();
-            let c_alive = Command::new("kill")
-                .args(["-0", &dead_cpid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success();
-            if !r_alive && !c_alive {
+            if !r_alive {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!state_dir.join("op-runner-dead/result.json").exists());
+        let rec_dead = invoke(
+            &[
+                "reconcile",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-runner-dead",
+            ],
+            &root,
+        );
+        assert_eq!(
+            rec_dead.code,
+            75,
+            "{}",
+            String::from_utf8_lossy(&rec_dead.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&rec_dead.stdout).unwrap()["state"],
+            "running"
+        );
         let canceled_dead = invoke(
             &[
                 "cancel",
@@ -4144,17 +4242,286 @@ exec sh -c "$last"
         let vd: serde_json::Value = serde_json::from_slice(&canceled_dead.stdout).unwrap();
         assert_eq!(vd["state"], "cancelled");
         assert_eq!(vd["signal"], "SIGKILL");
-        let dead_grand_alive = Command::new("kill")
-            .args(["-0", &dead_grand_pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
-        assert!(
-            !dead_grand_alive,
-            "grandchild {dead_grand_pid} survived dead-runner cancel"
-        );
+        for pid in [dead_cpid, dead_grand_pid] {
+            let alive = Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(!alive, "pid {pid} survived dead-runner cancel");
+        }
+
+        // 6b & 7. On Linux (/proc available):
+        //   - When both runner.sh and child leader die, OMS_REMOTE_OP_TAG proves PGID ownership
+        //     across reconcile (running) -> cancel (cancelled).
+        //   - An unrelated PGID whose leader exited and lacks OMS_REMOTE_OP_TAG is NOT signaled.
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::write(
+                root.join("drop_active"),
+                remote.join("dead2.ready").to_str().unwrap(),
+            )
+            .unwrap();
+            let launch_dead2 = invoke(
+                &[
+                    "exec",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--remote-dir",
+                    rd,
+                    "--op-id",
+                    "op-runner-leader-dead",
+                    "--",
+                    "sh",
+                    "-c",
+                    "(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\" > dead2.pid; : > dead2.ready; exec sleep 30",
+                ],
+                &root,
+            );
+            assert_eq!(launch_dead2.code, 75);
+            let dead2_meta: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(state_dir.join("op-runner-leader-dead/meta.json")).unwrap(),
+            )
+            .unwrap();
+            let dead2_runner_pid = dead2_meta["pid"].as_i64().unwrap();
+            let dead2_cpid: i32 =
+                std::fs::read_to_string(state_dir.join("op-runner-leader-dead/child.pid"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+            let dead2_grand_pid: i32 = std::fs::read_to_string(remote.join("dead2.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let _ = Command::new("kill")
+                .args([
+                    "-KILL",
+                    &dead2_runner_pid.to_string(),
+                    &dead2_cpid.to_string(),
+                ])
+                .status();
+            for _ in 0..50 {
+                let r_alive = Command::new("kill")
+                    .args(["-0", &dead2_runner_pid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success();
+                let c_alive = Command::new("kill")
+                    .args(["-0", &dead2_cpid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success();
+                if !r_alive && !c_alive {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let rec_dead2 = invoke(
+                &[
+                    "reconcile",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--op-id",
+                    "op-runner-leader-dead",
+                ],
+                &root,
+            );
+            assert_eq!(rec_dead2.code, 75);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&rec_dead2.stdout).unwrap()["state"],
+                "running"
+            );
+            let cancel_dead2 = invoke(
+                &[
+                    "cancel",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--op-id",
+                    "op-runner-leader-dead",
+                    "--grace-seconds",
+                    "1",
+                ],
+                &root,
+            );
+            assert_eq!(cancel_dead2.code, 0);
+            let vd2: serde_json::Value = serde_json::from_slice(&cancel_dead2.stdout).unwrap();
+            assert_eq!(vd2["state"], "cancelled");
+            assert_eq!(vd2["signal"], "SIGKILL");
+            let dead2_grand_alive = Command::new("kill")
+                .args(["-0", &dead2_grand_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(
+                !dead2_grand_alive,
+                "grandchild {dead2_grand_pid} survived dead-runner+leader cancel"
+            );
+
+            // Section 7: Reused PGID without OMS_REMOTE_OP_TAG must fail closed (lost, signal_sent=false).
+            let unrel_pid_file = remote.join("unrel.pid");
+            let unrel_pgid_file = remote.join("unrel.pgid");
+            let unrel_ready_file = remote.join("unrel.ready");
+            assert!(
+                Command::new("setsid")
+                    .args([
+                        "sh",
+                        "-c",
+                        "(exec sleep 30) </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\" > \"$1\"; printf '%s\\n' \"$$\" > \"$2\"; : > \"$3\"; exit 0",
+                        "sh",
+                        unrel_pid_file.to_str().unwrap(),
+                        unrel_pgid_file.to_str().unwrap(),
+                        unrel_ready_file.to_str().unwrap(),
+                    ])
+                    .env_remove("OMS_REMOTE_OP_TAG")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            for _ in 0..50 {
+                if unrel_ready_file.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let unrel_pid: i32 = std::fs::read_to_string(&unrel_pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let unrel_pgid: i32 = std::fs::read_to_string(&unrel_pgid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            for _ in 0..50 {
+                let leader_alive = Command::new("kill")
+                    .args(["-0", &unrel_pgid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success();
+                if !leader_alive {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::fs::write(
+                root.join("drop_active"),
+                remote.join("reused.ready").to_str().unwrap(),
+            )
+            .unwrap();
+            let launch_reused = invoke(
+                &[
+                    "exec",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--remote-dir",
+                    rd,
+                    "--op-id",
+                    "op-reused-pgid",
+                    "--",
+                    "sh",
+                    "-c",
+                    ": > reused.ready; exec sleep 30",
+                ],
+                &root,
+            );
+            assert_eq!(launch_reused.code, 75);
+            let reused_meta: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(state_dir.join("op-reused-pgid/meta.json")).unwrap(),
+            )
+            .unwrap();
+            let reused_runner = reused_meta["pid"].as_i64().unwrap();
+            let reused_cpid: i32 =
+                std::fs::read_to_string(state_dir.join("op-reused-pgid/child.pid"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+            let _ = Command::new("kill")
+                .args([
+                    "-KILL",
+                    &reused_runner.to_string(),
+                    &reused_cpid.to_string(),
+                ])
+                .status();
+            for _ in 0..50 {
+                let r_alive = Command::new("kill")
+                    .args(["-0", &reused_runner.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success();
+                let c_alive = Command::new("kill")
+                    .args(["-0", &reused_cpid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success();
+                if !r_alive && !c_alive {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            std::fs::write(
+                state_dir.join("op-reused-pgid/child.pgid"),
+                format!("{unrel_pgid}\n"),
+            )
+            .unwrap();
+            let cancel_reused = invoke(
+                &[
+                    "cancel",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--op-id",
+                    "op-reused-pgid",
+                    "--grace-seconds",
+                    "1",
+                ],
+                &root,
+            );
+            assert_eq!(cancel_reused.code, 1);
+            let vr: serde_json::Value = serde_json::from_slice(&cancel_reused.stdout).unwrap();
+            assert_eq!(vr["state"], "lost");
+            assert_eq!(vr["signal_sent"], false);
+            let unrel_still_alive = Command::new("kill")
+                .args(["-0", &unrel_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            let _ = Command::new("kill")
+                .args(["-KILL", &unrel_pid.to_string()])
+                .status();
+            assert!(
+                unrel_still_alive,
+                "unrelated PGID child {unrel_pid} was improperly signaled on PGID reuse"
+            );
+        }
     }
 
     #[test]
