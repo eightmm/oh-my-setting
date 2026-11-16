@@ -2419,6 +2419,46 @@ const RUN_ENV: &[&str] = &[
     "PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TERM", "USER", "SHELL", "HOME",
 ];
 
+pub(crate) fn resolve_lock_settings() -> Result<oms_lock::Settings, (i32, String)> {
+    match oms_lock::Settings::from_env() {
+        Ok(s) => Ok(s),
+        Err(oms_lock::Error::InvalidSettings) => {
+            let get = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+            let uid = users::get_current_uid();
+            let home = get("HOME")
+                .map(PathBuf::from)
+                .or_else(|| users::get_user_by_uid(uid).map(|user| user.home_dir().to_path_buf()));
+            let Some(home) = home.filter(|p| p.is_absolute()) else {
+                return Err((2, "invalid lock settings".into()));
+            };
+            let temp_dir = get("TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"));
+            let cwd = std::env::current_dir()
+                .map_err(|_| (2, "cannot resolve current directory for lock".into()))?;
+            Ok(oms_lock::Settings {
+                mode: oms_lock::Mode::LegacyAuto,
+                timeout: Duration::from_secs(oms_lock::legacy_seconds(
+                    get("OMS_LOCK_TIMEOUT").as_deref(),
+                    300,
+                )),
+                poll_max: Duration::from_secs(oms_lock::legacy_seconds(
+                    get("OMS_POLL_MAX_SECONDS").as_deref(),
+                    10,
+                )),
+                lock_dir: get("OMS_LOCK_DIR").map(PathBuf::from),
+                home,
+                temp_dir,
+                cwd,
+                search_path: get("PATH").unwrap_or_default(),
+                force_mkdir: get("OMS_LOCK_FORCE_MKDIR").as_deref()
+                    == Some(std::ffi::OsStr::new("1")),
+            })
+        }
+        Err(e) => Err((e.exit_code(), e.to_string())),
+    }
+}
+
 impl RuntimeServices<'_> {
     fn plan(
         &self,
@@ -2433,52 +2473,8 @@ impl RuntimeServices<'_> {
     }
     fn lock_settings(&self) -> oms_command_plan::Result<oms_lock::Settings> {
         #[allow(unused_mut)]
-        let mut settings = match oms_lock::Settings::from_env() {
-            Ok(s) => s,
-            Err(oms_lock::Error::InvalidSettings) => {
-                let get = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-                let uid = users::get_current_uid();
-                let home = get("HOME").map(PathBuf::from).or_else(|| {
-                    users::get_user_by_uid(uid).map(|user| user.home_dir().to_path_buf())
-                });
-                let Some(home) = home.filter(|p| p.is_absolute()) else {
-                    return Err(oms_command_plan::Error {
-                        code: 2,
-                        message: "invalid lock settings".into(),
-                    });
-                };
-                let temp_dir = get("TMPDIR")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("/tmp"));
-                let cwd = std::env::current_dir().map_err(|_| oms_command_plan::Error {
-                    code: 2,
-                    message: "cannot resolve current directory for lock".into(),
-                })?;
-                oms_lock::Settings {
-                    mode: oms_lock::Mode::LegacyAuto,
-                    timeout: Duration::from_secs(oms_lock::legacy_seconds(
-                        get("OMS_LOCK_TIMEOUT").as_deref(),
-                        300,
-                    )),
-                    poll_max: Duration::from_secs(oms_lock::legacy_seconds(
-                        get("OMS_POLL_MAX_SECONDS").as_deref(),
-                        10,
-                    )),
-                    lock_dir: get("OMS_LOCK_DIR").map(PathBuf::from),
-                    home,
-                    temp_dir,
-                    cwd,
-                    search_path: get("PATH").unwrap_or_default(),
-                    force_mkdir: get("OMS_LOCK_FORCE_MKDIR").as_deref() == Some(OsStr::new("1")),
-                }
-            }
-            Err(e) => {
-                return Err(oms_command_plan::Error {
-                    code: e.exit_code(),
-                    message: e.to_string(),
-                });
-            }
-        };
+        let mut settings = resolve_lock_settings()
+            .map_err(|(code, message)| oms_command_plan::Error { code, message })?;
         #[cfg(test)]
         if let Some(timeout) = self.lock_timeout {
             settings.timeout = timeout;

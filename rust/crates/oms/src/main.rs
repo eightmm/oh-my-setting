@@ -1160,7 +1160,7 @@ fn owns_invocation(argv: &[OsString]) -> bool {
     };
     let local = &argv[1..];
     match tool {
-        "runtime" | "mcp-server" | "agent-supervisor" => true,
+        "runtime" | "mcp-server" | "agent-supervisor" | "hud" => true,
         "artifact-index" => oms_command_telemetry::owns(local),
         "agent-role" => oms_command_agent_role::owns(local),
         "input" => oms_command_input::owns(local),
@@ -1260,6 +1260,76 @@ fn require_source_or_exit<'a>(tool: &str, source_root: Option<&'a Path>) -> &'a 
     })
 }
 
+fn maybe_notify_panel_wakeup(tool: &str, local: &[OsString], cwd: &Path) {
+    if matches!(
+        tool,
+        "hud"
+            | "oms-hud"
+            | "agy-statusline"
+            | "claude-statusline"
+            | "claude-subagent-statusline"
+            | "status"
+            | "list"
+            | "help"
+            | "panel"
+    ) {
+        return;
+    }
+    let mut notified_repo = false;
+    let mut i = 0;
+    while i < local.len() {
+        let arg = &local[i];
+        if arg == "--repo" {
+            if let Some(val) = local.get(i + 1).filter(|v| !v.is_empty()) {
+                let target = Path::new(val);
+                let resolved = if target.is_absolute() {
+                    target.to_path_buf()
+                } else {
+                    cwd.join(target)
+                };
+                oms_command_panel::notify_wakeup(&resolved);
+                notified_repo = true;
+            }
+            break;
+        }
+        if let Some(s) = arg.to_str()
+            && let Some(val) = s.strip_prefix("--repo=")
+            && !val.is_empty()
+        {
+            let target = Path::new(val);
+            let resolved = if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                cwd.join(target)
+            };
+            oms_command_panel::notify_wakeup(&resolved);
+            notified_repo = true;
+            break;
+        }
+        i += 1;
+    }
+    if !notified_repo {
+        oms_command_panel::notify_wakeup(cwd);
+    }
+}
+
+fn dispatch_exit(tool: &str, local: &[OsString], cwd: &Path, output: (i32, Vec<u8>, Vec<u8>)) -> ! {
+    maybe_notify_panel_wakeup(tool, local, cwd);
+    command_exit(tool, output);
+}
+
+fn dispatch_streaming_exit(
+    tool: &str,
+    local: &[OsString],
+    cwd: &Path,
+    code: i32,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+) -> ! {
+    maybe_notify_panel_wakeup(tool, local, cwd);
+    streaming_command_exit(tool, code, stdout, stderr);
+}
+
 fn dispatch_owned(
     tool: &str,
     local: &[OsString],
@@ -1269,8 +1339,10 @@ fn dispatch_owned(
     let cwd = caller_cwd(tool);
     if tool == "agent-events" {
         if oms_command_attempt_bundle::owns(local) {
-            command_exit(
+            dispatch_exit(
                 tool,
+                local,
+                &cwd,
                 oms_command_attempt_bundle::run(local, &cwd, interrupted),
             );
         }
@@ -1284,7 +1356,7 @@ fn dispatch_owned(
             &mut stdout,
             &mut stderr,
         );
-        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     if tool == "approval-inbox" {
         let mut stdout = std::io::stdout().lock();
@@ -1297,7 +1369,7 @@ fn dispatch_owned(
             &mut stdout,
             &mut stderr,
         );
-        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     if tool == "agent-supervisor" {
         let runner = sibling_companion("oms-supervisor").unwrap_or_default();
@@ -1316,16 +1388,31 @@ fn dispatch_owned(
             let _ = host.drive();
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     if tool == "artifact-index" {
-        command_exit(tool, oms_command_telemetry::run(local, &cwd, interrupted));
+        dispatch_exit(
+            tool,
+            local,
+            &cwd,
+            oms_command_telemetry::run(local, &cwd, interrupted),
+        );
     }
     if tool == "job-digest" {
-        command_exit(tool, oms_command_job_digest::run(local, &cwd, interrupted));
+        dispatch_exit(
+            tool,
+            local,
+            &cwd,
+            oms_command_job_digest::run(local, &cwd, interrupted),
+        );
     }
     if tool == "room" {
-        command_exit(tool, oms_command_room::run(local, &cwd, interrupted));
+        dispatch_exit(
+            tool,
+            local,
+            &cwd,
+            oms_command_room::run(local, &cwd, interrupted),
+        );
     }
     if tool == "input" {
         let result = match source_root {
@@ -1337,7 +1424,7 @@ fn dispatch_owned(
             },
             None => oms_command_input::run(local, &cwd, interrupted),
         };
-        command_exit(tool, result);
+        dispatch_exit(tool, local, &cwd, result);
     }
     let source = require_source_or_exit(tool, source_root);
     let err_output = |e: String| (2, Vec::new(), format!("error: {e}\n").into_bytes());
@@ -1390,12 +1477,12 @@ fn dispatch_owned(
             &mut stdout,
             &mut stderr,
         );
-        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     if tool == "agent-task" {
         let control = match services_control::ControlServices::new(interrupted, source) {
             Ok(svc) => svc,
-            Err(e) => command_exit(tool, err_output(e)),
+            Err(e) => dispatch_exit(tool, local, &cwd, err_output(e)),
         };
         let mut task_svc = control.task();
         let mut stdin = std::io::stdin().lock();
@@ -1411,17 +1498,19 @@ fn dispatch_owned(
             &mut stdout,
             &mut stderr,
         );
-        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     if oms_command_runs::owns(tool) {
         let mut runtime_svc = match services_runtime::RuntimeServices::new(interrupted, source) {
             Ok(svc) => svc,
-            Err(e) => command_exit(tool, err_output(e)),
+            Err(e) => dispatch_exit(tool, local, &cwd, err_output(e)),
         };
         let ctx = match oms_command_runs::Context::new(&cwd, interrupted) {
             Ok(c) => c,
-            Err(e) => command_exit(
+            Err(e) => dispatch_exit(
                 tool,
+                local,
+                &cwd,
                 (
                     e.code,
                     vec![],
@@ -1439,9 +1528,20 @@ fn dispatch_owned(
             &mut stdout,
             &mut stderr,
         );
-        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     let result = match tool {
+        "hud" => match services_runtime::RuntimeServices::new(interrupted, source) {
+            Ok(runtime_svc) => oms_command_hooks::run_with_source_and_services(
+                "oms-hud",
+                local,
+                &cwd,
+                source,
+                interrupted,
+                &runtime_svc,
+            ),
+            Err(e) => err_output(e),
+        },
         "agent-role" => oms_command_agent_role::run_with_source(local, &cwd, source, interrupted),
         "agent-memory" => oms_command_memory::run_with_source(local, &cwd, source, interrupted),
         "slurm-lint" => oms_command_slurm_lint::run_with_source(local, &cwd, source, interrupted),
@@ -1592,7 +1692,7 @@ fn dispatch_owned(
         }
         _ => unreachable!(),
     };
-    command_exit(tool, result);
+    dispatch_exit(tool, local, &cwd, result);
 }
 fn main() {
     let interrupted = Arc::new(AtomicBool::new(false));

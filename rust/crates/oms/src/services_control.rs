@@ -16,7 +16,7 @@
 //! ownership, the supervisor fails closed rather than weakening containment.
 use oms_command_graph::Error as GraphError;
 use oms_command_landing::services::{
-    Execution as LandingExecution, PublicationScan, VerifyRequest,
+    Execution as LandingExecution, PublicationGuard, PublicationScan, VerifyRequest,
 };
 use oms_command_plan::services::{
     ApprovalGrant, Execution as PlanExecution, LifecycleGuard, ProjectedLifecycle, ProjectedRoom,
@@ -627,6 +627,16 @@ impl oms_command_graph::HostServices for ControlServices<'_> {
     }
 }
 
+struct NativePublicationGuard(#[allow(dead_code)] oms_lock::Guard);
+impl PublicationGuard for NativePublicationGuard {}
+
+fn ensure_private_locks_dir(repo: &Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    for dir in [repo.join(".oms"), repo.join(".oms/locks")] {
+        let _ = std::fs::DirBuilder::new().mode(0o700).create(&dir);
+    }
+}
+
 impl oms_command_landing::Services for ControlServices<'_> {
     fn plan(&self) -> Option<&dyn oms_command_plan::Services> {
         Some(self)
@@ -692,6 +702,129 @@ impl oms_command_landing::Services for ControlServices<'_> {
     }
     fn check_python_syntax(&self, path: &Path, source: &[u8]) -> Option<bool> {
         crate::check_python_syntax_with_companion(path, source)
+    }
+    fn publication_guard(
+        &self,
+        repo: &Path,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<Box<dyn PublicationGuard + '_>> {
+        let canonical = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        ensure_private_locks_dir(&canonical);
+        let mut settings = crate::services_runtime::resolve_lock_settings()
+            .map_err(|(code, msg)| oms_command_landing::Error::new(code, msg))?;
+        settings.cwd = canonical.clone();
+        let target = canonical.join(".oms/locks/publication.lock");
+        let lock = oms_lock::Lock::for_file(&target, settings.clone())
+            .map_err(|e| oms_command_landing::Error::new(e.exit_code(), e.to_string()))?;
+        let started = Instant::now();
+        loop {
+            if interrupted.load(Ordering::Acquire) {
+                return Err(oms_command_landing::Error::new(
+                    130,
+                    "publication guard interrupted",
+                ));
+            }
+            match lock.try_acquire() {
+                Ok(guard) => return Ok(Box::new(NativePublicationGuard(guard))),
+                Err(oms_lock::Error::Busy) if started.elapsed() < settings.timeout => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(oms_lock::Error::Busy) => {
+                    return Err(oms_command_landing::Error::new(75, "publication lock busy"));
+                }
+                Err(err) => {
+                    return Err(oms_command_landing::Error::new(
+                        err.exit_code(),
+                        err.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    fn wait_siblings(
+        &self,
+        repo: &Path,
+        budget: Duration,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<()> {
+        let canonical = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let tmp_dir = canonical.join(".oms/tmp");
+        let mut settings = crate::services_runtime::resolve_lock_settings()
+            .map_err(|(code, msg)| oms_command_landing::Error::new(code, msg))?;
+        settings.cwd = canonical;
+        let started = Instant::now();
+        loop {
+            if interrupted.load(Ordering::Acquire) {
+                return Err(oms_command_landing::Error::new(
+                    130,
+                    "interrupted waiting for sibling worktrees",
+                ));
+            }
+            let mut active = false;
+            if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+                for entry in entries.flatten() {
+                    if !entry.file_name().to_string_lossy().starts_with("peer-") {
+                        continue;
+                    }
+                    let owner = entry.path().join("owner.json");
+                    if !std::fs::symlink_metadata(&owner).is_ok_and(|m| m.file_type().is_file()) {
+                        continue;
+                    }
+                    if let Ok(lock) = oms_lock::Lock::for_file(&owner, settings.clone())
+                        && matches!(lock.try_acquire(), Err(oms_lock::Error::Busy))
+                    {
+                        active = true;
+                        break;
+                    }
+                }
+            }
+            if !active {
+                return Ok(());
+            }
+            if started.elapsed() >= budget {
+                return Err(oms_command_landing::Error::new(
+                    75,
+                    "timed out waiting for active sibling worktrees",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    fn after_land(
+        &self,
+        repo: &Path,
+        _receipt: &oms_command_landing::V,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<oms_command_landing::V> {
+        if !repo.join("scripts/oms").is_file() || !repo.join("rust/Cargo.toml").is_file() {
+            return Ok(oms_command_landing::obj([
+                ("rc", 0usize.into()),
+                ("status", "not-applicable".into()),
+            ]));
+        }
+        let mut argv = if self.native.is_empty() {
+            vec![self.source.join("scripts/oms").into()]
+        } else {
+            self.native.clone()
+        };
+        argv.push("update".into());
+        let spawn = Spawn::new(
+            self.scope,
+            argv,
+            Duration::from_secs(600),
+            COMMAND_OUTPUT_LIMIT,
+        );
+        let child = run_child(spawn.cwd(repo), interrupted)
+            .map_err(|e| oms_command_landing::Error::new(2, e))?;
+        let rc = usize::try_from(child.code).unwrap_or(1);
+        let mut result = oms_command_landing::obj([("rc", rc.into())]);
+        if child.code != 0 {
+            let summary = String::from_utf8_lossy(&child.stderr).trim().to_owned();
+            if !summary.is_empty() {
+                result.set("stderr", summary);
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -2336,8 +2469,27 @@ mod tests {
         );
         assert!(oms_command_landing::Services::plan(&control).is_some());
         assert!(oms_command_landing::Services::admission_context(&control).is_none());
+        let pub_guard =
+            oms_command_landing::Services::publication_guard(&control, repo.path(), &stop).unwrap();
+        let canonical = std::fs::canonicalize(repo.path()).unwrap();
+        let mut settings = crate::services_runtime::resolve_lock_settings().unwrap();
+        settings.cwd = canonical.clone();
+        let contender =
+            oms_lock::Lock::for_file(&canonical.join(".oms/locks/publication.lock"), settings)
+                .unwrap();
+        assert!(matches!(
+            contender.try_acquire(),
+            Err(oms_lock::Error::Busy)
+        ));
+        drop(pub_guard);
         assert!(
-            oms_command_landing::Services::publication_guard(&control, repo.path(), &stop).is_err()
+            oms_command_landing::Services::wait_siblings(
+                &control,
+                repo.path(),
+                Duration::from_millis(50),
+                &stop,
+            )
+            .is_ok()
         );
     }
 

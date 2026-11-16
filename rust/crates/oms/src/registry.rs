@@ -18,8 +18,8 @@ The terminal panel is the human entrypoint. The other tools are the agent's
 hands; give your coding agent the goal instead of composing harness commands.
 "#;
 
-const PUBLIC: &str = "advise\nagent-call\nagent-events\nagent-memory\nagent-plan\nagent-role\nagent-supervisor\nagent-task\napply-project-template\napproval-inbox\nartifact-index\nartifact-view\nauto-update\nautopilot\ncandidate\nchange-guard\ncheckpoint\nci-status\ncite\ncleanup\nconnect-services\nconsult\ndashboard\ndata-manifest\ndeps\ndoctor\ndraft-pr\nexperiment-board\nexternal\nfail-ledger\ngc\ngoal-drive\ngraph\nharness\ninbox\ninit\ninput\ninstall-profile\nintent\njob-digest\njournal\nland\nlease\nmodel-doctor\nmodels\noutput-digest\npanel\npatch-admit\npatch-land\npeer-ask\npeer-delegate\npeer-review\nplan-from-spec\nplan-run\nproject-doctor\nproject-private\nprovider-permissions\nrecipe\nremove-project-template\nreport\nroom\nrun\nrun-ledger\nrun-reconcile\nruntime\nscratch-worktree\nsession\nsession-handoff\nskill-doctor\nskill-forge\nslurm-lint\nslurm-submit\nsnapshot\nstate\nstate-verify\nstatus\nsync-shared\nthread\ntick\ntsp-queue\nuninstall\nupdate";
-const FRONTDOOR: &str = "# Setup and capabilities\ninit\ninstall-profile\nconnect-services\n# Goals and daily work\npanel\nagent-plan\nautopilot\nharness\ninbox\nstatus\ndashboard\nruntime\njournal\ntick\n# Collaboration and review\nroom\nconsult\npeer-delegate\npeer-review\n# Admission and delivery\npatch-admit\npatch-land\nland\nlease\n# Maintenance and removal\nreport\ndoctor\nupdate\nuninstall";
+const PUBLIC: &str = "advise\nagent-call\nagent-events\nagent-memory\nagent-plan\nagent-role\nagent-supervisor\nagent-task\napply-project-template\napproval-inbox\nartifact-index\nartifact-view\nauto-update\nautopilot\ncandidate\nchange-guard\ncheckpoint\nci-status\ncite\ncleanup\nconnect-services\nconsult\ndashboard\ndata-manifest\ndeps\ndoctor\ndraft-pr\nexperiment-board\nexternal\nfail-ledger\ngc\ngoal-drive\ngraph\nharness\nhud\ninbox\ninit\ninput\ninstall-profile\nintent\njob-digest\njournal\nland\nlease\nmodel-doctor\nmodels\noutput-digest\npanel\npatch-admit\npatch-land\npeer-ask\npeer-delegate\npeer-review\nplan-from-spec\nplan-run\nproject-doctor\nproject-private\nprovider-permissions\nrecipe\nremove-project-template\nreport\nroom\nrun\nrun-ledger\nrun-reconcile\nruntime\nscratch-worktree\nsession\nsession-handoff\nskill-doctor\nskill-forge\nslurm-lint\nslurm-submit\nsnapshot\nstate\nstate-verify\nstatus\nsync-shared\nthread\ntick\ntsp-queue\nuninstall\nupdate";
+const FRONTDOOR: &str = "# Setup and capabilities\ninit\ninstall-profile\nconnect-services\n# Goals and daily work\npanel\nagent-plan\nautopilot\nharness\ninbox\nstatus\nhud\ndashboard\nruntime\njournal\ntick\n# Collaboration and review\nroom\nconsult\npeer-delegate\npeer-review\n# Admission and delivery\npatch-admit\npatch-land\nland\nlease\n# Maintenance and removal\nreport\ndoctor\nupdate\nuninstall";
 
 const DESCRIPTIONS: &[(&str, &str)] = &[
     (
@@ -136,6 +136,10 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "harness",
         "Run Codex models with the Codex, Pi, or Claude Code harness and existing ChatGPT login.",
+    ),
+    (
+        "hud",
+        "Render the compact OMS status strip for terminals, tmux, and provider statuslines.",
     ),
     (
         "inbox",
@@ -370,7 +374,7 @@ mod tests {
     #[test]
     fn embedded_registry_covers_public_and_frontdoor_without_scripts() {
         let names: Vec<_> = PUBLIC.lines().collect();
-        assert_eq!(names.len(), 82);
+        assert_eq!(names.len(), 83);
         for tool in FRONTDOOR.lines().filter(|line| !line.starts_with("# ")) {
             assert!(names.contains(&tool));
         }
@@ -379,7 +383,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(err.is_empty());
         let rendered = std::str::from_utf8(&all).unwrap();
-        assert_eq!(rendered.lines().count(), 82);
+        assert_eq!(rendered.lines().count(), 83);
         for (line, name) in rendered.lines().zip(&names) {
             assert!(line.starts_with(&format!("{name:<26} ")));
             assert!(line.len() > 27);
