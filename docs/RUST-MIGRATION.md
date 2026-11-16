@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native front-door cutover, `oms-command-graph` / SQLite / panel storage optimizations, and `GroupResolver` fixes integrated through Wave 4 (2026-11-15); M6 physical legacy `.py` retirement and release deployment remain gated on explicit authorization.
+Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: pure-Rust Phase A/B complete on `oms/autopilot-1e704d0e275f` (native front-door cutover, `oms-command-graph` / SQLite / panel storage optimizations, `GroupResolver` fixes, M6 legacy Python runtime deleted in `fc74f67e`, and v2 native capabilities B1-B6 through `b09bd84d`, 2026-11-16); PR-gated release via `oms land --pr` and live CI remain.
 
 ## Decision and completion boundary
 
@@ -773,3 +773,30 @@ Step A2 permanently retired the legacy Python runtime and shell wrapper stack:
 - **Pure-Bash + native trampolines**: collapsed `scripts/*.sh` wrappers (`scripts/check.sh` excepted) into lightweight native trampolines dispatching through `scripts/oms`, added `docs/examples/remote-adapter.sh`, streamlined `.github/workflows/test.yml` (zero `setup-python`, Ubuntu/macOS pure-Rust & pure-Bash gates), and updated `payload.rs` frontdoor wrappers to route `doctor --repair` / `uninstall` cache recovery through `scripts/oms`.
 - **Poisoned-Python E2E verification**: injected failing `python` and `python3` (`exit 99`) shims first on `PATH` inside `tests/lib/smoke-env.sh`; verified `bash scripts/check.sh --lint-only`, all `9` retained focused smoke suites (`bash scripts/check.sh --focused-only`), and all modified Rust workspace crate test suites (`oms`, `oms-command-lifecycle`, `oms-command-peer`, `oms-command-runs`, `oms-command-task`, `oms-command-autonomy`) with zero failures.
 
+
+## Phase B Native Capabilities & Dogfooding Verification (2026-11-16)
+
+Phase A/B is complete on `oms/autopilot-1e704d0e275f` (pure-Rust runtime; legacy Python runtime deleted in `fc74f67e`). Release through `oms land --pr` and live CI remain.
+
+### v2 native capabilities (`e22a6c0a..b09bd84d`)
+
+- **B1 Polyglot graph + SQLite file cache**: `oms-graph/src/polyglot.rs` parses Rust (`.rs`, `Cargo.toml` crate/workspace DAG, `#[test]` / `#[tokio::test]`), TypeScript/JS (`.ts`, `.tsx`, `.js`), Go (`.go`) and C/C++/CUDA (`.c`, `.cpp`, `.cu`). `oms-command-graph` stores per-file cache entries in `.oms/project-graph/cache.sqlite3` (`WAL`, `VERSION=10`) with zero JSON shard files under `.oms/project-graph/cache/`.
+- **B2 CAS + FTS5 cold archive and native GPU monitor**: `oms-command-state/src/archive.rs` manages `.oms/archive.sqlite3` (`WAL`, `0600`, SHA-256 content-addressed `blobs`, `entries`, FTS5 `entries_fts`) via `oms state compact`, `oms state archive list|show|search|stats` and `oms gc --apply`. `oms state gpu-status|gpu-wait` provides native GPU inspection.
+- **B3 Warm Cargo slots, graph context, interactive loop**: `oms-command-peer` provides `acquire_cargo_slot` caching (`OMS_CARGO_SLOT_CACHE`), `--graph-context` injection from `oms-command-graph`, `--interactive` NDJSON multi-turn delegation in one isolated worktree, and panel visibility (`panel_alias`, `panel_role`, `panel_room_id`, `parent_attempt_id`) for direct `peer-delegate`, `peer-review` and `consult`.
+- **B4 Kernel worker sandbox**: `oms-supervisor/src/sandbox.rs` wraps delegated worker commands in Linux `bwrap` or macOS `sandbox-exec` (`OMS_WORKER_SANDBOX=auto|strict|off`).
+- **B5 Native MCP tools, `<2ms` panel wakeup, tri-provider HUD**: `oms-mcp-server` adds `oms_memory_recall`, `oms_symbol_slice`, `oms_failure_diagnose` and `oms_state_compact`. `oms-command-panel` listens on `<repo>/.oms/panel-state/wakeup.sock` (`rustix::event::poll`) while `oms` root commands emit non-blocking wakeup datagrams. `oms hud` (`scripts/hud.sh`; `83` total public CLI entrypoints) and tri-provider statusline defaults (`agy-statusline`, `claude-statusline`, Codex 6-item HUD with reversible bare `["model"]` replacement) are wired across `oms-command-hooks`, `oms-command-lifecycle` and `oms doctor`.
+- **B6 Adaptive seat routing, native SSH bundle adapter, worktree-first / PR-gated integration**: `oms-command-peer` tracks per-account latency/cooldowns (`select_account_adaptive`); `oms runtime ssh-adapter` provides `ControlMaster` + a single `git bundle` + schema-1 attestation; `oms-failure` classifies CUDA OOM fragmentation/peak and NCCL watchdog timeouts; `oms land --pr` / `--local-merge`, `pre-merge-commit` and protected-branch Bash guards enforce verified PR integration onto `main`.
+
+### Dogfooding measurements at `b09bd84d`
+
+Host: Linux workstation with a 96 GiB CUDA GPU. The Wave 3-4 baselines come from the benchmark table above.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `oms graph project build --force --repo . --json` (cold) | `1.21s` real (`0.87s` user, `0.18s` sys); was `16.06s` | `files=947`, `parsed=947`, `cached=0`, `nodes=9548`, `edges=14010` |
+| `oms graph project build --repo . --json` (warm) | `1.04s` real (`0.72s` user, `0.15s` sys); was `4.24s` | `files=947`, `parsed=0`, `cached=947`, `nodes=9548`, `edges=14010` |
+| Graph cache layout | legacy `.oms/project-graph/cache/` absent | single `.oms/project-graph/cache.sqlite3` (`0600`, `11M`) |
+| `oms state compact --repo . --json` | `.oms/` files `81,835` -> `81,726` | `archived=110` stale handoffs, `kept=21`, `bytes_freed=998145` |
+| `.oms/archive.sqlite3` | `db_bytes=2695168` (`2.6M`, `0600`) | `entries=110`, `blobs=110`, `dedup_bytes=998145`; `oms state archive search "review" --limit 5` returned ranked FTS5 excerpts |
+| `oms hud --repo .` and `oms hud --tmux --repo .` | `oh-my-setting \| oms/autopilot-1e704d0e2… \| oms F16` | smoke check |
+| `oms state gpu-status --json` | local 96 GiB CUDA GPU detected (`available=true`, `12675 / 97887 MiB`) | smoke check |
