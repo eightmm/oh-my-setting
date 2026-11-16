@@ -8,7 +8,7 @@ use crate::capture::{Capture, CaptureOptions, Captured};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::Errno;
-use rustix::process::{self as os, Pid, Signal, WaitId, WaitIdOptions};
+use rustix::process::{self as os, Pid, Signal, WaitId, WaitIdOptions, WaitOptions};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::marker::PhantomData;
@@ -196,6 +196,7 @@ struct Job {
     stop: Option<StopReason>,
     stopping: Option<Instant>,
     kill_sent: bool,
+    kill_sent_at: Option<Instant>,
     reaped: bool,
     all_reaped: bool,
     children_exhausted: bool,
@@ -394,6 +395,7 @@ impl Reactor {
             stop: None,
             stopping: None,
             kill_sent: false,
+            kill_sent_at: None,
             reaped: false,
             all_reaped: false,
             children_exhausted: false,
@@ -552,7 +554,7 @@ impl Job {
                     Ok(Progress::Complete(result)) => {
                         self.group_probe = None;
                         self.group_probe_after = Instant::now() + Duration::from_millis(100);
-                        mac_group_result(self.pid, &result)
+                        mac_group_result(self.pid, self.exit.is_some(), &result)
                     }
                     Ok(Progress::Pending(_)) => Some(false),
                     Err(_) => None,
@@ -672,11 +674,13 @@ impl Job {
             WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
         ) {
             Ok(Some(status)) => {
-                self.exit = Some(Exit {
-                    code: status.exit_status(),
-                    signal: status.terminating_signal(),
-                });
-                self.exited_at = Some(Instant::now());
+                if status.exited() || status.killed() || status.dumped() {
+                    self.exit = Some(Exit {
+                        code: status.exit_status(),
+                        signal: status.terminating_signal(),
+                    });
+                    self.exited_at = Some(Instant::now());
+                }
             }
             Ok(None) => {}
             Err(Errno::INTR) => {}
@@ -747,18 +751,19 @@ impl Job {
         {
             self.signal(Signal::KILL);
             self.kill_sent = true;
+            self.kill_sent_at = Some(Instant::now());
         }
         self.observe_exit();
         // A kill is asynchronous. Only observed exit allows a nonblocking reap.
         // Final group signaling must happen BEFORE consuming the leader token.
+        let post_kill_settled = self
+            .kill_sent_at
+            .is_some_and(|t| t.elapsed() >= POST_EXIT_DRAIN);
         let signals_done = self.group_quiescent == Some(true)
-            || self.kill_sent && self.group_quiescent.is_none()
+            || self.kill_sent && (self.group_quiescent.is_none() || post_kill_settled)
             || self.request.scope == Scope::Leader;
         if !self.reaped && self.exit.is_some() && signals_done {
-            match os::waitid(
-                WaitId::Pid(self.pid),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-            ) {
+            match os::waitpid(Some(self.pid), WaitOptions::NOHANG) {
                 Ok(Some(_)) => self.reaped = true,
                 Ok(None) | Err(Errno::INTR) => {}
                 Err(Errno::CHILD) => {
@@ -790,7 +795,14 @@ impl Job {
             if self.request.scope == Scope::ProcessGroup {
                 self.group_quiescent = self.observe_group();
                 if self.group_quiescent == Some(false) {
-                    return;
+                    if !self.kill_sent_at.is_some_and(|t| {
+                        t.elapsed() >= POST_EXIT_DRAIN + self.request.terminate_grace
+                    }) {
+                        return;
+                    }
+                    self.error.get_or_insert_with(|| {
+                        "process group remained active after SIGKILL".into()
+                    });
                 }
                 if self.group_quiescent.is_none() && self.error.is_none() {
                     self.error =
@@ -1036,7 +1048,7 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
         // Job::observe_group instead retains it and advances without waiting.
         let mut reactor = Reactor::new();
         let id = reactor.start(mac_group_request()).ok()?;
-        let until = Instant::now() + Duration::from_millis(250);
+        let until = Instant::now() + Duration::from_millis(750);
         let result = loop {
             match reactor.poll(id, Duration::from_millis(10)).ok()? {
                 Progress::Complete(result) => break result,
@@ -1044,7 +1056,7 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
                 Progress::Pending(_) => {}
             }
         };
-        mac_group_result(pid, &result)
+        mac_group_result(pid, false, &result)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -1054,16 +1066,26 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
 }
 #[cfg(target_os = "macos")]
 fn mac_group_request() -> Request {
-    let mut request = Request::new(vec!["/bin/ps".into(), "-axo".into(), "pgid=,stat=".into()]);
+    let mut request = Request::new(vec![
+        "/bin/ps".into(),
+        "-ax".into(),
+        "-o".into(),
+        "pid=".into(),
+        "-o".into(),
+        "pgid=".into(),
+        "-o".into(),
+        "stat=".into(),
+    ]);
     request.scope = Scope::Leader;
-    request.deadline = Some(Instant::now() + Duration::from_millis(100));
+    request.environment = vec![("LC_ALL".into(), "C".into())];
+    request.deadline = Some(Instant::now() + Duration::from_millis(500));
     request.terminate_grace = Duration::ZERO;
     request.capture.max_bytes = 8 * 1024 * 1024;
     request.capture.on_limit = crate::capture::LimitAction::Terminate;
     request
 }
-#[cfg(target_os = "macos")]
-fn mac_group_result(pid: Pid, result: &Completion) -> Option<bool> {
+#[cfg(any(target_os = "macos", test))]
+fn mac_group_result(pid: Pid, leader_exited: bool, result: &Completion) -> Option<bool> {
     if !result.cleanup_complete()
         || !result.output_complete()
         || result.stop.is_some()
@@ -1071,16 +1093,106 @@ fn mac_group_result(pid: Pid, result: &Completion) -> Option<bool> {
     {
         return None;
     }
+    let target = pid.as_raw_nonzero().get();
     for row in std::str::from_utf8(&result.stdout.bytes).ok()?.lines() {
+        if row.trim().is_empty() {
+            continue;
+        }
         let mut fields = row.split_whitespace();
+        let row_pid = fields.next()?.parse::<i32>().ok()?;
         let group = fields.next()?.parse::<i32>().ok()?;
         let state = fields.next()?;
         if fields.next().is_some() {
             return None;
         }
-        if group == pid.as_raw_nonzero().get() && !state.starts_with(['Z', 'X']) {
+        if leader_exited && row_pid == target {
+            continue;
+        }
+        if group == target && !state.starts_with(['Z', 'X']) {
             return Some(false);
         }
     }
     Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::Captured;
+
+    fn fake_ps_completion(stdout: &[u8], code: Option<i32>) -> Completion {
+        Completion {
+            pid: 9999,
+            exit: code.map(|c| Exit {
+                code: Some(c),
+                signal: None,
+            }),
+            stop: None,
+            stdout: Captured {
+                bytes: stdout.to_vec(),
+                observed_bytes: stdout.len() as u64,
+                dropped_bytes: 0,
+                sha256: String::new(),
+                eof: true,
+                limited: false,
+                cutoff: false,
+            },
+            stderr: None,
+            duration: Duration::from_millis(5),
+            leader_reaped: true,
+            all_reaped: false,
+            group_quiescent: Some(true),
+            scope: Scope::Leader,
+            signals: vec![],
+            supervision_error: None,
+        }
+    }
+
+    #[test]
+    fn mac_group_result_ignores_exited_leader_and_handles_descendants_and_errors() {
+        let leader = Pid::from_raw(4242).unwrap();
+
+        // 1) Exited leader rendered as E / UE / ? / Z+ must still count as quiescent when alone.
+        for state in ["E", "UE", "?", "Z+"] {
+            let rows = format!("  4242   4242 {state}\n     1      1 Ss\n");
+            assert_eq!(
+                mac_group_result(leader, true, &fake_ps_completion(rows.as_bytes(), Some(0))),
+                Some(true),
+                "state={state}"
+            );
+        }
+
+        // 2) Live non-leader descendant (S or R+) in same pgid reports non-quiescent.
+        for state in ["S", "R+"] {
+            let rows = format!("  4242   4242 E\n  4243   4242 {state}\n");
+            assert_eq!(
+                mac_group_result(leader, true, &fake_ps_completion(rows.as_bytes(), Some(0))),
+                Some(false),
+                "state={state}"
+            );
+        }
+
+        // 3) Zombie non-leader descendant in same pgid reports quiescent.
+        let zombie_desc = b"  4242   4242 Z\n  4243   4242 Z+\n";
+        assert_eq!(
+            mac_group_result(leader, true, &fake_ps_completion(zombie_desc, Some(0))),
+            Some(true)
+        );
+
+        // 4) Malformed column count or non-zero exit returns None.
+        let too_few = b"  4242   4242\n";
+        assert_eq!(
+            mac_group_result(leader, true, &fake_ps_completion(too_few, Some(0))),
+            None
+        );
+        let too_many = b"  4242   4242 Z extra\n";
+        assert_eq!(
+            mac_group_result(leader, true, &fake_ps_completion(too_many, Some(0))),
+            None
+        );
+        assert_eq!(
+            mac_group_result(leader, true, &fake_ps_completion(b"", Some(1))),
+            None
+        );
+    }
 }
