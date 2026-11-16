@@ -48,7 +48,9 @@ impl Directory {
             if info.st_uid != rustix::process::getuid().as_raw() {
                 return Err(UNSAFE);
             }
-            fs::fchmod(&fd, Mode::from_raw_mode(0o700)).map_err(|_| UNSAFE)?;
+            if created || (info.st_mode & 0o7777) != 0o700 {
+                fs::fchmod(&fd, Mode::from_raw_mode(0o700)).map_err(|_| UNSAFE)?;
+            }
         }
         let dir = Self {
             fd,
@@ -219,14 +221,14 @@ pub fn run_bounded(
             WaitId::Pid(group),
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
         ) {
-            Ok(Some(status)) => {
+            Ok(Some(status)) if status.exited() || status.killed() || status.dumped() => {
                 return if status.exit_status() == Some(0) {
                     Ok(output)
                 } else {
                     Err(failed)
                 };
             }
-            Ok(None) | Err(rustix::io::Errno::INTR) => {}
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
             Err(_) => return Err(UNSAFE),
         }
         std::thread::sleep(Duration::from_millis(2));

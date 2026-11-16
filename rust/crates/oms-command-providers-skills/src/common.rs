@@ -107,7 +107,9 @@ impl ChildGroup {
                 WaitId::Pid(self.group),
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
             ) {
-                Ok(status) => return Ok(status.is_some()),
+                Ok(status) => {
+                    return Ok(status.is_some_and(|s| s.exited() || s.killed() || s.dumped()));
+                }
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(rustix::io::Errno::CHILD) => {
                     self.reaped = true;

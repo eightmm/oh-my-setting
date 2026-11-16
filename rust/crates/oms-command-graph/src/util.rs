@@ -153,7 +153,7 @@ pub fn process_detail(
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
             )
             .map_err(|e| Error::new(e.to_string()))?
-            .is_some()
+            .is_some_and(|s| s.exited() || s.killed() || s.dumped())
             {
                 break;
             }

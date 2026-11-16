@@ -43,7 +43,7 @@ impl OwnedChild {
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
             )
             .map_err(|e| Error::io("observe interrupted command", e))?
-            .is_some()
+            .is_some_and(|s| s.exited() || s.killed() || s.dumped())
             {
                 break;
             }
@@ -152,7 +152,8 @@ pub(crate) fn execute(
             WaitId::Pid(pid),
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
         )
-        .map_err(|e| Error::io("observe command", e))?;
+        .map_err(|e| Error::io("observe command", e))?
+        .filter(|s| s.exited() || s.killed() || s.dumped());
         if terminal.is_some() {
             let _ = kill_process_group(pid, Signal::KILL);
             let status = owned

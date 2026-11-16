@@ -185,6 +185,7 @@ fn child_status(child: &Child) -> Result<Option<rustix::process::WaitIdStatus>> 
         WaitId::Pid(pid),
         WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
     )
+    .map(|s| s.filter(|s| s.exited() || s.killed() || s.dumped()))
     .map_err(|_| Error::io("waiting for child"))
 }
 

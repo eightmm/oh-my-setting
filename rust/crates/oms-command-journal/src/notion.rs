@@ -423,7 +423,9 @@ impl ChildGroupGuard {
                 WaitId::Pid(pgid),
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
             ) {
-                Ok(status) => return Ok(status),
+                Ok(status) => {
+                    return Ok(status.filter(|s| s.exited() || s.killed() || s.dumped()));
+                }
                 Err(Errno::INTR) => continue,
                 Err(Errno::CHILD) => {
                     // Child was already reaped externally (e.g. SA_NOCLDWAIT/SIG_IGN);
