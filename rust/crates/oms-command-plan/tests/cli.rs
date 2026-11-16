@@ -145,6 +145,7 @@ fn help_and_parse_errors() {
         &["nonsense", "--help"],
         &["-x", "--help"],
         &["list", "show", "--help"],
+        &["--priority", "abc", "--help"],
         &["--ttl", "abc", "--help"],
         &["--ttl", "", "--help"],
         &["--ttl", "99999999999999999999999", "--help"],
@@ -915,4 +916,156 @@ fn merged_dependencies_scheduling_and_late_results() {
     assert_eq!(before, fs::read(r.join(".oms/plan/tasks.json")).unwrap());
     let ledger = fs::read_to_string(r.join(".oms/plan/late-results.jsonl")).unwrap();
     assert!(ledger.contains("\"supplied_lease_id\":\"old\""), "{ledger}");
+}
+
+#[test]
+fn versioned_contracts_gate_scheduling() {
+    if isolated("versioned_contracts_gate_scheduling") {
+        return;
+    }
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    let rs = r.to_str().unwrap();
+    let run = |rest: &[&str]| {
+        let mut command = vec!["--repo", rs];
+        command.extend_from_slice(rest);
+        go(&tmp.0, &command)
+    };
+    let ok = |rest: &[&str]| {
+        let (code, out, err) = run(rest);
+        assert_eq!(code, 0, "{rest:?}: {err}");
+        out
+    };
+    ok(&["init", "--goal", "g"]);
+    ok(&["contract-propose", "--id", "api", "--summary", "v1"]);
+    ok(&["contract-accept", "--id", "api", "--version", "1"]);
+    ok(&[
+        "add",
+        "--id",
+        "downstream",
+        "--title",
+        "work",
+        "--contracts",
+        "api@v1",
+    ]);
+    assert!(ok(&["ready"]).contains("downstream"));
+    ok(&["claim", "--id", "downstream", "--provider", "codex"]);
+    ok(&["release", "--id", "downstream"]);
+    ok(&["contract-propose", "--id", "api", "--summary", "v2"]);
+    assert!(ok(&["ready"]).contains("downstream"));
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "contract_child_accept", "--ignored"])
+        .env("OMS_HARNESS_CHILD", "1")
+        .env("CONTRACT_TEST_REPO", &r)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ok(&["contract-accept", "--id", "api", "--version", "2"]);
+    let show = ok(&["show", "--id", "downstream", "--json"]);
+    assert!(show.contains("\"contract_stale\": true"), "{show}");
+    assert!(
+        show.contains("\"stale_contracts\": [\n    \"api\""),
+        "{show}"
+    );
+    assert!(!ok(&["ready"]).contains("downstream"));
+    let (code, _, err) = run(&["claim", "--id", "downstream", "--provider", "codex"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("contract_stale"), "{err}");
+    ok(&["refresh-contracts", "--task", "downstream"]);
+    assert!(ok(&["show", "--id", "downstream"]).contains("api@v2"));
+    assert!(ok(&["ready"]).contains("downstream"));
+    ok(&["claim", "--id", "downstream", "--provider", "codex"]);
+    assert_eq!(
+        run(&["add", "--id", "bad", "--title", "bad", "--priority", "abc"]).0,
+        2
+    );
+}
+
+#[test]
+#[ignore = "driven by versioned_contracts_gate_scheduling"]
+fn contract_child_accept() {
+    let repo = PathBuf::from(std::env::var_os("CONTRACT_TEST_REPO").unwrap());
+    let (code, _, err) = go(&repo, &["contract-accept", "--id", "api", "--version", "2"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("parent-only"), "{err}");
+}
+
+#[test]
+fn contract_registry_refuses_unsafe_inputs_and_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    if isolated("contract_registry_refuses_unsafe_inputs_and_permissions") {
+        return;
+    }
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    let run = |rest: &[&str]| go(&r, rest);
+    assert_eq!(run(&["init", "--goal", "g"]).0, 0);
+    assert_eq!(
+        run(&["contract-propose", "--id", "api", "--summary", " "]).0,
+        2
+    );
+    assert_eq!(
+        run(&[
+            "contract-propose",
+            "--id",
+            "api",
+            "--summary",
+            "x",
+            "--scope-paths",
+            "../bad"
+        ])
+        .0,
+        2
+    );
+    assert_eq!(
+        run(&[
+            "contract-propose",
+            "--id",
+            "api",
+            "--summary",
+            "x",
+            "--decision-artifact",
+            "../bad"
+        ])
+        .0,
+        2
+    );
+    symlink("a.txt", r.join("link")).unwrap();
+    assert_eq!(
+        run(&[
+            "contract-propose",
+            "--id",
+            "api",
+            "--summary",
+            "x",
+            "--decision-artifact",
+            "link"
+        ])
+        .0,
+        2
+    );
+    assert_eq!(
+        run(&[
+            "contract-propose",
+            "--id",
+            "api",
+            "--summary",
+            "x",
+            "--decision-artifact",
+            "a.txt"
+        ])
+        .0,
+        0
+    );
+    let path = r.join(".oms/plan/contracts.json");
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(run(&["contract-list"]).0, 2);
 }

@@ -4,12 +4,31 @@ use oms_command_plan::{Action, Context as PlanContext, Plan, Request};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub const MAX_FILE: usize = 1024 * 1024;
 pub const MAX_LEDGER: usize = 16 * 1024 * 1024;
 pub const ACTIVE: &str = ".oms/plan/tasks.json";
 pub const PROGRESS: &str = ".oms/plan/progress.jsonl";
 pub const RECEIPT: &str = ".oms/plan/autopilot-run.json";
+
+/// In-process serialization for `plan-run --parallel`. `plan` covers one plan
+/// state call and `landing` the single integration writer; neither is ever
+/// held across worker execution. A poisoned gate still guards: a panicking
+/// worker must not take its siblings down.
+#[derive(Default)]
+pub struct Gates {
+    plan: Mutex<()>,
+    landing: Mutex<()>,
+}
+impl Gates {
+    pub fn plan(&self) -> MutexGuard<'_, ()> {
+        self.plan.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+    pub fn landing(&self) -> MutexGuard<'_, ()> {
+        self.landing.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 pub(crate) struct Context<'a> {
     pub repo: PathBuf,
@@ -22,6 +41,7 @@ pub(crate) struct Context<'a> {
     pub run_id: String,
     pub cycle: Option<u64>,
     pub peer_wall: Option<std::time::Duration>,
+    pub gates: Option<&'a Gates>,
 }
 impl<'a> Context<'a> {
     pub fn new(
@@ -42,6 +62,7 @@ impl<'a> Context<'a> {
             run_id: String::new(),
             cycle: None,
             peer_wall: None,
+            gates: None,
         })
     }
     pub fn parent(&self) -> Result<()> {
@@ -68,6 +89,7 @@ impl<'a> Context<'a> {
     }
     pub fn action(&self, req: &Request) -> Result<crate::Output> {
         checkpoint(self.interrupted)?;
+        let _gate = self.gates.map(Gates::plan);
         let out = self.plan()?.execute(req)?;
         Ok(crate::Output {
             code: out.code,
@@ -76,6 +98,7 @@ impl<'a> Context<'a> {
         })
     }
     pub fn plan_value(&self) -> Result<Value> {
+        let _gate = self.gates.map(Gates::plan);
         value::from_plan(&self.plan()?.load()?.plan)
     }
     pub fn git(&self, args: &[&str]) -> Result<String> {

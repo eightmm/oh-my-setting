@@ -3,6 +3,7 @@
 //! machines or clones. See README.md for streaming and internal helper adapters.
 mod json;
 pub mod ledger;
+mod reconcile;
 pub mod repository;
 mod scheduler;
 mod storage;
@@ -75,6 +76,37 @@ struct Options {
     dry: bool,
     force: bool,
     command: Vec<OsString>,
+    provenance: ledger::Provenance,
+}
+enum Parsed {
+    Submit(Options),
+    Reconcile(reconcile::Options),
+}
+fn safe_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+}
+fn sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+// An explicit flag must be valid; an ambient environment value that is not is
+// ignored rather than failing an unrelated submission.
+fn provenance_value(
+    flag: Option<OsString>,
+    variable: &str,
+    valid: fn(&str) -> bool,
+) -> Option<String> {
+    flag.and_then(|v| v.into_string().ok()).or_else(|| {
+        std::env::var(variable)
+            .ok()
+            .filter(|v| !v.is_empty() && valid(v))
+    })
 }
 fn fail(message: impl AsRef<[u8]>) -> Vec<u8> {
     let mut bytes = b"error: ".to_vec();
@@ -88,41 +120,68 @@ fn option_error(prefix: &[u8], arg: &OsStr, suffix: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(suffix);
     fail(bytes)
 }
-fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
+fn parse(args: &[OsString]) -> Result<Option<Parsed>, Vec<u8>> {
+    if args.first().is_some_and(|a| a == "reconcile") {
+        return Ok(reconcile::parse(&args[1..])?.map(Parsed::Reconcile));
+    }
     let mut options = Options {
         custom: OsString::new(),
         reason: OsString::new(),
         dry: false,
         force: false,
         command: Vec::new(),
+        provenance: ledger::Provenance::default(),
     };
+    let (mut key, mut idempotency, mut task, mut attempt, mut snapshot) =
+        (None, None, None, None, None);
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_bytes();
-        match arg {
+        let (name, inline) = match arg.iter().position(|&b| b == b'=') {
+            Some(at) if arg.starts_with(b"--") => (&arg[..at], Some(&arg[at + 1..])),
+            _ => (arg, None),
+        };
+        match name {
             b"-h" | b"--help" => return Ok(None),
             b"--" => {
                 options.command = args[index + 1..].to_vec();
                 break;
             }
-            b"--dry-run" => options.dry = true,
-            b"--force-resubmit" => options.force = true,
-            b"--key" | b"--reason" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| option_error(b"", OsStr::from_bytes(arg), b" needs a value"))?;
-                if arg == b"--key" {
-                    options.custom = value.clone();
-                } else {
-                    options.reason = value.clone();
+            b"--dry-run" if inline.is_none() => options.dry = true,
+            b"--force-resubmit" if inline.is_none() => options.force = true,
+            b"--key" | b"--reason" | b"--idempotency-key" | b"--task-id" | b"--attempt-id"
+            | b"--exec-snapshot" => {
+                let value = match inline {
+                    Some(value) => OsString::from_vec(value.to_vec()),
+                    None => {
+                        index += 1;
+                        args.get(index)
+                            .ok_or_else(|| {
+                                option_error(b"", OsStr::from_bytes(name), b" needs a value")
+                            })?
+                            .clone()
+                    }
+                };
+                let (slot, valid): (&mut Option<OsString>, fn(&str) -> bool) = match name {
+                    b"--key" => (&mut key, |_| true),
+                    b"--reason" => {
+                        options.reason = value;
+                        index += 1;
+                        continue;
+                    }
+                    b"--idempotency-key" => (&mut idempotency, |_| true),
+                    b"--task-id" => (&mut task, safe_id),
+                    b"--attempt-id" => (&mut attempt, safe_id),
+                    _ => (&mut snapshot, sha256_hex),
+                };
+                if !valid(&value.to_string_lossy()) {
+                    return Err(option_error(
+                        b"invalid value for ",
+                        OsStr::from_bytes(name),
+                        b" (safe ASCII identifier, or 64 lowercase hex for --exec-snapshot)",
+                    ));
                 }
-            }
-            _ if arg.starts_with(b"--key=") => {
-                options.custom = OsString::from_vec(arg[6..].to_vec())
-            }
-            _ if arg.starts_with(b"--reason=") => {
-                options.reason = OsString::from_vec(arg[9..].to_vec())
+                *slot = Some(value);
             }
             _ => {
                 return Err(option_error(
@@ -134,6 +193,17 @@ fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
         }
         index += 1;
     }
+    if let (Some(a), Some(b)) = (&key, &idempotency)
+        && a != b
+    {
+        return Err(fail(b"--key and --idempotency-key disagree; pass one"));
+    }
+    options.custom = key.or(idempotency).unwrap_or_default();
+    options.provenance = ledger::Provenance {
+        task_id: provenance_value(task, "OMS_TASK_ID", safe_id),
+        attempt_id: provenance_value(attempt, "OMS_ATTEMPT_ID", safe_id),
+        exec_snapshot_sha256: provenance_value(snapshot, "OMS_EXEC_SNAPSHOT_SHA256", sha256_hex),
+    };
     let Some(executable) = options.command.first() else {
         return Err(fail(
             b"usage: slurm-submit.sh [options] -- sbatch ARGS... SCRIPT",
@@ -152,7 +222,7 @@ fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
     if options.force && options.reason.is_empty() {
         return Err(fail(b"--force-resubmit requires --reason TEXT"));
     }
-    Ok(Some(options))
+    Ok(Some(Parsed::Submit(options)))
 }
 
 pub(crate) fn joined(args: &[OsString]) -> Vec<u8> {
@@ -185,8 +255,8 @@ fn adapter(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
-    let options = match parse(args) {
-        Ok(Some(options)) => options,
+    let parsed = match parse(args) {
+        Ok(Some(parsed)) => parsed,
         Ok(None) => {
             return if out.write_all(USAGE.as_bytes()).is_ok() {
                 0
@@ -203,7 +273,13 @@ fn adapter(
         let _ = err.write_all(b"error: interrupted\n");
         return 130;
     }
-    match execute(options, cwd, source_root, supplied, interrupted, out, err) {
+    let result = match parsed {
+        Parsed::Submit(options) => {
+            execute(options, cwd, source_root, supplied, interrupted, out, err)
+        }
+        Parsed::Reconcile(options) => reconcile::run(options, cwd, supplied, interrupted, out),
+    };
+    match result {
         Ok(code) => code,
         Err(message) => {
             if interrupted.load(Ordering::Relaxed) {
@@ -245,6 +321,12 @@ fn supplied_path(cwd: &Path, value: &OsStr) -> PathBuf {
     raw.push(b'/');
     raw.extend_from_slice(value.as_bytes());
     PathBuf::from(OsString::from_vec(raw))
+}
+fn ledger_path(logical: &Path, repository: &repository::Repository) -> PathBuf {
+    std::env::var_os("OMS_SLURM_SUBMITS_FILE")
+        .filter(|v| !v.is_empty())
+        .map(|v| supplied_path(logical, &v))
+        .unwrap_or_else(|| supplied_path(&repository.root, OsStr::new(".oms/slurm-submits.jsonl")))
 }
 fn execute(
     mut options: Options,
@@ -310,10 +392,7 @@ fn execute(
         run_args.push(format!("oms-key={}", key.short).into());
     }
     run_args.extend_from_slice(args);
-    let ledger = std::env::var_os("OMS_SLURM_SUBMITS_FILE")
-        .filter(|v| !v.is_empty())
-        .map(|v| supplied_path(&logical, &v))
-        .unwrap_or_else(|| supplied_path(&repository.root, OsStr::new(".oms/slurm-submits.jsonl")));
+    let ledger = ledger_path(&logical, repository);
     storage::validate_path(&ledger).map_err(str::to_owned)?;
     if options.dry {
         let status = ledger::status(&ledger, &key)?;
@@ -349,6 +428,7 @@ fn execute(
             tag,
             store_args,
             args,
+            provenance: &options.provenance,
         },
         interrupted,
     )
@@ -368,8 +448,14 @@ fn execute(
         }
         Begin::Started { attempt, .. } => attempt,
     };
+    // A bare `sbatch` may be redirected (tests, wrapper installs); an explicit
+    // path was already validated by name and is used as given.
+    let program = match std::env::var_os("OMS_SLURM_SBATCH_BIN") {
+        Some(bin) if options.command[0] == "sbatch" && !bin.is_empty() => bin,
+        _ => options.command[0].clone(),
+    };
     match scheduler::run(
-        &options.command[0],
+        &program,
         &run_args,
         &caller,
         scheduler::Input::Caller,

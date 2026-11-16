@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 impl Plan<'_> {
     pub(crate) fn view(&self, s: &mut Snapshot, t: &Value, details: bool) -> Result<Value> {
         let mut v = t.clone();
+        let stale = crate::contracts::stale(&s.registry, t)?;
+        v.set("contract_stale", Value::Bool(!stale.is_empty()))?;
+        v.set("stale_contracts", list(stale.iter().map(String::as_str)))?;
         if s.unverified.contains(t.text("id")) {
             v.set("state", string("blocked"))?;
             v.set("stored_state", t.get("state").clone())?;

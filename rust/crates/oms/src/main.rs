@@ -420,6 +420,8 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                 b"experiment",
                 b"benchmark",
                 b"doctor",
+                b"ssh-adapter",
+                b"exec-snapshot",
             ]
             .contains(&bytes);
             return Err(invalid_command(&arg));

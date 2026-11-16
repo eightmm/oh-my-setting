@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -296,4 +297,310 @@ pub fn pending(
     doc["suggested_order"] =
         json!({"label": "suggestion", "basis": "pairwise results only", "branches": order});
     Ok(doc)
+}
+
+/// Result of re-verifying candidate commits merged together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CombinedOutcome {
+    Verified {
+        combined_sha: String,
+        tree_sha: String,
+    },
+    MergeConflict {
+        commit: String,
+        stderr: String,
+    },
+    VerificationFailed {
+        commit: String,
+        code: i32,
+        stdout: String,
+        stderr: String,
+    },
+    TargetDrifted {
+        expected_base_sha: String,
+        actual_base_sha: String,
+    },
+}
+
+const COMBINED_WALL: Duration = Duration::from_secs(600);
+const COMBINED_OUTPUT: usize = 1024 * 1024;
+const COMBINED_TEXT: usize = 16 * 1024;
+
+struct Raw {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+fn tail(raw: &[u8]) -> String {
+    let at = raw.len().saturating_sub(COMBINED_TEXT);
+    String::from_utf8_lossy(&raw[at..]).into_owned()
+}
+/// Isolated Git: ambient `GIT_*` state and user/system configuration never
+/// reach the merge, and hooks cannot run during checkout or merge.
+fn git_raw(dir: &Path, args: &[&str]) -> Result<Raw> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args([
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "user.name=oms",
+        "-c",
+        "user.email=oms@localhost",
+        "-C",
+    ])
+    .arg(dir)
+    .args(args);
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("GIT_")
+        {
+            cmd.env_remove(key);
+        }
+    }
+    let out = cmd
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|_| Error::new(2, "local Git unavailable"))?;
+    Ok(Raw {
+        code: out.status.code().unwrap_or(128),
+        stdout: tail(&out.stdout),
+        stderr: tail(&out.stderr),
+    })
+}
+fn git_ok(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = git_raw(dir, args)?;
+    require(
+        out.code == 0,
+        format!(
+            "git {} failed: {}",
+            args.first().unwrap_or(&""),
+            out.stderr.trim()
+        ),
+    )?;
+    Ok(out.stdout.trim().to_owned())
+}
+fn resolve(repo: &Path, reference: &str) -> Result<String> {
+    let sha = git_ok(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )
+    .map_err(|_| Error::new(2, "cannot resolve commit reference"))?;
+    require(value::commit(&sha), "reference did not resolve to a commit")?;
+    Ok(sha)
+}
+/// Private detached worktree: removed with its metadata on every exit path and
+/// never the primary checkout.
+struct Worktree {
+    repo: PathBuf,
+    root: PathBuf,
+    path: PathBuf,
+    added: bool,
+}
+impl Worktree {
+    fn new(repo: &Path, base: &str) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let tmp = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = tmp.join(value::random("oms-combined-")?);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .map_err(|_| Error::new(2, "cannot create private combined-verification directory"))?;
+        let mut guard = Self {
+            repo: repo.to_owned(),
+            path: root.join("tree"),
+            root,
+            added: false,
+        };
+        let path = guard.path.to_string_lossy().into_owned();
+        guard.added = true;
+        git_ok(repo, &["worktree", "add", "--detach", &path, base])?;
+        Ok(guard)
+    }
+}
+impl Drop for Worktree {
+    fn drop(&mut self) {
+        if self.added {
+            let path = self.path.to_string_lossy().into_owned();
+            let _ = git_raw(&self.repo, &["worktree", "remove", "--force", &path]);
+            let _ = git_raw(&self.repo, &["worktree", "prune"]);
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+fn run_verify(argv: &[OsString], dir: &Path, interrupted: &AtomicBool) -> Result<Raw> {
+    use oms_supervisor::capture::{CaptureOptions, LimitAction};
+    use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
+    let mut request = Request::new(argv.to_vec());
+    request.cwd = Some(dir.to_owned());
+    request.stdin = None;
+    request.streams = Streams::Separate;
+    request.scope = Scope::ProcessGroup;
+    request.deadline = Instant::now().checked_add(COMBINED_WALL);
+    request.remove_environment = std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| {
+            key.to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("GIT_")
+        })
+        .collect();
+    request.capture = CaptureOptions {
+        max_bytes: COMBINED_OUTPUT,
+        on_limit: LimitAction::Terminate,
+        lines: None,
+    };
+    request.stderr_capture = Some(request.capture.clone());
+    // Reactor::new keeps process-global child ownership untouched, so this is
+    // safe beside other test or worker threads; dedicated() would refuse.
+    let mut reactor = Reactor::new();
+    let id = reactor
+        .start(request)
+        .map_err(|e| Error::new(2, e.to_string()))?;
+    let mut cancelled = false;
+    loop {
+        if interrupted.load(Ordering::Acquire) && !cancelled {
+            reactor
+                .stop(id, StopReason::Cancelled)
+                .map_err(|e| Error::new(2, e))?;
+            cancelled = true;
+        }
+        match reactor
+            .poll(id, Duration::from_millis(50))
+            .map_err(|e| Error::new(2, e))?
+        {
+            Progress::Pending(_) => {}
+            Progress::Complete(done) => {
+                require(
+                    done.cleanup_complete() && done.output_complete(),
+                    "combined verification supervision incomplete",
+                )?;
+                return match done.stop {
+                    Some(StopReason::Cancelled) => {
+                        Err(Error::new(130, "combined verification interrupted"))
+                    }
+                    Some(StopReason::Deadline) => Err(Error::new(
+                        124,
+                        "combined verification exceeded its wall deadline",
+                    )),
+                    Some(_) => Err(Error::new(
+                        125,
+                        "combined verification exceeded its output bound or was stopped",
+                    )),
+                    None => Ok(Raw {
+                        code: done.exit.map_or(125, |e| e.shell_code()),
+                        stdout: tail(&done.stdout.bytes),
+                        stderr: tail(&done.stderr.map_or_else(Vec::new, |s| s.bytes)),
+                    }),
+                };
+            }
+        }
+    }
+}
+/// Merge `candidate_commits` on a detached scratch worktree at
+/// `expected_base_sha`, run the verifier there, then compare-and-swap check
+/// that `base_ref` did not move. The primary checkout and every ref stay
+/// untouched; a pass proves only this exact combination on this exact base.
+pub fn verify_combined(
+    repo: &Path,
+    base_ref: &str,
+    expected_base_sha: &str,
+    candidate_commits: &[String],
+    verify_argv: Option<&[OsString]>,
+    interrupted: &AtomicBool,
+) -> Result<CombinedOutcome> {
+    crate::checkpoint(interrupted)?;
+    require(
+        !candidate_commits.is_empty(),
+        "no candidate commits to combine",
+    )?;
+    require(
+        !base_ref.is_empty()
+            && !base_ref.starts_with('-')
+            && !base_ref
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace()),
+        "invalid base reference",
+    )?;
+    require(
+        value::commit(expected_base_sha),
+        "expected base must be a full commit SHA",
+    )?;
+    for commit in candidate_commits {
+        require(value::commit(commit), "candidate must be a full commit SHA")?;
+    }
+    let repo =
+        std::fs::canonicalize(repo).map_err(|_| Error::new(2, "cannot resolve repository"))?;
+    git_ok(&repo, &["rev-parse", "--git-dir"])?;
+    let drifted = |actual: String| CombinedOutcome::TargetDrifted {
+        expected_base_sha: expected_base_sha.to_owned(),
+        actual_base_sha: actual,
+    };
+    let actual = resolve(&repo, base_ref)?;
+    if actual != expected_base_sha {
+        return Ok(drifted(actual));
+    }
+    for commit in candidate_commits {
+        resolve(&repo, commit)?;
+    }
+    let worktree = Worktree::new(&repo, expected_base_sha)?;
+    for commit in candidate_commits {
+        crate::checkpoint(interrupted)?;
+        let merged = git_raw(
+            &worktree.path,
+            &["merge", "--no-ff", "--no-edit", "--no-verify", commit],
+        )?;
+        if merged.code != 0 {
+            let mut stderr = merged.stderr;
+            stderr.push_str(&merged.stdout);
+            return Ok(CombinedOutcome::MergeConflict {
+                commit: commit.clone(),
+                stderr,
+            });
+        }
+    }
+    let combined = git_ok(&worktree.path, &["rev-parse", "HEAD"])?;
+    if let Some(argv) = verify_argv.filter(|argv| !argv.is_empty()) {
+        let out = run_verify(argv, &worktree.path, interrupted)?;
+        if out.code != 0 {
+            return Ok(CombinedOutcome::VerificationFailed {
+                commit: combined,
+                code: out.code,
+                stdout: out.stdout,
+                stderr: out.stderr,
+            });
+        }
+    }
+    crate::checkpoint(interrupted)?;
+    let after = resolve(&repo, base_ref)?;
+    if after != expected_base_sha {
+        return Ok(drifted(after));
+    }
+    let tree = git_ok(&worktree.path, &["rev-parse", "HEAD^{tree}"])?;
+    require(
+        value::commit(&combined) && value::commit(&tree),
+        "combined merge produced no commit identity",
+    )?;
+    Ok(CombinedOutcome::Verified {
+        combined_sha: combined,
+        tree_sha: tree,
+    })
 }

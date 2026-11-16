@@ -257,6 +257,23 @@ fn dispatch_owns_runtime_subcommands_and_leaves_unowned_tools_to_legacy() {
     assert_eq!(owned.status.code(), Some(0));
     assert!(!owned.stdout.is_empty());
 
+    for sub in ["ssh-adapter", "exec-snapshot"] {
+        let out = Command::new(f.binary())
+            .arg("--oms-dispatch")
+            .arg(&f.0)
+            .args([
+                "1111111111111111111111111111111111111111",
+                "--",
+                "runtime",
+                sub,
+                "--help",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{sub}");
+        assert!(!out.stdout.is_empty(), "{sub}");
+    }
+
     let unowned = Command::new(f.binary())
         .arg("--oms-dispatch")
         .arg(&f.0)
@@ -2114,6 +2131,8 @@ fn frontdoor_routes_navigation_and_native_commands_without_python() {
         vec!["room", "--help"],
         vec!["agent-plan", "--help"],
         vec!["runtime", "envelope", "--help"],
+        vec!["runtime", "ssh-adapter", "--help"],
+        vec!["runtime", "exec-snapshot", "--help"],
     ] {
         let out = f
             .command(&bin, &f.binary())

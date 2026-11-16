@@ -15,6 +15,7 @@ pub mod goal;
 pub mod handoff;
 mod install;
 pub mod intent;
+mod parallel;
 pub mod planning;
 pub mod receipt;
 pub mod runner;
@@ -25,6 +26,7 @@ pub mod value;
 pub mod verify;
 
 use cli::Args;
+pub use conflicts::{CombinedOutcome, verify_combined};
 pub use oms_command_plan::{completion, decision, retirement};
 pub use oms_command_task::{
     consumers as task_consumers, observe as verify_observe, packet as handoff_packet,
@@ -98,7 +100,14 @@ pub fn run_with_services(
         match tool {
             "intent" => intent::execute(&context, &args),
             "plan-from-spec" => planning::execute(&context, &args),
-            "plan-run" => runner::execute(&context, &args),
+            "plan-run" if args.flag("parallel") => parallel::execute(&context, &args),
+            "plan-run" => {
+                require(
+                    !args.has("max-writers") && !args.has("max-review-backlog"),
+                    "--max-writers and --max-review-backlog require --parallel",
+                )?;
+                runner::execute(&context, &args)
+            }
             "autopilot" => receipt::execute(&context, &args),
             "goal-drive" => goal::execute(&context, &args),
             "install-plan" => install::execute(&context, &args),

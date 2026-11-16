@@ -114,9 +114,12 @@ impl Args {
                     "fallback-model",
                     "reasoning-effort",
                     "context-pack",
+                    "max-writers",
+                    "max-review-backlog",
                 ],
                 &[
                     "next",
+                    "parallel",
                     "land",
                     "auto-repair",
                     "allow-verifier-change",
@@ -247,7 +250,7 @@ pub(crate) fn usage(tool: &str) -> &'static str {
             "Usage: oms plan-from-spec [--repo PATH] [--to PROVIDER] [--max-tasks 1..12]\n       oms plan-from-spec --apply FILE --expected-proposal-sha256 SHA\n       oms plan-from-spec --validate-spec FILE | --scope-only | --roadmap\nOptions: --allowed PATHS --id-prefix PREFIX --milestone ID --discover\n         --worker-provider PROVIDER --collaboration off|auto\n         --model MODEL --fallback-model MODEL --reasoning-effort E --provider-timeout DUR\nGenerated proposals never apply themselves. Apply binds exact reviewed bytes, plan CAS, base, spec and acceptance surface."
         }
         "plan-run" => {
-            "Usage: oms plan-run --to PROVIDER (--id ID | --next) [--repo PATH]\nOptions: --repair 0..3 --land --auto-repair --retry-known --dry-run\n         --model MODEL --fallback-model MODEL --reasoning-effort E (auto|low|medium|high|xhigh|max|ultra)\n         --allow-verifier-change --allow-floor-change REASON --context-pack FILE\nRuns one preauthorized task; stops in review unless --land explicitly requests admission. Never commits or publishes."
+            "Usage: oms plan-run --to PROVIDER (--id ID | --next) [--repo PATH]\n       oms plan-run --to PROVIDER --parallel [--max-writers 1..8] [--max-review-backlog 1..64] [--repo PATH]\nOptions: --repair 0..3 --land --auto-repair --retry-known --dry-run\n         --model MODEL --fallback-model MODEL --reasoning-effort E (auto|low|medium|high|xhigh|max|ultra)\n         --allow-verifier-change --allow-floor-change REASON --context-pack FILE\nRuns one preauthorized task; stops in review unless --land explicitly requests admission. Never commits or publishes.\n--parallel (opt-in; one controller per state repository) keeps up to --max-writers (default 2) non-overlapping ready tasks running, refilling each slot as a task ends. A failed task releases only its own lease. Landing is serialized. Exit 3: review backlog reached --max-review-backlog and no new task was claimed; 1: a task failed; 130: interrupted; 75: another controller holds the lock. --id and --dry-run are refused."
         }
         "autopilot" => {
             "Usage: oms autopilot [options] propose|run|status|abandon|reenter|shadow\nOptions: --proposal FILE --expected-proposal-sha256 SHA --repo PATH\n         --planner P --worker P --reviewer P --allowed PATHS --base BRANCH --remote NAME\n         --max-cycles 1..10 --initial-tasks 1..12 --replan-tasks 1..2\n         --auto-repair --retry-known --allow-verifier-change --allow-floor-change REASON\n         --review-mode shadow|gate|off --collaboration off|auto --draft-pr --discover\n         --provider-timeout DUR --ROLE-timeout DUR --ROLE-model MODEL\n         --ROLE-fallback-model MODEL --ROLE-reasoning-effort E --reason TEXT --session ID\nExit 4 requires exact proposal review; unsafe stops exit 3. Frozen contracts, parks and exhausted lifetime budgets cannot silently reset."

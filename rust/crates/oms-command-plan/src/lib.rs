@@ -10,6 +10,7 @@ pub mod acceptance;
 mod approval;
 mod cli;
 pub mod completion;
+mod contracts;
 pub mod decision;
 mod engine;
 pub mod floor;

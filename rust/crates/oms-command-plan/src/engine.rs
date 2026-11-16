@@ -208,6 +208,7 @@ pub struct Snapshot {
     pub generation: Option<Value>,
     pub unverified: BTreeSet<String>,
     pub contract: Value,
+    pub(crate) registry: Value,
     pub(crate) markers: Option<Vec<Value>>,
     pub(crate) settled: BTreeSet<String>,
 }
@@ -384,6 +385,7 @@ impl<'a> Plan<'a> {
             generation: snap.map(|s| s.generation),
             unverified: BTreeSet::new(),
             contract,
+            registry: crate::contracts::load(&self.store)?.0,
             markers: None,
             settled: BTreeSet::new(),
         };
@@ -505,7 +507,15 @@ impl<'a> Plan<'a> {
         }
         if matches!(
             req.action,
-            Init | Retire
+            ContractPropose | ContractAccept | ContractList | ContractShow
+        ) {
+            return self.locked(false, None, || crate::contracts::execute(self, req));
+        }
+        if matches!(
+            req.action,
+            RefreshContracts
+                | Init
+                | Retire
                 | ApplyProposal
                 | Add
                 | Cancel
@@ -695,7 +705,7 @@ impl<'a> Plan<'a> {
         }))
     }
     pub(crate) fn actionable(&self, s: &mut Snapshot, t: &Value) -> Result<bool> {
-        if t.get("contracts").truth()
+        if !crate::contracts::stale(&s.registry, t)?.is_empty()
             || t.get("executor_id").truth()
             || t.get("executor_soul_sha256").truth()
             || s.contract.get("satisfied") != &Value::Bool(true)
@@ -755,6 +765,7 @@ impl<'a> Plan<'a> {
                     }
                 )));
             }
+            RefreshContracts => return crate::contracts::refresh(self, req, s),
             Add => return self.add(req, s),
             ApplyProposal => return self.proposal(req, s),
             Amend => return self.amend(req, s),
@@ -769,10 +780,12 @@ impl<'a> Plan<'a> {
         require(valid_id(id), "--id must match [A-Za-z0-9._-]+")?;
         let mut t = s.task(id)?.clone();
         let state = t.text("state").to_owned();
-        if matches!(req.action, Claim | Land | Finish) && t.get("contracts").truth() {
-            return Err(error(
-                "contract_stale: contract registry verification is unavailable",
-            ));
+        if matches!(req.action, Claim | Land | Finish) {
+            let stale = crate::contracts::stale(&s.registry, &t)?;
+            require(
+                stale.is_empty(),
+                format!("contract_stale: {}", stale.join(", ")),
+            )?;
         }
         if req.action == Review && req.has("lease-id") {
             let supplied = req.value("lease-id")?;
@@ -1121,7 +1134,13 @@ impl<'a> Plan<'a> {
                 &mut task,
                 &csv(req.text("resources")?),
                 &csv(req.text("contracts")?),
-                req.text("priority")?.parse::<i32>().unwrap_or(0),
+                if req.has("priority") {
+                    req.value("priority")?
+                        .parse::<i32>()
+                        .map_err(|_| error("--priority must be an i32"))?
+                } else {
+                    0
+                },
             )?;
         }
         if !found.is_empty() {

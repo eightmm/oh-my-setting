@@ -15,6 +15,7 @@ pub mod guard;
 pub mod helpers;
 pub mod landing;
 pub mod managed;
+mod manifest;
 pub mod notes;
 pub mod red;
 pub mod report;

@@ -842,6 +842,9 @@ fn land_local(r: &Run<'_>, row: &mut V) -> Result<Output> {
     )
 }
 pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
+    if o.has("check-manifest") {
+        return crate::manifest::execute(c, o);
+    }
     match o.action("") {
         "notes" => return crate::notes::execute(c, o),
         "blame-session" => return crate::attribution::blame(c, o),

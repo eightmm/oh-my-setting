@@ -59,6 +59,9 @@ fn scan(args: &[OsString]) -> crate::Result<Scan> {
                 let digits = operand.bytes().all(|b| b.is_ascii_digit());
                 let number = operand.parse::<u64>().ok();
                 match o {
+                    "priority" => {
+                        require(operand.parse::<i32>().is_ok(), "--priority must be an i32")?
+                    }
                     "ttl" => require(
                         digits && number.is_some(),
                         "--ttl must be an integer number of seconds",

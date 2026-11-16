@@ -1007,3 +1007,209 @@ fn land_direct_still_gates_then_pushes_the_target() {
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     assert!(status.contains("\"mode\": \"direct\""), "{status}");
 }
+
+/// Multi-repo manifest fixture: repo-app depends on repo-core, repo-docs is
+/// independent. Each repo has a candidate branch one commit ahead of main.
+struct Manifest {
+    path: PathBuf,
+    receipt: PathBuf,
+    repos: Vec<(&'static str, PathBuf, String)>,
+}
+impl Manifest {
+    fn new(iso: &Isolated, verify: bool) -> Self {
+        let dir = iso.home.path();
+        let mut repos = Vec::new();
+        let mut entries = Vec::new();
+        for (id, deps) in [
+            ("repo-core", ""),
+            ("repo-app", "\"repo-core\""),
+            ("repo-docs", ""),
+        ] {
+            let repo = iso.repo(id);
+            iso.git(&repo, &["checkout", "-q", "-b", "cand"]);
+            let sha = iso.commit_file(&repo, "cand.txt");
+            iso.git(&repo, &["checkout", "-q", "main"]);
+            let counter = dir.join(format!("{id}.count"));
+            // Builtins only: the sandbox PATH holds nothing but git and bash.
+            let check = if id == "repo-core" {
+                format!(
+                    "test -e {} && echo run >> {}",
+                    dir.join("core.fixed").display(),
+                    counter.display()
+                )
+            } else {
+                format!("echo run >> {}", counter.display())
+            };
+            let cmd = if verify {
+                format!(", \"verify_cmd\": [\"bash\", \"-c\", \"{check}\"]")
+            } else {
+                String::new()
+            };
+            entries.push(format!(
+                "{{\"id\": \"{id}\", \"path\": \"{}\", \"target_ref\": \"main\", \"candidate_sha\": \"{sha}\", \"depends_on\": [{deps}]{cmd}}}",
+                repo.display()
+            ));
+            repos.push((id, repo, sha));
+        }
+        let path = dir.join("manifest.json");
+        fs::write(
+            &path,
+            format!("{{\"schema\": 1, \"repos\": [{}]}}", entries.join(", ")),
+        )
+        .unwrap();
+        Self {
+            path,
+            receipt: dir.join("manifest-receipt.json"),
+            repos,
+        }
+    }
+    fn args<'a>(&'a self, extra: &[&'a str]) -> Vec<&'a str> {
+        let mut args = vec![
+            "--check-manifest",
+            self.path.to_str().unwrap(),
+            "--manifest-receipt",
+            self.receipt.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        args
+    }
+    fn main_of(&self, iso: &Isolated, id: &str) -> String {
+        let repo = &self.repos.iter().find(|r| r.0 == id).unwrap().1;
+        iso.git_out(repo, &["rev-parse", "main"])
+    }
+    fn candidate(&self, id: &str) -> &str {
+        &self.repos.iter().find(|r| r.0 == id).unwrap().2
+    }
+    fn count(&self, iso: &Isolated, id: &str) -> usize {
+        fs::read_to_string(iso.home.path().join(format!("{id}.count")))
+            .map_or(0, |t| t.lines().count())
+    }
+}
+
+#[test]
+fn manifest_failure_holds_dependents_keeps_integrated_repos_and_resumes_idempotently() {
+    let iso = Isolated::new();
+    let m = Manifest::new(&iso, true);
+    let before: Vec<String> = ["repo-core", "repo-app", "repo-docs"]
+        .iter()
+        .map(|id| m.main_of(&iso, id))
+        .collect();
+    let args = m.args(&["--execute-manifest"]);
+    let held = iso.run_with_services("land", iso.home.path(), &args, &[]);
+    assert_eq!(held.0, 3, "{held:?}");
+    assert!(
+        held.1.contains("\"status\": \"partial-hold\""),
+        "{}",
+        held.1
+    );
+    assert!(held.1.contains("\"mode\": \"execute\""));
+    assert!(held.1.contains("\"manifest_sha256\":"));
+    let receipt = fs::read_to_string(&m.receipt).unwrap();
+    assert_eq!(receipt, held.1);
+    assert_eq!(
+        fs::metadata(&m.receipt).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let v = V::parse(receipt.as_bytes()).unwrap();
+    assert_eq!(
+        v.get("failed").array()[0].get("id").text(),
+        Some("repo-core")
+    );
+    assert_eq!(
+        v.get("blocked_dependents").array()[0].get("id").text(),
+        Some("repo-app")
+    );
+    assert_eq!(v.get("integrated").array()[0].text(), Some("repo-docs"));
+    // The independent repo moved; the failed one and its dependent did not.
+    assert_eq!(m.main_of(&iso, "repo-docs"), m.candidate("repo-docs"));
+    assert_eq!(m.main_of(&iso, "repo-core"), before[0]);
+    assert_eq!(m.main_of(&iso, "repo-app"), before[1]);
+    assert_eq!(m.count(&iso, "repo-docs"), 1);
+    assert_eq!(m.count(&iso, "repo-app"), 0);
+
+    // Fix lives outside the manifest, so the same manifest bytes resume.
+    fs::write(iso.home.path().join("core.fixed"), "").unwrap();
+    let resumed = iso.run_with_services("land", iso.home.path(), &args, &[]);
+    assert_eq!(resumed.0, 0, "{resumed:?}");
+    assert!(
+        resumed.1.contains("\"status\": \"integrated\""),
+        "{}",
+        resumed.1
+    );
+    assert!(
+        resumed.1.contains("already integrated (earlier receipt"),
+        "{}",
+        resumed.1
+    );
+    for id in ["repo-core", "repo-app", "repo-docs"] {
+        assert_eq!(m.main_of(&iso, id), m.candidate(id), "{id}");
+    }
+    // Integrated repos were not re-verified; the others ran once each.
+    assert_eq!(m.count(&iso, "repo-docs"), 1);
+    assert_eq!(m.count(&iso, "repo-core"), 1);
+    assert_eq!(m.count(&iso, "repo-app"), 1);
+    // A third run is a no-op.
+    let again = iso.run_with_services("land", iso.home.path(), &args, &[]);
+    assert_eq!(again.0, 0, "{again:?}");
+    assert_eq!(m.count(&iso, "repo-app"), 1);
+}
+
+#[test]
+fn manifest_check_publishes_nothing_and_execution_needs_the_publication_fence() {
+    let iso = Isolated::new();
+    let m = Manifest::new(&iso, false);
+    let before = m.main_of(&iso, "repo-core");
+    // Verification alone needs no services and moves no branch.
+    let checked = iso.run("land", iso.home.path(), &m.args(&[]));
+    assert_eq!(checked.0, 0, "{checked:?}");
+    assert!(
+        checked.1.contains("\"status\": \"verified\""),
+        "{}",
+        checked.1
+    );
+    assert_eq!(m.main_of(&iso, "repo-core"), before);
+    // Publication fails closed without a native fence.
+    let refused = iso.run("land", iso.home.path(), &m.args(&["--execute-manifest"]));
+    assert_eq!(refused.0, 2, "{refused:?}");
+    assert_eq!(m.main_of(&iso, "repo-core"), before);
+}
+
+#[test]
+fn manifest_rejects_malformed_graphs_and_missing_receipts_with_exit_two() {
+    let iso = Isolated::new();
+    let m = Manifest::new(&iso, false);
+    let text = fs::read_to_string(&m.path).unwrap();
+    let write = |t: &str| fs::write(&m.path, t).unwrap();
+    for (broken, needle) in [
+        (
+            text.replace(
+                "\"depends_on\": [\"repo-core\"]",
+                "\"depends_on\": [\"ghost\"]",
+            ),
+            "unknown depends_on",
+        ),
+        (
+            text.replace("\"id\": \"repo-docs\"", "\"id\": \"repo-core\""),
+            "duplicate repo id",
+        ),
+        (
+            text.replace("\"depends_on\": []", "\"depends_on\": [\"repo-app\"]"),
+            "cycle",
+        ),
+        (text.replacen(&m.repos[0].2, "abc", 1), "40 hex"),
+    ] {
+        write(&broken);
+        let r = iso.run("land", iso.home.path(), &m.args(&[]));
+        assert_eq!(r.0, 2, "{needle}: {r:?}");
+        assert!(r.2.contains(needle), "{needle}: {r:?}");
+        assert!(!m.receipt.exists());
+    }
+    write(&text);
+    let (code, _, err) = iso.run(
+        "land",
+        iso.home.path(),
+        &["--check-manifest", m.path.to_str().unwrap()],
+    );
+    assert_eq!(code, 2);
+    assert!(err.contains("required together"), "{err}");
+}

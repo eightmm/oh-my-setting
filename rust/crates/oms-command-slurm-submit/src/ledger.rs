@@ -178,16 +178,16 @@ pub(crate) fn line(value: &Value) -> Vec<u8> {
     bytes.push(b'\n');
     bytes
 }
-fn f<'a>(row: &'a Json, name: &str) -> Option<&'a Json> {
+pub(crate) fn f<'a>(row: &'a Json, name: &str) -> Option<&'a Json> {
     j::field(row, name)
 }
-fn kind(row: &Json, name: &str) -> bool {
+pub(crate) fn kind(row: &Json, name: &str) -> bool {
     j::is_text(f(row, "type"), name.as_bytes())
 }
 
 // Python equality for JSON values, notably True == 1 for old/foreign attempt
 // identifiers. Unhashable identifiers fail closed rather than freeing a key.
-fn identity(value: Option<&Json>) -> Result<Vec<u8>> {
+pub(crate) fn identity(value: Option<&Json>) -> Result<Vec<u8>> {
     match value {
         None | Some(Json::Null) => Ok(b"n".to_vec()),
         Some(Json::Bool(b)) => Ok(if *b { b"d1".to_vec() } else { b"d0".to_vec() }),
@@ -218,23 +218,25 @@ fn identity(value: Option<&Json>) -> Result<Vec<u8>> {
         _ => Err("unhashable attempt identifier".into()),
     }
 }
-struct State<'a> {
-    name: &'static str,
-    row: Option<&'a Json>,
+pub(crate) struct State<'a> {
+    pub name: &'static str,
+    pub row: Option<&'a Json>,
 }
-fn state<'a>(rows: &'a [Json], key: &Key) -> Result<State<'a>> {
-    use std::collections::BTreeMap;
-    let matching = match j::os(&key.value) {
+pub(crate) fn rows_for<'a>(rows: &'a [Json], key: &OsStr) -> Vec<&'a Json> {
+    let matching = match j::os(key) {
         Value::String(ref s) => j::encode(&Value::String(s.clone()), true),
         _ => unreachable!(),
     };
-    let mine: Vec<_> = rows
-        .iter()
+    rows.iter()
         .filter(|r| {
             matches!(f(r, "key"), Some(Json::String(_)))
                 && j::encode(&j::copy(f(r, "key")), true) == matching
         })
-        .collect();
+        .collect()
+}
+pub(crate) fn state<'a>(rows: &'a [Json], key: &OsStr) -> Result<State<'a>> {
+    use std::collections::BTreeMap;
+    let mine = rows_for(rows, key);
     let mut results = BTreeMap::new();
     for row in &mine {
         if kind(row, "submitted") || kind(row, "failed") {
@@ -281,7 +283,7 @@ fn state<'a>(rows: &'a [Json], key: &Key) -> Result<State<'a>> {
 /// unknown fields remain compatible and never become a second state store.
 pub fn status(path: &Path, key: &Key) -> Result<Vec<u8>> {
     let rows = storage::load(path, &key.cwd).map_err(str::to_owned)?;
-    let state = state(&rows, key)?;
+    let state = state(&rows, &key.value)?;
     let mut result = j::object([("state", j::text(state.name))]);
     if let Some(row) = state.row {
         for name in ["job_id", "ts", "attempt"] {
@@ -348,12 +350,30 @@ pub struct BeginOptions<'a> {
     pub tag: &'a str,
     pub store_args: bool,
     pub args: &'a [OsString],
+    pub provenance: &'a Provenance,
+}
+/// Optional links from an intent to the orchestrator task that requested it.
+#[derive(Default)]
+pub struct Provenance {
+    pub task_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub exec_snapshot_sha256: Option<String>,
+}
+pub(crate) const PROVENANCE_FIELDS: [&str; 3] = ["task_id", "attempt_id", "exec_snapshot_sha256"];
+impl Provenance {
+    fn fields(&self) -> [(&'static str, Option<&String>); 3] {
+        [
+            ("task_id", self.task_id.as_ref()),
+            ("attempt_id", self.attempt_id.as_ref()),
+            ("exec_snapshot_sha256", self.exec_snapshot_sha256.as_ref()),
+        ]
+    }
 }
 pub enum Begin {
     Started { attempt: String, json: Vec<u8> },
     Refused { diagnostic: Vec<u8> },
 }
-fn now() -> Result<String> {
+pub(crate) fn now() -> Result<String> {
     let seconds = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|_| "clock unavailable")?
@@ -399,7 +419,7 @@ pub fn begin(
     }
     let guard = acquire(path, cwd, interrupted)?;
     let rows = storage::load(path, cwd).map_err(str::to_owned)?;
-    let state = state(&rows, key)?;
+    let state = state(&rows, &key.value)?;
     if matches!(state.name, "submitted" | "unknown") && !options.force {
         return Ok(Begin::Refused {
             diagnostic: describe(&state, &rows, &key.short),
@@ -424,6 +444,11 @@ pub fn begin(
             if name != "short" {
                 j::put(&mut row, &name, j::copy_value(value));
             }
+        }
+    }
+    for (name, value) in options.provenance.fields() {
+        if let Some(value) = value {
+            j::put(&mut row, name, j::text(value));
         }
     }
     if options.store_args && crate::clean(&crate::joined(options.args)) {

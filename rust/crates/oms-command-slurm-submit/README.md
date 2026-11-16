@@ -27,6 +27,8 @@ interruption flag from its existing signal handling.
 | Submitted repeat | Prior job/time, reconciliation advice, status 3; no scheduler invocation |
 | Unknown attempt | Comment-search or untagged-attempt advice, status 3; never infer scheduler failure |
 | Failed attempt | Retry permitted; a failed forced attempt leaves the previous window authoritative |
+| `reconcile (--key KEY \| --job-id ID) [--repo PATH] [--json]` | Query squeue/sacct (bounded), classify, persist a recovered `submitted` and terminal `reconciled` row; status 0 active/succeeded, 1 other terminal, 75 unknown |
+| `--task-id`, `--attempt-id`, `--exec-snapshot`, `--idempotency-key` | Optional provenance on `intent` rows (env `OMS_TASK_ID`, `OMS_ATTEMPT_ID`, `OMS_EXEC_SNAPSHOT_SHA256`); `--idempotency-key` is a `--key` alias |
 | Invalid options/command/script | Canonical usage diagnostic, status 2 |
 | Scheduler failure | Append failed result and preserve scheduler status; scheduler status 3 maps to 1 |
 | Interruption or lost observation before a process answer | Kill/reap the local scheduler client, retain intent as unknown, status 130 or 1; no automatic retry |

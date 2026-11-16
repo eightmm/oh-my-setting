@@ -61,7 +61,8 @@ impl Invocation {
 /// Extend the plan producer's service contract instead of creating alternate
 /// approval, lifecycle, room or acceptance authorities. Host callbacks must
 /// dispatch native implementations and preserve their exact exit/output.
-pub trait Services: oms_command_plan::Services {
+/// `Sync` lets `plan-run --parallel` share one host across worker threads.
+pub trait Services: oms_command_plan::Services + Sync {
     /// Resolve the native registry/model-routing contract without calling a
     /// provider. The returned exact route is used for both failure identity
     /// and delegation, preventing defaults from moving between those steps.

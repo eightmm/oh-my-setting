@@ -1,6 +1,10 @@
 Usage: agent-plan.sh [--repo PATH] [--file PATH] <command> [options]
 
 Commands:
+  contract-propose --id ID --summary TEXT [--scope-paths CSV] [--decision-artifact REPO_REL] [--json]
+  contract-accept --id ID --version N [--json]  Parent-only acceptance.
+  contract-list [--json] | contract-show --id ID [--json]
+  refresh-contracts --task ID [--json]  Parent-only pin refresh.
   snapshot-decision --decision-artifact REPO_RELATIVE_FILE
          --expected-decision-artifact-sha256 SHA
                                      Parent-only capture of fresh reviewed raw
@@ -39,7 +43,7 @@ Commands:
                                      the plan lock. Exact replay is idempotent.
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
-         [--resources CSV] [--priority I32]
+         [--resources CSV] [--contracts CSV] [--priority I32]
          [--assignment '{"provider":"claude","workload":"routine"}']
          [--verify CMD] [--role NAME] [--discovered-from TASK_ID]
                                      --discovered-from records work found while

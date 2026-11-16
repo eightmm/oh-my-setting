@@ -1,13 +1,20 @@
 //! OpenSSH transport for repository bundles and remote commands.
-use crate::{Result, error, require, router::Response};
+use crate::{Result, error, require, router::Response, status};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-const USAGE: &str =
-    "usage: oms runtime ssh-adapter <probe|sync-bundle|exec> [options] [-- command...]";
+const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]";
+const DEFAULT_COLLECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_COLLECT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_LEDGER_OUTPUT: usize = 512 * 1024;
+const MAX_STDERR_BYTES: u64 = 64 * 1024;
 
 fn ssh_control_path(host: &str, port: Option<u16>) -> Result<String> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -62,11 +69,20 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     }
     let action = args[0].to_str().ok_or_else(|| error("invalid action"))?;
     require(
-        ["probe", "sync-bundle", "exec"].contains(&action),
+        [
+            "probe",
+            "sync-bundle",
+            "exec",
+            "reconcile",
+            "cancel",
+            "collect",
+        ]
+        .contains(&action),
         "unknown ssh-adapter action",
     )?;
     require(
         action == "probe"
+            || action == "reconcile"
             || std::env::var_os("OMS_HARNESS_CHILD").as_deref() != Some(OsStr::new("1")),
         "a harness child may only use read-only runtime actions",
     )?;
@@ -75,6 +91,14 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     let mut repo = None;
     let mut remote = None;
     let mut base = None;
+    let mut target = None;
+    let mut snapshot = None;
+    let mut op_id = None;
+    let mut grace_seconds = None;
+    let mut remote_path_arg = None;
+    let mut dest = None;
+    let mut expected_sha256 = None;
+    let mut max_bytes = None;
     let mut pretty = false;
     let mut tail = Vec::new();
     let mut i = 1;
@@ -99,6 +123,16 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             "--repo" if action != "probe" => &mut repo,
             "--remote-dir" if action != "probe" => &mut remote,
             "--base" if action == "sync-bundle" => &mut base,
+            "--target" if ["exec", "reconcile", "cancel", "collect"].contains(&action) => {
+                &mut target
+            }
+            "--snapshot" if action == "exec" => &mut snapshot,
+            "--op-id" if ["exec", "reconcile", "cancel"].contains(&action) => &mut op_id,
+            "--grace-seconds" if action == "cancel" => &mut grace_seconds,
+            "--remote-path" if action == "collect" => &mut remote_path_arg,
+            "--dest" if action == "collect" => &mut dest,
+            "--expected-sha256" if action == "collect" => &mut expected_sha256,
+            "--max-bytes" if action == "collect" => &mut max_bytes,
             _ => return Err(error(format!("unknown option: {flag}"))),
         };
         i += 1;
@@ -135,9 +169,322 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 .ok_or_else(|| error("invalid SSH port"))
         })
         .transpose()?;
+    if let Some(id) = op_id.as_deref() {
+        validate_op_id(id)?;
+    }
+    let grace_seconds = grace_seconds
+        .map(|raw| {
+            raw.parse::<u64>()
+                .ok()
+                .filter(|n| (1..=300).contains(n))
+                .ok_or_else(|| error("--grace-seconds must be an integer in 1..=300"))
+        })
+        .transpose()?
+        .unwrap_or(5);
+    let max_bytes = max_bytes
+        .map(|raw| {
+            raw.parse::<u64>()
+                .ok()
+                .filter(|n| (1..=MAX_COLLECT_BYTES).contains(n))
+                .ok_or_else(|| {
+                    error(format!(
+                        "--max-bytes must be an integer in 1..={MAX_COLLECT_BYTES}"
+                    ))
+                })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_COLLECT_MAX_BYTES);
+    if let Some(digest) = expected_sha256.as_deref() {
+        validate_sha256_hex(digest, "--expected-sha256")?;
+    }
+    if let Some(rp) = remote_path_arg.as_deref() {
+        validate_remote_rel_path(rp)?;
+    }
     let control = ssh_control_path(&host, port)?;
     assert!(control.len() <= 80);
     require(!interrupted.load(Ordering::Relaxed), "interrupted")?;
+    let mut ssh = build_ssh(&host, port, &control);
+    let mut value = serde_json::json!({"schema":1,"action":action,"host":host});
+    let code;
+    if action == "probe" {
+        let out = ssh.arg("printf ok").output().map_err(error)?;
+        code = exit_code(out.status);
+        value["control_path"] = control.into();
+        value["exit_code"] = code.into();
+        value["reachable"] = (code == 0).into();
+        value["stdout"] = String::from_utf8_lossy(&out.stdout).into_owned().into();
+        value["stderr"] = String::from_utf8_lossy(&out.stderr).into_owned().into();
+        return json_response(code, &value, pretty);
+    }
+    let repo = cwd.join(repo.ok_or_else(|| error("--repo required"))?);
+    let remote = match remote {
+        Some(r) => {
+            require(!r.is_empty(), "--remote-dir required")?;
+            Some(r)
+        }
+        None if matches!(action, "reconcile" | "cancel") => None,
+        None => return Err(error("--remote-dir required")),
+    };
+    if action == "reconcile" || action == "cancel" {
+        let op_id = op_id.as_deref().ok_or_else(|| error("--op-id required"))?;
+        return if action == "reconcile" {
+            run_reconcile(ReconcileRequest {
+                cwd,
+                repo: &repo,
+                host: &host,
+                port,
+                remote: remote.as_deref(),
+                target: target.as_deref(),
+                op_id,
+                control: &control,
+                pretty,
+            })
+        } else {
+            run_cancel(CancelRequest {
+                cwd,
+                repo: &repo,
+                host: &host,
+                port,
+                remote: remote.as_deref(),
+                target: target.as_deref(),
+                op_id,
+                grace_seconds,
+                control: &control,
+                pretty,
+            })
+        };
+    }
+    let remote = remote.expect("non-reconcile/cancel requires --remote-dir");
+    if let Some(target) = target.as_deref() {
+        validate_target(&repo, target, &host, &remote)?;
+    }
+    if let Some(snapshot) = snapshot.as_deref() {
+        validate_snapshot(&repo, snapshot)?;
+    }
+    if action == "collect" {
+        let remote_path_rel = remote_path_arg
+            .as_deref()
+            .ok_or_else(|| error("--remote-path required"))?;
+        let dest_raw = dest.as_deref().ok_or_else(|| error("--dest required"))?;
+        return run_collect(CollectRequest {
+            cwd,
+            host: &host,
+            port,
+            remote: &remote,
+            remote_path_rel,
+            dest_raw,
+            expected_sha256: expected_sha256.as_deref(),
+            max_bytes,
+            control: &control,
+            pretty,
+        });
+    }
+    value["remote_dir"] = remote.clone().into();
+    let head = git(&repo, &["rev-parse", "--verify", "HEAD"])?;
+    let head = if head.status.success() {
+        String::from_utf8_lossy(&head.stdout).trim().to_owned()
+    } else {
+        String::new()
+    };
+    value["head_sha"] = head.clone().into();
+    if action == "sync-bundle" {
+        require(!head.is_empty(), "repository has no HEAD")?;
+        let range;
+        let reference = match base.as_deref() {
+            None => "HEAD",
+            Some(base) => {
+                require(!base.starts_with('-'), "invalid bundle ref")?;
+                let resolved = git(
+                    &repo,
+                    &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                )?;
+                require(resolved.status.success(), "cannot resolve --base commit")?;
+                let base_sha = String::from_utf8_lossy(&resolved.stdout).trim().to_owned();
+                value["base_sha"] = base_sha.clone().into();
+                if base_sha == head {
+                    "HEAD"
+                } else {
+                    range = format!("{base_sha}..HEAD");
+                    &range
+                }
+            }
+        };
+        let temp = TempDir::new()?;
+        let bundle = temp.0.join("repo.bundle");
+        let result = Command::new("git")
+            .current_dir(&repo)
+            .arg("bundle")
+            .arg("create")
+            .arg(&bundle)
+            .arg(reference)
+            .output()
+            .map_err(error)?;
+        require(
+            result.status.success(),
+            format!(
+                "git bundle failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ),
+        )?;
+        let file = std::fs::File::open(&bundle).map_err(error)?;
+        value["bundle_bytes"] = file.metadata().map_err(error)?.len().into();
+        let script = format!(
+            "set -eu; mkdir -p -- {d}; cd -- {d}; t=$(mktemp .oms-bundle.XXXXXX); trap 'rm -f -- \"$t\"' EXIT HUP INT TERM; cat > \"$t\"; if [ ! -d .git ]; then git init; fi; test -z \"$(git status --porcelain)\"; git fetch \"$t\" HEAD; git checkout --no-overwrite-ignore --detach FETCH_HEAD; test \"$(git rev-parse HEAD)\" = {h}",
+            d = remote_path(&remote),
+            h = quote(&head)
+        );
+        // The bundle is outside the checkout so its presence cannot make it dirty.
+        let script = script.replace(
+            "mktemp .oms-bundle.XXXXXX",
+            "mktemp \"${TMPDIR:-/tmp}/oms-bundle.XXXXXX\"",
+        );
+        let out = ssh
+            .arg(format!("sh -lc {}", quote(&script)))
+            .stdin(Stdio::from(file))
+            .output()
+            .map_err(error)?;
+        code = exit_code(out.status);
+        value["exit_code"] = code.into();
+    } else if let Some(op_id) = op_id.as_deref() {
+        require(!tail.is_empty(), "command required after --")?;
+        return run_durable_exec(DurableExecRequest {
+            cwd,
+            repo: &repo,
+            host: &host,
+            port,
+            remote: &remote,
+            target: target.as_deref(),
+            snapshot: snapshot.as_deref(),
+            head_sha: &head,
+            op_id,
+            tail: &tail,
+            control: &control,
+            pretty,
+        });
+    } else {
+        require(!tail.is_empty(), "command required after --")?;
+        let command = tail
+            .iter()
+            .map(|v| {
+                v.to_str()
+                    .map(quote)
+                    .ok_or_else(|| error("command requires Unicode text"))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join(" ");
+        let script = format!("cd -- {} && {}", remote_path(&remote), command);
+        let remote_command = format!("sh -lc {}", quote(&script));
+        value["command_sha256"] = sha256(remote_command.as_bytes()).into();
+        value["control_path"] = control.into();
+        value["started_at"] = now()?.into();
+        let out = ssh.arg(&remote_command).output().map_err(error)?;
+        value["completed_at"] = now()?.into();
+        code = exit_code(out.status);
+        value["exit_code"] = code.into();
+        value["stdout"] = String::from_utf8_lossy(&out.stdout).into_owned().into();
+        value["stderr"] = String::from_utf8_lossy(&out.stderr).into_owned().into();
+    }
+    json_response(code, &value, pretty)
+}
+
+fn read_runtime_file(repo: &Path, path: &Path) -> Result<Vec<u8>> {
+    let root = oms_safe_fs::Root::open(repo).map_err(|e| error(format!("repository: {e:?}")))?;
+    root.read_no_follow(
+        path,
+        oms_safe_fs::ByteReadOptions {
+            missing_ok: false,
+            max_bytes: crate::storage::MAX_STATE,
+        },
+    )
+    .map_err(|e| error(format!("runtime input: {e:?}")))
+}
+
+fn validate_target(repo: &Path, name: &str, host: &str, remote: &str) -> Result<()> {
+    let registry = crate::value::parse(&read_runtime_file(repo, Path::new(crate::targets::FILE))?)?;
+    crate::value::keys(&registry, &["schema", "targets"], &[])?;
+    require(
+        registry.get("schema").is_int(1),
+        "invalid remote target registry",
+    )?;
+    let row = registry
+        .get("targets")
+        .opt(name)
+        .ok_or_else(|| error("unknown remote target"))?;
+    require(
+        crate::targets::approved(row)?,
+        "target execution is not approved",
+    )?;
+    require(
+        row.text("ssh_alias") == host && row.text("workdir") == remote,
+        "target does not match SSH host and remote directory",
+    )
+}
+
+fn validate_sha256_hex(digest: &str, label: &str) -> Result<()> {
+    require(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+        format!("invalid {label}"),
+    )
+}
+
+fn validate_snapshot(repo: &Path, digest: &str) -> Result<()> {
+    validate_sha256_hex(digest, "snapshot SHA256")?;
+    let path = PathBuf::from(format!(".oms/runtime/snapshots/{digest}.json"));
+    let value = crate::value::parse(&read_runtime_file(repo, &path)?)?;
+    crate::value::keys(
+        &value,
+        &[
+            "schema",
+            "head_sha",
+            "tree_sha",
+            "lockfiles",
+            "snapshot_sha256",
+        ],
+        &[],
+    )?;
+    require(
+        value.get("schema").is_int(1)
+            && value.text("snapshot_sha256") == digest
+            && crate::value::sha(crate::value::canonical(&crate::value::without(
+                &value,
+                &["snapshot_sha256"],
+            ))?) == digest,
+        "snapshot integrity mismatch",
+    )
+}
+
+fn validate_op_id(id: &str) -> Result<()> {
+    require(
+        !id.is_empty()
+            && id.len() <= 64
+            && !id.starts_with('-')
+            && !id.starts_with('.')
+            && !id.contains("..")
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
+        "invalid --op-id",
+    )
+}
+
+fn validate_remote_rel_path(path: &str) -> Result<()> {
+    require(
+        !path.is_empty()
+            && !path.starts_with('/')
+            && !path.starts_with('~')
+            && !path.contains('\0')
+            && !path.contains('\\')
+            && path
+                .split('/')
+                .all(|c| !c.is_empty() && c != "." && c != ".."),
+        "invalid --remote-path",
+    )
+}
+
+fn build_ssh(host: &str, port: Option<u16>, control: &str) -> Command {
     let mut ssh = Command::new(std::env::var_os("OMS_SSH_BIN").unwrap_or_else(|| "ssh".into()));
     ssh.args([
         "-o",
@@ -154,116 +501,15 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     if let Some(port) = port {
         ssh.args(["-p", &port.to_string()]);
     }
-    ssh.args(["--", &host]);
-    let mut value = serde_json::json!({"schema":1,"action":action,"host":host});
-    let code;
-    if action == "probe" {
-        let out = ssh.arg("printf ok").output().map_err(error)?;
-        code = exit_code(out.status);
-        value["control_path"] = control.into();
-        value["exit_code"] = code.into();
-        value["reachable"] = (code == 0).into();
-        value["stdout"] = String::from_utf8_lossy(&out.stdout).into_owned().into();
-        value["stderr"] = String::from_utf8_lossy(&out.stderr).into_owned().into();
-    } else {
-        let repo = cwd.join(repo.ok_or_else(|| error("--repo required"))?);
-        let remote = remote
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| error("--remote-dir required"))?;
-        value["remote_dir"] = remote.clone().into();
-        let head = git(&repo, &["rev-parse", "--verify", "HEAD"])?;
-        let head = if head.status.success() {
-            String::from_utf8_lossy(&head.stdout).trim().to_owned()
-        } else {
-            String::new()
-        };
-        value["head_sha"] = head.clone().into();
-        if action == "sync-bundle" {
-            require(!head.is_empty(), "repository has no HEAD")?;
-            let range;
-            let reference = match base.as_deref() {
-                None => "HEAD",
-                Some(base) => {
-                    require(!base.starts_with('-'), "invalid bundle ref")?;
-                    let resolved = git(
-                        &repo,
-                        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-                    )?;
-                    require(resolved.status.success(), "cannot resolve --base commit")?;
-                    let base_sha = String::from_utf8_lossy(&resolved.stdout).trim().to_owned();
-                    value["base_sha"] = base_sha.clone().into();
-                    if base_sha == head {
-                        "HEAD"
-                    } else {
-                        range = format!("{base_sha}..HEAD");
-                        &range
-                    }
-                }
-            };
-            let temp = TempDir::new()?;
-            let bundle = temp.0.join("repo.bundle");
-            let result = Command::new("git")
-                .current_dir(&repo)
-                .arg("bundle")
-                .arg("create")
-                .arg(&bundle)
-                .arg(reference)
-                .output()
-                .map_err(error)?;
-            require(
-                result.status.success(),
-                format!(
-                    "git bundle failed: {}",
-                    String::from_utf8_lossy(&result.stderr)
-                ),
-            )?;
-            let file = std::fs::File::open(&bundle).map_err(error)?;
-            value["bundle_bytes"] = file.metadata().map_err(error)?.len().into();
-            let script = format!(
-                "set -eu; mkdir -p -- {d}; cd -- {d}; t=$(mktemp .oms-bundle.XXXXXX); trap 'rm -f -- \"$t\"' EXIT HUP INT TERM; cat > \"$t\"; if [ ! -d .git ]; then git init; fi; test -z \"$(git status --porcelain)\"; git fetch \"$t\" HEAD; git checkout --no-overwrite-ignore --detach FETCH_HEAD; test \"$(git rev-parse HEAD)\" = {h}",
-                d = remote_path(&remote),
-                h = quote(&head)
-            );
-            // The bundle is outside the checkout so its presence cannot make it dirty.
-            let script = script.replace(
-                "mktemp .oms-bundle.XXXXXX",
-                "mktemp \"${TMPDIR:-/tmp}/oms-bundle.XXXXXX\"",
-            );
-            let out = ssh
-                .arg(format!("sh -lc {}", quote(&script)))
-                .stdin(Stdio::from(file))
-                .output()
-                .map_err(error)?;
-            code = exit_code(out.status);
-            value["exit_code"] = code.into();
-        } else {
-            require(!tail.is_empty(), "command required after --")?;
-            let command = tail
-                .iter()
-                .map(|v| {
-                    v.to_str()
-                        .map(quote)
-                        .ok_or_else(|| error("command requires Unicode text"))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .join(" ");
-            let script = format!("cd -- {} && {}", remote_path(&remote), command);
-            let remote_command = format!("sh -lc {}", quote(&script));
-            value["command_sha256"] = sha256(remote_command.as_bytes()).into();
-            value["control_path"] = control.into();
-            value["started_at"] = now()?.into();
-            let out = ssh.arg(&remote_command).output().map_err(error)?;
-            value["completed_at"] = now()?.into();
-            code = exit_code(out.status);
-            value["exit_code"] = code.into();
-            value["stdout"] = String::from_utf8_lossy(&out.stdout).into_owned().into();
-            value["stderr"] = String::from_utf8_lossy(&out.stderr).into_owned().into();
-        }
-    }
+    ssh.args(["--", host]);
+    ssh
+}
+
+fn json_response(code: i32, value: &serde_json::Value, pretty: bool) -> Result<Response> {
     let mut stdout = if pretty {
-        serde_json::to_vec_pretty(&value)
+        serde_json::to_vec_pretty(value)
     } else {
-        serde_json::to_vec(&value)
+        serde_json::to_vec(value)
     }
     .map_err(error)?;
     stdout.push(b'\n');
@@ -272,6 +518,1226 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         stdout,
         stderr: vec![],
     })
+}
+
+fn bounded_output(bytes: &[u8]) -> String {
+    let capped = &bytes[..bytes.len().min(MAX_LEDGER_OUTPUT)];
+    String::from_utf8_lossy(capped).into_owned()
+}
+
+fn normalize_ws(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn resolve_existing(path: &Path) -> Result<PathBuf> {
+    let mut cursor = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(&cursor) {
+            Ok(mut resolved) => {
+                for name in missing.iter().rev() {
+                    resolved.push(name);
+                }
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    cursor
+                        .file_name()
+                        .ok_or_else(|| error("invalid lock target path"))?
+                        .to_owned(),
+                );
+                require(cursor.pop(), "lock target has no existing ancestor")?;
+            }
+            Err(e) => return Err(error(e)),
+        }
+    }
+}
+
+fn lock_remote_op(repo: &Path, cwd: &Path, op_id: &str) -> Result<oms_lock::Guard> {
+    let rel = PathBuf::from(format!(".oms/runtime/remote-ops/{op_id}.json"));
+    let resolved = resolve_existing(&repo.join(&rel))?;
+    let mut settings = oms_lock::Settings::from_env()
+        .map_err(|e| status(e.exit_code(), format!("remote op lock: {e}")))?;
+    settings.mode = oms_lock::Mode::Mkdir;
+    settings.timeout = Duration::from_secs(15);
+    settings.cwd = cwd.to_path_buf();
+    let root = if let Some(raw) = std::env::var_os("OMS_LOCK_DIR") {
+        let raw_bytes = raw.as_bytes();
+        let expanded = if raw_bytes == b"~" || raw_bytes.starts_with(b"~/") {
+            settings
+                .home
+                .join(OsStr::from_bytes(raw_bytes.get(2..).unwrap_or(&[])))
+        } else {
+            PathBuf::from(raw)
+        };
+        if expanded.is_absolute() {
+            expanded
+        } else {
+            cwd.join(expanded)
+        }
+    } else {
+        settings.home.join(".cache/oh-my-setting/locks")
+    };
+    let stamp = sha256(
+        resolved
+            .to_str()
+            .ok_or_else(|| error("remote op target path must be UTF-8"))?
+            .as_bytes(),
+    );
+    let path = root.join(format!("runtime-{}.lock", &stamp[..32]));
+    oms_lock::Lock::at_path(path, settings)
+        .map_err(|e| status(e.exit_code(), format!("remote op lock: {e}")))?
+        .acquire(None)
+        .map_err(|e| status(e.exit_code(), format!("remote op lock: {e}")))
+}
+
+fn ensure_remote_ops_dirs(repo: &Path) -> Result<()> {
+    let mut dir = repo.to_path_buf();
+    for segment in [".oms", "runtime", "remote-ops"] {
+        dir.push(segment);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) => {
+                require(
+                    meta.is_dir() && !meta.file_type().is_symlink(),
+                    format!("unsafe non-directory state path: {}", dir.display()),
+                )?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(error(e)),
+        }
+    }
+    Ok(())
+}
+
+fn op_ledger_rel(op_id: &str) -> PathBuf {
+    PathBuf::from(format!(".oms/runtime/remote-ops/{op_id}.json"))
+}
+
+fn read_remote_op(repo: &Path, op_id: &str) -> Result<Option<serde_json::Value>> {
+    ensure_remote_ops_dirs(repo)?;
+    let root = oms_safe_fs::Root::open(repo).map_err(|e| error(format!("repository: {e:?}")))?;
+    let bytes = root
+        .read_no_follow(
+            &op_ledger_rel(op_id),
+            oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: crate::storage::MAX_STATE,
+            },
+        )
+        .map_err(|e| error(format!("remote op ledger: {e:?}")))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let val: serde_json::Value = serde_json::from_slice(&bytes).map_err(error)?;
+    require(
+        val.get("schema").and_then(|v| v.as_i64()) == Some(1)
+            && val.get("op_id").and_then(|v| v.as_str()) == Some(op_id),
+        "corrupt remote operation ledger record",
+    )?;
+    Ok(Some(val))
+}
+
+fn write_remote_op(repo: &Path, op_id: &str, record: &serde_json::Value) -> Result<()> {
+    ensure_remote_ops_dirs(repo)?;
+    let mut encoded = serde_json::to_vec(record).map_err(error)?;
+    encoded.push(b'\n');
+    let root = oms_safe_fs::Root::open(repo).map_err(|e| error(format!("repository: {e:?}")))?;
+    let rel = op_ledger_rel(op_id);
+    root.atomic_mutate(
+        &rel,
+        oms_safe_fs::MutationOptions {
+            read: oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: crate::storage::MAX_STATE,
+            },
+            create_parent: true,
+            max_output: crate::storage::MAX_STATE,
+            preserve_existing: false,
+            expected_exists: None,
+        },
+        move |_| Ok::<_, String>(encoded),
+    )
+    .map_err(|e| error(format!("persist remote op ledger: {e:?}")))?;
+    let abs = repo.join(&rel);
+    let meta = std::fs::symlink_metadata(&abs).map_err(error)?;
+    require(
+        meta.is_file() && !meta.file_type().is_symlink(),
+        "unsafe remote op ledger file",
+    )?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(&abs, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
+    }
+    Ok(())
+}
+
+const REMOTE_SH_HELPERS: &str = r#"
+read_host_id() {
+  cur_hn=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
+  [ -n "$cur_hn" ] || cur_hn='unknown'
+  if [ -r /proc/sys/kernel/random/boot_id ]; then
+    cur_bid=$(tr -d ' \t\r\n' < /proc/sys/kernel/random/boot_id | tr -cd 'A-Za-z0-9._: +=,-')
+  elif command -v sysctl >/dev/null 2>&1; then
+    cur_bid=$(sysctl -n kern.boottime 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
+  else
+    cur_bid='unknown'
+  fi
+  [ -n "$cur_bid" ] || cur_bid='unknown'
+}
+emit_part() {
+  name="$1"; file="$2"
+  if [ -f "$file" ]; then
+    sz=$(wc -c < "$file" | tr -d ' \t\r\n')
+    printf '__OMS_PART__ %s %s\n' "$name" "$sz"
+    cat -- "$file"
+    printf '\n'
+  else
+    printf '__OMS_PART__ %s -1\n' "$name"
+  fi
+}
+find_op_dir() {
+  op_dir=""
+  if [ -n "${OMS_REMOTE_STATE_DIR:-}" ] && [ -d "$OMS_REMOTE_STATE_DIR/$op_id_arg" ]; then
+    op_dir="$OMS_REMOTE_STATE_DIR/$op_id_arg"
+  elif [ -d "$rd/.git/oms-remote-ops/$op_id_arg" ]; then
+    op_dir="$rd/.git/oms-remote-ops/$op_id_arg"
+  elif [ -d "${TMPDIR:-/tmp}/oms-remote-ops-$(id -u)/$rd_key/$op_id_arg" ]; then
+    op_dir="${TMPDIR:-/tmp}/oms-remote-ops-$(id -u)/$rd_key/$op_id_arg"
+  fi
+}
+"#;
+
+struct ParsedStream {
+    markers: Vec<(String, String)>,
+    parts: BTreeMap<String, Vec<u8>>,
+}
+
+fn parse_framed_stream(data: &[u8]) -> Result<ParsedStream> {
+    let mut pos = 0usize;
+    let mut markers = Vec::new();
+    let mut parts = BTreeMap::new();
+    while pos < data.len() {
+        let rest = &data[pos..];
+        let line_end = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| pos + i)
+            .unwrap_or(data.len());
+        let line = String::from_utf8_lossy(&data[pos..line_end]);
+        pos = if line_end < data.len() {
+            line_end + 1
+        } else {
+            data.len()
+        };
+        if let Some(after) = line.strip_prefix("__OMS_PART__ ") {
+            let mut split = after.splitn(2, ' ');
+            let name = split
+                .next()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| error("malformed remote part header"))?;
+            let len_str = split
+                .next()
+                .ok_or_else(|| error("malformed remote part length"))?
+                .trim();
+            let len = len_str
+                .parse::<i64>()
+                .map_err(|_| error("invalid remote part length"))?;
+            if len >= 0 {
+                let len_usize = usize::try_from(len).map_err(error)?;
+                let end = pos
+                    .checked_add(len_usize)
+                    .filter(|&e| e <= data.len())
+                    .ok_or_else(|| error("truncated remote part payload"))?;
+                parts.insert(name.to_owned(), data[pos..end].to_vec());
+                pos = end;
+                if pos < data.len() && data[pos] == b'\n' {
+                    pos += 1;
+                }
+            }
+        } else if line.starts_with("__OMS_")
+            && let Some((kind, payload)) = line.split_once(' ')
+        {
+            markers.push((kind.to_owned(), payload.to_owned()));
+        }
+    }
+    Ok(ParsedStream { markers, parts })
+}
+
+struct DurableExecRequest<'a> {
+    cwd: &'a Path,
+    repo: &'a Path,
+    host: &'a str,
+    port: Option<u16>,
+    remote: &'a str,
+    target: Option<&'a str>,
+    snapshot: Option<&'a str>,
+    head_sha: &'a str,
+    op_id: &'a str,
+    tail: &'a [OsString],
+    control: &'a str,
+    pretty: bool,
+}
+
+fn request_matches(
+    record: &serde_json::Value,
+    host: &str,
+    port: Option<u16>,
+    remote: &str,
+    target: Option<&str>,
+    snapshot: Option<&str>,
+    command_sha256: &str,
+) -> bool {
+    record.get("host").and_then(|v| v.as_str()) == Some(host)
+        && record.get("port").and_then(|v| v.as_u64()) == port.map(u64::from)
+        && record.get("remote_dir").and_then(|v| v.as_str()) == Some(remote)
+        && record.get("target").and_then(|v| v.as_str()) == target
+        && record.get("snapshot").and_then(|v| v.as_str()) == snapshot
+        && record.get("command_sha256").and_then(|v| v.as_str()) == Some(command_sha256)
+}
+
+fn parse_meta_part(parts: &BTreeMap<String, Vec<u8>>) -> Option<serde_json::Value> {
+    parts
+        .get("meta")
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .filter(|v| v.is_object())
+}
+
+fn apply_result_parts(
+    record: &mut serde_json::Value,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Result<Option<i32>> {
+    if let Some(meta) = parse_meta_part(parts) {
+        record["remote_meta"] = meta;
+    }
+    if let Some(out_bytes) = parts.get("stdout") {
+        record["stdout"] = bounded_output(out_bytes).into();
+    }
+    if let Some(err_bytes) = parts.get("stderr") {
+        record["stderr"] = bounded_output(err_bytes).into();
+    }
+    let Some(res_bytes) = parts.get("result") else {
+        return Ok(None);
+    };
+    let parsed: serde_json::Value = serde_json::from_slice(res_bytes).map_err(error)?;
+    let rc = parsed
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| i32::try_from(v).ok())
+        .ok_or_else(|| error("invalid remote result.json exit_code"))?;
+    record["exit_code"] = rc.into();
+    record["state"] = if rc == 0 { "succeeded" } else { "failed" }.into();
+    let ts = now()?;
+    record["updated_at"] = ts.clone().into();
+    record["completed_at"] = ts.into();
+    Ok(Some(rc))
+}
+
+fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
+    let command = req
+        .tail
+        .iter()
+        .map(|v| {
+            v.to_str()
+                .map(quote)
+                .ok_or_else(|| error("command requires Unicode text"))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join(" ");
+    let cmd_script = format!("exec {command}");
+    let command_sha256 = sha256(cmd_script.as_bytes());
+    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id)?;
+
+    if let Some(mut existing) = read_remote_op(req.repo, req.op_id)? {
+        require(
+            request_matches(
+                &existing,
+                req.host,
+                req.port,
+                req.remote,
+                req.target,
+                req.snapshot,
+                &command_sha256,
+            ),
+            "conflicting reuse of --op-id",
+        )?;
+        let state = existing
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        existing["action"] = "exec".into();
+        existing["deduplicated"] = true.into();
+        return match state.as_str() {
+            "succeeded" | "failed" => {
+                let code = existing
+                    .get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+                    .unwrap_or(1);
+                json_response(code, &existing, req.pretty)
+            }
+            "cancelled" | "lost" => json_response(1, &existing, req.pretty),
+            _ => {
+                existing["reconcile_required"] = true.into();
+                json_response(75, &existing, req.pretty)
+            }
+        };
+    }
+
+    let ts = now()?;
+    let mut record = serde_json::json!({
+        "schema": 1,
+        "action": "exec",
+        "op_id": req.op_id,
+        "state": "intent",
+        "host": req.host,
+        "port": req.port,
+        "remote_dir": req.remote,
+        "head_sha": req.head_sha,
+        "target": req.target,
+        "snapshot": req.snapshot,
+        "command_sha256": command_sha256,
+        "control_path": req.control,
+        "started_at": ts,
+        "updated_at": ts,
+        "completed_at": serde_json::Value::Null,
+        "exit_code": serde_json::Value::Null,
+        "stdout": serde_json::Value::Null,
+        "stderr": serde_json::Value::Null,
+        "remote_meta": serde_json::Value::Null,
+    });
+    write_remote_op(req.repo, req.op_id, &record)?;
+
+    let rd_key = &sha256(req.remote.as_bytes())[..16];
+    let remote_script = format!(
+        r#"set -eu
+rd={rd}
+rd_key={rd_key}
+op_id_arg={op_id}
+if [ -n "${{OMS_REMOTE_STATE_DIR:-}}" ]; then
+  base="$OMS_REMOTE_STATE_DIR"
+elif [ -d "$rd/.git" ]; then
+  base="$rd/.git/oms-remote-ops"
+else
+  base="${{TMPDIR:-/tmp}}/oms-remote-ops-$(id -u)/$rd_key"
+fi
+mkdir -p -- "$base"
+op_dir="$base/$op_id_arg"
+if ! mkdir -- "$op_dir" 2>/dev/null; then
+  printf '__OMS_EXISTS__ 1\n'
+  exit 75
+fi
+{helpers}
+printf '%s\n' {cmd} > "$op_dir/cmd.sh"
+cat <<'EOF' > "$op_dir/runner.sh"
+set -eu
+trap '' HUP
+op_dir="$1"
+rd="$2"
+hn=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
+[ -n "$hn" ] || hn='unknown'
+if [ -r /proc/sys/kernel/random/boot_id ]; then
+  bid=$(tr -d ' \t\r\n' < /proc/sys/kernel/random/boot_id | tr -cd 'A-Za-z0-9._: +=,-')
+elif command -v sysctl >/dev/null 2>&1; then
+  bid=$(sysctl -n kern.boottime 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
+else
+  bid='unknown'
+fi
+[ -n "$bid" ] || bid='unknown'
+pid=$$
+ls_val=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+printf '{{"hostname":"%s","boot_id":"%s","pid":%s,"lstart":"%s"}}\n' "$hn" "$bid" "$pid" "$ls_val" >"$op_dir/meta.json.tmp"
+mv -f -- "$op_dir/meta.json.tmp" "$op_dir/meta.json"
+child=""
+trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null || :; exit 143' TERM
+( cd -- "$rd" && exec sh "$op_dir/cmd.sh" ) >"$op_dir/stdout" 2>"$op_dir/stderr" &
+child=$!
+printf '%s\n' "$child" >"$op_dir/child.pid"
+set +e
+wait "$child"
+rc=$?
+set -e
+printf '{{"exit_code":%d}}\n' "$rc" >"$op_dir/result.json.tmp"
+mv -f -- "$op_dir/result.json.tmp" "$op_dir/result.json"
+EOF
+nohup sh "$op_dir/runner.sh" "$op_dir" "$rd" </dev/null >/dev/null 2>&1 &
+rpid=$!
+i=0
+while [ ! -f "$op_dir/result.json" ]; do
+  if [ -f "$op_dir/meta.json" ] && ! kill -0 "$rpid" 2>/dev/null; then
+    sleep 0.05 2>/dev/null || sleep 1
+    [ -f "$op_dir/result.json" ] && break
+    printf '__OMS_RUNNER_DIED__ 1\n'
+    break
+  fi
+  i=$((i + 1))
+  [ "$i" -ge 1200 ] && break
+  sleep 0.05 2>/dev/null || sleep 1
+done
+emit_part meta "$op_dir/meta.json"
+emit_part result "$op_dir/result.json"
+emit_part stdout "$op_dir/stdout"
+emit_part stderr "$op_dir/stderr"
+"#,
+        rd = remote_path(req.remote),
+        rd_key = quote(rd_key),
+        op_id = quote(req.op_id),
+        helpers = REMOTE_SH_HELPERS,
+        cmd = quote(&cmd_script),
+    );
+    let out = build_ssh(req.host, req.port, req.control)
+        .arg(format!("sh -lc {}", quote(&remote_script)))
+        .output()
+        .map_err(error)?;
+
+    let ssh_uncertain = out.status.code().is_none() || out.status.code() == Some(255);
+    if ssh_uncertain || !out.status.success() {
+        if let Ok(parsed) = parse_framed_stream(&out.stdout)
+            && let Some(meta) = parse_meta_part(&parsed.parts)
+        {
+            record["remote_meta"] = meta;
+        }
+        record["state"] = "unknown".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
+    }
+
+    let parsed = match parse_framed_stream(&out.stdout) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            return json_response(75, &record, req.pretty);
+        }
+    };
+    if parsed
+        .markers
+        .iter()
+        .any(|(kind, _)| kind == "__OMS_EXISTS__" || kind == "__OMS_RUNNER_DIED__")
+    {
+        if let Some(meta) = parse_meta_part(&parsed.parts) {
+            record["remote_meta"] = meta;
+        }
+        record["state"] = "unknown".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
+    }
+
+    match apply_result_parts(&mut record, &parsed.parts)? {
+        Some(rc) => {
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(rc, &record, req.pretty)
+        }
+        None => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(75, &record, req.pretty)
+        }
+    }
+}
+
+struct ReconcileRequest<'a> {
+    cwd: &'a Path,
+    repo: &'a Path,
+    host: &'a str,
+    port: Option<u16>,
+    remote: Option<&'a str>,
+    target: Option<&'a str>,
+    op_id: &'a str,
+    control: &'a str,
+    pretty: bool,
+}
+
+fn validate_existing_scope(
+    record: &serde_json::Value,
+    repo: &Path,
+    host: &str,
+    port: Option<u16>,
+    remote: Option<&str>,
+    target: Option<&str>,
+) -> Result<String> {
+    require(
+        record.get("host").and_then(|v| v.as_str()) == Some(host),
+        "operation belongs to a different SSH host",
+    )?;
+    if let Some(port) = port {
+        require(
+            record.get("port").and_then(|v| v.as_u64()) == Some(u64::from(port)),
+            "operation belongs to a different SSH port",
+        )?;
+    }
+    let stored_remote = record
+        .get("remote_dir")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| error("operation record missing remote_dir"))?
+        .to_owned();
+    if let Some(remote) = remote {
+        require(
+            remote == stored_remote,
+            "operation belongs to a different --remote-dir",
+        )?;
+    }
+    if let Some(target) = target {
+        validate_target(repo, target, host, &stored_remote)?;
+    } else if let Some(stored_target) = record.get("target").and_then(|v| v.as_str()) {
+        validate_target(repo, stored_target, host, &stored_remote)?;
+    }
+    Ok(stored_remote)
+}
+
+fn run_reconcile(req: ReconcileRequest<'_>) -> Result<Response> {
+    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id)?;
+    let mut record =
+        read_remote_op(req.repo, req.op_id)?.ok_or_else(|| error("unknown --op-id"))?;
+    let remote_dir = validate_existing_scope(
+        &record, req.repo, req.host, req.port, req.remote, req.target,
+    )?;
+    record["action"] = "reconcile".into();
+    let state = record
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+    if matches!(state.as_str(), "succeeded" | "failed") {
+        let code = record
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(1);
+        return json_response(code, &record, req.pretty);
+    }
+    if matches!(state.as_str(), "cancelled" | "lost") {
+        return json_response(1, &record, req.pretty);
+    }
+
+    let rd_key = &sha256(remote_dir.as_bytes())[..16];
+    let script = format!(
+        r#"set -eu
+rd={rd}
+rd_key={rd_key}
+op_id_arg={op_id}
+{helpers}
+read_host_id
+find_op_dir
+if [ -z "$op_dir" ]; then
+  printf '__OMS_PROBE__ missing|%s|%s\n' "$cur_hn" "$cur_bid"
+  exit 0
+fi
+if [ -f "$op_dir/result.json" ]; then
+  printf '__OMS_PROBE__ result|%s|%s\n' "$cur_hn" "$cur_bid"
+  emit_part meta "$op_dir/meta.json"
+  emit_part result "$op_dir/result.json"
+  emit_part stdout "$op_dir/stdout"
+  emit_part stderr "$op_dir/stderr"
+  exit 0
+fi
+mpid=""
+if [ -f "$op_dir/meta.json" ]; then
+  mpid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+fi
+alive=0
+cur_ls=""
+if [ -n "$mpid" ] && kill -0 "$mpid" 2>/dev/null; then
+  st=$(LC_ALL=C ps -p "$mpid" -o stat= 2>/dev/null | tr -d ' \t\r\n' || true)
+  case "$st" in
+    Z*) alive=0 ;;
+    *)
+      alive=1
+      cur_ls=$(LC_ALL=C ps -p "$mpid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+      ;;
+  esac
+fi
+if [ "$alive" = 0 ] && [ -f "$op_dir/result.json" ]; then
+  printf '__OMS_PROBE__ result|%s|%s\n' "$cur_hn" "$cur_bid"
+  emit_part meta "$op_dir/meta.json"
+  emit_part result "$op_dir/result.json"
+  emit_part stdout "$op_dir/stdout"
+  emit_part stderr "$op_dir/stderr"
+  exit 0
+fi
+printf '__OMS_PROBE__ live|%s|%s|%s|%s\n' "$cur_hn" "$cur_bid" "$alive" "$cur_ls"
+emit_part meta "$op_dir/meta.json"
+emit_part stdout "$op_dir/stdout"
+emit_part stderr "$op_dir/stderr"
+"#,
+        rd = remote_path(&remote_dir),
+        rd_key = quote(rd_key),
+        op_id = quote(req.op_id),
+        helpers = REMOTE_SH_HELPERS,
+    );
+    let effective_port = req.port.or_else(|| {
+        record
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+    });
+    let out = build_ssh(req.host, effective_port, req.control)
+        .arg(format!("sh -lc {}", quote(&script)))
+        .output()
+        .map_err(error)?;
+    if !out.status.success() {
+        record["state"] = "unknown".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
+    }
+    let parsed = match parse_framed_stream(&out.stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            return json_response(75, &record, req.pretty);
+        }
+    };
+    let Some((_, payload)) = parsed
+        .markers
+        .iter()
+        .find(|(kind, _)| kind == "__OMS_PROBE__")
+    else {
+        record["state"] = "unknown".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
+    };
+    let fields: Vec<&str> = payload.split('|').collect();
+    let kind = fields.first().copied().unwrap_or("");
+    let cur_hn = fields.get(1).copied().unwrap_or("unknown");
+    let cur_bid = fields.get(2).copied().unwrap_or("unknown");
+    if let Some(meta) = parse_meta_part(&parsed.parts) {
+        let meta_hn = meta.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
+        if !meta_hn.is_empty() && meta_hn != cur_hn {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            return json_response(75, &record, req.pretty);
+        }
+        record["remote_meta"] = meta;
+    }
+    match kind {
+        "missing" => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(75, &record, req.pretty)
+        }
+        "result" => match apply_result_parts(&mut record, &parsed.parts)? {
+            Some(rc) => {
+                write_remote_op(req.repo, req.op_id, &record)?;
+                json_response(rc, &record, req.pretty)
+            }
+            None => {
+                record["state"] = "unknown".into();
+                record["updated_at"] = now()?.into();
+                write_remote_op(req.repo, req.op_id, &record)?;
+                json_response(75, &record, req.pretty)
+            }
+        },
+        "live" => {
+            let alive = fields.get(3).copied() == Some("1");
+            let cur_ls = fields.get(4).copied().unwrap_or("");
+            if let Some(out_bytes) = parsed.parts.get("stdout") {
+                record["stdout"] = bounded_output(out_bytes).into();
+            }
+            if let Some(err_bytes) = parsed.parts.get("stderr") {
+                record["stderr"] = bounded_output(err_bytes).into();
+            }
+            let Some(meta) = record.get("remote_meta").and_then(|v| v.as_object()) else {
+                record["state"] = "unknown".into();
+                record["updated_at"] = now()?.into();
+                write_remote_op(req.repo, req.op_id, &record)?;
+                return json_response(75, &record, req.pretty);
+            };
+            let meta_bid = meta
+                .get("boot_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let meta_ls = meta.get("lstart").and_then(|v| v.as_str()).unwrap_or("");
+            let rebooted = meta_bid != "unknown" && cur_bid != "unknown" && meta_bid != cur_bid;
+            let pid_reused = !meta_ls.is_empty()
+                && !cur_ls.is_empty()
+                && normalize_ws(meta_ls) != normalize_ws(cur_ls);
+            if !alive || rebooted || pid_reused {
+                record["state"] = "lost".into();
+                let ts = now()?;
+                record["updated_at"] = ts.clone().into();
+                record["completed_at"] = ts.into();
+                write_remote_op(req.repo, req.op_id, &record)?;
+                return json_response(1, &record, req.pretty);
+            }
+            record["state"] = "running".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(75, &record, req.pretty)
+        }
+        _ => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(75, &record, req.pretty)
+        }
+    }
+}
+
+struct CancelRequest<'a> {
+    cwd: &'a Path,
+    repo: &'a Path,
+    host: &'a str,
+    port: Option<u16>,
+    remote: Option<&'a str>,
+    target: Option<&'a str>,
+    op_id: &'a str,
+    grace_seconds: u64,
+    control: &'a str,
+    pretty: bool,
+}
+
+fn run_cancel(req: CancelRequest<'_>) -> Result<Response> {
+    let _guard = lock_remote_op(req.repo, req.cwd, req.op_id)?;
+    let mut record =
+        read_remote_op(req.repo, req.op_id)?.ok_or_else(|| error("unknown --op-id"))?;
+    let remote_dir = validate_existing_scope(
+        &record, req.repo, req.host, req.port, req.remote, req.target,
+    )?;
+    record["action"] = "cancel".into();
+    let state = record
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+    if state == "cancelled" {
+        return json_response(0, &record, req.pretty);
+    }
+    if matches!(state.as_str(), "succeeded" | "failed" | "lost") {
+        record["signal_sent"] = false.into();
+        return json_response(1, &record, req.pretty);
+    }
+
+    let rd_key = &sha256(remote_dir.as_bytes())[..16];
+    let script = format!(
+        r#"set -eu
+rd={rd}
+rd_key={rd_key}
+op_id_arg={op_id}
+grace={grace}
+{helpers}
+norm() {{ printf '%s' "$1" | awk '{{$1=$1;print}}'; }}
+read_host_id
+find_op_dir
+if [ -z "$op_dir" ]; then
+  printf '__OMS_CANCEL__ missing|%s|%s\n' "$cur_hn" "$cur_bid"
+  exit 0
+fi
+if [ -f "$op_dir/result.json" ]; then
+  printf '__OMS_CANCEL__ finished|%s|%s\n' "$cur_hn" "$cur_bid"
+  emit_part meta "$op_dir/meta.json"
+  emit_part result "$op_dir/result.json"
+  emit_part stdout "$op_dir/stdout"
+  emit_part stderr "$op_dir/stderr"
+  exit 0
+fi
+if [ ! -f "$op_dir/meta.json" ]; then
+  printf '__OMS_CANCEL__ missing_meta|%s|%s\n' "$cur_hn" "$cur_bid"
+  exit 0
+fi
+m_hn=$(sed -n 's/.*"hostname":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+m_bid=$(sed -n 's/.*"boot_id":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+m_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+m_ls=$(sed -n 's/.*"lstart":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+if [ -z "$m_hn" ] || [ "$m_hn" != "$cur_hn" ]; then
+  printf '__OMS_CANCEL__ host_mismatch|%s|%s\n' "$cur_hn" "$cur_bid"
+  emit_part meta "$op_dir/meta.json"
+  exit 0
+fi
+if [ -z "$m_pid" ] || ! kill -0 "$m_pid" 2>/dev/null; then
+  if [ -f "$op_dir/result.json" ]; then
+    printf '__OMS_CANCEL__ finished|%s|%s\n' "$cur_hn" "$cur_bid"
+    emit_part meta "$op_dir/meta.json"
+    emit_part result "$op_dir/result.json"
+    emit_part stdout "$op_dir/stdout"
+    emit_part stderr "$op_dir/stderr"
+  else
+    printf '__OMS_CANCEL__ lost|exited|%s|%s\n' "$cur_hn" "$cur_bid"
+    emit_part meta "$op_dir/meta.json"
+  fi
+  exit 0
+fi
+cur_ls=$(LC_ALL=C ps -p "$m_pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" != "$cur_bid" ] || [ -z "$m_ls" ] || [ -z "$cur_ls" ] || [ "$(norm "$m_ls")" != "$(norm "$cur_ls")" ]; then
+  printf '__OMS_CANCEL__ mismatch|%s|%s|%s\n' "$cur_hn" "$cur_bid" "$cur_ls"
+  emit_part meta "$op_dir/meta.json"
+  exit 0
+fi
+cpid=""
+if [ -f "$op_dir/child.pid" ]; then
+  cand_cpid=$(tr -d ' \t\r\n' < "$op_dir/child.pid" || true)
+  if [ -n "$cand_cpid" ]; then
+    cppid=$(LC_ALL=C ps -p "$cand_cpid" -o ppid= 2>/dev/null | tr -d ' \t\r\n' || true)
+    if [ "$cppid" = "$m_pid" ]; then
+      cpid="$cand_cpid"
+    fi
+  fi
+fi
+kill -TERM "$m_pid" 2>/dev/null || true
+ticks=$((grace * 10))
+i=0
+sig="SIGTERM"
+while [ "$i" -lt "$ticks" ]; do
+  if ! kill -0 "$m_pid" 2>/dev/null; then
+    break
+  fi
+  i=$((i + 1))
+  sleep 0.1 2>/dev/null || sleep 1
+done
+if kill -0 "$m_pid" 2>/dev/null; then
+  sig="SIGKILL"
+  [ -n "$cpid" ] && kill -KILL "$cpid" 2>/dev/null || true
+  kill -KILL "$m_pid" 2>/dev/null || true
+  j=0
+  while [ "$j" -lt 20 ]; do
+    if ! kill -0 "$m_pid" 2>/dev/null; then
+      break
+    fi
+    j=$((j + 1))
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+fi
+if kill -0 "$m_pid" 2>/dev/null; then
+  printf '__OMS_CANCEL__ still_alive|%s\n' "$sig"
+  exit 0
+fi
+printf '__OMS_CANCEL__ cancelled|%s\n' "$sig"
+emit_part meta "$op_dir/meta.json"
+emit_part stdout "$op_dir/stdout"
+emit_part stderr "$op_dir/stderr"
+"#,
+        rd = remote_path(&remote_dir),
+        rd_key = quote(rd_key),
+        op_id = quote(req.op_id),
+        grace = req.grace_seconds,
+        helpers = REMOTE_SH_HELPERS,
+    );
+    let effective_port = req.port.or_else(|| {
+        record
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+    });
+    let out = build_ssh(req.host, effective_port, req.control)
+        .arg(format!("sh -lc {}", quote(&script)))
+        .output()
+        .map_err(error)?;
+    if !out.status.success() {
+        record["state"] = "unknown".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
+    }
+    let parsed = parse_framed_stream(&out.stdout)?;
+    if let Some(meta) = parse_meta_part(&parsed.parts) {
+        record["remote_meta"] = meta;
+    }
+    if let Some(out_bytes) = parsed.parts.get("stdout") {
+        record["stdout"] = bounded_output(out_bytes).into();
+    }
+    if let Some(err_bytes) = parsed.parts.get("stderr") {
+        record["stderr"] = bounded_output(err_bytes).into();
+    }
+    let Some((_, payload)) = parsed
+        .markers
+        .iter()
+        .find(|(kind, _)| kind == "__OMS_CANCEL__")
+    else {
+        record["state"] = "unknown".into();
+        record["updated_at"] = now()?.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return json_response(75, &record, req.pretty);
+    };
+    let fields: Vec<&str> = payload.split('|').collect();
+    match fields.first().copied().unwrap_or("") {
+        "cancelled" => {
+            record["state"] = "cancelled".into();
+            record["signal"] = fields.get(1).copied().unwrap_or("SIGTERM").into();
+            record["signal_sent"] = true.into();
+            let ts = now()?;
+            record["updated_at"] = ts.clone().into();
+            record["completed_at"] = ts.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(0, &record, req.pretty)
+        }
+        "finished" => match apply_result_parts(&mut record, &parsed.parts)? {
+            Some(_) => {
+                record["signal_sent"] = false.into();
+                record["finished_before_cancel"] = true.into();
+                write_remote_op(req.repo, req.op_id, &record)?;
+                json_response(1, &record, req.pretty)
+            }
+            None => {
+                record["state"] = "unknown".into();
+                record["signal_sent"] = false.into();
+                write_remote_op(req.repo, req.op_id, &record)?;
+                json_response(75, &record, req.pretty)
+            }
+        },
+        "mismatch" | "lost" => {
+            record["state"] = "lost".into();
+            record["signal_sent"] = false.into();
+            let ts = now()?;
+            record["updated_at"] = ts.clone().into();
+            record["completed_at"] = ts.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(1, &record, req.pretty)
+        }
+        _ => {
+            record["state"] = "unknown".into();
+            record["updated_at"] = now()?.into();
+            write_remote_op(req.repo, req.op_id, &record)?;
+            json_response(75, &record, req.pretty)
+        }
+    }
+}
+
+struct CollectRequest<'a> {
+    cwd: &'a Path,
+    host: &'a str,
+    port: Option<u16>,
+    remote: &'a str,
+    remote_path_rel: &'a str,
+    dest_raw: &'a str,
+    expected_sha256: Option<&'a str>,
+    max_bytes: u64,
+    control: &'a str,
+    pretty: bool,
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+    keep: bool,
+}
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn prepare_collect_dest(cwd: &Path, raw: &str) -> Result<(PathBuf, PathBuf)> {
+    require(
+        !raw.is_empty()
+            && !raw.as_bytes().contains(&0)
+            && !raw.ends_with('/')
+            && !raw.ends_with("/.")
+            && !raw.ends_with("/..")
+            && raw != "."
+            && raw != "..",
+        "invalid --dest path",
+    )?;
+    let raw_path = Path::new(raw);
+    let abs = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        require(
+            raw_path
+                .components()
+                .all(|c| !matches!(c, Component::ParentDir)),
+            "relative --dest cannot traverse parent directories",
+        )?;
+        let mut cursor = cwd.to_path_buf();
+        let parts: Vec<_> = raw_path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        require(!parts.is_empty(), "invalid --dest path")?;
+        for dir_part in &parts[..parts.len() - 1] {
+            cursor.push(dir_part);
+            match std::fs::symlink_metadata(&cursor) {
+                Ok(meta) => require(
+                    meta.is_dir() && !meta.file_type().is_symlink(),
+                    "destination parent contains a symlink or non-directory",
+                )?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(error(e)),
+            }
+        }
+        cwd.join(raw_path)
+    };
+    let parent = abs
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| error("destination requires a parent directory"))?
+        .to_path_buf();
+    let _file_name = abs
+        .file_name()
+        .ok_or_else(|| error("destination requires a file name"))?;
+    match std::fs::symlink_metadata(&abs) {
+        Ok(meta) => require(
+            meta.is_file() && !meta.file_type().is_symlink(),
+            "destination cannot be a symlink or directory",
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(error(e)),
+    }
+    match std::fs::symlink_metadata(&parent) {
+        Ok(meta) => require(
+            meta.is_dir() && !meta.file_type().is_symlink(),
+            "destination parent must be a real non-symlink directory",
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&parent)
+                .map_err(error)?;
+        }
+        Err(e) => return Err(error(e)),
+    }
+    Ok((parent, abs))
+}
+
+fn create_private_temp(parent: &Path) -> Result<(std::fs::File, TempFileGuard)> {
+    let nofollow = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
+    for n in 0..1000 {
+        let candidate = parent.join(format!(".oms-collect-{}-{n}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(nofollow)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                return Ok((
+                    file,
+                    TempFileGuard {
+                        path: candidate,
+                        keep: false,
+                    },
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(error(e)),
+        }
+    }
+    Err(error("cannot create private collection temporary file"))
+}
+
+fn run_collect(req: CollectRequest<'_>) -> Result<Response> {
+    let (parent, dest_abs) = prepare_collect_dest(req.cwd, req.dest_raw)?;
+    let script = format!(
+        r#"set -eu
+rd={rd}
+rp={rp}
+target="$rd/$rp"
+if [ -L "$target" ] || [ ! -f "$target" ]; then
+  printf '%s\n' 'remote path must be a regular non-symlink file' >&2
+  exit 2
+fi
+exec cat -- "$target"
+"#,
+        rd = remote_path(req.remote),
+        rp = quote(req.remote_path_rel),
+    );
+    let mut child = build_ssh(req.host, req.port, req.control)
+        .arg(format!("sh -lc {}", quote(&script)))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(error)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| error("missing ssh stdout pipe"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| error("missing ssh stderr pipe"))?;
+
+    let (mut tmp_file, mut guard) = create_private_temp(&parent)?;
+    let (stream_res, err_bytes) = std::thread::scope(|s| {
+        let err_handle = s.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = (&mut stderr).take(MAX_STDERR_BYTES).read_to_end(&mut buf);
+            buf
+        });
+        let mut reader = stdout.take(req.max_bytes.saturating_add(1));
+        let mut buf = [0u8; 65536];
+        let mut total = 0u64;
+        let mut hasher = Sha256::new();
+        let copy_res: Result<()> = loop {
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break Ok(()),
+                Ok(n) => n,
+                Err(e) => break Err(error(e)),
+            };
+            total = total.saturating_add(n as u64);
+            if total > req.max_bytes {
+                break Err(status(
+                    2,
+                    format!("collected stream exceeded --max-bytes ({})", req.max_bytes),
+                ));
+            }
+            if let Err(e) = tmp_file.write_all(&buf[..n]) {
+                break Err(error(e));
+            }
+            hasher.update(&buf[..n]);
+        };
+        let err_buf = err_handle.join().unwrap_or_default();
+        (copy_res.map(|()| (total, hasher.finish())), err_buf)
+    });
+    if stream_res.is_err() {
+        let _ = child.kill();
+    }
+    let status_out = child.wait().map_err(error)?;
+    let (total_bytes, digest) = stream_res?;
+    let exit = exit_code(status_out);
+    if !status_out.success() {
+        return Err(status(
+            if exit == 0 { 1 } else { exit },
+            format!(
+                "remote collect failed (exit {exit}): {}",
+                String::from_utf8_lossy(&err_bytes).trim()
+            ),
+        ));
+    }
+    if let Some(expected) = req.expected_sha256 {
+        require(
+            expected == digest,
+            format!("collected file digest mismatch: expected {expected}, got {digest}"),
+        )?;
+    }
+    tmp_file.sync_all().map_err(error)?;
+    drop(tmp_file);
+    match std::fs::symlink_metadata(&dest_abs) {
+        Ok(meta) => require(
+            meta.is_file() && !meta.file_type().is_symlink(),
+            "destination became a symlink or directory",
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(error(e)),
+    }
+    std::fs::rename(&guard.path, &dest_abs).map_err(error)?;
+    guard.keep = true;
+
+    let value = serde_json::json!({
+        "schema": 1,
+        "action": "collect",
+        "host": req.host,
+        "remote_dir": req.remote,
+        "remote_path": req.remote_path_rel,
+        "dest": dest_abs.to_string_lossy(),
+        "bytes": total_bytes,
+        "sha256": digest,
+        "verified": req.expected_sha256.is_some(),
+    });
+    json_response(0, &value, req.pretty)
 }
 /// Shell word for a remote directory; a leading `~` expands on the remote host.
 fn remote_path(s: &str) -> String {
@@ -330,31 +1796,37 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn sha256(data: &[u8]) -> String {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let mut msg = data.to_vec();
-    let bits = (msg.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
+struct Sha256 {
+    h: [u32; 8],
+    buf: [u8; 64],
+    buf_len: usize,
+    total_bytes: u64,
+}
+impl Sha256 {
+    fn new() -> Self {
+        Self {
+            h: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buf: [0u8; 64],
+            buf_len: 0,
+            total_bytes: 0,
+        }
     }
-    msg.extend_from_slice(&bits.to_be_bytes());
-    for chunk in msg.as_chunks::<64>().0 {
+    fn compress(h: &mut [u32; 8], chunk: &[u8; 64]) {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
+        ];
         let mut w = [0u32; 64];
         for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
@@ -367,7 +1839,7 @@ fn sha256(data: &[u8]) -> String {
                 .wrapping_add(w[i - 7])
                 .wrapping_add(b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10));
         }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut z] = h;
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut z] = *h;
         for i in 0..64 {
             let t1 = z
                 .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
@@ -389,7 +1861,51 @@ fn sha256(data: &[u8]) -> String {
             *x = x.wrapping_add(y);
         }
     }
-    h.iter().map(|v| format!("{v:08x}")).collect()
+    fn update(&mut self, mut data: &[u8]) {
+        self.total_bytes = self.total_bytes.saturating_add(data.len() as u64);
+        if self.buf_len > 0 {
+            let take = data.len().min(64 - self.buf_len);
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+            self.buf_len += take;
+            data = &data[take..];
+            if self.buf_len == 64 {
+                let block = self.buf;
+                Self::compress(&mut self.h, &block);
+                self.buf_len = 0;
+            }
+        }
+        while data.len() >= 64 {
+            let block: &[u8; 64] = data[..64].try_into().expect("64-byte slice");
+            Self::compress(&mut self.h, block);
+            data = &data[64..];
+        }
+        if !data.is_empty() {
+            self.buf[..data.len()].copy_from_slice(data);
+            self.buf_len = data.len();
+        }
+    }
+    fn finish(mut self) -> String {
+        let bits = self.total_bytes.wrapping_mul(8);
+        self.buf[self.buf_len] = 0x80;
+        self.buf_len += 1;
+        if self.buf_len > 56 {
+            self.buf[self.buf_len..].fill(0);
+            let block = self.buf;
+            Self::compress(&mut self.h, &block);
+            self.buf_len = 0;
+        }
+        self.buf[self.buf_len..56].fill(0);
+        self.buf[56..64].copy_from_slice(&bits.to_be_bytes());
+        let block = self.buf;
+        Self::compress(&mut self.h, &block);
+        self.h.iter().map(|v| format!("{v:08x}")).collect()
+    }
+}
+
+fn sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -431,6 +1947,49 @@ mod tests {
         );
     }
     #[test]
+    fn execution_inputs_require_approval_and_integrity() {
+        use crate::value::*;
+        let temp = TempDir::new().unwrap();
+        let runtime = temp.0.join(".oms/runtime");
+        std::fs::create_dir_all(runtime.join("snapshots")).unwrap();
+        let identity = object([
+            ("ssh_alias", string("host")),
+            ("workdir", string("~/repo")),
+            ("scheduler", string("none")),
+            ("scratch_root", string("")),
+        ]);
+        let fingerprint = sha(canonical(&identity).unwrap());
+        let mut row = identity;
+        row.set("execution_approved", b(false)).unwrap();
+        row.set("approved_fingerprint", string(&fingerprint))
+            .unwrap();
+        let write_registry = |row: Value| {
+            let registry = object([("schema", number(1)), ("targets", object([("test", row)]))]);
+            std::fs::write(runtime.join("targets.json"), canonical(&registry).unwrap()).unwrap();
+        };
+        write_registry(row.clone());
+        assert!(validate_target(&temp.0, "test", "host", "~/repo").is_err());
+        row.set("execution_approved", b(true)).unwrap();
+        write_registry(row);
+        assert!(validate_target(&temp.0, "test", "host", "~/repo").is_ok());
+        assert!(validate_target(&temp.0, "test", "other", "~/repo").is_err());
+
+        let mut snapshot = object([
+            ("schema", number(1)),
+            ("head_sha", string("head")),
+            ("tree_sha", string("tree")),
+            ("lockfiles", empty()),
+        ]);
+        let digest = sha(canonical(&snapshot).unwrap());
+        snapshot.set("snapshot_sha256", string(&digest)).unwrap();
+        let path = runtime.join("snapshots").join(format!("{digest}.json"));
+        std::fs::write(&path, canonical(&snapshot).unwrap()).unwrap();
+        assert!(validate_snapshot(&temp.0, &digest).is_ok());
+        snapshot.set("head_sha", string("changed")).unwrap();
+        std::fs::write(path, canonical(&snapshot).unwrap()).unwrap();
+        assert!(validate_snapshot(&temp.0, &digest).is_err());
+    }
+    #[test]
     fn transport() {
         if std::env::var_os("OMS_TEST_SSH_CHILD").is_none() {
             let temp = TempDir::new().unwrap();
@@ -454,6 +2013,31 @@ mod tests {
         let repo = root.join("repo");
         let remote = root.join("remote space");
         std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir_all(repo.join(".oms/runtime")).unwrap();
+        std::fs::write(
+            repo.join(".oms/runtime/targets.json"),
+            r#"{"schema":1,"targets":{"test":{"ssh_alias":"host","workdir":"/remote","execution_approved":false}}}"#,
+        )
+        .unwrap();
+        let args_path = PathBuf::from(std::env::var_os("OMS_TEST_ARGS").unwrap());
+        let denied = invoke(
+            &[
+                "exec",
+                "--host",
+                "host",
+                "--repo",
+                "repo",
+                "--remote-dir",
+                "/remote",
+                "--target",
+                "test",
+                "--",
+                "true",
+            ],
+            &root,
+        );
+        assert_eq!(denied.code, 2);
+        assert!(!args_path.exists());
         for args in [
             &["init", "-q"][..],
             &["config", "user.name", "Test"][..],
@@ -604,5 +2188,768 @@ mod tests {
         for key in ["started_at", "completed_at"] {
             assert!(chrono::DateTime::parse_from_rfc3339(v[key].as_str().unwrap()).is_ok());
         }
+    }
+
+    #[test]
+    fn parse_framed_stream_handles_binary_and_marker_lines() {
+        let payload = b"__OMS_PART__ spoofed 999\nline2\n";
+        let stream = format!(
+            "__OMS_PROBE__ result|h1|b1\n__OMS_PART__ stdout {}\n{}__OMS_PART__ stderr 0\n\n",
+            payload.len(),
+            String::from_utf8_lossy(payload),
+        );
+        let parsed = parse_framed_stream(stream.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.markers,
+            vec![("__OMS_PROBE__".to_owned(), "result|h1|b1".to_owned())]
+        );
+        assert_eq!(parsed.parts.get("stdout").unwrap(), payload);
+        assert_eq!(parsed.parts.get("stderr").unwrap(), b"");
+    }
+
+    #[test]
+    fn remote_op_id_validation_and_child_read_only_gate() {
+        if std::env::var_os("OMS_TEST_SSH_CHILD_GATE").is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::remote_op_id_validation_and_child_read_only_gate",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_SSH_CHILD_GATE", "1")
+                .env("OMS_HARNESS_CHILD", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        for bad in ["", "-op", ".op", "a/../b", "a/b", &"x".repeat(65)] {
+            assert!(validate_op_id(bad).is_err(), "{bad}");
+        }
+        assert!(validate_op_id("op_1.a-b").is_ok());
+        for bad_rp in [
+            "",
+            "/etc/passwd",
+            "~/a",
+            "../secret",
+            "a/../b",
+            "a/./b",
+            "a/",
+        ] {
+            assert!(validate_remote_rel_path(bad_rp).is_err(), "{bad_rp}");
+        }
+        assert!(validate_remote_rel_path("outputs/artifact.bin").is_ok());
+
+        for blocked in ["sync-bundle", "exec", "cancel", "collect"] {
+            let resp = invoke(&[blocked, "--host", "example"], Path::new("."));
+            assert_eq!(resp.code, 2, "{blocked}");
+            assert!(
+                String::from_utf8_lossy(&resp.stderr)
+                    .contains("a harness child may only use read-only runtime actions")
+            );
+        }
+        // reconcile passes the child gate and fails only on missing --repo / --op-id
+        let rec = invoke(&["reconcile", "--host", "example"], Path::new("."));
+        assert!(
+            !String::from_utf8_lossy(&rec.stderr).contains("read-only runtime actions"),
+            "{}",
+            String::from_utf8_lossy(&rec.stderr)
+        );
+    }
+
+    struct ChildKillGuard(Option<std::process::Child>);
+    impl Drop for ChildKillGuard {
+        fn drop(&mut self) {
+            if let Some(mut c) = self.0.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+
+    fn init_temp_git_repo(repo: &Path) {
+        std::fs::create_dir_all(repo).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Test"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("file"), "init\n").unwrap();
+        assert!(
+            Command::new("git")
+                .current_dir(repo)
+                .args(["add", "file"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .current_dir(repo)
+                .args(["commit", "-qm", "init"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn exec_op_id_disconnect_recovers_via_reconcile_without_duplicate() {
+        if std::env::var_os("OMS_TEST_SCENARIO4").is_none() {
+            let temp = TempDir::new().unwrap();
+            let state_dir = temp.0.join("remote_state");
+            let fake = temp.0.join("ssh");
+            let script = r#"#!/bin/sh
+printf '%s\n' "$@" >> "$OMS_TEST_ARGS"
+for last do :; done
+if [ -f "$OMS_TEST_DROP_FLAG" ]; then
+  rm -f "$OMS_TEST_DROP_FLAG"
+  sh -c "$last" >/dev/null 2>&1 &
+  i=0
+  while [ ! -f "$OMS_REMOTE_STATE_DIR/op-4/result.json" ] && [ "$i" -lt 250 ]; do
+    i=$((i + 1))
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  exit 255
+fi
+exec sh -c "$last"
+"#;
+            std::fs::write(&fake, script).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(temp.0.join("drop_once"), "1").unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::exec_op_id_disconnect_recovers_via_reconcile_without_duplicate",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_SCENARIO4", "1")
+                .env("OMS_SSH_BIN", &fake)
+                .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_TEST_ARGS", temp.0.join("args"))
+                .env("OMS_TEST_DROP_FLAG", temp.0.join("drop_once"))
+                .env("OMS_REMOTE_STATE_DIR", &state_dir)
+                .env("OMS_LOCK_DIR", temp.0.join("locks"))
+                .env_remove("OMS_HARNESS_CHILD")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        init_temp_git_repo(&repo);
+        std::fs::create_dir_all(&remote).unwrap();
+        let exec_log = root.join("exec_count.log");
+        let cmd_str = format!(
+            "printf '1\\n' >> '{}'; printf 'recovered-ok\\n'",
+            exec_log.display()
+        );
+        let rs = repo.to_str().unwrap();
+        let rd = remote.to_str().unwrap();
+        let first = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-4",
+                "--",
+                "sh",
+                "-c",
+                &cmd_str,
+            ],
+            &root,
+        );
+        assert_eq!(first.code, 75, "{}", String::from_utf8_lossy(&first.stderr));
+        let v1: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+        assert_eq!(v1["state"], "unknown");
+        let ledger_path = repo.join(".oms/runtime/remote-ops/op-4.json");
+        assert_eq!(
+            std::fs::symlink_metadata(&ledger_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        let ssh_calls_after_1 = std::fs::read_to_string(root.join("args"))
+            .unwrap()
+            .lines()
+            .count();
+
+        // Repeat exec before reconcile must fail closed without touching SSH.
+        let repeat_before_reconcile = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-4",
+                "--",
+                "sh",
+                "-c",
+                &cmd_str,
+            ],
+            &root,
+        );
+        assert_eq!(repeat_before_reconcile.code, 75);
+        assert_eq!(
+            std::fs::read_to_string(root.join("args"))
+                .unwrap()
+                .lines()
+                .count(),
+            ssh_calls_after_1
+        );
+
+        let rec = invoke(
+            &[
+                "reconcile",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-4",
+            ],
+            &root,
+        );
+        assert_eq!(rec.code, 0, "{}", String::from_utf8_lossy(&rec.stderr));
+        let vr: serde_json::Value = serde_json::from_slice(&rec.stdout).unwrap();
+        assert_eq!(vr["state"], "succeeded");
+        assert_eq!(vr["exit_code"], 0);
+        assert_eq!(vr["stdout"], "recovered-ok\n");
+        let ssh_calls_after_reconcile = std::fs::read_to_string(root.join("args"))
+            .unwrap()
+            .lines()
+            .count();
+
+        // Subsequent exec --op-id must deduplicate without invoking SSH or re-executing command.
+        let dedup = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-4",
+                "--",
+                "sh",
+                "-c",
+                &cmd_str,
+            ],
+            &root,
+        );
+        assert_eq!(dedup.code, 0);
+        let vd: serde_json::Value = serde_json::from_slice(&dedup.stdout).unwrap();
+        assert_eq!(vd["deduplicated"], true);
+        assert_eq!(vd["stdout"], "recovered-ok\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("args"))
+                .unwrap()
+                .lines()
+                .count(),
+            ssh_calls_after_reconcile
+        );
+        assert_eq!(
+            std::fs::read_to_string(&exec_log).unwrap().lines().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn pid_reuse_boot_id_and_conflicting_op_id_are_fenced() {
+        if std::env::var_os("OMS_TEST_SCENARIO7").is_none() {
+            let temp = TempDir::new().unwrap();
+            let state_dir = temp.0.join("remote_state");
+            let fake = temp.0.join("ssh");
+            let script = r#"#!/bin/sh
+printf '%s\n' "$@" >> "$OMS_TEST_ARGS"
+for last do :; done
+if [ -f "$OMS_TEST_DROP_ACTIVE" ]; then
+  rm -f "$OMS_TEST_DROP_ACTIVE"
+  sh -c "$last" >/dev/null 2>&1 &
+  i=0
+  while [ ! -f "$OMS_REMOTE_STATE_DIR/op-live/child.pid" ] && [ "$i" -lt 250 ]; do
+    i=$((i + 1))
+    sleep 0.02 2>/dev/null || sleep 1
+  done
+  exit 255
+fi
+exec sh -c "$last"
+"#;
+            std::fs::write(&fake, script).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::pid_reuse_boot_id_and_conflicting_op_id_are_fenced",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_SCENARIO7", "1")
+                .env("OMS_SSH_BIN", &fake)
+                .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_TEST_ARGS", temp.0.join("args"))
+                .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
+                .env("OMS_REMOTE_STATE_DIR", &state_dir)
+                .env("OMS_LOCK_DIR", temp.0.join("locks"))
+                .env_remove("OMS_HARNESS_CHILD")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let state_dir = PathBuf::from(std::env::var_os("OMS_REMOTE_STATE_DIR").unwrap());
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        init_temp_git_repo(&repo);
+        std::fs::create_dir_all(&remote).unwrap();
+        let rs = repo.to_str().unwrap();
+        let rd = remote.to_str().unwrap();
+
+        // 1. Conflicting --op-id reuse refuses locally with exit 2 and remotely with exit 75.
+        let r0 = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-conflict",
+                "--",
+                "true",
+            ],
+            &root,
+        );
+        assert_eq!(r0.code, 0, "{}", String::from_utf8_lossy(&r0.stderr));
+        let diff_cmd = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-conflict",
+                "--",
+                "false",
+            ],
+            &root,
+        );
+        assert_eq!(diff_cmd.code, 2);
+        std::fs::remove_file(repo.join(".oms/runtime/remote-ops/op-conflict.json")).unwrap();
+        let remote_dup = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-conflict",
+                "--",
+                "true",
+            ],
+            &root,
+        );
+        assert_eq!(remote_dup.code, 75);
+
+        // 2. Live detached process -> reconcile reports running (75), cancel stops cleanly (0).
+        std::fs::write(root.join("drop_active"), "1").unwrap();
+        let live_exec = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-live",
+                "--",
+                "sleep",
+                "30",
+            ],
+            &root,
+        );
+        assert_eq!(live_exec.code, 75);
+        let live_rec = invoke(
+            &[
+                "reconcile",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-live",
+            ],
+            &root,
+        );
+        assert_eq!(live_rec.code, 75);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&live_rec.stdout).unwrap()["state"],
+            "running"
+        );
+        let canceled = invoke(
+            &[
+                "cancel",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-live",
+                "--grace-seconds",
+                "1",
+            ],
+            &root,
+        );
+        assert_eq!(
+            canceled.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&canceled.stderr)
+        );
+        let vc: serde_json::Value = serde_json::from_slice(&canceled.stdout).unwrap();
+        assert_eq!(vc["state"], "cancelled");
+        assert_eq!(vc["signal_sent"], true);
+
+        // 3. Simulated PID reuse (live unrelated sleep child with different lstart) blocks cancel.
+        let mut sleeper = ChildKillGuard(Some(Command::new("sleep").arg("30").spawn().unwrap()));
+        let sleeper_pid = sleeper.0.as_ref().unwrap().id();
+        let host_probe = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-meta-src",
+                "--",
+                "true",
+            ],
+            &root,
+        );
+        assert_eq!(host_probe.code, 0);
+        let meta_src: serde_json::Value =
+            serde_json::from_slice::<serde_json::Value>(&host_probe.stdout).unwrap()["remote_meta"]
+                .clone();
+        let cur_hn = meta_src["hostname"].as_str().unwrap();
+        let cur_bid = meta_src["boot_id"].as_str().unwrap();
+        let cur_ls_out = Command::new("ps")
+            .env("LC_ALL", "C")
+            .args(["-p", &sleeper_pid.to_string(), "-o", "lstart="])
+            .output()
+            .unwrap();
+        let cur_ls = String::from_utf8_lossy(&cur_ls_out.stdout)
+            .trim()
+            .to_owned();
+
+        let reuse_op_dir = state_dir.join("op-reuse");
+        std::fs::create_dir_all(&reuse_op_dir).unwrap();
+        std::fs::write(
+            reuse_op_dir.join("meta.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "hostname": cur_hn,
+                "boot_id": cur_bid,
+                "pid": sleeper_pid,
+                "lstart": "Mon Jan  1 00:00:00 1990"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        write_remote_op(
+            &repo,
+            "op-reuse",
+            &serde_json::json!({
+                "schema": 1,
+                "op_id": "op-reuse",
+                "state": "unknown",
+                "host": "example",
+                "port": serde_json::Value::Null,
+                "remote_dir": rd,
+                "command_sha256": sha256(b"exec 'true'"),
+            }),
+        )
+        .unwrap();
+        let fenced_cancel = invoke(
+            &[
+                "cancel", "--host", "example", "--repo", rs, "--op-id", "op-reuse",
+            ],
+            &root,
+        );
+        assert_eq!(fenced_cancel.code, 1);
+        let vfc: serde_json::Value = serde_json::from_slice(&fenced_cancel.stdout).unwrap();
+        assert_eq!(vfc["state"], "lost");
+        assert_eq!(vfc["signal_sent"], false);
+        assert!(sleeper.0.as_mut().unwrap().try_wait().unwrap().is_none());
+
+        // 4. boot_id mismatch (reboot) marks lost on reconcile instead of running.
+        if cur_bid != "unknown" {
+            let reboot_dir = state_dir.join("op-reboot");
+            std::fs::create_dir_all(&reboot_dir).unwrap();
+            std::fs::write(
+                reboot_dir.join("meta.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "hostname": cur_hn,
+                    "boot_id": "00000000-0000-0000-0000-000000000000",
+                    "pid": sleeper_pid,
+                    "lstart": cur_ls
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            write_remote_op(
+                &repo,
+                "op-reboot",
+                &serde_json::json!({
+                    "schema": 1,
+                    "op_id": "op-reboot",
+                    "state": "unknown",
+                    "host": "example",
+                    "port": serde_json::Value::Null,
+                    "remote_dir": rd,
+                    "command_sha256": sha256(b"exec 'true'"),
+                }),
+            )
+            .unwrap();
+            let reboot_rec = invoke(
+                &[
+                    "reconcile",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--op-id",
+                    "op-reboot",
+                ],
+                &root,
+            );
+            assert_eq!(reboot_rec.code, 1);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&reboot_rec.stdout).unwrap()["state"],
+                "lost"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_enforces_paths_bounds_and_digest_atomically() {
+        if std::env::var_os("OMS_TEST_SCENARIO8").is_none() {
+            let temp = TempDir::new().unwrap();
+            let fake = temp.0.join("ssh");
+            let script = r#"#!/bin/sh
+for last do :; done
+if [ -f "$OMS_TEST_FAIL_STREAM" ]; then
+  printf 'partial-chunk'
+  exit 23
+fi
+exec sh -c "$last"
+"#;
+            std::fs::write(&fake, script).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::collect_enforces_paths_bounds_and_digest_atomically",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_SCENARIO8", "1")
+                .env("OMS_SSH_BIN", &fake)
+                .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_TEST_FAIL_STREAM", temp.0.join("fail_stream"))
+                .env_remove("OMS_HARNESS_CHILD")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        let dest_dir = root.join("dests");
+        init_temp_git_repo(&repo);
+        std::fs::create_dir_all(remote.join("outputs")).unwrap();
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let payload = b"valid-payload-12345";
+        let digest = sha256(payload);
+        std::fs::write(remote.join("outputs/artifact.bin"), payload).unwrap();
+        std::fs::write(remote.join("outputs/large.bin"), vec![b'x'; 4096]).unwrap();
+
+        let existing = dest_dir.join("existing.bin");
+        std::fs::write(&existing, b"untouched-original").unwrap();
+        let link_dest = dest_dir.join("link.bin");
+        std::os::unix::fs::symlink(&existing, &link_dest).unwrap();
+
+        let rs = repo.to_str().unwrap();
+        let rd = remote.to_str().unwrap();
+
+        for bad_rp in ["../secret", "/etc/passwd", "~/secret"] {
+            let r = invoke(
+                &[
+                    "collect",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--remote-dir",
+                    rd,
+                    "--remote-path",
+                    bad_rp,
+                    "--dest",
+                    dest_dir.join("nope.bin").to_str().unwrap(),
+                ],
+                &root,
+            );
+            assert_eq!(r.code, 2, "{bad_rp}");
+        }
+        assert_eq!(
+            invoke(
+                &[
+                    "collect",
+                    "--host",
+                    "example",
+                    "--repo",
+                    rs,
+                    "--remote-dir",
+                    rd,
+                    "--remote-path",
+                    "outputs/artifact.bin",
+                    "--dest",
+                    link_dest.to_str().unwrap(),
+                ],
+                &root,
+            )
+            .code,
+            2
+        );
+        let overflow = dest_dir.join("overflow.bin");
+        let over = invoke(
+            &[
+                "collect",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--remote-path",
+                "outputs/large.bin",
+                "--dest",
+                overflow.to_str().unwrap(),
+                "--max-bytes",
+                "128",
+            ],
+            &root,
+        );
+        assert_eq!(over.code, 2);
+        assert!(!overflow.exists());
+
+        std::fs::write(root.join("fail_stream"), "1").unwrap();
+        let partial = invoke(
+            &[
+                "collect",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--remote-path",
+                "outputs/artifact.bin",
+                "--dest",
+                existing.to_str().unwrap(),
+            ],
+            &root,
+        );
+        assert_eq!(partial.code, 23);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"untouched-original");
+        std::fs::remove_file(root.join("fail_stream")).unwrap();
+
+        let wrong_hash = invoke(
+            &[
+                "collect",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--remote-path",
+                "outputs/artifact.bin",
+                "--dest",
+                existing.to_str().unwrap(),
+                "--expected-sha256",
+                &"0".repeat(64),
+            ],
+            &root,
+        );
+        assert_eq!(wrong_hash.code, 2);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"untouched-original");
+
+        let ok = invoke(
+            &[
+                "collect",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--remote-path",
+                "outputs/artifact.bin",
+                "--dest",
+                existing.to_str().unwrap(),
+                "--expected-sha256",
+                &digest,
+            ],
+            &root,
+        );
+        assert_eq!(ok.code, 0, "{}", String::from_utf8_lossy(&ok.stderr));
+        let v: serde_json::Value = serde_json::from_slice(&ok.stdout).unwrap();
+        assert_eq!(v["verified"], true);
+        assert_eq!(v["bytes"], payload.len() as u64);
+        assert_eq!(v["sha256"], digest);
+        assert_eq!(std::fs::read(&existing).unwrap(), payload);
+
+        let leftovers: Vec<_> = std::fs::read_dir(&dest_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".oms-collect-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

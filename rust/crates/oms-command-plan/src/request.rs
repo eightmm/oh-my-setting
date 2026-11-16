@@ -6,6 +6,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    ContractPropose,
+    ContractAccept,
+    ContractList,
+    ContractShow,
+    RefreshContracts,
     SnapshotDecision,
     Init,
     EnsureLineage,
@@ -46,6 +51,11 @@ pub enum Action {
 }
 impl Action {
     pub const ALL: &'static [(&'static str, Action)] = &[
+        ("contract-propose", Self::ContractPropose),
+        ("contract-accept", Self::ContractAccept),
+        ("contract-list", Self::ContractList),
+        ("contract-show", Self::ContractShow),
+        ("refresh-contracts", Self::RefreshContracts),
         ("snapshot-decision", Self::SnapshotDecision),
         ("init", Self::Init),
         ("ensure-lineage", Self::EnsureLineage),
@@ -117,6 +127,10 @@ pub(crate) const BOOLEANS: &[&str] = &[
     "json",
 ];
 pub(crate) const NAMES: &[&str] = &[
+    "summary",
+    "scope-paths",
+    "version",
+    "task",
     "repo",
     "file",
     "id",
@@ -219,7 +233,9 @@ impl Request {
     pub fn read_only(&self) -> bool {
         matches!(
             self.action,
-            Action::Show
+            Action::ContractList
+                | Action::ContractShow
+                | Action::Show
                 | Action::EvidenceSnapshot
                 | Action::List
                 | Action::Ready
@@ -383,6 +399,17 @@ impl Request {
             "main review approval requires its exact digest",
         )?;
         let only = match self.action {
+            ContractPropose => Some(vec![
+                "id",
+                "summary",
+                "scope-paths",
+                "decision-artifact",
+                "json",
+            ]),
+            ContractAccept => Some(vec!["id", "version", "json"]),
+            ContractList => Some(vec!["json"]),
+            ContractShow => Some(vec!["id", "json"]),
+            RefreshContracts => Some(vec!["task", "json"]),
             SnapshotDecision => Some(vec![
                 "decision-artifact",
                 "expected-decision-artifact-sha256",

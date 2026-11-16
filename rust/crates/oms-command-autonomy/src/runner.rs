@@ -100,6 +100,7 @@ fn delegate(
     )
 }
 fn land(ctx: &Context<'_>, args: &Args, task: &Value, wall: Duration) -> Result<Output> {
+    let _landing = ctx.gates.map(crate::storage::Gates::landing);
     let mut call = vec![
         "--repo".into(),
         ctx.repo.as_os_str().to_owned(),
@@ -122,18 +123,10 @@ fn land(ctx: &Context<'_>, args: &Args, task: &Value, wall: Duration) -> Result<
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     execute_bound(ctx, args, None)
 }
-pub(crate) fn execute_bound(
-    ctx: &Context<'_>,
-    args: &Args,
-    intent: Option<&Value>,
-) -> Result<Output> {
-    ctx.parent()?;
-    args.required("to")?;
-    require(
-        args.flag("next") != args.has("id"),
-        "use exactly one of --id or --next",
-    )?;
-    let repair = args.number("repair", if args.flag("auto-repair") { 1 } else { 0 }, 0, 3)?;
+/// Validation shared by the serial and parallel entry points; returns the
+/// provider wall bound.
+pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
+    args.number("repair", if args.flag("auto-repair") { 1 } else { 0 }, 0, 3)?;
     require(
         !args.flag("auto-repair") || args.flag("land"),
         "--auto-repair requires --land",
@@ -158,15 +151,29 @@ pub(crate) fn execute_bound(
         )?;
     }
     ctx.git(&["rev-parse", "--git-dir"])?;
-    let wall = ctx.peer_wall.unwrap_or(verify::duration(
-        &std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "5m".into()),
-    )?);
+    ctx.peer_wall.map_or_else(
+        || verify::duration(&std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "5m".into())),
+        Ok,
+    )
+}
+pub(crate) fn execute_bound(
+    ctx: &Context<'_>,
+    args: &Args,
+    intent: Option<&Value>,
+) -> Result<Output> {
+    ctx.parent()?;
+    args.required("to")?;
+    require(
+        args.flag("next") != args.has("id"),
+        "use exactly one of --id or --next",
+    )?;
+    let wall = preflight(ctx, args)?;
     let provider = ctx.services.normalize_provider(args.required("to")?)?;
     if !args.flag("dry-run") {
         let _ = ctx.action(&Request::new(Action::Reclaim));
     }
     let mut claimed = false;
-    let mut task = if args.flag("next") {
+    let task = if args.flag("next") {
         let mut request = Request::new(Action::Next)
             .with("provider", &provider)
             .flag("json");
@@ -180,6 +187,19 @@ pub(crate) fn execute_bound(
     } else {
         show(ctx, args.required("id")?)?
     };
+    run_task(ctx, args, intent, task, claimed, wall)
+}
+/// One task whose lease is either already held (`claimed`) or taken here.
+/// The caller owns selection; this owns the lease it was given until return.
+pub(crate) fn run_task(
+    ctx: &Context<'_>,
+    args: &Args,
+    intent: Option<&Value>,
+    mut task: Value,
+    mut claimed: bool,
+    wall: Duration,
+) -> Result<Output> {
+    let repair = args.number("repair", if args.flag("auto-repair") { 1 } else { 0 }, 0, 3)?;
     let id = value::text(&task, "id").to_owned();
     let mut lease = value::text(&task, "lease_id").to_owned();
     let result = (|| {
