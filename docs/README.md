@@ -31,6 +31,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
 | [Stabilization plan](STABILIZATION-PLAN.md) | Prioritized reliability work and bounded offline verification |
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
+| [Multi-agent and multi-host plan](MULTI-AGENT-MULTI-HOST-PLAN.md) | Proposed behavior, staged delivery and acceptance for parallel agents, Git integration and remote clusters; no runtime change |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 | [Implementation review](CONTROL-PLANE-IMPLEMENTATION-REVIEW.md) | Recent implementation findings, reproductions and UX tradeoffs |
