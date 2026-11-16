@@ -1177,14 +1177,14 @@ printf '{{"hostname":"%s","boot_id":"%s","pid":%s,"lstart":"%s","command_sha256"
 mv -f -- "$op_dir/meta.json.tmp" "$op_dir/meta.json"
 child=""
 trap '[ -n "$child" ] && {{ kill -TERM -"$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true; }}' TERM
-cpg_script='pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d " \t\r\n" || true); if [ "$pg" = "$$" ] && [ "$$" -gt 1 ] 2>/dev/null; then printf "%s\n" "$$" >"$3.tmp" && mv -f -- "$3.tmp" "$3"; fi; cd -- "$1" && exec sh "$2"'
+cpg_script='pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d " \t\r\n" || true); if [ "$pg" = "$$" ] && [ "$$" -gt 1 ] 2>/dev/null; then pg_ls=$(LC_ALL=C ps -p $$ -o lstart= 2>/dev/null | tr -cd "A-Za-z0-9._: +=,-" || true); printf "%s\n" "$pg_ls" >"$4.tmp" && mv -f -- "$4.tmp" "$4"; printf "%s\n" "$$" >"$3.tmp" && mv -f -- "$3.tmp" "$3"; fi; cd -- "$1" && exec sh "$2"'
 if command -v setsid >/dev/null 2>&1; then
-  setsid sh -c "$cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
+  setsid sh -c "$cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" "$op_dir/child.lstart" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
   child=$!
 else
   trap '' TTIN TTOU TSTP 2>/dev/null || true
   set -m
-  sh -c "trap - TTIN TTOU TSTP 2>/dev/null || true; $cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
+  sh -c "trap - TTIN TTOU TSTP 2>/dev/null || true; $cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" "$op_dir/child.lstart" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
   child=$!
   set +m
   trap - TTIN TTOU TSTP 2>/dev/null || true
@@ -1715,6 +1715,25 @@ if [ -z "$m_hn" ] || [ "$m_hn" != "$cur_hn" ]; then
   emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   exit 0
 fi
+cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
+read_cpg() {{
+  cpgid=""
+  cpg_ls=""
+  if [ -f "$op_dir/child.pgid" ]; then
+    cand_pg=$(tr -d ' \t\r\n' < "$op_dir/child.pgid" || true)
+    case "$cand_pg" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$cand_pg" -gt 1 ] 2>/dev/null && [ "$cand_pg" != "$$" ] && [ "$cand_pg" != "$cur_pg" ]; then
+          cpgid="$cand_pg"
+        fi
+        ;;
+    esac
+  fi
+  if [ -f "$op_dir/child.lstart" ]; then
+    cpg_ls=$(cat -- "$op_dir/child.lstart" 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+  fi
+}}
 if [ -z "$m_pid" ] || ! pid_live "$m_pid"; then
   if [ -f "$op_dir/result.json" ]; then
     printf '__OMS_MARK_%s__ CANCEL finished|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
@@ -1723,6 +1742,53 @@ if [ -z "$m_pid" ] || ! pid_live "$m_pid"; then
     emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
     emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
   else
+    read_cpg
+    if [ -n "$m_bid" ] && [ -n "$cur_bid" ] && [ "$m_bid" != "unknown" ] && [ "$cur_bid" != "unknown" ] && [ "$m_bid" = "$cur_bid" ] && [ ! -f "$op_dir/reaped.done" ] && [ -n "$cpgid" ] && pg_live "$cpgid"; then
+      if pid_live "$cpgid"; then
+        cur_cpg_ls=$(LC_ALL=C ps -p "$cpgid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+        if [ -z "$cpg_ls" ] || [ -z "$cur_cpg_ls" ]; then
+          printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+          emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+          exit 0
+        fi
+        if [ "$(norm "$cpg_ls")" != "$(norm "$cur_cpg_ls")" ]; then
+          printf '__OMS_MARK_%s__ CANCEL lost|exited|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
+          emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+          exit 0
+        fi
+      fi
+      : > "$op_dir/cancel.req"
+      kill -TERM -"$cpgid" 2>/dev/null || true
+      ticks=$((grace * 10))
+      i=0
+      sig="SIGTERM"
+      while [ "$i" -lt "$ticks" ]; do
+        pg_live "$cpgid" || break
+        i=$((i + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+      done
+      if pg_live "$cpgid"; then
+        sig="SIGKILL"
+        kill -KILL -"$cpgid" 2>/dev/null || true
+        j=0
+        while [ "$j" -lt 20 ]; do
+          pg_live "$cpgid" || break
+          j=$((j + 1))
+          sleep 0.1 2>/dev/null || sleep 1
+        done
+      fi
+      if pg_live "$cpgid"; then
+        rm -f -- "$op_dir/cancel.req"
+        printf '__OMS_MARK_%s__ CANCEL still_alive|%s\n' "$tok" "$sig"
+      else
+        : > "$op_dir/reaped.done"
+        printf '__OMS_MARK_%s__ CANCEL cancelled|%s\n' "$tok" "$sig"
+        emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+        emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
+        emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+      fi
+      exit 0
+    fi
     printf '__OMS_MARK_%s__ CANCEL lost|exited|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
     emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
   fi
@@ -1759,19 +1825,7 @@ if [ -f "$op_dir/child.pid" ]; then
     fi
   fi
 fi
-cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
-cpgid=""
-if [ -f "$op_dir/child.pgid" ]; then
-  cand_pg=$(tr -d ' \t\r\n' < "$op_dir/child.pgid" || true)
-  case "$cand_pg" in
-    ''|*[!0-9]*) ;;
-    *)
-      if [ "$cand_pg" -gt 1 ] 2>/dev/null && [ "$cand_pg" != "$$" ] && [ "$cand_pg" != "$cur_pg" ]; then
-        cpgid="$cand_pg"
-      fi
-      ;;
-  esac
-fi
+read_cpg
 all_live() {{
   if pid_live "$m_pid"; then return 0; fi
   if [ -n "$cpid" ] && pid_live "$cpid"; then return 0; fi
@@ -1814,6 +1868,7 @@ if all_live; then
   printf '__OMS_MARK_%s__ CANCEL still_alive|%s\n' "$tok" "$sig"
   exit 0
 fi
+: > "$op_dir/reaped.done"
 printf '__OMS_MARK_%s__ CANCEL cancelled|%s\n' "$tok" "$sig"
 emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
 emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
@@ -3993,6 +4048,112 @@ exec sh -c "$last"
         assert!(
             !grand_alive,
             "orphaned grandchild {grand_pid} survived cancel"
+        );
+
+        // 6. When runner.sh crashes/exits early (m_pid dead, no result.json), cancel still
+        //    reaps surviving descendants via validated child.pgid + child.lstart.
+        std::fs::write(
+            root.join("drop_active"),
+            remote.join("dead.ready").to_str().unwrap(),
+        )
+        .unwrap();
+        let launch_dead = invoke(
+            &[
+                "exec",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--remote-dir",
+                rd,
+                "--op-id",
+                "op-runner-dead",
+                "--",
+                "sh",
+                "-c",
+                "(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\" > dead.pid; : > dead.ready; exec sleep 30",
+            ],
+            &root,
+        );
+        assert_eq!(launch_dead.code, 75);
+        assert!(state_dir.join("op-runner-dead/child.pgid").exists());
+        assert!(state_dir.join("op-runner-dead/child.lstart").exists());
+        let dead_meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(state_dir.join("op-runner-dead/meta.json")).unwrap(),
+        )
+        .unwrap();
+        let dead_runner_pid = dead_meta["pid"].as_i64().unwrap();
+        let dead_cpid: i32 = std::fs::read_to_string(state_dir.join("op-runner-dead/child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let dead_grand_pid: i32 = std::fs::read_to_string(remote.join("dead.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let _ = Command::new("kill")
+            .args([
+                "-KILL",
+                &dead_runner_pid.to_string(),
+                &dead_cpid.to_string(),
+            ])
+            .status();
+        for _ in 0..50 {
+            let r_alive = Command::new("kill")
+                .args(["-0", &dead_runner_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            let c_alive = Command::new("kill")
+                .args(["-0", &dead_cpid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !r_alive && !c_alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!state_dir.join("op-runner-dead/result.json").exists());
+        let canceled_dead = invoke(
+            &[
+                "cancel",
+                "--host",
+                "example",
+                "--repo",
+                rs,
+                "--op-id",
+                "op-runner-dead",
+                "--grace-seconds",
+                "1",
+            ],
+            &root,
+        );
+        assert_eq!(
+            canceled_dead.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&canceled_dead.stderr)
+        );
+        let vd: serde_json::Value = serde_json::from_slice(&canceled_dead.stdout).unwrap();
+        assert_eq!(vd["state"], "cancelled");
+        assert_eq!(vd["signal"], "SIGKILL");
+        let dead_grand_alive = Command::new("kill")
+            .args(["-0", &dead_grand_pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !dead_grand_alive,
+            "grandchild {dead_grand_pid} survived dead-runner cancel"
         );
     }
 

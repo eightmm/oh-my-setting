@@ -1,5 +1,5 @@
 Usage: slurm-submit.sh [--key KEY] [--dry-run] [--force-resubmit --reason TEXT] -- sbatch ARGS... SCRIPT
-       slurm-submit.sh reconcile (--key KEY | --job-id ID) [--repo PATH] [--json]
+       slurm-submit.sh reconcile (--key KEY | --job-id ID) [--adopt-job] [--repo PATH] [--json]
 
 Run `sbatch ARGS... SCRIPT` once per request key and record it in
 .oms/slurm-submits.jsonl (append-only, under the repo file lock).
@@ -46,3 +46,5 @@ Terminal states append a `reconciled` row. Output state and exit:
 active/succeeded 0; failed, oom, timeout, preempted, cancelled 1; unknown 75
 (no match, failed query, ambiguous or unrecognised state). Unknown is never
 "absent": do not resubmit without --force-resubmit after checking by hand.
+With --key KEY --job-id ID, --adopt-job explicitly recovers an untagged or
+ambiguous attempt onto that key's active attempt without duplicating work.

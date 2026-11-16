@@ -244,7 +244,14 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     } else {
         Streams::Separate
     };
-    request.scope = Scope::ProcessGroup;
+    #[cfg(target_os = "linux")]
+    let (scope, mut reactor) = match Reactor::dedicated() {
+        Ok(dedicated) => (Scope::WholeTree, dedicated),
+        Err(_) => (Scope::ProcessGroup, Reactor::new()),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (scope, mut reactor) = (Scope::ProcessGroup, Reactor::new());
+    request.scope = scope;
     request.deadline = Some(
         Instant::now()
             .checked_add(job.timeout)
@@ -258,7 +265,6 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if !job.merged {
         request.stderr_capture = Some(request.capture.clone());
     }
-    let mut reactor = Reactor::new();
     let id = reactor.start(request).map_err(|e| e.to_string())?;
     let mut cancelling = false;
     let mut beat = Instant::now();

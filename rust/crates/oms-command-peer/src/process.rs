@@ -1,6 +1,6 @@
 //! Execution uses the supervisor reactor's owned child, cancellation and drainage.
 use crate::{Error, Result};
-use oms_supervisor::process::{Progress, Reactor, Request, StopReason, Streams};
+use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
 use std::{
     ffi::OsString,
     path::PathBuf,
@@ -44,13 +44,20 @@ impl Executor for Native {
         } else {
             Streams::Separate
         };
+        #[cfg(target_os = "linux")]
+        let (scope, mut reactor) = match Reactor::dedicated() {
+            Ok(dedicated) => (Scope::WholeTree, dedicated),
+            Err(_) => (Scope::ProcessGroup, Reactor::new()),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (scope, mut reactor) = (Scope::ProcessGroup, Reactor::new());
+        request.scope = scope;
         request.deadline = Some(
             Instant::now()
                 .checked_add(input.timeout)
                 .ok_or_else(|| Error::new(2, "execution deadline overflow"))?,
         );
         request.capture.max_bytes = input.max_bytes;
-        let mut reactor = Reactor::new();
         let job = reactor
             .start(request)
             .map_err(|e| Error::new(125, format!("process could not start: {e}")))?;

@@ -2209,3 +2209,123 @@ fn child_input_runs_natively_with_child_restrictions() {
     }
     assert!(!f.0.join("preflight").exists());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::process::CommandExt;
+    use std::time::{Duration, Instant};
+
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    for tool in ["sh", "setsid", "sleep"] {
+        let link = bin.join(tool);
+        if !link.exists() {
+            let found = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|p| p.join(tool))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| panic!("{tool} on PATH"));
+            symlink(std::fs::canonicalize(found).unwrap(), link).unwrap();
+        }
+    }
+    let source = std::env::var_os("OMS_CONTRACT_REPO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    fn copy_tree(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let ft = entry.file_type().unwrap();
+            let to = dst.join(entry.file_name());
+            if ft.is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else if ft.is_file() {
+                std::fs::copy(entry.path(), to).unwrap();
+            }
+        }
+    }
+    for data_root in ["config", "roles", "prompts"] {
+        let dir = source.join(data_root);
+        if dir.is_dir() {
+            copy_tree(&dir, &f.0.join(data_root));
+        }
+    }
+    let grand_pid_file = f.0.join("grand.pid");
+    let grand_ready_file = f.0.join("grand.ready");
+    std::fs::write(
+        bin.join("codex"),
+        "#!/bin/sh\nsetsid /bin/sh -c 'trap \"\" TERM; exec sleep 30' </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\" > \"$OMS_GRAND_PID\"; : > \"$OMS_GRAND_READY\"; exec sleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cmd = f.private(&bin, "--oms-dispatch");
+    cmd.args([
+        "peer-ask",
+        "--providers",
+        "codex",
+        "--model",
+        "gpt-5.4",
+        "--prompt",
+        "ping",
+    ])
+    .env("OMS_GRAND_PID", &grand_pid_file)
+    .env("OMS_GRAND_READY", &grand_ready_file)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .process_group(0);
+
+    let mut child = cmd.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !grand_ready_file.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "oms peer-ask exited early ({status}): stdout={} stderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+        assert!(Instant::now() < deadline, "codex fixture did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let grand_pid: i32 = std::fs::read_to_string(&grand_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+
+    let reap_deadline = Instant::now() + Duration::from_secs(6);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= reap_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("native oms did not exit cleanly after SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(status.code(), Some(130));
+    std::thread::sleep(Duration::from_millis(50));
+    let alive = Command::new("kill")
+        .args(["-0", &grand_pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        !alive,
+        "setsid TERM-ignoring grandchild {grand_pid} survived SIGTERM on native oms"
+    );
+}

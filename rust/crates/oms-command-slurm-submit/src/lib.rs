@@ -346,47 +346,97 @@ pub(crate) fn cluster_from_args(args: &[OsString]) -> Option<String> {
         }
         if s == "-M" || s == "--clusters" {
             i += 1;
-            if let Some(c) = args.get(i).and_then(|v| v.to_str())
-                && safe_cluster(c)
-            {
-                found = Some(c.to_owned());
-            }
+            found = args
+                .get(i)
+                .and_then(|v| v.to_str())
+                .filter(|c| safe_cluster(c))
+                .map(str::to_owned);
         } else if let Some(rest) = s.strip_prefix("--clusters=") {
-            if safe_cluster(rest) {
-                found = Some(rest.to_owned());
-            }
+            found = safe_cluster(rest).then(|| rest.to_owned());
         } else if s.len() > 2 && s.starts_with("-M") && !s.starts_with("-M-") {
             let c = &s[2..];
-            if safe_cluster(c) {
-                found = Some(c.to_owned());
-            }
+            found = safe_cluster(c).then(|| c.to_owned());
         } else if s.starts_with("--") {
             let takes_value = !s.contains('=')
-                && !matches!(
+                && matches!(
                     s,
-                    "--help"
-                        | "--usage"
-                        | "--version"
-                        | "--hold"
-                        | "--parsable"
-                        | "--quiet"
-                        | "--verbose"
-                        | "--wait"
-                        | "--no-kill"
-                        | "--no-requeue"
-                        | "--requeue"
-                        | "--overcommit"
-                        | "--oversubscribe"
-                        | "--exclusive"
-                        | "--spread-job"
-                        | "--contiguous"
-                        | "--ignore-pbs"
-                        | "--test-only"
-                        | "--get-user-env"
-                        | "--use-min-nodes"
-                        | "--whole"
-                        | "--bell"
-                        | "--no-bell"
+                    "--account"
+                        | "--array"
+                        | "--begin"
+                        | "--chdir"
+                        | "--cluster-constraint"
+                        | "--comment"
+                        | "--constraint"
+                        | "--container"
+                        | "--core-spec"
+                        | "--cores-per-socket"
+                        | "--cpu-bind"
+                        | "--cpu-freq"
+                        | "--cpus-per-gpu"
+                        | "--cpus-per-task"
+                        | "--deadline"
+                        | "--delay-boot"
+                        | "--dependency"
+                        | "--distribution"
+                        | "--error"
+                        | "--exclude"
+                        | "--export"
+                        | "--export-file"
+                        | "--extra"
+                        | "--extra-node-info"
+                        | "--gid"
+                        | "--gpu-bind"
+                        | "--gpu-freq"
+                        | "--gpus"
+                        | "--gpus-per-node"
+                        | "--gpus-per-socket"
+                        | "--gpus-per-task"
+                        | "--gres"
+                        | "--gres-flags"
+                        | "--hint"
+                        | "--input"
+                        | "--job-name"
+                        | "--kill-on-invalid-dep"
+                        | "--licenses"
+                        | "--mail-type"
+                        | "--mail-user"
+                        | "--mcs-label"
+                        | "--mem"
+                        | "--mem-bind"
+                        | "--mem-per-cpu"
+                        | "--mem-per-gpu"
+                        | "--mincpus"
+                        | "--network"
+                        | "--nodefile"
+                        | "--nodelist"
+                        | "--nodes"
+                        | "--ntasks"
+                        | "--ntasks-per-core"
+                        | "--ntasks-per-gpu"
+                        | "--ntasks-per-node"
+                        | "--ntasks-per-socket"
+                        | "--open-mode"
+                        | "--output"
+                        | "--partition"
+                        | "--power"
+                        | "--prefer"
+                        | "--priority"
+                        | "--profile"
+                        | "--qos"
+                        | "--reservation"
+                        | "--signal"
+                        | "--sockets-per-node"
+                        | "--switches"
+                        | "--thread-spec"
+                        | "--threads-per-core"
+                        | "--time"
+                        | "--time-min"
+                        | "--tmp"
+                        | "--tres-bind"
+                        | "--tres-per-task"
+                        | "--uid"
+                        | "--wckey"
+                        | "--wrap"
                 );
             if takes_value {
                 i += 1;
@@ -415,7 +465,6 @@ pub(crate) fn cluster_from_args(args: &[OsString]) -> Option<String> {
                     | "-q"
                     | "-S"
                     | "-t"
-                    | "-u"
                     | "-w"
                     | "-x"
             )
@@ -433,6 +482,12 @@ fn cluster_in_script(path: &Path) -> Option<String> {
     let mut found = None;
     for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
         let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.starts_with('#') {
+            break;
+        }
         let Some(after) = trimmed.strip_prefix("#SBATCH") else {
             continue;
         };
@@ -456,9 +511,13 @@ fn cluster_in_script(path: &Path) -> Option<String> {
 fn resolve_cluster_name(args: &[OsString], script: Option<&Path>) -> Option<String> {
     cluster_from_args(args)
         .or_else(|| {
-            std::env::var_os("SLURM_CLUSTERS")
-                .and_then(|v| v.to_str().map(str::trim).map(str::to_owned))
-                .filter(|c| safe_cluster(c))
+            ["SBATCH_CLUSTERS", "SLURM_CLUSTERS"]
+                .into_iter()
+                .find_map(|var| {
+                    std::env::var_os(var)
+                        .and_then(|v| v.to_str().map(str::trim).map(str::to_owned))
+                        .filter(|c| safe_cluster(c))
+                })
         })
         .or_else(|| script.and_then(cluster_in_script))
 }

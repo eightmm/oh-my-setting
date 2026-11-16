@@ -20,6 +20,7 @@ pub(crate) struct Options {
     pub job_id: String,
     pub repo: OsString,
     pub json: bool,
+    pub adopt_job: bool,
 }
 
 pub(crate) fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
@@ -28,6 +29,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
         job_id: String::new(),
         repo: OsString::new(),
         json: false,
+        adopt_job: false,
     };
     let mut index = 0;
     while index < args.len() {
@@ -39,6 +41,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
         match name {
             b"-h" | b"--help" => return Ok(None),
             b"--json" if inline.is_none() => options.json = true,
+            b"--adopt-job" if inline.is_none() => options.adopt_job = true,
             b"--key" | b"--job-id" | b"--repo" => {
                 let value = match inline {
                     Some(v) => OsString::from_vec(v.to_vec()),
@@ -72,6 +75,9 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Option<Options>, Vec<u8>> {
     }
     if !options.job_id.is_empty() && !digits(&options.job_id) {
         return Err(crate::fail(b"--job-id must be a numeric Slurm job id"));
+    }
+    if options.adopt_job && (options.key.is_empty() || options.job_id.is_empty()) {
+        return Err(crate::fail(b"--adopt-job requires both --key and --job-id"));
     }
     Ok(Some(options))
 }
@@ -598,11 +604,27 @@ fn attempt_cluster(rows: &[Json], attempt_id: &[u8]) -> Option<String> {
     submitted_c.or(intent_c).or(args_c)
 }
 
+fn clusters_overlap(a: Option<&str>, b: Option<&str>) -> bool {
+    let (Some(a), Some(b)) = (a.filter(|s| !s.is_empty()), b.filter(|s| !s.is_empty())) else {
+        return true;
+    };
+    let set_a: BTreeSet<&str> = a
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    b.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|part| set_a.contains(part))
+}
+
 fn record(
     ledger_path: &Path,
     logical: &Path,
     old: &Target,
     verdict: &Verdict,
+    adopted: bool,
     interrupted: &AtomicBool,
 ) -> Result<bool, String> {
     let Some(job) = &verdict.job_id else {
@@ -630,7 +652,10 @@ fn record(
                     .ok()
                     .is_some_and(|other_att| {
                         other_att != old.attempt_id
-                            && attempt_cluster(&rows, &other_att) == old.cluster_name
+                            && clusters_overlap(
+                                attempt_cluster(&rows, &other_att).as_deref(),
+                                old.cluster_name.as_deref(),
+                            )
                     })
         })
     {
@@ -650,6 +675,9 @@ fn record(
             ("reconciled", Value::Bool(true)),
             ("source", j::text(verdict.source)),
         ]);
+        if adopted {
+            j::put(&mut row, "adopted", Value::Bool(true));
+        }
         for (name, value) in &old.provenance {
             j::put(&mut row, name, j::copy_value(value));
         }
@@ -702,14 +730,17 @@ fn submitted_attempts(rows: &[Json], job: &str) -> Vec<(OsString, Vec<u8>, Optio
         .collect()
 }
 
-fn tag_exclusions(rows: &[Json], target: &Target, short: &str) -> (BTreeSet<String>, bool) {
+fn tag_exclusions(rows: &[Json], target: &Target, short: Option<&str>) -> (BTreeSet<String>, bool) {
     let mut excluded_jobs = BTreeSet::new();
     let mut attempt_has_result = std::collections::BTreeSet::new();
     for r in rows {
         if let Ok(att) = ledger::identity(f(r, "attempt")) {
             if kind(r, "submitted") {
                 if att != target.attempt_id
-                    && attempt_cluster(rows, &att) == target.cluster_name
+                    && clusters_overlap(
+                        attempt_cluster(rows, &att).as_deref(),
+                        target.cluster_name.as_deref(),
+                    )
                     && let Some(job_id) = text_of(r, "job_id")
                 {
                     excluded_jobs.insert(job_id);
@@ -720,23 +751,28 @@ fn tag_exclusions(rows: &[Json], target: &Target, short: &str) -> (BTreeSet<Stri
             }
         }
     }
-    let ambiguous_other_unresolved = rows.iter().any(|r| {
-        if !kind(r, "intent") {
-            return false;
-        }
-        let Ok(att) = ledger::identity(f(r, "attempt")) else {
-            return false;
-        };
-        if att == target.attempt_id || attempt_has_result.contains(&att) {
-            return false;
-        }
-        if attempt_cluster(rows, &att) != target.cluster_name {
-            return false;
-        }
-        let Some(Json::String(k)) = f(r, "key") else {
-            return false;
-        };
-        intent_short(r, OsStr::from_bytes(k)).as_deref() == Some(short)
+    let ambiguous_other_unresolved = short.is_some_and(|short| {
+        rows.iter().any(|r| {
+            if !kind(r, "intent") {
+                return false;
+            }
+            let Ok(att) = ledger::identity(f(r, "attempt")) else {
+                return false;
+            };
+            if att == target.attempt_id || attempt_has_result.contains(&att) {
+                return false;
+            }
+            if !clusters_overlap(
+                attempt_cluster(rows, &att).as_deref(),
+                target.cluster_name.as_deref(),
+            ) {
+                return false;
+            }
+            let Some(Json::String(k)) = f(r, "key") else {
+                return false;
+            };
+            intent_short(r, OsStr::from_bytes(k)).as_deref() == Some(short)
+        })
     });
     (excluded_jobs, ambiguous_other_unresolved)
 }
@@ -786,10 +822,9 @@ pub(crate) fn run(
                 {
                     return Err("--job-id does not match the active submission for --key".into());
                 }
-                if recorded
-                    .iter()
-                    .any(|(k, _, c)| k != &options.key && *c == t.cluster_name)
-                {
+                if recorded.iter().any(|(k, _, c)| {
+                    k != &options.key && clusters_overlap(c.as_deref(), t.cluster_name.as_deref())
+                }) {
                     return Err("--key does not match the recorded --job-id".into());
                 }
                 require_tag_for_job = t.job_id.is_none();
@@ -797,8 +832,8 @@ pub(crate) fn run(
             }
         } else {
             let mut distinct = BTreeSet::new();
-            for (k, _, c) in &recorded {
-                distinct.insert((k.clone(), c.clone()));
+            for (k, att, _) in &recorded {
+                distinct.insert((k.clone(), att.clone()));
             }
             if distinct.len() > 1 {
                 return Err(
@@ -833,25 +868,36 @@ pub(crate) fn run(
         found.as_ref().and_then(|t| t.short.as_deref()),
     ) {
         (Some(id), false, _) => Matcher::Job(id),
-        (Some(id), true, Some(short)) => {
+        (Some(id), true, short_opt) => {
             if let Some(t) = found.as_ref() {
-                let (excl, ambig) = tag_exclusions(&rows, t, short);
+                let (excl, ambig) = tag_exclusions(&rows, t, short_opt);
                 excluded_jobs = excl;
                 ambiguous_tag = ambig;
             }
-            if ambiguous_tag || excluded_jobs.contains(id.as_str()) {
+            if excluded_jobs.contains(id.as_str()) {
+                if options.adopt_job {
+                    return Err(
+                        "--job-id already belongs to another submission on an overlapping cluster"
+                            .into(),
+                    );
+                }
                 Matcher::Nothing
+            } else if options.adopt_job {
+                Matcher::Job(id)
+            } else if let Some(short) = short_opt {
+                if ambiguous_tag {
+                    Matcher::Nothing
+                } else {
+                    Matcher::TaggedJob { id, short }
+                }
             } else {
-                Matcher::TaggedJob { id, short }
+                untagged_for_job = true;
+                Matcher::Nothing
             }
-        }
-        (Some(_), true, None) => {
-            untagged_for_job = true;
-            Matcher::Nothing
         }
         (None, _, Some(short)) => {
             if let Some(t) = found.as_ref() {
-                let (excl, ambig) = tag_exclusions(&rows, t, short);
+                let (excl, ambig) = tag_exclusions(&rows, t, Some(short));
                 excluded_jobs = excl;
                 ambiguous_tag = ambig;
             }
@@ -874,10 +920,10 @@ pub(crate) fn run(
     let mut sacct_args: Vec<OsString> = ["-X", "--parsable2", "-n", "-S"].map(Into::into).to_vec();
     sacct_args.push(start.into());
     sacct_args.push("--format=JobIDRaw,JobName,State,ExitCode,Comment".into());
-    if let Some(cluster) = found.as_ref().and_then(|t| t.cluster_name.as_deref()) {
+    if let Some(clus) = found.as_ref().and_then(|t| t.cluster_name.as_deref()) {
         for args in [&mut squeue_args, &mut sacct_args] {
             args.push("-M".into());
-            args.push(cluster.into());
+            args.push(clus.into());
         }
     }
     match (&job, who) {
@@ -910,18 +956,24 @@ pub(crate) fn run(
     let squeue = query("OMS_SLURM_SQUEUE_BIN", "squeue", &squeue_args, parse_squeue)?;
     let sacct = query("OMS_SLURM_SACCT_BIN", "sacct", &sacct_args, parse_sacct)?;
     let mut verdict = resolve(&squeue, &sacct, &matcher);
-    if ambiguous_tag && verdict.class == Class::Unknown {
+    if ambiguous_tag && !options.adopt_job && verdict.class == Class::Unknown {
+        verdict.reason = if options.job_id.is_empty() {
+            "multiple unresolved tagged attempts share this key tag; pass --key, --job-id and --adopt-job after verifying by hand".into()
+        } else {
+            "multiple unresolved tagged attempts share this key tag; pass --adopt-job with --key and --job-id after verifying by hand".into()
+        };
+    } else if untagged_for_job && !options.adopt_job && verdict.class == Class::Unknown {
         verdict.reason =
-            "multiple unresolved tagged attempts share this key tag; cannot disambiguate safely"
-                .into();
-    } else if untagged_for_job && verdict.class == Class::Unknown {
-        verdict.reason =
-            "untagged attempt cannot safely adopt an unrecorded --job-id without oms-key verification"
+            "untagged attempt cannot safely adopt an unrecorded --job-id without oms-key verification; pass --adopt-job after verifying"
                 .into();
     }
+    let adopted = options.adopt_job
+        && require_tag_for_job
+        && verdict.class != Class::Unknown
+        && found.as_ref().is_some_and(|t| t.job_id.is_none());
     let recorded = match &found {
         Some(t) if verdict.class != Class::Unknown => {
-            record(&ledger_path, &base, t, &verdict, interrupted)?
+            record(&ledger_path, &base, t, &verdict, adopted, interrupted)?
         }
         _ => false,
     };
@@ -950,6 +1002,7 @@ pub(crate) fn run(
                 "recovered",
                 Value::Bool(recorded && found.as_ref().is_some_and(|t| t.job_id.is_none())),
             ),
+            ("adopted", Value::Bool(recorded && adopted)),
             (
                 "scheduler_exit",
                 j::text(verdict.exit.as_deref().unwrap_or("")),

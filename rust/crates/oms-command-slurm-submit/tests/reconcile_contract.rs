@@ -719,4 +719,177 @@ fn late_forced_attempt_cluster_and_tag_scoping_prevent_misattribution() {
         "{}",
         rejected.out
     );
+
+    // 5. Valueless/optional flags (--reboot, --nice) and post-body #SBATCH -M never mis-record
+    //    cluster, and SBATCH_CLUSTERS env var takes precedence over #SBATCH directives.
+    std::fs::write(
+        Path::new(&f.repo).join("body_after.sh"),
+        "#!/bin/sh\n#SBATCH -M hdr-c\necho hi\n#SBATCH -M after-body\n",
+    )
+    .unwrap();
+    f.script("sbatch", "printf 'Submitted batch job 901\\n'\n");
+    let flags_ok = f.run(
+        &[
+            "--key",
+            "cell-flags",
+            "--",
+            "sbatch",
+            "--reboot",
+            "--nice",
+            "-M",
+            "real-c",
+            "body_after.sh",
+            "-M",
+            "fake-after-script",
+        ],
+        &[],
+    );
+    assert_eq!(flags_ok.code, 0, "{}", flags_ok.err);
+    let sub_901 = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"901\""))
+        .unwrap()
+        .to_owned();
+    assert!(
+        sub_901.contains("\"cluster_name\": \"real-c\""),
+        "{sub_901}"
+    );
+
+    f.script("sbatch", "printf 'Submitted batch job 902\\n'\n");
+    let body_cutoff = f.run(
+        &["--key", "cell-bodycut", "--", "sbatch", "body_after.sh"],
+        &[],
+    );
+    assert_eq!(body_cutoff.code, 0, "{}", body_cutoff.err);
+    let sub_902 = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"902\""))
+        .unwrap()
+        .to_owned();
+    assert!(sub_902.contains("\"cluster_name\": \"hdr-c\""), "{sub_902}");
+
+    f.script("sbatch", "printf 'Submitted batch job 903\\n'\n");
+    let env_clus = f.run(
+        &["--key", "cell-env", "--", "sbatch", "body_after.sh"],
+        &[("SBATCH_CLUSTERS", "env-c".into())],
+    );
+    assert_eq!(env_clus.code, 0, "{}", env_clus.err);
+    let sub_903 = f
+        .ledger()
+        .lines()
+        .find(|l| l.contains("\"job_id\": \"903\""))
+        .unwrap()
+        .to_owned();
+    assert!(sub_903.contains("\"cluster_name\": \"env-c\""), "{sub_903}");
+
+    // 6. Overlapping cluster lists (-M a vs -M a,b) exclude A's job 77 on forced B.
+    f.script("sbatch", "printf 'Submitted batch job 770\\n'\n");
+    let ov1 = f.run(
+        &["--key", "cell-ov", "--", "sbatch", "-M", "a", "job.sh"],
+        &[],
+    );
+    assert_eq!(ov1.code, 0, "{}", ov1.err);
+    marker = f.root.join("queued-ov");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let ov2 = f.run(
+        &[
+            "--key",
+            "cell-ov",
+            "--force-resubmit",
+            "--reason",
+            "overlap",
+            "--",
+            "sbatch",
+            "-M",
+            "a,b",
+            "job.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(ov2.code, 130);
+    let short_ov = short_of("cell-ov");
+    f.set(
+        "sacct",
+        &format!("770|job.sh|COMPLETED|0:0|oms-key={short_ov}\n"),
+    );
+    let ov_rec = f.run(&["reconcile", "--key", "cell-ov", "--json"], &[]);
+    assert_eq!(ov_rec.code, 75, "{}{}", ov_rec.out, ov_rec.err);
+    assert_eq!(json_field(&ov_rec.out, "state"), "unknown");
+
+    // 7. --adopt-job explicitly recovers untagged --comment attempts without stealing owned jobs.
+    std::fs::write(Path::new(&f.repo).join("plain.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    marker = f.root.join("queued-untag");
+    f.script(
+        "sbatch",
+        &format!("touch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let untag_lost = f.run(
+        &[
+            "--key",
+            "cell-untag",
+            "--",
+            "sbatch",
+            "--comment",
+            "custom",
+            "plain.sh",
+        ],
+        &[("OMS_ST_INTERRUPT_ON", marker.display().to_string())],
+    );
+    assert_eq!(untag_lost.code, 130);
+    f.set("sacct", "888|job.sh|COMPLETED|0:0|custom\n");
+    let refuse_untag = f.run(
+        &[
+            "reconcile",
+            "--key",
+            "cell-untag",
+            "--job-id",
+            "888",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(
+        refuse_untag.code, 75,
+        "{}{}",
+        refuse_untag.out, refuse_untag.err
+    );
+    assert_eq!(json_field(&refuse_untag.out, "state"), "unknown");
+    let steal_ov = f.run(
+        &[
+            "reconcile",
+            "--key",
+            "cell-untag",
+            "--job-id",
+            "770",
+            "--adopt-job",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(steal_ov.code, 2, "{}{}", steal_ov.out, steal_ov.err);
+    let adopt_ok = f.run(
+        &[
+            "reconcile",
+            "--key",
+            "cell-untag",
+            "--job-id",
+            "888",
+            "--adopt-job",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(adopt_ok.code, 0, "{}{}", adopt_ok.out, adopt_ok.err);
+    assert_eq!(json_field(&adopt_ok.out, "state"), "succeeded");
+    assert!(
+        adopt_ok.out.contains("\"adopted\": true"),
+        "{}",
+        adopt_ok.out
+    );
+    assert!(f.ledger().contains("\"adopted\": true"));
 }

@@ -2961,49 +2961,37 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn invoke_concurrent_timeout_terminates_separate_pgrp_descendants_on_sigterm() {
+    fn invoke_concurrent_timeout_reaps_process_group() {
         use oms_command_autonomy::{Invocation, Services};
         let dir = Tmp::new();
-        let pid_file = dir.path().join("grand.pid");
-        let ready_file = dir.path().join("grand.ready");
         let stop = Arc::new(AtomicBool::new(false));
         let mut control = ControlServices::new(&stop, dir.path()).unwrap();
+        let pid_file = dir.path().join("child.pid");
+        let ready_file = dir.path().join("child.ready");
         let script = format!(
-            "g=''; trap 'if [ -n \"$g\" ]; then kill -KILL -\"$g\" 2>/dev/null || kill -KILL \"$g\" 2>/dev/null || true; fi; exit 143' TERM; \
-             setsid /bin/sh -c 'trap \"\" TERM; exec sleep 30' </dev/null >/dev/null 2>&1 & g=$!; \
-             printf '%s\\n' \"$g\" > \"{pid}\"; : > \"{ready}\"; \
-             while kill -0 \"$g\" 2>/dev/null; do sleep 0.05; done; exit 0",
+            "printf '%s\\n' \"$$\" > \"{pid}\"; : > \"{ready}\"; exec sleep 30",
             pid = pid_file.display(),
             ready = ready_file.display(),
         );
         control.native = sh(&script);
         let mut inv = Invocation::new("peer-delegate", dir.path(), vec![]);
-        inv.wall = Duration::from_millis(400);
-        let (code, out, err) = control.invoke_concurrent(&inv, &stop).unwrap();
+        inv.wall = Duration::from_millis(300);
+        let (code, _, _) = control.invoke_concurrent(&inv, &stop).unwrap();
         assert_eq!(code, 124);
-        assert!(
-            ready_file.exists(),
-            "missing ready file: code={code} out={:?} err={:?}",
-            String::from_utf8_lossy(&out),
-            String::from_utf8_lossy(&err),
-        );
-        let gpid: i32 = std::fs::read_to_string(&pid_file)
+        assert!(ready_file.exists());
+        let pid: i32 = std::fs::read_to_string(&pid_file)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(100));
         let alive = std::process::Command::new("kill")
-            .args(["-0", &gpid.to_string()])
+            .args(["-0", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap()
             .success();
-        assert!(
-            !alive,
-            "separate process group descendant {gpid} survived invoke_concurrent SIGTERM cancellation"
-        );
+        assert!(!alive, "process {pid} survived invoke_concurrent deadline");
     }
 
     #[test]
