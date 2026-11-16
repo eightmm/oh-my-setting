@@ -1,9 +1,32 @@
 use crate::{Error, Result, V, require};
+use oms_command_plan::services::GroupResolver;
 use oms_safe_fs::{ByteReadOptions, MutationOptions, Root};
 use std::{
+    cell::Cell,
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
 };
+
+thread_local! {
+    static GROUP_RESOLVER: Cell<Option<GroupResolver>> = const { Cell::new(None) };
+}
+
+pub(crate) struct GroupResolverGuard(Option<GroupResolver>);
+
+impl Drop for GroupResolverGuard {
+    fn drop(&mut self) {
+        GROUP_RESOLVER.with(|slot| slot.set(self.0));
+    }
+}
+
+pub(crate) fn with_group_resolver(resolver: Option<GroupResolver>) -> GroupResolverGuard {
+    let previous = GROUP_RESOLVER.with(|slot| slot.replace(resolver));
+    GroupResolverGuard(previous)
+}
+
+pub(crate) fn current_group_resolver() -> Option<GroupResolver> {
+    GROUP_RESOLVER.with(Cell::get)
+}
 
 pub(crate) const MAX: usize = 256 * 1024 * 1024;
 pub(crate) fn root(repo: &Path) -> Result<Root> {
@@ -146,7 +169,8 @@ pub(crate) fn append(repo: &Path, path: &Path, row: &V, interrupted: &AtomicBool
 }
 /// The caller retains the canonical file lock across its entire transaction.
 pub(crate) fn append_under_lock(repo: &Path, path: &Path, row: &V) -> Result<()> {
-    let store = oms_command_plan::storage::Store::open(repo)?;
+    let store =
+        oms_command_plan::storage::Store::open(repo)?.with_group_resolver(current_group_resolver());
     if !repo.join(path).try_exists()? {
         replace(repo, path, None, b"")?;
     }

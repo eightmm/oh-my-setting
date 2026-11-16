@@ -241,9 +241,33 @@ fn child_entry() {
 
 /// Local stand-ins for the parent CLI's authorities: the gate really runs.
 struct TestServices;
+struct TestPlanServices;
 struct NoGuard;
 impl PublicationGuard for NoGuard {}
+fn test_group_resolver(
+    gid: u32,
+) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+    let uid = rustix::process::getuid().as_raw();
+    let explicit_member_uids = if std::env::var_os("OMS_CT_SHARED_GROUP").is_some() {
+        vec![uid.wrapping_add(1)]
+    } else {
+        vec![]
+    };
+    Ok(oms_command_plan::services::GroupMembership {
+        gid,
+        explicit_member_uids,
+        primary_member_uids: vec![uid],
+    })
+}
+impl oms_command_plan::Services for TestPlanServices {
+    fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        Some(test_group_resolver)
+    }
+}
 impl Services for TestServices {
+    fn plan(&self) -> Option<&dyn oms_command_plan::Services> {
+        Some(&TestPlanServices)
+    }
     fn supervise(
         &self,
         request: &oms_command_landing::services::VerifyRequest,
@@ -561,6 +585,19 @@ fn group_writable_git_dir_requires_account_proof() {
     ] {
         assert_refused(&iso.run(tool, &repo, &args), NO_PROOF);
     }
+    fs::set_permissions(&repo, fs::Permissions::from_mode(0o775)).unwrap();
+    assert_refused(
+        &iso.run_with_services(
+            "checkpoint",
+            &repo,
+            &["create"],
+            &[("OMS_CT_SHARED_GROUP", "1")],
+        ),
+        "unsafe",
+    );
+    let proven = iso.run_with_services("checkpoint", &repo, &["create"], &[]);
+    assert_eq!(proven.0, 0, "{proven:?}");
+    fs::set_permissions(&repo, fs::Permissions::from_mode(0o755)).unwrap();
     fs::set_permissions(repo.join(".git"), fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(iso.run("checkpoint", &repo, &["create"]).0, 0);
 }

@@ -155,6 +155,11 @@ pub fn run_with_services(
         if options.has("help") {
             return Ok(Output::text(cli::usage(tool).unwrap()));
         }
+        let _groups = storage::with_group_resolver(
+            services
+                .plan()
+                .and_then(|plan| plan.group_membership_resolver()),
+        );
         let context = Context {
             cwd,
             source,

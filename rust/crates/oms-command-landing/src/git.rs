@@ -195,7 +195,7 @@ impl<'a> Git<'a> {
         oms_command_plan::repository::Git {
             repo: self.repo,
             interrupted: self.interrupted,
-            group_resolver: None,
+            group_resolver: crate::storage::current_group_resolver(),
         }
         .guard()?;
         let flags = self.text(&["ls-files", "-v"])?;
