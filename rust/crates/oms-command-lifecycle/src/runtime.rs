@@ -486,9 +486,10 @@ pub(crate) fn new_file(path: &Path, raw: &[u8], mode: u32) -> Result<()> {
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(mode)
+        .mode(mode & 0o777)
         .open(path)?;
     f.write_all(raw)?;
+    f.set_permissions(fs::Permissions::from_mode(mode & 0o777))?;
     f.sync_all()?;
     Ok(())
 }

@@ -558,6 +558,19 @@ mod tests {
             file.with_file_name("settings.json.oh-my-setting-backup")
                 .exists()
         );
+        use std::os::unix::fs::PermissionsExt;
+        let ext = paths
+            .home
+            .join(".codex/plugins/cache/oh-my-setting-local/oh-my-setting/0.7.0");
+        fs::create_dir_all(&ext).unwrap();
+        fs::set_permissions(&ext, fs::Permissions::from_mode(0o775)).unwrap();
+        let hook = ext.join("hooks.json");
+        fs::write(&hook, b"{}").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o666)).unwrap();
+        let mut tx = Transaction::begin(&paths).unwrap();
+        let start = tx.prepare_external(std::slice::from_ref(&ext)).unwrap();
+        tx.finish_external(start).unwrap();
+        tx.commit().unwrap();
     }
 
     #[test]
