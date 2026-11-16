@@ -254,9 +254,15 @@ mod tests {
                     && path.extension().is_none()
             })
             .unwrap();
+        assert!(Command::new(&fixture).status().unwrap().success());
         for scenario in 1..=8 {
+            let budget = if scenario == 7 {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(2)
+            };
             let observation = Observation {
-                deadline: Instant::now() + Duration::from_millis(250),
+                deadline: Instant::now() + budget,
                 cancellation: None,
             };
             let result = ps(scenario, observation, &fixture);

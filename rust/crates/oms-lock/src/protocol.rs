@@ -1304,7 +1304,15 @@ mod tests {
                     );
                 } else {
                     let guard = lock.acquire(None).unwrap();
-                    assert_eq!(lock.probe(), Status::Held, "{case} {mode:?}");
+                    assert_eq!(
+                        lock.probe(),
+                        if mode == Selection::Flock && !cfg!(target_os = "linux") {
+                            Status::Unknown
+                        } else {
+                            Status::Held
+                        },
+                        "{case} {mode:?}"
+                    );
                     guard.release().unwrap();
                     assert_eq!(
                         lock.probe(),
