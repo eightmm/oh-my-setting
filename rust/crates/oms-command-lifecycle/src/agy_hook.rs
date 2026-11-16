@@ -65,7 +65,7 @@ pub(crate) fn run(
         }
         let hint = String::from_utf8(out.1).unwrap_or_default();
         let mut result = if out.0 == 0 && !hint.trim().is_empty() {
-            r::json(&json!({"injectSteps":[{"ephemeralMessage":hint.trim()}]}))?
+            r::json(&json!({"injectSteps":[{"systemMessage":{"systemMessage":hint.trim()}}]}))?
         } else {
             empty()?
         };

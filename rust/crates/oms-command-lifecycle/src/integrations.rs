@@ -575,7 +575,15 @@ fn git_hook(
     }
     // The mutation helper suppresses hooks with core.hooksPath=/dev/null;
     // a read-only path query must retain Git's configured hook directory.
-    let git = r::find("git", &paths.cwd).ok_or_else(|| r::Error(2, "git is required".into()))?;
+    let remove = options.has("--remove");
+    let Some(git) = r::find("git", &paths.cwd) else {
+        // Withdrawal has nothing to undo without git; install cannot proceed.
+        return if remove {
+            Ok(())
+        } else {
+            r::fail("git is required")
+        };
+    };
     let output = r::command(
         git,
         &["rev-parse".into(), "--git-path".into(), "hooks".into()],
@@ -585,7 +593,11 @@ fn git_hook(
         std::time::Duration::from_secs(30),
     )?;
     if output.0 != 0 {
-        return r::fail("cannot resolve Git hook directory");
+        return if remove {
+            Ok(())
+        } else {
+            r::fail("cannot resolve Git hook directory")
+        };
     }
     let raw = String::from_utf8(output.1)
         .map_err(|_| r::Error(2, "Git hook directory is not UTF-8".into()))?;
@@ -595,30 +607,101 @@ fn git_hook(
     } else {
         paths.source.join(dir)
     };
-    let target = dir.join("pre-push");
-    if r::exists(&target) {
-        let old = r::read(&target, r::LIMIT)?;
-        let text = String::from_utf8_lossy(&old);
-        if !text.contains("scripts/pre-push-check.sh")
-            && !text.starts_with("#!/bin/sh\n# oh-my-setting native pre-push\n")
-        {
-            return r::fail("refusing to replace an unmanaged pre-push hook");
+    let owned = |name: &str, header: &str, legacy: &str| -> Result<(PathBuf, bool)> {
+        let target = dir.join(name);
+        let ours = !r::exists(&target) || {
+            let old = r::read(&target, r::LIMIT)?;
+            let text = String::from_utf8_lossy(&old);
+            text.starts_with(header) || !legacy.is_empty() && text.contains(legacy)
+        };
+        Ok((target, ours))
+    };
+    let push_header = "#!/bin/sh\n# oh-my-setting native pre-push\n";
+    let merge_header = "#!/bin/sh\n# oh-my-setting native pre-merge-commit\n";
+    let hooks = [
+        (
+            "pre-push",
+            owned("pre-push", push_header, "scripts/pre-push-check.sh")?,
+        ),
+        (
+            "pre-merge-commit",
+            owned("pre-merge-commit", merge_header, "")?,
+        ),
+    ];
+    if remove {
+        // Only OMS-written hooks are withdrawn; a user's own hook stays.
+        for (_, (target, ours)) in hooks {
+            if ours && r::exists(&target) {
+                tx.remove(&target)?;
+            }
+        }
+        return Ok(());
+    }
+    for (name, (_, ours)) in &hooks {
+        if !ours {
+            return r::fail(format!("refusing to replace an unmanaged {name} hook"));
         }
     }
+    let [(_, (push, _)), (_, (merge, _))] = hooks;
     let mode = if options.has("--quick") {
         ""
     } else {
         " --full"
     };
+    let check = native_command(paths, "pre-push-check")?;
     tx.write(
-        &target,
-        format!(
-            "#!/bin/sh\n# oh-my-setting native pre-push\nexec {}{mode} \"$@\"\n",
-            native_command(paths, "pre-push-check")?
-        )
-        .as_bytes(),
+        &push,
+        format!("{push_header}exec {check}{mode} \"$@\"\n").as_bytes(),
+        0o755,
+    )?;
+    tx.write(
+        &merge,
+        format!("{merge_header}exec {check} --pre-merge \"$@\"\n").as_bytes(),
         0o755,
     )
+}
+/// Provider HUD wiring that needs no plugin: Codex status line and Antigravity
+/// `statusLine`. Removal touches only OMS-owned entries.
+pub(crate) fn huds(
+    paths: &Paths,
+    tx: &mut Transaction,
+    remove: bool,
+    codex_plugin: bool,
+) -> Result<()> {
+    let codex = hud_enabled("OH_MY_SETTING_CODEX_HUD") && hud_enabled("OH_MY_SETTING_CODEX_PLUGIN");
+    let agy = hud_enabled("OH_MY_SETTING_AGY_HUD");
+    huds_with(
+        paths,
+        tx,
+        remove,
+        (codex && !codex_plugin, agy),
+        (&paths.codex_home()?, &paths.codex_config()?),
+    )
+}
+fn huds_with(
+    paths: &Paths,
+    tx: &mut Transaction,
+    remove: bool,
+    (codex, agy): (bool, bool),
+    (codex_home, codex_config): (&Path, &Path),
+) -> Result<()> {
+    if remove {
+        crate::settings::codex(tx, codex_config, true)?;
+        return crate::plugins::agy_statusline(paths, tx, true);
+    }
+    if codex
+        && r::exists(codex_home)
+        && let Err(e) = crate::settings::codex(tx, codex_config, false)
+    {
+        tx.warn(&format!("Codex HUD not installed: {}", e.1));
+    }
+    if agy && r::exists(&paths.home.join(".gemini/antigravity-cli")) {
+        crate::plugins::agy_statusline(paths, tx, false)?;
+    }
+    Ok(())
+}
+pub(crate) fn hud_enabled(var: &str) -> bool {
+    std::env::var_os(var).is_none_or(|v| v != "0")
 }
 pub(crate) fn prepare_hooks(
     paths: &Paths,
@@ -770,6 +853,10 @@ pub(crate) fn run(
         };
         if let Some(key) = key {
             row["components"][key] = json!(!options.has("--remove"));
+            if key == "agy_plugin" && options.has("--remove") {
+                // An explicit withdrawal must survive auto-enable on the next install.
+                row["component_modes"]["agy_plugin"] = json!("0");
+            }
             if key == "claude_hooks" {
                 row["hooks_schema"] = expected(paths)?["hooks_schema"].clone();
             }
@@ -782,4 +869,72 @@ pub(crate) fn run(
     let mut output = r::text(format!("{}: configuration converged", options.tool));
     output.2 = diagnostics;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct Dir(PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn hud_wiring_installs_when_hosts_exist_and_removes_only_owned_entries() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("oms-huds-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = Dir(root.clone());
+        let (agy, codex) = (
+            root.join("home/.gemini/antigravity-cli"),
+            root.join("home/.codex"),
+        );
+        fs::create_dir_all(&agy).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        let paths = Paths {
+            home: root.join("home"),
+            source: root.join("source"),
+            receipt: root.join("receipt"),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
+            cwd: root.clone(),
+        };
+        let config = codex.join("config.toml");
+        let bare = "[tui]\nstatus_line = [\"model\"]\n";
+        fs::write(&config, bare).unwrap();
+        let apply = |remove: bool, on: (bool, bool)| {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            huds_with(&paths, &mut tx, remove, on, (&codex, &config)).unwrap();
+            tx.commit().unwrap();
+        };
+        apply(false, (false, false));
+        assert_eq!(fs::read_to_string(&config).unwrap(), bare);
+        assert!(!agy.join("settings.json").exists());
+        apply(false, (true, true));
+        assert!(
+            fs::read_to_string(&config)
+                .unwrap()
+                .contains("# displaced:")
+        );
+        assert!(
+            fs::read_to_string(agy.join("settings.json"))
+                .unwrap()
+                .contains("agy-statusline")
+        );
+        apply(true, (false, false));
+        assert_eq!(fs::read_to_string(&config).unwrap(), bare);
+        assert!(
+            !fs::read_to_string(agy.join("settings.json"))
+                .unwrap()
+                .contains("statusLine")
+        );
+        drop(dir);
+    }
 }

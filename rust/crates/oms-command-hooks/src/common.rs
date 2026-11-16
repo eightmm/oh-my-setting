@@ -373,6 +373,32 @@ pub fn git_directories(repo: &Path) -> Option<(PathBuf, PathBuf)> {
         .unwrap_or_else(|| directory.clone());
     Some((directory, common.canonicalize().ok()?))
 }
+/// What `.git/HEAD` names, read without spawning git. Worktree `.git` files
+/// resolve through `git_directories`.
+pub enum HeadRef {
+    Branch(String),
+    Detached(String),
+}
+pub fn head_ref(repo: &Path) -> Option<HeadRef> {
+    let (directory, _) = git_directories(repo)?;
+    let raw = read(&directory.join("HEAD"), 4096).ok()?;
+    let raw = std::str::from_utf8(&raw).ok()?.trim();
+    if let Some(name) = raw.strip_prefix("ref: ") {
+        let name = name.trim();
+        return Some(match name.strip_prefix("refs/heads/") {
+            Some(branch) if !branch.is_empty() => HeadRef::Branch(branch.into()),
+            _ => HeadRef::Detached(name.rsplit('/').next().unwrap_or("").into()),
+        });
+    }
+    (raw.len() >= 7 && raw.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| HeadRef::Detached(raw[..7].into()))
+}
+/// The checkout at `base` sits on `main` or `master`.
+pub fn on_protected_branch(base: &Path) -> bool {
+    root(base, base).is_some_and(
+        |r| matches!(head_ref(&r), Some(HeadRef::Branch(b)) if b == "main" || b == "master"),
+    )
+}
 pub fn head(repo: &Path) -> Option<String> {
     let (directory, common) = git_directories(repo)?;
     let raw = read(&directory.join("HEAD"), 4096).ok()?;

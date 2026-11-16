@@ -1,5 +1,6 @@
 use crate::{Output, common::*};
 use serde_json::{Value, json};
+use std::{ffi::OsString, path::Path};
 
 fn number(v: &Value, min: f64, max: f64) -> Option<f64> {
     v.as_f64()
@@ -372,6 +373,12 @@ fn main_line(v: &Value, ctx: &Context<'_>) -> String {
             metrics.push(color(s, p, on));
         }
     }
+    if !cwd.trim().is_empty() {
+        let live = oms_live_strip(root(Path::new(cwd), ctx.cwd).as_deref());
+        if !live.is_empty() {
+            metrics.push(live);
+        }
+    }
     if let Some(cost) = number(&v["cost"]["total_cost_usd"], 0., 1e12) {
         identity.push(format!("${cost:.2}"));
     }
@@ -412,6 +419,256 @@ fn main_line(v: &Value, ctx: &Context<'_>) -> String {
         )
     }
 }
+/// Lightweight local OMS state, read without spawning processes. Total I/O is
+/// capped at `LIVE_BUDGET`; absent or unreadable state contributes nothing.
+const LIVE_BUDGET: usize = 2 * 1024 * 1024;
+#[derive(Default)]
+struct Live {
+    tasks: usize,
+    title: String,
+    failures: usize,
+    agents: usize,
+}
+fn spend(path: &Path, cap: usize, budget: &mut usize) -> Option<Vec<u8>> {
+    let raw = read(path, cap.min(*budget)).ok()?;
+    *budget -= raw.len();
+    Some(raw)
+}
+fn terminal(row: &Value) -> bool {
+    row["terminal"] == true
+        || [
+            "resolved",
+            "closed",
+            "superseded",
+            "done",
+            "completed",
+            "failed",
+            "cancelled",
+            "canceled",
+            "stopped",
+            "error",
+        ]
+        .contains(&first(row, &["status", "state"]).to_lowercase().as_str())
+}
+fn live(repo: &Path) -> Live {
+    let mut budget = LIVE_BUDGET;
+    let mut live = Live::default();
+    let state = repo.join(".oms");
+    if let Some(plan) = spend(&state.join("plan/tasks.json"), 1 << 20, &mut budget)
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+    {
+        let rows: Vec<&Value> = match &plan["tasks"] {
+            Value::Object(m) => m.values().collect(),
+            Value::Array(a) => a.iter().collect(),
+            _ => vec![],
+        };
+        for row in rows.into_iter().take(4096) {
+            if ["running", "claimed", "in_progress", "active"]
+                .contains(&text(row, "state").to_lowercase().as_str())
+            {
+                if live.tasks == 0 {
+                    live.title = clean(&json!(first(row, &["title", "goal", "id"])), "", 32, true);
+                }
+                live.tasks += 1;
+            }
+        }
+    }
+    // Mirrors the ledger fold: a fail adds to its fingerprint, `resolved` clears
+    // it, and an expired hook failure counts for nothing.
+    if let Some(raw) = spend(&state.join("failures.jsonl"), 1 << 20, &mut budget) {
+        let ttl = cap("OMS_HOOK_FAIL_TTL", 86400, 0, 365 * 86400) as f64;
+        let mut open = std::collections::BTreeMap::<String, (usize, bool)>::new();
+        for row in String::from_utf8_lossy(&raw)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        {
+            let fp = text(&row, "fingerprint");
+            if fp.is_empty() {
+                continue;
+            }
+            match text(&row, "event") {
+                "resolved" => {
+                    open.remove(fp);
+                }
+                "fail" => {
+                    let hook = text(&row, "kind") == "hook";
+                    if hook && epoch(text(&row, "ts")).is_some_and(|t| seconds() - t >= ttl) {
+                        continue;
+                    }
+                    let entry = open.entry(fp.to_owned()).or_default();
+                    entry.0 += 1;
+                    entry.1 = hook;
+                }
+                _ => {}
+            }
+        }
+        live.failures = open.values().filter(|(n, hook)| !(*hook && *n < 2)).count();
+    }
+    // A marker with a pid is live while that process exists (as the state GC
+    // decides); one without a pid is live until it records a terminal state.
+    if let Ok(dir) = std::fs::read_dir(state.join("delegations")) {
+        for entry in dir.flatten().take(256) {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json")
+                && let Some(row) = spend(&path, 64 * 1024, &mut budget)
+                    .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                && row.is_object()
+                && !terminal(&row)
+            {
+                let pid = row["pid"]
+                    .as_i64()
+                    .or_else(|| row["pid"].as_str().and_then(|s| s.parse().ok()))
+                    .and_then(|n| i32::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .and_then(rustix::process::Pid::from_raw);
+                if pid.is_none_or(|p| {
+                    rustix::process::test_kill_process(p) != Err(rustix::io::Errno::SRCH)
+                }) {
+                    live.agents += 1;
+                }
+            }
+        }
+    }
+    live
+}
+fn strip(l: &Live) -> String {
+    let mut parts = Vec::new();
+    if l.tasks > 0 {
+        parts.push(format!("T{} {}", l.tasks, l.title).trim_end().to_owned());
+    }
+    if l.failures > 0 {
+        parts.push(format!("F{}", l.failures));
+    }
+    if l.agents > 0 {
+        parts.push(format!("A{}", l.agents));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("oms {}", parts.join(" | "))
+    }
+}
+/// Empty when `repo` has no OMS state or nothing is live.
+pub fn oms_live_strip(repo: Option<&Path>) -> String {
+    repo.filter(|r| adopted(r))
+        .map(|r| strip(&live(r)))
+        .unwrap_or_default()
+}
+fn branch_label(repo: Option<&Path>) -> String {
+    match repo.and_then(head_ref) {
+        Some(HeadRef::Branch(b)) => clean(&json!(b), "", 24, true),
+        Some(HeadRef::Detached(h)) => clean(&json!(h), "", 24, true),
+        None => String::new(),
+    }
+}
+fn agy(v: &Value, ctx: &Context<'_>) -> String {
+    let mut parts = Vec::new();
+    let model = &v["model"];
+    let model = if model.is_object() {
+        &model["display_name"]
+    } else if model.is_null() {
+        &v["modelName"]
+    } else {
+        model
+    };
+    let mut label = clean(model, "agy", 24, false);
+    let tier = clean(&v["plan_tier"], "", 12, false);
+    if !tier.is_empty() {
+        label.push_str(&format!(" ({tier})"));
+    }
+    parts.push(label);
+    if let Some(p) = pct(&v["context_window"]["used_percentage"]) {
+        parts.push(format!("ctx {p}%"));
+    }
+    let cwd = first(v, &["cwd"]);
+    let repo = root(
+        if cwd.trim().is_empty() {
+            ctx.cwd
+        } else {
+            Path::new(cwd)
+        },
+        ctx.cwd,
+    );
+    let branch = branch_label(repo.as_deref());
+    if !branch.is_empty() {
+        parts.push(branch);
+    }
+    let mode = clean(&v["vim"]["mode"], "", 12, false);
+    let state = clean(&v["state"], "", 16, false);
+    let mode = [mode, state]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if !mode.is_empty() {
+        parts.push(mode);
+    }
+    let live = oms_live_strip(repo.as_deref());
+    if !live.is_empty() {
+        parts.push(live);
+    }
+    parts.join(" | ")
+}
+/// Standalone/tmux status: `oms-hud [--repo PATH] [--tmux] [--json] [--compact]`.
+pub fn hud(args: &[OsString], ctx: &Context<'_>) -> Output {
+    let (mut tmux, mut json_out, mut compact, mut target) = (false, false, false, None);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].to_str() {
+            Some("--tmux") => tmux = true,
+            Some("--json") => json_out = true,
+            Some("--compact") => compact = true,
+            Some("--repo") => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => target = Some(absolute(ctx.cwd, Path::new(p))),
+                    None => return fail("--repo requires a path"),
+                }
+            }
+            _ => return fail("usage: oms-hud [--repo PATH] [--tmux] [--json] [--compact]"),
+        }
+        i += 1;
+    }
+    let repo = root(target.as_deref().unwrap_or(ctx.cwd), ctx.cwd);
+    let branch = branch_label(repo.as_deref());
+    let state = repo
+        .as_deref()
+        .filter(|r| adopted(r))
+        .map(live)
+        .unwrap_or_default();
+    let name = repo
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|n| clean(&json!(n.to_string_lossy()), "", 24, true))
+        .unwrap_or_default();
+    if json_out {
+        return out(format!(
+            "{}\n",
+            json!({"schema":1,"repo":name,"branch":branch,"tasks":state.tasks,"task":state.title,
+                "failures":state.failures,"agents":state.agents})
+        ));
+    }
+    let mut parts = Vec::new();
+    if !compact && !name.is_empty() {
+        parts.push(name);
+    }
+    if !branch.is_empty() {
+        parts.push(branch);
+    }
+    let live = strip(&state);
+    if !live.is_empty() {
+        parts.push(live);
+    }
+    let mut line = parts.join(" | ");
+    if tmux {
+        line = line
+            .chars()
+            .filter(|c| !matches!(c, '#' | '%'))
+            .map(|c| if control(c) { ' ' } else { c })
+            .collect();
+    }
+    out(format!("{line}\n"))
+}
 pub fn run(name: &str, raw: &[u8], ctx: &Context<'_>) -> Output {
     let max = if name == "claude-statusline" {
         256 * 1024
@@ -426,6 +683,8 @@ pub fn run(name: &str, raw: &[u8], ctx: &Context<'_>) -> Output {
     };
     if name == "claude-subagent-statusline" {
         out(subagent(&v))
+    } else if name == "agy-statusline" {
+        out(format!("{}\n", agy(&v, ctx)))
     } else {
         let line = main_line(&v, ctx);
         context_cache(&v);

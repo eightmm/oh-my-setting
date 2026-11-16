@@ -160,7 +160,7 @@ pub(crate) fn probe(paths: &Paths, flag: &AtomicBool) -> Result<crate::Output> {
     r::new_file(&fixture.join("hooks.json"), &r::bytes(&hooks)?, 0o600)?;
     let quoted = r::shell(markers.as_os_str())?;
     let handler = format!(
-        "#!/bin/sh\nmarkers={quoted}\nevent=\"${{1:-unknown}}\"\ncase \"$event\" in preinvocation|stop) ;; *) exit 2 ;; esac\ncat > \"$markers/$event.json\"\n: > \"$markers/$event.fired\"\nif [ \"$event\" = preinvocation ]; then\n  printf '%s\\n' '{{\"injectSteps\":[{{\"ephemeralMessage\":\"oh-my-setting surface probe\"}}]}}'\nelse\n  printf '%s\\n' '{{}}'\nfi\n"
+        "#!/bin/sh\nmarkers={quoted}\nevent=\"${{1:-unknown}}\"\ncase \"$event\" in preinvocation|stop) ;; *) exit 2 ;; esac\ncat > \"$markers/$event.json\"\n: > \"$markers/$event.fired\"\nif [ \"$event\" = preinvocation ]; then\n  printf '%s\\n' '{{\"injectSteps\":[{{\"systemMessage\":{{\"systemMessage\":\"oh-my-setting surface probe\"}}}}]}}'\nelse\n  printf '%s\\n' '{{}}'\nfi\n"
     );
     let slow =
         format!("#!/bin/sh\nsleep 3\n: > {quoted}/timeout-violated\nprintf '%s\\n' '{{}}'\n");

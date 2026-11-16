@@ -1335,6 +1335,10 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
         ("project MCP", paths.cwd.join(".mcp.json")),
         ("project codex", paths.cwd.join(".codex/config.toml")),
         (
+            "antigravity cli",
+            paths.home.join(".gemini/antigravity-cli/settings.json"),
+        ),
+        (
             "managed claude",
             paths.home.join(".claude/managed-settings.json"),
         ),
@@ -1443,7 +1447,15 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
             "statusLine".into(),
             "fileSuggestion".into(),
         ] {
-            if value.get(&name).is_some() {
+            if name == "statusLine"
+                && value[&name]["command"].as_str().is_some_and(|c| {
+                    ["claude-statusline", "agy-statusline"]
+                        .iter()
+                        .any(|verb| crate::integrations::owned_native(c, verb, paths))
+                })
+            {
+                rows.push(finding(label, "ok", "statusLine is the OMS-owned HUD"));
+            } else if value.get(&name).is_some() {
                 rows.push(finding(
                     label,
                     "warn",
@@ -1490,4 +1502,49 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
         }
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_status_lines_are_ok_and_foreign_ones_stay_a_warning() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("oms-doctor-hud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        let paths = Paths {
+            home: root.join("home"),
+            source: root.join("source"),
+            receipt: root.join("receipt"),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
+            cwd: root.clone(),
+        };
+        let level = |command: &str| {
+            let body = json!({"statusLine":{"type":"command","command":command}});
+            std::fs::write(root.join(".claude/settings.json"), body.to_string()).unwrap();
+            policy_baselines(&paths)
+                .unwrap()
+                .iter()
+                .find(|row| {
+                    row["message"]
+                        .as_str()
+                        .is_some_and(|m| m.contains("tatusLine"))
+                })
+                .map(|row| row["level"].as_str().unwrap().to_owned())
+        };
+        let oms = paths.home.join(".local/bin/oms");
+        for verb in ["claude-statusline", "agy-statusline"] {
+            assert_eq!(
+                level(&format!("{} {verb}", oms.display())).as_deref(),
+                Some("ok")
+            );
+        }
+        assert_eq!(level("my-hud --claude-statusline").as_deref(), Some("warn"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

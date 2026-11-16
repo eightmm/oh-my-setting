@@ -28,6 +28,7 @@ mod syntax;
 use std::{ffi::OsString, io::Read, path::Path, sync::atomic::AtomicBool};
 pub type Output = (i32, Vec<u8>, Vec<u8>);
 pub use oms_command_telemetry::run as telemetry_report;
+pub use statusline::oms_live_strip;
 pub const HOOKS: &[&str] = &[
     "command-guard-hook",
     "syntax-guard-hook",
@@ -42,6 +43,8 @@ pub const HOOKS: &[&str] = &[
     "harness-hook",
     "claude-statusline",
     "claude-subagent-statusline",
+    "agy-statusline",
+    "oms-hud",
     "codex-hook-bridge",
     "codex-hud-config",
     "codex-usage-config",
@@ -116,9 +119,11 @@ pub fn run_with_source_and_services(
         "codex-app-notify",
         "claude-app-notify",
         "codex-turn-notify",
+        "oms-hud",
     ]
     .contains(&name)
         || name == "command-guard-hook" && args.first().is_some_and(|a| a == "--audit")
+        || name == "pre-push-check" && args.first().is_some_and(|a| a == "--pre-merge")
     {
         return run_with_services(name, args, &[], cwd, source, interrupted, host);
     }
@@ -262,7 +267,10 @@ fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'
         "syntax-guard-hook" => syntax::run(stdin, ctx),
         "codex-hud-config" | "codex-usage-config" => config::run(name, args, ctx),
         "codex-hook-bridge" => bridge::run(args, stdin, ctx),
-        "claude-statusline" | "claude-subagent-statusline" => statusline::run(name, stdin, ctx),
+        "claude-statusline" | "claude-subagent-statusline" | "agy-statusline" => {
+            statusline::run(name, stdin, ctx)
+        }
+        "oms-hud" => statusline::hud(args, ctx),
         "codex-app-notify" => notify::run(args, ctx),
         "claude-app-notify" => notify::claude(args, ctx),
         "codex-turn-notify" => notify::turn(args, ctx),

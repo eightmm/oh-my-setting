@@ -6,6 +6,39 @@ use crate::{
 use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, path::Path};
 
+const STATUS: &str = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"five-hour-limit\", \"weekly-limit\", \"git-branch\", \"current-dir\"]";
+// Earlier installs wrote this five-item form; it is still OMS-owned.
+const LEGACY_STATUS: &str = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"five-hour-limit\", \"weekly-limit\", \"git-branch\"]";
+// The factory bare value is displaced inside the managed block and restored on remove.
+const DISPLACED: &str = "# displaced: status_line = [\"model\"]";
+const FACTORY: &str = "status_line = [\"model\"]";
+fn factory(line: &str) -> bool {
+    line.trim_end_matches(['\r', '\n'])
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<String>()
+        .replace('\'', "\"")
+        == FACTORY.split_whitespace().collect::<String>()
+}
+/// The single-line factory `status_line` directly under `[tui]`.
+fn factory_line(lines: &[String]) -> Option<usize> {
+    let mut tui = false;
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim();
+        if t.starts_with('[') {
+            tui = header(&lines[i..=i], "tui").is_some();
+        } else if tui
+            && t.split('=')
+                .next()
+                .is_some_and(|k| k.trim() == "status_line")
+        {
+            return factory(l).then_some(i);
+        }
+    }
+    None
+}
 struct Block<'a> {
     begin: String,
     end: String,
@@ -39,12 +72,14 @@ impl<'a> Block<'a> {
         }
     }
     fn owned(&self, lines: &[String], a: usize, b: usize) -> bool {
-        lines[a + 1..b]
+        let inner = lines[a + 1..b]
             .iter()
             .map(|l| l.trim_end_matches(['\r', '\n']))
             .collect::<Vec<_>>()
-            .join("\n")
-            == self.body
+            .join("\n");
+        inner == self.body
+            || self.body == STATUS
+                && (inner == LEGACY_STATUS || inner == format!("{DISPLACED}\n{STATUS}"))
     }
     fn lines(&self, newline: &str) -> Vec<String> {
         std::iter::once(self.begin.as_str())
@@ -93,7 +128,7 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
     let hud = Block {
         begin: "# >>> oh-my-setting managed Codex HUD >>>".into(),
         end: "# <<< oh-my-setting managed Codex HUD <<<".into(),
-        body: "status_line = [\"model-with-reasoning\", \"context-remaining\", \"five-hour-limit\", \"weekly-limit\", \"git-branch\"]",
+        body: STATUS,
     };
     let root = Block::usage("root", "background_terminal_max_timeout = 900000");
     let waits = Block::usage(
@@ -102,12 +137,19 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
     );
     if remove {
         let mut spans = Vec::new();
+        let mut restore = Vec::new();
         for block in [&hud, &root, &waits] {
             if let Some((a, b)) = block.span(&lines)? {
                 if block.owned(&lines, a, b) {
                     spans.push((a, b));
                     if block.begin == hud.begin {
-                        if let Some(table) = expected["tui"].as_object_mut() {
+                        if lines
+                            .get(a + 1)
+                            .is_some_and(|l| l.trim_end_matches(['\r', '\n']) == DISPLACED)
+                        {
+                            restore.push(a);
+                            expected["tui"]["status_line"] = json!(["model"]);
+                        } else if let Some(table) = expected["tui"].as_object_mut() {
                             table.remove("status_line");
                         }
                     } else if block.begin == root.begin {
@@ -122,9 +164,9 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
                         table.remove("default_wait_timeout_ms");
                     }
                 } else if block.begin == hud.begin
-                    && lines
-                        .get(a + 1)
-                        .is_some_and(|l| l.trim_end_matches(['\r', '\n']) == hud.body)
+                    && lines.get(a + 1).is_some_and(|l| {
+                        [STATUS, LEGACY_STATUS].contains(&l.trim_end_matches(['\r', '\n']))
+                    })
                     && lines[a + 2..b]
                         .iter()
                         .find(|l| !l.trim().is_empty())
@@ -140,14 +182,38 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
         }
         spans.sort_unstable();
         for (a, b) in spans.into_iter().rev() {
-            lines.drain(a..=b);
+            if restore.contains(&a) {
+                lines.splice(a..=b, [format!("{FACTORY}{newline}")]);
+            } else {
+                lines.drain(a..=b);
+            }
         }
     } else {
         // Validate all markers before making any change, including user blocks.
         for block in [&hud, &root, &waits] {
             block.span(&lines)?;
         }
-        if hud.span(&lines)?.is_none() && value["tui"].is_null() {
+        let upgraded = || -> Result<serde_json::Value> {
+            Ok(
+                config::toml(format!("[tui]\n{STATUS}\n").as_bytes())?["tui"]["status_line"]
+                    .clone(),
+            )
+        };
+        if let Some((a, b)) = hud.span(&lines)?
+            && b == a + 2
+            && lines[a + 1].trim_end_matches(['\r', '\n']) == LEGACY_STATUS
+        {
+            lines[a + 1] = format!("{STATUS}{newline}");
+            expected["tui"]["status_line"] = upgraded()?;
+        } else if hud.span(&lines)?.is_none()
+            && value["tui"]["status_line"] == json!(["model"])
+            && let Some(i) = factory_line(&lines)
+        {
+            let mut block = hud.lines(newline);
+            block.insert(1, format!("{DISPLACED}{newline}"));
+            lines.splice(i..=i, block);
+            expected["tui"]["status_line"] = upgraded()?;
+        } else if hud.span(&lines)?.is_none() && value["tui"].is_null() {
             if let Some(last) = lines.last_mut()
                 && !last.ends_with('\n')
             {

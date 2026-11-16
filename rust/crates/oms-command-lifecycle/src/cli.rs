@@ -139,7 +139,10 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
             ],
             &["--profile", "--primary-provider", "--receipt", "--only"],
         ),
-        "install-hooks" => (&["--quick", "--check-protection", "--dry-run"], &[]),
+        "install-hooks" => (
+            &["--quick", "--check-protection", "--remove", "--dry-run"],
+            &[],
+        ),
         "install-claude-hooks" => (
             &["--remove", "--print-expected", "--dry-run"],
             &["--settings", "--ownership-receipt"],

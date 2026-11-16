@@ -196,8 +196,22 @@ fn git_args(args: &[String], cur: Option<&Path>) -> (usize, Option<PathBuf>) {
     }
     (j, base)
 }
-fn git_rule(sub: &str, rest: &[String], base: Option<&Path>) -> Option<Verdict> {
+fn git_rule(sub: &str, rest: &[String], base: Option<&Path>, land_active: bool) -> Option<Verdict> {
     let (letters, longs) = flags(rest);
+    if !land_active
+        && (sub == "pull"
+            || sub == "merge"
+                && !["--abort", "--quit", "--continue"]
+                    .iter()
+                    .any(|f| longs.contains(f)))
+        && base.is_some_and(on_protected_branch)
+    {
+        return Some(Verdict::new(
+            "git-merge-protected-branch",
+            format!("git {sub} would change main/master outside the landing gate"),
+            "oms land --pr or oms land --local-merge --from <branch>",
+        ));
+    }
     if sub == "reset" && longs.contains("--hard") {
         return Some(Verdict::new(
             "git-reset-hard",
@@ -262,6 +276,7 @@ fn git_rule(sub: &str, rest: &[String], base: Option<&Path>) -> Option<Verdict> 
     None
 }
 fn verdict(command: &str, cwd: &Path) -> Result<Option<Verdict>, &'static str> {
+    let land_active = std::env::var("OMS_LAND_ACTIVE").as_deref() == Ok("1");
     let mut cur = Some(cwd.to_path_buf());
     let mut previous = String::new();
     for segment in shell::segments(command)? {
@@ -335,7 +350,7 @@ fn verdict(command: &str, cwd: &Path) -> Result<Option<Verdict>, &'static str> {
             let (j, b) = git_args(args, cur.as_deref());
             base = b;
             args.get(j)
-                .and_then(|sub| git_rule(sub, &args[j + 1..], base.as_deref()))
+                .and_then(|sub| git_rule(sub, &args[j + 1..], base.as_deref(), land_active))
         } else {
             None
         };
@@ -983,4 +998,48 @@ pub fn git_move(raw: &[u8], ctx: &Context<'_>) -> Output {
         }
     }
     empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkout(head: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("oms-guard-{}-{n}", std::process::id()));
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git/HEAD"), head).unwrap();
+        dir
+    }
+    fn words(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn merge_and_pull_on_a_protected_branch_need_the_landing_gate() {
+        for head in ["ref: refs/heads/main\n", "ref: refs/heads/master\n"] {
+            let dir = checkout(head);
+            for sub in ["merge", "pull"] {
+                let found = git_rule(sub, &words(&["feat"]), Some(&dir), false).unwrap();
+                assert_eq!(found.rule, "git-merge-protected-branch");
+                assert!(found.instead.contains("oms land"));
+                assert!(git_rule(sub, &words(&["feat"]), Some(&dir), true).is_none());
+            }
+            for flag in ["--abort", "--quit", "--continue"] {
+                assert!(git_rule("merge", &words(&[flag]), Some(&dir), false).is_none());
+            }
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn merge_and_pull_on_feature_or_unknown_checkouts_stay_allowed() {
+        let dir = checkout("ref: refs/heads/feature/x\n");
+        for sub in ["merge", "pull"] {
+            assert!(git_rule(sub, &words(&["main"]), Some(&dir), false).is_none());
+            assert!(git_rule(sub, &[], None, false).is_none());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

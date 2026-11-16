@@ -609,6 +609,12 @@ fn install(
             )?;
         }
     }
+    crate::integrations::huds(
+        paths,
+        &mut tx,
+        false,
+        row["components"]["codex_plugin"] == true,
+    )?;
     if row["components"]["auto_update"] == true {
         let mut scheduler = component_options(options, "install-autoupdate", false);
         if row["component_modes"]["auto_update"] == "check" {
@@ -753,6 +759,15 @@ fn uninstall(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crat
                     flag,
                 )?;
             }
+        }
+        crate::integrations::huds(paths, &mut tx, true, false)?;
+        if paths.source.join(".git").exists() {
+            crate::integrations::apply(
+                paths,
+                &component_options(options, "install-hooks", true),
+                &mut tx,
+                flag,
+            )?;
         }
         if old
             .as_ref()

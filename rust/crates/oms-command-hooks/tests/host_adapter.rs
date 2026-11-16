@@ -1012,3 +1012,148 @@ fn codex_usage_config_refuses_python_notifier_scripts() {
         assert_eq!(fs::read(&cfg).expect("read config"), b"model = \"m\"\n");
     }
 }
+
+/// A repository stand-in: `.git/HEAD` plus an adopted `.oms/`, no git binary.
+fn fake_repo(tmp: &TempDir, head: &str) -> PathBuf {
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+    fs::write(repo.join(".git/HEAD"), head).expect("write HEAD");
+    for (name, body) in [
+        (
+            ".oms/plan/tasks.json",
+            r##"{"tasks":{"t1":{"state":"running","title":"Fix #(x) 100%"},"t2":{"state":"done"}}}"##.to_string(),
+        ),
+        (
+            ".oms/failures.jsonl",
+            "{\"event\":\"fail\",\"fingerprint\":\"aa\",\"kind\":\"cmd\"}\n{\"event\":\"fail\",\"fingerprint\":\"bb\",\"kind\":\"cmd\"}\n{\"event\":\"resolved\",\"fingerprint\":\"bb\"}\n".to_string(),
+        ),
+        (".oms/delegations/a.json", format!("{{\"pid\":{}}}", std::process::id())),
+        (".oms/delegations/b.json", "{\"pid\":2147483647}".to_string()),
+        (".oms/delegations/c.json", "{\"state\":\"done\"}".to_string()),
+    ] {
+        let path = repo.join(name);
+        fs::create_dir_all(path.parent().unwrap()).expect("mkdir state");
+        fs::write(path, body).expect("write state");
+    }
+    repo
+}
+
+#[test]
+fn agy_statusline_reads_head_and_live_state_without_spawning_git() {
+    let tmp = TempDir::new("agy-hud");
+    let repo = fake_repo(&tmp, "ref: refs/heads/feat-x\n");
+    let input = serde_json::json!({"model":"Gemini 3","state":"idle","plan_tier":"pro",
+        "context_window":{"used_percentage":42.4},"vim":{"mode":"NORMAL"},"cwd":repo});
+    let (code, out, err) = hook(&tmp, "agy-statusline", &[], input.to_string().as_bytes());
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "Gemini 3 (pro) | ctx 42% | feat-x | NORMAL/idle | oms T1 Fix #(x) 100% | F1 | A1\n"
+    );
+    fs::write(
+        repo.join(".git/HEAD"),
+        "0123456789abcdef0123456789abcdef01234567\n",
+    )
+    .unwrap();
+    let (_, out, _) = hook(&tmp, "agy-statusline", &[], br#"{"modelName":"m"}"#);
+    assert_eq!(out, "m\n");
+    let moved = serde_json::json!({"modelName":"m","cwd":repo});
+    let (_, out, _) = hook(&tmp, "agy-statusline", &[], moved.to_string().as_bytes());
+    assert!(out.starts_with("m | 0123456 | "), "{out}");
+    assert_eq!(hook(&tmp, "agy-statusline", &[], b"not json").1, "");
+}
+
+#[test]
+fn oms_hud_prints_standalone_tmux_safe_json_and_compact_forms() {
+    let tmp = TempDir::new("oms-hud");
+    let repo = fake_repo(&tmp, "ref: refs/heads/main\n");
+    let r = repo.to_str().unwrap();
+    let (code, out, _) = hook(&tmp, "oms-hud", &["--repo", r], b"");
+    assert_eq!(code, 0);
+    assert_eq!(out, "repo | main | oms T1 Fix #(x) 100% | F1 | A1\n");
+    let (_, out, _) = hook(&tmp, "oms-hud", &["--repo", r, "--compact", "--tmux"], b"");
+    assert_eq!(out, "main | oms T1 Fix (x) 100 | F1 | A1\n");
+    let (_, out, _) = hook(&tmp, "oms-hud", &["--repo", r, "--json"], b"");
+    let row: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (
+            row["branch"].as_str(),
+            row["tasks"].as_u64(),
+            row["failures"].as_u64(),
+            row["agents"].as_u64()
+        ),
+        (Some("main"), Some(1), Some(1), Some(1))
+    );
+    assert_ne!(hook(&tmp, "oms-hud", &["--bogus"], b"").0, 0);
+    // Outside an OMS repository nothing is live and no state is required.
+    let bare = TempDir::new("oms-hud-bare");
+    assert_eq!(oms_hook_live(bare.path()), "");
+}
+
+fn oms_hook_live(path: &Path) -> String {
+    oms_command_hooks::oms_live_strip(Some(path))
+}
+
+#[test]
+fn claude_statusline_appends_the_live_strip_inside_an_oms_repo() {
+    let tmp = TempDir::new("claude-hud");
+    let repo = fake_repo(&tmp, "ref: refs/heads/feat\n");
+    let input = serde_json::json!({"model":{"display_name":"M"},"workspace":{"current_dir":repo}});
+    let (code, out, err) = hook(&tmp, "claude-statusline", &[], input.to_string().as_bytes());
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("oms T1 Fix #(x) 100% | F1 | A1"), "{out}");
+}
+
+fn codex_hud(tmp: &TempDir, action: &str, cfg: &Path) -> String {
+    let (code, out, err) = hook(
+        tmp,
+        "codex-hud-config",
+        &[action, cfg.to_str().unwrap()],
+        b"",
+    );
+    assert_eq!(code, 0, "{err}");
+    out
+}
+
+#[test]
+fn codex_hud_displaces_the_factory_bare_model_and_restores_it() {
+    let tmp = TempDir::new("codex-hud");
+    let cfg = tmp.path().join("config.toml");
+    let original = "[tui]\nstatus_line = [\"model\"]\ntheme = \"x\"\n";
+    fs::write(&cfg, original).unwrap();
+    assert!(codex_hud(&tmp, "install", &cfg).contains("displaced"));
+    let installed = fs::read_to_string(&cfg).unwrap();
+    assert!(
+        installed.contains("# displaced: status_line = [\"model\"]\n"),
+        "{installed}"
+    );
+    assert!(
+        installed.contains("\"git-branch\", \"current-dir\"]"),
+        "{installed}"
+    );
+    assert!(codex_hud(&tmp, "check", &cfg).contains("managed"));
+    assert!(codex_hud(&tmp, "install", &cfg).contains("already current"));
+    codex_hud(&tmp, "remove", &cfg);
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), original);
+}
+
+#[test]
+fn codex_hud_upgrades_the_legacy_block_and_keeps_custom_status_lines() {
+    let tmp = TempDir::new("codex-hud-legacy");
+    let cfg = tmp.path().join("config.toml");
+    let legacy = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"five-hour-limit\", \"weekly-limit\", \"git-branch\"]";
+    fs::write(
+        &cfg,
+        format!("[tui]\n# >>> oh-my-setting managed Codex HUD >>>\n{legacy}\n# <<< oh-my-setting managed Codex HUD <<<\n"),
+    )
+    .unwrap();
+    assert!(codex_hud(&tmp, "install", &cfg).contains("upgraded"));
+    let upgraded = fs::read_to_string(&cfg).unwrap();
+    assert!(upgraded.contains("\"git-branch\", \"current-dir\"]") && !upgraded.contains(legacy));
+    codex_hud(&tmp, "remove", &cfg);
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), "[tui]\n");
+    let custom = "[tui]\nstatus_line = [\"model\", \"git-branch\"]\n";
+    fs::write(&cfg, custom).unwrap();
+    assert!(codex_hud(&tmp, "install", &cfg).contains("preserved user"));
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), custom);
+}

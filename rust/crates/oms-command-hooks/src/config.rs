@@ -3,7 +3,12 @@ use oms_toml::{Table, Value as T};
 use std::{ffi::OsString, path::Path};
 
 const MAX: usize = 8 * 1024 * 1024;
-const STATUS: &str = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"five-hour-limit\", \"weekly-limit\", \"git-branch\"]";
+const STATUS: &str = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"five-hour-limit\", \"weekly-limit\", \"git-branch\", \"current-dir\"]";
+// Earlier installs wrote this five-item form; it is still OMS-owned.
+const LEGACY_STATUS: &str = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"five-hour-limit\", \"weekly-limit\", \"git-branch\"]";
+// The factory bare value is displaced inside the managed block and restored on remove.
+const DISPLACED: &str = "# displaced: status_line = [\"model\"]";
+const FACTORY: &str = "status_line = [\"model\"]";
 struct Block {
     begin: String,
     end: String,
@@ -86,7 +91,9 @@ fn span(
     let (start, end) = (starts[0], ends[0]);
     let inner: Vec<_> = lines[start + 1..end].iter().map(|s| body(s)).collect();
     let displaced = hud
-        && inner.first() == Some(&STATUS)
+        && inner
+            .first()
+            .is_some_and(|s| *s == STATUS || *s == LEGACY_STATUS)
         && inner
             .iter()
             .skip(1)
@@ -98,6 +105,8 @@ fn span(
             && inner[0].starts_with("notify = [")
             && (inner[0].ends_with("codex_turn_notify.py\"]")
                 || inner[0].ends_with("\"codex-turn-notify\"]"))
+    } else if hud {
+        inner == [STATUS] || inner == [LEGACY_STATUS] || inner == [DISPLACED, STATUS]
     } else {
         inner == b.lines.iter().map(String::as_str).collect::<Vec<_>>()
     };
@@ -107,7 +116,8 @@ fn parse(lines: &[String]) -> Result<Table, String> {
     oms_toml::parse_bounded(lines.concat().as_bytes(), MAX)
         .map_err(|e| format!("config is not valid TOML ({e})"))
 }
-fn status_key(lines: &[String]) -> (bool, Option<usize>) {
+/// (a status_line exists, first `[tui]` header, `status_line` key line under `[tui]`).
+fn status_key(lines: &[String]) -> (bool, Option<usize>, Option<usize>) {
     let mut tui = false;
     let mut root = true;
     let mut first = None;
@@ -138,10 +148,16 @@ fn status_key(lines: &[String]) -> (bool, Option<usize>) {
                     .collect::<Vec<_>>()
                     == ["tui", "status_line"]
         {
-            return (true, first);
+            return (true, first, tui.then_some(i));
         }
     }
-    (false, first)
+    (false, first, None)
+}
+/// A single-line `[tui] status_line = ["model"]`, the Codex factory value.
+fn factory(line: &str) -> bool {
+    let s = body(line).split('#').next().unwrap_or("");
+    s.split_whitespace().collect::<String>().replace('\'', "\"")
+        == FACTORY.split_whitespace().collect::<String>()
 }
 fn hud(
     action: &str,
@@ -151,7 +167,7 @@ fn hud(
 ) -> Result<(Vec<String>, Vec<String>, i32), String> {
     let block = Block::hud();
     let marked = span(&lines, &block, true)?;
-    let (exists, head) = status_key(&lines);
+    let (exists, head, key) = status_key(&lines);
     if action == "check" {
         let managed = marked.is_some_and(|s| s.2);
         return Ok((
@@ -170,7 +186,19 @@ fn hud(
         ));
     }
     if action == "install" {
-        if let Some((_, _, managed, _)) = marked {
+        if let Some((start, _, managed, _)) = marked {
+            if managed && body(&lines[start + 1]) == LEGACY_STATUS {
+                lines[start + 1] = format!(
+                    "{STATUS}{}",
+                    &lines[start + 1][body(&lines[start + 1]).len()..]
+                );
+                parse(&lines)?;
+                return Ok((
+                    lines,
+                    vec![if dry { "would upgrade" } else { "upgraded" }.into()],
+                    0,
+                ));
+            }
             return Ok((
                 lines,
                 vec![
@@ -178,6 +206,26 @@ fn hud(
                         "already current"
                     } else {
                         "preserved customized status line"
+                    }
+                    .into(),
+                ],
+                0,
+            ));
+        }
+        if let Some(i) = key.filter(|i| factory(&lines[*i])) {
+            let tail = lines[i][body(&lines[i]).len()..].to_owned();
+            let tail = if tail.is_empty() { nl.to_owned() } else { tail };
+            let mut block = Block::hud();
+            block.lines.insert(0, DISPLACED.into());
+            lines.splice(i..=i, block.fence(&tail));
+            parse(&lines)?;
+            return Ok((
+                lines,
+                vec![
+                    if dry {
+                        "would displace factory status line"
+                    } else {
+                        "displaced factory status line"
                     }
                     .into(),
                 ],
@@ -218,7 +266,9 @@ fn hud(
     if !managed {
         return Ok((lines, vec!["preserved customized status line".into()], 0));
     }
-    if displaced {
+    if body(&lines[start + 1]) == DISPLACED {
+        lines.splice(start..=end, [format!("{FACTORY}{nl}")]);
+    } else if displaced {
         lines.remove(end);
         lines.remove(start + 1);
         lines.remove(start);

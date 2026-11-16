@@ -95,6 +95,20 @@ impl Services for NativeServices {
         (0, b"{\"wake\":0,\"wakes\":[]}\n".to_vec(), Vec::new())
     }
 }
+struct HintHost;
+impl Services for HintHost {
+    fn provider_hook(
+        &self,
+        _: &str,
+        _: &[u8],
+        _: &Path,
+        _: &Path,
+        _: bool,
+        _: &AtomicBool,
+    ) -> Output {
+        (0, b"route to plan\n".to_vec(), Vec::new())
+    }
+}
 fn call(tool: &str, args: &[&str], source: &Path, host: &dyn Services) -> Output {
     run_with_services(
         tool,
@@ -146,12 +160,29 @@ fn native_configuration_and_services() {
         )
         .unwrap();
         let codex = fixture.0.join("bin/codex");
+        // Removal records state so a later inventory proves the plugin is gone;
+        // only shell builtins are available on this PATH.
         fs::write(&codex, br##"#!/bin/sh
+state="$OMS_LIFECYCLE_FIXTURE/codex-state"
+now=here
+[ -e "$state" ] && read now < "$state"
 case "$*" in
-  'plugin list --json') printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}' ;;
-  'plugin marketplace list') printf 'oh-my-setting-local %s/source\n' "$OMS_LIFECYCLE_FIXTURE" ;;
+  'plugin remove '*|'plugin marketplace remove '*) echo gone > "$state" ;;
+  'plugin add '*|'plugin marketplace add '*) echo here > "$state" ;;
+  'plugin list --json')
+    if [ "$now" = gone ]; then printf '%s\n' '{"installed":[]}'
+    else printf '%s\n' '{"installed":[{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true}]}'; fi ;;
+  'plugin marketplace list') [ "$now" = gone ] || printf 'oh-my-setting-local %s/source\n' "$OMS_LIFECYCLE_FIXTURE" ;;
 esac
 "##).unwrap();
+        // agy-hook reads one payload from stdin; the re-exec child inherits this file.
+        fs::write(
+            fixture.0.join("agy-stdin.json"),
+            serde_json::to_vec(&json!({"workspacePaths":[fixture.0.join("source")],
+                "invocationNum":1,"conversationId":"c1","modelName":"m"}))
+            .unwrap(),
+        )
+        .unwrap();
         fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
         for dir in ["home", "source", "config", "data", "state"] {
             fs::DirBuilder::new()
@@ -165,6 +196,9 @@ esac
                 "native_configuration_and_services",
                 "--nocapture",
             ])
+            .stdin(std::process::Stdio::from(
+                fs::File::open(fixture.0.join("agy-stdin.json")).unwrap(),
+            ))
             .env_clear()
             .env("PATH", fixture.0.join("bin"))
             .env("HOME", fixture.0.join("home"))
@@ -238,6 +272,47 @@ esac
     assert_ne!(call("install-codex-plugin", &[], &source, &host).0, 0);
     assert_eq!(read(&hooks_file)["foreign"], true);
     fs::write(&hooks_file, &payload).unwrap();
+    // Antigravity injects its routing hint through the current systemMessage envelope.
+    let hint: Value = serde_json::from_slice(&success(call(
+        "agy-hook",
+        &["preinvocation"],
+        &source,
+        &HintHost,
+    )))
+    .unwrap();
+    assert_eq!(
+        hint,
+        json!({"injectSteps":[{"systemMessage":{"systemMessage":"route to plan"}}]})
+    );
+    // Codex HUD: the shipped block is six items; the factory bare model is
+    // displaced reversibly instead of blocking installation.
+    let codex_config = home.join(".codex/config.toml");
+    assert!(
+        fs::read_to_string(&codex_config)
+            .unwrap()
+            .contains("\"git-branch\", \"current-dir\"]")
+    );
+    success(call("install-codex-plugin", &["--remove"], &source, &host));
+    assert!(
+        !fs::read_to_string(&codex_config)
+            .unwrap()
+            .contains("managed Codex HUD")
+    );
+    let bare = "[tui]\nstatus_line = [\"model\"]\n";
+    fs::write(&codex_config, bare).unwrap();
+    success(call("install-codex-plugin", &[], &source, &host));
+    let displaced = fs::read_to_string(&codex_config).unwrap();
+    assert!(displaced.contains("# displaced: status_line = [\"model\"]\n"));
+    assert!(displaced.contains("\"current-dir\"]"));
+    success(call("install-codex-plugin", &["--remove"], &source, &host));
+    assert_eq!(fs::read_to_string(&codex_config).unwrap(), bare);
+    // A custom status line is never displaced.
+    let custom = "[tui]\nstatus_line = [\"model\", \"git-branch\"]\n";
+    fs::write(&codex_config, custom).unwrap();
+    success(call("install-codex-plugin", &[], &source, &host));
+    assert!(fs::read_to_string(&codex_config).unwrap().contains(custom));
+    success(call("install-codex-plugin", &["--remove"], &source, &host));
+    assert_eq!(fs::read_to_string(&codex_config).unwrap(), custom);
     let manifest: Value = serde_json::from_slice(&success(call(
         "install-claude-hooks",
         &["--print-expected"],
@@ -357,6 +432,34 @@ esac
         .0,
         0
     );
+    let hooks_dir = source.join(".git/hooks");
+    let merge = hooks_dir.join("pre-merge-commit");
+    let merge_text = fs::read_to_string(&merge).unwrap();
+    assert!(merge_text.starts_with("#!/bin/sh\n# oh-my-setting native pre-merge-commit\n"));
+    assert!(merge_text.contains(" pre-push-check --pre-merge \"$@\"\n"));
+    assert_eq!(
+        fs::metadata(&merge).unwrap().permissions().mode() & 0o111,
+        0o111
+    );
+    // An unmanaged merge hook is never replaced, and the managed pre-push stays untouched.
+    fs::write(&merge, "#!/bin/sh\necho mine\n").unwrap();
+    assert_ne!(call("install-hooks", &[], &source, &host).0, 0);
+    assert_eq!(
+        fs::read_to_string(&merge).unwrap(),
+        "#!/bin/sh\necho mine\n"
+    );
+    fs::remove_file(&merge).unwrap();
+    success(call("install-hooks", &[], &source, &host));
+    assert!(fs::read_to_string(&merge).unwrap().contains("--pre-merge"));
+    // Withdrawal removes OMS hooks only; a user's own hook survives it.
+    fs::write(&merge, "#!/bin/sh\necho mine\n").unwrap();
+    success(call("install-hooks", &["--remove"], &source, &host));
+    assert_eq!(
+        fs::read_to_string(&merge).unwrap(),
+        "#!/bin/sh\necho mine\n"
+    );
+    assert!(!hooks_dir.join("pre-push").exists());
+    fs::remove_file(&merge).unwrap();
     success(call(
         "install-autoupdate",
         &["--method", "cron"],
@@ -393,6 +496,27 @@ esac
     assert_ne!(call("install-mcp", &[], &source, &host).0, 0);
     let plan: Value =
         serde_json::from_slice(&success(call("install", &["--plan"], &source, &host))).unwrap();
+    native_only(&plan);
+    // Antigravity auto-enables only when its CLI directory exists.
+    assert_eq!(plan["install"]["components"]["agy_plugin"], false);
+    let agy_dir = home.join(".gemini/antigravity-cli");
+    fs::create_dir_all(&agy_dir).unwrap();
+    let plan: Value =
+        serde_json::from_slice(&success(call("install", &["--plan"], &source, &host))).unwrap();
+    assert_eq!(plan["install"]["components"]["agy_plugin"], true);
+    // statusLine removal drops only the OMS-owned entry and keeps user settings.
+    let agy_settings = agy_dir.join("settings.json");
+    let owned = format!("'{}' agy-statusline", home.join(".local/bin/oms").display());
+    write(
+        &agy_settings,
+        &json!({"theme":"x","statusLine":{"type":"command","command":owned,"enabled":true}}),
+    );
+    success(call("install-agy-plugin", &["--remove"], &source, &host));
+    assert_eq!(read(&agy_settings), json!({"theme":"x"}));
+    let user_line = json!({"statusLine":{"type":"command","command":"my-hud"}});
+    write(&agy_settings, &user_line);
+    success(call("install-agy-plugin", &["--remove"], &source, &host));
+    assert_eq!(read(&agy_settings), user_line);
     native_only(&plan);
     assert_ne!(call("install", &[], &source, &host).0, 0);
     success(call("tick", &["schedule", "--list"], &source, &host));
@@ -498,7 +622,24 @@ esac
         home.join(".local/bin/python3"),
     )
     .unwrap();
+    // Uninstall withdraws every owned HUD and git hook, whatever the receipt says.
+    fs::write(&codex_config, bare).unwrap();
+    success(call("install-codex-plugin", &[], &source, &host));
+    assert!(
+        fs::read_to_string(&codex_config)
+            .unwrap()
+            .contains("# displaced:")
+    );
+    write(
+        &agy_settings,
+        &json!({"theme":"x","statusLine":{"type":"command","command":owned,"enabled":true}}),
+    );
+    success(call("install-hooks", &[], &source, &host));
+    assert!(hooks_dir.join("pre-push").exists() && hooks_dir.join("pre-merge-commit").exists());
     success(call("uninstall", &["--yes"], &source, &host));
+    assert_eq!(fs::read_to_string(&codex_config).unwrap(), bare);
+    assert_eq!(read(&agy_settings), json!({"theme":"x"}));
+    assert!(!hooks_dir.join("pre-push").exists() && !hooks_dir.join("pre-merge-commit").exists());
     assert!(fs::symlink_metadata(home.join(".local/bin/python3")).is_err());
     symlink(
         "../../../data/oh-my-setting/python-runtime/bin/python3",

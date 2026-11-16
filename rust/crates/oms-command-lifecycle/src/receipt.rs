@@ -220,18 +220,28 @@ pub(crate) fn build(paths: &Paths, old: Option<&Value>, flag: &AtomicBool) -> Re
         ("machine_snapshot", "OH_MY_SETTING_GENERATE_MACHINE", false),
         ("slurm_snapshot", "OH_MY_SETTING_GENERATE_SLURM", false),
     ] {
+        // Antigravity auto-enables when its CLI directory exists, unless the
+        // install explicitly opted out (stored mode "0") or pinned it on.
+        let agy_auto = key == "agy_plugin"
+            && !matches!(
+                old.and_then(|v| v["component_modes"]["agy_plugin"].as_str()),
+                Some("0" | "1")
+            );
         let enabled = match env::var(var).ok().as_deref() {
             Some("0") => false,
             Some("1") => true,
+            Some("auto") if agy_auto => paths.home.join(".gemini/antigravity-cli").exists(),
             Some("auto")
-                if matches!(
-                    key,
-                    "machine_snapshot" | "slurm_snapshot" | "agy_plugin" | "codex_plugin"
-                ) =>
+                if matches!(key, "machine_snapshot" | "slurm_snapshot" | "codex_plugin") =>
             {
                 key == "machine_snapshot"
             }
+            Some("auto") if key == "agy_plugin" => false,
             Some(_) => return r::fail(format!("invalid component setting: {var}")),
+            None if agy_auto => {
+                paths.home.join(".gemini/antigravity-cli").exists()
+                    || row["components"][key].as_bool().unwrap_or(default)
+            }
             None => row["components"][key].as_bool().unwrap_or(default),
         };
         row["components"][key] = json!(enabled);

@@ -48,7 +48,20 @@ fn gate(ctx: &Context<'_>, base: Option<&str>, head: Option<&str>, reason: Optio
         Err(e) => fail(format!("pre-push: check runner unavailable ({e})")),
     }
 }
+/// `pre-merge-commit`: a real merge commit on main/master is refused unless
+/// the landing workflow is running. Other branches merge freely.
+fn pre_merge(land_active: bool, ctx: &Context<'_>) -> Output {
+    if land_active || !on_protected_branch(ctx.cwd) {
+        return out("");
+    }
+    fail(
+        "pre-merge: merging into main/master outside the landing gate is refused\nuse `oms land --pr` or `oms land --local-merge --from <branch>`",
+    )
+}
 pub fn run(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
+    if args.first().is_some_and(|a| a == "--pre-merge") {
+        return pre_merge(std::env::var("OMS_LAND_ACTIVE").as_deref() == Ok("1"), ctx);
+    }
     let full_mode = args.first().is_some_and(|a| a == "--full");
     let index = usize::from(full_mode);
     let remote = args.get(index).and_then(|s| s.to_str()).unwrap_or("origin");
@@ -189,4 +202,37 @@ pub fn run(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
     output.extend(result.1);
     result.1 = output;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn merge(head: &str, land_active: bool) -> Output {
+        let dir = std::env::temp_dir().join(format!("oms-premerge-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), head).unwrap();
+        let (snapshot, stop) = (Snapshot::default(), AtomicBool::new(false));
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: None,
+            cwd: &dir,
+            source: &dir,
+            interrupted: &stop,
+            host: &crate::NoHostServices,
+        };
+        let result = pre_merge(land_active, &ctx);
+        std::fs::remove_dir_all(dir).unwrap();
+        result
+    }
+
+    #[test]
+    fn pre_merge_refuses_main_outside_a_landing_run_only() {
+        let refused = merge("ref: refs/heads/main\n", false);
+        assert_ne!(refused.0, 0);
+        assert!(String::from_utf8_lossy(&refused.2).contains("oms land --local-merge"));
+        assert_eq!(merge("ref: refs/heads/main\n", true).0, 0);
+        assert_eq!(merge("ref: refs/heads/feat\n", false).0, 0);
+    }
 }
