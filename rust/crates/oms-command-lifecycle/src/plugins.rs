@@ -428,6 +428,97 @@ pub(crate) fn agy_statusline(paths: &Paths, tx: &mut Transaction, remove: bool) 
     }
     tx.write(&file, &body, 0o600)
 }
+/// Recognizes pre-native Antigravity plugin directories written before marker
+/// receipts existed while rejecting foreign or tampered directories.
+fn owned_legacy_agy(
+    paths: &Paths,
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(m) = std::fs::symlink_metadata(target) else {
+        return Ok(false);
+    };
+    if !m.is_dir() || m.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for row in std::fs::read_dir(target)? {
+        let row = row?;
+        let em = std::fs::symlink_metadata(row.path())?;
+        let Some(name) = row.file_name().to_str().map(str::to_owned) else {
+            return Ok(false);
+        };
+        if !em.is_file()
+            || em.file_type().is_symlink()
+            || em.nlink() != 1
+            || !matches!(
+                name.as_str(),
+                "plugin.json" | "mcp_config.json" | "hooks.json"
+            )
+        {
+            return Ok(false);
+        }
+        seen.insert(name);
+    }
+    if !seen.contains("plugin.json") || !seen.contains("mcp_config.json") {
+        return Ok(false);
+    }
+    let template_path = source.join("plugin.json");
+    if !r::exists(&template_path) {
+        return Ok(false);
+    }
+    let template = r::value(&template_path)?;
+    let Ok(plugin) = r::value(&target.join("plugin.json")) else {
+        return Ok(false);
+    };
+    let Some(plugin_obj) = plugin.as_object() else {
+        return Ok(false);
+    };
+    if !plugin_obj
+        .keys()
+        .all(|k| matches!(k.as_str(), "name" | "version" | "description"))
+        || plugin["name"] != "oh-my-setting"
+        || !plugin["version"].as_str().is_some_and(|s| !s.is_empty())
+        || plugin["description"] != template["description"]
+    {
+        return Ok(false);
+    }
+    let Ok(mcp) = r::value(&target.join("mcp_config.json")) else {
+        return Ok(false);
+    };
+    let Some(mcp_obj) = mcp.as_object() else {
+        return Ok(false);
+    };
+    if mcp_obj.len() != 1 || !mcp_obj.contains_key("mcpServers") {
+        return Ok(false);
+    }
+    let Some(servers) = mcp["mcpServers"].as_object() else {
+        return Ok(false);
+    };
+    if servers.len() != 1 {
+        return Ok(false);
+    }
+    let Some(entry) = servers.get("oh-my-setting") else {
+        return Ok(false);
+    };
+    if !crate::integrations::owned_mcp_entry(entry, paths, &paths.home.join(".local/bin/oms"))? {
+        return Ok(false);
+    }
+    if seen.contains("hooks.json") {
+        let Ok(hooks) = r::value(&target.join("hooks.json")) else {
+            return Ok(false);
+        };
+        let Some(hooks_obj) = hooks.as_object() else {
+            return Ok(false);
+        };
+        if !hooks_obj.keys().all(|k| k == "oh-my-setting") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn apply(
     paths: &Paths,
     options: &Options,
@@ -443,7 +534,10 @@ pub(crate) fn apply(
     let source = paths.source.join("plugins/antigravity");
     let target = paths.home.join(".gemini/config/plugins/oh-my-setting");
     let marker = crate::install::marker(&target);
-    if (r::exists(&target) || r::exists(&marker)) && !crate::install::owned(&source, &target)? {
+    if (r::exists(&target) || r::exists(&marker))
+        && !crate::install::owned(&source, &target)?
+        && (r::exists(&marker) || !owned_legacy_agy(paths, &source, &target)?)
+    {
         return r::fail("unmanaged or modified Antigravity plugin; takeover refused");
     }
     if remove {
