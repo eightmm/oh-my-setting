@@ -802,7 +802,7 @@ fn tool_lock(paths: &Paths) -> Result<Vec<Value>> {
         "tool lock schema, HTTPS URLs and payload digests validated",
     )])
 }
-fn health(paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
+fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     match paths.load() {
         Ok(Some(row)) => {
@@ -957,7 +957,8 @@ fn health(paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
             ));
         }
         let store = oms_command_plan::storage::Store::open(&paths.cwd)
-            .map_err(|e| r::Error(e.code, e.message))?;
+            .map_err(|e| r::Error(e.code, e.message))?
+            .with_group_resolver(services.group_resolver());
         if let Some(raw) = store
             .optional(".oms/plan/tasks.json", r::LIMIT)
             .map_err(|e| r::Error(e.code, e.message))?
@@ -1079,7 +1080,7 @@ pub(crate) fn run(
     } else if options.has("--tool-lock") {
         tool_lock(paths)?
     } else {
-        health(paths, flag)?
+        health(paths, flag, services)?
     };
     let model_mode = if options.has("--no-model-doctor") {
         "0".to_owned()

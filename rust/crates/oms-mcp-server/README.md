@@ -1,7 +1,7 @@
 # Native MCP component
 
 This crate implements the persistent stdio server and all 27 tools from
-[`oms-mcp-server.py`](../../../scripts/oms-mcp-server.py). It is an unintegrated
+`oms-mcp-server.py`. It is an unintegrated
 component, **not a Python retirement or installation claim**. Root workspace,
 lockfile, CLI routing, provider configuration, packaging and lifecycle changes
 belong to the parent. The private owner must be bundled before peer starts work.

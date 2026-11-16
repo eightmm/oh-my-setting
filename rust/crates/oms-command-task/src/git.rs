@@ -208,7 +208,7 @@ pub fn state_fingerprint(repo: &Path, interrupted: &AtomicBool) -> Result<String
     )?;
     let mut paths: Vec<_> = untracked
         .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
+        .filter(|p| !p.is_empty() && *p != b".oms" && !p.starts_with(b".oms/"))
         .collect();
     paths.sort();
     let mut h = Sha256::new();

@@ -154,7 +154,7 @@ fi
 #    history to attach.
 if out="$(
   cd "$REPO" &&
-    env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX -u OMS_AGENT \
+    env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX -u CODEX_THREAD_ID -u ANTIGRAVITY_AGENT -u ANTIGRAVITY_CLI -u AGY_SESSION -u OMS_AGENT \
       bash "$ROOT/scripts/advise.sh" --prompt "ship it?" \
       --to claude --dry-run --session 2>&1
 )"; then

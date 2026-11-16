@@ -325,7 +325,7 @@ The current [dispatcher](../scripts/oms) performs Python runtime checks before
 most Bash command entry points. A native feature is complete only when its
 public execution path also bypasses that Python startup. Appending a Rust helper
 behind the existing Python preflight is an interim bridge, not the target path.
-The [MCP server](../scripts/oms-mcp-server.py) is persistent but launches tool
+The `MCP server` is persistent but launches tool
 subprocesses; measure those boundaries separately from server startup.
 
 ### State, bytes, and locks
@@ -333,14 +333,14 @@ subprocesses; measure those boundaries separately from server startup.
 - Preserve each digest's original byte contract, including encoding, escaping,
   separators, key ordering, numeric bounds, and rejection of non-finite values.
   Do not substitute one generic canonical-JSON serializer for every domain.
-  [Agent event bytes](../scripts/lib/agent-events.py) use compact UTF-8 JSON,
+  `Agent event bytes` use compact UTF-8 JSON,
   while its projection cache uses ASCII escaping and the
-  [supervisor encoding](../scripts/lib/dispatch_supervisor.py) retains spaces.
+  `supervisor encoding` retains spaces.
 - Preserve physical repository identity, descriptor-relative reads, link and
   ownership checks, atomic updates, size limits, and change-during-read failures.
   A read failure must remain unknown/error rather than an empty success.
 - Use one lock authority for a state domain. The
-  [runtime lock bridge](../scripts/lib/oms_runtime/common.py) deliberately invokes
+  `runtime lock bridge` deliberately invokes
   [the canonical lock protocol](../scripts/lib/file-lock.sh); its comments record
   stale-holder and release bugs from a previous duplicate implementation.
   A generic Rust mutex or `flock` call is not an equivalent replacement.
@@ -356,7 +356,7 @@ subprocesses; measure those boundaries separately from server startup.
 
 Port launch, admission, cancellation, timeout, descendant cleanup, signal-derived
 exit codes, and reaping as one ownership contract. The
-[Linux supervisor](../scripts/lib/dispatch_supervisor.py) establishes a subreaper
+`Linux supervisor` establishes a subreaper
 before spawning and reports completion only after adopted children are reaped.
 Its platform-specific guarantee must remain explicit; a portable process API
 alone does not supply it. Dropping a handle is not a cancellation protocol.
@@ -376,15 +376,15 @@ already received a semantic audit.
 
 | Domain and current anchors | Required Rust result | Retirement evidence |
 |---|---|---|
-| CLI: [dispatcher](../scripts/oms), [runtime wrapper](../scripts/runtime.sh), [core](../scripts/lib/oms_core.py) | Native routing and shared argument/output contracts | Public migrated commands run without interpreter lookup; wrappers and Python preflight removed after complete coverage |
-| Context/output: [inspector](../scripts/lib/oms_runtime/context_inspect.py), [digest](../scripts/lib/output_digest.py) | Same bounds, errors, omission/retrieval semantics, and byte rules | Shared fixtures match; optimized accepted Python baseline compared; obsolete Python implementations deleted |
-| Work/evidence: [projection](../scripts/lib/oms_runtime/projection.py), [work CLI](../scripts/lib/oms_runtime/work_cli.py), [events](../scripts/lib/agent-events.py) | One interpretation of task, plan, failure, evidence, and freshness | Canonical-state tests pass; internal Python/Bash query bridges removed without independent state readers drifting |
-| Graph/source analysis: [graph package](../scripts/lib/oms_graph/), [Python parser](../scripts/lib/oms_graph/project/parsers/python.py) | Rust parser and graph pipeline, including Python input support | Symbol/import/call/scope/span and invalid-syntax fixtures match; no Python subprocess or embedded interpreter |
-| Evaluation/experiments: [harness](../scripts/lib/codex_harness.py), [experiment modules](../scripts/lib/oms_runtime/experiment.py), [harness regression](../tests/harness-eval-smoke.sh) | Rust scenarios, grading, budgets, measurements, and reports | Baselines retain their meaning; evaluator and test helper Python deleted; requested external experiment commands remain explicit |
-| State/admission: [runtime common](../scripts/lib/oms_runtime/common.py), [file locks](../scripts/lib/file-lock.sh), [inputs](../scripts/lib/oms_inputs/) | Rust storage and a single protocol/owner per domain | Contention, stale recovery, interruption, and corruption tests pass before writer switch; old lock holders and writers removed |
-| Supervisor/panel: [attempt runner](../scripts/lib/attempt-runner.py), [supervisor](../scripts/lib/dispatch_supervisor.py), [terminal panel](../scripts/lib/terminal_panel.py) | Rust process lifecycle, queue coordination, and panel behavior | No orphan or duplicate work under cancellation/restart; OS-specific guarantees preserved; old launch/control path removed |
-| MCP/hooks/providers: [MCP server](../scripts/oms-mcp-server.py), [hook state](../scripts/lib/hook_state.py), [provider registry](../scripts/lib/provider-registry.sh) | Native transport, hook handlers, provider adapters | Shared protocol/security fixtures pass for every supported provider; Python handlers and substantive Bash glue retired |
-| Lifecycle: [installer](../install.sh), [update](../scripts/update.sh), [uninstall](../scripts/uninstall.sh), [Python runtime manager](../scripts/python-runtime.sh) | Native install/update/repair/uninstall and verified artifacts | Clean-host install/upgrade/rollback/uninstall pass; Python installation/shims/precompile logic retired through ownership-aware cleanup |
+| CLI: [dispatcher](../scripts/oms), [runtime wrapper](../scripts/runtime.sh), `core` | Native routing and shared argument/output contracts | Public migrated commands run without interpreter lookup; wrappers and Python preflight removed after complete coverage |
+| Context/output: `inspector`, `digest` | Same bounds, errors, omission/retrieval semantics, and byte rules | Shared fixtures match; optimized accepted Python baseline compared; obsolete Python implementations deleted |
+| Work/evidence: `projection`, `work CLI`, `events` | One interpretation of task, plan, failure, evidence, and freshness | Canonical-state tests pass; internal Python/Bash query bridges removed without independent state readers drifting |
+| Graph/source analysis: [graph package](../scripts/lib/oms_graph/), `Python parser` | Rust parser and graph pipeline, including Python input support | Symbol/import/call/scope/span and invalid-syntax fixtures match; no Python subprocess or embedded interpreter |
+| Evaluation/experiments: `harness`, `experiment modules`, `harness regression` | Rust scenarios, grading, budgets, measurements, and reports | Baselines retain their meaning; evaluator and test helper Python deleted; requested external experiment commands remain explicit |
+| State/admission: `runtime common`, [file locks](../scripts/lib/file-lock.sh), `inputs` | Rust storage and a single protocol/owner per domain | Contention, stale recovery, interruption, and corruption tests pass before writer switch; old lock holders and writers removed |
+| Supervisor/panel: `attempt runner`, `supervisor`, `terminal panel` | Rust process lifecycle, queue coordination, and panel behavior | No orphan or duplicate work under cancellation/restart; OS-specific guarantees preserved; old launch/control path removed |
+| MCP/hooks/providers: `MCP server`, `hook state`, [provider registry](../scripts/lib/provider-registry.sh) | Native transport, hook handlers, provider adapters | Shared protocol/security fixtures pass for every supported provider; Python handlers and substantive Bash glue retired |
+| Lifecycle: [installer](../install.sh), [update](../scripts/update.sh), [uninstall](../scripts/uninstall.sh), `Python runtime manager` | Native install/update/repair/uninstall and verified artifacts | Clean-host install/upgrade/rollback/uninstall pass; Python installation/shims/precompile logic retired through ownership-aware cleanup |
 | Tests/templates/CI: [tests](../tests/), [templates](../templates/), [workflow](../.github/workflows/test.yml) | Rust-owned checks, fixture drivers, generated executable helpers, and release tasks | Source build, test, evaluation, package generation, and installed fixtures work without Python; remaining executable Python and invocation sites removed |
 
 Preserve inert Python example/source data required to test Python-project support.
@@ -401,7 +401,7 @@ tests and inventory check pass on the reviewed commit. M0 is not a runtime port.
 ### M1 — First native command
 
 Create the shared core and native CLI with `context-inspect` as the first bounded
-slice. Use the existing [context tests](../tests/test_context_inspect.py) as the
+slice. Use the existing `context tests` as the
 contract source and the initial [projection vectors](../migration/contracts/context-inspect-v1.json)
 as a seed. Wire the vectors into the native tests and extend the existing coverage
 rather than duplicating a second full test suite. Cover strict JSON, path safety, bounds,
@@ -427,7 +427,7 @@ duplicate readers. A smaller lossy response is not equivalent to a complete one.
 ### M3 — Parsers, evaluation, and development tools
 
 Select a Rust parser for the required Python grammar after running the existing
-[parser corpus](../tests/test_oms_graph_parsers.py); a parser dependency is a
+`parser corpus`; a parser dependency is a
 reviewed decision, not an assumed drop-in replacement for `ast`.
 Cover import resolution, binding/shadowing, decorators, async definitions,
 signatures, docstrings, locations, Unicode, and invalid syntax. Port graph,
@@ -506,9 +506,9 @@ moved; restore its historical bytes afterward. The command help gives the full
 required arguments. Changed old bytes still fail closed.
 
 This adds 78 physical Python lines in
-[agent_plan_core.py](../scripts/lib/agent_plan_core.py) (2202 to 2280) and four
+`agent_plan_core.py` (2202 to 2280) and four
 Python-reference lines in the existing
-[cancellation smoke fixture](../tests/scripts-smoke.sh) (1047 to 1051).
+`cancellation smoke fixture` (1047 to 1051).
 The inventory has been reconciled to those measured values, with no new paths.
 M4 owns retirement of this temporary growth: equivalent native cancellation,
 relocation, archive validation, contention and crash-recovery coverage must pass
@@ -601,7 +601,7 @@ before executable dispatch. An absent current-revision payload keeps the
 transitional legacy selection. This is not installed deployment or retirement.
 
 Reversible copies add 29 physical lines to existing
-[managed-target.py](../scripts/lib/managed-target.py) (246 to 275), with no new
+`managed-target.py` (246 to 275), with no new
 Python source path. The optional schema-1 source hash keeps rendered copies
 recognizable by older ownership readers. Existing shell/fixture reference rows
 increase by 17 lines: install-contract 15 to 18, link 1 to 2, and lifecycle smoke
@@ -616,13 +616,13 @@ decision-proof repair above raises it explicitly to 552. No Python deletion or M
 
 The demonstrated legacy defect and temporary repair remain explicit native-port requirements:
 
-- [Artifact indexing](../scripts/lib/peer-common.sh) truncates the task goal with
+- `Artifact indexing` truncates the task goal with
   `cut -c1-200`; splitting a valid UTF-8 character can create a lone surrogate
-  that the [index writer](../scripts/lib/artifact-index-store.py) cannot encode.
+  that the `index writer` cannot encode.
   An ASCII task header is the temporary operational workaround. M2/M4 must
   preserve the byte bound at a UTF-8 boundary and verify durable review receipts
   for non-ASCII goals.
-- [Retirement validation](../scripts/lib/plan-retire.py), when reached through
+- `Retirement validation`, when reached through
   [state-verify](../scripts/state-verify.sh) from another working directory, can
   resolve archived decision paths against CWD rather than the supplied repository.
   The temporary repair above passes the declared repository explicitly and tests
@@ -764,3 +764,12 @@ builds; 3-run median for read queries and `oms state`):
 | `oms graph project symbol` (`index.sqlite3` vs JSON) | `1480.13` vs `2493.56` (`1.68x`) | `index.sqlite3=89214976` B, `graph.json=46890861` B; JSON parity verified |
 | `oms graph project trace --no-refresh` (`index.sqlite3` vs JSON) | `38.67` vs `803.76` (`20.79x`) | Sub-40 ms SQLite traversal; JSON parity verified |
 | `oms room show` vs `room updates --after` (50 msgs, 5 tail) | `48.28` vs `45.38` (`1.06x`) | `room-bench.jsonl=15595` B; 5 exact tail turns returned |
+
+## M6 Pure-Rust Cutover
+
+Step A2 permanently retired the legacy Python runtime and shell wrapper stack:
+
+- **Deleted legacy surfaces**: removed `346` tracked `.py` files (`scripts/**/*.py`, `tests/**/*.py`, docs helpers/examples), `76` retired Python-dependent smoke/operator test files, and `16` obsolete `scripts/lib/*.sh` helpers; retained `templates/ml_smoke.py` and `templates/ml_resume_smoke.py` solely as project-template fixtures (`oms-migrate` `python-source`).
+- **Pure-Bash + native trampolines**: collapsed `scripts/*.sh` wrappers (`scripts/check.sh` excepted) into lightweight native trampolines dispatching through `scripts/oms`, added `docs/examples/remote-adapter.sh`, streamlined `.github/workflows/test.yml` (zero `setup-python`, Ubuntu/macOS pure-Rust & pure-Bash gates), and updated `payload.rs` frontdoor wrappers to route `doctor --repair` / `uninstall` cache recovery through `scripts/oms`.
+- **Poisoned-Python E2E verification**: injected failing `python` and `python3` (`exit 99`) shims first on `PATH` inside `tests/lib/smoke-env.sh`; verified `bash scripts/check.sh --lint-only`, all `9` retained focused smoke suites (`bash scripts/check.sh --focused-only`), and all modified Rust workspace crate test suites (`oms`, `oms-command-lifecycle`, `oms-command-peer`, `oms-command-runs`, `oms-command-task`, `oms-command-autonomy`) with zero failures.
+

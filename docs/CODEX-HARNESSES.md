@@ -126,7 +126,7 @@ source contract; it is separate from OpenAI's documented Sign in with ChatGPT
 flow for registering an independent third-party OAuth client. This feature
 does not promise continued endpoint support or access to every model.
 
-The offline contract suite is [test_codex_harness.py](../tests/test_codex_harness.py),
+The offline contract suite is `test_codex_harness.py`,
 run by the canonical provider-registry suite. It uses fake authentication RPC
 and HTTP/SSE peers and checks model pinning, tool/result/opaque reasoning
 round trips, completion, error redaction, local authorization, and cleanup.

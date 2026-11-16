@@ -28,7 +28,7 @@ pub fn outbound(bytes: &[u8]) -> Result<()> {
     } else {
         Err(Error::new(
             3,
-            "outbound text refused by the shared content scan; rephrase private content",
+            "outbound text blocked by the shared content scan; rephrase private content",
         ))
     }
 }

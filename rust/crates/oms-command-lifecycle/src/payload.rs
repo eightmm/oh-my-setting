@@ -185,9 +185,10 @@ pub(crate) fn install(paths: &Paths, payload: &Payload, tx: &mut Transaction) ->
     )?;
     let digest = r::hash(&r::read(&payload.executable, 1024 * 1024 * 1024)?);
     let executable = r::shell(payload.executable.as_os_str())?;
+    let scripts_oms = r::shell(paths.source.join("scripts/oms").as_os_str())?;
+    let source = r::shell(paths.source.as_os_str())?;
     let wrapper = format!(
-        "#!/bin/sh\n# oh-my-setting native lifecycle\nif command -v sha256sum >/dev/null 2>&1; then\n  observed=$(sha256sum < {executable}) || exit 2\n  observed=${{observed%% *}}\nelif command -v shasum >/dev/null 2>&1; then\n  observed=$(shasum -a 256 < {executable}) || exit 2\n  observed=${{observed%% *}}\nelse\n  echo 'error: native payload hash tool unavailable' >&2\n  exit 2\nfi\n[ \"$observed\" = '{digest}' ] || {{ echo 'error: native payload changed; run oms doctor --repair' >&2; exit 2; }}\nexec {executable} --oms-dispatch {} {} -- \"$@\"\n",
-        r::shell(paths.source.as_os_str())?,
+        "#!/bin/sh\n# oh-my-setting native lifecycle\nhash_file() {{\n  if command -v sha256sum >/dev/null 2>&1; then\n    out=$(sha256sum < \"$1\") || return 1\n    printf '%s\\n' \"${{out%% *}}\"\n  elif command -v shasum >/dev/null 2>&1; then\n    out=$(shasum -a 256 < \"$1\") || return 1\n    printf '%s\\n' \"${{out%% *}}\"\n  else\n    echo 'error: native payload hash tool unavailable' >&2\n    return 2\n  fi\n}}\nif observed=$(hash_file {executable} 2>/dev/null) && [ \"$observed\" = '{digest}' ]; then\n  exec {executable} --oms-dispatch {source} {} -- \"$@\"\nfi\nrecover=0\ncase \"${{1:-}}\" in\n  uninstall) recover=1 ;;\n  doctor)\n    for arg in \"$@\"; do\n      [ \"$arg\" = '--repair' ] && recover=1\n    done ;;\nesac\nif [ \"$recover\" = 1 ] && [ -x {scripts_oms} ]; then\n  exec {scripts_oms} \"$@\"\nfi\necho 'error: native payload changed; run oms doctor --repair' >&2\nexit 2\n",
         payload.revision
     );
     tx.write(&payload.frontdoor(paths), wrapper.as_bytes(), 0o755)?;

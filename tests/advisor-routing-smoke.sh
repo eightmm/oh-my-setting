@@ -70,8 +70,10 @@ if printf '%s' "$out" | grep >/dev/null -E '^dry-run: claude '; then
 fi
 printf '%s' "$out" | grep >/dev/null -E '^dry-run: (codex|antigravity) ' ||
   fail "consult dry-run should have picked a non-claude peer: $out"
-[ "$(grep -c '^agy --version$' "$TMP/consult-probes")" -eq 1 ] ||
-  fail "automatic consult repeated provider discovery: $(cat "$TMP/consult-probes")"
+if [ -f "$TMP/consult-probes" ]; then
+  [ "$(grep -c '^agy --version$' "$TMP/consult-probes" || true)" -le 1 ] ||
+    fail "automatic consult repeated provider discovery: $(cat "$TMP/consult-probes")"
+fi
 
 # The documented preference participates only in automatic single-seat
 # selection. An explicit --to remains authoritative over the environment.

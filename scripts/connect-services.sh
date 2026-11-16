@@ -1,265 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Connect account-backed services used by the harness without ever
-# reading or persisting their credentials. gh and ntn own their browser login
-# and credential stores; this script only verifies the resulting sessions and
-# records the non-secret Work Journal data-source id.
+# Native OMS entrypoint for connect-services.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-GH_BIN="${OMS_GH_BIN:-gh}"
-NOTION_CLI="${OMS_NOTION_CLI:-ntn}"
-NOTION_KEYRING_MODE="${OMS_NOTION_KEYRING:-}"
-MODE=auto
-CONNECT_GITHUB=1
-CONNECT_NOTION=1
-DATA_SOURCE_ID=""
-ACCOUNT_ARGS=()
-ACCOUNT_SELECTED=0
-ACCOUNT_OPTIONS=0
-SERVICE_OPTIONS=0
-
-usage() {
-  cat <<'EOF'
-Usage: connect-services.sh [--auto|--required] [--data-source-id ID]
-                           [--no-github] [--no-notion] [-h|--help]
-       connect-services.sh --account PROVIDER:ID [--home PATH] [--first|--last]
-                           [--repair|--remove|--verify]
-
-Authenticate GitHub with `gh auth login` and Notion with `ntn login`, then
-discover and configure the existing Work Journal data source. Credentials stay
-in the stores owned by those official CLIs; oh-my-setting saves only the
-Notion data-source id and authentication mode.
-
---auto continues a non-interactive install with exact follow-up commands.
---required fails unless every selected service is connected.
-
---account codex:ID registers an independent Codex home (default CODEX_HOME/accounts/ID,
-or ~/.codex/accounts/ID when CODEX_HOME is unset).
-The id default is reserved for the main home. Use --home PATH outside the
-repository when the default account home would be inside a repository.
-It shares AGENTS.md, config.toml, hooks.json, .hook-trust, plugins, rules and
-skills with the parent CODEX_HOME or ~/.codex. Existing files are kept;
---repair replaces conflicting links only. --first prioritizes the account;
---last is the default. --remove unregisters it and removes only recorded links,
-keeping its home, login and sessions. Login is always left to the user.
---verify checks login status for the main home and every registered Codex home.
-Existing homes must belong to the current user and must not be group/other
-writable. Every ancestor through the filesystem root must belong to the current
-user or root; writable ancestors need the sticky bit. Refusals name a fix; permissions
-are never changed automatically. Removal and repair require the recorded
-directory identity and a verified link; platforms without safe unlink keep it.
-Removing a missing or replaced home forgets its stale receipt and prints the
-exact registration command to recover. Cleanup retires ownership per entry;
-only remaining recorded links retain receipts for retry.
---account claude:ID manages an independent CLAUDE_CONFIG_DIR (default:
-CLAUDE_CONFIG_DIR/accounts/ID or ~/.claude/accounts/ID). It installs only OMS
-rules, skills, output style and owned settings; existing user values stay.
-Claude state uses provider-accounts.claude.json and provider-account-effects.json;
-legacy Codex registry and link receipts stay unchanged. IDs are provider-local;
-physical homes must be unique across providers and pending reservations.
-Claude --verify explicitly requests native auth status for the selected config.
-Manual config-scoped claude.ai use is documented. OMS isolation verification stays
-unsupported/uncertain: matching status fields do not attest credential origin or
-exclude shared global OAuth. Other auth modes are also unsupported. Native status
-can initialize vendor metadata in the selected root. Registration, doctor and update
-never run it.
-Account settings ownership uses .oms-claude-hooks.json; interrupted or ambiguous
-ownership keeps data and reservations for explicit recovery. --remove preserves
-homes, login and history. Antigravity account isolation is unproved and unavailable.
-After rollback, old writers cannot manage Claude or protect its homes against
-arbitrary --home collisions; use the modern version for account mutations.
-Account options cannot be combined with GitHub/Notion options.
-EOF
-}
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --auto) MODE=auto; SERVICE_OPTIONS=1 ;;
-    --required) MODE=required; SERVICE_OPTIONS=1 ;;
-    --data-source-id)
-      [ "$#" -ge 2 ] || {
-        echo "error: --data-source-id requires a value" >&2
-        exit 2
-      }
-      DATA_SOURCE_ID="$2"
-      SERVICE_OPTIONS=1
-      shift
-      ;;
-    --no-github) CONNECT_GITHUB=0; SERVICE_OPTIONS=1 ;;
-    --no-notion) CONNECT_NOTION=0; SERVICE_OPTIONS=1 ;;
-    --account|--home)
-      [ "$#" -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
-      [ "$1" != --account ] || ACCOUNT_SELECTED=1
-      ACCOUNT_OPTIONS=1
-      ACCOUNT_ARGS+=("$1" "$2")
-      shift
-      ;;
-    --first|--last|--repair|--remove|--verify) ACCOUNT_ARGS+=("$1"); ACCOUNT_OPTIONS=1 ;;
-    -h|--help) usage; exit 0 ;;
-    *)
-      echo "error: unknown option: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-  esac
-  shift
-done
-
-if [ "$ACCOUNT_SELECTED" = 1 ]; then
-  [ "$SERVICE_OPTIONS" = 0 ] || {
-    echo "error: account options cannot be combined with GitHub/Notion options" >&2
-    exit 2
-  }
-  command -v python3 >/dev/null 2>&1 || { echo "error: Python 3 is required" >&2; exit 2; }
-  exec python3 "$ROOT/scripts/lib/provider_accounts.py" connect "${ACCOUNT_ARGS[@]}"
-fi
-[ "$ACCOUNT_OPTIONS" = 0 ] || { echo "error: account options require --account PROVIDER:ID" >&2; exit 2; }
-
-case "${OMS_CONNECT_INTERACTIVE:-auto}" in
-  1) INTERACTIVE=1; LOGIN_USES_TTY=0 ;;
-  0) INTERACTIVE=0; LOGIN_USES_TTY=0 ;;
-  auto)
-    LOGIN_USES_TTY=1
-    if [ -t 0 ] || [ -t 1 ]; then INTERACTIVE=1; else INTERACTIVE=0; fi
-    ;;
-  *)
-    echo "error: OMS_CONNECT_INTERACTIVE must be 0, 1, or auto" >&2
-    exit 2
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
     ;;
 esac
 
-FAILED=0
-PENDING=0
-
-problem() {
-  PENDING=1
-  if [ "$MODE" = required ]; then
-    echo "error: $*" >&2
-    FAILED=1
-  else
-    echo "note: $*" >&2
-  fi
-}
-
-run_login() {
-  # Permissions are not a terminal: open it, as the redirect below will.
-  if [ "$LOGIN_USES_TTY" = 1 ] && { : </dev/tty >/dev/tty; } 2>/dev/null; then
-    "$@" </dev/tty >/dev/tty
-  else
-    "$@"
-  fi
-}
-
-github_authenticated() {
-  "$GH_BIN" auth status >/dev/null 2>&1
-}
-
-notion_authenticated() {
-  # Split the API path because the outbound scrubber correctly treats literal
-  # user-home paths as private; this endpoint would otherwise be an
-  # indistinguishable case-insensitive false positive in harness source.
-  local me_path='v1/user'"s/me"
-  "$NOTION_CLI" api "$me_path" 2>/dev/null |
-    python3 -c 'import json,sys; row=json.load(sys.stdin); raise SystemExit(0 if isinstance(row, dict) and row.get("object") == "user" else 1)' \
-      >/dev/null 2>&1
-}
-
-connect_github() {
-  if ! command -v "$GH_BIN" >/dev/null 2>&1; then
-    problem "GitHub CLI is unavailable; install gh, then run: gh auth login"
-    return 0
-  fi
-  if github_authenticated; then
-    echo "ok: GitHub CLI authenticated"
-    return 0
-  fi
-  if [ "$INTERACTIVE" != 1 ]; then
-    problem "GitHub login pending; run: gh auth login --web"
-    return 0
-  fi
-  echo "connecting GitHub through gh"
-  if ! run_login "$GH_BIN" auth login --web || ! github_authenticated; then
-    problem "GitHub login did not complete; rerun: gh auth login --web"
-    return 0
-  fi
-  echo "ok: GitHub CLI authenticated"
-}
-
-configure_notion_target() {
-  if [ -n "$DATA_SOURCE_ID" ]; then
-    OMS_WORK_JOURNAL_NOTION_AUTH=ntn OMS_NOTION_CLI="$NOTION_CLI" \
-      OMS_NOTION_KEYRING="$NOTION_KEYRING_MODE" \
-      "$ROOT/scripts/journal.sh" configure --data-source-id "$DATA_SOURCE_ID"
-  else
-    OMS_WORK_JOURNAL_NOTION_AUTH=ntn OMS_NOTION_CLI="$NOTION_CLI" \
-      OMS_NOTION_KEYRING="$NOTION_KEYRING_MODE" \
-      "$ROOT/scripts/journal.sh" configure --discover
-  fi
-}
-
-remember_unverified_notion_target() {
-  [ -n "$DATA_SOURCE_ID" ] || return 0
-  "$ROOT/scripts/journal.sh" configure \
-    --data-source-id "$DATA_SOURCE_ID" --no-validate
-}
-
-connect_notion() {
-  local login_hint="ntn login"
-  local keyring_probe
-
-  if ! command -v "$NOTION_CLI" >/dev/null 2>&1; then
-    remember_unverified_notion_target
-    problem "Notion CLI is unavailable; install ntn, run: ntn login, then rerun this command"
-    return 0
-  fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    problem "Python 3 is required to verify the Notion CLI session"
-    return 0
-  fi
-  # A machine without a usable OS keychain (headless or sandboxed session)
-  # cannot store or read the default credential; ntn's own hint names the
-  # fallback. Switch this run — and, through configure, the persisted
-  # transport — to the file-based store so hooks work without env plumbing.
-  keyring_probe="$("$NOTION_CLI" whoami 2>&1 || true)"
-  case "$keyring_probe" in
-    *[Kk]eychain*)
-      NOTION_KEYRING_MODE="file"
-      export NOTION_KEYRING=0
-      login_hint="NOTION_KEYRING=0 ntn login"
-      echo "note: OS keychain unavailable; using ntn's file-based credential store"
-      ;;
-  esac
-  if ! notion_authenticated; then
-    if [ "$INTERACTIVE" != 1 ]; then
-      remember_unverified_notion_target
-      problem "Notion login pending; run: $login_hint, then: oms journal configure --discover"
-      return 0
-    fi
-    echo "connecting Notion through ntn"
-    if ! run_login "$NOTION_CLI" login || ! notion_authenticated; then
-      remember_unverified_notion_target
-      problem "Notion login did not complete; rerun: $login_hint"
-      return 0
-    fi
-  fi
-  if ! configure_notion_target; then
-    if [ -n "$DATA_SOURCE_ID" ]; then
-      problem "the selected Notion data source is not a compatible Work Journal target"
-    else
-      problem "no unique compatible Work Journal data source was found; rerun with --data-source-id ID"
-    fi
-    return 0
-  fi
-  echo "ok: Notion Work Journal connected"
-}
-
-[ "$CONNECT_GITHUB" != 1 ] || connect_github
-[ "$CONNECT_NOTION" != 1 ] || connect_notion
-
-[ "$FAILED" = 0 ] || exit 1
-if [ "$PENDING" = 1 ]; then
-  echo "service connection: pending"
-else
-  echo "service connection: ok"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for connect-services; stage with cargo or run oms doctor --repair" >&2
+  exit 2
 fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "connect-services" "$@" || exit $?
+echo "error: native payload unavailable for connect-services (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

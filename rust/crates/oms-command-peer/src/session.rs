@@ -241,6 +241,20 @@ fn messages(source: &Source, raw: &[u8]) -> Vec<Message> {
             continue;
         }
         let (message, prefix) = if source.provider == "codex" {
+            if text(&row, "type") == "event_msg"
+                && text(row.get("payload"), "type") == "user_message"
+                && let Some(text) = row.get("payload").get("message").text()
+            {
+                result.push(Message {
+                    line: line + 1,
+                    part: 0,
+                    pointer: "/payload/message".into(),
+                    role: "user".into(),
+                    text: text.into(),
+                    hash: storage::hash(bytes),
+                });
+                continue;
+            }
             if text(&row, "type") != "response_item"
                 || text(row.get("payload"), "type") != "message"
             {
@@ -326,8 +340,25 @@ fn origin(source: &Source, message: &Message, start: usize, end: Option<usize>) 
         ("line_sha256", message.hash.clone().into()),
     ])
 }
-pub(crate) fn advice_digest(repo: &Path, ident: &str, context: &Context<'_>) -> Result<String> {
-    let caller = std::env::var("OMS_AGENT").unwrap_or_else(|_| "claude".into());
+pub(crate) fn advice_digest(
+    repo: &Path,
+    ident: &str,
+    allow_sensitive: bool,
+    context: &Context<'_>,
+) -> Result<String> {
+    let caller = crate::peer::detect_caller()?.filter(|p| matches!(p.as_str(), "claude" | "codex" | "pi")).ok_or_else(|| {
+        Error::new(
+            2,
+            "cannot identify calling agent with native session history for --session; set OMS_AGENT (e.g. codex or claude) or pass --session-id",
+        )
+    })?;
+    let pinned = if !ident.is_empty() {
+        ident.to_owned()
+    } else if caller == "codex" {
+        std::env::var("CODEX_THREAD_ID").unwrap_or_default()
+    } else {
+        String::new()
+    };
     let args = Args::parse(&["--provider".into(), caller.into()], &["provider"], &[])?;
     let (sources, truncated, _) = discover(repo, &args, context)?;
     if truncated {
@@ -335,7 +366,7 @@ pub(crate) fn advice_digest(repo: &Path, ident: &str, context: &Context<'_>) -> 
     }
     let source = sources
         .into_iter()
-        .find(|s| ident.is_empty() || s.ident == ident)
+        .find(|s| pinned.is_empty() || s.ident == pinned)
         .ok_or_else(|| Error::new(2, "calling session transcript absent"))?;
     let items = messages(&source, &read(&source)?);
     let mut selected = items
@@ -352,10 +383,10 @@ pub(crate) fn advice_digest(repo: &Path, ident: &str, context: &Context<'_>) -> 
             safety::truncate(&message.text, 2000)
         ));
     }
-    if let Some(last) = items.iter().rev().find(|m| m.role == "assistant") {
-        body.push_str(&format!(
-            "Last assistant summary:\n{}\n",
-            safety::truncate(&last.text, 6000)
+    if !allow_sensitive && safety::outbound(body.as_bytes()).is_err() {
+        return Err(Error::new(
+            3,
+            "calling session digest contains sensitive content; pass --allow-sensitive to override the session check",
         ));
     }
     Ok(body)

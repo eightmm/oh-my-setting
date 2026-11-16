@@ -53,9 +53,22 @@ impl Options {
         self.paths.get(k).map(Vec::as_slice).unwrap_or(&[])
     }
     pub fn preview(&self) -> bool {
-        self.has("--plan")
-            || self.has("--dry-run")
-            || std::env::var_os("OH_MY_SETTING_DRY_RUN").is_some_and(|s| s == "1")
+        if std::env::var_os("OH_MY_SETTING_DRY_RUN").is_some_and(|s| s == "1") {
+            return true;
+        }
+        self.raw
+            .iter()
+            .rev()
+            .find_map(|s| {
+                if s == "--plan" || s == "--dry-run" {
+                    Some(true)
+                } else if s == "--apply" {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false)
     }
 }
 fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {

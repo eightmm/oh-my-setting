@@ -1,127 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STYLE="${1:-all}"
-PROJECT_DIR="${2:-$PWD}"
-DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
+# Native OMS entrypoint for remove-project-template.
 
-usage() {
-  cat <<'EOF'
-Usage: remove-project-template.sh [all|general|ml|slurm] [project_dir] [files...]
-
-Remove oh-my-setting managed project rule blocks.
-EOF
-}
-
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
     ;;
 esac
 
-case "$STYLE" in
-  all|general|ml|slurm) ;;
-  *)
-    usage >&2
-    exit 2
-    ;;
-esac
-
-shift || true
-shift || true
-
-if [ "$#" -gt 0 ]; then
-  FILES=("$@")
-else
-  FILES=()
-  [ -e "$PROJECT_DIR/AGENTS.md" ] && FILES+=("AGENTS.md")
-  [ -e "$PROJECT_DIR/CLAUDE.md" ] && FILES+=("CLAUDE.md")
-  [ -e "$PROJECT_DIR/GEMINI.md" ] && FILES+=("GEMINI.md")
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for remove-project-template; stage with cargo or run oms doctor --repair" >&2
+  exit 2
 fi
-
-remove_one_style() {
-  local file="$1"
-  local style="$2"
-  local begin="<!-- oh-my-setting:${style}:begin -->"
-  local end="<!-- oh-my-setting:${style}:end -->"
-  local tmp
-  tmp="$(mktemp)"
-
-  awk -v begin="$begin" -v end="$end" '
-    $0 == begin {
-      if (skip) {
-        printf "error: nested managed block begin: %s\n", begin > "/dev/stderr"
-        bad = 1
-        exit 2
-      }
-      skip = 1
-      changed = 1
-      next
-    }
-    $0 == end {
-      if (!skip) {
-        printf "error: unmatched managed block end: %s\n", end > "/dev/stderr"
-        bad = 1
-        exit 2
-      }
-      skip = 0
-      next
-    }
-    !skip { print }
-    END {
-      if (bad) exit 2
-      if (skip) {
-        printf "error: missing managed block end: %s\n", end > "/dev/stderr"
-        exit 2
-      }
-      if (!changed) exit 3
-    }
-  ' "$file" > "$tmp" || {
-    local code="$?"
-    rm -f "$tmp"
-    [ "$code" -eq 3 ] && return 0
-    return "$code"
-  }
-
-  mv "$tmp" "$file"
-  echo "removed $style block from $file"
-}
-
-remove_one() {
-  local rel="$1"
-  local target="$PROJECT_DIR/$rel"
-
-  [ -f "$target" ] || return 0
-
-  if [ "$DRY_RUN" = "1" ]; then
-    echo "would remove $STYLE block(s) from $target"
-    return 0
-  fi
-
-  if [ "$STYLE" = "all" ]; then
-    remove_one_style "$target" "general"
-    remove_one_style "$target" "ml"
-    remove_one_style "$target" "slurm"
-  else
-    remove_one_style "$target" "$STYLE"
-  fi
-}
-
-for f in "${FILES[@]}"; do
-  remove_one "$f"
-done
-
-# The managed rule blocks are gone but the files (and their local git exclusion)
-# stay. Say so, so nobody has to discover the leftover block by hand.
-private_status=""
-if [ "$DRY_RUN" != "1" ] &&
-  git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-  private_status="$(
-    "$ROOT/scripts/project-private.sh" --repo "$PROJECT_DIR" status 2>/dev/null || true
-  )"
-fi
-if grep -qE '^(hidden|reserved)' <<<"$private_status"; then
-  echo "note: the agent files stay hidden from git; 'oms project-private remove' undoes that"
-fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "remove-project-template" "$@" || exit $?
+echo "error: native payload unavailable for remove-project-template (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

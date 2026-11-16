@@ -288,15 +288,15 @@ focus loss, 잘못된 대상 action 시도, 실제 추가 모델 호출 수다.
 
 ## 9. 구현자 인계와 범위
 
-수정 후보는 기존 [panel_view.py](../scripts/lib/panel_view.py),
-[room_view.py](../scripts/lib/room_view.py), [panel_state.py](../scripts/lib/panel_state.py),
-[panel_chats.py](../scripts/lib/panel_chats.py), [panel_metrics.py](../scripts/lib/panel_metrics.py),
-[dashboard_projection.py](../scripts/lib/dashboard_projection.py)와 runtime read API다.
+수정 후보는 기존 `panel_view.py`,
+`room_view.py`, `panel_state.py`,
+`panel_chats.py`, `panel_metrics.py`,
+`dashboard_projection.py`와 runtime read API다.
 모든 파일을 고치는 것이 목표가 아니다. 선택한 UX/NF의 최소 소비자 경로만 변경한다.
 
-회귀는 [visual_and_controls.py](../tests/operator/visual_and_controls.py),
-[room_and_board_rendering.py](../tests/operator/room_and_board_rendering.py),
-[native_integration.py](../tests/operator/native_integration.py)와 관련 existing case를 확장한다.
+회귀는 `visual_and_controls.py`,
+`room_and_board_rendering.py`,
+`native_integration.py`와 관련 existing case를 확장한다.
 새 테스트 프레임워크·대규모 E2E 인프라·real provider/GPU 작업을 기본 요구하지 않는다.
 
 각 후속 PR은 UX/NF와 CP ID, baseline/candidate snapshot, 실제 action 경로,

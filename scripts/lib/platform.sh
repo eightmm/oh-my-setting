@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
-# Small platform boundary shared by installers and lifecycle scripts. Windows
-# means a POSIX shell supplied by Git for Windows/MSYS2/Cygwin; WSL reports
-# Linux and follows the normal Linux path.
+# Small platform boundary shared by installers, entrypoints, and lifecycle tools.
+# Windows means a POSIX shell supplied by Git for Windows/MSYS2/Cygwin; WSL
+# reports Linux and follows the normal Linux path.
 
-# These values are process invariant. Initialize in the parent shell because
-# callers commonly invoke the functions below through command substitution.
 [ -n "${OMS_PLATFORM_KERNEL:-}" ] ||
   OMS_PLATFORM_KERNEL="$(uname -s 2>/dev/null || printf unknown)"
 [ -n "${OMS_PLATFORM_MACHINE:-}" ] ||
@@ -24,63 +22,6 @@ oms_platform_name() {
     linux|Linux) printf 'linux\n' ;;
     *) printf 'unknown\n' ;;
   esac
-}
-
-# The managed `python3` shim, recognized by its exact shape. Lives on the
-# platform boundary because both the installer that writes it and the
-# uninstaller that removes it must agree on what "ours" means — anything else
-# at that path is a user's launcher and is never touched. The `uv python find`
-# variant is legacy, recognized read-only so reinstall and uninstall still own
-# it: uv resolves from the caller's cwd (.python-version, .venv), so inside an
-# unrelated project it picks that project's interpreter or fails. New shims
-# name the OMS runtime's version-free bin/python3 instead.
-oms_install_python_shim_owned() {
-  local target="$1"
-  local command
-
-  [ -f "$target" ] && [ ! -L "$target" ] || return 1
-  [ "$(sed -n '1p' "$target")" = '#!/usr/bin/env bash' ] || return 1
-  [ "$(sed -n '2p' "$target")" = '# managed by oh-my-setting' ] || return 1
-  command="$(sed -n '3p' "$target")"
-  case "$command" in
-    'exec python "$@"'|'exec py -3 "$@"'|'exec "$(uv python find)" "$@"') ;;
-    'exec "'*'/bin/python3" "$@"') ;;  # the OMS runtime, written before it was quoted
-    "exec '"*"/bin/python3' \"\$@\"") ;;  # the OMS runtime, on a host without Python
-    *) return 1 ;;
-  esac
-  [ -z "$(sed -n '4p' "$target")" ]
-}
-
-# The shim's runtime line. The root is single-quoted, with embedded quotes
-# escaped, so a `$`, backtick or quote in the path stays literal when the shim
-# runs; sed keeps this Bash 3.2-safe where ${var//} quoting is not.
-oms_install_python_shim_runtime_line() {  # RUNTIME_ROOT
-  local quoted
-  quoted="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" || return 1
-  printf "exec '%s/bin/python3' \"\$@\"\n" "$quoted"
-}
-
-# Converge a legacy `uv python find` shim onto the OMS runtime launcher, so
-# existing hosts are repaired too (ensure_python3 returns early once a working
-# python3 exists). Rewrites only a shim that is byte-for-byte the legacy form,
-# and only when the launcher it will name is executable. Returns 0 when it rewrote.
-oms_install_python_shim_repoint() {  # SHIM RUNTIME_ROOT
-  local shim="$1" root="$2" stage
-
-  # Whole-file comparison: the ownership test above stops at line 4, so a
-  # legacy shim followed by a blank line and the user's own commands would
-  # pass it and lose that content to the rewrite.
-  oms_install_python_shim_owned "$shim" || return 1
-  printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
-    'exec "$(uv python find)" "$@"' | cmp -s - "$shim" || return 1
-  [ -x "$root/bin/python3" ] && [ ! -L "$root/bin" ] || return 1
-  stage="$(mktemp "$shim.XXXXXX")" || return 1
-  {
-    printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting'
-    oms_install_python_shim_runtime_line "$root"
-  } > "$stage" &&
-    chmod +x "$stage" &&
-    mv -f "$stage" "$shim" || { rm -f "$stage"; return 1; }
 }
 
 oms_install_link_mode() {
@@ -123,14 +64,11 @@ oms_sha256_file() {
   fi
 }
 
-# One scalar from tools.lock.json by dotted path, for the bootstrap that runs
-# before any Python exists. It walks strings and braces, not lines, so it
-# does not depend on formatting; a test compares it with tool-lock.py.
-oms_lock_scalar() {  # oms_lock_scalar LOCK DOTTED.PATH
+# Read one scalar from a flat or nested JSON object by dotted path using pure awk.
+oms_lock_scalar() {  # oms_lock_scalar JSON_FILE DOTTED.PATH
   awk -v want="$2" '
     { text = text $0 "\n" }
     END {
-      # Escaped JSON strings need decoding that this bootstrap reader cannot do.
       if (index(text, "\\") != 0) exit 1
       n = length(text); depth = 0; lists = 0; key = ""; value = 0
       for (i = 1; i <= n; i++) {
@@ -169,11 +107,8 @@ oms_lock_scalar() {  # oms_lock_scalar LOCK DOTTED.PATH
   ' "$1"
 }
 
-# Children started through `#!/usr/bin/env bash` resolve the first bash on PATH,
-# which is the system Bash 3.2 under macOS cron/launchd/hook PATHs, and would
-# now hit the Bash 5 floor. Under Bash 5, name this interpreter for them and put
-# its directory first unless `bash` already resolves to it. Call before the
-# Python runtime is activated so its launcher directory stays ahead.
+# Children started through `#!/usr/bin/env bash` resolve the first bash on PATH.
+# Under Bash 5, name this interpreter for them and prepend its directory when needed.
 oms_bash_enter() {
   local first
 
@@ -189,38 +124,13 @@ oms_bash_enter() {
   hash -r 2>/dev/null || true
 }
 
-# Native-first routing shared by the `oms` frontdoor and every shell entry
-# wrapper (provider/Git hooks, lifecycle commands, install.sh). Wrappers test
-# for "$ROOT/rust/target/oms-native" with builtins before sourcing this file,
-# so a checkout without a staged payload spawns nothing for routing.
-#
-# Recursion guard: OMS_NATIVE_DISPATCHED=1 means shell fallback routing for this
-# process tree is already decided. It is exported ONLY by a shell lifecycle
-# transaction (install, update, doctor, uninstall, auto-update) that continues
-# in shell so its sub-steps stay in one implementation, and by the frontdoor for
-# a wrapper verb native already declined — NOT on the native dispatch exec, so
-# child hooks or subcommands spawned by native oms still enter native routing.
-# Wrappers test it, as exactly 1, before sourcing this file; the frontdoor does
-# not, because --oms-select exits 75 for verbs native does not own and native
-# never re-enters the frontdoor for a verb it owns.
-#
-# The staged executable is authenticated before either private invocation: it
-# must be a regular, non-symlinked, executable file in a non-symlinked entry
-# directory whose cache ancestors, entry, binary and fixed-size oms.sha256
-# checksum are owned by the effective user and not world-writable, matching
-# the oms.sha256 written by the staging step. Hashing uses
-# oms_sha256_file (sha256sum, BSD shasum or openssl), only host digest tools. Same-UID
-# replacement stays outside this boundary.
-
-# oms_native_resolve ROOT: on success sets OMS_NATIVE_BINARY, OMS_NATIVE_ROOT
-# and OMS_NATIVE_REVISION and returns 0. Returns 1 when no payload is staged for
-# the current revision, 2 when one is present but unverifiable; the reason is
-# left in OMS_NATIVE_ERROR. Never exits and never executes the payload.
-oms_native_resolve() {
-  local root cache dir entry binary checksum expected actual revision size
-  OMS_NATIVE_BINARY="" OMS_NATIVE_ROOT="" OMS_NATIVE_REVISION="" OMS_NATIVE_ERROR=""
-  root="$(cd "$1" 2>/dev/null && pwd -P)" || { OMS_NATIVE_ERROR="cannot resolve native payload root: $1"; return 2; }
+# Resolve the verified current-revision native oms payload without building or
+# modifying files. Return 0 when verified; 1 when no entry exists for this commit;
+# 2 with OMS_NATIVE_ERROR when present state cannot be trusted.
+oms_native_resolve() {  # oms_native_resolve ROOT
+  local root="$1" cache revision entry binary checksum dir size expected actual
   cache="$root/rust/target/oms-native"
+  OMS_NATIVE_BINARY="" OMS_NATIVE_ROOT="" OMS_NATIVE_REVISION="" OMS_NATIVE_ERROR=""
   [ -e "$cache" ] || [ -L "$cache" ] || return 1
   for dir in "$root/rust" "$root/rust/target" "$cache"; do
     if [ -L "$dir" ] || [ ! -d "$dir" ]; then
@@ -278,25 +188,108 @@ oms_native_resolve() {
   OMS_NATIVE_BINARY="$binary" OMS_NATIVE_ROOT="$root" OMS_NATIVE_REVISION="$revision"
 }
 
+# Quarantine an invalid or symlinked rust/target/oms-native/<revision> entry so
+# `oms doctor --repair` can re-stage a verified payload cleanly.
+oms_native_quarantine() {  # oms_native_quarantine ROOT
+  local root="$1" cache revision entry quarantine
+  cache="$root/rust/target/oms-native"
+  revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || return 1
+  case "$revision" in *[!0-9a-f]*|'') return 1 ;; esac
+  [ "${#revision}" = 40 ] || return 1
+  entry="$cache/$revision"
+  [ -e "$entry" ] || [ -L "$entry" ] || return 0
+  if oms_native_resolve "$root" >/dev/null 2>&1; then
+    return 0
+  fi
+  quarantine="$cache/.broken-$revision-$$-$(date +%s)"
+  mv -f "$entry" "$quarantine"
+}
+
+# Build and publish verified release binaries into rust/target/oms-native/<HEAD>.
+oms_native_stage() {  # oms_native_stage ROOT
+  local root="$1" cache revision target_dir release_dir stage_dir entry
+  local artifacts="" oms_digest="" name digest
+  [ -f "$root/rust/Cargo.toml" ] || return 1
+  command -v cargo >/dev/null 2>&1 || return 1
+  revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || return 1
+  case "$revision" in *[!0-9a-f]*|'') return 1 ;; esac
+  [ "${#revision}" = 40 ] || return 1
+  cache="$root/rust/target/oms-native"
+  entry="$cache/$revision"
+  if [ -e "$entry" ] || [ -L "$entry" ]; then
+    if [ "${OMS_NATIVE_FORCE_STAGE:-0}" != 1 ] && oms_native_resolve "$root" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "${OMS_NATIVE_FORCE_STAGE:-0}" != 1 ]; then
+      return 2
+    fi
+  fi
+  mkdir -p "$root/rust/target" "$cache"
+  chmod go-w "$root/rust" "$root/rust/target" "$cache" 2>/dev/null || true
+  target_dir="$root/rust/target/lifecycle-build"
+  release_dir="$target_dir/release"
+  cargo +1.99.1 build --manifest-path "$root/rust/Cargo.toml" \
+    --locked --offline --release \
+    --bin oms \
+    --bin oms-mcp-peer-owner \
+    --bin oms-run-bounded-helper \
+    --bin oms-state-queue-worker \
+    --bin oms-graph-python-helper \
+    --target-dir "$target_dir" >&2 || return 1
+  stage_dir="$(mktemp -d "$cache/.stage-$revision.XXXXXX")" || return 1
+  chmod 0755 "$stage_dir"
+  for name in oms oms-mcp-peer-owner oms-run-bounded-helper oms-state-queue-worker oms-graph-python-helper; do
+    [ -f "$release_dir/$name" ] && [ -x "$release_dir/$name" ] || { rm -rf "$stage_dir"; return 1; }
+    cp -f "$release_dir/$name" "$stage_dir/$name" && chmod 0755 "$stage_dir/$name" || { rm -rf "$stage_dir"; return 1; }
+    digest="$(oms_sha256_file "$stage_dir/$name")" || { rm -rf "$stage_dir"; return 1; }
+    [ "$name" != oms ] || oms_digest="$digest"
+    artifacts="$artifacts${artifacts:+,}\"$name\":\"$digest\""
+  done
+  printf '%s\n' "$oms_digest" > "$stage_dir/oms.sha256"
+  printf '{"schema":1,"source_commit":"%s","artifacts":{%s}}\n' "$revision" "$artifacts" > "$stage_dir/manifest.json"
+  chmod 0600 "$stage_dir/oms.sha256" "$stage_dir/manifest.json"
+  if [ -e "$entry" ] || [ -L "$entry" ]; then
+    if [ "${OMS_NATIVE_FORCE_STAGE:-0}" = 1 ]; then
+      rm -rf "$entry" || { rm -rf "$stage_dir"; return 1; }
+    else
+      rm -rf "$stage_dir"
+      oms_native_resolve "$root" >/dev/null 2>&1
+      return $?
+    fi
+  fi
+  mv -T "$stage_dir" "$entry" 2>/dev/null || mv "$stage_dir" "$entry" || { rm -rf "$stage_dir"; return 1; }
+}
+
 # oms_native_route POLICY ROOT VERB [ARG...]
-# Execs the verified native `oms VERB ARG...` with stdin, stdout, stderr and
-# the exit status untouched when the payload selects VERB. Returns 0 when the
-# caller must run its shell body: no payload for this revision, --oms-select
-# declined (75), or a recovering POLICY met an unverifiable payload;
-# OMS_NATIVE_OUTCOME names which (absent, declined, unverified). Any other
-# nonzero return is the caller's exit status.
-#   strict   unverifiable payload: print why on stderr, return 2; a failing
-#            select returns its status
-#   recover  repair/removal paths (doctor, uninstall, install): never block on
-#            an unverifiable payload, never execute one
-#   hook     provider/Git hooks: like recover but silent, so a corrupt cache
-#            cannot deny the tool call that would repair it
+# Execs the verified native `oms VERB ARG...` when the payload selects VERB.
+# Auto-stages a missing payload when cargo is available (unless disabled via
+# OMS_NATIVE_NO_AUTO_STAGE=1) and quarantines corrupt entries on `doctor --repair`.
+# Returns 0 with OMS_NATIVE_OUTCOME (absent|declined|unverified) when unresolved
+# under recover/hook or when unbuilt without cargo; returns 2 under strict corruption.
 # shellcheck disable=SC2034 # OMS_NATIVE_OUTCOME is the caller's result.
 oms_native_route() {
-  local policy="$1" root="$2" status=0
+  local policy="$1" root="$2" status=0 arg has_repair=0
   shift 2
   OMS_NATIVE_OUTCOME=absent
   oms_native_resolve "$root" || status=$?
+  if [ "$status" -eq 1 ] && [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" != 1 ] &&
+     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ -f "$root/rust/Cargo.toml" ] &&
+     command -v cargo >/dev/null 2>&1; then
+    oms_native_stage "$root" || true
+    status=0
+    oms_native_resolve "$root" || status=$?
+  elif [ "$status" -ge 2 ] && [ "$policy" = recover ] && [ "${1:-}" = doctor ]; then
+    for arg in "${@:2}"; do
+      [ "$arg" = "--repair" ] && has_repair=1
+    done
+    if [ "$has_repair" = 1 ] && [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" != 1 ] &&
+       [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ -f "$root/rust/Cargo.toml" ] &&
+       command -v cargo >/dev/null 2>&1; then
+      oms_native_quarantine "$root" && oms_native_stage "$root" || true
+      status=0
+      oms_native_resolve "$root" || status=$?
+    fi
+  fi
   case "$status" in
     0) ;;
     1) return 0 ;;
@@ -304,7 +297,7 @@ oms_native_route() {
       OMS_NATIVE_OUTCOME=unverified
       case "$policy" in
         strict) echo "error: $OMS_NATIVE_ERROR" >&2; return 2 ;;
-        recover) echo "warning: $OMS_NATIVE_ERROR; continuing with the shell implementation" >&2; return 0 ;;
+        recover) echo "warning: $OMS_NATIVE_ERROR" >&2; return 0 ;;
         *) return 0 ;;
       esac
       ;;
@@ -319,7 +312,6 @@ oms_native_route() {
     75) OMS_NATIVE_OUTCOME=declined; return 0 ;;
   esac
   OMS_NATIVE_OUTCOME=unverified
-  # An interrupted select is the caller's interruption, whatever the policy.
   [ "$status" -lt 128 ] || return "$status"
   [ "$policy" = strict ] && return "$status"
   return 0

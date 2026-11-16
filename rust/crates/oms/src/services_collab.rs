@@ -1563,6 +1563,10 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
             Some(&self.wake_once),
         )
     }
+
+    fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        Some(crate::services_runtime::resolve_group_membership)
+    }
 }
 
 fn read_bounded_regular(path: &Path, limit: u64) -> Option<Vec<u8>> {

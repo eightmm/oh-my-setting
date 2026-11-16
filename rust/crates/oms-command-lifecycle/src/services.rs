@@ -109,6 +109,11 @@ pub trait Services {
     ) -> Output {
         unavailable("native idle-main notification service unavailable")
     }
+    /// Resolves group membership when an existing repository directory carries
+    /// group-write (`0o020`) permissions (e.g. UPG developer checkouts).
+    fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        None
+    }
 }
 pub struct UnavailableServices;
 impl Services for UnavailableServices {}

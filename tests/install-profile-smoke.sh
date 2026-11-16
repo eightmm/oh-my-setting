@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-profile.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 
 plan="$("$ROOT/scripts/install-profile.sh" --plan --profile core --primary-provider codex)"
-printf '%s' "$plan" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["managed_tools"] == ["node","codex"]; assert r["github_optional"] and r["notion_optional"]'
+printf '%s' "$plan" | jq -e '.managed_tools == ["node","codex"] and .profiles == ["core"] and .native_runtime == true' >/dev/null || {
+  echo "FAIL: core plan mismatch: $plan" >&2; exit 1
+}
 full="$("$ROOT/scripts/install-profile.sh" --plan --profile full --primary-provider codex)"
-printf '%s' "$full" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert {"node","codex","claude","agy","gh","ntn","uv"} <= set(r["managed_tools"])'
+printf '%s' "$full" | jq -e '(["node","codex","claude","agy","gh","ntn","uv"] - .managed_tools) | length == 0' >/dev/null || {
+  echo "FAIL: full plan mismatch: $full" >&2; exit 1
+}
 
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/codex" <<'EOF_CODEX'
 #!/usr/bin/env bash
-case "$1" in --version) echo 'codex fixture' ;; esac
+case "${1:-}" in --version) echo 'codex fixture' ;; esac
 exit 0
 EOF_CODEX
 chmod +x "$TMP/bin/codex"
@@ -23,26 +27,29 @@ PATH="$TMP/bin:$PATH" "$ROOT/scripts/install-profile.sh" --check --profile core 
 cat > "$TMP/capabilities.json" <<'EOF_RECEIPT'
 {"schema":1,"plan":{"requested":["core","github"],"primary_provider":"codex"},"allow_missing":false}
 EOF_RECEIPT
-reapply="$($ROOT/scripts/install-profile.sh --plan --reapply --receipt "$TMP/capabilities.json")"
-printf '%s' "$reapply" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["requested"] == ["core","github"]; assert r["primary_provider"] == "codex"; assert r["managed_tools"] == ["node","codex","gh"]'
+reapply="$("$ROOT/scripts/install-profile.sh" --plan --reapply --receipt "$TMP/capabilities.json")"
+printf '%s' "$reapply" | jq -e '.requested == ["core","github"] and .primary_provider == "codex" and .managed_tools == ["node","codex","gh"]' >/dev/null || {
+  echo "FAIL: reapply mismatch: $reapply" >&2; exit 1
+}
 
 added="$("$ROOT/scripts/install-profile.sh" --plan --add --profile notion --profile github --receipt "$TMP/capabilities.json")"
-printf '%s' "$added" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["requested"] == ["core","github","notion"]; assert r["primary_provider"] == "codex"'
+printf '%s' "$added" | jq -e '.requested == ["core","github","notion"] and .primary_provider == "codex"' >/dev/null || {
+  echo "FAIL: add mismatch: $added" >&2; exit 1
+}
 replacement="$("$ROOT/scripts/install-profile.sh" --plan --profile github --receipt "$TMP/capabilities.json")"
-printf '%s' "$replacement" | python3 -c 'import json,sys; assert json.load(sys.stdin)["requested"] == ["github"]'
-# Exercise the actual receipt write without downloading tools: these profiles
-# only check external capabilities and retain the existing degraded policy.
+printf '%s' "$replacement" | jq -e '.requested == ["github"]' >/dev/null || {
+  echo "FAIL: replacement mismatch: $replacement" >&2; exit 1
+}
+
 cat > "$TMP/external.json" <<'EOF_EXTERNAL'
 {"schema":1,"plan":{"requested":["hpc"],"primary_provider":"agy"},"allow_missing":true}
 EOF_EXTERNAL
 HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg-config" "$ROOT/scripts/install-profile.sh" \
   --apply --add --profile remote --receipt "$TMP/external.json" > "$TMP/added.json"
-python3 - "$TMP/external.json" <<'PY_ADDED'
-import json, sys
-r = json.load(open(sys.argv[1]))
-assert r["plan"]["requested"] == ["hpc", "remote"]
-assert r["primary_provider"] == "agy" and r["allow_missing"] is True
-PY_ADDED
+jq -e '.plan.requested == ["hpc","remote"] and .primary_provider == "agy" and .allow_missing == true' "$TMP/external.json" >/dev/null || {
+  echo "FAIL: updated external receipt mismatch: $(cat "$TMP/external.json")" >&2; exit 1
+}
+
 printf 'invalid\n' > "$TMP/invalid.json"
 if "$ROOT/scripts/install-profile.sh" --plan --add --profile github --receipt "$TMP/invalid.json" >/dev/null 2>&1; then
   echo "FAIL: --add accepted an invalid receipt" >&2; exit 1
@@ -64,15 +71,12 @@ assert_child_install_refused() {
     echo "FAIL: child $label install returned $rc: $(cat "$output")" >&2
     exit 1
   }
-  grep -Fq 'a harness child cannot install or apply capability profiles' "$output" || {
+  grep -Fq 'a harness child cannot mutate OMS host lifecycle authority' "$output" || {
     echo "FAIL: child $label install refusal was not actionable: $(cat "$output")" >&2
     exit 1
   }
 }
 
-# The hpc profile has no managed installer payload. Without the child guard it
-# would still write a receipt (under this fixture), so the regression exercises
-# a real apply without ever downloading or changing host tools.
 cat > "$TMP/child-capabilities.json" <<'EOF_CHILD_RECEIPT'
 {"schema":1,"plan":{"requested":["hpc"],"primary_provider":"codex"},"allow_missing":true}
 EOF_CHILD_RECEIPT
@@ -90,8 +94,6 @@ assert_child_install_refused reapply --reapply --receipt \
   exit 1
 }
 
-# The final parsed action is authoritative: plans/checks stay observable, and
-# an explicit --plan after --apply must not be misclassified as a mutation.
 OMS_HARNESS_CHILD=1 "$ROOT/scripts/install-profile.sh" --plan --profile core \
   --primary-provider codex >/dev/null
 OMS_HARNESS_CHILD=1 PATH="$TMP/bin:$PATH" "$ROOT/scripts/install-profile.sh" \

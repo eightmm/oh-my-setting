@@ -730,60 +730,21 @@ oms_file_lock_probe() {  # STATE_FILE
 
   lock_path="$(oms_file_lock_path_for_observation "$1")" || { echo unknown; return 0; }
   if command -v flock >/dev/null 2>&1 && [ "${OMS_LOCK_FORCE_MKDIR:-0}" != "1" ]; then
-    python3 - "$lock_path" <<'PY' 2>/dev/null || echo unknown
-import os, stat, sys
-try:
-    st = os.lstat(sys.argv[1])
-except FileNotFoundError:
-    print("free")
-    sys.exit(0)
-except OSError:
-    print("unknown")
-    sys.exit(0)
-if stat.S_ISLNK(st.st_mode):
-    try:
-        st = os.stat(sys.argv[1])
-    except OSError:
-        print("unknown")
-        sys.exit(0)
-key = "%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
-try:
-    with open("/proc/locks", encoding="ascii", errors="replace") as stream:
-        rows = stream.read().splitlines()
-except OSError:
-    print("unknown")
-    sys.exit(0)
-for row in rows:
-    fields = row.split()
-    if len(fields) > 5 and fields[1] == "FLOCK" and fields[5] == key:
-        try:
-            current = os.stat(sys.argv[1])
-        except OSError:
-            print("unknown")
-            sys.exit(0)
-        if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
-            print("unknown")
-            sys.exit(0)
-        print("held")
-        sys.exit(0)
-# An absent row cannot prove the lock is free: procfs may filter another
-# namespace, and flock helpers may have exited while a descriptor was shared.
-print("unknown")
-PY
+    if [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
+      echo free
+    else
+      # Native lock commands hold kernel ownership; the legacy shell probe never
+      # takes a lock and conservatively reports unknown for existing files.
+      echo unknown
+    fi
     return 0
   fi
   if [ ! -d "$lock_path" ]; then
-    python3 - "$lock_path" <<'PY' 2>/dev/null || { echo unknown; return 0; }
-import os, sys
-try:
-    os.lstat(sys.argv[1])
-except FileNotFoundError:
-    print("free")
-except OSError:
-    print("unknown")
-else:
-    print("unknown")
-PY
+    if [ ! -e "$lock_path" ] && [ ! -L "$lock_path" ]; then
+      echo free
+    else
+      echo unknown
+    fi
     return 0
   fi
   if oms_file_lock_mkdir_stale "$lock_path" "$(oms_file_lock_timeout)" "$(date +%s)"; then

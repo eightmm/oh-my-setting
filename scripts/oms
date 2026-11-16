@@ -3,7 +3,6 @@
 set -euo pipefail
 
 # Overrides can add a Windows signal, never hide the host identity.
-# Refuse before any lifecycle lock, checkout lookup or state write.
 case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}" in
   windows|Windows|WINDOWS|MINGW*|MSYS*|CYGWIN*)
     echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
@@ -18,15 +17,10 @@ case "$(uname -s):${OSTYPE:-}" in
 esac
 
 # One stable entrypoint so any agent CLI (Codex, Claude Code, Antigravity)
-# can invoke harness tools by name — `oms run-ledger ...` — without
-# memorizing script paths. link.sh puts this on PATH at ~/.local/bin/oms;
-# symlink installs resolve the checkout from that link, while copy installs
-# recover the canonical checkout from the install receipt.
+# can invoke harness tools by name without memorizing script paths.
 
 resolve_self() {
-  local src="$1"
-  local dir
-
+  local src="$1" dir
   while [ -L "$src" ]; do
     dir="$(cd "$(dirname "$src")" && pwd)"
     src="$(readlink "$src")"
@@ -38,123 +32,82 @@ resolve_self() {
   printf '%s\n' "$src"
 }
 
-receipt_runtime_safe() {
-  local root="$1" version env marker candidate path target parent managed count old_ifs
-  [ ! -L "$root" ] && [ -d "$root" ] && [ ! -L "$root/bin" ] &&
-    [ ! -L "$root/bin/python3" ] && [ -f "$root/bin/python3" ] && [ -x "$root/bin/python3" ] || return 1
-  marker="$root/.oh-my-setting-python-runtime"
-  [ ! -L "$marker" ] && [ -f "$marker" ] &&
-    [ "$(sed -n '1p' "$marker")" = schema=1 ] && [ "$(sed -n '2p' "$marker")" = owner=oh-my-setting ] || return 1
-  [ ! -L "$root/current" ] && [ -f "$root/current" ] || return 1
-  IFS= read -r version < "$root/current" || return 1
-  case "$version" in ''|*[!0-9.]*|.*|*.|*..*) return 1 ;; esac
-  old_ifs="$IFS"; IFS=.; set -- $version; IFS="$old_ifs"
-  [ "$#" -eq 3 ] && [ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] || return 1
-  env="$root/envs/$version"
-  marker="$env/.oh-my-setting-python-env"
-  [ ! -L "$root/envs" ] && [ ! -L "$env" ] && [ -d "$env" ] &&
-    [ ! -L "$marker" ] && [ -f "$marker" ] &&
-    [ "$(sed -n '1p' "$marker")" = schema=1 ] && [ "$(sed -n '2p' "$marker")" = "version=$version" ] || return 1
-  for candidate in "$env/bin/python3" "$env/bin/python"; do
-    [ ! -L "${candidate%/*}" ] && [ -f "$candidate" ] && [ -x "$candidate" ] || continue
-    if [ ! -L "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
-    [ ! -L "$root/managed" ] && [ -d "$root/managed" ] || continue
-    managed="$(cd "$root/managed" && pwd -P)" || continue
-    path="$candidate"; count=0
-    while [ -L "$path" ]; do
-      count=$((count + 1)); [ "$count" -le 32 ] || return 1
-      parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
-      target="$(readlink "$path")" || return 1
-      case "$target" in /*) path="$target" ;; *) path="$parent/$target" ;; esac
-    done
-    parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
-    case "$parent/${path##*/}" in "$managed"/*) printf '%s\n' "$candidate"; return 0 ;; esac
-  done
-  return 1
+# Pure-awk schema=2 install receipt source_root extractor (works on minimal PATH).
+read_receipt_source_root() {
+  local receipt="$1"
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  awk '
+    { text = text $0 "\n" }
+    END {
+      if (index(text, "\\") != 0) exit 1
+      n = length(text); depth = 0; lists = 0; key = ""; value = 0
+      schema = ""; root = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(text, i, 1)
+        if (c == "\"") {
+          s = ""
+          for (i++; i <= n && (d = substr(text, i, 1)) != "\""; i++) {
+            if (d == "\\") { i++; d = substr(text, i, 1) }
+            s = s d
+          }
+          if (lists) continue
+          if (value) {
+            if (depth == 1 && key == "source_root") root = s
+            value = 0
+          } else key = s
+        } else if (c == ":") value = 1
+        else if (c == "{") { depth++; value = 0 }
+        else if (c == "}") depth--
+        else if (c == "[") lists++
+        else if (c == "]") lists--
+        else if (c == ",") value = 0
+        else if (value && !lists && c ~ /[-0-9]/) {
+          s = c
+          while (i < n && index(",}] \t\r\n", substr(text, i + 1, 1)) == 0) s = s substr(text, ++i, 1)
+          if (depth == 1 && key == "schema") schema = s
+          value = 0
+        }
+      }
+      if (schema == "2" && substr(root, 1, 1) == "/") print root
+      else exit 1
+    }
+  ' "$receipt"
 }
 
 SCRIPTS_DIR="$(cd "$(dirname "$(resolve_self "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$SCRIPTS_DIR/.." && pwd -P)"
-if [ -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
-  # shellcheck source=scripts/lib/platform.sh
-  . "$SCRIPTS_DIR/lib/platform.sh"
-  oms_bash_enter
-fi
-# Native-first: with a native payload present the verified binary owns routing
-# for every tool (--oms-select exits 75 for tools it does not own, which falls
-# through to the shell dispatcher below, so no wrapper re-enters itself). Bare
-# `oms` on a terminal asks for the panel; without a terminal it prints usage in
-# shell. Recovery commands (`doctor`, `uninstall`) reach their shell fallback
-# when the cached payload is missing, foreign or corrupt instead of deadlocking
-# `oms doctor --repair`; every other tool refuses an unverifiable payload.
-native_outcome=absent
-if [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; then
-  native_args=("$@")
-  if [ "$#" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then native_args=(panel); fi
-  if [ "${#native_args[@]}" -gt 0 ] && [ -n "${native_args[0]}" ]; then
-    native_policy=strict
-    case "${native_args[0]}" in doctor|uninstall) native_policy=recover ;; esac
-    if declare -F oms_native_route >/dev/null; then
-      oms_native_route "$native_policy" "$ROOT" "${native_args[@]}" || exit
-      native_outcome="$OMS_NATIVE_OUTCOME"
-    elif [ "$native_policy" = strict ]; then
-      echo 'error: native payload unavailable; run oms doctor --repair' >&2
-      exit 2
-    fi
-  fi
-fi
-if [ -f "$SCRIPTS_DIR/lib/python-runtime.sh" ]; then
-  # shellcheck source=scripts/lib/python-runtime.sh
-  . "$SCRIPTS_DIR/lib/python-runtime.sh"
-  oms_python_runtime_activate_if_present
-fi
-if [ ! -f "$SCRIPTS_DIR/agent-task.sh" ]; then
-  receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
-  source_root=""
-  # A copied dispatcher has no adjacent library until this JSON bootstrap
-  # finds the checkout. Use the host interpreter in isolated mode.
-  unset -f python python3 2>/dev/null || true
-  runtime_root="${OMS_PYTHON_RUNTIME_ROOT:-$HOME/.local/share/oh-my-setting/python-runtime}"
-  if ! receipt_python="$(receipt_runtime_safe "$runtime_root")"; then
-    receipt_python="$(command -v python3 2>/dev/null || true)"
-    case "$receipt_python" in "$runtime_root"/*|"$HOME/.local/bin/python3") receipt_python="" ;; esac
-  fi
-  if [ -n "$receipt_python" ]; then
-    source_root="$(env -u PYTHONHOME -u PYTHONPATH "$receipt_python" -I - "$receipt" <<'PY' 2>/dev/null || true
-import json
-import os
-import sys
 
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        row = json.load(handle)
-    root = row.get("source_root", "")
-    if row.get("schema") == 2 and isinstance(root, str) and os.path.isabs(root):
-        print(root)
-except (OSError, ValueError):
-    pass
-PY
-)"
-  fi
+if [ ! -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
+  receipt="${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
+  source_root="$(read_receipt_source_root "$receipt" 2>/dev/null || true)"
   source_root="${source_root//$'\r'/}"
-  if [ -n "$source_root" ] && [ -f "$source_root/scripts/agent-task.sh" ]; then
+  if [ -n "$source_root" ] && [ -f "$source_root/scripts/lib/platform.sh" ]; then
     SCRIPTS_DIR="$source_root/scripts"
     ROOT="$source_root"
-    if [ -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
-      # shellcheck source=scripts/lib/platform.sh
-      . "$SCRIPTS_DIR/lib/platform.sh"
-      oms_bash_enter
-    fi
-    if [ -f "$SCRIPTS_DIR/lib/python-runtime.sh" ]; then
-      # shellcheck source=scripts/lib/python-runtime.sh
-      . "$SCRIPTS_DIR/lib/python-runtime.sh"
-      oms_python_runtime_activate_if_present
-    fi
   else
     echo "error: oms cannot locate its checkout from $SCRIPTS_DIR" >&2
     echo "error: no harness scripts there and no usable install receipt at $receipt" >&2
     echo "error: reinstall, or run scripts/oms from the checkout directly" >&2
     exit 1
+  fi
+fi
+
+# shellcheck source=scripts/lib/platform.sh
+. "$SCRIPTS_DIR/lib/platform.sh"
+oms_bash_enter
+
+native_outcome=absent
+export OMS_NATIVE_OUTCOME=absent
+if [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ] ||
+   { [ -f "$ROOT/rust/Cargo.toml" ] && [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" != 1 ] && command -v cargo >/dev/null 2>&1; }; then
+  native_args=("$@")
+  if [ "$#" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then native_args=(panel); fi
+  if [ "${#native_args[@]}" -gt 0 ] && [ -n "${native_args[0]}" ]; then
+    native_policy=strict
+    case "${native_args[0]}" in doctor|uninstall) native_policy=recover ;; esac
+    oms_native_route "$native_policy" "$ROOT" "${native_args[@]}" || exit
+    native_outcome="$OMS_NATIVE_OUTCOME"
+    export OMS_NATIVE_OUTCOME
   fi
 fi
 
@@ -165,222 +118,26 @@ Usage: oms <tool> [args...]
        oms list [--all]
        oms help
 
-Dispatch to an oh-my-setting harness tool by name. `list` prints the compact
-subsystem entrypoints; `list --all` reveals core primitives. The command-routing
-reference selects intent variants behind those entries. Docs/COMPONENTS.md
-describes the existing subsystems and docs/OMS-RUNTIME.md explains the typed
-runtime projection.
-
-The terminal panel is the human entrypoint. The other tools are the agent's
-hands; give your coding agent the goal instead of composing harness commands.
+Dispatch to the native oh-my-setting Rust CLI by name. `list` prints the
+frontdoor entrypoints; `list --all` reveals core primitives.
 EOF_USAGE
-}
-
-describe() {
-  awk '
-    function first_sentence(text,  rest, off, i, prefix) {
-      rest = text
-      off = 0
-      while ((i = index(rest, ". ")) > 0) {
-        prefix = substr(text, 1, off + i)
-        if (prefix !~ /(e\.g|i\.e)\.$/) return prefix
-        off += i + 1
-        rest = substr(text, off + 1)
-      }
-      return text
-    }
-    NR > 2 && !header_done {
-      if ($0 ~ /^# shellcheck/) {
-      } else if ($0 ~ /^#/) {
-        text = $0
-        sub(/^#+ ?/, "", text)
-        buf = buf (buf == "" ? "" : " ") text
-      } else if (buf != "" || $0 !~ /^[[:space:]]*$/) {
-        header_done = 1
-      }
-      if (header_done && buf != "") exit
-    }
-    /^Usage:/ { in_usage = 1; next }
-    in_usage && /^EOF$/ { exit }
-    in_usage && NF && !/^[[:space:]]/ { usage = usage (usage == "" ? "" : " ") $0; next }
-    in_usage && usage != "" { exit }
-    END { print first_sentence(buf != "" ? buf : usage) }
-  ' "$1"
-}
-
-OMS_PUBLIC_TOOLS="
-advise
-agent-call
-agent-events
-agent-memory
-agent-plan
-agent-role
-agent-supervisor
-agent-task
-apply-project-template
-approval-inbox
-artifact-index
-artifact-view
-auto-update
-autopilot
-candidate
-change-guard
-checkpoint
-ci-status
-cite
-cleanup
-connect-services
-consult
-dashboard
-data-manifest
-deps
-doctor
-draft-pr
-experiment-board
-external
-fail-ledger
-gc
-goal-drive
-graph
-harness
-inbox
-init
-input
-install-profile
-intent
-job-digest
-journal
-land
-lease
-model-doctor
-models
-output-digest
-panel
-patch-admit
-patch-land
-peer-ask
-peer-delegate
-peer-review
-plan-from-spec
-plan-run
-project-doctor
-project-private
-provider-permissions
-recipe
-remove-project-template
-report
-room
-run
-run-ledger
-run-reconcile
-runtime
-scratch-worktree
-session
-session-handoff
-skill-doctor
-skill-forge
-slurm-lint
-slurm-submit
-snapshot
-state
-state-verify
-status
-sync-shared
-thread
-tick
-tsp-queue
-uninstall
-update
-"
-
-OMS_FRONTDOOR_TOOLS="
-# Setup and capabilities
-init
-install-profile
-connect-services
-# Goals and daily work
-panel
-agent-plan
-autopilot
-harness
-inbox
-status
-dashboard
-runtime
-journal
-tick
-# Collaboration and review
-room
-consult
-peer-delegate
-peer-review
-# Admission and delivery
-patch-admit
-patch-land
-land
-lease
-# Maintenance and removal
-report
-doctor
-update
-uninstall
-"
-
-tool_in_list() {
-  case "$2" in
-    *"
-$1
-"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-is_public_tool() {
-  tool_in_list "$1" "$OMS_PUBLIC_TOOLS"
-}
-
-cmd_list() {
-  local selected="$1"
-  local name
-
-  while IFS= read -r name; do
-    case "$name" in
-      "") continue ;;
-      "# "*) printf '%s:\n' "${name#\# }"; continue ;;
-    esac
-    [ -f "$SCRIPTS_DIR/$name.sh" ] || continue
-    printf '%-26s %s\n' "$name" "$(describe "$SCRIPTS_DIR/$name.sh")"
-  done <<EOF_LIST
-$selected
-EOF_LIST
 }
 
 case "${1:-}" in
   "")
     if [ -t 0 ] && [ -t 1 ]; then
-      oms_python_runtime_require || exit 1
       exec bash "$SCRIPTS_DIR/panel.sh"
     fi
     usage
     exit 0
     ;;
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  help)
-    usage
-    echo
-    cmd_list "$OMS_FRONTDOOR_TOOLS"
-    exit 0
-    ;;
-  list)
-    case "${2:-}" in
-      "") cmd_list "$OMS_FRONTDOOR_TOOLS" ;;
-      --all) cmd_list "$OMS_PUBLIC_TOOLS" ;;
-      *) echo "error: oms list accepts --all" >&2; exit 2 ;;
-    esac
-    exit 0
+  -h|--help|help|list)
+    if [ "${1:-}" = -h ] || [ "${1:-}" = --help ]; then
+      usage
+      exit 0
+    fi
+    echo "error: native payload unavailable ($native_outcome); build with cargo or run oms doctor --repair" >&2
+    exit 2
     ;;
 esac
 
@@ -393,35 +150,14 @@ case "$TOOL" in
     ;;
 esac
 TOOL="${TOOL%.sh}"
-if ! is_public_tool "$TOOL"; then
-  echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
-  exit 2
-fi
 TARGET="$SCRIPTS_DIR/$TOOL.sh"
 if [ ! -f "$TARGET" ]; then
   echo "error: unknown tool: $TOOL (run: oms list --all)" >&2
   exit 2
 fi
-needs_python=1
-case "$TOOL" in doctor|uninstall) needs_python=0 ;; esac
-for arg in "$@"; do
-  case "$arg" in --help|-h) needs_python=0 ;; esac
-done
-[ "$needs_python" = 0 ] || oms_python_runtime_require || exit 1
 if [ "$TOOL" = panel ] || [ "$TOOL" = harness ]; then
-  # Interactive entrypoints own the caller PID so signals reach their cleanup.
   exec bash "$TARGET" "$@"
 fi
-# Native already declined this wrapper verb, or cannot be trusted for a
-# recovery verb: the wrapper must not select again.
-case "$native_outcome:$TOOL" in
-  declined:tick|declined:update|declined:status|declined:snapshot|declined:auto-update|declined:install-profile|declined:doctor|declined:uninstall|unverified:doctor|unverified:uninstall)
-    export OMS_NATIVE_DISPATCHED=1
-    ;;
-esac
 RC=0
 bash "$TARGET" "$@" || RC=$?
-if [ "$RC" -eq 2 ]; then
-  echo "hint: run \`oms $TOOL --help\` for usage" >&2
-fi
 exit "$RC"

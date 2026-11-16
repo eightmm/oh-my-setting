@@ -117,7 +117,7 @@ detached runners with stdin, stdout and stderr connected to `/dev/null`, and
 closed warning stderr pipes cannot turn a completed job into a supervisor error.
 
 Canonical anchors below refer to
-[`attempt-runner.py`](../../../scripts/lib/attempt-runner.py), read through EOF.
+`attempt-runner.py`, read through EOF.
 The implementation exists for every row; behavioral verification is deferred.
 
 | Mode | Source lines | Implemented behavior / limitation |

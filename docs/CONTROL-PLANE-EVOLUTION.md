@@ -36,9 +36,9 @@ Claude/Codex native subagent와 사용량을 제한적으로 읽는 경로가 �
 | 터미널 호스트 | tmux/inline 및 별도 선택형 Herdr host 관련 계약 | 기존 adapter의 기능 차이를 점검; 제거된 pane-control 계층 부활 금지 |
 | 연구·HPC | 기존 runtime backend 및 job-digest 등 제한된 관찰 도구 | Job/attempt/실험 근거의 읽기 전용 연결; 새 scheduler 금지 |
 
-주요 확인 경로: [panel_chats.py](../scripts/lib/panel_chats.py),
-[room_view.py](../scripts/lib/room_view.py), [panel_state.py](../scripts/lib/panel_state.py),
-[dashboard_projection.py](../scripts/lib/dashboard_projection.py),
+주요 확인 경로: `panel_chats.py`,
+`room_view.py`, `panel_state.py`,
+`dashboard_projection.py`,
 [패널 계약](TERMINAL-PANEL.md), [대시보드 계약](DASHBOARD.md), [runtime 계약](OMS-RUNTIME.md).
 이는 해당 코드·문서의 정적 확인이며 전체 기능을 실사용 검증했다는 뜻은 아니다.
 
@@ -331,7 +331,7 @@ I7–I11이 보류돼도 MVP를 미완료로 보지 않는다. 반대로 문서 
 
 ## 6. 테스트 연결과 측정 계획
 
-기존 section 이름은 [operator runner](../tests/operator/runner.py)를 기준으로 한다.
+기존 section 이름은 `operator runner`를 기준으로 한다.
 아래는 **후속 구현자가 실행할 명령**이며 이번 문서 PR에서 실행했다는 뜻이 아니다.
 
 | 작업 | 우선 확장할 기존 검사 |

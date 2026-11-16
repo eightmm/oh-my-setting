@@ -35,34 +35,7 @@ make_repo() {
   git -C "$dir" commit -q -m init
 }
 
-# --- 1. Verb-scoped wall defaults, explicit override stays authoritative ----
-
-default_for() {  # default_for MA_KIND_VALUE_OR_EMPTY
-  if [ -n "$1" ]; then
-    MA_KIND="$1" bash -c '. "$1/scripts/lib/peer-common.sh"; ma_peer_timeout_default' _ "$ROOT"
-  else
-    bash -c '. "$1/scripts/lib/peer-common.sh"; ma_peer_timeout_default' _ "$ROOT"
-  fi
-}
-
-[ "$(default_for ask)" = 15m ] || fail "ask default should be 15m"
-[ "$(default_for call)" = 20m ] || fail "call default should be 20m"
-[ "$(default_for review)" = 20m ] || fail "review default should be 20m"
-[ "$(default_for delegate)" = 30m ] || fail "delegate default should be 30m"
-[ "$(default_for '')" = 20m ] || fail "an unset verb rides call and should default to 20m"
-[ "$(default_for weird)" = 5m ] || fail "an unknown verb should keep the conservative 5m"
-
-wall="$(MA_KIND=review bash -c \
-  '. "$1/scripts/lib/peer-common.sh"; ma_run_bounded() { printf "%s\n" "$1"; }; run_with_timeout ignored' \
-  _ "$ROOT")"
-[ "$wall" = 20m ] || fail "run_with_timeout should use the verb default, got $wall"
-
-wall="$(MA_KIND=review OMS_PEER_TIMEOUT=7m bash -c \
-  '. "$1/scripts/lib/peer-common.sh"; ma_run_bounded() { printf "%s\n" "$1"; }; run_with_timeout ignored' \
-  _ "$ROOT")"
-[ "$wall" = 7m ] || fail "an explicit OMS_PEER_TIMEOUT must override the verb default, got $wall"
-
-# --- 2. check --ignore-state: seat history survives repo changes ------------
+# --- 1. check --ignore-state: seat history survives repo changes ------------
 
 ledger_repo="$TMP/ledger-repo"
 make_repo "$ledger_repo"
@@ -129,7 +102,7 @@ run_ask || fail "the recovered seat should keep answering: $(cat "$proj/err")"
 ! grep -q "unresolved no-answer history" "$proj/err" ||
   fail "a recovered seat must not keep warning"
 
-resolves="$(grep -c '"event": "resolved"' "$proj/.oms/failures.jsonl")"
+resolves="$(grep -Ec '"event":[ ]*"resolved"' "$proj/.oms/failures.jsonl")"
 [ "$resolves" -eq 1 ] ||
   fail "routine successes must not append resolve rows, got $resolves"
 

@@ -27,8 +27,8 @@ fixtures, rather than silently accepting either implementation's output.
 
 The public spelling is `oms runtime context-inspect`. Its full contract includes
 more than the pure `inspect_manifest` function. The actual option and dispatch
-sources are [cli_parser.py](../scripts/lib/oms_runtime/cli_parser.py) and
-[cli.py](../scripts/lib/oms_runtime/cli.py).
+sources are `cli_parser.py` and
+`cli.py`.
 
 | Slice | Public surface | Reference and acceptance evidence |
 |---|---|---|
@@ -70,7 +70,7 @@ whole `context-inspect` command.
 - Manifest reads are bounded, descriptor-relative, and reject traversal and
   symlink components. Preserve owned regular-file, single-link, byte-limit,
   and change-during-read checks from
-  [context_inspect.py](../scripts/lib/oms_runtime/context_inspect.py).
+  `context_inspect.py`.
 - Current-source verification preserves `unchanged`, `changed`, `missing`, and
   `unreadable` separately. Do not substitute an empty success for an unsafe or
   failed read. Its checks differ from manifest ownership/link checks; port the
@@ -87,7 +87,7 @@ whole `context-inspect` command.
 - Exactly one of a manifest, `--injections`, or `--session` selects a mode.
   `--session-hash` requires injections; `--timeline` requires a session. The
   timeline has its own step bound; `--limit` does not replace that bound.
-- Preserve [child authority](../scripts/lib/oms_runtime/child_policy.py): a
+- Preserve `child authority`: a
   marked harness child may inspect manifests and injection metadata, but may
   not inspect a transcript or timeline, or invoke context compilation.
 - Compare only immutable captured inputs. Never fall back automatically to a
@@ -97,7 +97,7 @@ whole `context-inspect` command.
 ## Using the candidate adapter
 
 Keep one canonical suite in
-[`tests/test_context_inspect.py`](../tests/test_context_inspect.py). Run the
+`tests/test_context_inspect.py`. Run the
 reference before attributing a difference to the native implementation:
 
 ```bash

@@ -52,7 +52,7 @@ equivalents before retiring the corresponding implementation.
 
 ## Existing suite and candidate command
 
-[`tests/test_context_inspect.py`](../../tests/test_context_inspect.py) remains the
+`tests/test_context_inspect.py` remains the
 canonical coverage for projection, comparison, safe reads, current-source
 verification, session metadata, reports, and child authority. Its `--cli` mode
 also exercises public option combinations and unchanged fixture state.

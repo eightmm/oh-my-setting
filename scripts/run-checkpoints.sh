@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Read-only audit of training-run checkpoint directories (oms run checkpoints).
-# The logic lives in scripts/lib/run_checkpoints.py; this resolves the repo
-# root and hands over. It never deletes or opens a checkpoint file.
+# Native OMS entrypoint for run-checkpoints.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ROOT_LIB="$ROOT/scripts/lib"
-# shellcheck source=scripts/lib/oms-common.sh
-. "$ROOT_LIB/oms-common.sh"
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
-command -v python3 >/dev/null 2>&1 || {
-  echo "run-checkpoints: python3 is required" >&2
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for run-checkpoints; stage with cargo or run oms doctor --repair" >&2
   exit 2
-}
-
-repo="$(oms_repo_root "$PWD" 2>/dev/null || pwd -P)"
-exec python3 "$ROOT_LIB/run_checkpoints.py" --repo "$repo" "$@"
+fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "run-checkpoints" "$@" || exit $?
+echo "error: native payload unavailable for run-checkpoints (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

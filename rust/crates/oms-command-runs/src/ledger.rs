@@ -38,6 +38,12 @@ pub fn root(ctx: &Context<'_>, cwd: &Path) -> Result<PathBuf> {
     }
     if cwd
         .ancestors()
+        .take_while(|p| {
+            p.parent().is_some()
+                && !p
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.permissions().mode() & 0o1000 != 0)
+        })
         .any(|p| p.join(".git").symlink_metadata().is_ok())
     {
         return Err(Error::usage(

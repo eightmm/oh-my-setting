@@ -162,6 +162,111 @@ pub(crate) fn question(args: &Args, context: &Context<'_>) -> Result<String> {
     }
     Ok(prompt.into())
 }
+pub(crate) fn detect_caller() -> Result<Option<String>> {
+    let env_nonempty = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
+    if let Ok(raw) = std::env::var("OMS_AGENT")
+        && !raw.trim().is_empty()
+    {
+        return providers::normalize(raw.trim()).map(Some);
+    }
+    if env_nonempty("CLAUDECODE") || env_nonempty("CLAUDE_CODE_ENTRYPOINT") {
+        return Ok(Some("claude".into()));
+    }
+    if env_nonempty("CODEX_SANDBOX") || env_nonempty("CODEX_THREAD_ID") {
+        return Ok(Some("codex".into()));
+    }
+    if env_nonempty("ANTIGRAVITY_CLI")
+        || env_nonempty("ANTIGRAVITY_AGENT")
+        || env_nonempty("AGY_SESSION")
+    {
+        return Ok(Some("antigravity".into()));
+    }
+    Ok(None)
+}
+fn seat_cmd(tool: &str, provider: &str) -> (&'static str, String) {
+    let kind = match tool {
+        "peer-ask" => "ask",
+        "advise" => "advise",
+        "consult" => "consult",
+        "agent-call" => "call",
+        _ => "review",
+    };
+    (kind, format!("{tool} seat {provider}"))
+}
+fn seat_fingerprint(cmd: &str) -> String {
+    let normalized = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = cached_regex!(r"\d{8,}").replace_all(&normalized, "N");
+    storage::hash(normalized.as_bytes())[..16].to_owned()
+}
+fn seat_unresolved(repo: &Path, cmd: &str) -> (usize, i64) {
+    let Ok(raw) = storage::read(repo, Path::new(".oms/failures.jsonl"), true) else {
+        return (0, 0);
+    };
+    let Ok(rows) = storage::rows(&raw) else {
+        return (0, 0);
+    };
+    let fp = seat_fingerprint(cmd);
+    let mut count = 0usize;
+    let mut last_exit = 0i64;
+    for row in &rows {
+        if crate::text(row, "fingerprint") != fp {
+            continue;
+        }
+        if crate::text(row, "event") == "resolved" {
+            count = 0;
+        } else if crate::text(row, "event") == "fail" {
+            count += 1;
+            if let V::Num(n) = row.get("exit") {
+                last_exit = n.parse().unwrap_or(0);
+            }
+        }
+    }
+    (count, last_exit)
+}
+fn seat_resolve(repo: &Path, cmd: &str, interrupted: &std::sync::atomic::AtomicBool) -> Result<()> {
+    let fp = seat_fingerprint(cmd);
+    let row = obj([
+        ("schema", 2usize.into()),
+        ("event", "resolved".into()),
+        ("ts", now().into()),
+        ("agent", "agent".into()),
+        ("fingerprint", fp.into()),
+        ("how", "auto-resolved after healthy seat response".into()),
+    ]);
+    storage::append(repo, Path::new(".oms/failures.jsonl"), &row, interrupted)
+}
+fn unresolved_failure_summary(repo: &Path) -> String {
+    let Ok(raw) = storage::read(repo, Path::new(".oms/failures.jsonl"), true) else {
+        return String::new();
+    };
+    let Ok(rows) = storage::rows(&raw) else {
+        return String::new();
+    };
+    let mut by_fp: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        let fp = crate::text(row, "fingerprint").to_owned();
+        if fp.is_empty() {
+            continue;
+        }
+        if crate::text(row, "event") == "resolved" {
+            by_fp.remove(&fp);
+        } else if crate::text(row, "event") == "fail" {
+            by_fp.insert(
+                fp,
+                (
+                    crate::text(row, "cmd").to_owned(),
+                    crate::text(row, "summary").to_owned(),
+                ),
+            );
+        }
+    }
+    by_fp
+        .into_iter()
+        .take(5)
+        .map(|(fp, (cmd, summary))| format!("- {fp} `{cmd}`: {summary}\n"))
+        .collect()
+}
 pub(crate) fn directory(args: &Args, repo: &Path, kind: &str) -> Result<PathBuf> {
     let path = if args.has("artifact-dir") {
         PathBuf::from(args.get("artifact-dir"))
@@ -282,13 +387,6 @@ pub(crate) fn prompt(
             )?);
         }
     }
-    if tool == "advise" && (args.has("session") || args.has("session-id")) {
-        body.push_str(&safety::untrusted(
-            "calling session",
-            "session digest",
-            crate::session::advice_digest(repo, args.get("session-id"), context)?.as_bytes(),
-        )?);
-    }
     if args.has("thread") {
         body.push_str(&thread::context(
             repo,
@@ -299,7 +397,36 @@ pub(crate) fn prompt(
             true,
         )?);
     }
-    body.push_str(&format!("Question:\n{question}\n\n"));
+    if tool == "advise" {
+        body.push_str(&format!("## Decision context\n\n{question}\n\n"));
+        if !args.has("no-failures") {
+            let summary = unresolved_failure_summary(repo);
+            if !summary.is_empty() {
+                body.push_str(&safety::untrusted(
+                    "fail-ledger",
+                    "unresolved failures",
+                    summary.as_bytes(),
+                )?);
+            }
+        }
+        if args.has("session") || args.has("session-id") {
+            let digest = crate::session::advice_digest(
+                repo,
+                args.get("session-id"),
+                args.has("allow-sensitive"),
+                context,
+            )?;
+            safety::outbound(digest.as_bytes())?;
+            body.push_str("## Caller session history\n\n");
+            body.push_str(&safety::untrusted(
+                "calling session",
+                "session digest",
+                digest.as_bytes(),
+            )?);
+        }
+    } else {
+        body.push_str(&format!("Question:\n{question}\n\n"));
+    }
     let include_diff = (tool == "peer-review" && !args.has("no-diff")) || args.has("diff");
     if include_diff || args.has("repo-context") {
         let status = process::git(context, repo, &["status", "--short"])?;
@@ -393,8 +520,24 @@ pub(crate) fn call(
     target: &Target,
     body: &str,
     round: usize,
+    warnings: &mut Vec<u8>,
     context: &Context<'_>,
 ) -> Result<Seat> {
+    let (seat_kind, cmd_key) = seat_cmd(tool, &target.provider);
+    let (unresolved_count, last_exit) = if round == 0 && tool != "_synthesis" {
+        seat_unresolved(repo, &cmd_key)
+    } else {
+        (0, 0)
+    };
+    if unresolved_count > 0 {
+        warnings.extend_from_slice(
+            format!(
+                "warning: {} {seat_kind} seat has unresolved no-answer history (count={unresolved_count}, last exit {last_exit})\n",
+                target.provider
+            )
+            .as_bytes(),
+        );
+    }
     let mut route = providers::route(
         context,
         target,
@@ -423,8 +566,13 @@ pub(crate) fn call(
             crate::board::slug(args.value("prompt", "call"))
         ))
     };
+    let seat_line = if unresolved_count > 0 {
+        "- seat-health: unresolved no-answer history\n"
+    } else {
+        ""
+    };
     let header = format!(
-        "# OMS {tool}\n\n- provider: {}\n- model: {}\n- run: {run}\n- round: {round}\n\n## Prompt\n\n{body}\n",
+        "# OMS {tool}\n\n- provider: {}\n- model: {}\n- run: {run}\n- round: {round}\n{seat_line}\n## Prompt\n\n{body}\n",
         target.provider, route.model
     );
     storage::write(
@@ -525,6 +673,9 @@ pub(crate) fn call(
     }
     if result.complete {
         bytes.extend_from_slice(format!("\n## Exit\n\n{}\n", result.code).as_bytes());
+        if result.code == 0 && unresolved_count > 0 {
+            seat_resolve(repo, &cmd_key, context.interrupted)?;
+        }
     }
     storage::write(repo, &artifact, bytes, true, context.interrupted)?;
     index(
@@ -606,6 +757,9 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     if args.has("interactive") {
         return fail("--interactive belongs to peer-delegate");
     }
+    if args.has("allow-sensitive") && !args.has("session") && !args.has("session-id") {
+        return fail("--allow-sensitive requires --session or --session-id");
+    }
     let question = question(args, context)?;
     let repo = storage::repository(context, &args.path("repo", context.cwd))?;
     let kind = match tool {
@@ -616,14 +770,19 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     };
     let dir = directory(args, &repo, kind)?;
     let single = matches!(tool, "agent-call" | "advise" | "consult");
-    let caller = std::env::var("OMS_AGENT").unwrap_or_default();
+    let caller = detect_caller()?.unwrap_or_default();
     let default = if tool == "advise" {
         std::env::var("OMS_ADVISOR_PROVIDER")
+            .ok()
+            .filter(|s| !s.is_empty())
+    } else if tool == "consult" {
+        std::env::var("OMS_CONSULT_PROVIDER")
             .ok()
             .filter(|s| !s.is_empty())
     } else {
         None
     };
+    let mut warnings = Vec::new();
     let mut targets = if single {
         let explicit = args.all("to");
         if args.has("all") && !explicit.is_empty() {
@@ -639,13 +798,21 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         } else if tool == "agent-call" {
             return fail("--to is required");
         } else {
-            ["codex", "claude", "antigravity"]
+            let peers = ["codex", "claude", "antigravity"]
                 .iter()
                 .filter(|p| **p != caller)
                 .filter(|p| providers::discovered(p))
                 .take(if args.has("all") { 3 } else { 1 })
                 .map(|p| Target::parse(p))
-                .collect::<Result<Vec<_>>>()?
+                .collect::<Result<Vec<_>>>()?;
+            if peers.is_empty() && !caller.is_empty() && providers::discovered(&caller) {
+                warnings.extend_from_slice(
+                    b"note: no independent provider available; answering from the caller's own family (self-advice)\n",
+                );
+                vec![Target::parse(&caller)?]
+            } else {
+                peers
+            }
         }
     } else {
         args.value("providers", "codex,claude,antigravity")
@@ -658,7 +825,6 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         let writer = providers::normalize(args.get("writer"))?;
         targets.retain(|s| s.provider != writer);
     }
-    let mut warnings = Vec::new();
     if tool == "peer-review" && args.has("writer") && args.has("providers") {
         let writer = providers::normalize(args.required("writer")?)?;
         let writer_family = providers::family(&writer, "");
@@ -759,7 +925,16 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     }
     for target in &targets {
         seats.push(call(
-            tool, args, &repo, &dir, &run, target, &body, 0, context,
+            tool,
+            args,
+            &repo,
+            &dir,
+            &run,
+            target,
+            &body,
+            0,
+            &mut warnings,
+            context,
         )?);
     }
     if !dry(args, tool) && !args.has("export-only") {
@@ -795,7 +970,16 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             let mut next = Vec::new();
             for target in &targets {
                 next.push(call(
-                    tool, args, &repo, &dir, &run, target, &debate, round, context,
+                    tool,
+                    args,
+                    &repo,
+                    &dir,
+                    &run,
+                    target,
+                    &debate,
+                    round,
+                    &mut warnings,
+                    context,
                 )?);
             }
             let stable = next.iter().all(|s| {
@@ -809,14 +993,21 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             }
         }
     }
+    if dry(args, tool) || args.has("export-only") {
+        for seat in &seats {
+            output.push_str(&format!(
+                "dry-run: {} -> {}\n",
+                seat.target.provider,
+                repo.join(&seat.artifact).display()
+            ));
+        }
+        return Ok((0, output.into_bytes(), warnings));
+    }
     for seat in &seats {
         output.push_str(&format!("{}\n", repo.join(&seat.artifact).display()));
         if !args.has("quiet") && !seat.answer.is_empty() {
             output.push_str(&format!("\n{}:\n{}\n", seat.target.provider, seat.answer));
         }
-    }
-    if dry(args, tool) || args.has("export-only") {
-        return Ok((0, output.into_bytes(), warnings));
     }
     if args.has("synthesize") {
         let target = Target::parse(args.get("synthesize"))?;
@@ -842,6 +1033,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             &target,
             &synthesis,
             0,
+            &mut warnings,
             context,
         )?;
         output.push_str(&format!(
@@ -877,7 +1069,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             usable == 0 || (args.has("require-complete") || args.has("deliberation")) && !complete,
         ),
         output.into_bytes(),
-        Vec::new(),
+        warnings,
     ))
 }
 fn agree(seats: &[Seat]) -> bool {

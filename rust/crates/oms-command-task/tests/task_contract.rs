@@ -245,16 +245,16 @@ fn unavailable_services_fail_closed_on_mutation() {
 }
 
 #[test]
-fn fingerprint_tolerates_missing_python3() {
+fn fingerprint_excludes_retired_python3_and_tolerates_missing_tools() {
     let repo = Repo::new();
     let mut asked = Vec::new();
     let fp = fingerprint(repo.path(), &[], |name| {
         asked.push(name.to_string());
-        (name != "python3").then(|| format!("{name} 1.0"))
+        (name != "git").then(|| format!("{name} 1.0"))
     })
     .unwrap();
-    assert!(asked.iter().any(|n| n == "python3"));
-    assert!(fp.tools.iter().all(|(n, _)| n != "python3"));
+    assert!(!asked.iter().any(|n| n == "python3"));
+    assert!(fp.tools.iter().all(|(n, _)| n != "python3" && n != "git"));
     assert!(fp.tools.iter().any(|(n, _)| n == "bash"));
     let none = fingerprint(repo.path(), &[], |_| None).unwrap();
     assert!(none.tools.is_empty());
@@ -266,7 +266,7 @@ fn fingerprint_adds_runner_tools_once() {
     let runners = ["cargo".to_string(), "cargo".to_string(), "go".to_string()];
     let fp = fingerprint(repo.path(), &runners, |n| Some(n.to_string())).unwrap();
     let names: Vec<_> = fp.tools.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["python3", "bash", "git", "cargo", "rustc", "go"]);
+    assert_eq!(names, ["bash", "git", "cargo", "rustc", "go"]);
 }
 
 #[test]

@@ -1,111 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Prioritized attention view derived entirely from `oms state`. The default is
-# read-only. `--fix-safe` performs only three idempotent mechanical repairs:
-# reclaim expired claimed plan leases, refresh a stale CI record, and resolve
-# artifact failures whose exact patch bytes later succeeded. Failures, other
-# unresolved artifacts, reviews, guards, and threads always remain judgments.
+# Native OMS entrypoint for inbox.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/agent-memory-common.sh
-. "$ROOT/scripts/lib/agent-memory-common.sh"
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
-REPO="${OMS_ROOM_REPO:-$PWD}"
-AS_JSON=0
-FIX_SAFE=0
-
-usage() {
-  cat <<'EOF'
-Usage: inbox.sh [--repo PATH] [--json] [--fix-safe]
-
-Rank the shared harness state by attention needed and print one exact next
-command for every item. The default is a pure query.
-
-  --repo PATH  Repository to inspect (default: current repository).
-  --json       Emit one schema-1 JSON object.
-  --fix-safe   Reclaim expired claimed plan leases, refresh stale CI, and
-               resolve exactly-superseded artifact failures, then report the
-               remaining inbox. Never deletes work or judges anything else.
-
-Only cross-agent threads idle past OMS_THREAD_STALE_TTL are listed, and
-OMS_THREAD_ATTENTION=0 drops that advisory entirely.
-EOF
-}
-
-fail() { echo "error: $*" >&2; exit 2; }
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
-    --json) AS_JSON=1; shift ;;
-    --fix-safe) FIX_SAFE=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) fail "unknown argument: $1" ;;
-  esac
-done
-
-command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
-
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-inbox.XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-
-read_state() {
-  "$ROOT/scripts/state.sh" --repo "$REPO" --json > "$tmp/state.json"
-}
-
-read_state
-safe_actions=""
-if [ "$FIX_SAFE" = 1 ]; then
-  stale_claims="$(python3 - "$tmp/state.json" <<'PY'
-import json, sys
-state = json.load(open(sys.argv[1], encoding="utf-8"))
-print(len(state.get("plan", {}).get("stale", [])))
-PY
-)"
-  if [ "$stale_claims" -gt 0 ]; then
-    if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" reclaim >/dev/null 2>&1; then
-      safe_actions="reclaimed-stale-plan"
-    else
-      safe_actions="reclaim-stale-plan-failed"
-    fi
-  fi
-
-  # Refresh only where a query can change the answer: a pushed HEAD with no
-  # run recorded for it, or a repo whose push state cannot be determined. An
-  # unpushed HEAD has no run to find, so asking gh is pure latency.
-  ci_stale="$(python3 - "$tmp/state.json" <<'PY'
-import json, sys
-ci = json.load(open(sys.argv[1], encoding="utf-8")).get("ci", {})
-print(1 if ci.get("state") in ("stale", "pending") else 0)
-PY
-)"
-  if [ "$ci_stale" = 1 ] && command -v "${OMS_GH_BIN:-gh}" >/dev/null 2>&1; then
-    # Record's exit code cannot say whether it refreshed: a red run exits one
-    # after writing its row, a late PR-lookup error exits two after writing it.
-    # The ledger is append-only, so a changed fingerprint is the only proof.
-    ci_ledger="${OMS_CI_LEDGER:-$REPO/.oms/ci.jsonl}"
-    ci_before="$(cksum < "$ci_ledger" 2>/dev/null || echo none)"
-    (cd "$REPO" && "$ROOT/scripts/ci-status.sh" record) >/dev/null 2>&1 || true
-    ci_after="$(cksum < "$ci_ledger" 2>/dev/null || echo none)"
-    if [ "$ci_before" != "$ci_after" ]; then
-      safe_actions="${safe_actions:+$safe_actions,}refreshed-ci"
-    else
-      safe_actions="${safe_actions:+$safe_actions,}ci-refresh-failed"
-    fi
-  fi
-
-  # Mechanically resolvable by construction: a failed artifact row whose exact
-  # patch bytes the same provider later admitted or landed. Idempotent sweep.
-  swept="$("$ROOT/scripts/artifact-index.sh" --repo "$REPO" resolve-superseded 2>/dev/null |
-    grep -c '^artifact-index: resolved ' || true)"
-  if [ "${swept:-0}" -gt 0 ] 2>/dev/null; then
-    safe_actions="${safe_actions:+$safe_actions,}resolved-superseded:$swept"
-  fi
-  read_state
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for inbox; stage with cargo or run oms doctor --repair" >&2
+  exit 2
 fi
-
-OMS_INBOX_JSON="$AS_JSON" OMS_INBOX_SAFE="$safe_actions" \
-OMS_INBOX_THREADS="${OMS_THREAD_ATTENTION:-1}" \
-python3 "$ROOT/scripts/lib/inbox_projection.py" "$tmp/state.json" "$REPO"
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "inbox" "$@" || exit $?
+echo "error: native payload unavailable for inbox (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

@@ -1,182 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Remove targets link.sh created and restore the backups they replaced.
+# Native OMS entrypoint for unlink.
+
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
 
 script_dir="${BASH_SOURCE[0]%/*}"
 [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
 ROOT="$(cd "$script_dir/.." && pwd -P)"
-# Native-first entry (oms_native_route, scripts/lib/platform.sh).
-if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
-   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
-  # shellcheck source=scripts/lib/platform.sh
-  . "$ROOT/scripts/lib/platform.sh"
-  oms_native_route strict "$ROOT" unlink "$@" || exit
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for unlink; stage with cargo or run oms doctor --repair" >&2
+  exit 2
 fi
-DRY_RUN="${OH_MY_SETTING_DRY_RUN:-0}"
-# shellcheck source=scripts/lib/agent-install-state.sh
-. "$ROOT/scripts/lib/agent-install-state.sh"
-# shellcheck source=scripts/lib/file-lock.sh
-. "$ROOT/scripts/lib/file-lock.sh"
-# shellcheck source=scripts/lib/install-contract.sh
-. "$ROOT/scripts/lib/install-contract.sh"
-
-usage() {
-  cat <<'EOF'
-usage: unlink.sh
-
-Remove oh-my-setting managed links/copies and restore the newest matching
-*.backup.TIMESTAMP file when one exists.
-
-Set OH_MY_SETTING_DRY_RUN=1 to preview changes.
-EOF
-}
-
-unlink_and_restore() {
-  local target="$1"
-  local source="$2"
-  local backup
-
-  if ! oms_install_target_owned "$source" "$target"; then
-    echo "skip: $target"
-    return 0
-  fi
-
-  backup="$(oms_ops_latest_backup "$target")"
-
-  if [ "$DRY_RUN" = "1" ]; then
-    if [ -n "$backup" ]; then
-      echo "would remove $target and restore $backup"
-    else
-      echo "would remove $target"
-    fi
-    return 0
-  fi
-
-  oms_install_remove_managed_target "$target"
-  echo "removed $target"
-
-  if [ -n "$backup" ]; then
-    mv "$backup" "$target"
-    echo "restored $target from $backup"
-  fi
-}
-
-unlink_skills() {
-  local target_root="$1"
-  local skill
-  local name
-  local row
-
-  for skill in "$ROOT"/custom-skills/*; do
-    [ -d "$skill" ] || continue
-    [ -f "$skill/SKILL.md" ] || continue
-    name="${skill##*/}"
-    unlink_and_restore "$target_root/$name" "$skill"
-  done
-
-  # A skill installed before the `oms-` namespace answers to neither the loop
-  # above nor its own source, which no longer exists. Uninstalling would leave
-  # it linked into a checkout the user is removing, so claim it by its old
-  # name; anything this checkout does not own is skipped as usual.
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    name="${row%%:*}"
-    unlink_and_restore "$target_root/$name" "$ROOT/custom-skills/$name"
-  done <<< "$(oms_ops_legacy_skill_renames)"
-}
-
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  "")
-    ;;
-  *)
-    usage >&2
-    exit 2
-    ;;
-esac
-
-unlink_all() {
-  local receipt owner receipt_parent
-  local python_shim="$HOME/.local/bin/python3" bash_record
-
-  # Pre-split installs linked the repository overlay directly. Accept that
-  # owned target so an interrupted upgrade can still restore user backups.
-  unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/AGENTS.md"
-  unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/AGENTS.md"
-  unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/AGENTS.md"
-  unlink_and_restore "$HOME/.codex/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
-  unlink_and_restore "$HOME/.claude/CLAUDE.md" "$ROOT/rules/global-AGENTS.md"
-  unlink_and_restore "$HOME/.gemini/AGENTS.md" "$ROOT/rules/global-AGENTS.md"
-  unlink_skills "$HOME/.codex/skills"
-  unlink_skills "$HOME/.claude/skills"
-  unlink_skills "$HOME/.gemini/config/skills"
-  # Pre-1.4 installs linked here; uninstall must still reach them.
-  unlink_skills "$HOME/.gemini/antigravity/skills"
-  # Legacy cleanup: pi support was removed from defaults; still unlink old installs.
-  unlink_and_restore "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/AGENTS.md" "$ROOT/AGENTS.md"
-  unlink_skills "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills"
-  unlink_and_restore "$HOME/.claude/output-styles/oms-korean.md" \
-    "$ROOT/output-styles/oms-korean.md"
-  unlink_and_restore "$HOME/.oh-my-setting-prompts" "$ROOT/prompts"
-  oms_ops_migrate_legacy_workflow_link "$DRY_RUN"
-  unlink_and_restore "$HOME/.local/bin/oms" "$ROOT/scripts/oms"
-
-  receipt="$(oms_install_receipt_path)"
-  [ -f "$receipt" ] || return 0
-  owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null || true)"
-  if [ "$owner" != "$ROOT" ]; then
-    echo "keep: install receipt belongs to ${owner:-an invalid or unavailable owner}"
-    return 0
-  fi
-  if [ "$DRY_RUN" = "1" ]; then
-    echo "would remove install receipt $receipt"
-  else
-    rm -f "$receipt"
-    echo "removed install receipt $receipt"
-  fi
-  # The capability receipt lives beside the install receipt and belongs to the
-  # same install: leaving it behind would steer the next install's updater at
-  # a selection this checkout no longer owns.
-  receipt_parent="${receipt%/*}"
-  [ "$receipt_parent" != "$receipt" ] || receipt_parent=.
-  [ -n "$receipt_parent" ] || receipt_parent=/
-  capability_receipt="${OMS_CAPABILITY_RECEIPT:-$receipt_parent/capabilities.json}"
-  if [ -f "$capability_receipt" ] && [ ! -L "$capability_receipt" ]; then
-    if [ "$DRY_RUN" = "1" ]; then
-      echo "would remove capability receipt $capability_receipt"
-    else
-      rm -f "$capability_receipt"
-      echo "removed capability receipt $capability_receipt"
-    fi
-  fi
-  bash_record="$(oms_install_bash_record_path)"
-  if [ -f "$bash_record" ] && [ ! -L "$bash_record" ]; then
-    if [ "$DRY_RUN" = "1" ]; then
-      echo "would remove bash interpreter record $bash_record"
-    else
-      rm -f "$bash_record"
-      echo "removed bash interpreter record $bash_record"
-    fi
-  fi
-  if oms_install_python_shim_owned "$python_shim"; then
-    if [ "$DRY_RUN" = "1" ]; then
-      echo "would remove managed Python shim $python_shim"
-    else
-      rm -f "$python_shim"
-      echo "removed managed Python shim $python_shim"
-    fi
-  fi
-}
-
-# Serialize uninstall against a concurrent relink. The receipt is removed only
-# when this checkout is the committed owner, so a foreign checkout cannot take
-# over or erase another installation's ownership record.
-if [ "$DRY_RUN" = "1" ]; then
-  unlink_all
-else
-  oms_with_file_lock "$(oms_install_receipt_path)" unlink_all
-fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "unlink" "$@" || exit $?
+echo "error: native payload unavailable for unlink (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

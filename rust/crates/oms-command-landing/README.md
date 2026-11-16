@@ -167,8 +167,8 @@ Nearest existing contracts include
 [`patch-admit.sh`](../../../scripts/patch-admit.sh),
 [`patch-land.sh`](../../../scripts/patch-land.sh),
 [`land.sh`](../../../scripts/land.sh),
-[`draft-pr-smoke.sh`](../../../tests/draft-pr-smoke.sh),
-[`durable-writers-contract-smoke.sh`](../../../tests/durable-writers-contract-smoke.sh),
-[`scripts-smoke.sh`](../../../tests/scripts-smoke.sh),
-[`dispatch_results.py`](../../../tests/operator/dispatch_results.py) and
-[`auto_review.py`](../../../tests/operator/auto_review.py).
+`draft-pr-smoke.sh`,
+`durable-writers-contract-smoke.sh`,
+`scripts-smoke.sh`,
+`dispatch_results.py` and
+`auto_review.py`.

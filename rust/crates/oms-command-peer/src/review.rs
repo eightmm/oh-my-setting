@@ -713,6 +713,7 @@ pub(crate) fn finish(
                 safety::untrusted("repository", "git diff", &patch)?
             );
             let body = peer::prompt("agent-call", &options, repo, &body, None, context)?;
+            let mut warnings = Vec::new();
             let seat = peer::call(
                 "agent-call",
                 &options,
@@ -722,6 +723,7 @@ pub(crate) fn finish(
                 &target,
                 &body,
                 0,
+                &mut warnings,
                 context,
             )?;
             output.push_str(&format!(
@@ -1352,6 +1354,7 @@ fn confirm(
         options.remove(key);
     }
     options.set_value("role", "reviewer");
+    let mut warnings = Vec::new();
     let seat = peer::call(
         "agent-call",
         &options,
@@ -1361,6 +1364,7 @@ fn confirm(
         &target,
         &body,
         0,
+        &mut warnings,
         context,
     )?;
     let expression = cached_regex!(

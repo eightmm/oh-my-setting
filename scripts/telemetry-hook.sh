@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || exit 0
 set -euo pipefail
 
-# Content-free lifecycle telemetry hook shared by Codex and Claude Code. The
-# helper keeps only bounded identifiers, counters, timings, and usage; prompts,
-# commands, tool arguments, and tool output never enter shared state. Fail-open:
-# observability must not block an agent lifecycle event.
+# Native OMS entrypoint for telemetry-hook.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER="$ROOT/scripts/lib/hook_state.py"
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    exit 0
+    ;;
+esac
 
-[ "${OMS_HARNESS_CHILD:-0}" != 1 ] || exit 0
-# Native-first entry before the payload is read (oms_native_route, scripts/lib/platform.sh).
-if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
-   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
-  # shellcheck source=scripts/lib/platform.sh
-  . "$ROOT/scripts/lib/platform.sh"
-  oms_native_route hook "$ROOT" telemetry-hook "$@" || exit
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  exit 0
 fi
-[ -f "$HELPER" ] || exit 0
-command -v python3 >/dev/null 2>&1 || exit 0
-
-python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$HELPER" telemetry >/dev/null 2>&1 || true
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route hook "$ROOT" "telemetry-hook" "$@" || exit 0
 exit 0

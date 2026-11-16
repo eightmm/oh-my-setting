@@ -89,7 +89,7 @@ impl Fixture {
             "input.sh",
             "agent-events.sh",
             "job-digest.sh",
-            "lib/python-runtime.sh",
+            "lib/platform.sh",
         ] {
             std::fs::copy(
                 source.join("scripts").join(name),

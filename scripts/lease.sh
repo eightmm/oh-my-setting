@@ -1,54 +1,28 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 set -euo pipefail
 
-# Advisory file leases: parallel sessions in one repository declare, with a time limit, which paths they intend to edit, so others see it before they collide.
-# Nothing in OMS refuses an edit because of a lease; call `oms lease check` yourself.
+# Native OMS entrypoint for lease.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/agent-memory-common.sh
-. "$ROOT/scripts/lib/agent-memory-common.sh"
-# shellcheck source=scripts/lib/file-lock.sh
-. "$ROOT/scripts/lib/file-lock.sh"
-
-usage() {
-  cat <<'EOF'
-Usage: lease.sh add PATH_OR_GLOB... [--ttl 30m] [--reason TEXT] [--shared]
-       lease.sh list [--json]
-       lease.sh release ID | --mine
-       lease.sh check PATH... | --staged
-
-Leases are advisory rows in .oms/leases.jsonl (append-only; add and release
-rows). Paths and globs are resolved from the current directory and must stay
-inside the repository. --ttl is 1m to 8h (default 30m); expiry is computed on
-read, an expired lease is listed as expired and never deleted. Shared leases do
-not conflict with each other; an exclusive lease conflicts with any overlap, and
-when two patterns cannot be compared exactly they count as overlapping.
-
-The holder is OMS_ATTEMPT_ID, else OMS_ROOM_PARTICIPANT, else unknown-session
-(sessions without either cannot be told apart and count as one holder).
-add warns about overlaps but still records. check exits 0 when free, 1 when an
-exclusive lease held by someone else covers a path, 2 on usage errors; --staged
-checks `git diff --cached --name-only` and suits a personal pre-commit hook.
-EOF
-}
-
-case "${1:-}" in
-  "") usage >&2; exit 2 ;;
-  -h|--help|help) usage; exit 0 ;;
-  add|list|check|release) ;;
-  *) usage >&2; exit 2 ;;
+case "${OMS_PLATFORM_OVERRIDE:-$(uname -s)}:$(uname -s):${OSTYPE:-}" in
+  windows:*|Windows:*|WINDOWS:*|MINGW*|MSYS*|CYGWIN*|*:MINGW*|*:MSYS*|*:CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
 esac
-command -v python3 >/dev/null 2>&1 || { echo "error: python3 is required" >&2; exit 2; }
 
-verb="$1"
-shift
-repo="$(oms_repo_root "$PWD")"
-repo="$(cd "$repo" && pwd -P)"
-state="$(oms_state_root "$PWD")"
-store="$state/.oms/leases.jsonl"
-mkdir -p "$state/.oms"
-run=(python3 -I "$ROOT/scripts/lib/file_lease.py" --root "$repo" --store "$store" "$verb" "$@")
-case "$verb" in
-  add|release) oms_with_file_lock "$store" "${run[@]}" ;;
-  *) "${run[@]}" ;;
-esac
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+ROOT="$(cd "$script_dir/.." && pwd -P)"
+if [ "${OMS_NATIVE_DISPATCHED:-}" = 1 ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = absent ] ||
+   [ "${OMS_NATIVE_OUTCOME:-}" = unverified ]; then
+  echo "error: native payload unavailable for lease; stage with cargo or run oms doctor --repair" >&2
+  exit 2
+fi
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
+oms_native_route "strict" "$ROOT" "lease" "$@" || exit $?
+echo "error: native payload unavailable for lease (${OMS_NATIVE_OUTCOME:-unknown}); stage with cargo or run oms doctor --repair" >&2
+exit 2

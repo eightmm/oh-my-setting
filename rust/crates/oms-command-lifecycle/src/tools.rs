@@ -72,13 +72,14 @@ pub(crate) fn plan(paths: &Paths, options: &Options) -> Result<Value> {
     if options.has("--full") && options.has("--only") {
         return r::fail("full and only are exclusive");
     }
-    let mut profiles = options.all("--profile").to_vec();
-    if options.has("--full") {
-        profiles = vec!["full".into()];
-    }
+    let mut profiles = Vec::new();
     let previous_provider = previous
         .as_ref()
-        .and_then(|v| v["primary_provider"].as_str())
+        .and_then(|v| {
+            v["primary_provider"]
+                .as_str()
+                .or_else(|| v["plan"]["primary_provider"].as_str())
+        })
         .map(str::to_owned);
     let allow_missing = options.has("--allow-missing")
         || previous
@@ -93,6 +94,15 @@ pub(crate) fn plan(paths: &Paths, options: &Options) -> Result<Value> {
         for name in strings(requested)? {
             if !profiles.contains(&name) {
                 profiles.push(name);
+            }
+        }
+    }
+    if options.has("--full") {
+        profiles = vec!["full".into()];
+    } else {
+        for name in options.all("--profile") {
+            if !profiles.contains(name) {
+                profiles.push(name.clone());
             }
         }
     }

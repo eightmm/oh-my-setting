@@ -634,7 +634,7 @@ an integer `exit` in `0..255` and boolean attestation fields
 `transport_authenticated`, `filesystem_isolated`, and `cleanup_confirmed`.
 Missing, false, malformed, or operation-mismatched isolation attestations fail
 closed with a runtime error. OMS still records these values as adapter claims—not
-locally enforced facts. See `docs/examples/remote-adapter.py`.
+locally enforced facts. See `docs/examples/remote-adapter.sh`.
 
 Every backend receipt separates:
 
