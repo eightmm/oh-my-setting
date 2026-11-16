@@ -54,15 +54,17 @@ struct Setup {
     b: String,
 }
 fn setup() -> Setup {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "oms-combined-{}-{}",
+        "oms-combined-{}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir(&dir).unwrap();
     let repo = fs::canonicalize(&dir).unwrap();
     let fixture = Fixture(repo.clone());
     git(&repo, &["init", "-q", "-b", "main"]);

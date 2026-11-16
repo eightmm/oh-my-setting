@@ -11,15 +11,17 @@ use std::time::{Duration, SystemTime};
 struct TempDir(PathBuf);
 impl TempDir {
     fn new(prefix: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "{prefix}-{}-{}",
+            "{prefix}-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, Permissions::from_mode(0o750)).unwrap();
         Self(dir)
     }

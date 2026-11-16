@@ -10,15 +10,17 @@ use std::time::{Duration, SystemTime};
 struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "oms-plan-gc-test-{}-{}",
+            "oms-plan-gc-test-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
         Self(dir)
     }
     fn path(&self) -> &Path {

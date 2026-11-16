@@ -211,15 +211,17 @@ impl Services for Mock {
 }
 
 fn fixture(tasks: &[(&str, &str)]) -> Repo {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
-        "oms-parallel-{}-{}",
+        "oms-parallel-{}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&path).unwrap();
+    fs::create_dir(&path).unwrap();
     let repo = Repo(fs::canonicalize(&path).unwrap());
     git(&repo.0, &["init", "-q"]);
     fs::write(repo.0.join("seed.txt"), "x").unwrap();

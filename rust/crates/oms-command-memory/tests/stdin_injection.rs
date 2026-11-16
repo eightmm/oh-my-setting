@@ -10,12 +10,15 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(prefix: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{}-{seq}-{nanos}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
         Self(path)
     }
 }
