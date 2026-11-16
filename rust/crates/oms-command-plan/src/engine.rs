@@ -73,9 +73,8 @@ impl Context {
             Some(s) => worktree_root(&physical_dir(cwd, &s), interrupted)
                 .map_err(|_| error("cannot resolve plan repository"))?,
             None => match hint(&execution_repo)? {
-                Some(h) => {
-                    std::fs::canonicalize(h).map_err(|_| error("cannot resolve plan repository"))?
-                }
+                Some(h) => crate::cli::canonicalize_dir(&h)
+                    .map_err(|_| error("cannot resolve plan repository"))?,
                 None => execution_repo.clone(),
             },
         };

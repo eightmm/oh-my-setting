@@ -101,6 +101,16 @@ fn scan(args: &[OsString]) -> crate::Result<Scan> {
     Ok(if action { Scan::Parsed } else { Scan::NoAction })
 }
 
+pub(crate) fn canonicalize_dir(path: &Path) -> std::io::Result<PathBuf> {
+    // Kernel stat enforces ENOTDIR on `regular_file/..` components that
+    // Darwin's userland realpath(3) otherwise collapses lexically.
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_dir() {
+        return Err(std::io::Error::other("not a directory"));
+    }
+    std::fs::canonicalize(path)
+}
+
 /// Absolute physical directory spelling (`pwd -P` semantics). Components are
 /// resolved left to right: each existing one is canonicalized at once, so a
 /// following `..` steps out of the symlink's physical target, never out of its
@@ -128,7 +138,7 @@ pub(crate) fn physical_dir(cwd: &Path, path: &OsStr) -> PathBuf {
             }
             Component::Normal(seg) => {
                 if missing.is_empty()
-                    && let Ok(real) = std::fs::canonicalize(base.join(seg))
+                    && let Ok(real) = canonicalize_dir(&base.join(seg))
                 {
                     base = real;
                 } else {
@@ -158,7 +168,7 @@ pub(crate) fn physical_leaf(cwd: &Path, path: &OsStr) -> PathBuf {
 /// redirect it and interruption/timeouts fail the call.
 pub(crate) fn worktree_root(repo: &Path, interrupted: &AtomicBool) -> crate::Result<PathBuf> {
     let physical =
-        std::fs::canonicalize(repo).map_err(|_| error("cannot resolve the physical repository"))?;
+        canonicalize_dir(repo).map_err(|_| error("cannot resolve the physical repository"))?;
     let git = Git {
         repo: &physical,
         interrupted,
@@ -177,7 +187,7 @@ pub(crate) fn worktree_root(repo: &Path, interrupted: &AtomicBool) -> crate::Res
     if out.code != 0 || top.is_empty() {
         return Ok(physical);
     }
-    std::fs::canonicalize(OsString::from_vec(top))
+    canonicalize_dir(Path::new(&OsString::from_vec(top)))
         .map_err(|_| error("cannot resolve the physical repository"))
 }
 
@@ -221,7 +231,7 @@ fn dispatch(
 ) -> crate::Result<Response> {
     require(!interrupted.load(Ordering::SeqCst), "interrupted")?;
     let req = Request::parse(args)?;
-    let cwd = std::fs::canonicalize(cwd).map_err(|_| error("cannot resolve current directory"))?;
+    let cwd = canonicalize_dir(cwd).map_err(|_| error("cannot resolve current directory"))?;
     let cwd = cwd.as_path();
     // The shell default is `${OMS_STATE_REPO:-$PWD}`; the context normalises it.
     let default_repo = std::env::var_os("OMS_STATE_REPO")
