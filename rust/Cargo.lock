@@ -960,6 +960,7 @@ dependencies = [
  "oms-toml",
  "oms-work-inspect",
  "regex",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

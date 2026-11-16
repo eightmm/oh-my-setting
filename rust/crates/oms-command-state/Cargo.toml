@@ -28,6 +28,7 @@ oms-safe-fs = { path = "../oms-safe-fs" }
 oms-scrub = { path = "../oms-scrub" }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 regex = "=1.13.1"
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
 sha2 = "=0.10.9"
 rustix = { version = "=1.1.6", features = ["fs", "process", "pipe", "system"] }
 serde = "=1.0.229"

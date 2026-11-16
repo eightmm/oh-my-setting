@@ -1197,13 +1197,15 @@ fn transport(
     }
     Ok(cmd)
 }
-pub(crate) fn execute(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_env(
     route: &Route,
     prompt: &[u8],
     cwd: &Path,
     write: bool,
     timeout: u64,
     account_repo: &Path,
+    extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
     crate::safety::outbound(prompt)?;
@@ -1267,6 +1269,7 @@ pub(crate) fn execute(
             ("OMS_HARNESS_DELEGATE_DEPTH".into(), "1".into()),
         ]);
         environment.extend(transport.environment.clone());
+        environment.extend(extra_env.iter().cloned());
         if let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
             environment.push((
                 "OMS_BASE_SHA".into(),
@@ -1326,12 +1329,55 @@ pub(crate) fn execute_with_fallback(
     account_repo: &Path,
     context: &Context<'_>,
 ) -> Result<Completed> {
-    let result = execute(route, prompt, cwd, write, timeout, account_repo, context)?;
+    execute_with_fallback_env(
+        route,
+        fallback,
+        prompt,
+        cwd,
+        write,
+        timeout,
+        account_repo,
+        &[],
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_with_fallback_env(
+    route: &mut Route,
+    fallback: &str,
+    prompt: &[u8],
+    cwd: &Path,
+    write: bool,
+    timeout: u64,
+    account_repo: &Path,
+    extra_env: &[(OsString, OsString)],
+    context: &Context<'_>,
+) -> Result<Completed> {
+    let result = execute_env(
+        route,
+        prompt,
+        cwd,
+        write,
+        timeout,
+        account_repo,
+        extra_env,
+        context,
+    )?;
     if !fallback.is_empty() && fallback != route.model && capacity(&result) {
         model_name(fallback)?;
         route.model = fallback.into();
         route.explicit = true;
-        execute(route, prompt, cwd, write, timeout, account_repo, context)
+        execute_env(
+            route,
+            prompt,
+            cwd,
+            write,
+            timeout,
+            account_repo,
+            extra_env,
+            context,
+        )
     } else {
         Ok(result)
     }
@@ -1579,7 +1625,7 @@ mod bridge_route_tests {
             interrupted: &stop,
             executor: capture,
         };
-        execute(route, prompt, cwd, write, 12, repo, &context)
+        execute_env(route, prompt, cwd, write, 12, repo, &[], &context)
     }
     #[test]
     fn native_write_transports() {

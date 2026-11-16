@@ -93,12 +93,24 @@ pub(crate) fn invoke(
     timeout: u64,
     merge: bool,
 ) -> Result<Completed> {
+    invoke_env(context, cwd, argv, input, Vec::new(), timeout, merge)
+}
+
+pub(crate) fn invoke_env(
+    context: &crate::Context<'_>,
+    cwd: &std::path::Path,
+    argv: Vec<OsString>,
+    input: Option<Vec<u8>>,
+    environment: Vec<(OsString, OsString)>,
+    timeout: u64,
+    merge: bool,
+) -> Result<Completed> {
     context.executor.execute(
         Invocation {
             argv,
             cwd: cwd.to_owned(),
             input,
-            environment: Vec::new(),
+            environment,
             remove_environment: Vec::new(),
             timeout: Duration::from_secs(timeout),
             max_bytes: 64 * 1024 * 1024,

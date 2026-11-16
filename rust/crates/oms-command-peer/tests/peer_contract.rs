@@ -1349,3 +1349,151 @@ fn thread_hot_paths_read_each_log_once_and_keep_stale_contracts() {
         },
     );
 }
+
+#[test]
+fn delegate_warm_cargo_slot_cache_and_opt_out() {
+    isolated("delegate_warm_cargo_slot_cache_and_opt_out", || {
+        use oms_command_peer::process::{Completed, Executor, Invocation};
+        use std::sync::Mutex;
+
+        struct EnvRecorder(Mutex<Vec<(String, Option<String>)>>);
+        impl Executor for EnvRecorder {
+            fn execute(
+                &self,
+                request: Invocation,
+                interrupted: &AtomicBool,
+            ) -> oms_command_peer::Result<Completed> {
+                let prog = request
+                    .argv
+                    .first()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_owned();
+                if !prog.ends_with("git") {
+                    let found = request
+                        .environment
+                        .iter()
+                        .find(|(k, _)| k == "CARGO_TARGET_DIR")
+                        .map(|(_, v)| v.to_string_lossy().into_owned());
+                    self.0.lock().unwrap().push((prog, found));
+                    return Ok(Completed {
+                        code: 0,
+                        stdout: b"ok\n".to_vec(),
+                        stderr: Vec::new(),
+                        complete: true,
+                        elapsed: std::time::Duration::ZERO,
+                    });
+                }
+                oms_command_peer::process::Native.execute(request, interrupted)
+            }
+        }
+
+        let repo = Repo::new();
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n",
+        );
+        repo.git(&["add", "Cargo.toml"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "cargo repo",
+        ]);
+        let fake_codex = repo.0.join(".fake-bin/codex");
+        fs::create_dir_all(fake_codex.parent().unwrap()).unwrap();
+        fs::write(&fake_codex, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let home = fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
+        let xdg_cache = home.join(".cache");
+        let path_val = format!(
+            "{}:{}",
+            fake_codex.parent().unwrap().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        if std::env::var_os("OMS_SLOT_INNER").is_none() {
+            for mode in ["slot", "optout"] {
+                let mut cmd = Command::new(std::env::current_exe().unwrap());
+                cmd.args([
+                    "--exact",
+                    "delegate_warm_cargo_slot_cache_and_opt_out",
+                    "--nocapture",
+                ])
+                .env(
+                    "CONTRACT_CHILD",
+                    "delegate_warm_cargo_slot_cache_and_opt_out",
+                )
+                .env("OMS_SLOT_INNER", mode)
+                .env("XDG_CACHE_HOME", &xdg_cache)
+                .env("PATH", &path_val)
+                .env_remove("CARGO_TARGET_DIR");
+                if mode == "optout" {
+                    cmd.env("OMS_DELEGATE_ISOLATED_BUILD", "1");
+                } else {
+                    cmd.env_remove("OMS_DELEGATE_ISOLATED_BUILD");
+                }
+                let out = cmd.output().unwrap();
+                assert!(
+                    out.status.success(),
+                    "{mode}: {}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            return;
+        }
+        let mode = std::env::var("OMS_SLOT_INNER").unwrap();
+        let recorder = EnvRecorder(Mutex::new(Vec::new()));
+        let values = args(&[
+            "--repo",
+            repo.0.to_str().unwrap(),
+            "--to",
+            "codex",
+            "--model",
+            "fixture",
+            "--verify",
+            "cargo test",
+            "--allow-no-change",
+            "Build check",
+        ]);
+        let stop = AtomicBool::new(false);
+        let out = oms_command_peer::run_with_executor(
+            "peer-delegate",
+            &values,
+            &repo.0,
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../..")),
+            &stop,
+            &recorder,
+        );
+        assert_eq!(
+            out.0,
+            0,
+            "delegate failed: {}",
+            String::from_utf8_lossy(&out.2)
+        );
+        let calls = recorder.0.lock().unwrap();
+        assert!(!calls.is_empty());
+        if mode == "optout" {
+            assert!(
+                calls[0].1.is_none(),
+                "OMS_DELEGATE_ISOLATED_BUILD=1 must omit CARGO_TARGET_DIR"
+            );
+        } else {
+            let first_dir = calls[0]
+                .1
+                .as_ref()
+                .expect("slot-0 CARGO_TARGET_DIR assigned");
+            assert!(
+                first_dir.contains("cargo-slots/") && first_dir.ends_with("/slot-0/target"),
+                "unexpected slot path: {first_dir}"
+            );
+        }
+    });
+}

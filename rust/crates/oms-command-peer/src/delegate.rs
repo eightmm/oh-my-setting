@@ -5,7 +5,57 @@ use crate::{
     providers::{self, Target},
     safety, storage,
 };
+use std::ffi::{OsStr, OsString};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+
+struct CargoSlot {
+    _guard: oms_lock::Guard,
+    target_dir: PathBuf,
+}
+
+fn acquire_cargo_slot(repo: &Path) -> Option<CargoSlot> {
+    if !(repo.join("Cargo.toml").is_file() || repo.join("rust/Cargo.toml").is_file()) {
+        return None;
+    }
+    if std::env::var_os("OMS_DELEGATE_ISOLATED_BUILD").as_deref() == Some(OsStr::new("1"))
+        || std::env::var_os("CARGO_TARGET_DIR").is_some_and(|v| !v.is_empty())
+    {
+        return None;
+    }
+    let cache_root = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".cache"))
+        })?;
+    let key = storage::hash(repo.to_string_lossy().as_bytes());
+    let base = cache_root
+        .join("oh-my-setting/cargo-slots")
+        .join(&key[..16]);
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(&base).ok()?;
+    let mut settings = oms_lock::Settings::from_env().ok()?;
+    settings.cwd = repo.to_owned();
+    for slot in 0..8 {
+        let slot_dir = base.join(format!("slot-{slot}"));
+        let _ = builder.create(&slot_dir);
+        let lock = oms_lock::Lock::for_file(&slot_dir.join("slot.lock"), settings.clone()).ok()?;
+        if let Ok(guard) = lock.try_acquire() {
+            let target_dir = slot_dir.join("target");
+            if builder.create(&target_dir).is_ok() {
+                return Some(CargoSlot {
+                    _guard: guard,
+                    target_dir,
+                });
+            }
+        }
+    }
+    None
+}
 
 pub(crate) struct Worktree {
     pub path: PathBuf,
@@ -205,12 +255,22 @@ pub(crate) fn transition(
     oms_command_operations::append_lifecycle(repo, event, context.interrupted)?;
     Ok(())
 }
+#[allow(dead_code)]
 pub(crate) fn verify(
     command: &str,
     cwd: &Path,
     context: &Context<'_>,
 ) -> Result<process::Completed> {
-    process::invoke(
+    verify_env(command, cwd, &[], context)
+}
+
+pub(crate) fn verify_env(
+    command: &str,
+    cwd: &Path,
+    environment: &[(OsString, OsString)],
+    context: &Context<'_>,
+) -> Result<process::Completed> {
+    process::invoke_env(
         context,
         cwd,
         vec![
@@ -221,6 +281,7 @@ pub(crate) fn verify(
             command.into(),
         ],
         None,
+        environment.to_vec(),
         1800,
         true,
     )
@@ -482,10 +543,20 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut captured = Vec::new();
     let mut verified = "not_run";
     let mut needs_keep = args.has("keep-worktree");
+    let cargo_slot = acquire_cargo_slot(&repo);
+    let extra_env: Vec<(OsString, OsString)> = cargo_slot
+        .as_ref()
+        .map(|slot| {
+            vec![(
+                "CARGO_TARGET_DIR".into(),
+                slot.target_dir.as_os_str().to_owned(),
+            )]
+        })
+        .unwrap_or_default();
     for round in 0..=repair {
         crate::check(context.interrupted)?;
         worktree.identity(context)?;
-        let result = providers::execute_with_fallback(
+        let result = providers::execute_with_fallback_env(
             &mut route,
             args.get("fallback-model"),
             prompt.as_bytes(),
@@ -493,6 +564,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             !read,
             peer::timeout(args, "peer-delegate")?,
             &repo,
+            &extra_env,
             context,
         );
         let result = match result {
@@ -593,7 +665,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             && let Some(command) = &command
         {
             transition(&repo, &attempt, "verifying", obj([]), context)?;
-            let checked = verify(command, &worktree.path, context)?;
+            let checked = verify_env(command, &worktree.path, &extra_env, context)?;
             code = checked.code;
             if !checked.complete && code == 0 {
                 code = 1;
