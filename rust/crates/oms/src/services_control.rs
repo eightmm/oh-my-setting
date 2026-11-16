@@ -749,9 +749,11 @@ impl oms_command_landing::Services for ControlServices<'_> {
     ) -> oms_command_landing::Result<()> {
         let canonical = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
         let tmp_dir = canonical.join(".oms/tmp");
+        let self_attempt = std::env::var("OMS_ATTEMPT_ID").unwrap_or_default();
+        let main_attempt = std::env::var("OMS_PANEL_MAIN_ATTEMPT").unwrap_or_default();
         let mut settings = crate::services_runtime::resolve_lock_settings()
             .map_err(|(code, msg)| oms_command_landing::Error::new(code, msg))?;
-        settings.cwd = canonical;
+        settings.cwd = canonical.clone();
         let started = Instant::now();
         loop {
             if interrupted.load(Ordering::Acquire) {
@@ -778,6 +780,21 @@ impl oms_command_landing::Services for ControlServices<'_> {
                     }
                 }
             }
+            if !active && let Ok((_, rows)) = oms_command_operations::load_projection(&canonical) {
+                active = rows.iter().any(|row| {
+                    let state = row.get("state").text().unwrap_or("");
+                    let role = row.get("refs").get("panel_role").text().unwrap_or("");
+                    let aid = row.get("attempt_id").text().unwrap_or("");
+                    !matches!(
+                        state,
+                        "done" | "failed" | "cancelled" | "timed_out" | "abandoned"
+                    ) && row.get("tool").text() == Some("peer-delegate")
+                        && matches!(role, "worker" | "delegate")
+                        && !aid.is_empty()
+                        && aid != self_attempt
+                        && aid != main_attempt
+                });
+            }
             if !active {
                 return Ok(());
             }
@@ -793,7 +810,7 @@ impl oms_command_landing::Services for ControlServices<'_> {
     fn after_land(
         &self,
         repo: &Path,
-        _receipt: &oms_command_landing::V,
+        receipt: &oms_command_landing::V,
         interrupted: &AtomicBool,
     ) -> oms_command_landing::Result<oms_command_landing::V> {
         if !repo.join("scripts/oms").is_file() || !repo.join("rust/Cargo.toml").is_file() {
@@ -802,20 +819,41 @@ impl oms_command_landing::Services for ControlServices<'_> {
                 ("status", "not-applicable".into()),
             ]));
         }
+        let sha = receipt
+            .get("merge")
+            .get("commit")
+            .text()
+            .filter(|s| !s.is_empty())
+            .or_else(|| receipt.get("sha").text().filter(|s| !s.is_empty()))
+            .filter(|s| s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+            .ok_or_else(|| {
+                oms_command_landing::Error::new(
+                    2,
+                    "landing receipt missing verified 40-char commit SHA",
+                )
+            })?;
         let mut argv = if self.native.is_empty() {
             vec![self.source.join("scripts/oms").into()]
         } else {
             self.native.clone()
         };
         argv.push("update".into());
+        argv.push("--ref".into());
+        argv.push("edge".into());
         let spawn = Spawn::new(
             self.scope,
             argv,
             Duration::from_secs(600),
             COMMAND_OUTPUT_LIMIT,
         );
-        let child = run_child(spawn.cwd(repo), interrupted)
-            .map_err(|e| oms_command_landing::Error::new(2, e))?;
+        let child = run_child(
+            spawn.cwd(repo).environment(vec![
+                ("OH_MY_SETTING_UPDATE_EXPECTED_TARGET".into(), sha.into()),
+                ("OH_MY_SETTING_UPDATE_TARGET_COMMIT".into(), sha.into()),
+            ]),
+            interrupted,
+        )
+        .map_err(|e| oms_command_landing::Error::new(2, e))?;
         let rc = usize::try_from(child.code).unwrap_or(1);
         let mut result = oms_command_landing::obj([("rc", rc.into())]);
         if child.code != 0 {

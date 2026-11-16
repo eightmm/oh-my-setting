@@ -847,6 +847,57 @@ fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
 }
 
 #[test]
+fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_remote("prdiv");
+    iso.git(&repo, &["checkout", "-q", "-b", "other"]);
+    iso.commit_file(&repo, "other.txt");
+    iso.git(&repo, &["push", "-q", "origin", "other:refs/heads/feat"]);
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
+    let head = iso.commit_file(&repo, "feat.txt");
+    let (gh, log) = iso.fake_gh(&bare, "success");
+    let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
+    let args = ["--pr", "--gate", "true", "--ignore-siblings", "--no-update"];
+    let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_eq!(r.0, 1, "{r:?}");
+    assert!(r.1.contains("diverged"), "{r:?}");
+    assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
+    iso.git(&bare, &["update-ref", "-d", "refs/heads/feat"]);
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &[&args[..], &["--ci-wait", "0"]].concat(),
+        &env,
+    );
+    assert_eq!(r.0, 0, "{r:?}");
+    assert!(r.1.contains("merge skipped because --ci-wait=0"), "{r:?}");
+    let calls = fs::read_to_string(log).expect("gh log");
+    assert!(
+        calls.contains("pr create") && !calls.contains("pr merge"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn land_pr_defers_install_when_merge_commit_differs_from_head() {
+    let iso = Isolated::new();
+    let (repo, bare) = iso.with_remote("prsquash");
+    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
+    iso.commit_file(&repo, "feat.txt");
+    let (gh, _) = iso.fake_gh(&bare, "success");
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &["--pr", "--gate", "true", "--ignore-siblings"],
+        &[("OMS_GH_BIN", gh.to_str().unwrap())],
+    );
+    assert_eq!(r.0, 0, "{r:?}");
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    assert!(status.contains("merge-commit-pending-ci"), "{status}");
+}
+
+#[test]
 fn land_local_merge_runs_gate_before_the_hooked_merge() {
     let iso = Isolated::new();
     let repo = iso.repo("local");

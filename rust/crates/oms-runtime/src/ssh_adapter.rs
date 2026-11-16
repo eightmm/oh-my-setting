@@ -180,8 +180,26 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         value["head_sha"] = head.clone().into();
         if action == "sync-bundle" {
             require(!head.is_empty(), "repository has no HEAD")?;
-            let reference = base.as_deref().unwrap_or("HEAD");
-            require(!reference.starts_with('-'), "invalid bundle ref")?;
+            let range;
+            let reference = match base.as_deref() {
+                None => "HEAD",
+                Some(base) => {
+                    require(!base.starts_with('-'), "invalid bundle ref")?;
+                    let resolved = git(
+                        &repo,
+                        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                    )?;
+                    require(resolved.status.success(), "cannot resolve --base commit")?;
+                    let base_sha = String::from_utf8_lossy(&resolved.stdout).trim().to_owned();
+                    value["base_sha"] = base_sha.clone().into();
+                    if base_sha == head {
+                        "HEAD"
+                    } else {
+                        range = format!("{base_sha}..HEAD");
+                        &range
+                    }
+                }
+            };
             let temp = TempDir::new()?;
             let bundle = temp.0.join("repo.bundle");
             let result = Command::new("git")
@@ -202,9 +220,9 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             let file = std::fs::File::open(&bundle).map_err(error)?;
             value["bundle_bytes"] = file.metadata().map_err(error)?.len().into();
             let script = format!(
-                "set -eu; mkdir -p -- {d}; cd -- {d}; t=$(mktemp .oms-bundle.XXXXXX); trap 'rm -f -- \"$t\"' EXIT HUP INT TERM; cat > \"$t\"; if [ ! -d .git ]; then git init; fi; test -z \"$(git status --porcelain)\"; git fetch \"$t\" {r}; git checkout --no-overwrite-ignore --detach FETCH_HEAD",
-                d = quote(&remote),
-                r = quote(reference)
+                "set -eu; mkdir -p -- {d}; cd -- {d}; t=$(mktemp .oms-bundle.XXXXXX); trap 'rm -f -- \"$t\"' EXIT HUP INT TERM; cat > \"$t\"; if [ ! -d .git ]; then git init; fi; test -z \"$(git status --porcelain)\"; git fetch \"$t\" HEAD; git checkout --no-overwrite-ignore --detach FETCH_HEAD; test \"$(git rev-parse HEAD)\" = {h}",
+                d = remote_path(&remote),
+                h = quote(&head)
             );
             // The bundle is outside the checkout so its presence cannot make it dirty.
             let script = script.replace(
@@ -229,7 +247,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 })
                 .collect::<Result<Vec<_>>>()?
                 .join(" ");
-            let script = format!("cd -- {} && {}", quote(&remote), command);
+            let script = format!("cd -- {} && {}", remote_path(&remote), command);
             let remote_command = format!("sh -lc {}", quote(&script));
             value["command_sha256"] = sha256(remote_command.as_bytes()).into();
             value["control_path"] = control.into();
@@ -254,6 +272,20 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         stdout,
         stderr: vec![],
     })
+}
+/// Shell word for a remote directory; a leading `~` expands on the remote host.
+fn remote_path(s: &str) -> String {
+    if s == "~" {
+        "\"$HOME\"".into()
+    } else if let Some(rest) = s.strip_prefix("~/") {
+        if rest.is_empty() {
+            "\"$HOME\"".into()
+        } else {
+            format!("\"$HOME\"/{}", quote(rest))
+        }
+    } else {
+        quote(s)
+    }
 }
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -364,6 +396,14 @@ fn sha256(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn remote_path_expands_leading_tilde() {
+        assert_eq!(remote_path("~"), "\"$HOME\"");
+        assert_eq!(remote_path("~/foo/bar"), "\"$HOME\"/'foo/bar'");
+        assert_eq!(remote_path("/a b"), "'/a b'");
+        assert_eq!(remote_path("a~/b"), "'a~/b'");
+    }
 
     fn invoke(args: &[&str], cwd: &Path) -> Response {
         run(
@@ -502,6 +542,38 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(remote.join("file")).unwrap(),
             "content"
+        );
+        let first = String::from_utf8(git(Path::new(repo), &["rev-parse", "HEAD"]).unwrap().stdout)
+            .unwrap();
+        let first = first.trim();
+        std::fs::write(Path::new(repo).join("file"), "second").unwrap();
+        assert!(
+            git(Path::new(repo), &["commit", "-qam", "second"])
+                .unwrap()
+                .status
+                .success()
+        );
+        let response = invoke(
+            &[
+                "sync-bundle",
+                "--repo",
+                repo,
+                "--host",
+                "example",
+                "--remote-dir",
+                remote_str,
+                "--base",
+                "HEAD~1",
+            ],
+            &root,
+        );
+        assert_eq!(response.code, 0);
+        let v: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
+        assert_eq!(v["base_sha"], first);
+        assert_ne!(v["head_sha"], first);
+        assert_eq!(
+            std::fs::read_to_string(remote.join("file")).unwrap(),
+            "second"
         );
         let response = invoke(
             &[

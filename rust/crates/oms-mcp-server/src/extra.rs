@@ -234,9 +234,14 @@ impl Server<'_> {
         if !apply {
             argv.push("--dry-run".into());
         }
-        if let Some(keep) = optional_integer(args, "keep_recent", 1, 3650)? {
-            argv.extend(["--keep-recent".into(), keep.to_string()]);
-        }
+        let keep = integer(args, "keep_recent", 25, 1, 3650)?;
+        let days = integer(args, "older_than_days", 7, 0, 3650)?;
+        argv.extend([
+            "--keep-recent".into(),
+            keep.to_string(),
+            "--older-than-days".into(),
+            days.to_string(),
+        ]);
         self.run_argv(tool, &argv, &repo)
     }
     pub(crate) fn failure_diagnose(&self, args: &Value) -> ToolResult {

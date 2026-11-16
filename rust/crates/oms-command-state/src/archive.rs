@@ -12,7 +12,7 @@ use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub(crate) const HELP: &str = "Usage: oms state compact [--repo PATH] [--keep-recent N] [--dry-run] [--json]\n       oms state archive list [--repo PATH] [--kind K] [--limit N] [--json]\n       oms state archive show PATH [--repo PATH] [--json]\n       oms state archive search QUERY [--repo PATH] [--limit N] [--json]\n       oms state archive stats [--repo PATH] [--json]\nCold artifacts move into .oms/archive.sqlite3 only after commit; referenced files stay on disk.\n";
+pub(crate) const HELP: &str = "Usage: oms state compact [--repo PATH] [--keep-recent N] [--older-than-days N] [--dry-run] [--json]\n       oms state archive list [--repo PATH] [--kind K] [--limit N] [--json]\n       oms state archive show PATH [--repo PATH] [--json]\n       oms state archive search QUERY [--repo PATH] [--limit N] [--json]\n       oms state archive stats [--repo PATH] [--json]\nCold artifacts move into .oms/archive.sqlite3 only after commit; referenced files stay on disk.\n";
 
 const DB: &str = ".oms/archive.sqlite3";
 const SCAN_LIMIT: usize = 50000;
@@ -145,6 +145,7 @@ fn referenced_text(ctx: &Context<'_>) -> Result<String> {
     let repo = &ctx.repo;
     let mut paths = vec![
         repo.join(".oms/plan/tasks.json"),
+        repo.join(".oms/task/current.md"),
         repo.join(".oms/lifecycle/events.jsonl"),
         repo.join(".oms/artifacts/index.jsonl"),
         repo.join(".oms/landings.jsonl"),
@@ -353,14 +354,31 @@ fn entry_rows(report: &Report) -> Value {
 }
 
 fn run_compact(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
-    let opts = Options::parse(args, &["repo", "keep-recent"], &["dry-run", "json"])?;
+    let opts = Options::parse(
+        args,
+        &["repo", "keep-recent", "older-than-days"],
+        &["dry-run", "json"],
+    )?;
     if opts.flag("help") {
         return Ok(success(HELP));
     }
     require(opts.pos.is_empty(), "unexpected positional argument")?;
     let ctx = scoped(ctx, &opts)?;
     let dry = opts.flag("dry-run");
-    let report = compact(&ctx, opts.number("keep-recent", DEFAULT_KEEP)?, None, !dry)?;
+    let days = opts.number("older-than-days", 0)?;
+    let cutoff = (days > 0).then(|| {
+        crate::epoch().saturating_sub(
+            i64::try_from(days)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(86400),
+        )
+    });
+    let report = compact(
+        &ctx,
+        opts.number("keep-recent", DEFAULT_KEEP)?,
+        cutoff,
+        !dry,
+    )?;
     if opts.flag("json") {
         return json_output(
             0,
@@ -773,6 +791,23 @@ mod tests {
             assert!(kept.exists(), "{kept:?}");
         }
         assert!(std::fs::symlink_metadata(repo.0.join(".oms/peer/link.md")).is_ok());
+    }
+
+    #[test]
+    fn active_task_and_age_protect_files() {
+        let repo = Repo::new("task-age");
+        let pinned = repo.write(".oms/peer/pinned.md", b"pinned", 10 * 86400);
+        let old = repo.write(".oms/peer/old.md", b"old", 10 * 86400);
+        let fresh = repo.write(".oms/peer/fresh.md", b"fresh", 60);
+        repo.write(".oms/task/current.md", b".oms/peer/pinned.md", 0);
+        let report = json_of(&call(
+            &repo,
+            "compact",
+            &["--keep-recent", "0", "--older-than-days", "7", "--json"],
+        ));
+        assert_eq!(report.get("archived").int().unwrap(), 1);
+        assert_eq!(report.get("skipped_referenced").int().unwrap(), 1);
+        assert!(pinned.exists() && fresh.exists() && !old.exists());
     }
 
     #[test]

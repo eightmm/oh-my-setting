@@ -276,6 +276,18 @@ pub struct SeatHealth {
     pub err: u64,
     pub latency_ms: u64,
     pub cooldown_until: u64,
+    pub last_error_ts: u64,
+}
+
+const ERROR_DECAY_SECS: u64 = 1800;
+fn penalty(h: Option<&SeatHealth>, now: u64) -> u64 {
+    h.map_or(0, |h| {
+        if h.last_error_ts == 0 || now.saturating_sub(h.last_error_ts) > ERROR_DECAY_SECS {
+            0
+        } else {
+            h.err.saturating_sub(h.ok).min(3)
+        }
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -325,14 +337,12 @@ pub fn select_account_adaptive(
         let hb = health.get(&b.id);
         let cool_a = ha.is_some_and(|h| h.cooldown_until > now);
         let cool_b = hb.is_some_and(|h| h.cooldown_until > now);
-        let pen_a = ha.map_or(0, |h| h.err.saturating_sub(h.ok));
-        let pen_b = hb.map_or(0, |h| h.err.saturating_sub(h.ok));
+        let pen_a = penalty(ha, now);
+        let pen_b = penalty(hb, now);
         let ua = a.used.unwrap_or(100.0);
         let ub = b.used.unwrap_or(100.0);
         cool_a
             .cmp(&cool_b)
-            .then_with(|| pen_a.cmp(&pen_b))
-            .then_with(|| ua.total_cmp(&ub))
             .then_with(|| {
                 if spread && !explicit {
                     a.running.cmp(&b.running)
@@ -340,6 +350,8 @@ pub fn select_account_adaptive(
                     std::cmp::Ordering::Equal
                 }
             })
+            .then_with(|| pen_a.cmp(&pen_b))
+            .then_with(|| ua.total_cmp(&ub))
             .then_with(|| {
                 let la = ha.map_or(u64::MAX, |h| {
                     if h.latency_ms == 0 {
@@ -385,6 +397,8 @@ fn load_seat_health(repo: &Path) -> std::collections::BTreeMap<String, SeatHealt
                     latency_ms: number(val.get("latency_ms")).map_or(0, |n| n.max(0.0) as u64),
                     cooldown_until: number(val.get("cooldown_until"))
                         .map_or(0, |n| n.max(0.0) as u64),
+                    last_error_ts: number(val.get("last_error_ts"))
+                        .map_or(0, |n| n.max(0.0) as u64),
                 },
             );
         }
@@ -398,12 +412,14 @@ fn record_seat_health(
     ok: bool,
     latency_ms: u64,
     capacity_hit: bool,
+    provider_fault: bool,
     interrupted: &std::sync::atomic::AtomicBool,
 ) {
-    if seat.is_empty() || !repo.join(".oms").is_dir() {
+    if seat.is_empty() || !repo.join(".oms").is_dir() || (!ok && !provider_fault) {
         return;
     }
     let rel = Path::new(".oms/seat-health.json");
+    let guard = storage::lock(repo, rel, interrupted).ok();
     let mut map = load_seat_health(repo);
     let entry = map.entry(seat.to_owned()).or_default();
     if ok {
@@ -416,6 +432,7 @@ fn record_seat_health(
         };
     } else {
         entry.err = entry.err.saturating_add(1);
+        entry.last_error_ts = crate::seconds();
         if capacity_hit {
             entry.cooldown_until = crate::seconds().saturating_add(300);
         }
@@ -430,6 +447,7 @@ fn record_seat_health(
                     ("err", V::Num(h.err.to_string())),
                     ("latency_ms", V::Num(h.latency_ms.to_string())),
                     ("cooldown_until", V::Num(h.cooldown_until.to_string())),
+                    ("last_error_ts", V::Num(h.last_error_ts.to_string())),
                 ]),
             )
         })
@@ -442,7 +460,10 @@ fn record_seat_health(
         ),
     ]);
     if let Ok(encoded) = crate::json(&doc) {
-        let _ = storage::write(repo, rel, encoded, true, interrupted);
+        let _ = match &guard {
+            Some(g) => storage::write_locked(repo, rel, g, encoded, true, interrupted),
+            None => storage::write(repo, rel, encoded, true, interrupted),
+        };
     }
 }
 fn unique_keys(value: &oms_context::Json) -> bool {
@@ -1447,8 +1468,11 @@ pub(crate) fn execute_env(
                     }
                 }
             }
+            if write {
+                extra_rw_dirs.extend(oms_supervisor::sandbox::git_writable_dirs(cwd));
+            }
             if let Some(home) = std::env::var_os("HOME") {
-                for sub in [".claude", ".config", ".cache"] {
+                for sub in [".claude", ".codex", ".gemini", ".config", ".cache"] {
                     let p = PathBuf::from(&home).join(sub);
                     if p.is_dir() {
                         extra_rw_dirs.push(p);
@@ -1498,6 +1522,7 @@ pub(crate) fn execute_env(
             result.code == 0 && result.complete && !cap_hit,
             elapsed_ms,
             cap_hit,
+            provider_fault(&result, cap_hit),
             context.interrupted,
         );
         if overflow == 0
@@ -1594,6 +1619,32 @@ pub(crate) fn capacity(result: &Completed) -> bool {
         ]
         .iter()
         .any(|word| body.contains(word))
+}
+
+/// Provider/transport failure, as opposed to an ordinary worker task exit.
+fn provider_fault(result: &Completed, capacity_hit: bool) -> bool {
+    if capacity_hit || !result.complete || result.code == 124 {
+        return true;
+    }
+    if result.code == 0 {
+        return false;
+    }
+    let body = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    )
+    .to_lowercase();
+    [
+        "429",
+        "too many requests",
+        "overloaded",
+        "unavailable",
+        "unauthorized",
+        "authentication",
+    ]
+    .iter()
+    .any(|word| body.contains(word))
 }
 
 fn configured_model(route: &Route, profile: Option<&std::ffi::OsStr>) -> Option<String> {
@@ -2191,6 +2242,7 @@ mod bridge_route_tests {
                 err: 0,
                 latency_ms: 900,
                 cooldown_until: 2000,
+                last_error_ts: 0,
             },
         );
         health.insert(
@@ -2200,6 +2252,7 @@ mod bridge_route_tests {
                 err: 0,
                 latency_ms: 120,
                 cooldown_until: 0,
+                last_error_ts: 0,
             },
         );
         let picked =
@@ -2212,6 +2265,26 @@ mod bridge_route_tests {
             select_account_adaptive(&accounts, true, false, "provider-default", &health, 3000)
                 .unwrap();
         assert_eq!(picked_after.id, "fast-healthy");
+
+        // Errors are bounded and decay: a stale/old error no longer starves a seat.
+        let mut decay = std::collections::BTreeMap::new();
+        decay.insert(
+            "slow-or-cooled".into(),
+            SeatHealth {
+                err: 50,
+                last_error_ts: 100,
+                ..SeatHealth::default()
+            },
+        );
+        let pick = |now| {
+            select_account_adaptive(&accounts, true, false, "provider-default", &decay, now)
+                .unwrap()
+                .id
+        };
+        assert_eq!(pick(200), "fast-healthy");
+        assert_eq!(penalty(decay.get("slow-or-cooled"), 200), 3);
+        assert_eq!(penalty(decay.get("slow-or-cooled"), 100 + 1801), 0);
+        assert_eq!(pick(5000), "slow-or-cooled");
 
         if std::env::var_os("SANDBOX_STRICT_PROBE").as_deref() == Some(OsStr::new("1")) {
             let dir = std::env::temp_dir().join(format!("oms-sbx-{}", std::process::id()));

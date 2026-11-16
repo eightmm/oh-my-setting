@@ -198,7 +198,9 @@ fn git_args(args: &[String], cur: Option<&Path>) -> (usize, Option<PathBuf>) {
 }
 fn git_rule(sub: &str, rest: &[String], base: Option<&Path>, land_active: bool) -> Option<Verdict> {
     let (letters, longs) = flags(rest);
+    let ff_only = longs.contains("--ff-only") && !longs.contains("--no-ff");
     if !land_active
+        && !ff_only
         && (sub == "pull"
             || sub == "merge"
                 && !["--abort", "--quit", "--continue"]
@@ -1031,6 +1033,19 @@ mod tests {
             }
             fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn ff_only_pull_and_merge_pass_on_protected_branches_but_not_no_ff() {
+        let dir = checkout("ref: refs/heads/main\n");
+        for sub in ["merge", "pull"] {
+            assert!(git_rule(sub, &words(&["--ff-only", "feat"]), Some(&dir), false).is_none());
+            for args in [&["--ff-only", "--no-ff", "feat"][..], &["--no-ff", "feat"]] {
+                assert!(git_rule(sub, &words(args), Some(&dir), false).is_some());
+            }
+            assert!(git_rule(sub, &words(&["feat"]), Some(&dir), false).is_some());
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

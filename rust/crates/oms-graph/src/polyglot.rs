@@ -74,8 +74,41 @@ struct Token<'a> {
     string: bool,
 }
 
+fn rust_char_literal(text: &str) -> bool {
+    let mut chars = text[1..].chars();
+    match chars.next() {
+        Some('\\') => match chars.next() {
+            Some('x') => {
+                if !chars.next().is_some_and(|c| c.is_ascii_hexdigit())
+                    || !chars.next().is_some_and(|c| c.is_ascii_hexdigit())
+                {
+                    return false;
+                }
+            }
+            Some('u') => {
+                if chars.next() != Some('{') {
+                    return false;
+                }
+                let mut count = 0;
+                loop {
+                    match chars.next() {
+                        Some('}') if count > 0 => break,
+                        Some(c) if c.is_ascii_hexdigit() || c == '_' => count += 1,
+                        _ => return false,
+                    }
+                }
+            }
+            Some(c) if c != '\n' && c != '\r' => {}
+            _ => return false,
+        },
+        Some(c) if c != '\n' && c != '\r' && c != '\'' => {}
+        _ => return false,
+    }
+    chars.next() == Some('\'')
+}
+
 // A flat token stream keeps nesting depth independent of the process stack.
-fn tokens(text: &str) -> Vec<Token<'_>> {
+fn tokens(text: &str, rust: bool) -> Vec<Token<'_>> {
     let bytes = text.as_bytes();
     let (mut i, mut line) = (0, 1);
     let mut out = Vec::new();
@@ -102,7 +135,9 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
                     i += 1;
                 }
             }
-        } else if matches!(bytes[i], b'"' | b'\'' | b'`') {
+        } else if matches!(bytes[i], b'"' | b'`')
+            || (bytes[i] == b'\'' && (!rust || rust_char_literal(&text[i..])))
+        {
             let quote = bytes[i];
             let start_line = line;
             i += 1;
@@ -152,7 +187,7 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
 
 pub(crate) fn parse(selection: Selection, path: &str, text: &str, digest: &str) -> GraphResult {
     let lang = selection.language_version().unwrap().0;
-    let ts = tokens(text);
+    let ts = tokens(text, selection == Selection::Rust);
     let mut result = GraphResult {
         nodes: vec![],
         edges: vec![],
@@ -291,4 +326,26 @@ pub(crate) fn parse(selection: Selection, path: &str, text: &str, digest: &str) 
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_lifetimes_do_not_hide_tests() {
+        let result = parse(
+            Selection::Rust,
+            "src/lib.rs",
+            "fn helper(x: &'static str) {}\n#[test] fn after_lifetime() {}",
+            "digest",
+        );
+        let node = result
+            .nodes
+            .iter()
+            .find(|n| n["name"] == "after_lifetime")
+            .unwrap();
+        assert_eq!(node["kind"], "function");
+        assert_eq!(node["metadata"]["test"], true);
+    }
 }

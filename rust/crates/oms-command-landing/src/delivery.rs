@@ -175,7 +175,7 @@ fn finish(path: &Path, row: &mut V, state: &str, message: &str, c: &Context<'_>)
     row.set("message", message);
     save(path, row, c.interrupted)?;
     Ok(Output {
-        code: i32::from(state != "passed"),
+        code: i32::from(!matches!(state, "passed" | "pr-opened")),
         stdout: format!("land: {message}\nreceipt: {}\n", path.display()).into_bytes(),
         stderr: vec![],
     })
@@ -393,6 +393,27 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         )?;
         git.transport_safe()?;
         let existing = crate::review::remote_tip(git, r.destination, head_branch)?;
+        if let Some(tip) = existing.as_deref().filter(|t| *t != snapshot.head) {
+            let ancestor = git.output(
+                &[
+                    OsStr::new("merge-base"),
+                    OsStr::new("--is-ancestor"),
+                    OsStr::new(tip),
+                    OsStr::new(&snapshot.head),
+                ],
+                None,
+                &[],
+            )?;
+            if ancestor.code != 0 {
+                return finish(
+                    r.receipt,
+                    row,
+                    "failed",
+                    "remote head branch has diverged from local HEAD; refusing to overwrite existing commits",
+                    c,
+                );
+            }
+        }
         if existing.as_deref() != Some(&snapshot.head) {
             let refspec = format!("{}:refs/heads/{head_branch}", snapshot.head);
             let lease = existing
@@ -490,6 +511,24 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
                 ("conclusion", "skipped".into()),
                 ("scope", "unknown".into()),
             ]),
+        );
+        row.set(
+            "merge",
+            obj([
+                ("state", "SKIPPED".into()),
+                ("reason", "ci-wait-zero".into()),
+            ]),
+        );
+        row.set(
+            "update",
+            obj([("rc", "skipped".into()), ("reason", "ci-wait-zero".into())]),
+        );
+        return finish(
+            r.receipt,
+            row,
+            "pr-opened",
+            "pull request opened/updated; merge skipped because --ci-wait=0",
+            c,
         );
     } else {
         let deadline = Instant::now() + Duration::from_secs(r.ci_wait);
@@ -646,10 +685,25 @@ fn land_pr(r: &Run<'_>, row: &mut V, base: &str) -> Result<Output> {
         );
     }
     let local_full = row.get("gate").get("scope").text() == Some("full");
+    let merge_commit = row
+        .get("merge")
+        .get("commit")
+        .text()
+        .unwrap_or("")
+        .to_owned();
     if o.has("no-update") {
         row.set(
             "update",
             obj([("rc", "skipped".into()), ("reason", "disabled".into())]),
+        );
+    } else if !merge_commit.is_empty() && merge_commit != snapshot.head {
+        // GitHub built a new commit (squash/merge); CI above covered only the PR head.
+        row.set(
+            "update",
+            obj([
+                ("rc", "skipped".into()),
+                ("reason", "merge-commit-pending-ci".into()),
+            ]),
         );
     } else if ci_scope == "full" || local_full {
         let update = c.services.after_land(r.repo, row, c.interrupted)?;
@@ -715,6 +769,7 @@ fn land_local(r: &Run<'_>, row: &mut V) -> Result<Output> {
     )?;
     let mut environment = global_git_config();
     environment.push(("OMS_LAND_ACTIVE".into(), "1".into()));
+    let before_head = git.commit("HEAD")?;
     // Hooks stay enabled here: a pre-merge-commit guard accepts only this gated merge.
     let merge = crate::git::process(
         r.repo,
@@ -740,18 +795,41 @@ fn land_local(r: &Run<'_>, row: &mut V) -> Result<Output> {
     let head = git.commit("HEAD")?;
     row.set("merged_head", head);
     save(r.receipt, row, c.interrupted)?;
-    let tree = git.text(&["rev-parse", "HEAD^{tree}"])?;
+    let tree = match git.text(&["rev-parse", "HEAD^{tree}"]) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = git.output(
+                &[
+                    OsStr::new("reset"),
+                    OsStr::new("--hard"),
+                    OsStr::new(&before_head),
+                ],
+                None,
+                &[],
+            );
+            return Err(e);
+        }
+    };
     if row
         .get("gate")
         .get("tree")
         .text()
         .is_some_and(|t| t != tree)
     {
+        let _ = git.output(
+            &[
+                OsStr::new("reset"),
+                OsStr::new("--hard"),
+                OsStr::new(&before_head),
+            ],
+            None,
+            &[],
+        );
         return finish(
             r.receipt,
             row,
             "failed",
-            "merged tree differs from the gated tree; inspect before pushing",
+            "merged tree differs from the gated tree; rolled back the local merge",
             c,
         );
     }

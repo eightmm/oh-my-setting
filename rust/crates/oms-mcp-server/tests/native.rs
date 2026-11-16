@@ -2340,12 +2340,32 @@ fn new_command_tools() {
     good(&c.tool("oms_state_compact", json!({})));
     assert_eq!(
         record(&source)["argv"],
-        json!(["state", "compact", "--json", "--dry-run"])
+        json!([
+            "state",
+            "compact",
+            "--json",
+            "--dry-run",
+            "--keep-recent",
+            "25",
+            "--older-than-days",
+            "7"
+        ])
     );
-    good(&c.tool("oms_state_compact", json!({"apply":true,"keep_recent":7})));
+    good(&c.tool(
+        "oms_state_compact",
+        json!({"apply":true,"keep_recent":7,"older_than_days":3}),
+    ));
     assert_eq!(
         record(&source)["argv"],
-        json!(["state", "compact", "--json", "--keep-recent", "7"])
+        json!([
+            "state",
+            "compact",
+            "--json",
+            "--keep-recent",
+            "7",
+            "--older-than-days",
+            "3"
+        ])
     );
     bad(
         &c.tool("oms_state_compact", json!({"apply":"yes"})),

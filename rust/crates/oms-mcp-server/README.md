@@ -130,7 +130,7 @@ module during development, never by a production subprocess or build script.
 | `oms_memory_recall` | `agent-memory recall --json --limit N QUERY` (native addition) | n/a |
 | `oms_symbol_slice` | In-process bounded numbered slice; no spawn, no scrubber crate (local fail-closed secret screen) | n/a |
 | `oms_failure_diagnose` | One of `runtime failure classify`, `fail-ledger check --cmd CMD`, `fail-ledger list --json --limit 10` (native addition) | n/a |
-| `oms_state_compact` | `gc --dry-run\|--apply [--days N]`; `keep_recent` is the retention window in days (native addition) | n/a |
+| `oms_state_compact` | `state compact --dry-run` by default; `keep_recent` retains a per-family count (default 25), and `older_than_days` retains newer files (default 7 days) | n/a |
 
 The table anchors identify canonical definitions. Execution handlers are at
 852–1000, 1105–1290, 1292–1753 and 1857–1929; `tool_definitions` starts at 771.

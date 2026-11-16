@@ -399,34 +399,60 @@ fn build_graph_context(
     }
 }
 
-fn interactive_turns_from_stdin() -> Result<Vec<String>> {
-    use std::io::Read;
-    let mut raw = String::new();
-    std::io::stdin()
-        .read_to_string(&mut raw)
-        .map_err(|e| Error::new(2, format!("failed reading interactive turns: {e}")))?;
-    let mut turns = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
+static INTERACTIVE_BUFFERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// In-process callers that consume the returned stdout can opt out of live
+/// per-turn NDJSON streaming; the CLI default writes each turn as it completes.
+pub fn buffer_interactive_stdout(buffered: bool) {
+    INTERACTIVE_BUFFERED.store(buffered, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn emit_turn_line(sink: &mut String, line: &[u8]) {
+    if INTERACTIVE_BUFFERED.load(std::sync::atomic::Ordering::SeqCst) {
+        sink.push_str(&String::from_utf8_lossy(line));
+        sink.push('\n');
+    } else {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(line);
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+    }
+}
+
+/// Reads the next turn from stdin; `None` on EOF or an explicit finish, without
+/// waiting for the writer to close the pipe.
+fn next_interactive_turn() -> Result<Option<String>> {
+    use std::io::BufRead;
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        let mut raw = String::new();
+        let n = stdin
+            .read_line(&mut raw)
+            .map_err(|e| Error::new(2, format!("failed reading interactive turns: {e}")))?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
         }
         if trimmed.starts_with('{')
             && let Ok(v) = V::parse(trimmed.as_bytes())
         {
-            if v.get("action").text() == Some("finish") {
-                break;
+            if v.get("action").text() == Some("finish") || v.get("finish") == &V::Bool(true) {
+                return Ok(None);
             }
             if let Some(prompt) = v.get("prompt").text() {
-                if !prompt.trim().is_empty() {
-                    turns.push(prompt.trim().to_owned());
+                if prompt.trim().is_empty() {
+                    continue;
                 }
-                continue;
+                return Ok(Some(prompt.trim().to_owned()));
             }
         }
-        turns.push(trimmed.to_owned());
+        return Ok(Some(trimmed.to_owned()));
     }
-    Ok(turns)
 }
 
 fn brief_label(question: &str) -> String {
@@ -662,16 +688,6 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if interactive && std::io::stdin().is_terminal() {
         return fail("--interactive requires NDJSON turn input on stdin; no worktree created");
     }
-    let interactive_turns = if interactive {
-        let turns = interactive_turns_from_stdin()?;
-        if turns.is_empty() {
-            vec![String::new()]
-        } else {
-            turns
-        }
-    } else {
-        Vec::new()
-    };
     let worktree = Worktree::create(&repo, &base, context)?;
     let mut attempt_refs = obj([
         ("artifact", artifact.to_string_lossy().into_owned().into()),
@@ -747,7 +763,18 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             let mut turn_history = String::new();
             let timeout = peer::timeout(args, "peer-delegate")?;
             code = 0;
-            for (idx, turn_prompt) in interactive_turns.iter().enumerate() {
+            let max_turns = args
+                .get("max-turns")
+                .parse::<usize>()
+                .ok()
+                .map_or(20, |n| n.clamp(1, 20));
+            let mut idx = 0;
+            while idx < max_turns {
+                let turn_prompt = match next_interactive_turn()? {
+                    Some(turn) => turn,
+                    None if idx == 0 => String::new(),
+                    None => break,
+                };
                 crate::check(context.interrupted)?;
                 worktree.identity(context)?;
                 let mut full_prompt = prompt.clone();
@@ -785,8 +812,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                             ("error", error.message.into()),
                         ])
                         .json(false)?;
-                        interactive_stdout.push_str(&String::from_utf8_lossy(&line));
-                        interactive_stdout.push('\n');
+                        emit_turn_line(&mut interactive_stdout, &line);
                         break;
                     }
                 };
@@ -821,12 +847,12 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                     ("output", clean_str.into()),
                 ])
                 .json(false)?;
-                interactive_stdout.push_str(&String::from_utf8_lossy(&line));
-                interactive_stdout.push('\n');
+                emit_turn_line(&mut interactive_stdout, &line);
                 code = turn_code;
                 if turn_code != 0 {
                     break;
                 }
+                idx += 1;
             }
         } else {
             let result = providers::execute_with_fallback_env(

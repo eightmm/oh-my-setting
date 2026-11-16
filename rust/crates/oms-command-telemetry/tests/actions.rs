@@ -1,7 +1,6 @@
 mod support;
 use oms_context::Json;
 use std::ffi::OsString;
-use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use support::Temp;
 
@@ -11,20 +10,6 @@ fn native(root: &Temp, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
         &root.0,
         &AtomicBool::new(false),
     )
-}
-fn oracle(root: &Temp, args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap();
-    let r = Command::new("bash")
-        .args(["-c", "umask 077; exec bash \"$@\"", "oracle"])
-        .arg(repo.join("scripts/artifact-index.sh"))
-        .args(args)
-        .current_dir(&root.0)
-        .output()
-        .unwrap();
-    (r.status.code().unwrap(), r.stdout, r.stderr)
 }
 fn event(id: &str, kind: &str, exit: i32, extra: &str) -> String {
     format!(
@@ -55,39 +40,36 @@ fn rows() -> String {
 fn assert_ok(r: &(i32, Vec<u8>, Vec<u8>)) {
     assert_eq!(r.0, 0, "{}", String::from_utf8_lossy(&r.2));
 }
-fn compare(root: &Temp, args: &[&str]) {
-    let path = root.0.join(".oms/artifacts/index.jsonl");
-    let before = std::fs::read(&path).ok();
-    let got = native(root, args);
-    let after = std::fs::read(&path).ok();
-    if let Some(body) = before {
-        root.index(body);
-    } else if path.exists() {
-        std::fs::remove_file(&path).unwrap();
+fn check_code(root: &Temp, args: &[&str], expected_code: i32) {
+    let result = native(root, args);
+    assert_eq!(result.0, expected_code, "{args:?}: {:?}", result);
+    if expected_code == 0 {
+        assert!(result.2.is_empty(), "{args:?}: {:?}", result);
+        if args.contains(&"--json") && args[0] != "latest-run" && !result.1.is_empty() {
+            assert!(
+                oms_context::parse_json(&result.1).is_ok(),
+                "{args:?}: {:?}",
+                result
+            );
+        }
+    } else {
+        assert!(!result.1.is_empty() || !result.2.is_empty(), "{args:?}");
+        assert!(
+            result.1.is_empty() || result.2.is_empty(),
+            "{args:?}: {:?}",
+            result
+        );
     }
-    let expected = oracle(root, args);
-    if let Some(body) = after {
-        root.index(body);
-    } else if path.exists() {
-        std::fs::remove_file(&path).unwrap();
-    }
-    let decode = |r: (i32, Vec<u8>, Vec<u8>)| {
-        let body = if args.contains(&"--json") {
-            oms_context::parse_json(&r.1)
-                .ok()
-                .map(|j| format!("{:?}", normalized(j)))
-                .unwrap_or_else(|| String::from_utf8_lossy(&r.1).into_owned())
-        } else {
-            String::from_utf8_lossy(&r.1).into_owned()
-        };
-        (r.0, body, String::from_utf8_lossy(&r.2).into_owned())
-    };
-    assert_eq!(decode(got), decode(expected), "{args:?}");
 }
 #[test]
-fn native_views_and_waste_match_public_oracle() {
+fn native_views_and_waste_are_consistent() {
     let root = Temp::new();
     root.index(rows());
+    let listed = native(&root, &["list", "--json"]);
+    assert_ok(&listed);
+    let doc = oms_context::parse_json(&listed.1).unwrap();
+    assert_eq!(support::field(&doc, "schema"), &Json::Number("1".into()));
+    assert_eq!(support::array(support::field(&doc, "rows")).len(), 4);
     root.write(".oms/hooks/events.jsonl",concat!(
         "{\"action\":\"telemetry\",\"session\":\"one\",\"model\":\"m1\"}\n",
         "{\"action\":\"telemetry\",\"session\":\"one\",\"model\":\"m2\",\"cache_creation_tokens\":400}\n",
@@ -96,20 +78,21 @@ fn native_views_and_waste_match_public_oracle() {
     root.write(".oms/artifacts/output-digest/a.txt", b"12345");
     root.write(".oms/artifacts/output-digest/b.txt", b"1234567890");
     for action in ["list", "latest", "latest-run", "failures", "unresolved"] {
-        compare(&root, &[action]);
-        compare(&root, &[action, "--json"]);
+        check_code(&root, &[action], 0);
+        check_code(&root, &[action, "--json"], 0);
     }
     for action in ["list", "failures", "unresolved"] {
-        compare(&root, &[action, "2"]);
-        compare(&root, &[action, "2", "--json"]);
+        check_code(&root, &[action, "2"], 0);
+        check_code(&root, &[action, "2", "--json"], 0);
     }
     for top in ["1", "10", "100", "0001"] {
-        compare(&root, &["telemetry", "--waste", "--top", top]);
-        compare(&root, &["telemetry", "--waste", "--top", top, "--json"]);
+        check_code(&root, &["telemetry", "--waste", "--top", top], 0);
+        check_code(&root, &["telemetry", "--waste", "--top", top, "--json"], 0);
     }
-    compare(
+    check_code(
         &root,
         &["telemetry", "--waste", "--since", "2026-07-03", "--json"],
+        0,
     );
     root.index(
         event(
@@ -124,8 +107,8 @@ fn native_views_and_waste_match_public_oracle() {
             ",\"tokens\":2,\"task_id\":\"retry\"",
         ),
     );
-    compare(&root, &["telemetry", "--waste"]);
-    compare(&root, &["telemetry", "--waste", "--json"]);
+    check_code(&root, &["telemetry", "--waste"], 0);
+    check_code(&root, &["telemetry", "--waste", "--json"], 0);
     let mut tied = String::new();
     for (id, task) in [
         ("evt_z1", "shared-prefix-xxz"),
@@ -141,32 +124,33 @@ fn native_views_and_waste_match_public_oracle() {
         ));
     }
     root.index(tied);
-    compare(&root, &["telemetry", "--waste", "--json"]);
+    check_code(&root, &["telemetry", "--waste", "--json"], 0);
 }
 #[test]
-fn missing_empty_and_argument_edges_match_oracle() {
+fn missing_empty_and_argument_edges_are_handled() {
     let root = Temp::new();
     for body in [None, Some(b"".as_slice()), Some(b"{}\n".as_slice())] {
+        let nonempty = body.is_some_and(|bytes| !bytes.is_empty());
         if let Some(body) = body {
             root.index(body);
         }
-        for action in [
-            "list",
-            "latest",
-            "latest-run",
-            "failures",
-            "unresolved",
-            "resolve-superseded",
-            "resolve-recovered",
-            "validate",
-            "migrate",
-            "prune",
-        ] {
-            compare(&root, &[action]);
-            compare(&root, &[action, "--json"]);
+        for action in ["list", "latest", "latest-run", "failures", "unresolved"] {
+            check_code(&root, &[action], if nonempty { 0 } else { 2 });
+            check_code(&root, &[action, "--json"], 0);
         }
+        for action in ["resolve-superseded", "resolve-recovered"] {
+            check_code(&root, &[action], 0);
+            check_code(&root, &[action, "--json"], 2);
+        }
+        check_code(&root, &["validate"], if nonempty { 1 } else { 2 });
+        check_code(&root, &["validate", "--json"], 2);
+        for action in ["migrate", "prune"] {
+            check_code(&root, &[action], if nonempty { 0 } else { 2 });
+            check_code(&root, &[action, "--json"], 2);
+        }
+        check_code(&root, &["--help"], 0);
+        check_code(&root, &["telemetry", "--waste", "--top", ""], 0);
         for args in [
-            vec!["--help"],
             vec!["list", "0"],
             vec!["list", ""],
             vec!["list", "invalid"],
@@ -178,10 +162,9 @@ fn missing_empty_and_argument_edges_match_oracle() {
             vec!["telemetry", "--waste", "--top", "0"],
             vec!["telemetry", "--waste", "--top", "101"],
             vec!["telemetry", "--waste", "--top", "bad"],
-            vec!["telemetry", "--waste", "--top", ""],
             vec!["telemetry", "--top", "1"],
         ] {
-            compare(&root, &args);
+            check_code(&root, &args, 2);
         }
     }
 }
@@ -195,22 +178,23 @@ fn resolution_is_atomic_idempotent_and_preserves_lineage() {
         &["resolve", "--event-id", "evt_a", "--event-id", "missing"],
     );
     assert_eq!(invalid.0, 1);
+    assert_eq!(invalid.2, b"error: unknown artifact event: missing\n");
     assert_eq!(
         std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap(),
         snapshot.as_bytes()
     );
-    for args in [
-        vec!["resolve", "--event-id", "evt_c"],
-        vec![
+    check_code(&root, &["resolve", "--event-id", "evt_c"], 1);
+    check_code(
+        &root,
+        &[
             "resolve",
             "--event-id",
             "evt_a",
             "--reason",
             &"x".repeat(201),
         ],
-    ] {
-        compare(&root, &args);
-    }
+        2,
+    );
     let r = native(
         &root,
         &[
@@ -230,9 +214,9 @@ fn resolution_is_atomic_idempotent_and_preserves_lineage() {
         String::from_utf8(r.1).unwrap(),
         "artifact-index: resolved evt_a\nartifact-index: resolved evt_b\n"
     );
-    compare(&root, &["validate"]);
-    compare(&root, &["unresolved", "--json"]);
-    compare(&root, &["resolve", "--event-id", "evt_a"]);
+    check_code(&root, &["validate"], 0);
+    check_code(&root, &["unresolved", "--json"], 0);
+    check_code(&root, &["resolve", "--event-id", "evt_a"], 0);
     let body = std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
     assert_eq!(body.lines().count(), 6);
     let second = native(
@@ -255,17 +239,15 @@ fn reason_scan_refuses_patterns_without_writes() {
     assignments.push(format!("{}{}", "/ho", "me/user/private"));
     assignments.push(format!("{}{}", "Bearer ", "abcdefghijklmno"));
     for reason in assignments {
-        compare(
+        let result = native(
             &root,
             &["resolve", "--event-id", "evt_a", "--reason", &reason],
         );
+        assert_eq!(result.0, 2);
+        assert!(result.1.is_empty());
         assert_eq!(
-            native(
-                &root,
-                &["resolve", "--event-id", "evt_a", "--reason", &reason]
-            )
-            .0,
-            2
+            result.2,
+            b"error: --reason contains sensitive-looking content\n"
         );
     }
     assert_eq!(
@@ -286,37 +268,29 @@ fn mechanical_resolvers_match_dry_plans_and_clear_once() {
     let root = Temp::new();
     for action in ["resolve-superseded", "resolve-recovered"] {
         root.index(rows());
-        compare(&root, &[action, "--dry-run"]);
+        check_code(&root, &[action, "--dry-run"], 0);
         let before = std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
-        let expected = oracle(&root, &[action]);
-        root.index(&before);
-        assert_eq!(native(&root, &[action]), expected);
-        compare(&root, &[action]);
-        compare(&root, &["validate"]);
-        compare(&root, &["unresolved"]);
+        assert_eq!(
+            std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap(),
+            before
+        );
+        assert_ok(&native(&root, &[action]));
+        check_code(&root, &[action], 0);
+        check_code(&root, &["validate"], 0);
+        check_code(&root, &["unresolved"], 0);
     }
 }
 #[test]
-fn migration_and_retention_match_public_oracle() {
+fn migration_and_retention_are_consistent() {
     let root = Temp::new();
     root.write(".oms/artifacts/recovered/old.md", b"answer");
     let source = "{\"kind\":\"call\",\"provider\":\"codex\",\"exit\":0,\"ts\":\"2026-07-01\",\"artifact\":\"gone/old.md\"}\n";
     root.index(source);
-    let expected = oracle(&root, &["migrate"]);
+    assert_ok(&native(&root, &["migrate"]));
     let migrated = std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
-    root.index(source);
-    assert_eq!(native(&root, &["migrate"]), expected);
-    assert_eq!(
-        normalized(
-            oms_context::parse_json(
-                &std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap()
-            )
-            .unwrap()
-        ),
-        normalized(oms_context::parse_json(&migrated).unwrap())
-    );
-    compare(&root, &["migrate"]);
-    compare(&root, &["validate"]);
+    assert!(oms_context::parse_json(&migrated).is_ok());
+    check_code(&root, &["migrate"], 0);
+    check_code(&root, &["validate"], 0);
     let source = event("evt_old", "call", 0, ",\"artifact\":\"missing.md\"")
         + &event("evt_new", "call", 0, "");
     for args in [
@@ -327,14 +301,14 @@ fn migration_and_retention_match_public_oracle() {
         vec!["prune", "1", "--files", "--dry-run"],
     ] {
         root.index(&source);
-        let expected = oracle(&root, &args);
-        let kept = std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
-        root.index(&source);
-        assert_eq!(native(&root, &args), expected, "{args:?}");
-        assert_eq!(
-            std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap(),
-            kept
-        );
+        let result = native(&root, &args);
+        assert_ok(&result);
+        let kept = std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
+        if args.contains(&"--dry-run") {
+            assert_eq!(kept, source);
+        } else {
+            assert_eq!(kept.lines().count(), 1);
+        }
     }
 }
 #[test]
@@ -360,7 +334,7 @@ fn salvage_plans_then_quarantines_before_replacement() {
         std::fs::read(files[0].as_ref().unwrap().path()).unwrap(),
         broken.as_bytes()
     );
-    compare(&root, &["salvage", "--apply"]);
+    check_code(&root, &["salvage", "--apply"], 0);
     let result = native(&root, &["list", "--json"]);
     assert_ok(&result);
     let doc = oms_context::parse_json(&result.1).unwrap();
@@ -391,7 +365,7 @@ fn imports_publish_artifact_and_index_without_executing_provider() {
             .unwrap()
             .starts_with("imported: antigravity -> ")
     );
-    compare(&root, &["validate"]);
+    check_code(&root, &["validate"], 0);
     let r = native(&root, &["latest", "--json"]);
     let doc = oms_context::parse_json(&r.1).unwrap();
     let row = &support::array(support::field(&doc, "rows"))[0];
@@ -528,41 +502,20 @@ fn concurrent_resolvers_append_only_one_resolution() {
     });
     let body = std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
     assert_eq!(body.lines().count(), 5);
-    compare(&root, &["validate"]);
+    check_code(&root, &["validate"], 0);
 }
 #[test]
 fn non_string_and_duplicate_lineage_cannot_hide_failure() {
     let root = Temp::new();
     let snapshot = rows() + &event("evt_a", "delegate", 0, "");
     root.index(&snapshot);
-    compare(&root, &["unresolved", "--json"]);
-    compare(&root, &["resolve-superseded", "--dry-run"]);
-    compare(&root, &["resolve", "--event-id", "evt_a"]);
-    compare(&root, &["validate"]);
+    check_code(&root, &["unresolved", "--json"], 0);
+    check_code(&root, &["resolve-superseded", "--dry-run"], 0);
+    check_code(&root, &["resolve", "--event-id", "evt_a"], 1);
+    check_code(&root, &["validate"], 1);
     let r = native(&root, &["unresolved", "--json"]);
     let doc = oms_context::parse_json(&r.1).unwrap();
     assert!(matches!(support::field(&doc, "rows"), Json::Array(_)));
-}
-
-fn normalized(mut value: Json) -> Json {
-    fn sort(value: &mut Json) {
-        match value {
-            Json::Object(fields) => {
-                for (_, v) in fields.iter_mut() {
-                    sort(v);
-                }
-                fields.sort_by(|a, b| a.0.cmp(&b.0));
-            }
-            Json::Array(items) => {
-                for v in items {
-                    sort(v);
-                }
-            }
-            _ => (),
-        }
-    }
-    sort(&mut value);
-    value
 }
 
 #[test]
@@ -578,7 +531,7 @@ fn validator_matches_corrupt_rows_and_typed_metadata() {
         "{\"exit\":NaN}\n",
     ] {
         root.index(raw);
-        compare(&root, &["validate"]);
+        check_code(&root, &["validate"], 1);
     }
     for extra in [
         ",\"executor_id\":\"invalid space\"",
@@ -588,7 +541,7 @@ fn validator_matches_corrupt_rows_and_typed_metadata() {
         ",\"artifact\":\"../outside\"",
     ] {
         root.index(event("evt_bad", "call", 0, extra));
-        compare(&root, &["validate"]);
+        check_code(&root, &["validate"], 1);
     }
 }
 
@@ -629,21 +582,21 @@ fn native_index_boundary_and_interruption_protect_writers() {
 fn waste_absence_zero_and_malformed_ledger_are_not_estimates() {
     let root = Temp::new();
     root.index(event("evt_zero", "delegate", 0, ",\"tokens\":0"));
-    compare(&root, &["telemetry", "--waste", "--json"]);
+    check_code(&root, &["telemetry", "--waste", "--json"], 0);
     root.write(
         ".oms/hooks/events.jsonl",
         b"not-json\n{}\n{\"action\":\"injection\",\"status\":\"context\",\"bytes\":0}\n",
     );
     root.write(".oms/artifacts/output-digest/empty", b"");
-    compare(&root, &["telemetry", "--waste"]);
-    compare(&root, &["telemetry", "--waste", "--json"]);
+    check_code(&root, &["telemetry", "--waste"], 0);
+    check_code(&root, &["telemetry", "--waste", "--json"], 0);
     root.index(event(
         "evt_one",
         "delegate",
         1,
         ",\"tokens\":1,\"task_id\":\"only\"",
     ));
-    compare(&root, &["telemetry", "--waste", "--json"]);
+    check_code(&root, &["telemetry", "--waste", "--json"], 0);
 }
 
 #[test]

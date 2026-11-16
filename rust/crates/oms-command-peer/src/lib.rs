@@ -14,6 +14,7 @@ mod board;
 pub mod cli;
 mod context_pack;
 mod delegate;
+pub use delegate::buffer_interactive_stdout;
 mod digest;
 mod manifest;
 mod ml_context;

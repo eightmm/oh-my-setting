@@ -375,7 +375,7 @@ fn owned_agy_statusline(command: &str) -> bool {
         words.iter().any(|w| {
             std::path::Path::new(w)
                 .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("agy-statusline"))
+                .is_some_and(|n| n == "agy-statusline" || n == "agy-statusline.sh")
         })
     })
 }
@@ -558,6 +558,16 @@ mod tests {
             file.with_file_name("settings.json.oh-my-setting-backup")
                 .exists()
         );
+    }
+
+    #[test]
+    fn antigravity_status_line_keeps_similarly_named_user_commands() {
+        let (_dir, paths, file) = fixture("similar");
+        let custom = r#"{"statusLine":{"type":"command","command":"/x/agy-statusline-custom"}}"#;
+        fs::write(&file, custom).unwrap();
+        converge(&paths, false);
+        converge(&paths, true);
+        assert_eq!(fs::read_to_string(&file).unwrap(), custom);
     }
 
     #[test]

@@ -1591,14 +1591,23 @@ fn delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree() {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
                 let mut child = cmd.spawn().unwrap();
-                {
-                    let stdin = child.stdin.as_mut().unwrap();
-                    stdin
-                        .write_all(
-                            b"{\"prompt\":\"first turn\"}\n{\"prompt\":\"second turn\"}\n{\"action\":\"finish\"}\n",
-                        )
-                        .unwrap();
+                // Keep the pipe open after finish: the child must exit without EOF.
+                let mut stdin = child.stdin.take().unwrap();
+                stdin
+                    .write_all(
+                        b"{\"prompt\":\"first turn\"}\n{\"prompt\":\"second turn\"}\n{\"action\":\"finish\"}\n",
+                    )
+                    .unwrap();
+                stdin.flush().unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                while child.try_wait().unwrap().is_none() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "child waited for stdin EOF after finish"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
                 }
+                drop(stdin);
                 let out = child.wait_with_output().unwrap();
                 assert!(
                     out.status.success(),
@@ -1623,6 +1632,7 @@ fn delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree() {
                 "--interactive",
                 "Interactive base",
             ]);
+            oms_command_peer::buffer_interactive_stdout(true);
             let stop = AtomicBool::new(false);
             let out = oms_command_peer::run_with_executor(
                 "peer-delegate",

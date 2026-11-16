@@ -25,6 +25,28 @@ pub struct SandboxSpec {
     pub allow_network: bool,
 }
 
+/// Directories a write-mode worker in a linked `git worktree` must be able to
+/// write: its private gitdir and the shared common dir (objects, refs).
+pub fn git_writable_dirs(worktree: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(worktree.join(".git")) else {
+        return Vec::new();
+    };
+    let Some(raw) = text.lines().find_map(|l| l.strip_prefix("gitdir:")) else {
+        return Vec::new();
+    };
+    let Ok(gitdir) = worktree.join(raw.trim()).canonicalize() else {
+        return Vec::new();
+    };
+    let mut dirs = vec![gitdir.clone()];
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir"))
+        && let Ok(common) = gitdir.join(common.trim()).canonicalize()
+        && !dirs.contains(&common)
+    {
+        dirs.push(common);
+    }
+    dirs
+}
+
 fn executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -153,6 +175,22 @@ mod tests {
             wrap_command(OsStr::new("cmd"), &args, &spec, SandboxMode::Off).unwrap(),
             ("cmd".into(), args, "disabled")
         );
+    }
+    #[test]
+    fn git_writable_dirs_resolves_linked_worktree() {
+        let root = std::env::temp_dir().join(format!("oms-gwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let gitdir = root.join("main/.git/worktrees/w");
+        let work = root.join("w");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(work.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        let dirs = git_writable_dirs(&work);
+        let common = root.join("main/.git").canonicalize().unwrap();
+        assert_eq!(dirs, vec![gitdir.canonicalize().unwrap(), common]);
+        assert!(git_writable_dirs(&root).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
     #[cfg(target_os = "linux")]
     #[test]

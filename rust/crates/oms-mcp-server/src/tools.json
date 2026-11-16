@@ -941,7 +941,7 @@
   },
   {
     "name": "oms_state_compact",
-    "description": "Retention plan for aged harness state (oms gc). Dry run by default: reports what would be reclaimed. Only apply=true removes aged state, so request it only when asked.",
+    "description": "Retention plan for harness state (oms state compact). Dry run by default: reports what would be reclaimed. Only apply=true removes aged state, so request it only when asked.",
     "properties": {
       "repo": {
         "type": "string",
@@ -955,7 +955,13 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 3650,
-        "description": "Retention window in days (oms gc --days); state newer than this is kept. Default 30."
+        "description": "Number of newest files to retain per family. Default 25."
+      },
+      "older_than_days": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 3650,
+        "description": "Retain files newer than this many days; 0 disables the age limit. Default 7."
       }
     },
     "annotations": {
