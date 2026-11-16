@@ -967,9 +967,50 @@ fn peer_dry_runs_and_ml_context() {
             .join("\n");
         assert!(prompts.contains("ML Agent Context Digest"));
         assert!(prompts.contains("train.py"));
+        repo.write(
+            "src/lib.rs",
+            "pub fn graph_context_probe() -> usize { 42 }\n",
+        );
+        repo.git(&["add", "src/lib.rs"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "add graph probe",
+        ]);
+        let graph_out = run(
+            &repo,
+            &repo.0,
+            "peer-delegate",
+            &[
+                "--to",
+                "codex",
+                "--model",
+                "fixture",
+                "--dry-run",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--graph-context",
+                "Inspect graph_context_probe",
+            ],
+        );
+        assert_eq!(graph_out.0, 0, "{}", String::from_utf8_lossy(&graph_out.2));
+        let delegate_prompts = fs::read_dir(repo.0.join(".oms/artifacts/delegate"))
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            delegate_prompts.contains("project graph")
+                && delegate_prompts.contains("graph_context_probe"),
+            "missing injected graph context in delegate prompt:\n{delegate_prompts}"
+        );
         for (option, message) in [
             ("--apply", "patch-admission"),
-            ("--graph-context", "context compilation"),
             ("--plan-task", "plan lease"),
         ] {
             let mut values = vec![option];
@@ -1496,4 +1537,116 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
             );
         }
     });
+}
+
+#[test]
+fn delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree() {
+    isolated(
+        "delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree",
+        || {
+            let repo = Repo::new();
+            repo.write("README.md", "interactive base\n");
+            repo.git(&["add", "README.md"]);
+            repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "init",
+            ]);
+            let fake_claude = repo.0.join(".fake-bin/claude");
+            fs::create_dir_all(fake_claude.parent().unwrap()).unwrap();
+            fs::write(
+                &fake_claude,
+                "#!/bin/sh\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"turn-ack\"}\\n'\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let path_val = format!(
+                "{}:{}",
+                fake_claude.parent().unwrap().display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            if std::env::var_os("OMS_INTERACTIVE_INNER").is_none() {
+                use std::io::Write;
+                let mut cmd = Command::new(std::env::current_exe().unwrap());
+                cmd.args([
+                    "--exact",
+                    "delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree",
+                    "--nocapture",
+                ])
+                .env(
+                    "CONTRACT_CHILD",
+                    "delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree",
+                )
+                .env("OMS_INTERACTIVE_INNER", "1")
+                .env("PATH", &path_val)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+                let mut child = cmd.spawn().unwrap();
+                {
+                    let stdin = child.stdin.as_mut().unwrap();
+                    stdin
+                        .write_all(
+                            b"{\"prompt\":\"first turn\"}\n{\"prompt\":\"second turn\"}\n{\"action\":\"finish\"}\n",
+                        )
+                        .unwrap();
+                }
+                let out = child.wait_with_output().unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                return;
+            }
+            let values = args(&[
+                "--repo",
+                repo.0.to_str().unwrap(),
+                "--to",
+                "claude",
+                "--model",
+                "fixture",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--no-verify",
+                "--allow-no-change",
+                "--interactive",
+                "Interactive base",
+            ]);
+            let stop = AtomicBool::new(false);
+            let out = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &values,
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../..")),
+                &stop,
+                &Native,
+            );
+            let stdout = String::from_utf8_lossy(&out.1);
+            assert_eq!(
+                out.0,
+                0,
+                "interactive failed: {stdout}\n{}",
+                String::from_utf8_lossy(&out.2)
+            );
+            assert!(stdout.contains("\"turn\":1"), "{stdout}");
+            assert!(stdout.contains("\"turn\":2"), "{stdout}");
+            let md = fs::read_dir(repo.0.join(".oms/artifacts/delegate"))
+                .unwrap()
+                .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(md.contains("## Turn 1") && md.contains("## Turn 2"), "{md}");
+        },
+    );
 }

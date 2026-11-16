@@ -805,6 +805,7 @@ dependencies = [
  "oms-command-agent-role",
  "oms-command-attempt-bundle",
  "oms-command-failure",
+ "oms-command-graph",
  "oms-command-memory",
  "oms-command-operations",
  "oms-command-plan",

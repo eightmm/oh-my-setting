@@ -270,6 +270,14 @@ fn route_with_source(
         explicit,
     })
 }
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SeatHealth {
+    pub ok: u64,
+    pub err: u64,
+    pub latency_ms: u64,
+    pub cooldown_until: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Account {
     pub id: String,
@@ -285,6 +293,24 @@ pub fn select_account(
     explicit: bool,
     model: &str,
 ) -> Option<Account> {
+    select_account_adaptive(
+        accounts,
+        spread,
+        explicit,
+        model,
+        &std::collections::BTreeMap::new(),
+        0,
+    )
+}
+
+pub fn select_account_adaptive(
+    accounts: &[Account],
+    spread: bool,
+    explicit: bool,
+    model: &str,
+    health: &std::collections::BTreeMap<String, SeatHealth>,
+    now: u64,
+) -> Option<Account> {
     let mut eligible = accounts
         .iter()
         .filter(|a| {
@@ -295,9 +321,18 @@ pub fn select_account(
         })
         .collect::<Vec<_>>();
     eligible.sort_by(|a, b| {
-        a.used
-            .unwrap_or(100.0)
-            .total_cmp(&b.used.unwrap_or(100.0))
+        let ha = health.get(&a.id);
+        let hb = health.get(&b.id);
+        let cool_a = ha.is_some_and(|h| h.cooldown_until > now);
+        let cool_b = hb.is_some_and(|h| h.cooldown_until > now);
+        let pen_a = ha.map_or(0, |h| h.err.saturating_sub(h.ok));
+        let pen_b = hb.map_or(0, |h| h.err.saturating_sub(h.ok));
+        let ua = a.used.unwrap_or(100.0);
+        let ub = b.used.unwrap_or(100.0);
+        cool_a
+            .cmp(&cool_b)
+            .then_with(|| pen_a.cmp(&pen_b))
+            .then_with(|| ua.total_cmp(&ub))
             .then_with(|| {
                 if spread && !explicit {
                     a.running.cmp(&b.running)
@@ -305,8 +340,110 @@ pub fn select_account(
                     std::cmp::Ordering::Equal
                 }
             })
+            .then_with(|| {
+                let la = ha.map_or(u64::MAX, |h| {
+                    if h.latency_ms == 0 {
+                        u64::MAX
+                    } else {
+                        h.latency_ms
+                    }
+                });
+                let lb = hb.map_or(u64::MAX, |h| {
+                    if h.latency_ms == 0 {
+                        u64::MAX
+                    } else {
+                        h.latency_ms
+                    }
+                });
+                la.cmp(&lb)
+            })
     });
     eligible.first().map(|a| (*a).clone())
+}
+
+fn load_seat_health(repo: &Path) -> std::collections::BTreeMap<String, SeatHealth> {
+    let Ok(bytes) = storage::read(repo, Path::new(".oms/seat-health.json"), true) else {
+        return std::collections::BTreeMap::new();
+    };
+    if bytes.is_empty() || bytes.len() > 262_144 {
+        return std::collections::BTreeMap::new();
+    }
+    let Ok(doc) = V::parse(&bytes) else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut map = std::collections::BTreeMap::new();
+    if let V::Obj(fields) = doc.get("accounts") {
+        for (key, val) in fields {
+            let Ok(name) = std::str::from_utf8(key) else {
+                continue;
+            };
+            map.insert(
+                name.to_owned(),
+                SeatHealth {
+                    ok: number(val.get("ok")).map_or(0, |n| n.max(0.0) as u64),
+                    err: number(val.get("err")).map_or(0, |n| n.max(0.0) as u64),
+                    latency_ms: number(val.get("latency_ms")).map_or(0, |n| n.max(0.0) as u64),
+                    cooldown_until: number(val.get("cooldown_until"))
+                        .map_or(0, |n| n.max(0.0) as u64),
+                },
+            );
+        }
+    }
+    map
+}
+
+fn record_seat_health(
+    repo: &Path,
+    seat: &str,
+    ok: bool,
+    latency_ms: u64,
+    capacity_hit: bool,
+    interrupted: &std::sync::atomic::AtomicBool,
+) {
+    if seat.is_empty() || !repo.join(".oms").is_dir() {
+        return;
+    }
+    let rel = Path::new(".oms/seat-health.json");
+    let mut map = load_seat_health(repo);
+    let entry = map.entry(seat.to_owned()).or_default();
+    if ok {
+        entry.ok = entry.ok.saturating_add(1);
+        entry.cooldown_until = 0;
+        entry.latency_ms = if entry.latency_ms == 0 {
+            latency_ms.max(1)
+        } else {
+            (entry.latency_ms * 3 + latency_ms.max(1)) / 4
+        };
+    } else {
+        entry.err = entry.err.saturating_add(1);
+        if capacity_hit {
+            entry.cooldown_until = crate::seconds().saturating_add(300);
+        }
+    }
+    let rows = map
+        .into_iter()
+        .map(|(k, h)| {
+            (
+                k,
+                crate::obj([
+                    ("ok", V::Num(h.ok.to_string())),
+                    ("err", V::Num(h.err.to_string())),
+                    ("latency_ms", V::Num(h.latency_ms.to_string())),
+                    ("cooldown_until", V::Num(h.cooldown_until.to_string())),
+                ]),
+            )
+        })
+        .collect::<Vec<_>>();
+    let doc = crate::obj([
+        ("schema", V::Num("1".into())),
+        (
+            "accounts",
+            V::Obj(rows.into_iter().map(|(k, v)| (k.into_bytes(), v)).collect()),
+        ),
+    ]);
+    if let Ok(encoded) = crate::json(&doc) {
+        let _ = storage::write(repo, rel, encoded, true, interrupted);
+    }
 }
 fn unique_keys(value: &oms_context::Json) -> bool {
     match value {
@@ -492,7 +629,15 @@ fn account_environment(
             models,
         });
     }
-    match select_account(&accounts, policy == "spread", route.explicit, &route.model) {
+    let health = load_seat_health(repo);
+    match select_account_adaptive(
+        &accounts,
+        policy == "spread",
+        route.explicit,
+        &route.model,
+        &health,
+        crate::seconds(),
+    ) {
         Some(account) => Ok((
             vec![("CODEX_HOME".into(), account.home.into_os_string())],
             Some(account.id),
@@ -1283,9 +1428,47 @@ pub(crate) fn execute_env(
                 .find(|(key, _)| key == "CODEX_HOME")
                 .map(|(_, value)| value.as_os_str()),
         );
+        let mut exec_argv = transport.argv.clone();
+        let sandbox_mode = match std::env::var("OMS_WORKER_SANDBOX").as_deref() {
+            Ok("strict") => Some(oms_supervisor::sandbox::SandboxMode::Strict),
+            Ok("auto") => Some(oms_supervisor::sandbox::SandboxMode::Auto),
+            _ => None,
+        };
+        if let Some(mode) = sandbox_mode
+            && !(mode == oms_supervisor::sandbox::SandboxMode::Auto && route.provider == "codex")
+            && let Some((program, rest)) = exec_argv.split_first()
+        {
+            let mut extra_rw_dirs = Vec::new();
+            for (k, v) in &environment {
+                if k == "CARGO_TARGET_DIR" || k == "CODEX_HOME" {
+                    let p = PathBuf::from(v);
+                    if p.is_dir() {
+                        extra_rw_dirs.push(p);
+                    }
+                }
+            }
+            if let Some(home) = std::env::var_os("HOME") {
+                for sub in [".claude", ".config", ".cache"] {
+                    let p = PathBuf::from(&home).join(sub);
+                    if p.is_dir() {
+                        extra_rw_dirs.push(p);
+                    }
+                }
+            }
+            let spec = oms_supervisor::sandbox::SandboxSpec {
+                worktree: cwd.to_owned(),
+                extra_rw_dirs,
+                allow_network: true,
+            };
+            let (wrapped_prog, wrapped_args, _) =
+                oms_supervisor::sandbox::wrap_command(program, rest, &spec, mode)
+                    .map_err(|e| Error::new(2, e))?;
+            exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
+        }
+        let started = std::time::Instant::now();
         let mut result = context.executor.execute(
             Invocation {
-                argv: transport.argv.clone(),
+                argv: exec_argv,
                 cwd: cwd.to_owned(),
                 input: transport.input.clone(),
                 environment,
@@ -1296,6 +1479,7 @@ pub(crate) fn execute_env(
             },
             context.interrupted,
         )?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         let (decoded, terminal) = decode_output(&route.provider, &result.stdout);
         result.stdout = decoded.into_bytes();
         if !result.stdout.is_empty()
@@ -1306,8 +1490,18 @@ pub(crate) fn execute_env(
                 .extend_from_slice(format!("\nconfigured model\n{model}\n").as_bytes());
         }
         result.complete &= terminal;
+        let seat_key = account.as_deref().unwrap_or(&route.provider);
+        let cap_hit = capacity(&result);
+        record_seat_health(
+            account_repo,
+            seat_key,
+            result.code == 0 && result.complete && !cap_hit,
+            elapsed_ms,
+            cap_hit,
+            context.interrupted,
+        );
         if overflow == 0
-            && capacity(&result)
+            && cap_hit
             && let Some(account) = account.filter(|s| s != "default")
         {
             excluded.insert(account);
@@ -1966,5 +2160,89 @@ mod bridge_route_tests {
         assert!(!automatic.explicit);
         assert!(resolve_route(source, "", "", "", "worker").is_err());
         assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());
+    }
+
+    #[test]
+    fn adaptive_routing_prefers_healthy_low_latency_accounts_and_strict_sandbox() {
+        let accounts = vec![
+            Account {
+                id: "slow-or-cooled".into(),
+                home: PathBuf::from("/tmp/a1"),
+                used: Some(20.0),
+                running: 0,
+                usable: true,
+                models: None,
+            },
+            Account {
+                id: "fast-healthy".into(),
+                home: PathBuf::from("/tmp/a2"),
+                used: Some(20.0),
+                running: 0,
+                usable: true,
+                models: None,
+            },
+        ];
+        let mut health = std::collections::BTreeMap::new();
+        health.insert(
+            "slow-or-cooled".into(),
+            SeatHealth {
+                ok: 1,
+                err: 0,
+                latency_ms: 900,
+                cooldown_until: 2000,
+            },
+        );
+        health.insert(
+            "fast-healthy".into(),
+            SeatHealth {
+                ok: 3,
+                err: 0,
+                latency_ms: 120,
+                cooldown_until: 0,
+            },
+        );
+        let picked =
+            select_account_adaptive(&accounts, true, false, "provider-default", &health, 1000)
+                .unwrap();
+        assert_eq!(picked.id, "fast-healthy");
+
+        // When cooldown has expired, lower latency still wins ties at identical quota.
+        let picked_after =
+            select_account_adaptive(&accounts, true, false, "provider-default", &health, 3000)
+                .unwrap();
+        assert_eq!(picked_after.id, "fast-healthy");
+
+        if std::env::var_os("SANDBOX_STRICT_PROBE").as_deref() == Some(OsStr::new("1")) {
+            let dir = std::env::temp_dir().join(format!("oms-sbx-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let route = Route {
+                provider: "claude".into(),
+                model: "provider-default".into(),
+                effort: String::new(),
+                explicit: false,
+            };
+            let capture = Capture::default();
+            let err = direct(&route, b"probe", true, &dir, &dir, &capture).unwrap_err();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(err.message.contains("sandbox backend"), "{}", err.message);
+            return;
+        }
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "providers::bridge_route_tests::adaptive_routing_prefers_healthy_low_latency_accounts_and_strict_sandbox",
+            ])
+            .env("SANDBOX_STRICT_PROBE", "1")
+            .env("OMS_WORKER_SANDBOX", "strict")
+            .env("OMS_BWRAP_BIN", "/nonexistent-oms-bwrap-bin")
+            .env("OMS_SANDBOX_EXEC_BIN", "/nonexistent-oms-sandbox-exec")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

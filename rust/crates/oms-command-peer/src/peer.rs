@@ -613,6 +613,48 @@ pub(crate) fn call(
         )?;
     }
     let workdir = private.as_ref().map_or(repo, |tree| tree.path.as_path());
+    let live_attempt = if repo.join(".oms").is_dir() && tool != "_synthesis" {
+        let mut refs = obj([
+            ("artifact", artifact.to_string_lossy().into_owned().into()),
+            ("panel_alias", format!("{}-{tool}", route.provider).into()),
+            (
+                "panel_role",
+                if tool == "peer-review" {
+                    "reviewer"
+                } else {
+                    "advisor"
+                }
+                .into(),
+            ),
+            ("panel_model", route.model.clone().into()),
+            ("panel_label", format!("{tool} ({})", route.provider).into()),
+        ]);
+        if let Ok(room_id) = std::env::var("OMS_ROOM_ID")
+            && !room_id.trim().is_empty()
+        {
+            refs.set("panel_room_id", room_id.trim());
+        }
+        let parent_attempt_id = std::env::var("OMS_PANEL_MAIN_ATTEMPT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_default();
+        let req = oms_command_operations::StartRequest {
+            provider: route.provider.clone(),
+            tool: tool.to_owned(),
+            task_id: args.get("task-id").into(),
+            parent_attempt_id,
+            refs,
+            ..Default::default()
+        };
+        oms_command_operations::create_attempt(repo, &req, context.interrupted)
+            .ok()
+            .inspect(|id| {
+                let _ = crate::delegate::transition(repo, id, "starting", obj([]), context);
+                let _ = crate::delegate::transition(repo, id, "working", obj([]), context);
+            })
+    } else {
+        None
+    };
     let result = providers::execute_with_fallback(
         &mut route,
         args.get("fallback-model"),
@@ -633,6 +675,14 @@ pub(crate) fn call(
             elapsed: std::time::Duration::ZERO,
         },
     };
+    if let Some(id) = live_attempt {
+        let to_state = if result.code == 0 && result.complete {
+            "completed"
+        } else {
+            "failed"
+        };
+        let _ = crate::delegate::transition(repo, &id, to_state, obj([]), context);
+    }
     if let Some(tree) = private {
         let unchanged = tree.identity(context).is_ok()
             && process::git(context, &tree.path, &["diff", "--binary", "HEAD", "--"])

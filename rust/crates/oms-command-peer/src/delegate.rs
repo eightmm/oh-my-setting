@@ -6,6 +6,7 @@ use crate::{
     safety, storage,
 };
 use std::ffi::{OsStr, OsString};
+use std::io::IsTerminal;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
@@ -14,27 +15,37 @@ struct CargoSlot {
     target_dir: PathBuf,
 }
 
-fn acquire_cargo_slot(repo: &Path) -> Option<CargoSlot> {
+fn acquire_cargo_slot(repo: &Path, provider: &str) -> Option<CargoSlot> {
     if !(repo.join("Cargo.toml").is_file() || repo.join("rust/Cargo.toml").is_file()) {
         return None;
     }
     if std::env::var_os("OMS_DELEGATE_ISOLATED_BUILD").as_deref() == Some(OsStr::new("1"))
+        || std::env::var_os("OMS_CARGO_SLOT_CACHE").as_deref() == Some(OsStr::new("0"))
         || std::env::var_os("CARGO_TARGET_DIR").is_some_and(|v| !v.is_empty())
     {
         return None;
     }
-    let cache_root = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|h| PathBuf::from(h).join(".cache"))
-        })?;
     let key = storage::hash(repo.to_string_lossy().as_bytes());
-    let base = cache_root
-        .join("oh-my-setting/cargo-slots")
-        .join(&key[..16]);
+    let base = if provider == "codex" {
+        std::env::temp_dir()
+            .join(format!(
+                "oms-cargo-slots-{}/cargo-slots",
+                rustix::process::geteuid().as_raw()
+            ))
+            .join(&key[..16])
+    } else {
+        let cache_root = std::env::var_os("XDG_CACHE_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(|h| PathBuf::from(h).join(".cache"))
+            })?;
+        cache_root
+            .join("oh-my-setting/cargo-slots")
+            .join(&key[..16])
+    };
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
     builder.create(&base).ok()?;
@@ -309,11 +320,140 @@ pub(crate) fn verification(args: &Args, repo: &Path, read: bool) -> Result<Optio
         fail("check.sh has no declared fast mode; give --verify CMD or --no-verify")
     }
 }
+fn build_graph_context(
+    repo: &Path,
+    question: &str,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let is_valid_helper = |path: &Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| {
+            meta.file_type().is_file()
+                && (meta.permissions().mode() & 0o111 != 0)
+                && (meta.permissions().mode() & 0o022 == 0)
+        })
+    };
+    let helper = std::env::current_exe().ok().and_then(|exe| {
+        let sibling = exe
+            .parent()
+            .map(|dir| dir.join("oms-graph-python-helper"))
+            .filter(|p| is_valid_helper(p));
+        sibling.or_else(|| {
+            exe.parent()
+                .and_then(Path::parent)
+                .map(|dir| dir.join("oms-graph-python-helper"))
+                .filter(|p| is_valid_helper(p))
+        })
+    });
+    let sig_args = |no_refresh: bool| -> Vec<OsString> {
+        let mut argv: Vec<OsString> = vec![
+            "project".into(),
+            "map".into(),
+            "--signatures".into(),
+            "--task".into(),
+            question.into(),
+            "--max-bytes".into(),
+            "12000".into(),
+            "--repo".into(),
+            repo.as_os_str().to_owned(),
+        ];
+        if no_refresh {
+            argv.push("--no-refresh".into());
+        }
+        argv
+    };
+    let (code, stdout, _) =
+        oms_command_graph::run_with_helper(&sig_args(false), repo, interrupted, helper.as_deref());
+    if code == 0 && !stdout.is_empty() {
+        return String::from_utf8(stdout).ok();
+    }
+    let build_args: Vec<OsString> = vec![
+        "project".into(),
+        "build".into(),
+        "--exclude".into(),
+        "*.py".into(),
+        "--repo".into(),
+        repo.as_os_str().to_owned(),
+    ];
+    if oms_command_graph::run_with_helper(&build_args, repo, interrupted, None).0 == 0 {
+        let (code, stdout, _) =
+            oms_command_graph::run_with_helper(&sig_args(true), repo, interrupted, None);
+        if code == 0 && !stdout.is_empty() {
+            return String::from_utf8(stdout).ok();
+        }
+    }
+    let brief_args: Vec<OsString> = vec![
+        "project".into(),
+        "map".into(),
+        "--brief".into(),
+        "--no-refresh".into(),
+        "--repo".into(),
+        repo.as_os_str().to_owned(),
+    ];
+    let (code, stdout, _) =
+        oms_command_graph::run_with_helper(&brief_args, repo, interrupted, None);
+    if code == 0 && !stdout.is_empty() {
+        String::from_utf8(stdout).ok()
+    } else {
+        None
+    }
+}
+
+fn interactive_turns_from_stdin() -> Result<Vec<String>> {
+    use std::io::Read;
+    let mut raw = String::new();
+    std::io::stdin()
+        .read_to_string(&mut raw)
+        .map_err(|e| Error::new(2, format!("failed reading interactive turns: {e}")))?;
+    let mut turns = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('{')
+            && let Ok(v) = V::parse(trimmed.as_bytes())
+        {
+            if v.get("action").text() == Some("finish") {
+                break;
+            }
+            if let Some(prompt) = v.get("prompt").text() {
+                if !prompt.trim().is_empty() {
+                    turns.push(prompt.trim().to_owned());
+                }
+                continue;
+            }
+        }
+        turns.push(trimmed.to_owned());
+    }
+    Ok(turns)
+}
+
+fn brief_label(question: &str) -> String {
+    for raw in question.lines() {
+        let trimmed = raw
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .trim_start_matches("Goal:")
+            .trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("goal:") {
+            let clean: String = trimmed
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(80)
+                .collect();
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+    }
+    "peer-delegate".into()
+}
+
 pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     safety::parent()?;
-    if args.has("interactive") {
-        return fail("interactive control requires a streaming input adapter; no worktree created");
-    }
+    let interactive = args.has("interactive");
     if args.has("plan-task")
         || args.has("observe-plan-binding")
         || args.has("terminalize-resumed-repair")
@@ -328,9 +468,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if args.has("resume-session") {
         return fail("native session relocation must be bound before resuming a delegation");
     }
-    if args.has("context-manifest")
-        || args.has("graph-context") && !args.has("no-graph-context") && !args.has("context-pack")
-    {
+    if args.has("context-manifest") {
         return fail("typed context compilation is not integrated; no worktree created");
     }
     let orientation = if args.has("context-pack") {
@@ -426,6 +564,16 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             "orientation metadata",
             orientation.as_bytes(),
         )?);
+    } else if args.has("graph-context")
+        && !args.has("no-graph-context")
+        && !args.has("context-pack")
+        && let Some(graph_text) = build_graph_context(&repo, &question, context.interrupted)
+    {
+        prompt.push_str(&safety::untrusted(
+            "project graph",
+            "task signatures",
+            graph_text.as_bytes(),
+        )?);
     }
     if read {
         prompt.push_str(
@@ -511,27 +659,65 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         }
         return Ok(out(output.into_bytes()));
     }
+    if interactive && std::io::stdin().is_terminal() {
+        return fail("--interactive requires NDJSON turn input on stdin; no worktree created");
+    }
+    let interactive_turns = if interactive {
+        let turns = interactive_turns_from_stdin()?;
+        if turns.is_empty() {
+            vec![String::new()]
+        } else {
+            turns
+        }
+    } else {
+        Vec::new()
+    };
     let worktree = Worktree::create(&repo, &base, context)?;
+    let mut attempt_refs = obj([
+        ("artifact", artifact.to_string_lossy().into_owned().into()),
+        ("patch", patch.to_string_lossy().into_owned().into()),
+        (
+            "worktree",
+            worktree
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+                .into(),
+        ),
+    ]);
+    let mut parent_attempt_id = String::new();
+    if std::env::var_os("OMS_PANEL_DISPATCH").as_deref() != Some(OsStr::new("1")) {
+        attempt_refs.set(
+            "panel_alias",
+            V::from(format!("{}-delegate", target.provider)),
+        );
+        attempt_refs.set(
+            "panel_role",
+            V::from(if read { "researcher" } else { "delegate" }),
+        );
+        attempt_refs.set("panel_model", V::from(route.model.as_str()));
+        attempt_refs.set("panel_label", V::from(brief_label(&question)));
+        if let Ok(room_id) = std::env::var("OMS_ROOM_ID")
+            && !room_id.trim().is_empty()
+        {
+            attempt_refs.set("panel_room_id", V::from(room_id.trim()));
+        }
+        if let Ok(main_id) = std::env::var("OMS_PANEL_MAIN_ATTEMPT")
+            && !main_id.trim().is_empty()
+        {
+            parent_attempt_id = main_id.trim().to_owned();
+        }
+    }
     let attempt = oms_command_operations::create_attempt(
         &repo,
         &oms_command_operations::StartRequest {
             provider: target.provider.clone(),
             tool: "peer-delegate".into(),
             task_id: args.get("task-id").into(),
-            refs: obj([
-                ("artifact", artifact.to_string_lossy().into_owned().into()),
-                ("patch", patch.to_string_lossy().into_owned().into()),
-                (
-                    "worktree",
-                    worktree
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                        .into(),
-                ),
-            ]),
+            parent_attempt_id,
+            refs: attempt_refs,
             ..Default::default()
         },
         context.interrupted,
@@ -543,7 +729,8 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut captured = Vec::new();
     let mut verified = "not_run";
     let mut needs_keep = args.has("keep-worktree");
-    let cargo_slot = acquire_cargo_slot(&repo);
+    let mut interactive_stdout = String::new();
+    let cargo_slot = acquire_cargo_slot(&repo, &target.provider);
     let extra_env: Vec<(OsString, OsString)> = cargo_slot
         .as_ref()
         .map(|slot| {
@@ -556,36 +743,125 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     for round in 0..=repair {
         crate::check(context.interrupted)?;
         worktree.identity(context)?;
-        let result = providers::execute_with_fallback_env(
-            &mut route,
-            args.get("fallback-model"),
-            prompt.as_bytes(),
-            &worktree.path,
-            !read,
-            peer::timeout(args, "peer-delegate")?,
-            &repo,
-            &extra_env,
-            context,
-        );
-        let result = match result {
-            Ok(r) => r,
-            Err(error) => {
-                code = error.code;
-                body.extend_from_slice(format!("\n## Output\n\n{}\n", error.message).as_bytes());
-                break;
+        if interactive && round == 0 {
+            let mut turn_history = String::new();
+            let timeout = peer::timeout(args, "peer-delegate")?;
+            code = 0;
+            for (idx, turn_prompt) in interactive_turns.iter().enumerate() {
+                crate::check(context.interrupted)?;
+                worktree.identity(context)?;
+                let mut full_prompt = prompt.clone();
+                if !turn_history.is_empty() {
+                    full_prompt.push_str("\n## Prior Interactive Turns\n");
+                    full_prompt.push_str(&turn_history);
+                }
+                if !turn_prompt.is_empty() {
+                    full_prompt.push_str(&format!("\n## Turn {} Input\n{turn_prompt}\n", idx + 1));
+                }
+                safety::outbound(full_prompt.as_bytes())?;
+                let res = providers::execute_with_fallback_env(
+                    &mut route,
+                    args.get("fallback-model"),
+                    full_prompt.as_bytes(),
+                    &worktree.path,
+                    !read,
+                    timeout,
+                    &repo,
+                    &extra_env,
+                    context,
+                );
+                let res = match res {
+                    Ok(r) => r,
+                    Err(error) => {
+                        code = error.code;
+                        body.extend_from_slice(
+                            format!("\n## Turn {} Error\n\n{}\n", idx + 1, error.message)
+                                .as_bytes(),
+                        );
+                        let line = obj([
+                            ("turn", V::Num((idx + 1).to_string())),
+                            ("code", V::Num(code.to_string())),
+                            ("complete", false.into()),
+                            ("error", error.message.into()),
+                        ])
+                        .json(false)?;
+                        interactive_stdout.push_str(&String::from_utf8_lossy(&line));
+                        interactive_stdout.push('\n');
+                        break;
+                    }
+                };
+                let turn_code = if !res.complete && res.code == 0 {
+                    1
+                } else {
+                    res.code
+                };
+                let clean = safety::redact(&res.stdout)?;
+                let clean_str = String::from_utf8_lossy(&clean).into_owned();
+                body.extend_from_slice(
+                    format!("\n## Turn {}\n\n{clean_str}\n", idx + 1).as_bytes(),
+                );
+                turn_history.push_str(&format!(
+                    "\nTurn {}: {}\nReply: {}\n",
+                    idx + 1,
+                    turn_prompt,
+                    clean_str.chars().take(4000).collect::<String>()
+                ));
+                if turn_history.len() > 24 * 1024 {
+                    let drop_bytes = turn_history.len() - 24 * 1024;
+                    let boundary = turn_history
+                        .char_indices()
+                        .find(|(pos, _)| *pos >= drop_bytes)
+                        .map_or(turn_history.len(), |(pos, _)| pos);
+                    turn_history.drain(..boundary);
+                }
+                let line = obj([
+                    ("turn", V::Num((idx + 1).to_string())),
+                    ("code", V::Num(turn_code.to_string())),
+                    ("complete", res.complete.into()),
+                    ("output", clean_str.into()),
+                ])
+                .json(false)?;
+                interactive_stdout.push_str(&String::from_utf8_lossy(&line));
+                interactive_stdout.push('\n');
+                code = turn_code;
+                if turn_code != 0 {
+                    break;
+                }
             }
-        };
-        code = result.code;
-        if !result.complete && code == 0 {
-            code = 1;
+        } else {
+            let result = providers::execute_with_fallback_env(
+                &mut route,
+                args.get("fallback-model"),
+                prompt.as_bytes(),
+                &worktree.path,
+                !read,
+                peer::timeout(args, "peer-delegate")?,
+                &repo,
+                &extra_env,
+                context,
+            );
+            let result = match result {
+                Ok(r) => r,
+                Err(error) => {
+                    code = error.code;
+                    body.extend_from_slice(
+                        format!("\n## Output\n\n{}\n", error.message).as_bytes(),
+                    );
+                    break;
+                }
+            };
+            code = result.code;
+            if !result.complete && code == 0 {
+                code = 1;
+            }
+            body.extend_from_slice(
+                format!(
+                    "\n## Output\n\n{}\n",
+                    String::from_utf8_lossy(&safety::redact(&result.stdout)?)
+                )
+                .as_bytes(),
+            );
         }
-        body.extend_from_slice(
-            format!(
-                "\n## Output\n\n{}\n",
-                String::from_utf8_lossy(&safety::redact(&result.stdout)?)
-            )
-            .as_bytes(),
-        );
         worktree.identity(context)?;
         process::git(
             context,
@@ -774,7 +1050,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     Ok((
         code,
         format!(
-            "{}\n{}\n",
+            "{interactive_stdout}{}\n{}\n",
             repo.join(artifact).display(),
             repo.join(patch).display()
         )
