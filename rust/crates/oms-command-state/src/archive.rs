@@ -47,13 +47,18 @@ fn real_oms_dir(repo: &Path) -> Result<()> {
     )
 }
 
-fn private_files(path: &Path) {
+fn private_files(path: &Path) -> Result<()> {
     for suffix in ["", "-wal", "-shm"] {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
-        let _ =
-            std::fs::set_permissions(PathBuf::from(name), std::fs::Permissions::from_mode(0o600));
+        match std::fs::set_permissions(PathBuf::from(name), std::fs::Permissions::from_mode(0o600))
+        {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(error(2, e)),
+        }
     }
+    Ok(())
 }
 
 fn open_rw(repo: &Path) -> Result<Connection> {
@@ -90,7 +95,7 @@ fn open_rw(repo: &Path) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS entries(path TEXT PRIMARY KEY, kind TEXT NOT NULL, sha256 TEXT NOT NULL, mtime_sec INTEGER NOT NULL, bytes INTEGER NOT NULL, archived_at TEXT NOT NULL);
          CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(path, kind, body, tokenize='unicode61');",
     ))?;
-    private_files(&path);
+    private_files(&path)?;
     Ok(conn)
 }
 
@@ -314,7 +319,7 @@ pub(crate) fn compact(
             r.get::<_, i64>(2)?,
         ))
     }))?;
-    private_files(&db_path(&ctx.repo));
+    private_files(&db_path(&ctx.repo))?;
     report.archived = loaded.len();
     if busy != 0 || log != done {
         // Committed but not fully checkpointed: retain every original rather than trust the WAL.

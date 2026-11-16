@@ -9,6 +9,48 @@ use std::time::SystemTime;
 const USAGE: &str =
     "usage: oms runtime ssh-adapter <probe|sync-bundle|exec> [options] [-- command...]";
 
+fn ssh_control_path(host: &str, port: Option<u16>) -> Result<String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let uid = rustix::process::geteuid().as_raw();
+    let suffix = format!(
+        "s-{}.sock",
+        &sha256(format!("{host}\0{}", port.unwrap_or(22)).as_bytes())[..16]
+    );
+    let mut candidates = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        let dir = PathBuf::from(runtime).join("oms-ssh");
+        if dir.join(&suffix).to_string_lossy().len() <= 80 {
+            candidates.push(dir);
+        }
+    }
+    candidates.push(PathBuf::from(format!("/tmp/oms-ssh-{uid}")));
+    for dir in candidates {
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => continue,
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != uid {
+            continue;
+        }
+        if meta.permissions().mode() & 0o077 != 0
+            && std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).is_err()
+        {
+            continue;
+        }
+        let control = dir.join(&suffix).to_string_lossy().into_owned();
+        if control.len() <= 80 {
+            return Ok(control);
+        }
+    }
+    Err(error(
+        "cannot provision user-private 0700 SSH control directory within socket limit",
+    ))
+}
+
 pub fn run(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Response {
     execute(args, cwd, interrupted).unwrap_or_else(Response::failure)
 }
@@ -93,10 +135,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 .ok_or_else(|| error("invalid SSH port"))
         })
         .transpose()?;
-    let control = format!(
-        "/tmp/oms-ssh-{}.sock",
-        &sha256(format!("{host}\0{}", port.unwrap_or(22)).as_bytes())[..16]
-    );
+    let control = ssh_control_path(&host, port)?;
     assert!(control.len() <= 80);
     require(!interrupted.load(Ordering::Relaxed), "interrupted")?;
     let mut ssh = Command::new(std::env::var_os("OMS_SSH_BIN").unwrap_or_else(|| "ssh".into()));
@@ -411,7 +450,17 @@ mod tests {
         assert_eq!(response.code, 0);
         let v: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
         assert_eq!(v["stdout"], "ok");
-        assert!(v["control_path"].as_str().unwrap().len() <= 80);
+        let ctrl = v["control_path"].as_str().unwrap();
+        assert!(ctrl.len() <= 80);
+        let ctrl_dir = Path::new(ctrl).parent().unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(ctrl_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
         let args = std::fs::read_to_string(root.join("args")).unwrap();
         for option in [
             "ControlMaster=auto",

@@ -32,7 +32,7 @@ pub const WAKE_DAILY_LIMIT: usize = 6;
 pub const WAKE_IDLE_SECONDS: i64 = 1800;
 pub const TICK_RECEIPT_MAX: usize = 1024 * 1024;
 const RESUME_SUBJECT: &str = "autopilot";
-const CHILD_ROLES: [&str; 4] = ["worker", "advisor", "reviewer", "researcher"];
+const CHILD_ROLES: [&str; 5] = ["worker", "advisor", "reviewer", "researcher", "delegate"];
 const LAUNCH_HARNESSES: [&str; 4] = ["claude", "codex", "pi", "agy"];
 const APPROVED_STAGES: [&str; 4] = ["approved", "driving", "reviewing", "publishing"];
 

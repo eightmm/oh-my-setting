@@ -542,8 +542,23 @@ pub fn build(
     let found = discover(repo, options, cancel)?;
     Ok(build_from(repo, state, options, cancel, explicit_helper, found)?.0)
 }
+fn cache_private_files(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        match std::fs::set_permissions(PathBuf::from(name), std::fs::Permissions::from_mode(0o600))
+        {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 fn cache_open(state: &Path, writable: bool) -> Result<Option<rusqlite::Connection>> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
     let path = state.join("cache.sqlite3");
     no_symlinks(&path)?;
     if writable {
@@ -562,7 +577,7 @@ fn cache_open(state: &Path, writable: bool) -> Result<Option<rusqlite::Connectio
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(Error::new("invalid graph cache file"));
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        cache_private_files(&path)?;
     } else if !path.exists() {
         return Ok(None);
     }
@@ -574,6 +589,7 @@ fn cache_open(state: &Path, writable: bool) -> Result<Option<rusqlite::Connectio
     let db = rusqlite::Connection::open_with_flags(&path, flags).map_err(cache_error)?;
     if writable {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; CREATE TABLE IF NOT EXISTS file_cache (cache_key TEXT PRIMARY KEY, path TEXT NOT NULL, sha256 TEXT NOT NULL, version INTEGER NOT NULL, schema_ver INTEGER NOT NULL, payload BLOB NOT NULL);").map_err(cache_error)?;
+        cache_private_files(&path)?;
     }
     Ok(Some(db))
 }
@@ -624,10 +640,6 @@ fn build_from(
     let mut extractions = vec![];
     let mut cached = 0;
     let legacy = state.join("cache");
-    no_symlinks(&legacy)?;
-    if std::fs::symlink_metadata(&legacy).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
-        std::fs::remove_dir_all(&legacy)?;
-    }
     let mut db = cache_open(state, true)?.expect("writable cache");
     let transaction = db.transaction().map_err(cache_error)?;
     transaction
@@ -733,6 +745,11 @@ fn build_from(
     transaction.commit().map_err(cache_error)?;
     db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .map_err(cache_error)?;
+    cache_private_files(&state.join("cache.sqlite3"))?;
+    no_symlinks(&legacy)?;
+    if std::fs::symlink_metadata(&legacy).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
+        std::fs::remove_dir_all(&legacy)?;
+    }
     Ok((manifest, index))
 }
 pub fn load(state: &Path) -> Result<Value> {

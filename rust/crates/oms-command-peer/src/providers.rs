@@ -1646,7 +1646,8 @@ fn running_accounts(repo: &Path) -> Result<std::collections::BTreeMap<String, us
             text(refs, "panel_provider")
         };
         if provider != "codex"
-            || !["worker", "researcher", "advisor", "reviewer"].contains(&text(refs, "panel_role"))
+            || !["worker", "researcher", "advisor", "reviewer", "delegate"]
+                .contains(&text(refs, "panel_role"))
             || ![
                 "queued",
                 "starting",

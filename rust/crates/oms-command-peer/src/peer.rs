@@ -648,9 +648,15 @@ pub(crate) fn call(
         };
         oms_command_operations::create_attempt(repo, &req, context.interrupted)
             .ok()
-            .inspect(|id| {
-                let _ = crate::delegate::transition(repo, id, "starting", obj([]), context);
-                let _ = crate::delegate::transition(repo, id, "working", obj([]), context);
+            .and_then(|id| {
+                if crate::delegate::transition(repo, &id, "starting", obj([]), context).is_ok()
+                    && crate::delegate::transition(repo, &id, "working", obj([]), context).is_ok()
+                {
+                    Some(id)
+                } else {
+                    let _ = crate::delegate::transition(repo, &id, "failed", obj([]), context);
+                    None
+                }
             })
     } else {
         None
@@ -676,12 +682,39 @@ pub(crate) fn call(
         },
     };
     if let Some(id) = live_attempt {
-        let to_state = if result.code == 0 && result.complete {
-            "completed"
-        } else {
-            "failed"
+        let retry_transition = |state: &str| {
+            let mut last_err = None;
+            for attempt_idx in 0..3 {
+                match crate::delegate::transition(repo, &id, state, obj([]), context) {
+                    Ok(()) => return Ok(()),
+                    Err(err) => {
+                        last_err = Some(err);
+                        if attempt_idx < 2 {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                    }
+                }
+            }
+            Err(last_err.unwrap())
         };
-        let _ = crate::delegate::transition(repo, &id, to_state, obj([]), context);
+        let outcome = if result.code == 0 && result.complete {
+            retry_transition("review").and_then(|()| retry_transition("done"))
+        } else {
+            let to_state = if result.code == 124 {
+                "timed_out"
+            } else if result.code == 130 {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            retry_transition(to_state)
+        };
+        if let Err(err) = outcome {
+            result.code = if result.code == 0 { 1 } else { result.code };
+            result
+                .stderr
+                .extend_from_slice(format!("\nfailed finalizing attempt {id}: {err}\n").as_bytes());
+        }
     }
     if let Some(tree) = private {
         let unchanged = tree.identity(context).is_ok()

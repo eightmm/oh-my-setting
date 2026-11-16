@@ -294,7 +294,15 @@ fn main_line(v: &Value, ctx: &Context<'_>) -> String {
     let model = &v["model"];
     identity.push(clean(
         &model["display_name"],
-        &clean(&model["id"], "Claude", 24, false),
+        &clean(
+            &model["id"],
+            model
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Claude"),
+            24,
+            false,
+        ),
         24,
         false,
     ));
