@@ -395,7 +395,15 @@ pub(crate) fn process(pid: u32, flag: &AtomicBool, cwd: &std::path::Path) -> Opt
             fields.get(1)?.parse().ok()?,
         ));
     }
-    let ps = r::find("ps", cwd)?;
+    let ps = r::find("ps", cwd).or_else(|| {
+        [
+            std::path::Path::new("/bin/ps"),
+            std::path::Path::new("/usr/bin/ps"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(std::path::Path::to_path_buf)
+    })?;
     let out = r::command_env(
         ps,
         &[

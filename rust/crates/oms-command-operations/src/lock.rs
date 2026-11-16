@@ -38,10 +38,15 @@ pub fn process_start(pid: u32) -> Option<String> {
     {
         return Some(format!("proc:{}", fields[19]));
     }
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "lstart="])
-        .env("LC_ALL", "C")
-        .output()
+    let run_ps = |program: &str| {
+        std::process::Command::new(program)
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .env("LC_ALL", "C")
+            .output()
+    };
+    let output = run_ps("ps")
+        .or_else(|_| run_ps("/bin/ps"))
+        .or_else(|_| run_ps("/usr/bin/ps"))
         .ok()?;
     if !output.status.success() {
         return None;
