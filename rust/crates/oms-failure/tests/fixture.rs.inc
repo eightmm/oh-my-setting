@@ -96,6 +96,9 @@ const CASES: &[Case] = &[
 const CATALOG: &[CatalogRow] = &[
     ("guard_parent_interference", false, false, false, "inspect_guard_evidence_and_redispatch"),
     ("provider_capacity", true, true, false, "one_explicit_fallback"),
+    ("cuda_oom_fragmentation", true, false, false, "reduce_fragmentation"),
+    ("cuda_oom_peak", true, false, false, "reduce_batch_or_offload"),
+    ("nccl_watchdog_timeout", true, false, false, "restart_collective_with_debug"),
     ("provider_timeout", false, false, false, "resize_task_or_budget"),
     ("read_guard_changed", true, false, false, "rerun_review"),
     ("outbound_context_refused", false, false, false, "remove_sensitive_context"),

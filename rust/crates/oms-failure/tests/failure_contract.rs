@@ -90,3 +90,31 @@ fn json_fields_and_invalid_codepoint() {
         .is_err()
     );
 }
+
+#[test]
+fn gpu_and_collective_failures_take_precedence() {
+    for (text, code, recovery) in [
+        (
+            "CUDA out of memory; expandable_segments",
+            "cuda_oom_fragmentation",
+            "reduce_fragmentation",
+        ),
+        (
+            "CUDA out of memory",
+            "cuda_oom_peak",
+            "reduce_batch_or_offload",
+        ),
+        (
+            "NCCL WARN collective Timeout",
+            "nccl_watchdog_timeout",
+            "restart_collective_with_debug",
+        ),
+    ] {
+        let result = classify(text, None, "");
+        assert_eq!((result.code, result.properties.recovery), (code, recovery));
+        assert!(result.properties.retryable);
+        assert!(
+            !result.properties.fallback_allowed && !result.properties.context_escalation_allowed
+        );
+    }
+}

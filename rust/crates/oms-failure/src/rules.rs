@@ -22,6 +22,36 @@ pub(super) const RULES: &[Rule] = &[
         },
     },
     Rule {
+        code: "cuda_oom_fragmentation",
+        pattern: r"reserved memory is >> allocated memory|expandable_segments|memory fragmentation",
+        properties: Properties {
+            retryable: true,
+            fallback_allowed: false,
+            context_escalation_allowed: false,
+            recovery: "reduce_fragmentation",
+        },
+    },
+    Rule {
+        code: "cuda_oom_peak",
+        pattern: r"cuda out of memory|cublasstatusallocfailed|cudnnstatusallocfailed|outofmemoryerror.*cuda",
+        properties: Properties {
+            retryable: true,
+            fallback_allowed: false,
+            context_escalation_allowed: false,
+            recovery: "reduce_batch_or_offload",
+        },
+    },
+    Rule {
+        code: "nccl_watchdog_timeout",
+        pattern: r"nccl warn.*timeout|processgroupnccl.*watchdog|ncclsystemerror|ncclremoteerror",
+        properties: Properties {
+            retryable: true,
+            fallback_allowed: false,
+            context_escalation_allowed: false,
+            recovery: "restart_collective_with_debug",
+        },
+    },
+    Rule {
         code: "provider_timeout",
         pattern: r"timeout|timed out|wall clock",
         properties: Properties {

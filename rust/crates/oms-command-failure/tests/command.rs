@@ -283,3 +283,30 @@ fn choice_repr_escapes_c1_controls() {
         )));
     }
 }
+
+#[test]
+fn gpu_and_collective_classifications_are_exposed() {
+    for (input, code, recovery) in [
+        (
+            "memory fragmentation",
+            "cuda_oom_fragmentation",
+            "reduce_fragmentation",
+        ),
+        (
+            "cublasStatusAllocFailed",
+            "cuda_oom_peak",
+            "reduce_batch_or_offload",
+        ),
+        (
+            "ProcessGroupNCCL Watchdog",
+            "nccl_watchdog_timeout",
+            "restart_collective_with_debug",
+        ),
+    ] {
+        let (status, output, error) = call(&["classify", input]);
+        assert_eq!(status, 0, "{}", String::from_utf8_lossy(&error));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(code));
+        assert!(output.contains(recovery));
+    }
+}

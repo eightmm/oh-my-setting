@@ -149,7 +149,10 @@ pub fn classify_codepoints(
         return Ok(result(r.code, r.properties, "explicit".into()));
     }
     if exit == Some(124) {
-        let r = &rules::RULES[2];
+        let r = rules::RULES
+            .iter()
+            .find(|r| r.code == "provider_timeout")
+            .expect("timeout rule");
         return Ok(result(r.code, r.properties, "exit-124".into()));
     }
     static REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
