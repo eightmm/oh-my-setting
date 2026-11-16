@@ -1259,7 +1259,7 @@ impl Env<'_> {
             self.resume_attempt(None, dry, once, scheduled_only)
         } else {
             // Main start takes this lock too, so no main can start between the liveness proof and the spawn.
-            self.locked(Duration::from_millis(100), |tx| {
+            self.locked(Duration::from_millis(500), |tx| {
                 self.resume_attempt(Some(tx), dry, once, scheduled_only)
             })
         };
@@ -1703,7 +1703,7 @@ impl Env<'_> {
             self.wake_attempt(None, dry, &reason)
         } else {
             // swap_main verifies and types under this lock; a wake must not interleave with a swap or start.
-            self.locked(Duration::from_millis(100), |tx| {
+            self.locked(Duration::from_millis(500), |tx| {
                 self.wake_attempt(Some(tx), dry, &reason)
             })
         };
@@ -3681,7 +3681,7 @@ mod tests {
         let mut sp_env = sched_pause_rig.env(t);
         sp_env.after_panel_lock = Some(&sp_hook);
         assert!(matches!(
-            sp_env.locked(Duration::from_millis(100), |tx| {
+            sp_env.locked(Duration::from_millis(500), |tx| {
                 sp_env.schedule_change(Some(tx), "pause", OWNER, 2, None)
             }),
             Err(Fail::Ledger(_))
@@ -3699,7 +3699,7 @@ mod tests {
         let mut sc_env = sched_create_rig.env(t);
         sc_env.after_panel_lock = Some(&sc_hook);
         assert!(matches!(
-            sc_env.locked(Duration::from_millis(100), |tx| {
+            sc_env.locked(Duration::from_millis(500), |tx| {
                 sc_env.schedule_change(Some(tx), "create", OWNER, 2, None)
             }),
             Err(Fail::Ledger(_))
@@ -4189,7 +4189,7 @@ mod tests {
         let concurrent = Rig::new("driving");
         concurrent.seed(json!(today));
         let mut settings = oms_lock::Settings::from_env().unwrap();
-        settings.timeout = Duration::from_millis(20);
+        settings.timeout = Duration::from_secs(2);
         let guard = oms_lock::Lock::for_file(&receipt_path(&concurrent.dir.0), settings)
             .unwrap()
             .acquire(None)
@@ -4802,7 +4802,7 @@ mod tests {
         let busy = rig.schedule_wait(
             t,
             &["--pause", "--contract", OWNER],
-            Duration::from_millis(100),
+            Duration::from_millis(500),
         );
         assert!(
             busy.0 == 1 && busy.2.contains("panel typing lock held"),
@@ -4810,7 +4810,7 @@ mod tests {
         );
         assert_eq!(rig.log(), before, "nothing was appended without the lock");
         assert_eq!(
-            rig.schedule_wait(t, &["--list"], Duration::from_millis(100))
+            rig.schedule_wait(t, &["--list"], Duration::from_millis(500))
                 .0,
             0
         );

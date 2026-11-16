@@ -52,7 +52,21 @@ pub(crate) fn start(pid: u64, observation: Observation<'_>) -> Result<Option<Vec
     }
     #[cfg(target_os = "macos")]
     {
-        ps(pid, observation, std::path::Path::new("/bin/ps"))
+        static SELF_START: std::sync::OnceLock<(u32, Vec<u8>)> = std::sync::OnceLock::new();
+        let self_pid = std::process::id();
+        if pid == self_pid as u64
+            && let Some((cached_pid, cached_bytes)) = SELF_START.get()
+            && *cached_pid == self_pid
+        {
+            return Ok(Some(cached_bytes.clone()));
+        }
+        let result = ps(pid, observation, std::path::Path::new("/bin/ps"))?;
+        if pid == self_pid as u64
+            && let Some(ref bytes) = result
+        {
+            let _ = SELF_START.set((self_pid, bytes.clone()));
+        }
+        Ok(result)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
