@@ -67,14 +67,26 @@ fn base64(raw: &[u8]) -> String {
     out
 }
 fn connect(path: &Path, deadline: Instant) -> Result<UnixStream, String> {
-    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+    #[cfg(not(target_os = "macos"))]
     let fd = rustix::net::socket_with(
         AddressFamily::UNIX,
         SocketType::STREAM,
-        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        rustix::net::SocketFlags::NONBLOCK | rustix::net::SocketFlags::CLOEXEC,
         None,
     )
     .map_err(|_| "socket unavailable")?;
+    #[cfg(target_os = "macos")]
+    let fd = {
+        let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
+            .map_err(|_| "socket unavailable")?;
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
+            .map_err(|_| "socket unavailable")?;
+        let flags = rustix::fs::fcntl_getfl(&fd).map_err(|_| "socket unavailable")?;
+        rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK)
+            .map_err(|_| "socket unavailable")?;
+        fd
+    };
     let addr = SocketAddrUnix::new(path).map_err(|_| "invalid socket path")?;
     loop {
         match rustix::net::connect(&fd, &addr) {

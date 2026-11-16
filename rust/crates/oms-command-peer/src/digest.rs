@@ -117,6 +117,7 @@ fn render(mut digest: oms_output::OutputDigest, json: bool, code: i32) -> Result
     };
     Ok((code, output, Vec::new()))
 }
+#[allow(clippy::unnecessary_cast)]
 fn file_digest(
     path: &Path,
     options: &oms_output::Options,
@@ -195,11 +196,11 @@ fn file_digest(
         || before.mtime_nsec() != after.mtime_nsec()
         || before.ctime() != after.ctime()
         || before.ctime_nsec() != after.ctime_nsec()
-        || named.st_dev != before.dev()
-        || named.st_ino != before.ino()
+        || named.st_dev as u64 != before.dev()
+        || named.st_ino as u64 != before.ino()
         || named.st_nlink != 1
-        || parent_after.dev() != parent_before.st_dev
-        || parent_after.ino() != parent_before.st_ino
+        || parent_after.dev() != parent_before.st_dev as u64
+        || parent_after.ino() != parent_before.st_ino as u64
         || parent.canonicalize()? != anchor.physical_root()
         || digest.raw.bytes as u64 != before.len()
     {

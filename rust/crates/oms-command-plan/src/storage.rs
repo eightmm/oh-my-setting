@@ -211,6 +211,7 @@ impl Store {
     pub fn optional(&self, path: impl AsRef<Path>, limit: usize) -> Result<Option<Vec<u8>>> {
         Ok(self.snapshot(path, limit, true)?.map(|s| s.raw))
     }
+    #[allow(clippy::unnecessary_cast)]
     pub fn snapshot(
         &self,
         path: impl AsRef<Path>,
@@ -275,7 +276,7 @@ impl Store {
         Ok(Some(FileSnapshot {
             raw,
             generation: generation(&after),
-            mode: after.st_mode & 0o7777,
+            mode: after.st_mode as u32 & 0o7777,
         }))
     }
     pub fn value(&self, path: impl AsRef<Path>, limit: usize) -> Result<Value> {

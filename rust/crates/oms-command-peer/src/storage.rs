@@ -220,6 +220,7 @@ pub fn append(repo: &Path, path: &Path, row: &V, interrupted: &AtomicBool) -> Re
 
 /// Retains the inode used by thread delivery cursors. A kill during a short
 /// write can leave an incomplete tail; all later writes refuse that tail.
+#[allow(clippy::unnecessary_cast)]
 pub fn log<T>(
     repo: &Path,
     path: &Path,
@@ -303,8 +304,8 @@ pub fn log<T>(
     let named = fs::statat(&directory, name, fs::AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|_| Error::new(2, "log disappeared before append"))?;
     if FileType::from_raw_mode(named.st_mode) != FileType::RegularFile
-        || named.st_dev != before.dev()
-        || named.st_ino != before.ino()
+        || named.st_dev as u64 != before.dev()
+        || named.st_ino as u64 != before.ino()
         || named.st_nlink != 1
         || named.st_size as u64 != before.len()
         || file.seek(SeekFrom::End(0))? != before.len()

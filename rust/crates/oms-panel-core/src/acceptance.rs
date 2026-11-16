@@ -267,7 +267,7 @@ impl Drop for IndexLock {
         let _ = std::fs::remove_file(&self.0);
     }
 }
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::unnecessary_cast)]
 fn exact_commit<S: Services + ?Sized>(
     repo: &Path,
     execution: &Path,
@@ -355,8 +355,8 @@ fn exact_commit<S: Services + ?Sized>(
         .map_err(Error::new)?;
         let info = rustix::fs::fstat(&fd).map_err(Error::new)?;
         require(
-            info.st_dev == source.dev()
-                && info.st_ino == source.ino()
+            info.st_dev as u64 == source.dev()
+                && info.st_ino as u64 == source.ino()
                 && info.st_size >= 0
                 && info.st_size as u64 <= 64 * 1024 * 1024,
             "Git index changed or exceeds bound",

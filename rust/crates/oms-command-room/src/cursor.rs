@@ -49,12 +49,13 @@ fn anchor(s: &Snapshot, offset: usize) -> String {
     bytes.extend_from_slice(&s.bytes[offset.saturating_sub(256)..offset]);
     digest(&bytes)
 }
+#[allow(clippy::unnecessary_cast)]
 fn cursor(s: &Snapshot, offset: usize) -> Result<String> {
     let v = Value::Array(vec![
         1u64.into(),
         s.id.clone().into(),
-        s.stat.st_dev.into(),
-        s.stat.st_ino.into(),
+        (s.stat.st_dev as u64).into(),
+        (s.stat.st_ino as u64).into(),
         offset.into(),
         anchor(s, offset).into(),
     ]);
@@ -65,6 +66,7 @@ fn cursor_room(text: &str) -> Option<String> {
     let v = parse(&raw, 8192).ok()?;
     v.as_array()?.get(1)?.as_str().map(str::to_owned)
 }
+#[allow(clippy::unnecessary_cast)]
 fn offset(s: &Snapshot, text: &str) -> Result<usize> {
     if text.is_empty() {
         return Ok(0);
@@ -83,8 +85,8 @@ fn offset(s: &Snapshot, text: &str) -> Result<usize> {
         .ok_or_else(|| Error::new("invalid thread cursor"))?;
     if a[0].as_u64() != Some(1)
         || a[1].as_str() != Some(&s.id)
-        || a[2].as_u64() != Some(s.stat.st_dev)
-        || a[3].as_u64() != Some(s.stat.st_ino)
+        || a[2].as_u64() != Some(s.stat.st_dev as u64)
+        || a[3].as_u64() != Some(s.stat.st_ino as u64)
         || at > s.bytes.len()
         || a[5].as_str() != Some(anchor(s, at).as_str())
     {

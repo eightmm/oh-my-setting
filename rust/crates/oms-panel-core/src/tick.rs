@@ -420,10 +420,11 @@ struct TickTx<'a> {
     receipt_guard: Option<&'a oms_lock::Guard>,
     expected_tick: std::cell::Cell<Option<(u64, u64)>>,
 }
+#[allow(clippy::unnecessary_cast)]
 fn tick_dir_id(dir: &rustix::fd::OwnedFd) -> std::result::Result<(u64, u64), Fail> {
     let st = rustix::fs::fstat(dir)
         .map_err(|_| Fail::Ledger("tick directory cannot be inspected".into()))?;
-    Ok((st.st_dev, st.st_ino))
+    Ok((st.st_dev as u64, st.st_ino as u64))
 }
 fn tick_dir_state(repo: &Path) -> std::result::Result<Option<(u64, u64)>, Fail> {
     open_tick_dir(repo, false)

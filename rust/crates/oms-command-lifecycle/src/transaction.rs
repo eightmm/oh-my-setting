@@ -281,6 +281,10 @@ impl Transaction {
         if r::exists(&undo) {
             return r::fail("account settings undo name exists");
         }
+        #[cfg(target_os = "macos")]
+        let raw_mode = mode as u16;
+        #[cfg(not(target_os = "macos"))]
+        let raw_mode = mode;
         let fd = rustix::fs::openat(
             &directory,
             staged.file_name().unwrap(),
@@ -289,7 +293,7 @@ impl Transaction {
                 | rustix::fs::OFlags::EXCL
                 | rustix::fs::OFlags::NOFOLLOW
                 | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::from_raw_mode(mode),
+            rustix::fs::Mode::from_raw_mode(raw_mode),
         )
         .map_err(|_| r::Error(2, "cannot stage bound account settings".into()))?;
         let mut output = fs::File::from(fd);

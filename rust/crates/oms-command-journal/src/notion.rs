@@ -289,13 +289,14 @@ impl RequestTempDir {
 }
 
 impl Drop for RequestTempDir {
+    #[allow(clippy::unnecessary_cast)]
     fn drop(&mut self) {
         let Ok(fd_stat) = rfs::fstat(&self.dir_fd) else {
             return;
         };
         if FileType::from_raw_mode(fd_stat.st_mode) != FileType::Directory
             || fd_stat.st_uid != self.uid
-            || ({ fd_stat.st_dev }, { fd_stat.st_ino }) != (self.dir_dev, self.dir_ino)
+            || (fd_stat.st_dev as u64, fd_stat.st_ino as u64) != (self.dir_dev, self.dir_ino)
         {
             return;
         }
@@ -303,7 +304,7 @@ impl Drop for RequestTempDir {
             && let Ok(st) = rfs::statat(&self.dir_fd, "cfg", AtFlags::SYMLINK_NOFOLLOW)
             && FileType::from_raw_mode(st.st_mode) == FileType::RegularFile
             && st.st_uid == self.uid
-            && ({ st.st_dev }, { st.st_ino }) == expected_cfg
+            && (st.st_dev as u64, st.st_ino as u64) == expected_cfg
         {
             let _ = rfs::unlinkat(&self.dir_fd, "cfg", AtFlags::empty());
         }
@@ -315,7 +316,7 @@ impl Drop for RequestTempDir {
             let _ = rfs::unlinkat(&self.dir_fd, "hdr", AtFlags::empty());
         }
         if let Ok(path_stat) = rfs::lstat(&self.dir_path)
-            && ({ path_stat.st_dev }, { path_stat.st_ino }) == (self.dir_dev, self.dir_ino)
+            && (path_stat.st_dev as u64, path_stat.st_ino as u64) == (self.dir_dev, self.dir_ino)
         {
             let _ = fs::remove_dir(&self.dir_path);
         }

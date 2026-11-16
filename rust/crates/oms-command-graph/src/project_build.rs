@@ -117,6 +117,7 @@ struct FileStat {
     bytes: u64,
 }
 impl FileStat {
+    #[allow(clippy::unnecessary_cast)]
     fn from_stat(stat: &rustix::fs::Stat) -> Self {
         Self {
             mtime_sec: Some(stat.st_mtime),

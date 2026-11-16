@@ -200,6 +200,7 @@ struct Job {
     all_reaped: bool,
     children_exhausted: bool,
     ownership_lost: bool,
+    #[cfg(target_os = "linux")]
     adopted_signals: BTreeMap<i32, bool>,
     group_quiescent: Option<bool>,
     #[cfg(target_os = "macos")]
@@ -214,6 +215,19 @@ struct Job {
 struct GroupProbe {
     reactor: Reactor,
     id: JobId,
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pipe_cloexec() -> std::result::Result<(OwnedFd, OwnedFd), String> {
+    rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn pipe_cloexec() -> std::result::Result<(OwnedFd, OwnedFd), String> {
+    let (r, w) = rustix::pipe::pipe().map_err(|e| e.to_string())?;
+    rustix::io::fcntl_setfd(&r, rustix::io::FdFlags::CLOEXEC).map_err(|e| e.to_string())?;
+    rustix::io::fcntl_setfd(&w, rustix::io::FdFlags::CLOEXEC).map_err(|e| e.to_string())?;
+    Ok((r, w))
 }
 
 /// Ordinary reactors wait only their exact child PIDs; they never use wait(-1).
@@ -303,12 +317,10 @@ impl Reactor {
         started
             .checked_add(request.terminate_grace)
             .ok_or("termination grace is too large")?;
-        let (out_read, out_write) =
-            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).map_err(|e| e.to_string())?;
+        let (out_read, out_write) = pipe_cloexec()?;
         nonblocking(&out_read)?;
         let (err_read, err_write) = if request.streams == Streams::Separate {
-            let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
-                .map_err(|e| e.to_string())?;
+            let (r, w) = pipe_cloexec()?;
             nonblocking(&r)?;
             (Some(r), w)
         } else {
@@ -320,8 +332,7 @@ impl Reactor {
         // Prepare every fallible descriptor operation before spawning. A later
         // error must never lose an already-created child's ownership handle.
         let (input, child_input) = if request.stdin.is_some() {
-            let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
-                .map_err(|e| e.to_string())?;
+            let (r, w) = pipe_cloexec()?;
             nonblocking(&w)?;
             (Some(w), Stdio::from(r))
         } else {
@@ -387,6 +398,7 @@ impl Reactor {
             all_reaped: false,
             children_exhausted: false,
             ownership_lost: false,
+            #[cfg(target_os = "linux")]
             adopted_signals: BTreeMap::new(),
             group_quiescent: None,
             #[cfg(target_os = "macos")]

@@ -248,6 +248,7 @@ impl IndexLock {
         };
         Ok((lock, parent.join(path.file_name().unwrap())))
     }
+    #[allow(clippy::unnecessary_cast)]
     fn check(&self) -> Result<()> {
         let held = self
             .directory
@@ -265,7 +266,7 @@ impl IndexLock {
         let info = rustix::fs::statat(&self.directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|_| Error::new(3, "index lock changed"))?;
         require(
-            (info.st_dev, info.st_ino) == self.identity && info.st_nlink == 1,
+            (info.st_dev as u64, info.st_ino as u64) == self.identity && info.st_nlink == 1,
             "index lock replaced during transaction",
         )
     }

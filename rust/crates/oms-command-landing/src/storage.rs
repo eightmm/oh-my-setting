@@ -217,11 +217,15 @@ pub(crate) fn create_exclusive(
         descriptors.push(next);
     }
     let parent = descriptors.last().unwrap();
+    #[cfg(target_os = "macos")]
+    let raw_mode = mode as u16;
+    #[cfg(not(target_os = "macos"))]
+    let raw_mode = mode;
     let fd = fs::openat(
         parent,
         parts[parts.len() - 1],
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(mode),
+        Mode::from_raw_mode(raw_mode),
     )
     .map_err(|_| Error::new(2, "destination exists or cannot be exclusively created"))?;
     let mut file = std::fs::File::from(fd);
