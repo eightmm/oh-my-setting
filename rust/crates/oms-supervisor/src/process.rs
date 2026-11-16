@@ -456,6 +456,10 @@ impl Reactor {
                 wait = wait
                     .min((stopping + job.request.terminate_grace).saturating_duration_since(now));
             }
+            #[cfg(target_os = "macos")]
+            if job.group_probe.is_some() {
+                wait = wait.min(Duration::from_millis(10));
+            }
             let mut fds = Vec::new();
             if let Some(fd) = &job.out {
                 fds.push(PollFd::new(fd, PollFlags::IN));
@@ -547,6 +551,17 @@ impl Job {
         }
         #[cfg(target_os = "macos")]
         {
+            // Check kernel group membership first so reaped empty groups finish immediately
+            // even while an asynchronous /bin/ps helper is still running.
+            match os::test_kill_process_group(self.pid) {
+                Err(Errno::SRCH) => {
+                    self.group_probe = None;
+                    return Some(true);
+                }
+                Err(Errno::PERM | Errno::ACCESS) => return Some(false),
+                Err(_) => return None,
+                Ok(()) => {}
+            }
             // The helper stays owned across turns; never wait for ps from a
             // payload poll turn or drop a still-running helper on a timeout.
             if let Some(probe) = &mut self.group_probe {
@@ -559,12 +574,6 @@ impl Job {
                     Ok(Progress::Pending(_)) => Some(false),
                     Err(_) => None,
                 };
-            }
-            match os::test_kill_process_group(self.pid) {
-                Err(Errno::SRCH) => return Some(true),
-                Err(Errno::PERM | Errno::ACCESS) => return Some(false),
-                Err(_) => return None,
-                Ok(()) => {}
             }
             if self.group_quiescent == Some(true) || Instant::now() < self.group_probe_after {
                 return self.group_quiescent;
@@ -631,6 +640,9 @@ impl Job {
         }
         self.stopping = Some(Instant::now());
         self.input.take();
+        if self.request.scope == Scope::Leader && self.stop.is_none() && self.exit.is_some() {
+            return;
+        }
         let signal = match self.stop {
             Some(StopReason::Signal(number)) => {
                 Signal::from_named_raw(number).unwrap_or(Signal::TERM)
@@ -1048,7 +1060,7 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
         // Job::observe_group instead retains it and advances without waiting.
         let mut reactor = Reactor::new();
         let id = reactor.start(mac_group_request()).ok()?;
-        let until = Instant::now() + Duration::from_millis(750);
+        let until = Instant::now() + Duration::from_millis(2500);
         let result = loop {
             match reactor.poll(id, Duration::from_millis(10)).ok()? {
                 Progress::Complete(result) => break result,
@@ -1068,17 +1080,12 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
 fn mac_group_request() -> Request {
     let mut request = Request::new(vec![
         "/bin/ps".into(),
-        "-ax".into(),
-        "-o".into(),
-        "pid=".into(),
-        "-o".into(),
-        "pgid=".into(),
-        "-o".into(),
-        "stat=".into(),
+        "-axo".into(),
+        "pid=,pgid=,state=".into(),
     ]);
     request.scope = Scope::Leader;
     request.environment = vec![("LC_ALL".into(), "C".into())];
-    request.deadline = Some(Instant::now() + Duration::from_millis(500));
+    request.deadline = Some(Instant::now() + Duration::from_millis(2000));
     request.terminate_grace = Duration::ZERO;
     request.capture.max_bytes = 8 * 1024 * 1024;
     request.capture.on_limit = crate::capture::LimitAction::Terminate;
@@ -1099,16 +1106,27 @@ fn mac_group_result(pid: Pid, leader_exited: bool, result: &Completion) -> Optio
             continue;
         }
         let mut fields = row.split_whitespace();
-        let row_pid = fields.next()?.parse::<i32>().ok()?;
+        let first = fields.next()?;
+        if first.eq_ignore_ascii_case("PID")
+            || first.eq_ignore_ascii_case("PGID")
+            || first.eq_ignore_ascii_case("STAT")
+            || first.eq_ignore_ascii_case("STATE")
+        {
+            continue;
+        }
+        let row_pid = first.parse::<i32>().ok()?;
         let group = fields.next()?.parse::<i32>().ok()?;
         let state = fields.next()?;
+        if group != target {
+            continue;
+        }
         if fields.next().is_some() {
             return None;
         }
         if leader_exited && row_pid == target {
             continue;
         }
-        if group == target && !state.starts_with(['Z', 'X']) {
+        if !state.starts_with(['Z', 'X']) {
             return Some(false);
         }
     }
@@ -1179,7 +1197,19 @@ mod tests {
             Some(true)
         );
 
-        // 4) Malformed column count or non-zero exit returns None.
+        // 4) Header rows and extra tokens on unrelated groups still succeed.
+        let with_header_and_unrelated =
+            b"  PID  PGID STAT\n  4242   4242 E\n     1      1 Ss extra\n";
+        assert_eq!(
+            mac_group_result(
+                leader,
+                true,
+                &fake_ps_completion(with_header_and_unrelated, Some(0))
+            ),
+            Some(true)
+        );
+
+        // 5) Malformed column count on target group or non-zero exit returns None.
         let too_few = b"  4242   4242\n";
         assert_eq!(
             mac_group_result(leader, true, &fake_ps_completion(too_few, Some(0))),
@@ -1194,5 +1224,29 @@ mod tests {
             mac_group_result(leader, true, &fake_ps_completion(b"", Some(1))),
             None
         );
+    }
+
+    #[test]
+    fn leader_scope_natural_exit_completes_without_sending_signals() {
+        let mut reactor = Reactor::new();
+        let mut request = Request::new(vec!["/bin/sh".into(), "-c".into(), "printf ok".into()]);
+        request.scope = Scope::Leader;
+        request.deadline = Some(Instant::now() + Duration::from_secs(5));
+        let id = reactor.start(request).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        let completion = loop {
+            match reactor.poll(id, Duration::from_millis(50)).unwrap() {
+                Progress::Complete(done) => break done,
+                Progress::Pending(_) => {
+                    assert!(Instant::now() < until, "leader job timed out");
+                }
+            }
+        };
+        assert!(completion.cleanup_complete());
+        assert!(completion.output_complete());
+        assert_eq!(completion.stop, None);
+        assert_eq!(completion.exit.map(|e| e.shell_code()), Some(0));
+        assert_eq!(completion.stdout.bytes, b"ok");
+        assert!(completion.signals.is_empty(), "{:?}", completion.signals);
     }
 }

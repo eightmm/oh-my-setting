@@ -907,8 +907,9 @@ read_host_id() {
   [ -n "$cur_bid" ] || cur_bid='unknown'
 }
 emit_part() {
-  tok="$1"; name="$2"; file="$3"; tmp="$4"
+  tok="$1"; name="$2"; file="$3"
   if [ -f "$file" ]; then
+    tmp="$op_dir/.emit.$$.$tok.$name.tmp"
     rm -f -- "$tmp"
     dd if="$file" of="$tmp" bs=65536 count=8 2>/dev/null || cp -- "$file" "$tmp"
     sz=$(wc -c < "$tmp" | tr -d ' \t\r\n')
@@ -1298,13 +1299,13 @@ while [ ! -f "$op_dir/result.json" ]; do
   sleep 0.05 2>/dev/null || sleep 1
 done
 if [ -f "$op_dir/result.json" ]; then
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
+  emit_part "$tok" result "$op_dir/result.json"
+  emit_part "$tok" stdout "$op_dir/stdout"
+  emit_part "$tok" stderr "$op_dir/stderr"
 else
   printf '__OMS_MARK_%s__ STILL_RUNNING 1\n' "$tok"
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
 fi
 "#,
         rd = remote_path(req.remote),
@@ -1533,10 +1534,10 @@ if [ -z "$op_dir" ]; then
 fi
 if [ -f "$op_dir/result.json" ]; then
   printf '__OMS_MARK_%s__ PROBE result|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
+  emit_part "$tok" result "$op_dir/result.json"
+  emit_part "$tok" stdout "$op_dir/stdout"
+  emit_part "$tok" stderr "$op_dir/stderr"
   exit 0
 fi
 mpid=""
@@ -1555,17 +1556,17 @@ if pid_live "$mpid"; then
 fi
 if [ "$alive" = 0 ] && [ -f "$op_dir/result.json" ]; then
   printf '__OMS_MARK_%s__ PROBE result|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
+  emit_part "$tok" result "$op_dir/result.json"
+  emit_part "$tok" stdout "$op_dir/stdout"
+  emit_part "$tok" stderr "$op_dir/stderr"
   exit 0
 fi
 cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
 read_cpg
 check_orphan_cpg
 printf '__OMS_MARK_%s__ PROBE live|%s|%s|%s|%s|%s\n' "$tok" "$cur_hn" "$cur_bid" "$alive" "$cur_ls" "$cpg_verdict"
-emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+emit_part "$tok" meta "$op_dir/meta.json"
 "#,
         rd = remote_path(&remote_dir),
         rd_key = quote(rd_key),
@@ -1794,16 +1795,16 @@ if [ -f "$op_dir/meta.json" ]; then
   m_tag=$(sed -n 's/.*"op_tag":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
   if {{ [ -n "$exp_cmd" ] && [ "$m_cmd" != "$exp_cmd" ]; }} || [ "$m_snap" != "$exp_snap" ] || {{ [ -n "$exp_tag" ] && [ "$m_tag" != "$exp_tag" ]; }}; then
     printf '__OMS_MARK_%s__ CANCEL meta_mismatch|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+    emit_part "$tok" meta "$op_dir/meta.json"
     exit 0
   fi
 fi
 if [ -f "$op_dir/result.json" ]; then
   printf '__OMS_MARK_%s__ CANCEL finished|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
-  emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-  emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
+  emit_part "$tok" result "$op_dir/result.json"
+  emit_part "$tok" stdout "$op_dir/stdout"
+  emit_part "$tok" stderr "$op_dir/stderr"
   exit 0
 fi
 if [ ! -f "$op_dir/meta.json" ]; then
@@ -1816,7 +1817,7 @@ m_pid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$op_dir/meta.json" | head -n 
 m_ls=$(sed -n 's/.*"lstart":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
 if [ -z "$m_hn" ] || [ "$m_hn" != "$cur_hn" ]; then
   printf '__OMS_MARK_%s__ CANCEL host_mismatch|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
   exit 0
 fi
 cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
@@ -1847,19 +1848,19 @@ reap_orphan_cpg() {{
   else
     : > "$op_dir/reaped.done"
     printf '__OMS_MARK_%s__ CANCEL cancelled|%s\n' "$tok" "$sig"
-    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-    emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-    emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+    emit_part "$tok" meta "$op_dir/meta.json"
+    emit_part "$tok" stdout "$op_dir/stdout"
+    emit_part "$tok" stderr "$op_dir/stderr"
   fi
   exit 0
 }}
 if [ -z "$m_pid" ] || ! pid_live "$m_pid"; then
   if [ -f "$op_dir/result.json" ]; then
     printf '__OMS_MARK_%s__ CANCEL finished|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-    emit_part "$tok" result "$op_dir/result.json" "$op_dir/.emit.tmp"
-    emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-    emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+    emit_part "$tok" meta "$op_dir/meta.json"
+    emit_part "$tok" result "$op_dir/result.json"
+    emit_part "$tok" stdout "$op_dir/stdout"
+    emit_part "$tok" stderr "$op_dir/stderr"
   else
     read_cpg
     check_orphan_cpg
@@ -1869,19 +1870,19 @@ if [ -z "$m_pid" ] || ! pid_live "$m_pid"; then
         ;;
       unverifiable)
         printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-        emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+        emit_part "$tok" meta "$op_dir/meta.json"
         exit 0
         ;;
     esac
     printf '__OMS_MARK_%s__ CANCEL lost|exited|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-    emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+    emit_part "$tok" meta "$op_dir/meta.json"
   fi
   exit 0
 fi
 cur_ls=$(LC_ALL=C ps -p "$m_pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
 if [ -z "$m_ls" ] || [ -z "$cur_ls" ]; then
   printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
   exit 0
 fi
 if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" != "$cur_bid" ] || [ "$(norm "$m_ls")" != "$(norm "$cur_ls")" ]; then
@@ -1894,13 +1895,13 @@ if [ -z "$m_bid" ] || [ -z "$cur_bid" ] || [ "$m_bid" != "$cur_bid" ] || [ "$(no
         ;;
       unverifiable)
         printf '__OMS_MARK_%s__ CANCEL unverifiable_lstart|%s|%s\n' "$tok" "$cur_hn" "$cur_bid"
-        emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+        emit_part "$tok" meta "$op_dir/meta.json"
         exit 0
         ;;
     esac
   fi
   printf '__OMS_MARK_%s__ CANCEL mismatch|%s|%s|%s\n' "$tok" "$cur_hn" "$cur_bid" "$cur_ls"
-  emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
+  emit_part "$tok" meta "$op_dir/meta.json"
   exit 0
 fi
 w=0
@@ -1968,9 +1969,9 @@ if all_live; then
 fi
 : > "$op_dir/reaped.done"
 printf '__OMS_MARK_%s__ CANCEL cancelled|%s\n' "$tok" "$sig"
-emit_part "$tok" meta "$op_dir/meta.json" "$op_dir/.emit.tmp"
-emit_part "$tok" stdout "$op_dir/stdout" "$op_dir/.emit.tmp"
-emit_part "$tok" stderr "$op_dir/stderr" "$op_dir/.emit.tmp"
+emit_part "$tok" meta "$op_dir/meta.json"
+emit_part "$tok" stdout "$op_dir/stdout"
+emit_part "$tok" stderr "$op_dir/stderr"
 "#,
         rd = remote_path(&remote_dir),
         rd_key = quote(rd_key),
