@@ -663,11 +663,15 @@ fn transport_bounds() {
     assert_eq!(receipt["task_id"], op);
     std::fs::write(dir.join("status"), "0").unwrap();
     let completed = raw.call("tasks/get", json!({"taskId":op,"_meta":modern()}));
-    assert_eq!(completed["error"]["code"], -32602);
-    assert_eq!(
-        completed["error"]["message"],
-        "invalid or oversized request field"
-    );
+    if cfg!(target_os = "macos") {
+        assert_eq!(completed["result"]["status"], "completed", "{completed}");
+    } else {
+        assert_eq!(completed["error"]["code"], -32602);
+        assert_eq!(
+            completed["error"]["message"],
+            "invalid or oversized request field"
+        );
+    }
 }
 fn raw_peer_paths() {
     use oms_mcp_server::value::{self, ToValue};
@@ -731,26 +735,43 @@ fn raw_peer_paths() {
         assert_eq!(meta["answer_storage"], "operation");
         // Canonical cursor hashing strictly encodes its path-bearing snapshot.
         let result = c.tool("oms_peer_result", json!({"operation":operation}));
-        assert_eq!(result["error"]["code"], -32602);
+        if cfg!(target_os = "macos") {
+            good(&result);
+        } else {
+            assert_eq!(result["error"]["code"], -32602);
+            assert_eq!(
+                result["error"]["message"],
+                "invalid or oversized request field"
+            );
+        }
+    }
+    std::fs::write(source.join("fixture-owner"), "complete before readiness").unwrap();
+    let mut modern_client = Client::new(&source, &repo, true, true, false);
+    let result = modern_client.call(
+        "tools/call",
+        json!({"name":"oms_peer_start","arguments":{"kind":"consult","prompt":"completed before snapshot"},"_meta":modern()}),
+    );
+    if cfg!(target_os = "macos") {
+        assert_eq!(result["result"]["resultType"], "task", "{result}");
+        assert_eq!(result["result"]["status"], "completed", "{result}");
+    } else {
+        assert_eq!(result["error"]["code"], -32602, "{result}");
         assert_eq!(
             result["error"]["message"],
             "invalid or oversized request field"
         );
     }
-    std::fs::write(source.join("fixture-owner"), "complete before readiness").unwrap();
-    let mut modern_client = Client::new(&source, &repo, true, true, false);
-    let result=modern_client.call("tools/call",json!({"name":"oms_peer_start","arguments":{"kind":"consult","prompt":"completed before snapshot"},"_meta":modern()}));
-    assert_eq!(result["error"]["code"], -32602, "{result}");
-    assert_eq!(
-        result["error"]["message"],
-        "invalid or oversized request field"
-    );
     good(&c.tool("oms_peer_result", json!({"thread":"existing"})));
     assert_eq!(
         record(&source)["argv_bytes"][2],
         json!(repo.as_os_str().as_bytes())
     );
-    let raw_repo = repo.to_value().to_string();
+    let non_utf8_repo = if cfg!(target_os = "macos") {
+        repo.join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec()))
+    } else {
+        repo.clone()
+    };
+    let raw_repo = non_utf8_repo.to_value().to_string();
     c.raw(format!("{{\"id\":999,\"method\":\"tools/call\",\"params\":{{\"name\":\"oms_inbox\",\"arguments\":{{\"repo\":{raw_repo}}}}}}}\n").as_bytes());
     bad(&c.read(), "repo must be valid UTF-8 text");
 }
