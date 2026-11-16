@@ -301,16 +301,34 @@ pub fn scan_worker(
             && request.memory_bytes > 0,
         "publication scan limits must be positive",
     )?;
-    let old = rustix::process::getrlimit(rustix::process::Resource::As);
-    let limit = request.memory_bytes.min(old.maximum.unwrap_or(u64::MAX));
-    rustix::process::setrlimit(
-        rustix::process::Resource::As,
-        rustix::process::Rlimit {
-            current: Some(limit),
-            maximum: Some(limit),
-        },
-    )
-    .map_err(|_| park("strong-scan-memory-limit-unavailable"))?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let old = rustix::process::getrlimit(rustix::process::Resource::As);
+        let limit = request.memory_bytes.min(old.maximum.unwrap_or(u64::MAX));
+        rustix::process::setrlimit(
+            rustix::process::Resource::As,
+            rustix::process::Rlimit {
+                current: Some(limit),
+                maximum: Some(limit),
+            },
+        )
+        .map_err(|_| park("strong-scan-memory-limit-unavailable"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // XNU aliases RLIMIT_AS to RLIMIT_RSS and rejects finite virtual-address
+        // caps below the dyld shared cache with EINVAL. Apply RLIMIT_DATA where
+        // supported and enforce `memory_bytes` against scanned object bytes below.
+        let old = rustix::process::getrlimit(rustix::process::Resource::Data);
+        let limit = request.memory_bytes.min(old.maximum.unwrap_or(u64::MAX));
+        let _ = rustix::process::setrlimit(
+            rustix::process::Resource::Data,
+            rustix::process::Rlimit {
+                current: Some(limit),
+                maximum: Some(limit),
+            },
+        );
+    }
     let started = Instant::now();
     let git = Git::new(&request.repo, interrupted);
     let (base, head) = (request.base.as_str(), request.head.as_str());
@@ -350,7 +368,10 @@ pub fn scan_worker(
             .checked_add(size)
             .ok_or_else(|| park("publish-total-size-overflow"))?;
         require(
-            size <= one && bytes <= total,
+            size <= one
+                && bytes <= total
+                && size <= request.memory_bytes
+                && bytes <= request.memory_bytes,
             "publication payload exceeds byte limit",
         )?;
         let kind = git.text(&["cat-file", "-t", object])?;

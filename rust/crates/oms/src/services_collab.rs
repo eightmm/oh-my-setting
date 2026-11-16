@@ -2111,10 +2111,10 @@ mod tests {
         assert!(run(&ok).is_err());
         ok.argv = vec!["x".into(); MAX_ARGV + 1];
         assert!(run(&ok).is_err());
-        let mut edge = request(&["/bin/true"], dir.path());
+        let mut edge = request(&["true"], dir.path());
         edge.argv.extend((1..MAX_ARGV).map(|_| OsString::from("a")));
         assert_eq!(run(&edge).expect("256 args").code, 0);
-        let mut limits = request(&["/bin/true"], dir.path());
+        let mut limits = request(&["true"], dir.path());
         limits.timeout = Duration::ZERO;
         assert!(run(&limits).is_err());
         limits.timeout = MAX_WALL + Duration::from_secs(1);
@@ -2124,7 +2124,7 @@ mod tests {
         assert!(run(&limits).is_err());
         limits.output_limit = MAX_OUTPUT + 1;
         assert!(run(&limits).is_err());
-        let missing = request(&["/bin/true"], &dir.path().join("absent"));
+        let missing = request(&["true"], &dir.path().join("absent"));
         assert!(run(&missing).is_err());
 
         let mut env = request(
@@ -2145,8 +2145,8 @@ mod tests {
         assert!(run(&big).expect("limit stop").limited);
 
         let cancelled = AtomicBool::new(true);
-        let err = PeerExecutor::execute(&host, &request(&["/bin/true"], dir.path()), &cancelled)
-            .unwrap_err();
+        let err =
+            PeerExecutor::execute(&host, &request(&["true"], dir.path()), &cancelled).unwrap_err();
         assert_eq!(err.code, 130);
     }
 

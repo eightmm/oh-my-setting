@@ -2162,6 +2162,10 @@ mod tests {
         let limit = rustix::process::getrlimit(rustix::process::Resource::As);
         (limit.current, limit.maximum)
     }
+    fn data_segment_limit() -> (Option<u64>, Option<u64>) {
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Data);
+        (limit.current, limit.maximum)
+    }
 
     /// Child half of the scan-worker tests: the test binary re-executes itself
     /// with `--ignored` and the worker request as the trailing words.
@@ -2207,17 +2211,25 @@ mod tests {
         let mut control = services(&stop, repo.path(), Vec::new());
         control.scan_worker = self_scan_launcher();
         let before = address_space_limit();
+        let data_before = data_segment_limit();
         control
             .publication_scan(&scan_request(repo.path(), &base, &head, 4 << 30), &stop)
             .expect("clean range passes");
         assert_eq!(before, address_space_limit());
-        // A starved address space cannot pass: the worker fails closed.
+        assert_eq!(data_before, data_segment_limit());
+        // A starved memory budget cannot pass: the worker fails closed.
+        let starved = if cfg!(target_os = "macos") {
+            1
+        } else {
+            1 << 20
+        };
         assert!(
             control
-                .publication_scan(&scan_request(repo.path(), &base, &head, 1 << 20), &stop)
+                .publication_scan(&scan_request(repo.path(), &base, &head, starved), &stop)
                 .is_err()
         );
         assert_eq!(before, address_space_limit());
+        assert_eq!(data_before, data_segment_limit());
     }
 
     #[test]
@@ -2238,6 +2250,11 @@ mod tests {
             .publication_scan(&scan_request(repo.path(), &base, &head, 4 << 30), &stop)
             .unwrap_err();
         assert_eq!(leak.code, 3, "{}", leak.message);
+        assert!(
+            leak.message.contains("sensitive-publish-payload"),
+            "{}",
+            leak.message
+        );
         for bad in ["", "-x", "a b"] {
             assert!(
                 control
