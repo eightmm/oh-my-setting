@@ -36,6 +36,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Run input identity](RUN-INPUT-IDENTITY.md) | Pre-command input identity and metric contract capture |
 | [Work inspection](WORK-INSPECTION.md) | Evidence matrix, next-step explanation and return briefs |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
+| [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 
 ## Migration notes
