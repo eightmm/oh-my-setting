@@ -702,10 +702,12 @@ impl Store {
 
     pub(crate) fn summary_body(&self) -> Result<String> {
         let active = self.active()?;
+        let eligible = crate::review::context_filter(self)?;
         Ok(active
             .iter()
             .filter(|e| {
-                e.field("source_path").is_empty()
+                eligible(e)
+                    && e.field("source_path").is_empty()
                     && e.field("paths").is_empty()
                     && !e.body.trim().is_empty()
             })
@@ -831,7 +833,9 @@ impl Store {
     ) -> Result<String> {
         let (n, p) = self.logs()?;
         let state = records::states(&n, &p);
-        let active = |e: &&Entry| e.kind != "retirement" && !state.contains_key(&e.event_id);
+        let eligible = crate::review::context_filter(self)?;
+        let active =
+            |e: &&Entry| e.kind != "retirement" && !state.contains_key(&e.event_id) && eligible(e);
         let mut body = String::new();
         if full {
             if !clean(&String::from_utf8_lossy(&read(&self.shared)?), true) {

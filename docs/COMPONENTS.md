@@ -1442,15 +1442,22 @@ non-instruction provider locations (auto-memory, subagent memory, Codex
 memories) when any exist; it uses the same stat-only inventory under a one-second
 limit, prints nothing on any error, and is absent from `--json` and for harness children.
 
-Two kinds of note reach shared memory without a person reading them: the one-line
-outcome `oms agent-task close` promotes and the lessons `oms journal distill`
-writes. `oms agent-memory review` lists those, plus anything brought in by
-`import`, until someone decides: `--accept ID` appends one receipt row to
+`oms agent-task close` archives the resume packet and records the journal outcome;
+automatic task-outcome memory is off by default. Explicit
+`OMS_AGENT_TASK_CLOSE_MEMORY=1` queues that outcome as a pending proposal.
+Daily journal distillation still proposes selected decisions and recurring
+blockers (`OMS_JOURNAL_AUTODISTILL=0` opts out). `oms agent-memory review` lists
+those proposals, plus anything brought in by `import`, until someone decides:
+`--accept ID` appends one receipt row to
 `.oms/memory/reviews.jsonl` and leaves the log untouched; `--retire ID --reason
 TEXT` is the ordinary retirement. `--kind task-close|distill|imported|correction`
 narrows the list and `--json` prints it. A harness child can list but not decide.
-Review is a reading aid: an unreviewed note is still searched, recalled and
-summarized exactly as before, and an accepted one is not thereby verified.
+Pending or rejected automatic notes stay out of compact summaries and provider
+context, including full mode and query-ranked injection. Acceptance preserves
+existing retirement, supersession, source-validation and path-scope behavior.
+Explicitly authored notes, pins and legacy manual notes keep their existing
+eligibility. `show`, `search` and explicit `recall` still expose stored proposals
+for review; no source notes are deleted. Acceptance does not verify a claim.
 
 `oms agent-memory import --from serena|PATH` reads Markdown memory written
 elsewhere — a file, a directory of `.md`/`.txt` files, or the repository's

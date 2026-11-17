@@ -5,6 +5,11 @@ existing `.oms/task/current.md` and adjacent `archive/` records. The parent
 registers it in the workspace and CLI; this crate does not install itself.
 There is no Python or Bash implementation bridge. Bash is invoked only for
 the user's stored Verify command, with its declared `bash -c` semantics.
+The packet is a resume note; `agent-plan` owns execution tasks, claims and
+review state. Closing archives the packet and observes the journal without
+copying the outcome into shared memory by default. Explicit
+`OMS_AGENT_TASK_CLOSE_MEMORY=1` queues a `task_close` proposal for memory review;
+it becomes eligible for provider context only after acceptance.
 
 ## Public command and internal consumers
 
@@ -89,7 +94,7 @@ for the user's verification command.
 | Archive | Closed metadata is atomically published before a descriptor-relative no-replace rename. Concurrent calls cannot overwrite an archive; a name collision takes a numeric suffix. A kill can leave a complete closed current packet before rename, or a complete archived packet after it. Both directories are fsynced where supported. |
 | Rotation successor | Archive publication precedes new current-packet publication. A kill between them leaves the prior closed archive with no current packet. No successor is implied until its own publication succeeds. A replacement note is a separate operation with a task-identity comparison; interruption may leave that note absent and returns failure. |
 | Verification | Snapshot sets active under lock, then the user command runs unlocked. Outcomes compare task identity; successful receipts also recheck command digest and fresh Git state. Rotation or a changed contract cannot give its successor a pass. Interruption leaves active state and no successful receipt. A successful run preserves the source's two Verification bullets before setting verified. |
-| Memory and journal | These are written only by the injected native producers. Memory promotion precedes close/archive, and journal close follows archive. A kill between those domains can leave memory without an archive, or an archive without its journal observation; their existing producers own dedupe/reconciliation. This crate does not claim cross-domain atomicity. |
+| Memory and journal | These are written only by the injected native producers. Opt-in memory proposals precede close/archive, and journal close follows archive. A kill between those domains can leave memory without an archive, or an archive without its journal observation; their existing producers own dedupe/reconciliation. This crate does not claim cross-domain atomicity. |
 | Reference lifecycle/monitor | Owned entirely by the injected reference service; a kill or unproven monitor shutdown must preserve unresolved operation evidence. Membership or an operation record grants no new authority. |
 
 Canonical packet reads refuse symlinks, multiple hard links, foreign owners,

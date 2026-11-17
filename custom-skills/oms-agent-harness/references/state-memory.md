@@ -38,8 +38,9 @@ and memory files each provider CLI keeps for this repository (names, sizes,
 counts and times only; nothing is opened or written): use it to see what a
 provider loads before assuming it saw a note.
 
-Use the active task packet for one short-lived handoff. Automatic prompt
-recording is opt-in with `OMS_AUTO_TASK=1`.
+Use the active task packet as one short-lived resume note; `agent-plan` owns
+execution tasks, claims and review state. Automatic prompt recording is opt-in
+with `OMS_AUTO_TASK=1`.
 
 ```bash
 oms agent-task --repo . init --goal "Ship the focused fix" --verify "bash scripts/check.sh"
@@ -79,13 +80,17 @@ does a bounded, read-only plain-text search of recorded work under `.oms`; it
 finds records, not meaning, so open the hit before relying on it. For maintenance, use `oms journal status`,
 `oms journal rebuild`, or `oms journal sync --force`. Set
 `OMS_WORK_JOURNAL=0` only when a project must opt out. Recurring blockers and
-recorded decisions graduate into shared memory automatically once per local
-day at the prompt tick, deduplicated against notes `agent-task close` already
-promoted (`OMS_JOURNAL_AUTODISTILL=0` opts out); run `oms journal distill`
-for an off-cycle pass — `--dry-run` previews what would graduate.
+recorded decisions become pending memory proposals once per local day at the
+prompt tick, deduplicated against stored notes (`OMS_JOURNAL_AUTODISTILL=0`
+opts out); run `oms journal distill` for an off-cycle pass — `--dry-run`
+previews the proposals. `oms agent-memory review --accept ID` makes an automatic
+note eligible for summaries and provider context; acceptance does not verify it.
+Manual notes and pins remain eligible, while `show`, `search` and `recall` keep
+stored proposals available for review.
 
-Before `close`, set `OMS_AGENT_TASK_CLOSE_MEMORY=0` when the outcome should not
-be promoted into durable memory.
+`agent-task close` archives and records the journal outcome without adding a
+memory proposal by default. Set `OMS_AGENT_TASK_CLOSE_MEMORY=1` explicitly to
+queue the task outcome for review.
 
 Use a change guard only when user edits or scope drift are plausible:
 

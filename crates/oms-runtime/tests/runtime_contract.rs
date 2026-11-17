@@ -83,6 +83,63 @@ fn child_test(name: &str) -> bool {
     assert!(status.success());
     true
 }
+
+#[test]
+fn context_keeps_cached_memory_summary_explicit() {
+    if child_test("context_keeps_cached_memory_summary_explicit") {
+        return;
+    }
+    let f = Fixture::new();
+    for directory in ["config", ".oms", ".oms/memory"] {
+        let path = f.0.join(directory);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for (path, body) in [
+        (
+            "config/context-phases.json",
+            include_bytes!("../../../config/context-phases.json").as_slice(),
+        ),
+        (
+            ".oms/memory/pins.md",
+            b"Explicitly authored pin\n".as_slice(),
+        ),
+        (
+            ".oms/memory/summary.md",
+            b"Cached unreviewed task outcome\n".as_slice(),
+        ),
+    ] {
+        let path = f.0.join(path);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    for explicit in [false, true] {
+        let mut args = vec!["context", "--phase", "orientation"];
+        if explicit {
+            args.extend(["--file", ".oms/memory/summary.md"]);
+        }
+        let response = f.run(&args, false);
+        assert_eq!(
+            response.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&response.stderr)
+        );
+        let manifest = oms_runtime::value::parse(&response.stdout).unwrap();
+        let bundle = std::fs::read_to_string(f.0.join(manifest.text("bundle_path"))).unwrap();
+        assert!(bundle.contains("Explicitly authored pin"), "{bundle}");
+        assert_eq!(
+            bundle.contains("Cached unreviewed task outcome"),
+            explicit,
+            "{bundle}"
+        );
+        assert_eq!(
+            std::fs::read(f.0.join(".oms/memory/summary.md")).unwrap(),
+            b"Cached unreviewed task outcome\n"
+        );
+    }
+}
+
 #[test]
 fn launch_dry_run_uses_native_command_and_forwards_options() {
     if child_test("launch_dry_run_uses_native_command_and_forwards_options") {
