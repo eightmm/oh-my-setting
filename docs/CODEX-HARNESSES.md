@@ -3,6 +3,10 @@
 This guide is for operators running Codex inference through Pi or Claude Code.
 It covers routing, credential boundaries, compatibility and verified evidence.
 
+This is an optional experimental bridge. Prefer it when a recurring workflow
+needs another CLI's UI with Codex inference; ordinary OMS work can use native
+provider routes. Bridge compatibility and native provider support are separate.
+
 ## In this guide
 
 - [Data and authority](#data-and-authority)
@@ -126,12 +130,16 @@ source contract; it is separate from OpenAI's documented Sign in with ChatGPT
 flow for registering an independent third-party OAuth client. This feature
 does not promise continued endpoint support or access to every model.
 
-The offline contract suite is `test_codex_harness.py`,
-run by the canonical provider-registry suite. It uses fake authentication RPC
-and HTTP/SSE peers and checks model pinning, tool/result/opaque reasoning
-round trips, completion, error redaction, local authorization, and cleanup.
-Offline checks do not establish live account/model access, actual Pi UI
-operation, or native macOS/Windows behavior.
+The native Rust fixtures live in `crates/oms-command-providers-skills`.
+`harness_dry_run_is_pure_and_refused_in_workers` in
+`tests/project_parity.rs` covers dry-run routing and child refusal; the
+`src/harness.rs` unit tests cover private extension materialization, concurrent
+cold setup and native entrypoint selection. The removed Python suite is not
+evidence for current Rust transport behavior. These fixtures do not establish
+live account/model access or actual Pi UI operation.
+
+The observations below are historical evidence from before the Rust migration,
+not fresh verification of the current bridge.
 
 On 2026-10-10, the existing subscription login completed a real
 `gpt-6.1-sol` request through Claude Code 2.1.296 and the local bridge, returning

@@ -8,6 +8,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 |---|---|---|
 | Install or update OMS | [Install](INSTALL.md) · [한국어](INSTALL.ko.md) | Host requirements, profiles and maintenance |
 | Find a command | [Components](COMPONENTS.md) | Command catalog, workflows and authority boundaries |
+| Choose the right feature scope | [Feature scope](FEATURE-SCOPE.md) | Core behavior, optional workflows and adoption criteria |
 | Define a project | [Project context](PROJECT-CONTEXT.md) | Purpose, decisions and work evidence |
 
 ## Using OMS
