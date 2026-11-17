@@ -106,6 +106,13 @@ an execution error without acknowledgement keeps cleanup unknown. The result
 includes `provider_call_id`. Registration or completion-persistence failures stop
 continuation and never authorize automatic resend.
 
+The typed `admission` facade lets interactive Main use that same producer without
+capturing or altering its TTY streams. It verifies the selected canonical state
+root, carries the actual attempt and explicit resume identity, and returns an
+opaque handle for the final fence and unknown settlement. Dropping a handle
+does not refund or resend. Uncaptured output has no source digest; missing cleanup
+acknowledgement stays unknown.
+
 The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
 thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed
 sessions without a tracked baseline retain unknown per-call usage. This follows

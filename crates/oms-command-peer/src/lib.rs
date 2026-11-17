@@ -30,6 +30,12 @@ mod session;
 pub mod storage;
 mod thread;
 mod usage;
+/// Shared registration for interactive callers retaining their native terminal.
+pub mod admission {
+    pub use crate::usage::{
+        InteractiveCall, InteractiveRequest, begin_interactive, interactive_state,
+    };
+}
 mod view;
 
 pub use oms_command_operations::value::{V, obj};

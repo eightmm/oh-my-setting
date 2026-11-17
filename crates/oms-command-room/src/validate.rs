@@ -410,7 +410,7 @@ impl Room<'_> {
                     ));
                 }
             }
-            "join" => {
+            "join" | "main-resume" => {
                 id(e, "participant", "participant")?;
                 id(e, "provider", "provider")?;
                 if self.services.canonical_provider(e.text("provider"))? != e.text("provider") {
@@ -433,6 +433,7 @@ impl Room<'_> {
                         p.flag("joined")
                             && p["consumer"] == e["consumer"]
                             && p["participant"] != e["participant"]
+                            && p["participant"] != e["replaces"]
                     })
                 {
                     return Err(Error::new(
@@ -489,6 +490,12 @@ impl Room<'_> {
                         return Err(Error::new("leave before changing participant metadata"));
                     }
                 }
+                if !e["replaces"].is_null() {
+                    id(e, "replaces", "previous main")?;
+                    if carry.active() || e.text("role") != "main" || prior.is_some() {
+                        return Err(Error::new("native resume needs a fresh main participant"));
+                    }
+                }
                 if !carry.active() && !e.text("parent").is_empty() && !scopes.is_empty() {
                     self.refuse_finished_call(room_id, rows, e.text("participant"))?;
                 }
@@ -520,7 +527,7 @@ impl Room<'_> {
                     }
                 }
                 if e.text("role") == "main" && !carry.active() {
-                    self.validate_new_main(rows, &state, e.text("participant"), proofs)?;
+                    self.validate_new_main(rows, &state, e, proofs)?;
                 }
             }
             "leave" => {
@@ -883,20 +890,73 @@ impl Room<'_> {
         &'s self,
         rows: &[Value],
         state: &Value,
-        who: &str,
+        event: &Value,
         proofs: &mut Vec<Box<dyn OperationsRead + 's>>,
     ) -> Result<()> {
         let others = state
             .list("participants")
             .iter()
             .filter(|p| {
-                p.flag("joined") && p.text("role") == "main" && p.text("participant") != who
+                p.flag("joined")
+                    && p.text("role") == "main"
+                    && p["participant"] != event["participant"]
             })
             .collect::<Vec<_>>();
-        if others.is_empty() {
+        if others.is_empty() && event["replaces"].is_null() {
             return Ok(());
         }
         let read = self.services.operations(&self.repo)?;
+        if !event["replaces"].is_null() {
+            let previous = member(state, event.text("replaces"))?;
+            if state
+                .list("participants")
+                .iter()
+                .any(|p| p.flag("joined") && p["parent"] == previous["participant"])
+            {
+                return Err(Error::new(
+                    "native resume has joined descendants; reconcile them before replacing the main",
+                ));
+            }
+            if previous.text("role") != "main"
+                || !previous.text("parent").is_empty()
+                || !event.text("parent").is_empty()
+                || previous["provider"] != event["provider"]
+                || previous.text("consumer").is_empty()
+                || previous["consumer"] != event["consumer"]
+            {
+                return Err(Error::new(
+                    "native resume binding changed or belongs to another main",
+                ));
+            }
+            let exact = |who: &str, terminal: bool| {
+                read.attempts().iter().position(|a| {
+                    a.attempt_id == who
+                        && a.tool == "panel-main"
+                        && a.provider == event.text("provider")
+                        && a.terminal == terminal
+                        && (terminal || a.state == "working")
+                        && a.refs.text("panel_role") == "main"
+                        && a.refs.text("panel_owner") == a.provider
+                        && main_owner_matches(a.refs.text("panel_harness"), &a.provider)
+                        && a.refs
+                            .get("panel_room_participant")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&a.attempt_id)
+                            == who
+                        && self
+                            .same_room(a.refs.text("panel_room_id"), state.text("id"))
+                            .unwrap_or(false)
+                        && a.refs.text("panel_session_digest") == event.text("consumer")
+                })
+            };
+            let old = exact(event.text("replaces"), true);
+            let new = exact(event.text("participant"), false);
+            if !old.zip(new).is_some_and(|(old, new)| old < new) {
+                return Err(Error::new(
+                    "native resume main ownership or terminal release is unverified",
+                ));
+            }
+        }
         let mut here: BTreeSet<String> = self
             .predecessors(state.text("id"), true)?
             .into_iter()

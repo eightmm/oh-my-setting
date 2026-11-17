@@ -781,6 +781,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "oms-command-operations",
+ "oms-command-peer",
  "oms-command-plan",
  "oms-command-room",
  "oms-command-task",

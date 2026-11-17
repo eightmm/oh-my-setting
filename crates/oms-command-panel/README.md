@@ -30,3 +30,24 @@ resolution and process creation remains subject to ordinary OS spawn behavior.
 Resolution regressions live in `tests/support/executable_resolution.rs` and run
 as library tests with isolated subprocess environments and temporary Git repos.
 `tests/panel_parity.rs` retains the end-to-end recommendation and CLI contracts.
+
+Interactive Main registers a physical intent and pending usage through peer's
+typed admission producer immediately before its inline spawn. Campaign soft
+usage policy applies to that physical call. The tmux launcher only relays context;
+it creates no duplicate call. State and Room roots are explicitly the selected
+canonical repository, and absent caller context is removed from inherited tmux
+server environment. Explicit empty or non-UTF-8 bindings cannot silently fall
+back to an unbudgeted launch. Dispatch locks are released before execution; the
+existing Main session lock remains held through spawn/wait and settlement.
+TTY streams are inherited. Exit, spawn failure and cancellation retain unknown
+usage and cleanup; a false cancellation shield permits the final lifecycle write.
+
+Native resume enumerates complete Room summaries and reads current bindings with
+`room show`. Ambiguous, foreign or unverified ownership refuses before provider
+entry. A terminal Main's exact binding transfers to a fresh Main attempt through
+Room's atomic `join --replaces` contract. Joined descendants must be reconciled
+first. Physical usage liabilities survive this explicit resume. The canonical
+library fixture uses real lifecycle/Room producers and fake provider processes;
+it covers terminal resume, live/foreign/unverified/duplicate bindings, retained
+descendants, budget refusal, spawn failure, exit 125 and cancellation. The staged
+entry fixture executes the generated shell against stale server environment.

@@ -123,6 +123,14 @@ pub fn required(kind: &str) -> Option<&'static [&'static str]> {
     Some(match kind {
         "created" | "carried" => &[],
         "join" => &["participant", "provider", "role", "label"],
+        "main-resume" => &[
+            "participant",
+            "provider",
+            "role",
+            "label",
+            "replaces",
+            "consumer",
+        ],
         "bind" => &["participant", "consumer"],
         "main-swap" => &["participant", "provider", "model", "attempt", "harness"],
         "scope" | "leave" | "closed" | "received" => &["participant"],
@@ -152,7 +160,7 @@ pub fn required(kind: &str) -> Option<&'static [&'static str]> {
 pub fn allowed(kind: &str) -> &'static [&'static str] {
     match kind {
         "created" => &["kind", "task_id", "participant", "predecessor"],
-        "join" => &[
+        "join" | "main-resume" => &[
             "kind",
             "participant",
             "provider",
@@ -167,6 +175,7 @@ pub fn allowed(kind: &str) -> &'static [&'static str] {
             "state",
             "alias",
             "task_id",
+            "replaces",
         ],
         "main-swap" => &[
             "kind",
@@ -240,6 +249,9 @@ pub fn event_shape(event: &Value) -> Result<()> {
         return Ok(());
     }
     let kind = event.text("kind");
+    if kind == "join" && event.get("replaces").is_some() {
+        return Err(Error::new("native resume requires its explicit event kind"));
+    }
     let required = required(kind).ok_or_else(|| Error::new("invalid persisted room event"))?;
     if required.iter().any(|k| !event[k].is_string()) {
         return Err(Error::new("invalid persisted room event"));
@@ -248,6 +260,7 @@ pub fn event_shape(event: &Value) -> Result<()> {
         "model",
         "consumer",
         "previous",
+        "replaces",
         "parent",
         "reply_to",
         "task_id",
@@ -375,7 +388,32 @@ pub fn project(rows: &[Value]) -> Result<Value> {
         let e = &r["room_event"];
         let who = e.text("participant");
         match e.text("kind") {
-            "join" => {
+            "join" | "main-resume" => {
+                if let Some(previous) = e.get("replaces").and_then(Value::as_str) {
+                    if members.iter().any(|p| {
+                        p.text("participant") == who
+                            || p.flag("joined") && p.text("parent") == previous
+                    }) {
+                        return Err(Error::new("invalid native resume membership transfer"));
+                    }
+                    let old = members
+                        .iter_mut()
+                        .find(|p| p.text("participant") == previous)
+                        .ok_or_else(|| Error::new("resumed main has no previous participant"))?;
+                    if !old.flag("joined")
+                        || old.text("role") != "main"
+                        || e.text("role") != "main"
+                        || old["provider"] != e["provider"]
+                        || old.text("consumer").is_empty()
+                        || old["consumer"] != e["consumer"]
+                    {
+                        return Err(Error::new("invalid native resume binding transfer"));
+                    }
+                    old.set("joined", false);
+                    if owner.as_str() == Some(previous) {
+                        owner = who.into();
+                    }
+                }
                 let at = members.iter().position(|p| p.text("participant") == who);
                 let prev = at.map(|i| &members[i]);
                 let first = prev

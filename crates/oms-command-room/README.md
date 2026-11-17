@@ -30,6 +30,18 @@ producer while holding its writer lock, in original creation order; the guard
 also checks the snapshot before room publication. Shared-state resolution uses
 the same explicit state-root contract as the control plane.
 
+`join --replaces PARTICIPANT --native-session ID` is an explicit Main resume.
+Under one Room append lock it validates the previous joined Main, the same
+provider/session digest, a terminal exact previous lifecycle and a fresh working
+Main lifecycle in original creation order. The operations guard remains pinned
+through publication. Both lifecycles must name this Room and native session.
+Joined descendants refuse replacement so their parent and scope blockers remain
+intact. One `main-resume` event marks the previous participant left and enrolls the new
+attempt; replay is idempotent. This release proof grants no usage settlement,
+whole-tree cleanup, team admission or publication authority. Historical joins
+without `replaces` retain their existing interpretation. The new event kind makes
+older writers refuse the log rather than silently retain two joined owners.
+
 Room publication uses the existing native Codex/Claude notification producers.
 Codex targets its saved receiver; Claude requires the enrolled recipient and
 explicit `--wakeup` authority. Submission, uncertainty, turn identity, persistence

@@ -233,6 +233,14 @@ fn shape(event: &J) -> Result<()> {
     let required: &[&str] = match kind {
         Some("created" | "carried") => &[],
         Some("join") => &["participant", "provider", "role", "label"],
+        Some("main-resume") => &[
+            "participant",
+            "provider",
+            "role",
+            "label",
+            "replaces",
+            "consumer",
+        ],
         Some("bind") => &["participant", "consumer"],
         Some("main-swap") => &["participant", "provider", "model", "attempt", "harness"],
         Some("scope" | "leave" | "closed" | "received") => &["participant"],
@@ -293,7 +301,10 @@ fn shape(event: &J) -> Result<()> {
         Some("main-swap") if !matches!(get(event, "attempt"), Some(J::String(_))) => {
             return Err(UNSAFE);
         }
-        Some("join") => {
+        Some("join" | "main-resume") => {
+            if kind == Some("join") && get(event, "replaces").is_some() {
+                return Err(UNSAFE);
+            }
             if let Some(alias) = get(event, "alias").filter(|v| **v != J::Null) {
                 let ok = matches!(alias, J::String(b) if (1..=8).contains(&b.len())
                     && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-'));
@@ -418,7 +429,29 @@ pub fn project(rows: &[J]) -> Result<Projection> {
         let name = str_of(event, "participant").unwrap_or("");
         match kind_of(row) {
             "closed" => result.closed = true,
-            "join" => {
+            "join" | "main-resume" => {
+                if kind_of(row) == "main-resume" {
+                    let previous = str_of(event, "replaces").ok_or(UNSAFE)?;
+                    if result.members.iter().any(|m| {
+                        m.name == name || m.joined && str_of(&m.fields, "parent") == Some(previous)
+                    }) {
+                        return Err(UNSAFE);
+                    }
+                    let old = member(&mut result.members, previous)?;
+                    if !old.joined
+                        || str_of(&old.fields, "role") != Some("main")
+                        || str_of(event, "role") != Some("main")
+                        || get(&old.fields, "provider") != get(event, "provider")
+                        || str_of(&old.fields, "consumer").is_none_or(str::is_empty)
+                        || get(&old.fields, "consumer") != get(event, "consumer")
+                    {
+                        return Err(UNSAFE);
+                    }
+                    old.joined = false;
+                    if result.owner.as_deref() == Some(previous) {
+                        result.owner = Some(name.to_owned());
+                    }
+                }
                 let mut fields = dup(event);
                 crate::json::set(&mut fields, "joined", J::Bool(true));
                 let entry = Member {
@@ -537,7 +570,7 @@ pub fn identity(histories: &[(&str, &[J])], who: &str, to: &str) -> Result<J> {
         if let Some(event) = event_of(row)
             && matches!(
                 kind_of(row),
-                "join" | "leave" | "bind" | "main-swap" | "scope"
+                "join" | "main-resume" | "leave" | "bind" | "main-swap" | "scope"
             )
             && let Some(p) = str_of(event, "participant")
         {

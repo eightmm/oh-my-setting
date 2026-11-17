@@ -75,7 +75,9 @@ pub(crate) fn lineage<S: Services + ?Sized>(
             if event["participant"] != member {
                 continue;
             }
-            if event["kind"] == "join" && event["role"] == "main" {
+            if matches!(event["kind"].as_str(), Some("join" | "main-resume"))
+                && event["role"] == "main"
+            {
                 provider = event["provider"].clone();
             } else if event["kind"] == "main-swap" {
                 require(provider.is_string(), "main swap lacks its join anchor")?;
@@ -170,7 +172,8 @@ pub(crate) fn swap_parents<S: Services + ?Sized>(
         if event["participant"] != member {
             continue;
         }
-        if event["kind"] == "join" && event["role"] == "main" {
+        if matches!(event["kind"].as_str(), Some("join" | "main-resume")) && event["role"] == "main"
+        {
             provider = event["provider"].clone();
         }
         if event["kind"] == "main-swap" {

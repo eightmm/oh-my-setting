@@ -17,6 +17,76 @@ pub(crate) struct Pending {
     deadline: Instant,
     campaign_deadline: Option<i64>,
 }
+pub struct InteractiveRequest<'a> {
+    pub state_root: &'a Path,
+    pub provider: &'a str,
+    pub selected_model: Option<&'a str>,
+    pub account: Option<&'a str>,
+    pub attempt: Option<&'a str>,
+    pub resume_session: Option<&'a str>,
+}
+/// Dropping a handle retains its durable pending liability. It never refunds or
+/// resends an invocation, and registration alone supplies no owner authority.
+#[must_use]
+pub struct InteractiveCall {
+    state: std::path::PathBuf,
+    pending: Pending,
+}
+/// The caller's selected shared state remains authoritative over an ambient
+/// locator. Physical aliases are accepted; a different repository is refused.
+pub fn interactive_state(selected: &Path) -> Result<std::path::PathBuf> {
+    let selected = std::fs::canonicalize(selected)
+        .map_err(|_| Error::new(2, "selected interactive state is unavailable"))?;
+    if let Some(ambient) = std::env::var_os("OMS_STATE_REPO").filter(|value| !value.is_empty())
+        && std::fs::canonicalize(ambient).ok().as_ref() != Some(&selected)
+    {
+        return Err(Error::new(
+            2,
+            "native accounting state differs from selected shared state",
+        ));
+    }
+    Ok(selected)
+}
+pub fn begin_interactive(
+    request: InteractiveRequest<'_>,
+    interrupted: &AtomicBool,
+) -> Result<InteractiveCall> {
+    let state = interactive_state(request.state_root)?;
+    let mut extra = vec![(
+        "OMS_RESUME_SESSION".into(),
+        request.resume_session.unwrap_or("").into(),
+    )];
+    if let Some(attempt) = request.attempt {
+        extra.push(("OMS_ATTEMPT_ID".into(), attempt.into()));
+    }
+    let extra = operation_env(&extra)?;
+    let route = crate::providers::Route {
+        provider: crate::providers::normalize(request.provider)?,
+        model: request.selected_model.unwrap_or("provider-default").into(),
+        effort: String::new(),
+        explicit: request.selected_model.is_some(),
+        account: request.account.unwrap_or("").into(),
+        account_pinned: false,
+    };
+    let pending = begin(&state, &route, request.account, true, &extra, interrupted)?;
+    Ok(InteractiveCall { state, pending })
+}
+impl InteractiveCall {
+    pub fn call_id(&self) -> &str {
+        &self.pending.receipt.identity.call_id
+    }
+    pub fn operation_id(&self) -> &str {
+        &self.pending.receipt.identity.operation_id
+    }
+    pub fn fence(&self, interrupted: &AtomicBool) -> Result<()> {
+        self.pending.fence(interrupted)
+    }
+    /// Terminal output is never interpreted as accounting. Missing capture and
+    /// missing native cleanup evidence remain absent independently of exit code.
+    pub fn finish(self, output: Option<&[u8]>, cleanup_complete: Option<bool>) -> Result<()> {
+        finish_unobserved(&self.state, self.pending.receipt, output, cleanup_complete)
+    }
+}
 impl Pending {
     pub fn fence(&self, interrupted: &AtomicBool) -> Result<()> {
         if interrupted.load(Ordering::Acquire) {
@@ -411,14 +481,14 @@ pub(crate) fn finish(
 pub(crate) fn finish_unobserved(
     repo: &Path,
     mut receipt: Receipt,
-    raw: &[u8],
+    raw: Option<&[u8]>,
     cleanup_complete: Option<bool>,
 ) -> Result<()> {
     receipt.revision = 1;
     receipt.phase = Phase::Unknown;
     receipt.usage = Usage::default();
     receipt.cost = Cost::Unknown;
-    receipt.source_sha256 = Some(format!("{:x}", Sha256::digest(raw)));
+    receipt.source_sha256 = raw.map(|raw| format!("{:x}", Sha256::digest(raw)));
     receipt.cleanup_complete = cleanup_complete;
     persist(repo, &receipt)
 }

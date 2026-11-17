@@ -7,7 +7,7 @@ use oms_panel_core::{
     terminals,
 };
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::os::unix::fs::PermissionsExt;
@@ -18,6 +18,24 @@ use std::time::{Duration, Instant};
 
 const MAX_LIVE_MAINS: usize = 1;
 const LAUNCH_HARNESSES: &[&str] = &["claude", "codex", "pi", "agy"];
+const NATIVE_CONTEXT_ENV: &[&str] = &[
+    "OMS_CAMPAIGN_MANIFEST_SHA256",
+    "OMS_OPERATION_ID",
+    "OMS_GOAL_ID",
+    "OMS_TASK_ID",
+    "OMS_RUN_ID",
+    "OMS_GOAL_RUN_ID",
+    "OMS_PANEL_EXECUTION_ROOT",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "OMS_ROOM_PARTICIPANT",
+];
+fn admission_error(error: oms_command_peer::Error) -> Error {
+    Error {
+        code: error.code,
+        ..Error::new(error.message)
+    }
+}
 const ENV_KEYS: &[&str] = &[
     "OMS_AGENT",
     "OMS_PANEL_REPO",
@@ -140,6 +158,9 @@ pub fn run(
     stop: &AtomicBool,
 ) -> Result<Output> {
     parent_only()?;
+    if options.has("launch") || options.has("spawn-main") {
+        oms_command_peer::admission::interactive_state(repo).map_err(admission_error)?;
+    }
     if options.has("reopen") {
         return reopen(repo, source, services, stop);
     }
@@ -408,7 +429,7 @@ fn split_panel(
             bound_rooms.len() <= 1,
             "native session is bound to multiple rooms; resume refused",
         )?;
-        if let Some(bound) = bound_rooms.iter().next() {
+        if let Some(bound) = bound_rooms.keys().next() {
             let selected = chosen_room
                 .clone()
                 .or_else(|| recorded_room(services, repo, &session, stop));
@@ -477,7 +498,7 @@ fn split_panel(
                 services,
                 stop,
             )?;
-            let candidate = chosen_room.or_else(|| bound.into_iter().next());
+            let candidate = chosen_room.or_else(|| bound.into_keys().next());
             start_lock.check()?;
             ensure_room(repo, candidate.as_deref(), services, stop)?
         } else {
@@ -494,7 +515,7 @@ fn split_panel(
             options.get("model"),
             options.get("task"),
             Some(&ident),
-        );
+        )?;
         let mut argv = crate::commands::strings(&[
             "new-session",
             "-d",
@@ -601,6 +622,7 @@ fn run_native(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<i32> {
+    oms_command_peer::admission::interactive_state(repo).map_err(admission_error)?;
     let resolution = resolve_main(policy, harness, options.get("model"));
     require(
         !(harness == "pi" && resolution.transport == "direct"),
@@ -617,7 +639,7 @@ fn run_native(
     let execution = state::native_repository(repo, None)?;
     let resume = options.get("resume");
     let chosen_room = crate::commands::room(options);
-    let room_id = if let Some(res) = resume {
+    let (room_id, replaces) = if let Some(res) = resume {
         let bound_rooms = native_resume_binding(&resolution.owner, repo, res, services, stop)?;
         require(
             bound_rooms.len() <= 1,
@@ -628,20 +650,24 @@ fn run_native(
             repo,
             chosen_room
                 .as_deref()
-                .or_else(|| bound_rooms.iter().next().map(String::as_str)),
+                .or_else(|| bound_rooms.keys().next().map(String::as_str)),
             services,
             stop,
         )?;
-        if let Some(bound) = bound_rooms.iter().next() {
+        if let Some(bound) = bound_rooms.keys().next() {
             require(
                 bound == &ident,
                 "native session is bound to another room; resume refused",
             )?;
         }
-        ident
+        let replaces = bound_rooms.get(&ident).cloned();
+        (ident, replaces)
     } else {
         session_lock.check()?;
-        ensure_room(repo, chosen_room.as_deref(), services, stop)?
+        (
+            ensure_room(repo, chosen_room.as_deref(), services, stop)?,
+            None,
+        )
     };
 
     let native_session = resume
@@ -707,6 +733,9 @@ fn run_native(
     join_args.push(&label_arg);
     if let Some(sid) = &native_session {
         join_args.extend(["--native-session", sid]);
+    }
+    if let Some(previous) = replaces.as_deref() {
+        join_args.extend(["--replaces", previous]);
     }
     join_args.push("--json");
     if let Err(err) = services
@@ -799,35 +828,82 @@ fn run_native(
         cmd.env_remove(key);
     }
 
+    let admission = (|| -> Result<oms_command_peer::admission::InteractiveCall> {
+        let call = oms_command_peer::admission::begin_interactive(
+            oms_command_peer::admission::InteractiveRequest {
+                state_root: repo,
+                provider: &resolution.owner,
+                selected_model: resolution.model.as_deref(),
+                account: None,
+                attempt: Some(&attempt),
+                resume_session: resume,
+            },
+            stop,
+        )
+        .map_err(admission_error)?;
+        session_lock.check()?;
+        call.fence(stop).map_err(admission_error)?;
+        Ok(call)
+    })();
+    let call = match admission {
+        Ok(call) => call,
+        Err(error) => {
+            let settling = AtomicBool::new(false);
+            let states: &[&str] = if stop.load(Ordering::Acquire) || error.code == 130 {
+                &["cancelled"]
+            } else {
+                &["failed"]
+            };
+            let _ = transition_attempt(
+                repo,
+                &attempt,
+                states,
+                Some("native_admission_refused"),
+                services,
+                &settling,
+            );
+            return Err(error);
+        }
+    };
+    cmd.env("OMS_STATE_REPO", repo)
+        .env("OMS_PROVIDER_CALL_ID", call.call_id())
+        .env("OMS_OPERATION_ID", call.operation_id())
+        .env_remove("OMS_RESUME_SESSION");
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(err) => {
+            let accounting = call.finish(None, None).map_err(admission_error);
+            let settling = AtomicBool::new(false);
             let _ = transition_attempt(
                 repo,
                 &attempt,
                 &["failed"],
                 Some("native_launch_failed"),
                 services,
-                stop,
+                &settling,
             );
+            accounting?;
             return Err(Error::new(format!("native launch failed: {err}")));
         }
     };
 
     let status_code = wait_with_heartbeat(&mut child, repo, &attempt, services, stop);
+    let accounting = call.finish(None, None).map_err(admission_error);
     let final_states: &[&str] = match status_code {
         0 => &["verifying", "review", "done"],
         129 | 130 | 143 => &["cancelled"],
         _ => &["failed"],
     };
+    let settling = AtomicBool::new(false);
     let _ = transition_attempt(
         repo,
         &attempt,
         final_states,
         Some("native_exit"),
         services,
-        stop,
+        &settling,
     );
+    accounting?;
     Ok(status_code)
 }
 
@@ -1010,6 +1086,12 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
     }
     if words.first().is_some_and(|w| w == "env") {
         words.remove(0);
+        while words.first().is_some_and(|word| word == "-u") {
+            if !words.get(1).is_some_and(|name| is_env_name(name)) {
+                return None;
+            }
+            words.drain(..2);
+        }
         while words.first().is_some_and(|w| is_env_assign(w)) {
             words.remove(0);
         }
@@ -1155,6 +1237,9 @@ fn is_env_assign(word: &str) -> bool {
     let Some((name, _)) = word.split_once('=') else {
         return false;
     };
+    is_env_name(name)
+}
+fn is_env_name(name: &str) -> bool {
     !name.is_empty()
         && name.as_bytes()[0].is_ascii_alphabetic()
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -1229,7 +1314,7 @@ fn add_main_window(
         model,
         task,
         Some(room_id),
-    );
+    )?;
     let mut argv = crate::commands::strings(&[
         "new-window",
         "-d",
@@ -1318,8 +1403,30 @@ fn launch_command(
     model: Option<&str>,
     task: Option<&str>,
     room_id: Option<&str>,
-) -> String {
-    let mut parts = panel_env_prefix_for(launch == "agy");
+) -> Result<String> {
+    let state = repo
+        .to_str()
+        .ok_or_else(|| Error::new("tmux launch requires a UTF-8 state path"))?;
+    let mut parts = vec!["env".into()];
+    for name in ["OMS_STATE_REPO", "OMS_ROOM_REPO", "OMS_ROOM_ID"]
+        .iter()
+        .chain(NATIVE_CONTEXT_ENV)
+    {
+        parts.extend(["-u".into(), (*name).into()]);
+    }
+    parts.extend(panel_env_prefix_for(launch == "agy").into_iter().skip(1));
+    parts.push(format!("OMS_STATE_REPO={state}"));
+    parts.push(format!("OMS_ROOM_REPO={state}"));
+    for name in NATIVE_CONTEXT_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            let value = value.into_string().map_err(|_| {
+                Error::new(format!(
+                    "{name} is not UTF-8; native launch context cannot be relayed"
+                ))
+            })?;
+            parts.push(format!("{name}={value}"));
+        }
+    }
     parts.push(format!("OMS_PANEL_SESSION={session}"));
     if let Some(id) = room_id {
         parts.push(format!("OMS_ROOM_ID={id}"));
@@ -1343,14 +1450,14 @@ fn launch_command(
             }
         }
     }
-    format!(
+    Ok(format!(
         "exec {}",
         parts
             .iter()
             .map(|p| crate::commands::shell_quote(p))
             .collect::<Vec<_>>()
             .join(" ")
-    )
+    ))
 }
 
 fn watch_shell(
@@ -2112,28 +2219,59 @@ fn native_resume_binding(
     resume: &str,
     services: &dyn Services,
     stop: &AtomicBool,
-) -> Result<BTreeSet<String>> {
+) -> Result<BTreeMap<String, String>> {
     let digest = &oms_panel_core::digest(resume.as_bytes())[..32];
     let raw = crate::commands::query(
         services,
         NativeCommand::Room,
         repo,
-        &["discover", "--json"],
+        &["list", "--json"],
         stop,
     )?;
     require(
-        raw["incomplete"] != true,
+        raw["incomplete"] == false,
         "native resume ownership discovery is incomplete; inspect existing sessions",
     )?;
-    let mut bound = BTreeSet::new();
-    for state in rows(&raw["rooms"]) {
-        for enrolled in rows(&state["participants"]) {
+    let mut bound = BTreeMap::new();
+    let rooms = raw["rooms"]
+        .as_array()
+        .ok_or_else(|| Error::new("native resume room enumeration is unavailable"))?;
+    // List exposes summaries; current participant bindings belong to show.
+    // Missing discovery evidence must not become an unbound-session claim.
+    for summary in rooms {
+        if summary["successor"].as_str().is_some() {
+            continue;
+        }
+        let id = summary["id"]
+            .as_str()
+            .ok_or_else(|| Error::new("native resume room identity is unavailable"))?;
+        let state = crate::commands::query(
+            services,
+            NativeCommand::Room,
+            repo,
+            &["show", "--id", id, "--json"],
+            stop,
+        )?;
+        let participants = state["participants"]
+            .as_array()
+            .ok_or_else(|| Error::new("native resume participant bindings are unavailable"))?;
+        let current_id = state["id"]
+            .as_str()
+            .ok_or_else(|| Error::new("native resume current room identity is unavailable"))?;
+        for enrolled in participants {
             if enrolled["provider"] == provider
                 && enrolled["joined"] == true
                 && enrolled["consumer"] == digest
-                && let Some(id) = state["id"].as_str()
             {
-                bound.insert(id.to_owned());
+                let participant = enrolled["participant"].as_str().ok_or_else(|| {
+                    Error::new("native resume participant identity is unavailable")
+                })?;
+                require(
+                    bound
+                        .insert(current_id.to_owned(), participant.to_owned())
+                        .is_none(),
+                    "native session has duplicate room participants; resume refused",
+                )?;
             }
         }
     }
@@ -2317,6 +2455,7 @@ mod native_lifecycle_contract {
     };
     use std::ffi::OsString;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -2331,6 +2470,7 @@ mod native_lifecycle_contract {
                 SEQ.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&p).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
             let p = p.canonicalize().unwrap();
             let init = std::process::Command::new("git")
                 .args(["-C", p.to_str().unwrap(), "init", "-q"])
@@ -2347,6 +2487,62 @@ mod native_lifecycle_contract {
     }
 
     struct RealCliParsers;
+    struct RoomOperations {
+        repo: PathBuf,
+        bytes: Vec<u8>,
+        attempts: Vec<oms_command_room::Attempt>,
+        _guard: oms_command_operations::lock::FileLock,
+    }
+    impl oms_command_room::OperationsRead for RoomOperations {
+        fn attempts(&self) -> &[oms_command_room::Attempt] {
+            &self.attempts
+        }
+        fn check(&self) -> oms_command_room::Result<()> {
+            if fs::read(oms_command_operations::event_path(&self.repo)).unwrap_or_default()
+                != self.bytes
+            {
+                return Err(oms_command_room::Error::new("fixture operations changed"));
+            }
+            Ok(())
+        }
+    }
+    impl oms_command_room::Services for RealCliParsers {
+        fn state_repository(&self, path: &Path) -> oms_command_room::Result<PathBuf> {
+            oms_command_room::Services::state_repository(&oms_command_room::LocalServices, path)
+        }
+        fn canonical_provider(&self, provider: &str) -> oms_command_room::Result<String> {
+            oms_command_room::Services::canonical_provider(
+                &oms_command_room::LocalServices,
+                provider,
+            )
+        }
+        fn operations<'a>(
+            &'a self,
+            repo: &Path,
+        ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
+            let error = oms_command_room::Error::new;
+            let guard = oms_command_operations::lock::FileLock::acquire(
+                &oms_command_operations::event_path(repo),
+                &AtomicBool::new(false),
+            )
+            .map_err(error)?;
+            let (_, projection) = oms_command_operations::load_projection(repo).map_err(error)?;
+            let attempts = projection
+                .iter()
+                .map(|row| {
+                    let raw = row.json(false).map_err(error)?;
+                    let row = oms_command_room::value::parse(&raw, oms_command_room::MAX_ROW)?;
+                    oms_command_room::Attempt::from_projection_row(&row)
+                })
+                .collect::<oms_command_room::Result<Vec<_>>>()?;
+            Ok(Box::new(RoomOperations {
+                repo: repo.to_path_buf(),
+                bytes: fs::read(oms_command_operations::event_path(repo)).unwrap_or_default(),
+                attempts,
+                _guard: guard,
+            }))
+        }
+    }
     impl PeerExecutor for RealCliParsers {
         fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
             Err(oms_panel_core::Error::new("unexpected subprocess"))
@@ -2367,7 +2563,7 @@ mod native_lifecycle_contract {
                     repo,
                     stop,
                 ),
-                NativeCommand::Room => oms_command_room::run(args, repo, stop),
+                NativeCommand::Room => oms_command_room::run_with_services(args, repo, stop, self),
                 _ => return Err(oms_panel_core::Error::new("unsupported test command")),
             };
             if code != 0 {
@@ -2385,6 +2581,675 @@ mod native_lifecycle_contract {
                 limited: false,
             })
         }
+    }
+
+    fn usage_rows(repo: &Path) -> Vec<serde_json::Value> {
+        fs::read(repo.join(".oms/usage/receipts.jsonl"))
+            .unwrap_or_default()
+            .split(|byte| *byte == b'\n')
+            .filter(|row| !row.is_empty())
+            .map(|row| serde_json::from_slice(row).unwrap())
+            .collect()
+    }
+    fn last_main(repo: &Path, svc: &RealCliParsers) -> Value {
+        let raw = fs::read(repo.join(".oms/lifecycle/events.jsonl")).unwrap();
+        let created = raw
+            .split(|b| *b == b'\n')
+            .filter(|row| !row.is_empty())
+            .map(|row| serde_json::from_slice::<serde_json::Value>(row).unwrap())
+            .rfind(|row| row["event_type"] == "attempt.created")
+            .unwrap();
+        crate::commands::query(
+            svc,
+            NativeCommand::Events,
+            repo,
+            &[
+                "show",
+                "--attempt",
+                created["attempt_id"].as_str().unwrap(),
+                "--json",
+            ],
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn native_main_launch_preserves_physical_custody_and_unknown_evidence() {
+        const NAME: &str = "native_panel::native_lifecycle_contract::native_main_launch_preserves_physical_custody_and_unknown_evidence";
+        const CASE: &str = "OMS_NATIVE_MAIN_TEST_CASE";
+        if std::env::var_os("OMS_NATIVE_MAIN_TEST_ENTRY").is_some() {
+            let repo = PathBuf::from(std::env::var_os("OMS_STATE_REPO").unwrap());
+            let call_id = std::env::var("OMS_PROVIDER_CALL_ID").unwrap();
+            let rows = usage_rows(&repo);
+            let pending = rows.last().unwrap();
+            assert_eq!(pending["call_id"], call_id);
+            assert_eq!(
+                pending["operation_id"],
+                std::env::var("OMS_OPERATION_ID").unwrap()
+            );
+            assert_eq!(pending["phase"], "pending");
+            assert_eq!(
+                pending["provider"],
+                std::env::var("OMS_PANEL_OWNER").unwrap()
+            );
+            assert_eq!(pending["selected_model"], "fixture-model");
+            assert_eq!(
+                pending["attempt_id"],
+                std::env::var("OMS_PANEL_MAIN_ATTEMPT").unwrap()
+            );
+            assert!(std::env::var_os("OMS_ATTEMPT_ID").is_none());
+            assert!(std::env::var_os("OMS_RESUME_SESSION").is_none());
+            if std::env::var(CASE).is_ok_and(|case| case.starts_with("resume-")) {
+                assert_eq!(
+                    pending["cumulative"]["session_id"],
+                    "11111111-1111-1111-1111-111111111111"
+                );
+                assert_eq!(pending["cumulative"]["baseline_unknown"], true);
+            } else {
+                assert!(
+                    pending["cumulative"].is_null(),
+                    "a fresh launch ignores stale resume context"
+                );
+            }
+            let argv = fs::read_to_string(repo.join(".oms/native-argv")).unwrap();
+            assert!(argv.lines().any(|arg| arg == "fixture-model"));
+            if std::env::var(CASE).is_ok_and(|case| case.starts_with("resume-")) {
+                assert!(
+                    argv.lines()
+                        .any(|arg| arg == "11111111-1111-1111-1111-111111111111")
+                );
+            }
+            let registry: serde_json::Value = serde_json::from_slice(
+                &fs::read(repo.join(".oms/artifacts/panel-dispatch/reservations.json")).unwrap(),
+            )
+            .unwrap();
+            let intent = &registry["physical"]["calls"][&call_id];
+            assert_eq!(intent["state"], "ready");
+            assert_eq!(intent["usage_ordinal"], pending["ordinal"]);
+            assert_eq!(intent["request"]["identity"]["call_id"], call_id);
+            let mut settings = oms_lock::Settings::from_env().unwrap();
+            settings.mode = oms_lock::Mode::Flock;
+            let _dispatch = oms_lock::Lock::in_root(
+                repo.clone(),
+                Path::new(".oms/artifacts/panel-dispatch.lock"),
+                settings.clone(),
+            )
+            .unwrap()
+            .try_acquire()
+            .unwrap();
+            assert!(matches!(
+                oms_lock::Lock::in_root(
+                    repo.clone(),
+                    Path::new(".oms/artifacts/panel-main-session.lock"),
+                    settings
+                )
+                .unwrap()
+                .try_acquire(),
+                Err(oms_lock::Error::Busy)
+            ));
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(repo.join(".oms/native-entry-count"))
+                .and_then(|mut file| std::io::Write::write_all(&mut file, b"entry\n"))
+                .unwrap();
+            if fs::read_to_string(repo.join(".oms/native-main-wait")).is_ok() {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            if std::env::var(CASE).as_deref() == Ok("exit125") {
+                std::process::exit(125);
+            }
+            return;
+        }
+        let Ok(case) = std::env::var(CASE) else {
+            for case in [
+                "plain",
+                "alias",
+                "wrong-state",
+                "invalid-binding",
+                "fresh-codex",
+                "resume-codex",
+                "resume-bound",
+                "resume-unverified",
+                "resume-live",
+                "resume-foreign",
+                "resume-descendants",
+                "resume-ambiguous",
+                "bounded",
+                "exit125",
+                "spawn-error",
+            ] {
+                let home = TempRepo::new();
+                let repo = TempRepo::new();
+                let bin = home.0.join("bin");
+                fs::create_dir(&bin).unwrap();
+                let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                    .map(|dir| dir.join("git"))
+                    .find(|path| path.is_file())
+                    .unwrap();
+                std::os::unix::fs::symlink(git.canonicalize().unwrap(), bin.join("git")).unwrap();
+                let script = format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMS_STATE_REPO/.oms/native-argv\"\nOMS_NATIVE_MAIN_TEST_ENTRY=1 exec \"$OMS_NATIVE_MAIN_TEST_EXE\" --exact {NAME} --nocapture\n"
+                );
+                for provider in ["claude", "codex"] {
+                    fs::write(
+                        bin.join(provider),
+                        if case == "spawn-error" {
+                            format!("#!{}/missing-interpreter\n", bin.display())
+                        } else {
+                            script.clone()
+                        },
+                    )
+                    .unwrap();
+                    fs::set_permissions(bin.join(provider), fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                let mut cmd = std::process::Command::new("/bin/bash");
+                cmd.env_clear();
+                for key in ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ"] {
+                    if let Some(value) = std::env::var_os(key) {
+                        cmd.env(key, value);
+                    }
+                }
+                cmd.args([
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    "umask 022; exec \"$@\"",
+                    "native-main-fixture",
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("HOME", &home.0)
+                .env("XDG_CACHE_HOME", home.0.join(".cache"))
+                .env("PATH", &bin)
+                .env(CASE, case)
+                .env("OMS_NATIVE_MAIN_TEST_ROOT", &repo.0)
+                .env("OMS_NATIVE_MAIN_TEST_EXE", std::env::current_exe().unwrap());
+                match case {
+                    "alias" => {
+                        let alias = home.0.join("state-alias");
+                        std::os::unix::fs::symlink(&repo.0, &alias).unwrap();
+                        cmd.env("OMS_STATE_REPO", alias);
+                    }
+                    "wrong-state" => {
+                        cmd.env("OMS_STATE_REPO", &home.0);
+                    }
+                    "invalid-binding" => {
+                        cmd.env("OMS_CAMPAIGN_MANIFEST_SHA256", "");
+                    }
+                    "fresh-codex" | "resume-codex" | "resume-bound" | "resume-unverified"
+                    | "resume-ambiguous" => {
+                        cmd.env("OMS_RESUME_SESSION", "stale-session");
+                    }
+                    "bounded" => {
+                        let manifest = serde_json::json!({"problem":{"file":"problem.txt","sha256":"a".repeat(64)},"base":"b".repeat(40),
+                            "verify":{"command":"true","timeout_s":30,"inputs":[]},"candidate_formats":["text"],
+                            "groups":[{"id":"group","formulation":"fixture","k":1,"routes":[{"provider":"claude","model":"fixture-model"}]}],
+                            "budget":{"max_concurrent":4,"total_calls":10,"deadline_s":60,"max_waves":2,"stall_waves":2,
+                            "verifier":{"concurrency":1,"timeout_s":30,"max_artifact_bytes":1024},"usage":{"max_tokens":60,"per_call":{"tokens":60}}}});
+                        let raw = oms_command_plan::json::canonical(
+                            &oms_command_plan::json::parse(&serde_json::to_vec(&manifest).unwrap())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        let digest = oms_panel_core::digest(&raw);
+                        let directory = format!(".oms/plan/campaigns/{}", &digest[..16]);
+                        let operation =
+                            format!("res_{}", oms_command_plan::storage::random_hex(16).unwrap());
+                        let store = oms_command_plan::storage::Store::open(&repo.0).unwrap();
+                        store
+                            .publish_once(format!("{directory}/manifest.json"), &raw, 1024 * 1024)
+                            .unwrap();
+                        let now = chrono::DateTime::from_timestamp(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() as i64,
+                            0,
+                        )
+                        .unwrap()
+                        .to_rfc3339();
+                        for row in [
+                            serde_json::json!({"type":"campaign_started","budget":manifest["budget"],"started_at":now}),
+                            serde_json::json!({"type":"reservation","id":operation,"provider":"claude","kind":"seat","reserved_usage":{"tokens":60,"cost_microusd":null}}),
+                        ] {
+                            store
+                                .append(
+                                    format!("{directory}/events.jsonl"),
+                                    &oms_command_plan::json::parse(
+                                        &serde_json::to_vec(&row).unwrap(),
+                                    )
+                                    .unwrap(),
+                                )
+                                .unwrap();
+                        }
+                        cmd.env("OMS_CAMPAIGN_MANIFEST_SHA256", &digest)
+                            .env("OMS_OPERATION_ID", operation)
+                            .env("OMS_GOAL_ID", &digest[..16]);
+                    }
+                    _ => {}
+                }
+                let output = cmd.output().unwrap();
+                let body = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.status.success(), "{case}: {body}");
+                assert!(body.contains("1 passed;"), "{case}: {body}");
+            }
+            return;
+        };
+        let repo = PathBuf::from(std::env::var_os("OMS_NATIVE_MAIN_TEST_ROOT").unwrap());
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let policy =
+            oms_panel_core::routing::Policy::load(&source.join("config/panel-routing.json"))
+                .unwrap();
+        let harness = if case == "fresh-codex" || case.starts_with("resume-") {
+            "codex"
+        } else {
+            "claude"
+        };
+        let mut args = crate::commands::strings(&["--launch", harness, "--model", "fixture-model"]);
+        if case.starts_with("resume-") {
+            args.extend(crate::commands::strings(&[
+                "--resume",
+                "11111111-1111-1111-1111-111111111111",
+            ]));
+        }
+        let options = crate::cli::Options::parse(&args).unwrap();
+        let stop = AtomicBool::new(false);
+        let svc = RealCliParsers;
+        let mut expected_room = None;
+        if ["resume-bound", "resume-descendants"].contains(&case.as_str()) {
+            assert_eq!(
+                super::run_native(&repo, &policy, harness, &options, &svc, &stop).unwrap(),
+                0
+            );
+            expected_room = last_main(&repo, &svc)["refs"]["panel_room_id"]
+                .as_str()
+                .map(str::to_owned);
+            if case == "resume-descendants" {
+                let owner = last_main(&repo, &svc)["attempt_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                svc.command(
+                    NativeCommand::Room,
+                    &repo,
+                    &crate::commands::strings(&[
+                        "join",
+                        "--id",
+                        expected_room.as_deref().unwrap(),
+                        "--participant",
+                        "existing-worker",
+                        "--provider",
+                        "claude",
+                        "--role",
+                        "worker",
+                        "--parent",
+                        &owner,
+                        "--owns",
+                        "src",
+                        "--json",
+                    ]),
+                    &stop,
+                )
+                .unwrap()
+                .success()
+                .unwrap();
+            }
+        }
+        if ["resume-live", "resume-foreign"].contains(&case.as_str()) {
+            let room = super::ensure_room(&repo, None, &svc, &stop).unwrap();
+            let digest = oms_panel_core::digest(b"11111111-1111-1111-1111-111111111111");
+            let proof = if case == "resume-foreign" {
+                "f".repeat(32)
+            } else {
+                digest[..32].to_owned()
+            };
+            let old = event_id(
+                &repo,
+                &[
+                    "start",
+                    "--provider",
+                    "codex",
+                    "--tool",
+                    "panel-main",
+                    "--ref",
+                    "panel_role=main",
+                    "--ref",
+                    "panel_owner=codex",
+                    "--ref",
+                    "panel_harness=codex",
+                    "--ref",
+                    &format!("panel_room_id={room}"),
+                    "--ref",
+                    &format!("panel_session_digest={proof}"),
+                    "--then",
+                    "starting",
+                    "--then",
+                    "working",
+                ]
+                .map(str::to_owned),
+                &svc,
+                &stop,
+            )
+            .unwrap();
+            svc.command(
+                NativeCommand::Room,
+                &repo,
+                &crate::commands::strings(&[
+                    "join",
+                    "--id",
+                    &room,
+                    "--participant",
+                    &old,
+                    "--provider",
+                    "codex",
+                    "--role",
+                    "main",
+                    "--native-session",
+                    "11111111-1111-1111-1111-111111111111",
+                    "--json",
+                ]),
+                &stop,
+            )
+            .unwrap()
+            .success()
+            .unwrap();
+            if case == "resume-foreign" {
+                transition_attempt(
+                    &repo,
+                    &old,
+                    &["verifying", "review", "done"],
+                    None,
+                    &svc,
+                    &stop,
+                )
+                .unwrap();
+            }
+            expected_room = Some(room);
+        }
+        if ["resume-unverified", "resume-ambiguous"].contains(&case.as_str()) {
+            for n in 0..if case == "resume-ambiguous" { 2 } else { 1 } {
+                let room = super::ensure_room(&repo, None, &svc, &stop).unwrap();
+                svc.command(
+                    NativeCommand::Room,
+                    &repo,
+                    &crate::commands::strings(&[
+                        "join",
+                        "--id",
+                        &room,
+                        "--participant",
+                        &format!("old-main-{n}"),
+                        "--provider",
+                        "codex",
+                        "--role",
+                        "main",
+                        "--native-session",
+                        "11111111-1111-1111-1111-111111111111",
+                        "--json",
+                    ]),
+                    &stop,
+                )
+                .unwrap()
+                .success()
+                .unwrap();
+                expected_room = Some(room);
+            }
+        }
+        let before_room = expected_room
+            .as_ref()
+            .map(|id| fs::read(repo.join(format!(".oms/threads/{id}.jsonl"))).unwrap());
+        let result = super::run_native(&repo, &policy, harness, &options, &svc, &stop);
+        if case == "resume-ambiguous" {
+            assert!(result.unwrap_err().message.contains("multiple rooms"));
+            assert!(usage_rows(&repo).is_empty());
+            assert!(!repo.join(".oms/native-entry-count").exists());
+            return;
+        }
+        if [
+            "resume-unverified",
+            "resume-live",
+            "resume-foreign",
+            "resume-descendants",
+        ]
+        .contains(&case.as_str())
+        {
+            assert!(
+                result
+                    .unwrap_err()
+                    .message
+                    .contains(if case == "resume-descendants" {
+                        "joined descendants"
+                    } else {
+                        "unverified"
+                    })
+            );
+            assert_eq!(
+                usage_rows(&repo).len(),
+                if case == "resume-descendants" { 2 } else { 0 }
+            );
+            assert_eq!(
+                repo.join(".oms/native-entry-count").exists(),
+                case == "resume-descendants"
+            );
+            assert_eq!(
+                fs::read(repo.join(format!(
+                    ".oms/threads/{}.jsonl",
+                    expected_room.as_deref().unwrap()
+                )))
+                .unwrap(),
+                before_room.unwrap()
+            );
+            let room = crate::commands::query(
+                &svc,
+                NativeCommand::Room,
+                &repo,
+                &["show", "--id", expected_room.as_deref().unwrap(), "--json"],
+                &stop,
+            )
+            .unwrap();
+            assert_eq!(
+                room["participants"].as_array().unwrap().len(),
+                if case == "resume-descendants" { 2 } else { 1 }
+            );
+            assert_eq!(room["participants"][0]["joined"], Value::from(true));
+            if case == "resume-descendants" {
+                let core = oms_command_room::Room::open(
+                    &repo,
+                    oms_command_room::Session::default(),
+                    &svc,
+                    &stop,
+                    false,
+                    false,
+                )
+                .unwrap();
+                let id = expected_room.as_deref().unwrap();
+                let state = core.status(id, false).unwrap();
+                let overlaps = core
+                    .scope_overlaps(id, &state, "next-main", &["src".into()])
+                    .unwrap();
+                assert!(
+                    overlaps
+                        .iter()
+                        .any(|p| p.text("participant") == "existing-worker")
+                );
+                let next = core.rollover(id, None).unwrap();
+                let carried = core.status(&next, false).unwrap();
+                assert!(
+                    carried
+                        .list("participants")
+                        .iter()
+                        .any(|p| p.text("participant") == "existing-worker" && p.flag("joined"))
+                );
+            }
+            return;
+        }
+        if case == "spawn-error" {
+            assert!(result.unwrap_err().message.contains("native launch failed"));
+            assert!(!repo.join(".oms/native-entry-count").exists());
+            let rows = usage_rows(&repo);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0]["phase"], "pending");
+            assert_eq!(rows[1]["phase"], "unknown");
+            assert!(rows[1]["cleanup_complete"].is_null());
+            assert!(rows[1]["source_sha256"].is_null());
+            assert_eq!(last_main(&repo, &svc)["state"], Value::from("failed"));
+            return;
+        }
+        if ["wrong-state", "invalid-binding"].contains(&case.as_str()) {
+            assert_eq!(result.unwrap_err().code, 2);
+            assert!(!repo.join(".oms/native-entry-count").exists());
+            assert!(usage_rows(&repo).is_empty());
+            if case == "invalid-binding" {
+                assert_eq!(last_main(&repo, &svc)["state"], Value::from("failed"));
+            }
+            return;
+        }
+        assert_eq!(result.unwrap(), if case == "exit125" { 125 } else { 0 });
+        if let Some(room) = expected_room {
+            assert_eq!(
+                last_main(&repo, &svc)["refs"]["panel_room_id"],
+                Value::from(room)
+            );
+        }
+        if case == "resume-bound" {
+            let room_id = last_main(&repo, &svc)["refs"]["panel_room_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let core = oms_command_room::Room::open(
+                &repo,
+                oms_command_room::Session::default(),
+                &svc,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            let rows = core.records(&room_id).unwrap();
+            let state = oms_command_room::project(&rows).unwrap();
+            let members = state.list("participants");
+            assert_eq!(members.len(), 2);
+            assert!(!members[0].flag("joined"));
+            assert!(members[1].flag("joined"));
+            assert_eq!(state["owner"], members[1]["participant"]);
+            core.updates(&room_id, members[1].text("participant"), "", 65536, 200)
+                .unwrap();
+            let resumed = rows
+                .iter()
+                .rev()
+                .find(|r| r["room_event"].text("kind") == "main-resume")
+                .unwrap();
+            let before = fs::read(repo.join(format!(".oms/threads/{room_id}.jsonl"))).unwrap();
+            assert!(
+                !core
+                    .append(&room_id, &resumed["room_event"], resumed.text("text"))
+                    .unwrap()
+                    .0
+            );
+            assert_eq!(
+                fs::read(repo.join(format!(".oms/threads/{room_id}.jsonl"))).unwrap(),
+                before
+            );
+            let mut changed = resumed["room_event"].clone();
+            changed.set("kind", "join");
+            assert!(oms_command_room::event_shape(&changed).is_err());
+            changed.set("kind", "main-resume");
+            changed.set("label", "changed resume payload");
+            assert!(core.append(&room_id, &changed, "changed resume").is_err());
+            assert_eq!(
+                fs::read(repo.join(format!(".oms/threads/{room_id}.jsonl"))).unwrap(),
+                before
+            );
+            let successor = core.rollover(&room_id, None).unwrap();
+            let carried = core.status(&successor, false).unwrap();
+            assert!(
+                carried
+                    .list("participants")
+                    .iter()
+                    .any(|p| p["participant"] == members[1]["participant"] && p.flag("joined"))
+            );
+        }
+        let rows = usage_rows(&repo);
+        let finished = rows.last().unwrap();
+        assert_eq!(finished["phase"], "unknown");
+        assert!(finished["source_sha256"].is_null());
+        assert!(finished["cleanup_complete"].is_null());
+        assert!(finished["provider_usage"]["total_tokens"].is_null());
+        assert_eq!(finished["cost"]["status"], "unknown");
+        assert_eq!(
+            fs::read_to_string(repo.join(".oms/native-entry-count")).unwrap(),
+            if case == "resume-bound" {
+                "entry\nentry\n"
+            } else {
+                "entry\n"
+            }
+        );
+        if case == "bounded" {
+            let before =
+                fs::read(repo.join(".oms/artifacts/panel-dispatch/reservations.json")).unwrap();
+            assert_eq!(
+                super::run_native(&repo, &policy, harness, &options, &svc, &stop)
+                    .unwrap_err()
+                    .code,
+                3
+            );
+            assert_eq!(
+                fs::read(repo.join(".oms/artifacts/panel-dispatch/reservations.json")).unwrap(),
+                before
+            );
+            assert_eq!(
+                fs::read_to_string(repo.join(".oms/native-entry-count")).unwrap(),
+                "entry\n"
+            );
+        }
+        if case != "plain" {
+            return;
+        }
+
+        let registry = repo.join(".oms/artifacts/panel-dispatch/reservations.json");
+        let before = fs::read(&registry).unwrap();
+        let receipts = fs::read(repo.join(".oms/usage/receipts.jsonl")).unwrap();
+        fs::write(&registry, b"{corrupt").unwrap();
+        assert!(super::run_native(&repo, &policy, harness, &options, &svc, &stop).is_err());
+        assert_eq!(fs::read(&registry).unwrap(), b"{corrupt");
+        assert_eq!(
+            fs::read(repo.join(".oms/usage/receipts.jsonl")).unwrap(),
+            receipts
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join(".oms/native-entry-count")).unwrap(),
+            "entry\n"
+        );
+        assert_eq!(last_main(&repo, &svc)["state"], Value::from("failed"));
+        fs::write(registry, before).unwrap();
+        fs::write(repo.join(".oms/native-main-wait"), b"wait").unwrap();
+        std::thread::scope(|scope| {
+            let running =
+                scope.spawn(|| super::run_native(&repo, &policy, harness, &options, &svc, &stop));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                if fs::read_to_string(repo.join(".oms/native-entry-count"))
+                    .is_ok_and(|value| value.lines().count() == 2)
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            stop.store(true, Ordering::Release);
+            assert_eq!(running.join().unwrap().unwrap(), 130);
+        });
+        assert_eq!(last_main(&repo, &svc)["state"], Value::from("cancelled"));
+        let rows = usage_rows(&repo);
+        assert_eq!(rows.last().unwrap()["phase"], "unknown");
+        assert!(rows.last().unwrap()["cleanup_complete"].is_null());
     }
 
     #[test]
@@ -2492,12 +3357,61 @@ mod native_lifecycle_contract {
 
     #[test]
     fn staged_entry_prefix_carries_oms_dispatch_and_matches_panes() {
+        const NAME: &str = "native_panel::native_lifecycle_contract::staged_entry_prefix_carries_oms_dispatch_and_matches_panes";
+        const CASE: &str = "OMS_NATIVE_RELAY_CASE";
+        if std::env::var_os("OMS_NATIVE_RELAY_ENTRY").is_some() {
+            let names = ["OMS_STATE_REPO", "OMS_ROOM_REPO", "OMS_ROOM_ID"]
+                .iter()
+                .chain(super::NATIVE_CONTEXT_ENV);
+            let snapshot = names
+                .map(|name| ((*name).to_owned(), std::env::var(name).ok()))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            fs::write(
+                std::env::var_os("OMS_NATIVE_RELAY_OUT").unwrap(),
+                serde_json::to_vec(&snapshot).unwrap(),
+            )
+            .unwrap();
+            return;
+        }
+        let Ok(case) = std::env::var(CASE) else {
+            for case in ["absent", "present", "empty", "non-utf8"] {
+                let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+                cmd.env_clear()
+                    .args(["--exact", NAME, "--nocapture"])
+                    .env(CASE, case);
+                for key in ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ"] {
+                    if let Some(value) = std::env::var_os(key) {
+                        cmd.env(key, value);
+                    }
+                }
+                if case == "present" {
+                    for name in super::NATIVE_CONTEXT_ENV {
+                        cmd.env(name, format!("caller {name} 'quoted'\nnext"));
+                    }
+                } else if case == "empty" {
+                    cmd.env("OMS_CAMPAIGN_MANIFEST_SHA256", "");
+                } else if case == "non-utf8" {
+                    use std::os::unix::ffi::OsStringExt;
+                    cmd.env("CODEX_HOME", OsString::from_vec(vec![0xff]));
+                }
+                let output = cmd.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{case}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+            }
+            return;
+        };
         let dir = TempRepo::new();
         let rev = "0123456789abcdef0123456789abcdef01234567";
         let staged_dir = dir.0.join("target/oms-native").join(rev);
         fs::create_dir_all(&staged_dir).unwrap();
         let exe = staged_dir.join("oms");
-        fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&exe, format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$OMS_NATIVE_RELAY_ARGS\"\nOMS_NATIVE_RELAY_ENTRY=1 exec \"$OMS_NATIVE_RELAY_EXE\" --exact {NAME} --nocapture\n")).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(staged_dir.join("manifest.json"), "{}").unwrap();
 
         let prefix = super::entry_prefix_for(
@@ -2519,7 +3433,7 @@ mod native_lifecycle_contract {
         );
         assert!(super::test_entry_matches(&dir.0, &prefix));
 
-        let launch_cmd = super::launch_command(
+        let launched = super::launch_command(
             &dir.0,
             &prefix,
             "oms-test",
@@ -2529,6 +3443,62 @@ mod native_lifecycle_contract {
             None,
             Some("room-1234"),
         );
+        if case == "non-utf8" {
+            assert!(
+                launched
+                    .unwrap_err()
+                    .message
+                    .contains("CODEX_HOME is not UTF-8")
+            );
+            return;
+        }
+        let launch_cmd = launched.unwrap();
+        let snapshot = dir.0.join("relay.json");
+        let recorded_args = dir.0.join("relay-args");
+        let mut shell = std::process::Command::new("sh");
+        shell
+            .env_clear()
+            .args(["-c", &launch_cmd])
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("OMS_NATIVE_RELAY_EXE", std::env::current_exe().unwrap())
+            .env("OMS_NATIVE_RELAY_OUT", &snapshot)
+            .env("OMS_NATIVE_RELAY_ARGS", &recorded_args);
+        for name in ["OMS_STATE_REPO", "OMS_ROOM_REPO", "OMS_ROOM_ID"]
+            .iter()
+            .chain(super::NATIVE_CONTEXT_ENV)
+        {
+            shell.env(name, "stale-server-value");
+        }
+        let output = shell.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let seen: serde_json::Value = serde_json::from_slice(&fs::read(snapshot).unwrap()).unwrap();
+        assert_eq!(seen["OMS_STATE_REPO"], dir.0.to_str().unwrap());
+        assert_eq!(seen["OMS_ROOM_REPO"], dir.0.to_str().unwrap());
+        assert_eq!(seen["OMS_ROOM_ID"], "room-1234");
+        for name in super::NATIVE_CONTEXT_ENV {
+            assert_eq!(
+                seen[name],
+                serde_json::to_value(std::env::var(name).ok()).unwrap(),
+                "{name}"
+            );
+        }
+        let captured = fs::read(recorded_args).unwrap();
+        let captured: Vec<_> = captured
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| OsString::from(String::from_utf8(arg.to_vec()).unwrap()))
+            .collect();
+        assert_eq!(
+            &captured[..prefix.len() - 1],
+            &prefix[1..].iter().map(OsString::from).collect::<Vec<_>>()
+        );
+        assert_eq!(captured[prefix.len() - 1], "panel");
+        assert!(!dir.0.join(".oms/usage/receipts.jsonl").exists());
         assert_eq!(super::match_panel_command(&launch_cmd, &dir.0), Some(false));
         for task in [
             "--foo",
@@ -2546,7 +3516,8 @@ mod native_lifecycle_contract {
                 None,
                 Some(task),
                 Some("room-1234"),
-            );
+            )
+            .unwrap();
             let words = super::split_shell_words(&command).unwrap();
             let panel = words.iter().position(|word| word == "panel").unwrap();
             let args: Vec<OsString> = words[panel + 1..].iter().map(OsString::from).collect();

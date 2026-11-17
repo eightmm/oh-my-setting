@@ -35,6 +35,7 @@ const VALUES: &[&str] = &[
     "--model",
     "--label",
     "--native-session",
+    "--replaces",
     "--owns",
     "--parent",
     "--topic",
@@ -52,7 +53,7 @@ const VALUES: &[&str] = &[
     "--worktree",
 ];
 const FLAGS: &[&str] = &["--clear", "--json", "--exact", "--retry", "--allow-wakeup"];
-pub const HELP: &str = "OMS work rooms: shared threads, addressed messages and explicit consumption.\n\nUsage: oms room ACTION [OPTIONS]\nActions: new join bind scope describe leave close send updates ack show list publish rollover relay-server\n  --repo PATH             State repository (defaults to inherited room or current repository)\n  --id ID                 Room id (defaults to inherited room)\n  --participant ID        Exact participant (defaults to inherited participant)\n  --provider PROVIDER     Registered provider or adapter (default OMS_AGENT or codex)\n  --role ROLE             main, worker, advisor, reviewer, researcher\n  --model MODEL           Declared model\n  --label TEXT            Bounded plain participant label\n  --native-session ID     Native session id, or current inside Claude; stored only as a hash\n  --owns PATH             Repeatable declared relative scope, not a write grant\n  --clear                 scope only: clear declared scopes\n  --parent ID             Parent participant\n  --topic TEXT            New room title (default Shared work)\n  --task-id ID            Task identifier for new\n  --to ID                 Exact recipient or all; a worker defaults to its parent\n  --text TEXT             Inline message of 1..4000 UTF-8 bytes\n  --text-file PATH        Message file of at most 4000 bytes\n  --kind KIND             question, answer, note, decision, handoff, status\n  --reply-to ID           Exact message being answered\n  --message-id ID         Stable message identity for idempotent retry\n  --after CURSOR          Opaque updates cursor; never an acknowledgment\n  --message ID            Repeatable exact consumed message id for ack\n  --json                  JSON output\n  --exact                 show only: read this log itself, not its successor\n  --retry                 publish only: explicitly retry an uncertain snapshot; may duplicate output\n  --app APP               publish target codex or claude; default Codex fixed receiver\n  --allow-wakeup          Claude publish only: authorize native inbox delivery which can spend model usage\n  -h, --help              Show this help\n";
+pub const HELP: &str = "OMS work rooms: shared threads, addressed messages and explicit consumption.\n\nUsage: oms room ACTION [OPTIONS]\nActions: new join bind scope describe leave close send updates ack show list publish rollover relay-server\n  --repo PATH             State repository (defaults to inherited room or current repository)\n  --id ID                 Room id (defaults to inherited room)\n  --participant ID        Exact participant (defaults to inherited participant)\n  --provider PROVIDER     Registered provider or adapter (default OMS_AGENT or codex)\n  --role ROLE             main, worker, advisor, reviewer, researcher\n  --model MODEL           Declared model\n  --label TEXT            Bounded plain participant label\n  --native-session ID     Native session id, or current inside Claude; stored only as a hash\n  --replaces ID           join only: atomically resume an exact terminal Main binding\n  --owns PATH             Repeatable declared relative scope, not a write grant\n  --clear                 scope only: clear declared scopes\n  --parent ID             Parent participant\n  --topic TEXT            New room title (default Shared work)\n  --task-id ID            Task identifier for new\n  --to ID                 Exact recipient or all; a worker defaults to its parent\n  --text TEXT             Inline message of 1..4000 UTF-8 bytes\n  --text-file PATH        Message file of at most 4000 bytes\n  --kind KIND             question, answer, note, decision, handoff, status\n  --reply-to ID           Exact message being answered\n  --message-id ID         Stable message identity for idempotent retry\n  --after CURSOR          Opaque updates cursor; never an acknowledgment\n  --message ID            Repeatable exact consumed message id for ack\n  --json                  JSON output\n  --exact                 show only: read this log itself, not its successor\n  --retry                 publish only: explicitly retry an uncertain snapshot; may duplicate output\n  --app APP               publish target codex or claude; default Codex fixed receiver\n  --allow-wakeup          Claude publish only: authorize native inbox delivery which can spend model usage\n  -h, --help              Show this help\n";
 struct Options {
     action: String,
     values: BTreeMap<String, Vec<OsString>>,
@@ -191,6 +192,9 @@ fn parse(args: &[OsString]) -> Result<Options> {
         return Err(Error::new("invalid app delivery options"));
     }
     let action = options.action.as_str();
+    if options.values.contains_key("--replaces") && action != "join" {
+        return Err(Error::new("--replaces applies to join only"));
+    }
     if action == "scope" && (options.values.contains_key("--owns") == options.flag("--clear")) {
         return Err(Error::new(
             "scope needs --owns PATH (repeatable) or --clear",
@@ -411,6 +415,7 @@ fn execute(
                 join.model = o.text("--model")?.map(str::to_owned);
                 join.label = o.text("--label")?.map(str::to_owned);
                 join.native_session = o.text("--native-session")?.map(str::to_owned);
+                join.replaces = o.text("--replaces")?.map(str::to_owned);
                 join.owns = o.texts("--owns")?;
                 join.parent = o.text("--parent")?.map(str::to_owned);
                 core.join(id, join)

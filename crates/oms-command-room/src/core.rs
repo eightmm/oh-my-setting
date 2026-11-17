@@ -26,6 +26,8 @@ pub struct Join {
     pub model: Option<String>,
     pub label: Option<String>,
     pub native_session: Option<String>,
+    /// Exact terminal Main whose native binding is transferred atomically.
+    pub replaces: Option<String>,
     pub owns: Vec<String>,
     pub parent: Option<String>,
     pub dispatch_role: Option<String>,
@@ -43,6 +45,7 @@ impl Join {
             model: None,
             label: None,
             native_session: None,
+            replaces: None,
             owns: vec![],
             parent: None,
             dispatch_role: None,
@@ -698,7 +701,15 @@ impl<'a> Room<'a> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| join.participant.clone());
         let mut e = obj([
-            ("kind", "join".into()),
+            (
+                "kind",
+                if join.replaces.is_some() {
+                    "main-resume"
+                } else {
+                    "join"
+                }
+                .into(),
+            ),
             ("participant", join.participant.into()),
             ("provider", provider.into()),
             ("role", join.role.into()),
@@ -713,6 +724,7 @@ impl<'a> Room<'a> {
             ("state", join.state),
             ("alias", join.alias),
             ("task_id", join.task_id),
+            ("replaces", join.replaces),
         ] {
             if let Some(v) = v {
                 e.set(k, v);

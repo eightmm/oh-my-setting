@@ -2146,6 +2146,58 @@ fn identity_change_blocks_preview_and_delivery() {
         ],
         "closed, sealed, or incompletely carried",
     );
+
+    let resumed = Fixture::new();
+    resumed.room();
+    resumed.push_row(r#"{"kind":"leave","participant":"worker"}"#);
+    resumed.push_row(r#"{"kind":"main-resume","participant":"next-main","provider":"codex","role":"main","label":"next-main","consumer":"c1","replaces":"main"}"#);
+    resumed.push_row(r#"{"kind":"join","participant":"next-worker","provider":"claude","role":"worker","label":"next-worker","parent":"next-main"}"#);
+    let args = [
+        "add",
+        "--room",
+        "input-room",
+        "--from",
+        "next-main",
+        "--to",
+        "next-worker",
+        "--text",
+        "new main",
+    ];
+    let queued = resumed.ok(&args);
+    let identity = field(field(&queued, "binding"), "identity");
+    assert_eq!(
+        text_of(field(identity, "owner"), "participant"),
+        "next-main"
+    );
+    assert_eq!(
+        text_of(field(identity, "sender"), "participant"),
+        "next-main"
+    );
+    assert_eq!(
+        number_of(field(field(identity, "sender"), "epoch"), "seq"),
+        6
+    );
+    resumed.refused(
+        &[
+            "add",
+            "--room",
+            "input-room",
+            "--from",
+            "main",
+            "--to",
+            "next-worker",
+            "--text",
+            "old main",
+        ],
+        "unavailable, or unsafe",
+    );
+    let bytes = fs::read(resumed.log()).unwrap();
+    let malformed = String::from_utf8(bytes.clone())
+        .unwrap()
+        .replace("main-resume", "join");
+    fs::write(resumed.log(), malformed).unwrap();
+    resumed.refused(&args, "unavailable, or unsafe");
+    fs::write(resumed.log(), bytes).unwrap();
 }
 
 fn digest_of(text: &str) -> String {

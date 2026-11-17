@@ -815,28 +815,19 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
             })
             .collect();
         remove_environment.extend(account_remove);
-        let extra = crate::usage::operation_env(&[(
-            "OMS_RESUME_SESSION".into(),
-            source.ident.clone().into(),
-        )])?;
-        let usage_repo = crate::usage::state_repository(&repo, &extra)?;
-        let route = providers::Route {
-            provider: source.provider.clone(),
-            model: "provider-default".into(),
-            effort: String::new(),
-            explicit: false,
-            account: account.clone().unwrap_or_default(),
-            account_pinned: false,
-        };
-        let pending = crate::usage::begin(
-            &usage_repo,
-            &route,
-            account.as_deref(),
-            true,
-            &extra,
+        let usage_repo = crate::usage::state_repository(&repo, &[])?;
+        let pending = crate::admission::begin_interactive(
+            crate::admission::InteractiveRequest {
+                state_root: &usage_repo,
+                provider: &source.provider,
+                selected_model: None,
+                account: account.as_deref(),
+                attempt: None,
+                resume_session: Some(&source.ident),
+            },
             context.interrupted,
         )?;
-        let call_id = pending.receipt.identity.call_id.clone();
+        let call_id = pending.call_id().to_owned();
         environment.push(("OMS_PROVIDER_CALL_ID".into(), call_id.clone().into()));
         remove_environment.retain(|key| key != "OMS_PROVIDER_CALL_ID");
         pending.fence(context.interrupted)?;
@@ -856,24 +847,20 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                let _ = crate::usage::finish_unobserved(&usage_repo, pending.receipt, &[], None);
+                let _ = pending.finish(None, None);
                 return Err(error);
             }
         };
-        crate::usage::finish_unobserved(
-            &usage_repo,
-            pending.receipt,
-            &result.stdout,
-            result.cleanup_complete,
-        )
-        .map_err(|error| {
-            Error::new(
-                error.code,
-                format!(
-                    "native resume usage accounting failed; reconcile before retrying: {error}"
-                ),
-            )
-        })?;
+        pending
+            .finish(Some(&result.stdout), result.cleanup_complete)
+            .map_err(|error| {
+                Error::new(
+                    error.code,
+                    format!(
+                        "native resume usage accounting failed; reconcile before retrying: {error}"
+                    ),
+                )
+            })?;
         report.set("provider_call_id", call_id);
         report.set("native_returncode", V::Num(result.code.to_string()));
         return Ok((result.code, json(&report)?, Vec::new()));
