@@ -53,22 +53,11 @@ pub fn describe(profile: &str) -> Result<Value> {
                     ("network", string("off-by-default")),
                     (concat!("creden", "tials"), string("not-mounted")),
                     ("wall_clock", b(true)),
-                ]),
-            ),
-            (
-                "enforced",
-                object([
-                    ("filesystem", string("container-mount-policy")),
-                    ("network", string("container-network-policy")),
-                    (
-                        concat!("creden", "tials"),
-                        string("environment-and-mount-filter"),
-                    ),
-                    ("wall_clock", b(true)),
                     ("capabilities", string("drop-all")),
                     ("no_new_privileges", b(true)),
                 ]),
             ),
+            ("enforced", empty()),
             (
                 "unknown",
                 list([
@@ -79,7 +68,9 @@ pub fn describe(profile: &str) -> Result<Value> {
             ),
             (
                 "warning",
-                string("Image contents and the container daemon remain operator-owned."),
+                string(
+                    "Declared policy only; the native container supervisor is unavailable. Check backend readiness before execution.",
+                ),
             ),
         ]),
         "remote" => object([
@@ -92,7 +83,7 @@ pub fn describe(profile: &str) -> Result<Value> {
                     ("wall_clock", b(true)),
                 ]),
             ),
-            ("enforced", object([("wall_clock", b(true))])),
+            ("enforced", empty()),
             (
                 "unknown",
                 list([
@@ -104,7 +95,9 @@ pub fn describe(profile: &str) -> Result<Value> {
             ),
             (
                 "warning",
-                string("Isolation claims are adapter attestations, not locally enforced facts."),
+                string(
+                    "Declared adapter contract only; the native remote adapter supervisor is unavailable. SSH adapter operations use a separate entrypoint.",
+                ),
             ),
         ]),
         _ => return Err(error(format!("unsupported execution profile: {profile}"))),

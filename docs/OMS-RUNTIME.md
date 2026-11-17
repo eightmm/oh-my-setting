@@ -59,9 +59,9 @@ agent skill / MCP / intent router
            existing .oms append-only state
 ```
 
-The runtime core has no daemon and no independent authority database. Project
-state on disk remains the source of truth. The Python package uses Python 3.11+
-and only the standard library.
+The native Rust runtime core has no daemon and no independent authority
+database. Project state on disk remains the source of truth. The installed
+runtime does not require a system Python interpreter.
 
 A delegated process marked with `OMS_HARNESS_CHILD=1` can use the runtime's
 read/probe actions, including install planning, but mutation and execution fail
@@ -472,14 +472,14 @@ Profiles:
 
 | Profile | Contract |
 |---|---|
-| `core` | Bash, Git, Python, and any one registered built-in provider transport |
+| `core` | Bash, Git, and any one provider transport listed by the profile |
 | `council` | Inherits `core`; at least two registered built-in provider transports |
 | `github` | `gh` |
 | `notion` | `ntn`, optional Work Journal mirror |
 | `research` | `uv`; GPU inspection remains optional |
 | `hpc` | Slurm submission/accounting commands |
-| `container` | Docker or Podman |
-| `remote` | explicit `OMS_REMOTE_ADAPTER` |
+| `container` | Docker or Podman tooling; does not establish backend execution readiness |
+| `remote` | explicit `OMS_REMOTE_ADAPTER`; does not establish backend execution readiness |
 | `full` | compatibility profile for the former all-tools install |
 
 The agent-side installer reuses the existing locked tool installer:
@@ -497,28 +497,27 @@ capability.
 
 ## Execution backends
 
-`oms runtime backend` is the single readiness and execution entrypoint.
+`oms runtime backend` describes execution policy and reports native readiness.
 The former `execution-profile` command is removed: use `backend describe PROFILE`
 or `backend check PROFILE` (`--adapter` replaces `--remote-adapter`). Check reports
 use the runtime JSON schema with `ready`, `missing`, and `details`; an unready
 backend exits 3. Checks never install engines, pull images, or run adapters.
-`OMS_CONTAINER_ENGINE` is the preferred explicit
-container executable; `OMS_DOCKER_BIN` remains a compatibility override. With
-neither set, Docker is preferred and Podman is the fallback.
+
+In the native implementation, `trusted-local` has an execution producer.
+`isolated` and generic `remote` retain declared contracts but report not ready:
+their native supervisors are unavailable. Their descriptions therefore make no
+`enforced` claims. Installing Docker/Podman or setting an adapter path does not
+change that result. The separate `runtime ssh-adapter` and Slurm commands retain
+their own execution, reconciliation and collection contracts.
 
 ```bash
 oms runtime backend describe trusted-local
 oms runtime backend check isolated --image oms-runtime:locked
 oms runtime backend run trusted-local -- python3 -m unittest
-oms runtime backend run isolated \
-  --image oms-runtime:locked \
-  --worktree /path/to/delegate-worktree \
-  --memory-mb 8192 --cpus 4 --pids-limit 512 \
-  -- python3 -m unittest
-oms runtime backend run remote \
-  --adapter /path/to/adapter \
-  -- python3 -m unittest
 ```
+
+The isolated check above exits 3 until a native producer exists; it is a
+readiness diagnostic, not a setup recipe.
 
 ### `trusted-local`
 
@@ -528,7 +527,7 @@ process read or contain writes outside the repository.
 
 ### `isolated`
 
-The container backend applies:
+The retained container policy requires a future producer to apply:
 
 - read-only container root
 - read-only repository mount
@@ -540,9 +539,15 @@ The container backend applies:
 - PID, memory, CPU, and tmpfs limits
 - bounded log tail and content-free receipt
 
-The image, container daemon, and host kernel remain operator trust boundaries.
+These are declared requirements, not enforced capabilities of the current
+native CLI. The image, container daemon, and host kernel would remain operator
+trust boundaries even with such a producer.
 
 ### `remote`
+
+Generic adapter supervision is not wired into the native CLI. The target
+registry below is checkout management; explicit SSH adapter operations are a
+separate feature and do not make this generic profile ready.
 
 #### Same-path git targets
 
@@ -627,7 +632,8 @@ Delegated children remain limited to `target list`. Status/sync are checkout
 management; `backend check remote --target NAME` stays offline and command
 execution still reports “SSH target execution is not yet supported”.
 
-The adapter receives one JSON request on stdin. It owns authentication,
+The retained generic adapter contract specifies one JSON request on stdin.
+A future producer must enforce this contract. The adapter owns authentication,
 transport, isolation, cancellation, and cleanup. A response must bind the exact
 `operation_id` and set boolean `accepted`. An accepted response must also carry
 an integer `exit` in `0..255` and boolean attestation fields

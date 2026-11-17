@@ -8,6 +8,85 @@ use std::{
     path::{Component, Path},
 };
 
+// Quoted examples and comments cannot certify a Rust source definition.
+fn rust_code(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if bytes[i..].starts_with(b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i..].starts_with(b"/*") {
+            let mut depth = 1;
+            i += 2;
+            while i < bytes.len() && depth != 0 {
+                if bytes[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if bytes[i] == b'r' {
+            let mut quote = i + 1;
+            while bytes.get(quote) == Some(&b'#') {
+                quote += 1;
+            }
+            if bytes.get(quote) != Some(&b'"') {
+                i += 1;
+                continue;
+            }
+            let hashes = &bytes[i + 1..quote];
+            i = quote + 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' && bytes[i + 1..].starts_with(hashes) {
+                    i += 1 + hashes.len();
+                    break;
+                }
+                i += 1;
+            }
+        } else if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if bytes[i] == b'\'' {
+            let end = if bytes.get(i + 1) == Some(&b'\\') {
+                (i + 3..bytes.len()).find(|&j| matches!(bytes[j], b'\'' | b'\n'))
+            } else {
+                text[i + 1..].chars().next().map(|c| i + 1 + c.len_utf8())
+            };
+            let Some(end) = end.filter(|&j| bytes.get(j) == Some(&b'\'')) else {
+                i += 1;
+                continue;
+            };
+            i = end + 1;
+        } else {
+            i += 1;
+            continue;
+        }
+        for byte in &mut code[start..i] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(code).expect("source masking preserves UTF-8")
+}
+
 pub(crate) fn check(table: &Value, paths: &Paths) -> Result<Value> {
     let functions = table["functions"]
         .as_array()
@@ -91,10 +170,19 @@ pub(crate) fn check(table: &Value, paths: &Paths) -> Result<Value> {
                         if !r::physical(&full).is_ok_and(|p| p.starts_with(&paths.source)) {
                             return None;
                         }
-                        String::from_utf8(r::read(&full, r::LIMIT).ok()?).ok()
+                        let text = String::from_utf8(r::read(&full, r::LIMIT).ok()?).ok()?;
+                        Some(if file.ends_with(".rs") {
+                            rust_code(&text)
+                        } else {
+                            text
+                        })
                     });
                     let symbol = regex::escape(word);
-                    let pattern = if kind == "impl" && file.ends_with(".py") {
+                    let pattern = if file.ends_with(".rs") {
+                        format!(
+                            r"(?m)^\s*(?:pub(?:\([^)\r\n]*\))?\s+)?(?:(?:async|unsafe|const|extern)\s+)*(?:fn|struct|enum|union|trait|type|const|static)\s+(?:mut\s+)?{symbol}\b"
+                        )
+                    } else if kind == "impl" && file.ends_with(".py") {
                         format!(
                             r"(?m)^\s*(?:async\s+)?(?:def|class)\s+{symbol}\b|(?m)^{symbol}\s*="
                         )

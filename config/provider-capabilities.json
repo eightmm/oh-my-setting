@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "doc": "Per-provider, per-function support, derived from code paths and the tests that exercise them. Every supported/partial cell names its implementation (path::symbol, a definition) and test (path::name, a word that must occur in that file); tests/provider-registry-smoke.sh checks both. verified is fixture unless the repo records a live run; no cell here has one.",
+  "doc": "Per-provider, per-function support from current native code and fixtures. Every supported/partial cell names implementation and test evidence as path::symbol; Rust symbols must be source definitions. oms doctor --providers --check and the native lifecycle fixture validate the shipped references. verified identifies the evidence class, not live provider compatibility; unknown cells have no sufficient current fixture claim. No cell records a live run.",
   "statuses": {
     "supported": "code path exists and a test exercises it",
     "partial": "code path exists with the stated limit",
     "unsupported": "no code path",
-    "unknown": "cannot be determined statically"
+    "unknown": "implementation or current fixture evidence is insufficient to establish support"
   },
   "functions": [
     {"id": "launch_main", "label": "launch a main session"},
@@ -20,199 +20,152 @@
   ],
   "profiles": {
     "exec-only": {
-      "launch_main": {"status": "unsupported", "verified": "fixture", "note": "panel mains are claude, codex, pi, agy only (terminal_panel.py _LAUNCH_HARNESSES)"},
+      "launch_main": {"status": "unsupported", "verified": "fixture", "note": "The native panel launch set contains Claude, Codex, Pi and Antigravity only."},
       "worker_call": {
         "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_provider_attempt_run", "scripts/lib/provider-registry.sh::oms_provider_supports_access"],
-        "test": ["tests/provider-registry-smoke.sh::run_write_attempt"]
+        "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
+        "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports", "crates/oms-command-peer/tests/peer_contract.rs::provider_native_transports_match_shell_contract"]
       },
-      "observe": {"status": "unsupported", "verified": "fixture", "note": "no hook table or pane reader for this provider"},
-      "resume": {"status": "unsupported", "verified": "fixture", "note": "peer-delegate.sh --resume-session accepts claude and codex only"},
-      "send_message": {"status": "unsupported", "verified": "fixture", "note": "no main session, so nothing to type into"},
+      "observe": {"status": "unsupported", "verified": "fixture", "note": "No native panel activity hook or session reader for this provider."},
+      "resume": {"status": "unsupported", "verified": "fixture", "note": "Native delegated resume transport is defined for Claude and Codex only."},
+      "send_message": {"status": "unsupported", "verified": "fixture", "note": "No registered native main transport to receive a panel wake."},
       "stop": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_run_bounded"],
-        "test": ["tests/scripts-smoke.sh::test_peer_review_signal_cleans_provider_processes"],
-        "limit": "delegated calls only: the shared runner kills the provider process group on timeout or signal; the test drives a Claude fixture, not this provider"
+        "impl": ["crates/oms-command-peer/src/process.rs::Native", "crates/oms-supervisor/src/process.rs::stop"],
+        "test": ["crates/oms-supervisor/src/process.rs::process_group_natural_exit_and_stop_complete_cleanly"],
+        "limit": "Delegated calls use the shared supervisor cancellation path; the fixture covers generic process-group cleanup, not each live provider or a native main stop control."
       },
-      "approval": {"status": "unsupported", "verified": "fixture", "note": "headless transport; the permission mode is fixed per call"},
-      "usage": {"status": "unsupported", "verified": "fixture", "note": "no usage parser: only claude, codex, pi and antigravity emit a usage footer"},
-      "handoff": {"status": "unsupported", "verified": "fixture", "note": "session-handoff.sh reads claude, codex and antigravity transcripts only"}
+      "approval": {"status": "unsupported", "verified": "fixture", "note": "Headless transport; permission mode is fixed per call, without an approval relay."},
+      "usage": {"status": "unsupported", "verified": "fixture", "note": "No measurement parser for this provider; canonical call receipts retain unknown usage, never zero."},
+      "handoff": {"status": "unsupported", "verified": "fixture", "note": "Native session-handoff capture reads Claude, Codex and Antigravity sources only."}
     }
   },
   "providers": {
     "claude": {
-      "launch_main": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/panel_native.py::native_command"],
-        "test": ["tests/operator/room_protocol.py::pi-main-bootstrap", "tests/operator/native_integration.py::compact-main-contract"]
-      },
+      "launch_main": {"status": "unknown", "verified": "fixture", "note": "Native panel launch code exists, but current native fixtures do not establish the Claude launch branch."},
       "worker_call": {
         "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_provider_attempt_run"],
-        "test": ["tests/scripts-smoke.sh::test_claude_envelope_carries_stop_reason"]
+        "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
+        "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports", "crates/oms-command-peer/tests/peer_contract.rs::provider_native_transports_match_shell_contract"]
       },
       "observe": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/hook_state.py::record_panel_activity", "scripts/lib/panel_state.py::main_activity"],
-        "test": ["tests/autonomy-hook-smoke.sh::test_panel_main_activity"],
-        "limit": "a hook-written activity file (busy, idle, waiting); a recent write is not proof of liveness"
+        "impl": ["crates/oms-command-hooks/src/lifecycle.rs::activity"],
+        "test": ["crates/oms-command-hooks/tests/host_adapter.rs::panel_safe_point_reads_activity_once_and_keeps_noop_hook_parity"],
+        "limit": "Shared busy/idle activity from supplied hook events; fixture coverage does not establish live provider hook delivery or process liveness."
       },
       "resume": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/panel_native.py::_native_resume_binding", "scripts/peer-delegate.sh::prepare_resume_session"],
-        "test": ["tests/operator/native_integration.py::startup-crash-resume", "tests/scripts-smoke.sh::test_delegate_resumes_native_session"]
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-peer/src/providers.rs::transport"],
+        "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports"],
+        "limit": "Fixture covers delegated resume argv for Claude and Codex; native panel/session ownership and live resume are not established by this evidence."
       },
       "send_message": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/panel_interaction.py::wake_main"],
-        "test": ["tests/tick-smoke.sh::wake_main"],
-        "limit": "opt-in tick wake into an idle panel main only; types one line and never into a non-empty input"
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-panel-core/src/tick.rs::wake_main", "crates/oms-panel-core/src/tick.rs::input_line_empty"],
+        "test": ["crates/oms-panel-core/src/tick.rs::an_idle_main_with_an_empty_prompt_is_woken_once_with_the_ledger_written_first", "crates/oms-panel-core/src/tick.rs::the_input_line_proof_is_conservative"],
+        "limit": "Opt-in tick wake into an idle verified main with an empty prompt; the fixture uses a Claude main and simulated tmux, not a live native session."
       },
       "stop": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_run_bounded"],
-        "test": ["tests/scripts-smoke.sh::test_peer_review_signal_cleans_provider_processes"],
-        "limit": "delegated calls only; a main session has no stop control (panel_native.py _run_native stop_native runs on panel exit and is untested)"
+        "impl": ["crates/oms-command-peer/src/process.rs::Native", "crates/oms-supervisor/src/process.rs::stop"],
+        "test": ["crates/oms-supervisor/src/process.rs::process_group_natural_exit_and_stop_complete_cleanly"],
+        "limit": "Delegated calls use the shared supervisor cancellation path; the fixture covers generic process-group cleanup, not each live provider or a native main stop control."
       },
-      "approval": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/hook_state.py::record_panel_activity"],
-        "test": ["tests/autonomy-hook-smoke.sh::permission_prompt"],
-        "limit": "a Notification hook (permission_prompt, elicitation_dialog) marks the main waiting in the panel; the person answers in the native session"
-      },
+      "approval": {"status": "unknown", "verified": "fixture", "note": "The native hook writer handles permission notifications, but current fixtures do not establish the permission-to-waiting transition or live delivery; the person answers in the native session."},
       "usage": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/claude-statusline.py::render", "scripts/lib/peer-common.sh::ma_claude_envelope_to_text"],
-        "test": ["tests/scripts-smoke.sh::test_claude_hud_renders_usage_safely"],
-        "limit": "reported tokens and context from the statusline payload and call envelope; quota windows only when the payload carries them"
+        "impl": ["crates/oms-command-peer/src/usage.rs::observation"],
+        "test": ["crates/oms-command-peer/src/usage.rs::provider_envelopes_keep_cumulative_and_estimated_cost_semantics", "crates/oms-command-peer/src/providers.rs::physical_provider_calls_record_fallback_and_timeout_usage"],
+        "limit": "Canonical per-call token counts and provider-client cost estimates from result envelopes; this evidence does not establish live quota or context reporting."
       },
-      "handoff": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/session-handoff.sh::digest_claude"],
-        "test": ["tests/scripts-smoke.sh::test_session_handoff_claude_digest"]
-      }
+      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native session-handoff capture is implemented; current native fixtures do not establish the Claude digest output."}
     },
     "codex": {
       "launch_main": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/panel_native.py::native_command"],
-        "test": ["tests/operator/room_protocol.py::pi-main-bootstrap", "tests/operator/native_integration.py::compact-main-contract"]
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-panel/src/native_panel.rs::native_command", "crates/oms-command-panel/src/native_panel.rs::dry_run_plan"],
+        "test": ["crates/oms-command-panel/tests/panel_parity.rs::empty_scope_preserved_on_continue_and_dry_run_launch"],
+        "limit": "Native Codex launch planning is exercised as a dry run; this fixture does not start a live provider session."
       },
       "worker_call": {
         "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_provider_attempt_run"],
-        "test": ["tests/scripts-smoke.sh::test_codex_jsonl_carries_stop_reason"],
-        "note": "write access refuses on hosts that block unprivileged user namespaces (oms_provider_codex_sandbox_blocked)"
+        "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
+        "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports", "crates/oms-command-peer/tests/peer_contract.rs::provider_native_transports_match_shell_contract"]
       },
       "observe": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/hook_state.py::record_panel_activity", "scripts/lib/panel_state.py::main_activity"],
-        "test": ["tests/autonomy-hook-smoke.sh::test_panel_main_activity"],
-        "limit": "same hook-written activity file; the test drives the shared writer with a provider-neutral payload, not Codex hook delivery"
+        "impl": ["crates/oms-command-hooks/src/lifecycle.rs::activity"],
+        "test": ["crates/oms-command-hooks/tests/host_adapter.rs::panel_safe_point_reads_activity_once_and_keeps_noop_hook_parity"],
+        "limit": "Shared busy/idle activity from supplied hook events; fixture coverage does not establish live provider hook delivery or process liveness."
       },
       "resume": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/panel_native.py::_native_resume_binding", "scripts/peer-delegate.sh::prepare_resume_session"],
-        "test": ["tests/operator/native_integration.py::startup-crash-resume"],
-        "limit": "the delegate --resume-session path for Codex has no dedicated assertion in the tests named here"
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-peer/src/providers.rs::transport"],
+        "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports"],
+        "limit": "Fixture covers delegated resume argv for Claude and Codex; native panel/session ownership and live resume are not established by this evidence."
       },
-      "send_message": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/panel_interaction.py::wake_main"],
-        "test": ["tests/tick-smoke.sh::wake_main"],
-        "limit": "opt-in tick wake into an idle panel main only; the wake fixture uses a Codex main"
-      },
+      "send_message": {"status": "unknown", "verified": "fixture", "note": "The shared native wake path exists, but current wake fixtures use a Claude main; Codex prompt delivery is not established."},
       "stop": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_run_bounded"],
-        "test": ["tests/scripts-smoke.sh::test_peer_review_signal_cleans_provider_processes"],
-        "limit": "delegated calls only; a main session has no stop control; the test drives a Claude fixture"
+        "impl": ["crates/oms-command-peer/src/process.rs::Native", "crates/oms-supervisor/src/process.rs::stop"],
+        "test": ["crates/oms-supervisor/src/process.rs::process_group_natural_exit_and_stop_complete_cleanly"],
+        "limit": "Delegated calls use the shared supervisor cancellation path; the fixture covers generic process-group cleanup, not each live provider or a native main stop control."
       },
-      "approval": {"status": "unsupported", "verified": "fixture", "note": "the Codex hook table has no Notification entry; an approval dialog is only detected so the wake will not type into it (panel_native.py input_line_empty), never relayed"},
+      "approval": {"status": "unsupported", "verified": "fixture", "note": "The Codex hook configuration has no permission notification relay; native input checks refuse to type into an approval dialog."},
       "usage": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/hook_state.py::context_pressure_hint", "scripts/lib/panel_chats.py::_codex_usage", "scripts/lib/peer-common.sh::ma_codex_jsonl_to_text"],
-        "test": ["tests/scripts-smoke.sh::test_context_pressure_reads_codex_transcript"],
-        "limit": "tokens and context from the rollout token_count rows; no quota window"
+        "impl": ["crates/oms-command-peer/src/usage.rs::observation"],
+        "test": ["crates/oms-command-peer/src/usage.rs::provider_envelopes_keep_cumulative_and_estimated_cost_semantics"],
+        "limit": "Canonical thread-cumulative tokens from native envelopes; resumed sessions without a measured baseline keep unknown per-call usage, and absent cost remains unknown. Live quota/context coverage is not established here."
       },
-      "handoff": {
-        "status": "supported", "verified": "fixture",
-        "impl": ["scripts/session-handoff.sh::digest_codex"],
-        "test": ["tests/scripts-smoke.sh::test_session_handoff_codex_digest"]
-      }
+      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native session-handoff capture is implemented; current native fixtures do not establish the Codex digest output."}
     },
     "antigravity": {
-      "launch_main": {
-        "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/panel_native.py::native_command"],
-        "test": ["tests/operator/native_integration.py::agy-fresh-main"],
-        "limit": "fresh sessions only; no resume"
-      },
+      "launch_main": {"status": "unknown", "verified": "fixture", "note": "Native fresh-session panel launch code exists, but no current native launch fixture establishes this branch; resume remains refused."},
       "worker_call": {
         "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_provider_attempt_run", "scripts/lib/provider-registry.sh::oms_provider_requires_read_isolation"],
-        "test": ["tests/scripts-smoke.sh::test_agy_read_pass_cannot_write_repo"],
-        "note": "read calls run in a disposable detached worktree because agy has no write-blocking read flag"
+        "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env", "crates/oms-command-peer/src/providers.rs::requires_read_isolation"],
+        "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports", "crates/oms-command-peer/tests/peer_contract.rs::provider_native_transports_match_shell_contract", "crates/oms-command-peer/tests/peer_contract.rs::provider_private_prompt_cleanup_and_read_boundaries"],
+        "note": "Read calls require a disposable detached worktree; fixture isolation checks do not establish live provider containment."
       },
-      "observe": {"status": "unknown", "verified": "fixture", "note": "hooks.json is installed only for an agy binary that install-agy-plugin.sh --probe-surfaces certifies, and no panel reader for an agy main was found; whether activity is recorded depends on that binary"},
-      "resume": {"status": "unsupported", "verified": "fixture", "note": "panel_native.py run_single_native refuses an agy resume"},
-      "send_message": {"status": "unknown", "verified": "fixture", "note": "wake_main needs a panel-activity idle record; whether an agy main produces one is not determinable statically"},
+      "observe": {"status": "unknown", "verified": "fixture", "note": "Hook delivery depends on the installed provider surfaces; current native panel fixtures do not establish Antigravity activity delivery."},
+      "resume": {"status": "unsupported", "verified": "fixture", "note": "Native panel launch refuses Antigravity resume without a verified session binding."},
+      "send_message": {"status": "unknown", "verified": "fixture", "note": "No current native fixture establishes Antigravity idle activity or prompt delivery for the shared wake path."},
       "stop": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_run_bounded"],
-        "test": ["tests/scripts-smoke.sh::test_peer_review_signal_cleans_provider_processes"],
-        "limit": "delegated calls only; the test drives a Claude fixture"
+        "impl": ["crates/oms-command-peer/src/process.rs::Native", "crates/oms-supervisor/src/process.rs::stop"],
+        "test": ["crates/oms-supervisor/src/process.rs::process_group_natural_exit_and_stop_complete_cleanly"],
+        "limit": "Delegated calls use the shared supervisor cancellation path; the fixture covers generic process-group cleanup, not each live provider or a native main stop control."
       },
-      "approval": {"status": "unknown", "verified": "fixture", "note": "no Notification hook or pane reader for agy was found; the hook surface depends on the certified binary"},
-      "usage": {
-        "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/peer-conversation.py::agy_text"],
-        "test": ["tests/scripts-smoke.sh::test_agy_read_pass_cannot_write_repo"],
-        "limit": "per-call tokens in the artifact footer only; no panel context or quota reader"
-      },
-      "handoff": {
-        "status": "partial", "verified": "fixture",
-        "impl": ["scripts/session-handoff.sh::digest_antigravity"],
-        "test": ["tests/scripts-smoke.sh::test_session_handoff_antigravity_prompts_only"],
-        "limit": "user prompts only; assistant output is not in history.jsonl"
-      }
+      "approval": {"status": "unknown", "verified": "fixture", "note": "Current native fixtures do not establish an Antigravity permission-notification relay."},
+      "usage": {"status": "unsupported", "verified": "fixture", "note": "Native output decoding extracts answer text without usage measurements; canonical receipts retain unknowns, and there is no native panel quota/context reader."},
+      "handoff": {"status": "unknown", "verified": "fixture", "note": "Native prompts-only handoff capture is implemented, but current native fixtures do not establish its digest output; assistant output is unavailable from that source."}
     },
     "pi": {
-      "launch_main": {
-        "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/panel_native.py::native_command"],
-        "test": ["tests/operator/room_protocol.py::pi-main-bootstrap"],
-        "limit": "gateway transport only; the direct transport is refused"
-      },
+      "launch_main": {"status": "unknown", "verified": "fixture", "note": "Native gateway-only panel launch code exists, but no current native fixture establishes the Pi launch branch; direct launch is refused."},
       "worker_call": {
         "status": "supported", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_provider_attempt_run"],
-        "test": ["tests/scripts-smoke.sh::test_pi_json_usage_and_fallback"],
-        "note": "Pi has no sandbox; patch admission governs a returned write"
+        "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
+        "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports", "crates/oms-command-peer/tests/peer_contract.rs::provider_native_transports_match_shell_contract"]
       },
       "observe": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/pi-oms-extension.mjs::agent_settled", "scripts/lib/hook_state.py::record_panel_activity"],
-        "test": ["tests/autonomy-hook-smoke.sh::test_panel_main_activity"],
-        "limit": "busy and idle forwarded by the Pi extension; no waiting state and no native transcript reading"
+        "impl": ["crates/oms-command-hooks/src/lib.rs::pi_hook", "crates/oms-command-hooks/src/lifecycle.rs::activity"],
+        "test": ["crates/oms-command-hooks/tests/host_adapter.rs::harness_hook_pi_relay_records_idle_and_relay_hint_shows_the_other_agents_card", "crates/oms-command-hooks/tests/host_adapter.rs::panel_safe_point_reads_activity_once_and_keeps_noop_hook_parity"],
+        "limit": "Fixture Pi hook payloads update busy/idle activity; no waiting state, native transcript reader or live extension delivery is established."
       },
-      "resume": {"status": "unsupported", "verified": "fixture", "note": "panel_native.py native_command refuses a Pi resume until ownership is verifiable (asserted in pi-main-bootstrap)"},
-      "send_message": {"status": "unknown", "verified": "fixture", "note": "the Pi extension writes the idle record wake_main needs, but no test drives a wake into a Pi main"},
+      "resume": {"status": "unknown", "verified": "fixture", "note": "Panel launch refuses Pi resume without a verified binding. Standalone native session resume code exists with an installed-help check, but current fixtures do not establish that path."},
+      "send_message": {"status": "unknown", "verified": "fixture", "note": "Pi hook payloads can supply an idle record, but no current native fixture drives a wake into a Pi main."},
       "stop": {
         "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_run_bounded"],
-        "test": ["tests/scripts-smoke.sh::test_peer_review_signal_cleans_provider_processes"],
-        "limit": "delegated calls only; the test drives a Claude fixture"
+        "impl": ["crates/oms-command-peer/src/process.rs::Native", "crates/oms-supervisor/src/process.rs::stop"],
+        "test": ["crates/oms-supervisor/src/process.rs::process_group_natural_exit_and_stop_complete_cleanly"],
+        "limit": "Delegated calls use the shared supervisor cancellation path; the fixture covers generic process-group cleanup, not each live provider or a native main stop control."
       },
-      "approval": {"status": "unsupported", "verified": "fixture", "note": "Pi workers run with --no-approve; the extension forwards no permission event"},
-      "usage": {
-        "status": "partial", "verified": "fixture",
-        "impl": ["scripts/lib/peer-common.sh::ma_pi_jsonl_to_text"],
-        "test": ["tests/scripts-smoke.sh::test_pi_json_usage_and_fallback"],
-        "limit": "per-call tokens in the artifact footer only; no panel reader"
-      },
-      "handoff": {"status": "unsupported", "verified": "fixture", "note": "session-handoff.sh has no Pi digest"}
+      "approval": {"status": "unsupported", "verified": "fixture", "note": "Workers use --no-approve; the Pi hook bridge does not forward permission events."},
+      "usage": {"status": "unsupported", "verified": "fixture", "note": "Native output decoding extracts answer text without usage measurements; canonical receipts retain unknowns, and there is no native panel quota/context reader."},
+      "handoff": {"status": "unsupported", "verified": "fixture", "note": "Native session-handoff capture has no Pi digest."}
     },
     "cursor": {"profile": "exec-only"},
     "grok": {"profile": "exec-only"},
@@ -237,9 +190,9 @@
   "refs": {
     "write-only-worker": {
       "status": "partial", "verified": "fixture",
-      "impl": ["scripts/lib/peer-common.sh::ma_provider_attempt_run", "scripts/lib/provider-registry.sh::oms_provider_supports_access"],
-      "test": ["tests/provider-registry-smoke.sh::run_write_attempt"],
-      "limit": "write access only; read access is refused by oms_provider_supports_access"
+      "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
+      "test": ["crates/oms-command-peer/src/providers.rs::native_write_transports", "crates/oms-command-peer/tests/peer_contract.rs::provider_native_transports_match_shell_contract"],
+      "limit": "Write access only; native execution refuses read access before invoking the provider. Fixtures verify argv and the refusal, not live CLI compatibility."
     }
   }
 }

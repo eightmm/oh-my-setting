@@ -3641,6 +3641,8 @@ mod runtime_tests {
             .unwrap();
         assert!(ready.get("ready").truth() && ready.get("missing").strings().unwrap().is_empty());
         for profile in ["isolated", "remote"] {
+            let description = oms_runtime::backend::describe(profile).unwrap();
+            assert!(description.get("enforced").object().unwrap().is_empty());
             let row = rt
                 .backend_check(profile, OsStr::new("img"), OsStr::new("adp"))
                 .unwrap();
