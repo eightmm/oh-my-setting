@@ -3471,7 +3471,9 @@ esac"#,
         };
 
         stage(&root, rev, "exit 0");
-        assert_eq!(run(), 0);
+        let preflight =
+            host.incoming_lifecycle(IncomingPhase::Preflight, &root, rev, b"{}", &[], &stop);
+        assert_eq!(preflight.0, 0, "{}", String::from_utf8_lossy(&preflight.2));
 
         // Corrupt manifest is refused before spawning.
         std::fs::write(dir.join("manifest.json"), b"not json").unwrap();
