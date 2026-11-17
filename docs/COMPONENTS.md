@@ -2874,9 +2874,11 @@ missing) it still allows it, with the same exit code, but prints one stderr line
 warns when those helpers are missing. An OMS worker in its own
 worktree skips the git rules and keeps the others.
 
-Coverage is Claude Code only. The Codex plugin registers no pre-tool hook and
-the Antigravity plugin carries only certified lifecycle hooks (prompt and
-Stop), so their behaviour is unchanged.
+Coverage is Claude Code only. The Codex plugin registers no pre-tool hook, and
+the Antigravity plugin's `PreToolUse` and `PostToolUse` hooks (enabled when tool-hook
+surfaces pass `tool_hooks_verified=yes` or `OH_MY_SETTING_AGY_HOOKS=1` is set) only
+observe native agent calls (always returning `allow`) alongside prompt and `Stop`, so
+destructive command guarding for those providers is unchanged.
 
 The switch belongs to the person, not the command: `OMS_COMMAND_GUARD=0` in the
 environment the session was started from turns the guard off, while the same

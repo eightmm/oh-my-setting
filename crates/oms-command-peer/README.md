@@ -107,6 +107,27 @@ session logs supply account model eligibility and reported quota. No account
 authentication contents are copied into artifacts. Native transcript roots
 are independently checked and bound by provider metadata to the repository.
 
+Provider accounts are limited to providers whose home is one verified environment
+variable: `codex` (`CODEX_HOME`), `claude` (`CLAUDE_CONFIG_DIR`) and `pi`
+(`PI_CODING_AGENT_DIR`, with `PI_CODING_AGENT_SESSION_DIR` removed from the child so
+sessions stay in the account). Any other provider named in
+`provider-accounts.json` or by `--account`/`PROVIDER:account=ID` is refused as
+unproved; Antigravity stays fail-closed. `provider-accounts.json` `providers` accepts
+`codex`, `claude` and `pi`; without `providers.claude`, `provider-accounts.claude.json`
+adds Claude accounts after an implicit `default` (`$HOME/.claude`).
+Canonical homes are unique across all providers; ids are provider-local.
+Unpinned calls rank usable accounts by cooldown, recent-error penalty, 10%
+weekly-quota bucket (Codex session logs only), running count when the policy is
+`spread`, then registry order. A caller-set home variable is respected unless an
+account is pinned. A pinned account never overflows. An unpinned capacity failure
+records a 300s cooldown on `provider:id` and retries once on another account of the
+same provider before any model fallback; with none left the first result stands.
+Binding a non-default Claude account is refused while an Anthropic credential
+variable is set. An unpinned native resume is refused as ambiguous when multiple
+accounts exist or the sole registered home is not the default. Session discovery
+retains registered account ownership when launching a native resume. Health and
+`panel_account` use `provider:id`.
+
 The files in `src/help/` preserve the public shell help as migration reference
 text. They describe the target contract, including options which this snapshot
 still refuses. Their presence is not evidence that every branch is implemented.

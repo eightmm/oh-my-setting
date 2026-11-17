@@ -27,7 +27,7 @@ const ENV_KEYS: &[&str] = &[
     "OMS_ROOM_PARTICIPANT",
     "OMS_ROOM_REPO",
 ];
-const PANEL_ENV_PASSTHROUGH: &[&str] = &[
+pub const PANEL_ENV_PASSTHROUGH: &[&str] = &[
     "OMS_PANEL_NO_ANIMATION",
     "OMS_PANEL_AUTO_SWAP",
     "OMS_PANEL_ATTENTION_BELL",
@@ -49,6 +49,8 @@ const PANEL_ENV_PASSTHROUGH: &[&str] = &[
     "OMS_PANEL_THEME",
     "COLORFGBG",
     "OMS_EXECUTION_REPO",
+    "OMS_MODEL",
+    "OMS_ANTIGRAVITY_SETTINGS",
 ];
 
 struct MainResolution {
@@ -121,6 +123,7 @@ pub fn dry_run_plan(
         "harness": harness,
         "max_live_mains": MAX_LIVE_MAINS,
         "argv": argv,
+        "model": resolution.as_ref().and_then(|r| r.model.as_deref()),
         "room": room,
         "environment_keys": ENV_KEYS,
         "executes": false,
@@ -768,6 +771,7 @@ fn run_native(
         .env("OMS_ROOM_REPO", repo)
         .env("OMS_PANEL_MAIN_ATTEMPT", &attempt)
         .env("OMS_PANEL_RESULTS", "1");
+    apply_main_model_env(&mut cmd, harness, resolution.model.as_deref());
     if harness != "pi" && ["codex", "claude", "antigravity"].contains(&resolution.owner.as_str()) {
         cmd.env("OMS_HOOK_AGENT", &resolution.owner);
     } else {
@@ -776,6 +780,7 @@ fn run_native(
     for key in [
         "OMS_ATTEMPT_ID",
         "OMS_PANEL_DISPATCH",
+        "OMS_PANEL_EXPLICIT_TARGET",
         "OMS_PANEL_ROLE",
         "OMS_PANEL_PURPOSE",
         "OMS_PANEL_WORKLOAD",
@@ -1260,7 +1265,7 @@ fn launch_command(
     task: Option<&str>,
     room_id: Option<&str>,
 ) -> String {
-    let mut parts = panel_env_prefix();
+    let mut parts = panel_env_prefix_for(launch == "agy");
     parts.push(format!("OMS_PANEL_SESSION={session}"));
     if let Some(id) = room_id {
         parts.push(format!("OMS_ROOM_ID={id}"));
@@ -1296,7 +1301,7 @@ fn watch_shell(
     owner: Option<&str>,
     session: Option<&str>,
 ) -> String {
-    let mut parts = panel_env_prefix();
+    let mut parts = panel_env_prefix_for(owner.is_none_or(|o| o == "antigravity" || o == "agy"));
     if let Some(s) = session {
         parts.push(format!("OMS_PANEL_SESSION={s}"));
     }
@@ -1331,9 +1336,26 @@ fn entry_prefix(source: &Path) -> Result<Vec<String>> {
     Ok(prefix)
 }
 
-fn panel_env_prefix() -> Vec<String> {
+/// Apply or scrub `OMS_MODEL` and `OMS_ANTIGRAVITY_SETTINGS` for a spawned main process.
+pub fn apply_main_model_env(cmd: &mut Command, harness: &str, resolved_model: Option<&str>) {
+    if harness == "agy" {
+        if let Some(m) = resolved_model {
+            cmd.env("OMS_MODEL", m);
+        } else {
+            cmd.env_remove("OMS_MODEL");
+        }
+    } else {
+        cmd.env_remove("OMS_MODEL");
+        cmd.env_remove("OMS_ANTIGRAVITY_SETTINGS");
+    }
+}
+
+fn panel_env_prefix_for(keep_agy_model: bool) -> Vec<String> {
     let mut out = vec!["env".into()];
     for name in PANEL_ENV_PASSTHROUGH {
+        if !keep_agy_model && (*name == "OMS_MODEL" || *name == "OMS_ANTIGRAVITY_SETTINGS") {
+            continue;
+        }
         if let Ok(val) = std::env::var(name) {
             out.push(format!("{name}={val}"));
         }
@@ -1486,6 +1508,78 @@ fn native_command(
     }
 }
 
+fn slug_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=160).contains(&b.len())
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._:/-".contains(c))
+        && !["none", "auto", "default", "null", "unknown"].contains(&s)
+}
+
+/// Map an Antigravity display name (or lowercase slug) to its canonical `agy` CLI slug.
+pub fn normalize_antigravity_model(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return None;
+    }
+    if slug_ok(s) {
+        return Some(s.to_owned());
+    }
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "orchestrator (carbon)" => return Some("gemini-pro-orchestrator".into()),
+        "orchestrator (argon)" => return Some("gemini-pro-orchestrator-argon".into()),
+        _ => {}
+    }
+    let (body, effort) = match lower.strip_suffix(')') {
+        Some(rest) => {
+            let (body, effort) = rest.rsplit_once(" (")?;
+            let effort = effort.trim();
+            if effort.is_empty() || !effort.bytes().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            (body, Some(effort))
+        }
+        None => (lower.as_str(), None),
+    };
+    let words: Vec<&str> = body.split_whitespace().collect();
+    let mut slug = match words.as_slice() {
+        ["gemini", ver, variant @ ..] if !variant.is_empty() => {
+            format!("gemini-{ver}-{}", variant.join("-"))
+        }
+        ["claude", tier, ver] => format!("claude-{tier}-{}", ver.replace('.', "-")),
+        ["gpt-oss", size] => format!("gpt-oss-{size}"),
+        _ => return None,
+    };
+    if let Some(e) = effort {
+        slug = format!("{slug}-{e}");
+    }
+    slug_ok(&slug).then_some(slug)
+}
+
+/// Detect the configured Antigravity model from `OMS_MODEL` or antigravity-cli settings.
+pub fn detect_antigravity_model() -> Option<String> {
+    if let Some(m) = std::env::var("OMS_MODEL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        return normalize_antigravity_model(&m);
+    }
+    let path = match std::env::var_os("OMS_ANTIGRAVITY_SETTINGS").filter(|v| !v.is_empty()) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::path::PathBuf::from(std::env::var_os("HOME").filter(|v| !v.is_empty())?)
+            .join(".gemini/antigravity-cli/settings.json"),
+    };
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 256 * 1024 {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let doc: Value = serde_json::from_slice(&bytes).ok()?;
+    normalize_antigravity_model(doc.as_object()?.get("model")?.as_str()?)
+}
+
 fn resolve_main(policy: &routing::Policy, harness: &str, model: Option<&str>) -> MainResolution {
     if harness == "pi" {
         let preset = policy.main.get("codex");
@@ -1501,7 +1595,13 @@ fn resolve_main(policy: &routing::Policy, harness: &str, model: Option<&str>) ->
     if harness == "agy" {
         return MainResolution {
             owner: "antigravity".into(),
-            model: model.map(str::to_owned),
+            model: match model {
+                Some(m) => normalize_antigravity_model(m).or_else(|| {
+                    Some(m.trim().to_owned())
+                        .filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+                }),
+                None => detect_antigravity_model(),
+            },
             effort: "native-settings".into(),
             transport: "native".into(),
         };

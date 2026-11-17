@@ -18,6 +18,7 @@ struct Source {
     root: PathBuf,
     repo: PathBuf,
     modified: u128,
+    account_home: Option<PathBuf>,
 }
 #[derive(Clone)]
 struct Message {
@@ -47,7 +48,9 @@ fn plain(path: &Path, directory: bool) -> Result<()> {
     }
     Ok(())
 }
-fn roots(args: &Args) -> Result<Vec<(String, PathBuf, usize)>> {
+type Root = (String, PathBuf, usize, Option<PathBuf>);
+
+fn roots(args: &Args) -> Result<Vec<Root>> {
     let selected = args.value("provider", "all");
     if !["all", "claude", "codex", "pi"].contains(&selected) {
         return fail("invalid native session provider");
@@ -76,7 +79,7 @@ fn roots(args: &Args) -> Result<Vec<(String, PathBuf, usize)>> {
                 return fail("choose a bounded transcript directory");
             }
             plain(&path, true)?;
-            values.push((provider, path, 4));
+            values.push((provider, path, 4, None));
         }
         return Ok(values);
     }
@@ -95,15 +98,39 @@ fn roots(args: &Args) -> Result<Vec<(String, PathBuf, usize)>> {
                 .unwrap_or_else(|| home.join(".pi/agent"))
                 .join("sessions")
         });
-    Ok(vec![
-        ("claude".into(), claude.join("projects"), 1),
-        ("codex".into(), codex.join("sessions"), 3),
-        ("codex".into(), codex.join("archived_sessions"), 3),
-        ("pi".into(), pi, 1),
-    ]
-    .into_iter()
-    .filter(|(p, _, _)| selected == "all" || p == selected)
-    .collect())
+    let mut found = vec![
+        ("claude".into(), claude.join("projects"), 1, None),
+        ("codex".into(), codex.join("sessions"), 3, None),
+        ("codex".into(), codex.join("archived_sessions"), 3, None),
+        ("pi".into(), pi, 1, None),
+    ];
+    // Registered account homes keep their transcripts beside their own credentials.
+    for entry in providers::configured_homes()? {
+        let (provider, home) = entry;
+        match provider.as_str() {
+            "claude" => found.insert(0, (provider, home.join("projects"), 1, Some(home))),
+            "codex" => {
+                found.insert(
+                    0,
+                    (
+                        provider.clone(),
+                        home.join("sessions"),
+                        3,
+                        Some(home.clone()),
+                    ),
+                );
+                found.insert(0, (provider, home.join("archived_sessions"), 3, Some(home)));
+            }
+            _ => found.insert(0, (provider, home.join("sessions"), 1, Some(home))),
+        }
+    }
+    let mut seen = BTreeSet::new();
+    Ok(found
+        .into_iter()
+        .filter(|(p, path, _, _)| {
+            (selected == "all" || p == selected) && seen.insert((p.clone(), path.clone()))
+        })
+        .collect())
 }
 fn metadata(raw: &[u8], provider: &str) -> Option<(String, PathBuf)> {
     for line in raw.split(|b| *b == b'\n').take(32) {
@@ -144,7 +171,7 @@ fn discover(repo: &Path, args: &Args, context: &Context<'_>) -> Result<(Vec<Sour
     let mut entries = 0usize;
     let mut files = 0usize;
     let mut seen = BTreeSet::new();
-    for (provider, root, max_depth) in roots(args)? {
+    for (provider, root, max_depth, account_home) in roots(args)? {
         if plain(&root, true).is_err() {
             continue;
         }
@@ -190,6 +217,7 @@ fn discover(repo: &Path, args: &Args, context: &Context<'_>) -> Result<(Vec<Sour
                             root: root.clone(),
                             repo: repo.into(),
                             modified,
+                            account_home: account_home.clone(),
                         });
                     }
                 }
@@ -555,6 +583,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                 root: PathBuf::from(text(value, "root")),
                 repo: repo.clone(),
                 modified: 0,
+                account_home: None,
             };
             if !source.path.is_absolute() || !source.root.is_absolute() {
                 return fail("bookmark source paths must be absolute");
@@ -677,7 +706,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
     if source.provider != "pi"
         && !roots(&configured)?
             .iter()
-            .any(|(_, root, _)| source.path.starts_with(root))
+            .any(|(_, root, _, _)| source.path.starts_with(root))
     {
         return fail(
             "selected transcript is outside the configured native store; custom roots are read-only for native launches",
@@ -761,26 +790,37 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
             ),
         ),
         ("cwd", repo.to_string_lossy().into_owned().into()),
-        ("provider", source.provider.into()),
+        ("provider", source.provider.clone().into()),
         ("source_session", source.ident.into()),
         ("action", if fork { "fork" } else { "resume" }.into()),
         ("capability", "installed CLI --help".into()),
         ("dry_run", (!args.has("apply")).into()),
     ]);
     if args.has("apply") {
-        let remove_environment = std::env::vars_os()
+        let owner = source.account_home.clone().or(roots(&configured)?
+            .into_iter()
+            .find(|(provider, root, _, _)| {
+                *provider == source.provider && source.path.starts_with(root)
+            })
+            .and_then(|(_, _, _, home)| home));
+        let (environment, account_remove) = match owner {
+            Some(home) => providers::session_environment(&source.provider, &home)?,
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut remove_environment: Vec<OsString> = std::env::vars_os()
             .filter_map(|(k, _)| {
                 k.to_str()
                     .is_some_and(|s| s.starts_with("OMS_") || s.starts_with("GIT_"))
                     .then_some(k)
             })
             .collect();
+        remove_environment.extend(account_remove);
         let result = context.executor.execute(
             process::Invocation {
                 argv: native,
                 cwd: repo,
                 input: None,
-                environment: Vec::new(),
+                environment,
                 remove_environment,
                 timeout: Duration::from_secs(86400),
                 max_bytes: 1024 * 1024,

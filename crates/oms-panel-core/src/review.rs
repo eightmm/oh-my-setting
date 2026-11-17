@@ -681,7 +681,11 @@ pub fn council_execute(
         attempt: attempt.clone(),
         actor: "panel-council".into(),
     });
-    execution.remove_environment = crate::services::args(&["OMS_ATTEMPT_ID", "OMS_COUNCIL_LENSES"]);
+    execution.remove_environment = crate::services::args(&[
+        "OMS_ATTEMPT_ID",
+        "OMS_COUNCIL_LENSES",
+        "OMS_PANEL_EXPLICIT_TARGET",
+    ]);
     execution.environment = vec![
         ("OMS_TASK_ID".into(), request.task_id.clone().into()),
         ("OMS_PANEL_DISPATCH".into(), "1".into()),

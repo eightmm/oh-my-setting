@@ -43,8 +43,10 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   uses Bash-compatible binary spelling and stat identity, including macOS path
   aliases. A binary removed during the probe produces `binary_changed`.
   `agy-surfaces.env` is evidence only for that binary; changed identity retracts
-  hooks. Certified plugins register `oms agy-hook` PreInvocation/Stop commands;
-  uncertified plugins remain MCP-only. The adapter translates provider payloads,
+  hooks. Certified lifecycle plugins register `PreInvocation` and `Stop` via
+  `oms agy-hook`, while `PreToolUse` and `PostToolUse` require
+  `tool_hooks_verified=yes` or explicit `OH_MY_SETTING_AGY_HOOKS=1` (uncertified
+  plugins remain MCP-only unless `OH_MY_SETTING_AGY_HOOKS=1` is set). The adapter translates provider payloads,
   bounds stdin, honors kill switches, and keeps advisory Stop calls nonblocking.
 - `install-tools` / `install-profile`: catalog/profile inheritance, `--only`,
   `--full`, `--upgrade`, installed-provider-only `--providers`, capability

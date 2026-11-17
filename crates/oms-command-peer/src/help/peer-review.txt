@@ -90,6 +90,8 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   One-shot capacity fallback; requires one provider.
+  --account ID         Run on a registered codex, claude or pi account (also
+                       PROVIDER:account=ID); requires exactly one provider.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --no-diff            Do not attach git diff/status context.
   --candidate-patch P  Automatic panel gate: indexed patch in the owner repo.

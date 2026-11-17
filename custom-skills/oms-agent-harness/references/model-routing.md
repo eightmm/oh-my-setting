@@ -37,18 +37,29 @@ background advisor or require another model call for routine completion.
 ## Existing router contract
 
 Panel dispatch uses each role's capability tier and the configured tier order,
-ordering candidates by weekly quota left. Readings within the 15-point tie band
-go to fewer room dispatches, then away from the main. Installed
+ordering candidates by weekly quota left. Readings within the 15-point tie band,
+or when either native provider's weekly reading is unknown, go to fewer recent
+non-`main` room dispatches (`refs.panel_room_id`, `refs.panel_room`, or
+`panel.room_id`), then away from the main. Installed
 candidates with recorded weekly usage at 90% or above are skipped when another
 is installed; unknown readings remain available,
 a sole installed candidate is retained, and all saturated alternatives fail.
 Reviewer/verifier/security-auditor/critic routes exclude the linked writer's recorded
 model family, or the main's when no writer is linked. Matching retries from one
 provider may share a family; links across providers or families are ambiguous. An unknown
-linked writer family is unverified. If no independent family is usable, review remains pending; an owner-pinned
+linked writer family is unverified; Antigravity main models resolve from
+`OMS_MODEL`, `OMS_ANTIGRAVITY_SETTINGS`, or the local Antigravity CLI
+`settings.json` (normalizing display names to canonical slugs) and fail closed
+when unverified. If no independent family is usable, review remains pending; an owner-pinned
 same-family judge is labelled on the result. Routine judges may use the deep-tier
 Antigravity route. `--to codex|claude`
-without `--model` pins that provider's tier candidate and effort; explicit models
+without `--model` pins that provider's tier candidate and reasoning effort;
+`--account ID` and `--to PROVIDER:account=ID` pin a registered account for
+`codex`, `claude`, or `pi` (`antigravity` fails closed with `provider account
+isolation is unproved`). Unpinned multi-account selection ranks active
+`provider:id` cooldown, decayed error penalty, 10-point weekly-quota buckets,
+`spread` running worker counts (`panel_account`), and registry order, with
+one-shot same-provider capacity overflow on clean worktrees. Explicit models
 remain exact, and other model-selecting transports still require `--model`.
 `--routes` shows tiers and chosen candidates; owner detection follows
 `OMS_AGENT`, Claude markers, Codex markers, then Codex. Usage comes from existing

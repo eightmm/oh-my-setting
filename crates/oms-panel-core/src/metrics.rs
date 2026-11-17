@@ -268,68 +268,8 @@ pub fn collect_local_with(
                 row.insert("observed_at".into(), o.into());
             }
             codex_log = Some((resets_at, observed_at, weekly_used, shorts));
-
-            match crate::routing::Accounts::configured() {
-                Ok(Some(config)) => {
-                    let mut accs = serde_json::Map::new();
-                    let active_home = std::env::var_os("CODEX_HOME")
-                        .map(std::path::PathBuf::from)
-                        .or_else(|| {
-                            std::env::var_os("HOME")
-                                .map(|h| std::path::PathBuf::from(h).join(".codex"))
-                        })
-                        .and_then(|p| std::fs::canonicalize(p).ok());
-                    let mut errs = Vec::new();
-                    for entry in &config.accounts {
-                        let resolved = std::fs::canonicalize(&entry.home);
-                        if active_home
-                            .as_ref()
-                            .is_some_and(|h| resolved.as_ref().is_ok_and(|r| r == h))
-                        {
-                            row.insert("account_label".into(), entry.id.clone().into());
-                        }
-                        match resolved {
-                            Ok(home_path) if home_path.is_dir() => {
-                                let (w_used, r_at, o_at, _) =
-                                    codex_readings(Some(&home_path), now, false);
-                                let mut info = serde_json::Map::new();
-                                info.insert(
-                                    "weekly_used".into(),
-                                    w_used.map(Value::from).unwrap_or(Value::Null),
-                                );
-                                if let Some(u) = w_used {
-                                    info.insert("used".into(), u.into());
-                                    info.insert("source".into(), "session log".into());
-                                }
-                                if let Some(r) = r_at {
-                                    info.insert("resets_at".into(), r.into());
-                                }
-                                if let Some(o) = o_at {
-                                    info.insert("observed_at".into(), o.into());
-                                }
-                                accs.insert(entry.id.clone(), Value::Object(info));
-                            }
-                            _ => {
-                                let msg = "account home unavailable".to_string();
-                                errs.push(format!("{}: {msg}", entry.id));
-                                accs.insert(
-                                    entry.id.clone(),
-                                    serde_json::json!({"weekly_used": null, "error": msg}),
-                                );
-                            }
-                        }
-                    }
-                    row.insert("accounts".into(), Value::Object(accs));
-                    if !errs.is_empty() {
-                        row.insert("accounts_error".into(), errs.join("; ").into());
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    row.insert("accounts_error".into(), e.message.into());
-                }
-            }
         }
+        account_status(provider, now, &mut row);
 
         if let Some(main) = selected {
             row.insert("participant".into(), main["participant"].clone());
@@ -352,6 +292,11 @@ pub fn collect_local_with(
         }
         let _ = codex_log;
         output.insert(provider.into(), Value::Object(row));
+    }
+    let mut pi = serde_json::Map::new();
+    account_status("pi", now, &mut pi);
+    if !pi.is_empty() {
+        output.insert("pi".into(), Value::Object(pi));
     }
 
     let mut agy = serde_json::Map::new();
@@ -396,6 +341,74 @@ pub fn collect_local_with(
     }
     output.insert("antigravity".into(), Value::Object(agy));
     Value::Object(output)
+}
+
+/// Per-account readings and the active account label for an account-isolated
+/// provider. Only Codex session logs carry per-home usage; other providers
+/// report availability with `weekly_used: null`.
+fn account_status(provider: &str, now: f64, row: &mut serde_json::Map<String, Value>) {
+    let config = match crate::routing::Accounts::configured() {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(e) => {
+            row.insert("accounts_error".into(), e.message.into());
+            return;
+        }
+    };
+    let Some(config) = config.provider(provider) else {
+        return;
+    };
+    let mut accs = serde_json::Map::new();
+    let active_home =
+        crate::routing::active_account_home(provider).and_then(|p| std::fs::canonicalize(p).ok());
+    let mut errs = Vec::new();
+    for entry in &config.accounts {
+        let resolved = std::fs::canonicalize(&entry.home);
+        if active_home
+            .as_ref()
+            .is_some_and(|h| resolved.as_ref().is_ok_and(|r| r == h))
+        {
+            row.insert("account_label".into(), entry.id.clone().into());
+        }
+        match resolved {
+            Ok(home_path) if crate::routing::private_home(&home_path) => {
+                let (w_used, r_at, o_at) = if provider == "codex" {
+                    let (w, r, o, _) = codex_readings(Some(&home_path), now, false);
+                    (w, r, o)
+                } else {
+                    (None, None, None)
+                };
+                let mut info = serde_json::Map::new();
+                info.insert(
+                    "weekly_used".into(),
+                    w_used.map(Value::from).unwrap_or(Value::Null),
+                );
+                if let Some(u) = w_used {
+                    info.insert("used".into(), u.into());
+                    info.insert("source".into(), "session log".into());
+                }
+                if let Some(r) = r_at {
+                    info.insert("resets_at".into(), r.into());
+                }
+                if let Some(o) = o_at {
+                    info.insert("observed_at".into(), o.into());
+                }
+                accs.insert(entry.id.clone(), Value::Object(info));
+            }
+            _ => {
+                let msg = "account home unavailable".to_string();
+                errs.push(format!("{}: {msg}", entry.id));
+                accs.insert(
+                    entry.id.clone(),
+                    serde_json::json!({"weekly_used": null, "error": msg}),
+                );
+            }
+        }
+    }
+    row.insert("accounts".into(), Value::Object(accs));
+    if !errs.is_empty() {
+        row.insert("accounts_error".into(), errs.join("; ").into());
+    }
 }
 
 fn hud_cache_reading(consumer: &str, now: f64) -> Value {

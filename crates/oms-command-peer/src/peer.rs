@@ -21,6 +21,7 @@ pub(crate) const VALUES: &[&str] = &[
     "to",
     "artifact-dir",
     "model",
+    "account",
     "fallback-model",
     "reasoning-effort",
     "thread",
@@ -267,6 +268,22 @@ fn unresolved_failure_summary(repo: &Path) -> String {
         .map(|(fp, (cmd, summary))| format!("- {fp} `{cmd}`: {summary}\n"))
         .collect()
 }
+/// Applies `--account` to the single selected provider target.
+pub(crate) fn apply_account(args: &Args, targets: &mut [Target]) -> Result<()> {
+    if !args.has("account") {
+        return Ok(());
+    }
+    let account = args.get("account");
+    providers::account_id(account)?;
+    let [target] = targets else {
+        return fail("--account requires exactly one provider");
+    };
+    if !target.account.is_empty() && target.account != account {
+        return fail("--account conflicts with the :account= target selector");
+    }
+    target.account = account.into();
+    Ok(())
+}
 pub(crate) fn directory(args: &Args, repo: &Path, kind: &str) -> Result<PathBuf> {
     let path = if args.has("artifact-dir") {
         PathBuf::from(args.get("artifact-dir"))
@@ -510,6 +527,14 @@ pub(crate) fn index(repo: &Path, row: &V, context: &Context<'_>) -> Result<()> {
         context.interrupted,
     )
 }
+fn apply_target_explicitness(route: &mut providers::Route, args: &Args) {
+    if providers::panel_implicit_target() && !route.account_pinned {
+        route.explicit = false;
+    } else {
+        route.explicit |= args.has("to") || args.has("providers");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn call(
     tool: &str,
@@ -551,7 +576,10 @@ pub(crate) fn call(
             "advisor"
         },
     )?;
-    route.explicit |= args.has("to") || args.has("providers");
+    apply_target_explicitness(&mut route, args);
+    if !dry(args, tool) && !args.has("export-only") {
+        providers::bind_account(&mut route, repo)?;
+    }
     let suffix = if round == 0 {
         String::new()
     } else {
@@ -561,9 +589,17 @@ pub(crate) fn call(
         dir.join(format!("_synthesis-{run}{suffix}.md"))
     } else {
         dir.join(format!(
-            "{}-{}-{run}{suffix}.md",
+            "{}-{}{}-{run}{suffix}.md",
             target.provider,
-            crate::board::slug(args.value("prompt", "call"))
+            crate::board::slug(args.value("prompt", "call")),
+            if target.account.is_empty() && target.model.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "-{}",
+                    &storage::hash(format!("{}:{}", target.account, target.model).as_bytes())[..12]
+                )
+            }
         ))
     };
     let seat_line = if unresolved_count > 0 {
@@ -637,6 +673,9 @@ pub(crate) fn call(
         ]);
         if let Some(room_id) = env_nonempty("OMS_ROOM_ID") {
             refs.set("panel_room_id", room_id);
+        }
+        if !providers::panel_account(&route).is_empty() {
+            refs.set("panel_account", providers::panel_account(&route));
         }
         if std::env::var_os("OMS_PANEL_DISPATCH").as_deref() == Some(OsStr::new("1")) {
             refs.set(
@@ -726,10 +765,17 @@ pub(crate) fn call(
         },
     };
     if let Some(id) = live_attempt {
+        // Re-recorded because a capacity overflow can move the call to another account.
+        let account = providers::panel_account(&route);
         let retry_transition = |state: &str| {
             let mut last_err = None;
             for attempt_idx in 0..3 {
-                match crate::delegate::transition(repo, &id, state, obj([]), context) {
+                let refs = if account.is_empty() {
+                    obj([])
+                } else {
+                    obj([("panel_account", account.clone().into())])
+                };
+                match crate::delegate::transition(repo, &id, state, refs, context) {
                     Ok(()) => return Ok(()),
                     Err(err) => {
                         last_err = Some(err);
@@ -971,6 +1017,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             warnings.extend_from_slice(b"warning: explicit reviewer council includes the writer's model family; correlated judgment is not independent\n");
         }
     }
+    apply_account(args, &mut targets)?;
     if targets.is_empty() {
         return fail("no available peer target");
     }
@@ -980,7 +1027,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     let mut seen = BTreeSet::new();
     if targets
         .iter()
-        .any(|t| !seen.insert(format!("{}:{}", t.provider, t.model)))
+        .any(|t| !seen.insert(format!("{}:{}:{}", t.provider, t.model, t.account)))
     {
         return fail("duplicate council seat");
     }
@@ -1008,6 +1055,40 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     }
     if args.has("deliberation") && rounds == 0 {
         return fail("--deliberation requires --debate");
+    }
+    if !dry(args, tool) && !args.has("export-only") {
+        let mut valid = Vec::new();
+        for target in targets {
+            let checked = providers::route(
+                context,
+                &target,
+                args.get("model"),
+                args.value("reasoning-effort", "auto"),
+                if !args.get("role").is_empty() {
+                    args.get("role")
+                } else if tool == "peer-review" {
+                    "reviewer"
+                } else {
+                    "advisor"
+                },
+            )
+            .and_then(|mut route| {
+                apply_target_explicitness(&mut route, args);
+                providers::bind_account(&mut route, &repo)
+            });
+            match checked {
+                Ok(()) => valid.push(target),
+                Err(error) if target.optional => warnings.extend_from_slice(
+                    format!(
+                        "warning: optional {} seat unavailable: {}\n",
+                        target.provider, error.message
+                    )
+                    .as_bytes(),
+                ),
+                Err(error) => return Err(error),
+            }
+        }
+        targets = valid;
     }
     if args.has("thread") && !dry(args, tool) && !args.has("export-only") {
         if thread::current(&repo).as_deref() != Some(args.get("thread")) {

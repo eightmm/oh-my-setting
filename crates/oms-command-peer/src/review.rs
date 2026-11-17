@@ -253,13 +253,14 @@ fn verdicts(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         let Some(caps) = pattern.captures(&name) else {
             continue;
         };
+        let stem = name[..caps.get(0).unwrap().start()].to_owned();
         let run = caps[1].to_owned();
         let round = caps
             .get(2)
             .and_then(|m| m.as_str().parse::<usize>().ok())
             .unwrap_or(0);
         let modified = std::fs::symlink_metadata(repo.join(&directory).join(&name))?.modified()?;
-        candidates.push((modified, run, round, name));
+        candidates.push((modified, run, round, stem, name));
     }
     let run = candidates
         .iter()
@@ -267,19 +268,19 @@ fn verdicts(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         .map(|v| v.1.clone())
         .ok_or_else(|| Error::new(2, "no review artifacts"))?;
     let mut seats = BTreeMap::new();
-    for (_, group, round, name) in candidates {
+    for (_, group, round, stem, name) in candidates {
         if group != run {
             continue;
         }
-        let provider = name.split('-').next().unwrap_or("").to_owned();
-        if seats.get(&provider).is_none_or(|(old, _)| round >= *old) {
-            seats.insert(provider, (round, name));
+        if seats.get(&stem).is_none_or(|(old, _)| round >= *old) {
+            seats.insert(stem, (round, name));
         }
     }
     let mut values = Vec::new();
     let mut states = Vec::new();
     let mut output = format!("run: {run}\n");
-    for (provider, (round, name)) in seats {
+    for (_stem, (round, name)) in seats {
+        let provider = name.split('-').next().unwrap_or("").to_owned();
         let bytes = storage::read(&repo, &directory.join(&name), false)?;
         let (answer, code) = artifact_sections(&String::from_utf8_lossy(&bytes), true);
         let (state, confidence) = verdict(&answer, code, true);

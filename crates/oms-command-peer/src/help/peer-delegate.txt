@@ -40,6 +40,8 @@ Options:
   --idle-timeout N     Seconds to wait for each control message (1-3600;
                        default 300). EOF/timeout fails; never auto-finishes.
   --fallback-model M   Explicit one-shot capacity fallback model.
+  --account ID         Run on a registered codex, claude or pi account (also
+                       PROVIDER:account=ID); requires exactly one provider.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --verify CMD         Command run inside the worktree after the worker
                        finishes (e.g. "uv run pytest tests/"). Non-zero exit

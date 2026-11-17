@@ -860,6 +860,255 @@ fn tool_lock(paths: &Paths) -> Result<Vec<Value>> {
         "tool lock schema, HTTPS URLs and payload digests validated",
     )])
 }
+/// Read-only report of registered provider accounts: home safety and
+/// ownership-receipt health. Never mutates and never contacts a provider.
+fn accounts(paths: &Paths) -> Vec<Value> {
+    use std::os::unix::fs::MetadataExt;
+    const SECTION: &str = "provider accounts";
+    const LIMIT: usize = 64;
+    let load = |name: &str| -> Option<std::result::Result<Value, ()>> {
+        let path = paths.config.join(name);
+        r::exists(&path).then(|| r::value(&path).map_err(|_| ()))
+    };
+    let mut rows = Vec::new();
+    let reg_opt = load("provider-accounts.json");
+    let claude_registry = load("provider-accounts.claude.json");
+    let receipt_meta = [
+        ("codex", "codex-account-links.json", "link receipt"),
+        ("pi", "pi-account-links.json", "link receipt"),
+        ("claude", "provider-account-effects.json", "effects receipt"),
+    ];
+    let raw_receipts = receipt_meta.map(|(_, name, _)| load(name));
+    if reg_opt.is_none() && claude_registry.is_none() && raw_receipts.iter().all(Option::is_none) {
+        return rows;
+    }
+    let registry = match reg_opt {
+        None => None,
+        Some(Ok(v)) if v["schema"] == 1 && v["providers"].is_object() => Some(v),
+        Some(_) => {
+            return vec![finding(
+                SECTION,
+                "warn",
+                "provider-accounts.json is unreadable",
+            )];
+        }
+    };
+    if let Some(result) = &claude_registry
+        && !matches!(result, Ok(doc) if doc["schema"] == 1 && doc["provider"] == "claude" && doc["accounts"].is_array())
+    {
+        rows.push(finding(
+            SECTION,
+            "warn",
+            "Claude account registry unreadable or invalid",
+        ));
+    }
+    for (index, receipt) in raw_receipts.iter().enumerate() {
+        let (_, file_name, _) = receipt_meta[index];
+        match receipt {
+            None => (),
+            Some(Err(())) => {
+                rows.push(finding(
+                    SECTION,
+                    "warn",
+                    format!("{file_name} receipt unreadable"),
+                ));
+            }
+            Some(Ok(doc)) => {
+                let valid = if index == 2 {
+                    doc["schema"] == 1 && doc["accounts"].is_array()
+                } else {
+                    doc.is_array()
+                };
+                if !valid {
+                    rows.push(finding(SECTION, "warn", "account receipt schema invalid"));
+                }
+            }
+        }
+    }
+    let receipts = raw_receipts
+        .iter()
+        .map(|entry| entry.as_ref().map(|res| res.as_ref().ok().cloned()))
+        .collect::<Vec<_>>();
+    let claude_fallback = match &claude_registry {
+        Some(Ok(doc)) if doc["schema"] == 1 && doc["provider"] == "claude" => {
+            doc["accounts"].as_array()
+        }
+        _ => None,
+    };
+    let mut visited: Vec<(&'static str, Value, Value)> = Vec::new();
+    let mut seen = 0;
+    for provider in ["codex", "claude", "pi"] {
+        let Some(list) = registry
+            .as_ref()
+            .and_then(|reg| reg["providers"][provider]["accounts"].as_array())
+            .or_else(|| (provider == "claude").then_some(claude_fallback).flatten())
+        else {
+            continue;
+        };
+        let (index, label) = match provider {
+            "codex" => (0, "link receipt"),
+            "pi" => (1, "link receipt"),
+            _ => (2, "effects receipt"),
+        };
+        for account in list.iter().filter(|a| a["id"] != "default") {
+            seen += 1;
+            if seen > LIMIT {
+                rows.push(finding(SECTION, "note", "account report truncated"));
+                return rows;
+            }
+            visited.push((provider, account["id"].clone(), account["home"].clone()));
+            let id = clean(account["id"].as_str().unwrap_or("?"));
+            let home = account["home"].as_str().map(PathBuf::from);
+            let mut problems = Vec::new();
+            match home.as_ref().map(fs::symlink_metadata) {
+                Some(Ok(m)) if m.is_dir() => {
+                    if m.uid() != rustix::process::geteuid().as_raw() {
+                        problems.push("home is not user-owned".to_owned());
+                    }
+                    if m.mode() & 0o022 != 0 {
+                        problems.push(format!(
+                            "home mode {:o} is group/other-writable",
+                            m.mode() & 0o777
+                        ));
+                    }
+                }
+                Some(Ok(_)) => problems.push("home is not a directory".into()),
+                _ => problems.push("home is missing".into()),
+            }
+            let row = match &receipts[index] {
+                None => None,
+                Some(None) => {
+                    problems.push(format!("{label} unreadable"));
+                    None
+                }
+                Some(Some(doc)) => doc
+                    .as_array()
+                    .or_else(|| doc["accounts"].as_array())
+                    .and_then(|rows| {
+                        rows.iter()
+                            .find(|r| r["id"] == account["id"] && r["home"] == account["home"])
+                    }),
+            };
+            match row {
+                None if !problems.iter().any(|p| p.ends_with("unreadable")) => {
+                    problems.push(format!("no {label}"));
+                }
+                None => (),
+                Some(row) => {
+                    let expected = if provider == "claude" {
+                        &row["identity"]
+                    } else {
+                        row
+                    };
+                    if let Some(Ok(meta)) = home.as_ref().map(fs::symlink_metadata)
+                        && (expected["st_dev"].as_u64() != Some(meta.dev())
+                            || expected["st_ino"].as_u64() != Some(meta.ino()))
+                    {
+                        problems.push("home identity changed".into());
+                    }
+                    if provider == "claude"
+                        && !matches!(&claude_registry, Some(Ok(doc)) if doc["schema"] == 1 && doc["provider"] == "claude" && doc["accounts"].as_array().is_some_and(|entries| entries.iter().any(|entry| entry["id"] == account["id"] && entry["home"] == account["home"])))
+                    {
+                        problems.push("Claude registry entry missing or invalid".into());
+                    }
+                    let allowed_links: &[&str] = match provider {
+                        "claude" => &["CLAUDE.md", "skills", "output-styles/oms-korean.md"],
+                        "pi" => &["AGENTS.md", "skills"],
+                        _ => &[
+                            "AGENTS.md",
+                            "config.toml",
+                            "hooks.json",
+                            ".hook-trust",
+                            "plugins",
+                            "rules",
+                            "skills",
+                        ],
+                    };
+                    match row["links"].as_object() {
+                        None => problems.push("receipt links missing or invalid".into()),
+                        Some(links) => {
+                            let broken = links
+                                .iter()
+                                .filter(|(name, rec)| {
+                                    let target = if provider == "claude" {
+                                        rec["target"].as_str()
+                                    } else {
+                                        rec.as_str()
+                                    };
+                                    let path = allowed_links
+                                        .contains(&name.as_str())
+                                        .then(|| home.as_ref().map(|h| h.join(name)))
+                                        .flatten();
+                                    !path.zip(target).is_some_and(|(p, t)| {
+                                        fs::read_link(&p).is_ok_and(|actual| actual == Path::new(t))
+                                            && (provider != "claude"
+                                                || fs::symlink_metadata(&p).is_ok_and(|m| {
+                                                    rec["identity"]["st_uid"].as_u64()
+                                                        == Some(m.uid() as u64)
+                                                        && rec["identity"]["st_dev"].as_u64()
+                                                            == Some(m.dev())
+                                                        && rec["identity"]["st_ino"].as_u64()
+                                                            == Some(m.ino())
+                                                }))
+                                    })
+                                })
+                                .count();
+                            if broken > 0 {
+                                problems.push(format!("{broken} owned link(s) missing or changed"));
+                            }
+                        }
+                    }
+                }
+            }
+            rows.push(if problems.is_empty() {
+                finding(
+                    SECTION,
+                    "ok",
+                    format!("{provider}:{id} home private; {label} ok"),
+                )
+            } else {
+                finding(
+                    SECTION,
+                    "warn",
+                    format!("{provider}:{id} {}", clean(&problems.join("; "))),
+                )
+            });
+        }
+    }
+    for (index, receipt) in receipts.iter().enumerate() {
+        let (provider, _, label) = receipt_meta[index];
+        let Some(Some(doc)) = receipt else {
+            continue;
+        };
+        let Some(list) = (if index == 2 {
+            doc["accounts"].as_array()
+        } else {
+            doc.as_array()
+        }) else {
+            continue;
+        };
+        for row in list.iter().filter(|r| r["id"] != "default") {
+            let already_reported = visited
+                .iter()
+                .any(|(p, id, home)| *p == provider && *id == row["id"] && *home == row["home"]);
+            if already_reported {
+                continue;
+            }
+            seen += 1;
+            if seen > LIMIT {
+                rows.push(finding(SECTION, "note", "account report truncated"));
+                return rows;
+            }
+            let id = clean(row["id"].as_str().unwrap_or("?"));
+            rows.push(finding(
+                SECTION,
+                "warn",
+                format!("{provider}:{id} orphaned {label} without registry entry"),
+            ));
+        }
+    }
+    rows
+}
 fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     match paths.load() {
@@ -967,6 +1216,7 @@ fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> R
             ),
         ));
     }
+    rows.extend(accounts(paths));
     match crate::install::skill_sources(paths) {
         Ok(s) => rows.push(finding(
             "skills",

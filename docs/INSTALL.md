@@ -4,15 +4,18 @@ Host requirements, profiles and maintenance for Linux, macOS and Windows via WSL
 For the one-line install and a summary of changed files, see the [README](../README.md).
 [한국어](INSTALL.ko.md)
 
-Register another account with `oms connect-services --account codex:ID` or
-`--account claude:ID`; see [provider accounts](TERMINAL-PANEL.md#provider-accounts)
-for private homes, explicit verification, repair and removal. Codex routing is
-unchanged. Manual config-scoped claude.ai use is documented; OMS isolation
-verification remains unsupported/uncertain because native selection fields do not
-attest credential origin. Native status may initialize metadata in its selected root. Registration, doctor
-and update never run status. Claude state is separate from legacy Codex files;
-old versions cannot manage it or protect against arbitrary home collisions.
-Antigravity OAuth account isolation remains unknown and unavailable.
+Register another account with `oms connect-services --account codex:ID`,
+`--account claude:ID`, or `--account pi:ID`; see
+[provider accounts](TERMINAL-PANEL.md#provider-accounts) for private homes
+(`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`), routing, doctor
+checks, repair and removal. Manual config-scoped claude.ai use is documented;
+OMS isolation `--verify` attestation remains unsupported/uncertain because
+native selection fields do not prove credential origin. Native status may
+initialize metadata in its selected root; registration, doctor and update never
+run status. Claude state stays separate from legacy Codex and Pi files, and
+old versions cannot manage them or protect against arbitrary home collisions.
+Antigravity OAuth account isolation remains unproved and fails closed
+(`provider account isolation is unproved`).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash

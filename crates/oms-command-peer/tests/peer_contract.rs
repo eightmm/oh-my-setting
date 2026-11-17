@@ -1398,6 +1398,40 @@ fn review_classification_and_validation() {
             assert_eq!(row.get("quote_found"), &false.into());
             assert_eq!(row.get("anchor").text(), Some("anchor-not-found"));
         }
+
+        // Account-specific council seats on one provider stay distinct during verdict reconstruction.
+        let seat_a = "review-multi/codex-call-111111111111-20260102T000000Z-2.md";
+        let seat_b = "review-multi/codex-call-222222222222-20260102T000000Z-2.md";
+        repo.write(seat_a, "## Output\nGATE: fail\n## Exit\n0\n");
+        repo.write(seat_b, "## Output\nGATE: pass\n## Exit\n0\n");
+        let multi = run(
+            &repo,
+            &repo.0,
+            "peer-review",
+            &["verdicts", "review-multi", "--json"],
+        );
+        assert_eq!(multi.0, 1);
+        let parsed = V::parse(&multi.1).unwrap();
+        let multi_seats = parsed.get("seats").array();
+        assert_eq!(multi_seats.len(), 2);
+        assert_eq!(multi_seats[0].get("verdict").text(), Some("fail"));
+        assert_eq!(multi_seats[1].get("verdict").text(), Some("pass"));
+
+        repo.write(
+            "review-multi/codex-call-111111111111-20260102T000000Z-2-r1.md",
+            "## Output\nGATE: pass\n## Exit\n0\n",
+        );
+        let updated = run(
+            &repo,
+            &repo.0,
+            "peer-review",
+            &["verdicts", "review-multi", "--json"],
+        );
+        assert_eq!(updated.0, 0);
+        let updated_parsed = V::parse(&updated.1).unwrap();
+        let updated_seats = updated_parsed.get("seats").array();
+        assert_eq!(updated_seats.len(), 2);
+        assert_eq!(updated_seats[0].get("round").py(), "1");
     });
 }
 #[test]
@@ -2144,4 +2178,991 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
             );
         },
     );
+}
+
+fn account_isolated(name: &str, extra: &[(String, String)], body: impl FnOnce(&Path)) {
+    if let (Some(repo_dir), Some(tool)) = (
+        std::env::var_os("OMS_ACCOUNT_DISPATCH_REPO"),
+        std::env::var("OMS_ACCOUNT_DISPATCH_TOOL").ok(),
+    ) {
+        let mut values = vec!["--repo", repo_dir.to_str().unwrap(), "--to", "codex"];
+        if tool == "peer-delegate" {
+            values.extend([
+                "--read-only",
+                "--model",
+                "fixture",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+            ]);
+        } else {
+            values.extend([
+                "--model",
+                "fixture",
+                "--strategy",
+                "advisor",
+                "--no-failures",
+                "--no-task",
+                "--no-memory",
+            ]);
+        }
+        values.push("Implicit cap probe");
+        let out = run_with_source(
+            &tool,
+            &args(&values),
+            Path::new(&repo_dir),
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            &STOP,
+        );
+        assert_eq!(out.0, 0, "{}", message(&out));
+        return;
+    }
+    if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
+        body(Path::new(&std::env::var_os("HOME").unwrap()));
+        return;
+    }
+    let home = Repo::new();
+    let bin = home.0.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let claude = "printf 'claude|%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$HOME/calls.log\"\ncase \"$CLAUDE_CONFIG_DIR\" in *overflow-a1) echo 'rate limit reached' >&2; exit 1;; esac\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n";
+    let pi = "printf 'pi|%s|%s\\n' \"$PI_CODING_AGENT_DIR\" \"${PI_CODING_AGENT_SESSION_DIR-unset}\" >> \"$HOME/calls.log\"\necho ok\n";
+    for (file, script) in [
+        ("claude", claude),
+        ("pi", pi),
+        ("agy", "exit 0\n"),
+        ("codex", "exit 0\n"),
+    ] {
+        fs::write(bin.join(file), format!("#!/bin/sh\n{script}")).unwrap();
+        fs::set_permissions(bin.join(file), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for dir in [
+        "acc/overflow-a1",
+        "acc/work",
+        "acc/pi1",
+        "acc/codex1",
+        "acc/codex-work",
+        ".claude",
+        "custom",
+    ] {
+        fs::create_dir_all(home.0.join(dir)).unwrap();
+        fs::set_permissions(home.0.join(dir), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let h = home.0.display();
+    home.write(
+        ".config/oh-my-setting/provider-accounts.json",
+        format!(
+            r#"{{"schema":1,"providers":{{
+"claude":{{"policy":"ordered","accounts":[{{"id":"a1","home":"{h}/acc/overflow-a1"}},{{"id":"work","home":"{h}/acc/work"}}]}},
+"pi":{{"accounts":[{{"id":"p1","home":"{h}/acc/pi1"}}]}},
+"codex":{{"accounts":[{{"id":"work","home":"{h}/acc/codex-work"}}]}}}}}}"#
+        ),
+    );
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    clean_env_child(&mut command)
+        .args(["--exact", name, "--nocapture"])
+        .env("HOME", &home.0)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env(CHILD_ENV, name);
+    for (key, value) in extra {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{out}");
+    assert!(out.contains("1 passed;"), "child ran no test: {out}");
+}
+fn account_repo() -> Repo {
+    let repo = Repo::new();
+    repo.write("README.md", "base\n");
+    repo.git(&["add", "README.md"]);
+    repo.git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+    repo
+}
+fn account_delegate(repo: &Repo, extra: &[&str]) -> Output {
+    let mut values = vec!["--repo", repo.0.to_str().unwrap()];
+    values.extend_from_slice(extra);
+    values.extend([
+        "--read-only",
+        "--model",
+        "fixture",
+        "--no-task",
+        "--no-memory",
+        "--no-ml-context",
+        "Account probe",
+    ]);
+    run_with_source(
+        "peer-delegate",
+        &args(&values),
+        &repo.0,
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+        &STOP,
+    )
+}
+fn account_log(home: &Path) -> Vec<String> {
+    fs::read_to_string(home.join("calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.replace(&home.display().to_string(), "$HOME"))
+        .collect()
+}
+fn lifecycle_refs(repo: &Repo, kind: &str) -> Vec<Option<String>> {
+    fs::read_to_string(repo.0.join(".oms/lifecycle/events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| V::parse(l.as_bytes()).unwrap())
+        .filter(|v| v.get("event_type").text() == Some(kind))
+        .map(|v| v.get("refs").get("panel_account").text().map(str::to_owned))
+        .collect()
+}
+fn message(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.1),
+        String::from_utf8_lossy(&out.2)
+    )
+}
+
+#[test]
+fn provider_accounts_select_pin_overflow_and_validate() {
+    account_isolated(
+        "provider_accounts_select_pin_overflow_and_validate",
+        &[("PI_CODING_AGENT_SESSION_DIR".into(), "elsewhere".into())],
+        |home| {
+            let repo = account_repo();
+            // Auto: first ordered account hits capacity, one retry moves to the next.
+            let out = account_delegate(&repo, &["--to", "claude"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(
+                account_log(home),
+                ["claude|$HOME/acc/overflow-a1", "claude|$HOME/acc/work"]
+            );
+            assert_eq!(
+                lifecycle_refs(&repo, "attempt.created"),
+                [Some("claude:a1".into())]
+            );
+            let moved = lifecycle_refs(&repo, "attempt.state_changed");
+            assert_eq!(moved.last().unwrap().as_deref(), Some("claude:work"));
+            let health = fs::read_to_string(repo.0.join(".oms/seat-health.json")).unwrap();
+            let health = V::parse(health.as_bytes()).unwrap();
+            let seat = health.get("accounts").get("claude:a1");
+            assert!(seat.get("cooldown_until").py() != "0", "{}", seat.py());
+            assert!(matches!(health.get("accounts").get("a1"), V::Null));
+            fs::remove_file(home.join("calls.log")).unwrap();
+
+            // Pinned by flag or by target suffix: no overflow, no silent re-selection.
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "a1"]);
+            assert_ne!(out.0, 0);
+            assert_eq!(account_log(home), ["claude|$HOME/acc/overflow-a1"]);
+            let out = account_delegate(&repo, &["--to", "claude:account=work"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home).last().unwrap(), "claude|$HOME/acc/work");
+            let created = lifecycle_refs(&repo, "attempt.created");
+            assert_eq!(created.last().unwrap().as_deref(), Some("claude:work"));
+
+            // pi: account home bound and the session dir override removed.
+            let out = account_delegate(&repo, &["--to", "pi", "--account", "p1"]);
+            assert!(!message(&out).contains("unavailable"), "{}", message(&out));
+            assert_eq!(account_log(home).last().unwrap(), "pi|$HOME/acc/pi1|unset");
+
+            // Validation fails closed before any worker runs.
+            let calls = account_log(home).len();
+            for (extra, needle) in [
+                (
+                    &["--to", "claude:account=work", "--account", "a1"][..],
+                    "conflicts",
+                ),
+                (
+                    &["--to", "claude", "--account", "Bad_ID"],
+                    "invalid provider account id",
+                ),
+                (
+                    &["--to", "claude", "--account", ""],
+                    "invalid provider account id",
+                ),
+                (&["--to", "claude", "--account", "zz"], "unavailable"),
+                (&["--to", "pi", "--account", "work"], "unavailable"),
+                (
+                    &["--to", "antigravity", "--account", "x"],
+                    "isolation is unproved",
+                ),
+                (
+                    &["--to", "claude:account=a1:account=a1"],
+                    "invalid provider account id",
+                ),
+            ] {
+                let out = account_delegate(&repo, extra);
+                assert_ne!(out.0, 0, "{extra:?}");
+                assert!(
+                    message(&out).contains(needle),
+                    "{extra:?}: {}",
+                    message(&out)
+                );
+            }
+            assert_eq!(account_log(home).len(), calls);
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let out = run(
+                &repo,
+                source,
+                "consult",
+                &[
+                    "--to",
+                    "claude:account=work",
+                    "--to",
+                    "claude:account=missing",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "q",
+                ],
+            );
+            assert_ne!(out.0, 0);
+            assert!(message(&out).contains("unavailable"), "{}", message(&out));
+            assert_eq!(account_log(home).len(), calls);
+            let out = run(
+                &repo,
+                source,
+                "consult",
+                &[
+                    "--to",
+                    "claude:account=work",
+                    "--to",
+                    "claude:account=missing:optional",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "q",
+                ],
+            );
+            assert!(
+                !message(&out).contains("destination already exists"),
+                "{}",
+                message(&out)
+            );
+            assert!(message(&out).contains("optional"), "{}", message(&out));
+
+            let council = run(
+                &repo,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                "peer-ask",
+                &[
+                    "--providers",
+                    "claude,pi",
+                    "--account",
+                    "work",
+                    "--dry-run",
+                    "q",
+                ],
+            );
+            assert!(message(&council).contains("exactly one provider"));
+            let out = run(
+                &repo,
+                source,
+                "consult",
+                &[
+                    "--to",
+                    "claude:account=work",
+                    "--to",
+                    "claude:account=a1",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "q",
+                ],
+            );
+            assert!(
+                !message(&out).contains("destination already exists"),
+                "{}",
+                message(&out)
+            );
+            // Same id on two providers is legal; one canonical home on two is not.
+            let config = home.join(".config/oh-my-setting/provider-accounts.json");
+            let good = fs::read_to_string(&config).unwrap();
+            let out = account_delegate(&repo, &["--to", "codex", "--account", "work"]);
+            assert!(!message(&out).contains("duplicate"), "{}", message(&out));
+            for (from, to, needle) in [
+                (
+                    "acc/codex-work",
+                    "acc/work",
+                    "duplicate provider account id or canonical home",
+                ),
+                ("\"pi\":{", "\"antigravity\":{", "isolation is unproved"),
+                (
+                    "\"schema\":1",
+                    "\"schema\":2",
+                    "unsupported provider accounts schema",
+                ),
+            ] {
+                fs::write(&config, good.replace(from, to)).unwrap();
+                let out = account_delegate(&repo, &["--to", "claude", "--account", "work"]);
+                assert!(
+                    message(&out).contains(needle),
+                    "{needle}: {}",
+                    message(&out)
+                );
+            }
+            fs::write(&config, "{bad").unwrap();
+            let out = account_delegate(&repo, &["--to", "antigravity", "--dry-run"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            let out = account_delegate(
+                &repo,
+                &["--to", "antigravity", "--account", "work", "--dry-run"],
+            );
+            assert_ne!(out.0, 0);
+            assert!(message(&out).contains("unproved"), "{}", message(&out));
+            let out = account_delegate(&repo, &["--to", "claude"]);
+            assert_ne!(out.0, 0);
+            assert!(
+                message(&out).contains("invalid provider accounts"),
+                "{}",
+                message(&out)
+            );
+            // Claude's own registry supplies accounts after an implicit default.
+            fs::write(&config, "{\"schema\":1,\"providers\":{}}").unwrap();
+            fs::write(
+                home.join(".config/oh-my-setting/provider-accounts.claude.json"),
+                format!(
+                    "{{\"schema\":1,\"provider\":\"claude\",\"accounts\":[{{\"id\":\"w2\",\"home\":\"{}/acc/work\"}}]}}",
+                    home.display()
+                ),
+            )
+            .unwrap();
+            fs::remove_file(home.join("calls.log")).unwrap();
+            let out = account_delegate(&repo, &["--to", "claude"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home), ["claude|$HOME/.claude"]);
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "w2"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home).last().unwrap(), "claude|$HOME/acc/work");
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "default"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home).last().unwrap(), "claude|$HOME/.claude");
+            // Missing or non-array Claude-private accounts fail closed instead of looking empty.
+            let claude_private = home.join(".config/oh-my-setting/provider-accounts.claude.json");
+            let saved_claude_private = fs::read(&claude_private).unwrap();
+            for bad in [
+                r#"{"schema":1,"provider":"claude"}"#,
+                r#"{"schema":1,"provider":"claude","accounts":"invalid"}"#,
+            ] {
+                fs::write(&claude_private, bad).unwrap();
+                let _ = fs::remove_file(home.join("calls.log"));
+                let err_out = account_delegate(&repo, &["--to", "claude"]);
+                assert_ne!(err_out.0, 0, "{bad}");
+                assert!(
+                    message(&err_out).contains("provider accounts"),
+                    "{bad}: {}",
+                    message(&err_out)
+                );
+                assert!(account_log(home).is_empty(), "{bad}");
+            }
+            // Another provider owning the standard home must block both pinned default and implicit fallback.
+            fs::remove_file(&claude_private).unwrap();
+            fs::write(
+                &config,
+                format!(
+                    "{{\"schema\":1,\"providers\":{{\"codex\":{{\"accounts\":[{{\"id\":\"steal\",\"home\":\"{}/.claude\"}}]}},\"claude\":{{\"accounts\":[{{\"id\":\"missing_w\",\"home\":\"{}/acc/missing-claude\"}}]}}}}}}",
+                    home.display(),
+                    home.display(),
+                ),
+            )
+            .unwrap();
+            let _ = fs::remove_file(home.join("calls.log"));
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "default"]);
+            assert_ne!(out.0, 0, "{}", message(&out));
+            assert!(account_log(home).is_empty(), "{}", message(&out));
+            let out = account_delegate(&repo, &["--to", "claude"]);
+            assert_ne!(out.0, 0, "{}", message(&out));
+            assert!(account_log(home).is_empty(), "{}", message(&out));
+            fs::write(
+                &config,
+                format!(
+                    "{{\"schema\":1,\"providers\":{{\"codex\":{{\"accounts\":[{{\"id\":\"steal\",\"home\":\"{}/.claude\"}}]}}}}}}",
+                    home.display(),
+                ),
+            )
+            .unwrap();
+            let out = account_delegate(&repo, &["--to", "claude"]);
+            assert_ne!(out.0, 0, "{}", message(&out));
+            assert!(account_log(home).is_empty(), "{}", message(&out));
+            fs::write(&claude_private, saved_claude_private).unwrap();
+            // Explicit unpinned routes fall back to the caller home when no registered account qualifies,
+            // provided the fallback home itself passes safety and model checks.
+            let default_codex = home.join(".codex");
+            fs::create_dir_all(&default_codex).unwrap();
+            fs::set_permissions(&default_codex, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                &config,
+                format!(
+                    "{{\"schema\":1,\"providers\":{{\"codex\":{{\"accounts\":[{{\"id\":\"codex1\",\"home\":\"{}/acc/codex-missing\"}}]}}}}}}",
+                    home.display()
+                ),
+            )
+            .unwrap();
+            let out = account_delegate(&repo, &["--to", "codex"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            let out = account_delegate(&repo, &["--to", "codex", "--account", "codex1"]);
+            assert_ne!(out.0, 0);
+            assert!(message(&out).contains("unavailable"), "{}", message(&out));
+            fs::set_permissions(&default_codex, fs::Permissions::from_mode(0o777)).unwrap();
+            let unsafe_fallback = account_delegate(&repo, &["--to", "codex"]);
+            assert_ne!(unsafe_fallback.0, 0);
+            assert!(
+                message(&unsafe_fallback).contains("no eligible codex account"),
+                "{}",
+                message(&unsafe_fallback)
+            );
+            fs::set_permissions(&default_codex, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(
+                default_codex.join("models_cache.json"),
+                r#"{"models":[{"slug":"other-model"}]}"#,
+            )
+            .unwrap();
+            let model_excluded = account_delegate(&repo, &["--to", "codex"]);
+            assert_ne!(model_excluded.0, 0);
+            assert!(
+                message(&model_excluded).contains("no eligible codex account"),
+                "{}",
+                message(&model_excluded)
+            );
+            fs::remove_file(default_codex.join("models_cache.json")).unwrap();
+
+            // Implicit panel dispatch preserves the 90% account quota cap so a cooling 10% seat
+            // beats a healthy 95% seat, while explicit --to (or direct CLI) waives the cap.
+            for dir in ["acc/codex-over/sessions", "acc/codex-cool/sessions"] {
+                fs::create_dir_all(home.join(dir)).unwrap();
+                fs::set_permissions(
+                    home.join(dir.trim_end_matches("/sessions")),
+                    fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+            }
+            fs::write(
+                home.join("bin/codex"),
+                "#!/bin/sh\nprintf 'codex|%s\\n' \"$CODEX_HOME\" >> \"$HOME/calls.log\"\necho 'Recommendation: proceed'\n",
+            )
+            .unwrap();
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let date_out = Command::new("date")
+                .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+                .output()
+                .unwrap();
+            let ts = String::from_utf8(date_out.stdout).unwrap();
+            let ts = ts.trim();
+            for (acc, used) in [("acc/codex-over", 95), ("acc/codex-cool", 10)] {
+                fs::write(
+                    home.join(acc).join("sessions/usage.jsonl"),
+                    format!(
+                        "{{\"timestamp\":\"{ts}\",\"rate_limits\":{{\"primary\":{{\"window_minutes\":10080,\"used_percent\":{used},\"resets_at\":{}}}}}}}\n",
+                        now_secs + 3600
+                    ),
+                )
+                .unwrap();
+            }
+            fs::write(
+                &config,
+                format!(
+                    "{{\"schema\":1,\"providers\":{{\"codex\":{{\"accounts\":[{{\"id\":\"over\",\"home\":\"{h}/acc/codex-over\"}},{{\"id\":\"cool\",\"home\":\"{h}/acc/codex-cool\"}}]}}}}}}",
+                    h = home.display()
+                ),
+            )
+            .unwrap();
+            let cap_repo = account_repo();
+            for (explicit_flag, expected) in [
+                ("0", "codex|$HOME/acc/codex-cool"),
+                ("1", "codex|$HOME/acc/codex-over"),
+            ] {
+                for tool in ["peer-delegate", "advise"] {
+                    cap_repo.write(
+                        ".oms/seat-health.json",
+                        format!(
+                            "{{\"schema\":1,\"accounts\":{{\"codex:cool\":{{\"cooldown_until\":{},\"last_error_ts\":{}}}}}}}",
+                            now_secs + 3600,
+                            now_secs
+                        ),
+                    );
+                    let _ = fs::remove_file(home.join("calls.log"));
+                    let child = Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "provider_accounts_select_pin_overflow_and_validate",
+                            "--nocapture",
+                        ])
+                        .env("HOME", home)
+                        .env("PATH", std::env::var_os("PATH").unwrap())
+                        .env("OMS_PANEL_DISPATCH", "1")
+                        .env("OMS_PANEL_EXPLICIT_TARGET", explicit_flag)
+                        .env("OMS_ACCOUNT_DISPATCH_REPO", &cap_repo.0)
+                        .env("OMS_ACCOUNT_DISPATCH_TOOL", tool)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        child.status.success(),
+                        "explicit={explicit_flag} tool={tool}: {}{}",
+                        String::from_utf8_lossy(&child.stdout),
+                        String::from_utf8_lossy(&child.stderr)
+                    );
+                    assert_eq!(
+                        account_log(home),
+                        [expected],
+                        "explicit={explicit_flag} tool={tool}"
+                    );
+                }
+            }
+            // Pinned account with a model-excluding cache must refuse launch.
+            fs::write(
+                home.join("acc/codex-over/models_cache.json"),
+                r#"{"models":[{"slug":"other-model"}]}"#,
+            )
+            .unwrap();
+            let _ = fs::remove_file(home.join("calls.log"));
+            let excluded_pin = account_delegate(&cap_repo, &["--to", "codex", "--account", "over"]);
+            assert_ne!(excluded_pin.0, 0);
+            assert!(
+                message(&excluded_pin).contains("unavailable"),
+                "{}",
+                message(&excluded_pin)
+            );
+            assert!(account_log(home).is_empty());
+        },
+    );
+}
+
+#[test]
+fn claude_binding_refuses_credential_overrides_and_resume_guesses() {
+    let key = format!("ANTHROPIC_{}", "API_KEY");
+    account_isolated(
+        "claude_binding_refuses_credential_overrides_and_resume_guesses",
+        &[
+            (key, "fixture".into()),
+            ("OMS_RESUME_SESSION".into(), "sess-1".into()),
+        ],
+        |home| {
+            let repo = account_repo();
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "work"]);
+            assert_ne!(out.0, 0);
+            assert!(
+                message(&out).contains("credential environment"),
+                "{}",
+                message(&out)
+            );
+            let out = account_delegate(&repo, &["--to", "claude"]);
+            assert_ne!(out.0, 0);
+            assert!(message(&out).contains("ambiguous"), "{}", message(&out));
+            assert!(account_log(home).is_empty());
+            // The default home keeps its own credentials, so the guard does not apply.
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "default"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home), ["claude|$HOME/.claude"]);
+            // A single non-default registered home is still ambiguous.
+            let single = home.join(".config/oh-my-setting/provider-accounts.json");
+            fs::write(
+                single,
+                format!(
+                    "{{\"schema\":1,\"providers\":{{\"pi\":{{\"accounts\":[{{\"id\":\"p1\",\"home\":\"{}/acc/pi1\"}}]}}}}}}",
+                    home.display()
+                ),
+            )
+            .unwrap();
+            let out = account_delegate(&repo, &["--to", "pi"]);
+            assert!(message(&out).contains("ambiguous"), "{}", message(&out));
+            let default_pi = home.join(".pi/agent");
+            fs::create_dir_all(&default_pi).unwrap();
+            fs::set_permissions(&default_pi, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(home.join(".config/oh-my-setting/provider-accounts.json"), format!("{{\"schema\":1,\"providers\":{{\"pi\":{{\"accounts\":[{{\"id\":\"only\",\"home\":\"{}\"}}]}}}}}}", default_pi.display())).unwrap();
+            let out = account_delegate(&repo, &["--to", "pi"]);
+            assert!(!message(&out).contains("ambiguous"), "{}", message(&out));
+            assert_eq!(
+                account_log(home).last().unwrap(),
+                "pi|$HOME/.pi/agent|unset"
+            );
+        },
+    );
+}
+
+#[test]
+fn caller_home_variable_wins_unless_an_account_is_requested() {
+    if let Some(repo_dir) = std::env::var_os("OMS_RESUME_HOME_REPO") {
+        let values = [
+            "--repo",
+            repo_dir.to_str().unwrap(),
+            "--to",
+            "claude",
+            "--read-only",
+            "--model",
+            "fixture",
+            "--no-task",
+            "--no-memory",
+            "--no-ml-context",
+            "Account probe",
+        ];
+        let out = run_with_source(
+            "peer-delegate",
+            &args(&values),
+            Path::new(&repo_dir),
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            &STOP,
+        );
+        if std::env::var_os("OMS_RESUME_EXPECT_FAIL").is_some() {
+            assert_ne!(out.0, 0, "{}", message(&out));
+            if let Ok(expect) = std::env::var("OMS_RESUME_EXPECT_CONTAINS") {
+                assert!(message(&out).contains(&expect), "{}", message(&out));
+            }
+            return;
+        }
+        assert_eq!(out.0, 0, "{}", message(&out));
+        return;
+    }
+    let custom = "CLAUDE_CONFIG_DIR".to_owned();
+    let env_name = format!("ANTHROPIC_{}", "API_KEY");
+    account_isolated(
+        "caller_home_variable_wins_unless_an_account_is_requested",
+        &[(custom, "custom".into())],
+        |home| {
+            let repo = account_repo();
+            let out = account_delegate(&repo, &["--to", "claude"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home), ["claude|custom"]);
+            assert_eq!(lifecycle_refs(&repo, "attempt.created"), [None]);
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "work"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home).last().unwrap(), "claude|$HOME/acc/work");
+            let out = account_delegate(&repo, &["--to", "claude", "--account", "default"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(account_log(home).last().unwrap(), "claude|$HOME/.claude");
+
+            // Registered non-default caller override must honor Claude credential isolation,
+            // and a home claimed by another provider must fail closed instead of bypassing bind.
+            let _ = fs::remove_file(home.join("calls.log"));
+            let cred_collision = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "caller_home_variable_wins_unless_an_account_is_requested",
+                    "--nocapture",
+                ])
+                .env("HOME", home)
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("CLAUDE_CONFIG_DIR", home.join("acc/work"))
+                .env(&env_name, "fixture")
+                .env("OMS_RESUME_HOME_REPO", &repo.0)
+                .env("OMS_RESUME_EXPECT_FAIL", "1")
+                .env("OMS_RESUME_EXPECT_CONTAINS", "credential environment")
+                .env_remove("OMS_RESUME_SESSION")
+                .output()
+                .unwrap();
+            assert!(
+                cred_collision.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&cred_collision.stdout),
+                String::from_utf8_lossy(&cred_collision.stderr)
+            );
+            assert!(account_log(home).is_empty());
+
+            let cross_provider = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "caller_home_variable_wins_unless_an_account_is_requested",
+                    "--nocapture",
+                ])
+                .env("HOME", home)
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("CLAUDE_CONFIG_DIR", home.join("acc/codex-work"))
+                .env("OMS_RESUME_HOME_REPO", &repo.0)
+                .env("OMS_RESUME_EXPECT_FAIL", "1")
+                .env_remove(&env_name)
+                .env_remove("OMS_RESUME_EXPECT_CONTAINS")
+                .env_remove("OMS_RESUME_SESSION")
+                .output()
+                .unwrap();
+            assert!(
+                cross_provider.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&cross_provider.stdout),
+                String::from_utf8_lossy(&cross_provider.stderr)
+            );
+            assert!(account_log(home).is_empty());
+
+            let reg_repo = account_repo();
+            let _ = fs::remove_file(home.join("calls.log"));
+            let reg_override = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "caller_home_variable_wins_unless_an_account_is_requested",
+                    "--nocapture",
+                ])
+                .env("HOME", home)
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("CLAUDE_CONFIG_DIR", home.join("acc/work"))
+                .env("OMS_RESUME_HOME_REPO", &reg_repo.0)
+                .env_remove(&env_name)
+                .env_remove("OMS_RESUME_EXPECT_FAIL")
+                .env_remove("OMS_RESUME_EXPECT_CONTAINS")
+                .env_remove("OMS_RESUME_SESSION")
+                .output()
+                .unwrap();
+            assert!(
+                reg_override.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&reg_override.stdout),
+                String::from_utf8_lossy(&reg_override.stderr)
+            );
+            assert_eq!(account_log(home), ["claude|$HOME/acc/work"]);
+            assert_eq!(
+                lifecycle_refs(&reg_repo, "attempt.created"),
+                [Some("claude:work".into())]
+            );
+            let health = fs::read_to_string(reg_repo.0.join(".oms/seat-health.json")).unwrap();
+            assert!(health.contains("\"claude:work\""), "{health}");
+            assert!(!health.contains("\"claude\":"), "{health}");
+
+            // Unpinned resume must also honor a caller home override instead of binding ~/.claude.
+            let cfg = home.join(".config/oh-my-setting");
+            fs::write(
+                cfg.join("provider-accounts.json"),
+                format!(
+                    "{{\"schema\":1,\"providers\":{{\"claude\":{{\"accounts\":[{{\"id\":\"only\",\"home\":\"{}/.claude\"}}]}}}}}}",
+                    home.display()
+                ),
+            )
+            .unwrap();
+            let _ = fs::remove_file(home.join("calls.log"));
+            let resumed = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "caller_home_variable_wins_unless_an_account_is_requested",
+                    "--nocapture",
+                ])
+                .env("HOME", home)
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("CLAUDE_CONFIG_DIR", "custom")
+                .env("OMS_RESUME_SESSION", "sess-1")
+                .env("OMS_RESUME_HOME_REPO", &repo.0)
+                .output()
+                .unwrap();
+            assert!(
+                resumed.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&resumed.stdout),
+                String::from_utf8_lossy(&resumed.stderr)
+            );
+            assert_eq!(account_log(home), ["claude|custom"]);
+        },
+    );
+}
+
+#[test]
+fn registered_pi_session_resumes_with_owning_home() {
+    account_isolated(
+        "registered_pi_session_resumes_with_owning_home",
+        &[("PI_CODING_AGENT_SESSION_DIR".into(), "elsewhere".into())],
+        |home| {
+            let repo = account_repo();
+            let session_dir = home.join("acc/pi1/sessions");
+            fs::create_dir_all(&session_dir).unwrap();
+            fs::write(
+                session_dir.join("one.jsonl"),
+                format!(
+                    "{{\"type\":\"session\",\"id\":\"sess-1\",\"cwd\":\"{}\"}}\n",
+                    repo.0.display()
+                ),
+            )
+            .unwrap();
+            fs::write(home.join("bin/pi"), "#!/bin/sh\nif [ \"$1\" = --help ]; then echo --session; exit; fi\nprintf '%s|%s' \"$PI_CODING_AGENT_DIR\" \"${PI_CODING_AGENT_SESSION_DIR-unset}\" > \"$HOME/resumed\"\n").unwrap();
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let out = run(
+                &repo,
+                source,
+                "session",
+                &[
+                    "resume",
+                    "--provider",
+                    "pi",
+                    "--session",
+                    "sess-1",
+                    "--apply",
+                ],
+            );
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(
+                fs::read_to_string(home.join("resumed")).unwrap(),
+                format!("{}|unset", home.join("acc/pi1").display())
+            );
+            fs::set_permissions(home.join("acc/pi1"), fs::Permissions::from_mode(0o777)).unwrap();
+            fs::remove_file(home.join("resumed")).unwrap();
+            let bad = run(
+                &repo,
+                source,
+                "session",
+                &[
+                    "resume",
+                    "--provider",
+                    "pi",
+                    "--session",
+                    "sess-1",
+                    "--apply",
+                ],
+            );
+            assert_ne!(bad.0, 0);
+            assert!(message(&bad).contains("unavailable"), "{}", message(&bad));
+            assert!(!home.join("resumed").exists());
+            fs::set_permissions(home.join("acc/pi1"), fs::Permissions::from_mode(0o700)).unwrap();
+
+            // Corrupt account registry fails closed instead of falling back to an inherited home.
+            let default_sessions = home.join(".pi/agent/sessions");
+            fs::create_dir_all(&default_sessions).unwrap();
+            fs::write(
+                default_sessions.join("def.jsonl"),
+                format!(
+                    "{{\"type\":\"session\",\"id\":\"sess-def\",\"cwd\":\"{}\"}}\n",
+                    repo.0.display()
+                ),
+            )
+            .unwrap();
+            fs::write(
+                home.join(".config/oh-my-setting/provider-accounts.json"),
+                "{corrupt",
+            )
+            .unwrap();
+            let corrupt = run(
+                &repo,
+                source,
+                "session",
+                &[
+                    "resume",
+                    "--provider",
+                    "pi",
+                    "--session",
+                    "sess-def",
+                    "--apply",
+                ],
+            );
+            assert_ne!(corrupt.0, 0);
+            assert!(!home.join("resumed").exists());
+        },
+    );
+}
+
+#[test]
+fn retries_reselect_unpinned_accounts() {
+    account_isolated("retries_reselect_unpinned_accounts", &[], |home| {
+        let repo = account_repo();
+        fs::write(home.join("bin/claude"), "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$HOME/retries\"\necho 'server unavailable' >&2\nexit 1\n").unwrap();
+        let _ = account_delegate(&repo, &["--to", "claude", "--repair", "1"]);
+        let calls = fs::read_to_string(home.join("retries")).unwrap();
+        let calls: Vec<_> = calls.lines().collect();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls[0].ends_with("acc/overflow-a1"), "{calls:?}");
+        assert!(calls[1].ends_with("acc/work"), "{calls:?}");
+        let repo = account_repo();
+        fs::write(home.join("bin/claude"), "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$HOME/capacity-calls\"\necho 'rate limit' >&2\nexit 1\n").unwrap();
+        let _ = account_delegate(&repo, &["--to", "claude", "--fallback-model", "other"]);
+        let calls = fs::read_to_string(home.join("capacity-calls")).unwrap();
+        let calls: Vec<_> = calls.lines().collect();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        assert!(calls[2].ends_with("acc/overflow-a1"), "{calls:?}");
+
+        let dirty_repo = account_repo();
+        fs::write(home.join("bin/claude"), "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$HOME/dirty-capacity-calls\"\ntouch dirty.txt\necho 'rate limit' >&2\nexit 1\n").unwrap();
+        let dirty_out = run_with_source(
+            "peer-delegate",
+            &args(&[
+                "--repo",
+                dirty_repo.0.to_str().unwrap(),
+                "--to",
+                "claude",
+                "--fallback-model",
+                "other",
+                "--model",
+                "fixture",
+                "--no-verify",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "Write probe",
+            ]),
+            &dirty_repo.0,
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            &STOP,
+        );
+        assert_ne!(dirty_out.0, 0);
+        let dirty_calls = fs::read_to_string(home.join("dirty-capacity-calls")).unwrap();
+        assert_eq!(dirty_calls.lines().count(), 1, "{dirty_calls}");
+
+        // Overwriting a pre-existing untracked file keeps porcelain status unchanged yet must refuse retries.
+        let edited_repo = account_repo();
+        fs::write(edited_repo.0.join("scratch.txt"), "before\n").unwrap();
+        fs::write(home.join("bin/claude"), "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" >> \"$HOME/edited-capacity-calls\"\nprintf 'after\\n' > scratch.txt\necho 'rate limit' >&2\nexit 1\n").unwrap();
+        let edited_out = run_with_source(
+            "peer-delegate",
+            &args(&[
+                "--repo",
+                edited_repo.0.to_str().unwrap(),
+                "--to",
+                "claude",
+                "--fallback-model",
+                "other",
+                "--model",
+                "fixture",
+                "--no-verify",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "Write probe",
+            ]),
+            &edited_repo.0,
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            &STOP,
+        );
+        assert_ne!(edited_out.0, 0);
+        let edited_calls = fs::read_to_string(home.join("edited-capacity-calls")).unwrap();
+        assert_eq!(edited_calls.lines().count(), 1, "{edited_calls}");
+
+        // Implicit ~/.claude fallback registry collides cleanly if Codex already claims ~/.claude.
+        let cfg = home.join(".config/oh-my-setting");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::set_permissions(home.join(".claude"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            cfg.join("provider-accounts.json"),
+            format!(
+                "{{\"schema\":1,\"providers\":{{\"codex\":{{\"accounts\":[{{\"id\":\"steal\",\"home\":\"{}/.claude\"}}]}}}}}}",
+                home.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            cfg.join("provider-accounts.claude.json"),
+            format!(
+                "{{\"schema\":1,\"provider\":\"claude\",\"accounts\":[{{\"id\":\"work\",\"home\":\"{}/acc/work\"}}]}}",
+                home.display()
+            ),
+        )
+        .unwrap();
+        let collide = account_delegate(&repo, &["--to", "claude", "--account", "work"]);
+        assert_ne!(collide.0, 0);
+        assert!(
+            message(&collide).contains("duplicate"),
+            "{}",
+            message(&collide)
+        );
+    });
 }

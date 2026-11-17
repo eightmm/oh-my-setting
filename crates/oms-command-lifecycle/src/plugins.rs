@@ -558,11 +558,25 @@ pub(crate) fn apply(
             .trim()
     );
     let mcp = json!({"mcpServers":{"oh-my-setting":{"command":paths.home.join(".local/bin/oms"),"args":["mcp-server"]}}});
-    let certified = crate::agy_surface::verified(paths)?;
-    let hooks = json!({"oh-my-setting":{
+    let explicit = std::env::var_os("OH_MY_SETTING_AGY_HOOKS").is_some_and(|v| v == "1");
+    let certified = crate::agy_surface::verified(paths)? || explicit;
+    let tool_certified = crate::agy_surface::tool_hooks_verified(paths)? || explicit;
+    let mut entry = json!({
         "PreInvocation":[{"type":"command","command":format!("{} preinvocation", crate::integrations::native_command(paths, "agy-hook")?),"timeout":5}],
         "Stop":[{"type":"command","command":format!("{} stop", crate::integrations::native_command(paths, "agy-hook")?),"timeout":5}]
-    }});
+    });
+    if tool_certified {
+        let obj = entry.as_object_mut().expect("hook map");
+        obj.insert(
+            "PreToolUse".into(),
+            json!([{"matcher":"invoke_subagent|swarm|run_workflow|manage_subagents","hooks":[{"type":"command","command":format!("{} pretooluse", crate::integrations::native_command(paths, "agy-hook")?),"timeout":5}]}]),
+        );
+        obj.insert(
+            "PostToolUse".into(),
+            json!([{"matcher":"invoke_subagent|swarm|run_workflow|manage_subagents","hooks":[{"type":"command","command":format!("{} posttooluse", crate::integrations::native_command(paths, "agy-hook")?),"timeout":5}]}]),
+        );
+    }
+    let hooks = json!({"oh-my-setting": entry});
     let plugin_raw = r::bytes(&plugin)?;
     let mcp_raw = r::bytes(&mcp)?;
     let hooks_raw = r::bytes(&hooks)?;

@@ -32,6 +32,8 @@ Options:
                        Alias: --role NAME.
   --model MODEL        Exact advisor model.
   --fallback-model M   Explicit one-shot capacity fallback model.
+  --account ID         Run on a registered codex, claude or pi account (also
+                       PROVIDER:account=ID); requires exactly one provider.
   --reasoning-effort E Explicit effort; default uses the shared model router.
   --no-strategy        Do not inject a strategy profile.
   --no-failures        Do not attach unresolved fail-ledger rows.
