@@ -195,6 +195,7 @@ struct Job<'a> {
     limit: usize,
     heartbeat: Option<&'a ActivityHeartbeat>,
     cancel: StopReason,
+    physical_call: Option<oms_supervisor::process::PhysicalCall>,
 }
 
 impl<'a> Job<'a> {
@@ -210,6 +211,7 @@ impl<'a> Job<'a> {
             limit,
             heartbeat: None,
             cancel: StopReason::Cancelled,
+            physical_call: None,
         }
     }
 }
@@ -236,6 +238,7 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     let mut request = Request::new(job.argv);
     request.cwd = Some(std::fs::canonicalize(job.cwd).map_err(|e| e.to_string())?);
     request.stdin = job.stdin;
+    request.physical_call = job.physical_call;
     let mut remove_environment = job.remove_environment;
     for key in ["OMS_NATIVE_OUTCOME", "OMS_NATIVE_DISPATCHED"] {
         if !remove_environment.iter().any(|v| v == key) {
@@ -624,6 +627,7 @@ impl PeerProcessExecutor for CollabServices<'_> {
                 environment: input.environment,
                 remove_environment: input.remove_environment,
                 merged: input.merge,
+                physical_call: input.physical_call,
                 ..Job::new(argv, &input.cwd, input.timeout, input.max_bytes)
             },
             interrupted,
@@ -634,12 +638,14 @@ impl PeerProcessExecutor for CollabServices<'_> {
             && done.cleanup_complete()
             && done.supervision_error.is_none();
         let cleanup_complete = Some(done.cleanup_complete());
+        let owned_cleanup = done.owned_cleanup().cloned();
         Ok(Completed {
             code: stop_code(&done),
             stdout: done.stdout.bytes,
             stderr: done.stderr.map_or_else(Vec::new, |s| s.bytes),
             complete,
             cleanup_complete,
+            owned_cleanup,
             elapsed: done.duration,
         })
     }
@@ -2556,6 +2562,13 @@ mod tests {
                     timeout,
                     max_bytes: 1024,
                     merge: false,
+                    physical_call: Some(
+                        oms_supervisor::process::PhysicalCall::new(&format!(
+                            "call_fixture_{}",
+                            script.len()
+                        ))
+                        .unwrap(),
+                    ),
                 },
                 &stop,
             )
@@ -2565,9 +2578,16 @@ mod tests {
             (done.code, done.stdout.as_slice(), done.complete),
             (4, &b"in"[..], true)
         );
+        let cleanup = done.owned_cleanup.as_ref().unwrap();
+        assert_eq!(cleanup.call().id(), "call_fixture_11");
+        assert_eq!(cleanup.scope(), Scope::ProcessGroup);
         let done = invoke("sleep 30", Duration::from_millis(200)).expect("deadline");
         assert_eq!((done.code, done.complete), (124, false));
         assert_eq!(done.cleanup_complete, Some(true));
+        assert_eq!(
+            done.owned_cleanup.as_ref().unwrap().call().id(),
+            "call_fixture_8"
+        );
         assert!(invoke("true", Duration::ZERO).is_err());
     }
 

@@ -1,17 +1,16 @@
 # oms-command-peer
 
-Native peer command migration with the W5b integrations described below.
-This crate compiles independently but is **not yet a complete compatibility replacement**.
-Do not wire it into production routing until the remaining contracts below
-have been implemented and the canonical behavior suites have run.
+Native peer commands and the root CLI's execution adapters use this crate.
+The boundaries below distinguish implemented paths from remaining capabilities;
+compilation alone does not establish complete compatibility.
 
-The standalone workspace uses Rust 1.99.1, edition 2024, resolver 3 and forbids
+The workspace uses Rust 1.99.1, edition 2024, resolver 3 and forbids
 unsafe code. Dependencies resolve through the root workspace lockfile; no crate-local
 lockfile or new dependency is needed for the embedded view assets.
 
 ## Entrypoints
 
-- `owns(tool, args)` classifies the fifteen command names without IO, including
+- `owns(tool, args)` classifies the native command names without IO, including
   malformed invocations. Unknown names are unowned and return status 75.
 - `run(tool, args, cwd, interrupted)` uses the checkout as development source.
 - `run_with_source(tool, args, cwd, source_root, interrupted)` accepts the
@@ -74,6 +73,11 @@ and leaves the registered liability for reconciliation.
 Schema-2 receipts separately retain the executor's native cleanup evidence;
 timeout or incomplete provider usage never manufactures zero spend. Missing
 execution acknowledgements retain unknown cleanup. Schema-1 history stays readable.
+`Invocation::physical_call` additionally carries the exact physical-call tag to
+the native reactor. `Completed::owned_cleanup` retains its opaque, actual-scope
+proof separately from the legacy Boolean observation. Synthetic executors leave
+that proof absent. This in-memory handoff grants no resource release by itself;
+durable resource/session/WIP settlement and native fanout bounds remain separate.
 Registration failure prevents that physical invocation. Completion-persistence
 failure stops automatic account overflow and model fallback, even when provider
 output is already available. Ordinary and budget-enforced calls share this
@@ -243,20 +247,11 @@ not established by compilation:
 
 ## Remaining compatibility work and integration blockers
 
-W5b is incomplete. The owner must resolve these concrete dependency boundaries:
-
-1. Existing `oms-output/Cargo.toml` still enables the JSON precision feature
-   prohibited by this brief. Runtime itself no longer enables it. No such feature
-   was added here, but a zero-feature dependency closure requires an upstream
-   repair outside this crate; preserving native digest reuse cannot fix that
-   manifest from the allowed directory.
-2. Canonical admission/checkpoint APIs live in `oms-command-landing`, whose
-   `oms-reference` dependency requires `proc_pidinfo` 0.1.4. That package is absent
-   from the permitted root lockfile. Importing that dependency would violate the
-   external-package constraint. No alternate admission implementation is invented.
-3. The public peer executor returns buffered process results and has no terminal
-   control-input or streamed durable sink interface. Interactive delegation and
-   complete streamed command capture need the owner's interface decision.
+The historical W5b dependency blockers no longer describe this workspace:
+`oms-output` does not enable `arbitrary_precision`, and `proc_pidinfo` is in the
+root lockfile. The remaining public peer executor returns buffered process
+results and has no terminal control-input or streamed durable sink interface.
+Interactive delegation and complete streamed command capture need that interface.
 
 The remaining behavior is still refused or incomplete:
 
@@ -269,9 +264,9 @@ The remaining behavior is still refused or incomplete:
   `oms-command-graph`. Only the supplied typed pack path above is implemented.
 - Session checkpoint/fork/launch/compare/file restore, managed panel relocation,
   full status projection and complete handoff-prompt synthesis need the native
-  checkpoint/panel interfaces. Resume launch serialization/receipts are not yet
-  complete. Prompts-only Antigravity capture is bounded by the general 64 MiB
-  reader and is not a streaming history implementation.
+  checkpoint/panel interfaces. Native resume uses physical registration and its
+  final fence as described above. Prompts-only Antigravity capture is bounded by
+  the general 64 MiB reader and is not a streaming history implementation.
 - Remote artifact views still refuse. Legacy `artifact_view.py::ssh_read` uses
   SSH plus a remote no-follow reader; the requested private curl-config transport
   is a different interface. Neither transport may silently lose remote no-follow
@@ -285,9 +280,9 @@ The remaining behavior is still refused or incomplete:
   semantic deliberation enforcement, until-agreement stop reports, advice
   triggers, task observation and persistent failure recovery remain incomplete.
 
-The canonical behavioral suites, failure/edge cases, adversarial namespace
-cases and cross-provider fixtures were not run under the implementation-first
-brief. No production selector, commit, push or install was performed.
+The original implementation-first brief deferred behavioral verification.
+Current native fixtures cover the implemented paths listed below; they do not
+establish every compatibility item above or live provider/platform behavior.
 
 ## Concurrent calls and interrupted publication
 
@@ -313,7 +308,8 @@ authority over concurrent owner work or prove whole-tree containment.
 ## Validation for this phase
 
 ```sh
-cargo +1.99.1 check --manifest-path Cargo.toml -p oms-command-peer --all-targets --offline
+cargo +1.99.1 check --manifest-path Cargo.toml -p oms-command-peer --all-targets --locked --offline
+cargo +1.99.1 test -p oms-command-peer --all-targets --locked --offline
 cargo +1.99.1 fmt --manifest-path Cargo.toml -p oms-command-peer -- --check
 ```
 
@@ -324,15 +320,15 @@ services. It uses isolated subprocess environments and unique initialized Git
 repositories; no provider executable or online service is needed.
 The owner must still run canonical behavioral suites for full migration parity.
 
-Behavior sources inspected: `scripts/thread.sh`,
+Historical migration sources: `scripts/thread.sh`,
 `scripts/lib/review_confirm.py`, `scripts/lib/review_since.py`,
 `scripts/lib/red_check.py`, `scripts/lib/answer-quality.py`,
 `scripts/lib/oms_runtime/context_pack.py`, `scripts/lib/oms_sessions/`,
 `scripts/session-handoff.sh`, `scripts/agent-ml-context.sh`,
 `scripts/detect-project-style.sh`, and `scripts/lib/peer-common.sh`.
-Existing `tests/test_sessions.py`, `tests/test_oms_runtime_context_pack.py`,
-`tests/test_artifact_view.py`, operator suites and shell smoke coverage remain
-for the owner's behavioral validation phase.
+The retired Python tests are historical references. Current native fixtures and
+the affected root integration checks supply behavioral evidence; platform, live
+provider and release/install verification remain separate.
 
 ## Asset and dependency audit (W2)
 

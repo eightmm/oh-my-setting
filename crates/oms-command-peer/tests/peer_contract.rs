@@ -295,6 +295,7 @@ impl Executor for ProviderProbe {
             stderr: Vec::new(),
             complete: true,
             cleanup_complete: Some(true),
+            owned_cleanup: None,
             elapsed: Duration::ZERO,
         })
     }
@@ -1109,6 +1110,7 @@ fn review_classification_and_validation() {
                     stderr: Vec::new(),
                     complete: true,
                     cleanup_complete: Some(true),
+                    owned_cleanup: None,
                     elapsed: Duration::ZERO,
                 })
             }
@@ -1829,6 +1831,7 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                         stderr: Vec::new(),
                         complete: true,
                         cleanup_complete: Some(true),
+                        owned_cleanup: None,
                         elapsed: std::time::Duration::ZERO,
                     });
                 }

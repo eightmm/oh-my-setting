@@ -776,6 +776,7 @@ pub fn invocation(
                 environment: vec![],
                 remove_environment: vec![],
                 merge: false,
+                physical_call: None,
             },
             ctx.interrupted,
         )

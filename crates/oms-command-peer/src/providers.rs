@@ -2006,6 +2006,10 @@ pub(crate) fn execute_env(
                 timeout: Duration::from_secs(timeout),
                 max_bytes: 64 * 1024 * 1024,
                 merge: false,
+                physical_call: Some(
+                    oms_supervisor::process::PhysicalCall::new(&usage_receipt.identity.call_id)
+                        .map_err(|e| Error::new(2, e))?,
+                ),
             },
             context.interrupted,
         );
@@ -2378,6 +2382,7 @@ mod bridge_route_tests {
                 stderr: Vec::new(),
                 complete: true,
                 cleanup_complete: Some(true),
+                owned_cleanup: None,
                 elapsed: Duration::ZERO,
             })
         }
@@ -2421,6 +2426,7 @@ mod bridge_route_tests {
                                 stderr: vec![],
                                 complete: true,
                                 cleanup_complete: Some(true),
+                                owned_cleanup: None,
                                 elapsed: Duration::ZERO,
                             });
                         }
@@ -2474,11 +2480,15 @@ mod bridge_route_tests {
                                 .iter()
                                 .any(|(k, _)| k == "OMS_PROVIDER_CALL_ID")
                         );
+                        assert_eq!(
+                            request.physical_call.as_ref().map(|call| call.id()),
+                            Some(intent.identity.call_id.as_str())
+                        );
                         Ok(Completed {
                         code:if n == 0 {1} else if n == 2 {124} else {0},
                         stdout:format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fixture answer\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":2,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":0}},\"total_cost_usd\":0.0000{}}}\n",n+1).into_bytes(),
                         stderr:if n == 0 {b"rate limit".to_vec()} else {vec![]},
-                        complete:n != 2,cleanup_complete:Some(true),elapsed:Duration::ZERO,
+                        complete:n != 2,cleanup_complete:Some(true),owned_cleanup:None,elapsed:Duration::ZERO,
                     })
                     }
                 }

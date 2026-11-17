@@ -1,6 +1,6 @@
 # Native agent supervisor and owned-process engine
 
-This standalone crate supplies native process execution and implementations of
+This workspace crate supplies native process execution and implementations of
 all `agent-supervisor` modes. `capture.rs` and `process.rs` are reusable engine
 modules; `command.rs`, `cli.rs`, `lifecycle.rs`, and `storage.rs` implement the
 command domain. The binary is a native runner entry point. No implementation
@@ -8,11 +8,9 @@ invokes Python, Bash, provider CLIs, a scheduler, or a container engine. An
 explicit payload may itself be a user-selected shell. Fixed Git and `ps`
 queries are native external producers, driven by the same process engine.
 
-This is an intermediate migration patch. Compilation does not establish
-behavioral/security parity. The gaps below block a claim of full migration
-completion. Root workspace/lock registration, CLI routing, service adapters,
-global signal installation, integration tests, release, and global documentation
-remain with the parent.
+The root CLI and native service adapters use this engine. Compilation alone does
+not establish behavioral or security parity; the scope and recovery limits below
+remain part of the contract. Release/install and platform evidence stay separate.
 
 ## Reusable API
 
@@ -56,6 +54,15 @@ duration, signal records, reaping evidence and explicit supervision error.
 `Complete` alone is not successful cleanup: callers must inspect
 `cleanup_complete()`, output completeness/cutoff, requested scope and stop reason.
 Process-group completion never claims whole-tree containment.
+
+A parent can tag `Request::physical_call` with a validated `PhysicalCall` ID.
+Only the owning reactor can mint `Completion::owned_cleanup()` after confirming
+cleanup. Its opaque `OwnedCleanup` retains the exact call, PID and actual scope;
+editing public completion diagnostics cannot change that proof. Consumers compare
+`matches(expected_call, expected_scope)` against their admitted binding. Missing
+tags, unknown cleanup and synthetic results provide no proof. The tag grants no
+admission, and the proof supplies no native fanout limit, session closure, WIP
+settlement or durable restart evidence.
 
 The state machine is spawn -> observe/drain/feed -> freeze completion or stop
 reason -> TERM/grace/KILL as needed -> observe quiescence -> nonblocking reap ->
@@ -116,9 +123,8 @@ entry point. Neither installs process-global signal handlers. Dispatch launches
 detached runners with stdin, stdout and stderr connected to `/dev/null`, and
 closed warning stderr pipes cannot turn a completed job into a supervisor error.
 
-Canonical anchors below refer to
-`attempt-runner.py`, read through EOF.
-The implementation exists for every row; behavioral verification is deferred.
+Canonical anchors below refer to the historical `attempt-runner.py` migration
+source. Current implementations and fixtures live in this crate and the root.
 
 | Mode | Source lines | Implemented behavior / limitation |
 | --- | --- | --- |
@@ -225,16 +231,11 @@ their existing process identity checks.
 
 ## Verification boundary
 
-Rust 1.99.1 offline `cargo check --all-targets` and rustfmt are the implementation-phase
-checks; exact session results are in the worker report.
-All resolved dependency versions already occur in the root lockfile.
-
-No tests were added, edited, deleted or executed in the R179 repair pass.
-Reference inspection was scoped to the repaired paths and canonical process
-shutdown helpers. Existing tests remain unchanged. Tests, integration scenarios,
-behavioral probes, cross-platform
-execution, baseline-reversal tests, CI/install/publication and paid/provider/
-scheduler/container/remote launches were explicitly deferred by the brief.
-Consequently empty/zero/equal/malformed boundaries and failure exits are source
-implementations, not runtime evidence. Independent security review and parent
-admission are still required.
+Use pinned Rust 1.99.1 with the workspace lockfile:
+`cargo +1.99.1 test -p oms-supervisor --all-targets --locked --offline`.
+The existing process fixtures exercise owned leader/group cleanup, cancellation,
+call/scope correlation and resistance to diagnostic-field changes. Recovery
+fixtures exercise durable settlement replay, mismatched identity and legacy
+terminal records. Root/Peer fixtures cover their service handoff separately.
+These checks do not establish live provider, macOS/WSL2, kernel-stuck teardown,
+whole-tree fanout bounds or final CI/install/publication correctness.

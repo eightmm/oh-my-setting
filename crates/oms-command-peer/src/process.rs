@@ -18,6 +18,7 @@ pub struct Invocation {
     pub timeout: Duration,
     pub max_bytes: usize,
     pub merge: bool,
+    pub physical_call: Option<oms_supervisor::process::PhysicalCall>,
 }
 #[derive(Clone, Debug)]
 pub struct Completed {
@@ -28,6 +29,7 @@ pub struct Completed {
     /// Cleanup of the executor's supervision scope, not proof of bounded native
     /// fanout. Missing execution acknowledgement stays unknown even with an exit code.
     pub cleanup_complete: Option<bool>,
+    pub owned_cleanup: Option<oms_supervisor::process::OwnedCleanup>,
     pub elapsed: Duration,
 }
 pub trait Executor: Sync {
@@ -50,6 +52,7 @@ impl Executor for Native {
         request.stdin = input.input;
         request.environment = input.environment;
         request.remove_environment = input.remove_environment;
+        request.physical_call = input.physical_call;
         request.streams = if input.merge {
             Streams::Merged
         } else {
@@ -99,12 +102,14 @@ impl Executor for Native {
                         && result.cleanup_complete()
                         && result.supervision_error.is_none();
                     let cleanup_complete = Some(result.cleanup_complete());
+                    let owned_cleanup = result.owned_cleanup().cloned();
                     return Ok(Completed {
                         code,
                         stdout: result.stdout.bytes,
                         stderr: result.stderr.map_or_else(Vec::new, |s| s.bytes),
                         complete,
                         cleanup_complete,
+                        owned_cleanup,
                         elapsed: result.duration,
                     });
                 }
@@ -142,6 +147,7 @@ pub(crate) fn invoke_env(
             timeout: Duration::from_secs(timeout),
             max_bytes: 64 * 1024 * 1024,
             merge,
+            physical_call: None,
         },
         context.interrupted,
     )
@@ -196,6 +202,7 @@ pub(crate) fn git_input(
             timeout: Duration::from_secs(30),
             max_bytes: 64 * 1024 * 1024,
             merge: false,
+            physical_call: None,
         },
         context.interrupted,
     )?;

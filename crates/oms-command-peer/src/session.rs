@@ -841,6 +841,10 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                 timeout: Duration::from_secs(86400),
                 max_bytes: 1024 * 1024,
                 merge: false,
+                physical_call: Some(
+                    oms_supervisor::process::PhysicalCall::new(&call_id)
+                        .map_err(|e| Error::new(2, e))?,
+                ),
             },
             context.interrupted,
         );

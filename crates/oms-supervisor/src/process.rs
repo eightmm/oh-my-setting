@@ -31,6 +31,49 @@ pub enum Scope {
     /// Requires the exclusive, pre-spawn Linux subreaper reactor.
     WholeTree,
 }
+
+/// A parent's physical-call correlation, not admission or permission to spawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhysicalCall(String);
+impl PhysicalCall {
+    pub fn new(id: &str) -> Result<Self, String> {
+        if id.is_empty()
+            || id.len() > 160
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+        {
+            return Err("invalid physical call correlation".into());
+        }
+        Ok(Self(id.into()))
+    }
+    pub fn id(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Sealed by the owning reactor after cleanup. Scope stays explicit: leader or
+/// POSIX-group cleanup cannot establish whole-tree or native-fanout bounds.
+#[derive(Clone, Debug)]
+pub struct OwnedCleanup {
+    call: PhysicalCall,
+    pid: u32,
+    scope: Scope,
+}
+impl OwnedCleanup {
+    pub fn call(&self) -> &PhysicalCall {
+        &self.call
+    }
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+    pub fn matches(&self, call: &PhysicalCall, scope: Scope) -> bool {
+        self.call == *call && self.scope == scope
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Streams {
     Merged,
@@ -51,6 +94,7 @@ pub struct Request {
     pub deadline: Option<Instant>,
     pub scope: Scope,
     pub terminate_grace: Duration,
+    pub physical_call: Option<PhysicalCall>,
 }
 impl Request {
     pub fn new(argv: Vec<OsString>) -> Self {
@@ -67,6 +111,7 @@ impl Request {
             deadline: None,
             scope: Scope::ProcessGroup,
             terminate_grace: Duration::from_secs(2),
+            physical_call: None,
         }
     }
 }
@@ -150,8 +195,13 @@ pub struct Completion {
     pub scope: Scope,
     pub signals: Vec<SignalRecord>,
     pub supervision_error: Option<String>,
+    owned_cleanup: Option<OwnedCleanup>,
 }
 impl Completion {
+    /// Uses sealed observations, unaffected by edits to public diagnostic fields.
+    pub fn owned_cleanup(&self) -> Option<&OwnedCleanup> {
+        self.owned_cleanup.as_ref()
+    }
     pub fn cleanup_complete(&self) -> bool {
         self.leader_reaped
             && self.supervision_error.is_none()
@@ -599,7 +649,8 @@ impl Job {
         }
     }
     fn completion(self) -> Completion {
-        Completion {
+        let physical_call = self.request.physical_call;
+        let mut completion = Completion {
             pid: self.pid.as_raw_nonzero().get() as u32,
             exit: self.exit,
             stop: self.stop,
@@ -612,7 +663,18 @@ impl Job {
             scope: self.request.scope,
             signals: self.signals,
             supervision_error: self.error,
+            owned_cleanup: None,
+        };
+        if completion.cleanup_complete()
+            && let Some(call) = physical_call
+        {
+            completion.owned_cleanup = Some(OwnedCleanup {
+                call,
+                pid: completion.pid,
+                scope: completion.scope,
+            });
         }
+        completion
     }
     fn fail(&mut self, error: String) {
         if self.error.is_none() {
@@ -1172,6 +1234,7 @@ mod tests {
             scope: Scope::Leader,
             signals: vec![],
             supervision_error: None,
+            owned_cleanup: None,
         }
     }
 
@@ -1240,10 +1303,12 @@ mod tests {
         let mut reactor = Reactor::new();
         let mut request = Request::new(vec!["/bin/sh".into(), "-c".into(), "printf ok".into()]);
         request.scope = Scope::Leader;
+        let call = PhysicalCall::new("call_leader_fixture").unwrap();
+        request.physical_call = Some(call.clone());
         request.deadline = Some(Instant::now() + Duration::from_secs(5));
         let id = reactor.start(request).unwrap();
         let until = Instant::now() + Duration::from_secs(5);
-        let completion = loop {
+        let mut completion = loop {
             match reactor.poll(id, Duration::from_millis(50)).unwrap() {
                 Progress::Complete(done) => break done,
                 Progress::Pending(_) => {
@@ -1257,6 +1322,22 @@ mod tests {
         assert_eq!(completion.exit.map(|e| e.shell_code()), Some(0));
         assert_eq!(completion.stdout.bytes, b"ok");
         assert!(completion.signals.is_empty(), "{:?}", completion.signals);
+        let proof = completion.owned_cleanup().unwrap();
+        assert!(proof.matches(&call, Scope::Leader));
+        assert_eq!(proof.pid(), completion.pid);
+        assert!(!proof.matches(&call, Scope::WholeTree));
+        assert!(!proof.matches(&PhysicalCall::new("call_other").unwrap(), Scope::Leader));
+        completion.scope = Scope::WholeTree;
+        completion.all_reaped = true;
+        assert_eq!(completion.owned_cleanup().unwrap().scope(), Scope::Leader);
+        let mut synthetic = fake_ps_completion(b"", Some(0));
+        synthetic.scope = Scope::WholeTree;
+        synthetic.all_reaped = true;
+        assert!(synthetic.cleanup_complete());
+        assert!(synthetic.owned_cleanup().is_none());
+        for invalid in ["", "call with space", "call/new", &"a".repeat(161)] {
+            assert!(PhysicalCall::new(invalid).is_err());
+        }
     }
 
     #[test]
@@ -1270,6 +1351,8 @@ mod tests {
             "printf out; exit 3".into(),
         ]);
         natural.scope = Scope::ProcessGroup;
+        let natural_call = PhysicalCall::new("call_group_fixture").unwrap();
+        natural.physical_call = Some(natural_call.clone());
         natural.deadline = Some(Instant::now() + Duration::from_secs(5));
         let id = reactor.start(natural).unwrap();
         let until = Instant::now() + Duration::from_secs(5);
@@ -1284,10 +1367,23 @@ mod tests {
         assert_eq!(done.group_quiescent, Some(true), "{done:?}");
         assert!(done.leader_reaped, "{done:?}");
         assert_eq!(done.exit.map(|e| e.shell_code()), Some(3), "{done:?}");
+        assert!(
+            done.owned_cleanup()
+                .unwrap()
+                .matches(&natural_call, Scope::ProcessGroup)
+        );
+        assert!(
+            !done
+                .owned_cleanup()
+                .unwrap()
+                .matches(&natural_call, Scope::WholeTree)
+        );
 
         // 2) Cancelled running child under Scope::ProcessGroup.
         let mut slow = Request::new(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()]);
         slow.scope = Scope::ProcessGroup;
+        let stopped_call = PhysicalCall::new("call_group_cancel_fixture").unwrap();
+        slow.physical_call = Some(stopped_call.clone());
         slow.deadline = Some(Instant::now() + Duration::from_secs(30));
         let id = reactor.start(slow).unwrap();
         std::thread::sleep(Duration::from_millis(100));
@@ -1303,5 +1399,16 @@ mod tests {
         assert!(done.supervision_error.is_none(), "{done:?}");
         assert_eq!(done.group_quiescent, Some(true), "{done:?}");
         assert!(done.leader_reaped, "{done:?}");
+        assert!(
+            done.owned_cleanup()
+                .unwrap()
+                .matches(&stopped_call, Scope::ProcessGroup)
+        );
+        assert!(
+            !done
+                .owned_cleanup()
+                .unwrap()
+                .matches(&natural_call, Scope::ProcessGroup)
+        );
     }
 }

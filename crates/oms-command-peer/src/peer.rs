@@ -762,6 +762,7 @@ pub(crate) fn call(
             stderr: error.message.into_bytes(),
             complete: false,
             cleanup_complete: None,
+            owned_cleanup: None,
             elapsed: std::time::Duration::ZERO,
         },
     };
