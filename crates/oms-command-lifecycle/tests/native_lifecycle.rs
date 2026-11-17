@@ -142,6 +142,222 @@ fn native_only(value: &Value) {
     }
 }
 
+// Keep diagnostics in the canonical isolated lifecycle fixture: the same read-only
+// contract applies to both inventory and pin comparison, without --pin or probes.
+fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeServices) {
+    fn snapshot(root: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
+        fn visit(base: &Path, path: &Path, rows: &mut Vec<(PathBuf, u32, Vec<u8>)>) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            let body = if metadata.is_symlink() {
+                fs::read_link(path)
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec()
+            } else if metadata.is_file() {
+                fs::read(path).unwrap()
+            } else {
+                Vec::new()
+            };
+            rows.push((
+                path.strip_prefix(base).unwrap().to_owned(),
+                metadata.mode(),
+                body,
+            ));
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(base, &entry.unwrap().path(), rows);
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        visit(root, root, &mut rows);
+        rows.sort();
+        rows
+    }
+    let home = root.join("home");
+    let command = root.join("bin/doctor-server");
+    fs::write(
+        &command,
+        "#!/bin/sh\nprintf called > \"$OMS_LIFECYCLE_FIXTURE/doctor-executed\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+    let hidden = "fixture-private-material";
+    let spec = json!({"command":command,"args":[hidden],"env":{"PRIVATE_VALUE":hidden}});
+    let user = home.join(".claude.json");
+    let project = source.join(".mcp.json");
+    let codex = home.join(".codex/config.toml");
+    let agy_user = home.join(".gemini/settings.json");
+    let agy_legacy = home.join(".gemini/config/mcp_config.json");
+    let agy_project = source.join(".gemini/mcp_config.json");
+    let agy_plugin = home.join(".gemini/config/plugins/fixture:variant/mcp_config.json");
+    write(
+        &user,
+        &json!({"mcpServers":{"shared":spec,"user-only":spec}}),
+    );
+    write(
+        &project,
+        &json!({"mcpServers":{"shared":{"command":command,"disabled":true}}}),
+    );
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(
+        &codex,
+        format!(
+            "[mcp_servers.shared]\ncommand = \"{}\"\nenabled = false\nargs = [\"{hidden}\"]\n",
+            command.display()
+        ),
+    )
+    .unwrap();
+    let remote = [
+        "https://",
+        "user:",
+        hidden,
+        "@example.test/private?",
+        hidden,
+    ]
+    .concat();
+    for file in [&agy_user, &agy_legacy, &agy_project, &agy_plugin] {
+        write(
+            file,
+            &json!({"mcpServers":{"shared":{"url":remote,"headers":{"Private":hidden}}}}),
+        );
+    }
+    let baseline = snapshot(root);
+    let services = host.0.borrow().clone();
+    for mode in ["--extensions", "--mcp"] {
+        let raw = success(call("doctor", &[mode, "--json"], source, host));
+        assert!(!String::from_utf8_lossy(&raw).contains(hidden));
+        assert!(!String::from_utf8_lossy(&raw).contains("PRIVATE_VALUE"));
+        let report: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(report["collisions"].as_array().unwrap().len(), 2);
+        let claude = report["collisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["provider"] == "claude")
+            .unwrap();
+        assert_eq!(claude["scopes"], json!(["project", "user"]));
+        let agy = report["collisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["provider"] == "antigravity")
+            .unwrap();
+        assert_eq!(
+            agy["scopes"],
+            json!(["legacy", "plugin-fixture:variant", "project", "user"])
+        );
+        assert!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["effective"] == "unknown" && v["runtime"] == "unknown")
+        );
+        assert_eq!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|v| v["configuration"] == "disabled" && v["disabled"] == true)
+                .count(),
+            2
+        );
+        assert_eq!(report["unknown"], json!([]));
+        assert!(
+            report["config_layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["status"] == "parsed")
+        );
+        assert!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["server"] == "claude:user:user-only"
+                    && v["configuration"] == "configured")
+        );
+    }
+    assert_eq!(snapshot(root), baseline);
+    assert_eq!(*host.0.borrow(), services);
+    assert!(!root.join("doctor-executed").exists());
+    assert!(!root.join("config/oh-my-setting/mcp-pins.json").exists());
+    // A malformed peer never makes a readable entry effective. A missing layer
+    // is distinguished from an unreadable one, without guessing runtime state.
+    fs::write(&project, format!("{{invalid {hidden}")).unwrap();
+    fs::remove_file(&agy_legacy).unwrap();
+    fs::remove_file(&agy_project).unwrap();
+    symlink(&agy_user, &agy_project).unwrap();
+    fs::write(&codex, "[mcp_servers.invalid\n").unwrap();
+    write(
+        &agy_plugin,
+        &json!({"mcpServers":{"invalid":42,"shared":spec}}),
+    );
+    let pins = root.join("config/oh-my-setting/mcp-pins.json");
+    write(
+        &pins,
+        &json!({"schema":1,"pins":{"claude:project:previous":"prior-digest","codex:user:previous":"prior-digest"}}),
+    );
+    let baseline = snapshot(root);
+    for mode in ["--extensions", "--mcp"] {
+        let raw = success(call("doctor", &[mode, "--json"], source, host));
+        assert!(!String::from_utf8_lossy(&raw).contains(hidden));
+        let report: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(report["unknown"], json!(["antigravity", "claude", "codex"]));
+        for (provider, scope, expected) in [
+            ("claude", "project", "unknown"),
+            ("codex", "user", "unknown"),
+            ("antigravity", "legacy", "missing"),
+            ("antigravity", "project", "unknown"),
+            ("antigravity", "plugin-fixture:variant", "unknown"),
+        ] {
+            let layer = report["config_layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["provider"] == provider && v["scope"] == scope)
+                .unwrap();
+            assert_eq!(layer["status"], expected);
+            assert!(layer["reason"].is_string());
+        }
+        assert!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["effective"] == "unknown"
+                    && v["effective_reason"] == "provider configuration incomplete")
+        );
+        if mode == "--mcp" {
+            // A manually supplied prior pin is comparison data, never permission
+            // to probe or to overwrite a malformed provider's baseline.
+            assert_eq!(report["probe"], Value::Null);
+            assert_eq!(report["removed"], json!([]));
+        }
+    }
+    assert_eq!(snapshot(root), baseline);
+    assert_eq!(*host.0.borrow(), services);
+    for file in [
+        &user,
+        &project,
+        &codex,
+        &agy_user,
+        &agy_legacy,
+        &agy_project,
+        &agy_plugin,
+        &command,
+        &pins,
+    ] {
+        if fs::symlink_metadata(file).is_ok() {
+            fs::remove_file(file).unwrap();
+        }
+    }
+    fs::remove_dir(agy_plugin.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn native_configuration_and_services() {
     if let Some(root) =
@@ -317,6 +533,7 @@ esac
     let source = root.join("source");
     let home = root.join("home");
     let host = NativeServices::default();
+    doctor_configuration_diagnostics(&source, &root, &host);
     assert!(
         Command::new("git")
             .arg("init")

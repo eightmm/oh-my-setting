@@ -374,84 +374,138 @@ fn extension_configs(paths: &Paths) -> Vec<(&'static str, &'static str, PathBuf)
         ),
     ]
 }
-type DoctorSpecs = (Vec<(String, Value)>, Vec<String>);
-
-fn specs(paths: &Paths) -> Result<DoctorSpecs> {
-    let mut specs = Vec::new();
-    let mut unknown = Vec::new();
-    for (provider, scope, path) in extension_configs(paths) {
-        if !r::exists(&path) {
-            continue;
-        }
-        match r::value(&path) {
-            Ok(v) if v.is_object() => {
-                if let Some(servers) = v["mcpServers"].as_object() {
-                    for (name, spec) in servers {
-                        specs.push((format!("{provider}:{scope}:{name}"), spec.clone()));
+struct DoctorSpec {
+    key: String,
+    provider: String,
+    scope: String,
+    name: String,
+    spec: Value,
+}
+#[derive(Default)]
+struct DoctorSpecs {
+    servers: Vec<DoctorSpec>,
+    unknown: Vec<String>,
+    layers: Vec<Value>,
+}
+impl DoctorSpecs {
+    fn layer(&mut self, provider: &str, scope: &str, path: &Path, toml: bool) {
+        let state = match fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
+            Err(_) => "unknown",
+            Ok(_) => {
+                let value = if toml {
+                    crate::config::read_toml(path)
+                } else {
+                    r::value(path)
+                };
+                match value {
+                    Ok(value) if value.is_object() => {
+                        match value.get(if toml { "mcp_servers" } else { "mcpServers" }) {
+                            None => "parsed",
+                            Some(Value::Object(servers)) => {
+                                let mut state = "parsed";
+                                for (name, spec) in servers {
+                                    if spec.is_object() {
+                                        // Preserve the existing pin key spelling for plugins;
+                                        // use original names separately for collision identity.
+                                        let key_name = if scope.starts_with("plugin-") {
+                                            clean(name)
+                                        } else {
+                                            name.clone()
+                                        };
+                                        self.servers.push(DoctorSpec {
+                                            key: format!("{provider}:{scope}:{key_name}"),
+                                            provider: provider.into(),
+                                            scope: scope.into(),
+                                            name: name.clone(),
+                                            spec: spec.clone(),
+                                        });
+                                    } else {
+                                        state = "unknown";
+                                    }
+                                }
+                                state
+                            }
+                            Some(_) => "unknown",
+                        }
                     }
-                } else if !v["mcpServers"].is_null() {
-                    unknown.push(provider.into());
+                    _ => "unknown",
                 }
             }
-            _ => unknown.push(provider.into()),
+        };
+        self.layer_state(provider, scope, state);
+    }
+    fn layer_state(&mut self, provider: &str, scope: &str, state: &str) {
+        if state == "unknown" {
+            self.unknown.push(provider.into());
         }
+        self.layers.push(json!({"provider":provider,"scope":clean(scope),"status":state,"reason":match state {
+            "parsed" => "configuration parsed; runtime selection not checked",
+            "missing" => "file not found; runtime selection unknown",
+            _ => "configuration unsafe, unreadable, or malformed; declarations may be incomplete",
+        }}));
+    }
+    fn collisions(&self) -> Vec<Value> {
+        let mut groups = BTreeMap::<(&str, &str), Vec<&str>>::new();
+        for server in &self.servers {
+            groups
+                .entry((&server.provider, &server.name))
+                .or_default()
+                .push(&server.scope);
+        }
+        groups
+            .into_iter()
+            .filter_map(|((provider, name), mut scopes)| {
+                scopes.sort_unstable();
+                scopes.dedup();
+                (scopes.len() > 1).then(|| json!({
+                    "provider":provider,"name":clean(name),"scopes":scopes,
+                    "effective":"unknown","reason":"scope precedence and runtime selection not established"
+                }))
+            })
+            .collect()
+    }
+}
+fn specs(paths: &Paths) -> Result<DoctorSpecs> {
+    let mut inventory = DoctorSpecs::default();
+    for (provider, scope, path) in extension_configs(paths) {
+        inventory.layer(provider, scope, &path, false);
     }
     let plugins = paths.home.join(".gemini/config/plugins");
-    if plugins.is_dir() {
-        for entry in fs::read_dir(plugins)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let file = entry.path().join("mcp_config.json");
-            if !r::exists(&file) {
-                continue;
-            }
-            match r::value(&file) {
-                Ok(v) => {
-                    if let Some(servers) = v["mcpServers"].as_object() {
-                        for (name, spec) in servers {
-                            specs.push((
-                                format!(
-                                    "antigravity:plugin-{}:{}",
-                                    clean(&entry.file_name().to_string_lossy()),
-                                    clean(name)
-                                ),
-                                spec.clone(),
-                            ));
-                        }
-                    } else {
-                        unknown.push("antigravity".into());
-                    }
+    match fs::read_dir(&plugins) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    inventory.layer_state("antigravity", "plugins", "unknown");
+                    continue;
+                };
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => inventory.layer(
+                        "antigravity",
+                        &format!("plugin-{}", clean(&entry.file_name().to_string_lossy())),
+                        &entry.path().join("mcp_config.json"),
+                        false,
+                    ),
+                    Ok(_) => (),
+                    Err(_) => inventory.layer_state("antigravity", "plugins", "unknown"),
                 }
-                Err(_) => unknown.push("antigravity".into()),
             }
         }
-    }
-    let codex = paths.codex_config()?;
-    if r::exists(&codex) {
-        match crate::config::read_toml(&codex) {
-            Ok(v) => match v.get("mcp_servers") {
-                Some(Value::Object(servers)) => {
-                    for (name, spec) in servers {
-                        specs.push((format!("codex:user:{name}"), spec.clone()));
-                    }
-                }
-                None => (),
-                _ => unknown.push("codex".into()),
-            },
-            Err(_) => unknown.push("codex".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            inventory.layer_state("antigravity", "plugins", "missing");
         }
+        Err(_) => inventory.layer_state("antigravity", "plugins", "unknown"),
     }
-    for (key, spec) in &specs {
-        if !spec.is_object() {
-            unknown.push(key.split(':').next().unwrap_or("").into());
-        }
-    }
-    specs.retain(|(_, spec)| spec.is_object());
-    unknown.sort();
-    unknown.dedup();
-    Ok((specs, unknown))
+    inventory.layer("codex", "user", &paths.codex_config()?, true);
+    inventory.unknown.sort();
+    inventory.unknown.dedup();
+    inventory.layers.sort_by_key(|row| {
+        (
+            row["provider"].as_str().unwrap().to_owned(),
+            row["scope"].as_str().unwrap().to_owned(),
+        )
+    });
+    Ok(inventory)
 }
 fn safe_target(spec: &Value) -> String {
     if let Some(url) = spec["url"]
@@ -578,10 +632,14 @@ fn extensions(
     if options.has("--pin") {
         r::child_guard()?;
     }
-    let (specs, unknown) = specs(paths)?;
+    let inventory = specs(paths)?;
+    let specs = &inventory.servers;
+    let unknown = &inventory.unknown;
+    let collisions = inventory.collisions();
     let mut rows = Vec::new();
     let mut current = serde_json::Map::new();
-    for (key, spec) in &specs {
+    for server in specs {
+        let (key, spec) = (&server.key, &server.spec);
         let mut env_names = spec["env"]
             .as_object()
             .map(|m| m.keys().cloned().collect::<Vec<_>>())
@@ -590,26 +648,26 @@ fn extensions(
         let material = json!({"type":spec.get("type").or_else(||spec.get("transport")),"command":spec.get("command"),"args":spec.get("args"),"url":spec.get("url").or_else(||spec.get("httpUrl")).or_else(||spec.get("serverUrl")),"env_names":env_names});
         let compact = r::canonical_ascii(&material)?;
         current.insert(key.clone(), json!(r::hash(&compact)));
-        rows.push(json!({"server":clean(key),"transport":if spec["command"].is_string(){"stdio"}else{"http"},"target":safe_target(spec),"env_names":env_names.len(),"disabled":spec["disabled"]==true || spec["enabled"]==false,"risks":risks(spec)}));
+        rows.push(json!({"server":clean(key),"transport":if spec["command"].is_string(){"stdio"}else{"http"},"target":safe_target(spec),"env_names":env_names.len(),"disabled":spec["disabled"]==true || spec["enabled"]==false,"configuration":if spec["disabled"]==true || spec["enabled"]==false{"disabled"}else{"configured"},"effective":"unknown","effective_reason":if unknown.iter().any(|provider| key.starts_with(&format!("{provider}:"))){"provider configuration incomplete"}else{"scope precedence and runtime selection not established"},"runtime":"unknown","risks":risks(spec)}));
     }
     let plugins = plugin_inventory(paths)?;
     if !pins {
         return r::json(
-            &json!({"schema":1,"kind":"oms-doctor-extensions","servers":rows,"plugins":plugins,"unknown":unknown}),
+            &json!({"schema":1,"kind":"oms-doctor-extensions","servers":rows,"plugins":plugins,"unknown":unknown,"config_layers":inventory.layers,"collisions":collisions}),
         );
     }
     let probed = if let Some(name) = options.get("--probe-tools") {
         let selected = specs
             .iter()
-            .filter(|(key, _)| key == name || key.splitn(3, ':').nth(2) == Some(name))
+            .filter(|server| server.key == name || server.name == name)
             .collect::<Vec<_>>();
         if selected.len() != 1 {
             return r::fail("--probe-tools must name exactly one configured server");
         }
-        let (key, spec) = selected[0];
+        let server = selected[0];
         Some((
-            key.clone(),
-            crate::mcp_probe::cached(spec, &paths.cwd, flag)?,
+            server.key.clone(),
+            crate::mcp_probe::cached(&server.spec, &paths.cwd, flag)?,
         ))
     } else {
         None
@@ -682,7 +740,7 @@ fn extensions(
         json!({"server":key,"tools":now.len(),"baseline":if old.is_some(){"recorded"}else{"none"},"added":names("new"),"changed":names("changed"),"removed":old.map(|o| o.keys().filter(|k| !now.contains_key(*k)).map(|k| clean(k)).collect::<Vec<_>>()).unwrap_or_default()})
     });
     r::json(
-        &json!({"schema":1,"kind":"oms-mcp-pins","servers":rows,"new":added,"changed":changed,"removed":removed,"unknown":unknown,"pinned":options.has("--pin"),"probe":probe}),
+        &json!({"schema":1,"kind":"oms-mcp-pins","servers":rows,"new":added,"changed":changed,"removed":removed,"unknown":unknown,"config_layers":inventory.layers,"collisions":collisions,"pinned":options.has("--pin"),"probe":probe}),
     )
 }
 fn residue(paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
@@ -1286,7 +1344,9 @@ fn contract(
             format!("unadopted hook no-op: {name}"),
         ));
     }
-    let (servers, unknown) = specs(paths)?;
+    let inventory = specs(paths)?;
+    let servers = &inventory.servers;
+    let unknown = &inventory.unknown;
     let mut registrations = std::collections::BTreeSet::new();
     for (provider, binary) in [
         ("claude", "claude"),
@@ -1295,9 +1355,7 @@ fn contract(
     ] {
         let matching = servers
             .iter()
-            .filter(|(name, _)| {
-                name.starts_with(&format!("{provider}:")) && name.ends_with(":oh-my-setting")
-            })
+            .filter(|server| server.provider == provider && server.name == "oh-my-setting")
             .collect::<Vec<_>>();
         if matching.is_empty() && r::find(binary, &paths.cwd).is_some() {
             rows.push(finding(
@@ -1306,7 +1364,8 @@ fn contract(
                 format!("{provider}: managed MCP registration missing"),
             ));
         }
-        for (_, spec) in matching {
+        for server in matching {
+            let spec = &server.spec;
             registrations.insert(r::canonical_ascii(
                 &json!({"command":spec["command"],"args":spec["args"]}),
             )?);
