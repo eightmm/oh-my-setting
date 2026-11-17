@@ -1,51 +1,21 @@
 //! Soft campaign admission, using lifetime physical-call receipts.
-use crate::{Error, Result, require, value};
-use oms_command_telemetry::store::{budget, physical, usage};
+use crate::{Error, Result, value};
+use oms_command_telemetry::store::{budget, campaign, physical, usage};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Policy {
-    inner: budget::Policy,
+    pub(crate) inner: budget::Policy,
 }
 pub(crate) fn policy(budget: &Value) -> Result<Option<Policy>> {
-    let Some(raw) = budget.get("usage") else {
-        return Ok(None);
-    };
-    value::keys(raw, &["per_call"], &["max_tokens", "max_cost_microusd"])?;
-    value::keys(&raw["per_call"], &[], &["tokens", "cost_microusd"])?;
-    let pair = |total: &str, reserve: &str| -> Result<(Option<u64>, Option<u64>)> {
-        match (raw.get(total), raw["per_call"].get(reserve)) {
-            (None, None) => Ok((None, None)),
-            (Some(max), Some(each)) => {
-                let max = value::integer(max, 1, i64::MAX as u64, total)?;
-                let each = value::integer(each, 1, max, reserve)?;
-                Ok((Some(max), Some(each)))
-            }
-            _ => Err(Error::new(
-                2,
-                "usage cap requires its explicit per_call reservation",
-            )),
-        }
-    };
-    let (max_tokens, tokens) = pair("max_tokens", "tokens")?;
-    let (max_cost_microusd, cost_microusd) = pair("max_cost_microusd", "cost_microusd")?;
-    require(
-        max_tokens.is_some() || max_cost_microusd.is_some(),
-        "usage budget needs at least one total cap",
-    )?;
-    let limit = |max: Option<u64>, each: Option<u64>| {
-        max.zip(each)
-            .map(|(max, per_call)| budget::Limit { max, per_call })
-    };
-    Ok(Some(Policy {
-        inner: budget::Policy {
-            tokens: limit(max_tokens, tokens),
-            cost_microusd: limit(max_cost_microusd, cost_microusd),
-        },
-    }))
+    let raw = value::canonical(budget)?;
+    let shared =
+        oms_json::parse_strict(&raw).map_err(|_| Error::new(2, "invalid campaign budget JSON"))?;
+    campaign::usage_policy(&shared)
+        .map(|policy| policy.map(|inner| Policy { inner }))
+        .map_err(|error| Error::new(error.exit_code(), error.to_string()))
 }
 fn error(error: budget::Error) -> Error {
     let message = match &error {
@@ -86,33 +56,19 @@ fn dimension(value: &budget::Dimension) -> Value {
 pub(crate) fn summary(
     repo: &Path,
     policy: &Policy,
-    rows: &[Value],
-    reservations: &BTreeMap<String, Value>,
-    settled: &BTreeSet<String>,
+    view: &campaign::View,
     interrupted: &AtomicBool,
 ) -> Result<Value> {
     let intents = physical::load(repo, interrupted)
         .map_err(|error| Error::new(error.exit_code(), error.to_string()))?;
     let projection = usage::load(repo).map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
-    let operations = reservations
-        .keys()
-        .map(|id| budget::Operation {
-            id,
-            state: if !settled.contains(id) {
-                budget::OperationState::Active
-            } else if rows
-                .iter()
-                .any(|r| r["type"] == "settled" && r["id"] == *id && r["outcome"] == "refused")
-            {
-                budget::OperationState::RefusedBeforeInvocation
-            } else {
-                budget::OperationState::Settled
-            },
-        })
-        .collect::<Vec<_>>();
+    let operations = view.operations();
     let claims = intents
         .iter()
-        .filter(|intent| reservations.contains_key(&intent.identity.operation_id))
+        .filter(|intent| {
+            view.reservations
+                .contains_key(&intent.identity.operation_id)
+        })
         .map(|intent| budget::PhysicalClaim {
             call_id: &intent.identity.call_id,
             operation_id: &intent.identity.operation_id,

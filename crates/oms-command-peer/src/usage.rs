@@ -4,6 +4,7 @@ use oms_command_telemetry::store::physical::{self, Registration};
 use oms_command_telemetry::store::usage::{
     self, Cost, Cumulative, Identity, Phase, Receipt, Usage,
 };
+use oms_command_telemetry::store::{StoreError, budget, campaign};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::Path;
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 pub(crate) struct Pending {
     pub receipt: Receipt,
     deadline: Instant,
+    campaign_deadline: Option<i64>,
 }
 impl Pending {
     pub fn fence(&self, interrupted: &AtomicBool) -> Result<()> {
@@ -29,7 +31,155 @@ impl Pending {
                 "provider admission deadline expired; pending intent retained",
             ));
         }
+        if self
+            .campaign_deadline
+            .is_some_and(|deadline| unix_now() >= deadline)
+        {
+            return Err(Error::new(
+                3,
+                "campaign deadline expired; pending intent retained",
+            ));
+        }
         Ok(())
+    }
+}
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or(i64::MAX)
+}
+fn accounting(error: StoreError) -> Error {
+    Error::new(error.exit_code(), error.to_string())
+}
+struct Campaign {
+    manifest: campaign::Manifest,
+    view: campaign::View,
+    guard: oms_lock::Guard,
+    deadline: i64,
+}
+fn campaign_binding(
+    repo: &Path,
+    extra: &[(OsString, OsString)],
+    identity: &Identity,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<Campaign>> {
+    let binding = extra
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "OMS_CAMPAIGN_MANIFEST_SHA256")
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os("OMS_CAMPAIGN_MANIFEST_SHA256"));
+    let Some(binding) = binding else {
+        return Ok(None);
+    };
+    let digest = binding
+        .to_str()
+        .ok_or_else(|| Error::new(2, "campaign manifest binding is not UTF-8"))?;
+    let directory = campaign::directory(digest).map_err(accounting)?;
+    if identity.goal_id.as_deref() != Some(&digest[..16]) {
+        return Err(Error::new(
+            2,
+            "campaign goal differs from the bound manifest",
+        ));
+    }
+    let plan_error = |error: oms_command_plan::Error| Error::new(error.code, error.message);
+    let store = oms_command_plan::storage::Store::open(repo).map_err(plan_error)?;
+    let read = |path: &str, limit| store.read(path, limit).map_err(plan_error);
+    let manifest_path = format!("{directory}/manifest.json");
+    let events_path = format!("{directory}/events.jsonl");
+    // The owning store checks the target before deriving its existing ledger
+    // lock; producer bytes are read again after that lock is acquired.
+    read(&manifest_path, campaign::MAX_MANIFEST)?;
+    read(&events_path, campaign::MAX_EVENTS)?;
+    let guard = oms_command_telemetry::store::lock_file_before(
+        &store.repo().join(&events_path),
+        interrupted,
+        deadline,
+    )
+    .map_err(accounting)?;
+    guard
+        .check()
+        .map_err(|error| accounting(StoreError::Lock(error)))?;
+    let manifest = campaign::saved_manifest(
+        &read(&manifest_path, campaign::MAX_MANIFEST)?,
+        &digest[..16],
+    )
+    .map_err(accounting)?;
+    if manifest.sha256 != digest {
+        return Err(Error::new(2, "campaign manifest binding changed"));
+    }
+    let view = campaign::saved_events(&manifest, &read(&events_path, campaign::MAX_EVENTS)?)
+        .map_err(accounting)?;
+    let campaign_deadline = view
+        .active(
+            &manifest,
+            &identity.operation_id,
+            &identity.provider,
+            unix_now(),
+        )
+        .map_err(accounting)?;
+    guard
+        .check()
+        .map_err(|error| accounting(StoreError::Lock(error)))?;
+    Ok(Some(Campaign {
+        manifest,
+        view,
+        guard,
+        deadline: campaign_deadline,
+    }))
+}
+impl Campaign {
+    fn admit(
+        &self,
+        identity: &Identity,
+        intents: &[physical::Intent],
+        projection: &usage::Projection,
+    ) -> std::result::Result<(), StoreError> {
+        self.guard.check().map_err(StoreError::Lock)?;
+        self.view.active(
+            &self.manifest,
+            &identity.operation_id,
+            &identity.provider,
+            unix_now(),
+        )?;
+        if let Some(policy) = &self.manifest.policy {
+            let operations = self.view.operations();
+            let mut claims = Vec::new();
+            for intent in intents.iter().filter(|intent| {
+                self.view
+                    .reservations
+                    .contains_key(&intent.identity.operation_id)
+            }) {
+                if intent
+                    .campaign_manifest_sha256
+                    .as_ref()
+                    .is_some_and(|digest| *digest != self.manifest.sha256)
+                {
+                    return Err(StoreError::Invalid(
+                        "physical call has a conflicting campaign binding",
+                    ));
+                }
+                claims.push(budget::PhysicalClaim {
+                    call_id: &intent.identity.call_id,
+                    operation_id: &intent.identity.operation_id,
+                });
+            }
+            budget::admit_candidate(
+                policy,
+                projection,
+                &operations,
+                &claims,
+                budget::PhysicalClaim {
+                    call_id: &identity.call_id,
+                    operation_id: &identity.operation_id,
+                },
+            )
+            .map_err(StoreError::Budget)?;
+        }
+        self.guard.check().map_err(StoreError::Lock)
     }
 }
 
@@ -94,15 +244,51 @@ pub(crate) fn begin(
         None
     };
     let deadline = Instant::now() + Duration::from_secs(10);
-    match physical::begin(repo, identity, cumulative, write, interrupted, deadline).map_err(
-        |e| {
-            Error::new(
-                e.exit_code(),
-                format!("physical call registration failed; reconcile before retry: {e}"),
-            )
+    let campaign = campaign_binding(repo, extra, &identity, interrupted, deadline)?;
+    let campaign_deadline = campaign.as_ref().map(|campaign| campaign.deadline);
+    let request = physical::Request {
+        identity: identity.clone(),
+        cumulative,
+        write,
+        campaign_manifest_sha256: campaign
+            .as_ref()
+            .map(|campaign| campaign.manifest.sha256.clone()),
+    };
+    let registered = physical::begin_checked(
+        repo,
+        request,
+        interrupted,
+        deadline,
+        |intents, projection| {
+            campaign.as_ref().map_or(Ok(()), |campaign| {
+                campaign.admit(&identity, intents, projection)
+            })
         },
-    )? {
-        Registration::New(receipt) => Ok(Pending { receipt, deadline }),
+    )
+    .map_err(|e| {
+        Error::new(
+            e.exit_code(),
+            format!("physical call registration failed; reconcile before retry: {e}"),
+        )
+    })?;
+    if let Some(campaign) = &campaign {
+        campaign.guard.check().map_err(|error| Error::new(error.exit_code(),format!("campaign guard changed after physical registration; reconcile before retry: {error}")))?;
+        campaign
+            .view
+            .active(
+                &campaign.manifest,
+                &identity.operation_id,
+                &identity.provider,
+                unix_now(),
+            )
+            .map_err(accounting)?;
+    }
+    match registered {
+        Registration::New(receipt) => Ok(Pending {
+            receipt,
+            deadline,
+            campaign_deadline,
+        }),
         Registration::Existing { .. } => Err(Error::new(
             75,
             "physical call intent already exists; no provider resend occurred",

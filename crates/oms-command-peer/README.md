@@ -87,6 +87,16 @@ A repeated physical ID returns status without resending. Partial publication
 stops continuation until reconciliation. This observed registration does not
 establish team authority, canonical owner generations or hard native limits.
 
+An explicit `OMS_CAMPAIGN_MANIFEST_SHA256` binds a physical call to the original
+canonical manifest and an active matching provider reservation. Empty, changed,
+expired or settled bindings refuse before execution. Admission holds the existing
+campaign events lock before the shared dispatch, usage and ignore-file locks,
+using one monotonic deadline. The shared budget projection includes the candidate
+physical call, previous receipts and outstanding intents; every fallback repeats
+this check. The outer ledger guard and campaign deadline are checked again after
+nested registration. All locks are released before execution. This observed soft
+usage policy does not grant controller/root authority or a provider hard cap.
+
 `session resume --apply` uses the same intent, pending receipt and final launch
 fence before its native executor call; previews create no call liability.
 Registered account homes supply an account ID only on an exact registry match.

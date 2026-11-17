@@ -6,6 +6,7 @@
 #[path = "../actions.rs"]
 pub(crate) mod actions;
 pub mod budget;
+pub mod campaign;
 pub mod dispatch;
 mod paths;
 pub mod physical;
@@ -41,6 +42,7 @@ pub const DEFAULT_INDEX: &str = ".oms/artifacts/index.jsonl";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     Invalid(&'static str),
+    Budget(budget::Error),
     Changed,
     Interrupted,
     Lock(oms_lock::Error),
@@ -55,6 +57,7 @@ impl StoreError {
         match self {
             Self::Interrupted => 130,
             Self::Lock(error) => error.exit_code(),
+            Self::Budget(error) => error.exit_code(),
             Self::Changed
             | Self::Storage {
                 phase: MutationPhase::PublicationUncertain | MutationPhase::Published,
@@ -119,6 +122,15 @@ fn cancelled(interrupted: &AtomicBool) -> Result<(), StoreError> {
 }
 fn acquire(target: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Guard, StoreError> {
     acquire_before(target, interrupted, None)
+}
+/// Acquire the existing LegacyAuto lock for a target already validated by its
+/// owning store. This supplies bounded serialization, without read/write policy.
+pub fn lock_file_before(
+    target: &Path,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<oms_lock::Guard, StoreError> {
+    acquire_before(target, interrupted, Some(deadline))
 }
 fn before(interrupted: &AtomicBool, deadline: Option<Instant>) -> Result<(), StoreError> {
     cancelled(interrupted)?;

@@ -2443,6 +2443,25 @@ mod bridge_route_tests {
                             oms_command_telemetry::store::physical::Phase::Ready
                         );
                         assert!(intent.write);
+                        if let Some((_, digest)) = request
+                            .environment
+                            .iter()
+                            .find(|(key, _)| key == "OMS_CAMPAIGN_MANIFEST_SHA256")
+                        {
+                            let digest = digest.to_str().unwrap();
+                            assert_eq!(intent.campaign_manifest_sha256.as_deref(), Some(digest));
+                            let directory =
+                                oms_command_telemetry::store::campaign::directory(digest).unwrap();
+                            let campaign_guard = oms_command_telemetry::store::lock_file_before(
+                                &self.1.join(directory).join("events.jsonl"),
+                                interrupted,
+                                std::time::Instant::now() + Duration::from_millis(100),
+                            )
+                            .unwrap();
+                            drop(campaign_guard);
+                        } else {
+                            assert_eq!(intent.campaign_manifest_sha256, None);
+                        }
                         let _guard = oms_command_telemetry::store::dispatch::Transaction::acquire(
                             &self.1,
                             Duration::from_millis(100),
@@ -2520,6 +2539,253 @@ mod bridge_route_tests {
                 assert_eq!(calls[2].receipt.phase, Phase::Unknown);
                 assert_eq!(calls[2].cost_microusd, Some(30));
                 assert_eq!(calls[2].receipt.cleanup_complete, Some(true));
+
+                let bounded = repo.join("bounded-state");
+                std::fs::create_dir(&bounded).unwrap();
+                std::fs::set_permissions(&bounded, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let raw = format!(
+                    r#"{{"problem":{{"file":"problem.txt","sha256":"{}"}},"base":"{}",
+                    "verify":{{"command":"true","timeout_s":30,"inputs":[]}},"candidate_formats":["text"],
+                    "groups":[{{"id":"group","formulation":"fixture","k":1,"routes":[{{"provider":"claude","model":"first"}}]}}],
+                    "budget":{{"max_concurrent":4,"total_calls":10,"deadline_s":60,"max_waves":2,"stall_waves":2,
+                    "verifier":{{"concurrency":1,"timeout_s":30,"max_artifact_bytes":1024}},
+                    "usage":{{"max_tokens":60,"per_call":{{"tokens":60}}}}}}}}"#,
+                    "a".repeat(64),
+                    "b".repeat(40),
+                );
+                let manifest = oms_json::parse_strict(raw.as_bytes()).unwrap();
+                let raw = oms_json::canonical_json(&manifest).unwrap();
+                let digest = crate::storage::hash(&raw);
+                let directory = format!(".oms/plan/campaigns/{}", &digest[..16]);
+                let store = oms_command_plan::storage::Store::open(&bounded).unwrap();
+                store
+                    .publish_once(format!("{directory}/manifest.json"), &raw, 1024 * 1024)
+                    .unwrap();
+                let budget = String::from_utf8(
+                    oms_json::canonical_json(manifest.get("budget").unwrap()).unwrap(),
+                )
+                .unwrap();
+                let started = format!(
+                    r#"{{"type":"campaign_started","budget":{budget},"started_at":{:?}}}"#,
+                    crate::now()
+                );
+                store
+                    .append(
+                        format!("{directory}/events.jsonl"),
+                        &oms_command_plan::json::parse(started.as_bytes()).unwrap(),
+                    )
+                    .unwrap();
+                let operation = crate::id("res_").unwrap();
+                let reservation = format!(
+                    r#"{{"type":"reservation","id":"{operation}","provider":"claude","kind":"seat","reserved_usage":{{"tokens":60,"cost_microusd":null}}}}"#
+                );
+                store
+                    .append(
+                        format!("{directory}/events.jsonl"),
+                        &oms_command_plan::json::parse(reservation.as_bytes()).unwrap(),
+                    )
+                    .unwrap();
+                let bounded_reports =
+                    Reports(std::sync::atomic::AtomicUsize::new(0), bounded.clone());
+                let bounded_context = Context {
+                    executor: &bounded_reports,
+                    ..context
+                };
+                let extra = vec![
+                    ("OMS_STATE_REPO".into(), bounded.as_os_str().to_owned()),
+                    ("OMS_OPERATION_ID".into(), operation.clone().into()),
+                    ("OMS_GOAL_ID".into(), digest[..16].into()),
+                    ("OMS_CAMPAIGN_MANIFEST_SHA256".into(), digest.clone().into()),
+                ];
+                route.model = "first".into();
+                let error = execute_with_fallback_env(
+                    &mut route,
+                    "second",
+                    b"fixture",
+                    cwd,
+                    true,
+                    12,
+                    repo,
+                    &extra,
+                    &bounded_context,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.code, 3,
+                    "each physical fallback must pass campaign admission"
+                );
+                assert_eq!(
+                    bounded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                    1
+                );
+                assert_eq!(usage::load(&bounded).unwrap().calls.len(), 1);
+                assert_eq!(
+                    oms_command_telemetry::store::physical::load(&bounded, &stop)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                let registry = bounded.join(oms_command_telemetry::store::dispatch::REGISTRY);
+                let before = std::fs::read(&registry).unwrap();
+                for (key, value) in [
+                    ("OMS_CAMPAIGN_MANIFEST_SHA256", String::new()),
+                    (
+                        "OMS_CAMPAIGN_MANIFEST_SHA256",
+                        format!("{}{}", &digest[..16], "e".repeat(48)),
+                    ),
+                    ("OMS_GOAL_ID", "other_goal".into()),
+                    ("OMS_OPERATION_ID", format!("res_{}", "0".repeat(32))),
+                ] {
+                    let mut invalid = extra.clone();
+                    invalid.push((key.into(), value.into()));
+                    let error = execute_env(
+                        &mut route,
+                        b"fixture",
+                        cwd,
+                        true,
+                        12,
+                        repo,
+                        &invalid,
+                        &bounded_context,
+                    )
+                    .unwrap_err();
+                    assert_eq!(
+                        error.code, 2,
+                        "invalid explicit campaign binding must not become unbudgeted: {error}"
+                    );
+                    assert_eq!(
+                        bounded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                        1
+                    );
+                    assert_eq!(std::fs::read(&registry).unwrap(), before);
+                    assert_eq!(usage::load(&bounded).unwrap().calls.len(), 1);
+                }
+                store
+                    .append(
+                        format!("{directory}/events.jsonl"),
+                        &oms_command_plan::json::parse(
+                            format!(
+                                r#"{{"type":"settled","id":"{operation}","outcome":"refused"}}"#
+                            )
+                            .as_bytes(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                let error = execute_env(
+                    &mut route,
+                    b"fixture",
+                    cwd,
+                    true,
+                    12,
+                    repo,
+                    &extra,
+                    &bounded_context,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.code, 2,
+                    "settled reservation cannot authorize another physical call"
+                );
+                assert_eq!(
+                    bounded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                    1
+                );
+
+                let guarded = repo.join("guarded-state");
+                fs::create_dir(&guarded).unwrap();
+                fs::set_permissions(&guarded, fs::Permissions::from_mode(0o700)).unwrap();
+                let guarded_store = oms_command_plan::storage::Store::open(&guarded).unwrap();
+                guarded_store
+                    .publish_once(format!("{directory}/manifest.json"), &raw, 1024 * 1024)
+                    .unwrap();
+                for row in [&started, &reservation] {
+                    guarded_store
+                        .append(
+                            format!("{directory}/events.jsonl"),
+                            &oms_command_plan::json::parse(row.as_bytes()).unwrap(),
+                        )
+                        .unwrap();
+                }
+                let receipt_target = oms_command_telemetry::store::canonical_index(
+                    &guarded,
+                    Some(Path::new(usage::RECEIPTS)),
+                    true,
+                    false,
+                )
+                .unwrap();
+                let settings = oms_lock::Settings::from_env().unwrap();
+                let held = oms_lock::Lock::for_file(&receipt_target, settings.clone())
+                    .unwrap()
+                    .try_acquire()
+                    .unwrap();
+                let events_lock = oms_lock::Lock::for_file(
+                    &guarded.join(&directory).join("events.jsonl"),
+                    settings,
+                )
+                .unwrap();
+                let guarded_reports =
+                    Reports(std::sync::atomic::AtomicUsize::new(0), guarded.clone());
+                let guarded_context = Context {
+                    executor: &guarded_reports,
+                    ..bounded_context
+                };
+                let mut guarded_env = extra.clone();
+                guarded_env.push(("OMS_STATE_REPO".into(), guarded.as_os_str().to_owned()));
+                let mut guarded_route = route.clone();
+                std::thread::scope(|scope| {
+                    let worker = scope.spawn(|| {
+                        execute_env(
+                            &mut guarded_route,
+                            b"fixture",
+                            cwd,
+                            true,
+                            12,
+                            repo,
+                            &guarded_env,
+                            &guarded_context,
+                        )
+                    });
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    let mut reserved = false;
+                    while std::time::Instant::now() < deadline {
+                        if oms_command_telemetry::store::physical::load(&guarded, &stop)
+                            .is_ok_and(|intents| !intents.is_empty())
+                        {
+                            reserved = true;
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    assert!(
+                        reserved,
+                        "physical registration reached the nested receipt wait"
+                    );
+                    let moved = events_lock.path().with_extension("fixture-moved");
+                    assert!(!moved.exists());
+                    fs::rename(events_lock.path(), &moved).unwrap();
+                    drop(held);
+                    let outcome = worker.join().unwrap();
+                    if moved.is_dir() {
+                        fs::remove_dir_all(moved).unwrap();
+                    } else {
+                        fs::remove_file(moved).unwrap();
+                    }
+                    let error = outcome.unwrap_err();
+                    assert_eq!(error.code, 75, "{error}");
+                    assert!(error.message.contains("campaign guard changed"), "{error}");
+                    assert_eq!(
+                        guarded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                        0
+                    );
+                    let pending = usage::load(&guarded).unwrap().calls;
+                    assert_eq!(pending.len(), 1);
+                    assert_eq!(pending[0].receipt.phase, Phase::Pending);
+                    let intents =
+                        oms_command_telemetry::store::physical::load(&guarded, &stop).unwrap();
+                    assert_eq!(intents.len(), 1);
+                    assert_eq!(intents[0].usage_ordinal, Some(pending[0].receipt.ordinal));
+                });
             },
         );
     }

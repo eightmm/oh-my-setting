@@ -21,6 +21,7 @@ impl Fixture {
             "verify":{"command":"true","timeout_s":30,"inputs":[]},"candidate_formats":["text"],
             "groups":[{"id":"group","formulation":"fixture","k":1,"routes":[{"provider":"claude","model":"fixture-model"}]}],
             "budget":{"max_concurrent":4,"total_calls":10,"deadline_s":60,"max_waves":2,"stall_waves":2,
+                "per_provider":{"codex":{"calls":5,"concurrency":1}},
                 "verifier":{"concurrency":1,"timeout_s":30,"max_artifact_bytes":1024}}});
         if let Some(usage) = usage {
             manifest["budget"]["usage"] = usage;
@@ -34,7 +35,7 @@ impl Fixture {
         store
             .append(
                 format!("{directory}/events.jsonl"),
-                &value::plan(&json!({"type":"campaign_started","budget":manifest["budget"]}))
+                &value::plan(&json!({"type":"campaign_started","budget":manifest["budget"],"started_at":value::now()}))
                     .unwrap(),
             )
             .unwrap();
@@ -76,6 +77,49 @@ impl Drop for Fixture {
 }
 fn limits() -> Value {
     json!({"max_tokens":100,"max_cost_microusd":100,"per_call":{"tokens":60,"cost_microusd":60}})
+}
+#[test]
+fn saved_campaign_reader_refuses_torn_and_conflicting_budget_rows() {
+    let fixture = Fixture::new(Some(limits()));
+    let stop = AtomicBool::new(false);
+    let ledger = fixture.ledger(&stop);
+    ledger.reserve("claude", "seat", None).unwrap();
+    let path = fixture.repo.join(&fixture.directory).join("events.jsonl");
+    let before = std::fs::read(&path).unwrap();
+    let rows = ledger.events().unwrap();
+    let encode = |rows: &[Value]| {
+        rows.iter()
+            .flat_map(|row| {
+                let mut raw = value::canonical(row).unwrap();
+                raw.push(b'\n');
+                raw
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut wrong_budget = rows.clone();
+    wrong_budget[0]["budget"]["verifier"]["concurrency"] = true.into();
+    let mut duplicate = rows.clone();
+    duplicate.push(rows[1].clone());
+    let mut foreign = rows.clone();
+    foreign
+        .push(json!({"type":"settled","id":format!("res_{}","0".repeat(32)),"outcome":"refused"}));
+    for malformed in [
+        before[..before.len() - 1].to_vec(),
+        encode(&wrong_budget),
+        encode(&duplicate),
+        encode(&foreign),
+    ] {
+        std::fs::write(&path, &malformed).unwrap();
+        assert_eq!(ledger.spent().unwrap_err().code, 2);
+        assert_eq!(ledger.reserve("claude", "seat", None).unwrap_err().code, 2);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            malformed,
+            "refusal preserves untrusted history"
+        );
+    }
+    std::fs::write(path, before).unwrap();
+    assert_eq!(ledger.spent().unwrap()["total_calls"], 1);
 }
 #[test]
 fn settled_previous_attempts_stay_in_admission_and_late_corrections_reconcile() {
@@ -154,7 +198,17 @@ fn each_unknown_physical_retry_retains_its_own_reservation() {
     let stop = AtomicBool::new(false);
     let ledger = fixture.ledger(&stop);
     let refused = ledger.reserve("claude", "seat", None).unwrap();
+    let environment = ledger.provider_environment(&refused).unwrap();
+    let manifest =
+        std::fs::read(fixture.repo.join(&fixture.directory).join("manifest.json")).unwrap();
+    assert_eq!(environment.len(), 3);
+    assert!(environment.contains(&(
+        "OMS_CAMPAIGN_MANIFEST_SHA256".into(),
+        value::hash(manifest).into()
+    )));
+    assert!(environment.contains(&("OMS_OPERATION_ID".into(), refused.clone().into())));
     ledger.settle(&refused, "refused").unwrap();
+    assert_eq!(ledger.provider_environment(&refused).unwrap_err().code, 2);
     assert_eq!(
         ledger.spent().unwrap()["usage"]["cost_microusd"]["committed"],
         0

@@ -1,7 +1,7 @@
 //! Physical call intent and usage registration share the existing dispatch
 //! writer. Observed legacy bindings grant neither team authority nor a hard
 //! bound on native descendants. Budget/owner policy must be checked by admission.
-use super::{StoreError, before, dispatch, usage};
+use super::{StoreError, before, campaign, dispatch, usage};
 use crate::value::{V, encode, obj, parse};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -19,6 +19,13 @@ pub struct Intent {
     pub write: bool,
     pub phase: Phase,
     pub usage_ordinal: Option<u64>,
+    pub campaign_manifest_sha256: Option<String>,
+}
+pub struct Request {
+    pub identity: usage::Identity,
+    pub cumulative: Option<usage::Cumulative>,
+    pub write: bool,
+    pub campaign_manifest_sha256: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub enum Registration {
@@ -70,10 +77,40 @@ fn intents(value: &V) -> std::result::Result<Vec<Intent>, StoreError> {
     for (id, record) in calls {
         usage::keys(record, &["schema", "request", "state", "usage_ordinal"])?;
         let request = &record["request"];
-        usage::keys(
-            request,
-            &["identity", "cumulative", "access", "scope", "binding"],
-        )?;
+        let campaign_manifest_sha256 = match record["schema"].int() {
+            Some("1") => {
+                usage::keys(
+                    request,
+                    &["identity", "cumulative", "access", "scope", "binding"],
+                )?;
+                if request["binding"].text() != Some("legacy-observed") {
+                    return Err(invalid("invalid legacy physical binding"));
+                }
+                None
+            }
+            Some("2") => {
+                usage::keys(
+                    request,
+                    &[
+                        "identity",
+                        "cumulative",
+                        "access",
+                        "scope",
+                        "binding",
+                        "campaign_manifest_sha256",
+                    ],
+                )?;
+                let digest = request["campaign_manifest_sha256"]
+                    .text()
+                    .filter(|value| campaign::digest(value))
+                    .ok_or(invalid("invalid campaign physical binding"))?;
+                if request["binding"].text() != Some("campaign-observed") {
+                    return Err(invalid("invalid campaign physical binding"));
+                }
+                Some(digest.to_owned())
+            }
+            _ => return Err(invalid("unsupported physical call schema")),
+        };
         usage::keys(
             &request["identity"],
             &[
@@ -92,10 +129,11 @@ fn intents(value: &V) -> std::result::Result<Vec<Intent>, StoreError> {
         let cumulative = cumulative(&request["cumulative"])?;
         usage::validate_pending(&identity, &cumulative)?;
         if identity.call_id.as_bytes() != id
-            || record["schema"] != V::from(1)
             || !matches!(request["access"].text(), Some("read" | "write"))
             || request["scope"].text() != Some("repository-local-observed")
-            || request["binding"].text() != Some("legacy-observed")
+            || campaign_manifest_sha256
+                .as_ref()
+                .is_some_and(|digest| identity.goal_id.as_deref() != Some(&digest[..16]))
         {
             return Err(invalid("invalid physical invocation binding"));
         }
@@ -112,6 +150,7 @@ fn intents(value: &V) -> std::result::Result<Vec<Intent>, StoreError> {
             write: request["access"].text() == Some("write"),
             phase,
             usage_ordinal,
+            campaign_manifest_sha256,
         });
     }
     Ok(result)
@@ -141,8 +180,42 @@ pub fn begin(
     interrupted: &AtomicBool,
     deadline: Instant,
 ) -> Result<Registration> {
+    begin_checked(
+        repo,
+        Request {
+            identity,
+            cumulative,
+            write,
+            campaign_manifest_sha256: None,
+        },
+        interrupted,
+        deadline,
+        |_, _| Ok(()),
+    )
+}
+
+/// The caller holds its canonical policy/operation lock. Admission runs under
+/// the shared dispatch writer before any new intent; it grants no resend.
+pub fn begin_checked(
+    repo: &Path,
+    request: Request,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+    admit: impl FnOnce(&[Intent], &usage::Projection) -> std::result::Result<(), StoreError>,
+) -> Result<Registration> {
+    let Request {
+        identity,
+        cumulative,
+        write,
+        campaign_manifest_sha256,
+    } = request;
     before(interrupted, Some(deadline)).map_err(initial)?;
     usage::validate_pending(&identity, &cumulative).map_err(initial)?;
+    if campaign_manifest_sha256.as_ref().is_some_and(|digest| {
+        !campaign::digest(digest) || identity.goal_id.as_deref() != Some(&digest[..16])
+    }) {
+        return Err(initial(invalid("invalid campaign physical binding")));
+    }
     let timeout = deadline
         .saturating_duration_since(Instant::now())
         .min(Duration::from_secs(10));
@@ -158,16 +231,19 @@ pub fn begin(
     if registry.get("physical").is_none() {
         registry["physical"] = obj!("schema":1,"calls":obj!());
     }
-    let request = obj!("identity":usage::identity_value(&identity),
+    let mut request = obj!("identity":usage::identity_value(&identity),
         "cumulative":cumulative.as_ref().map(|value| obj!("session_id":value.session_id.clone(),"baseline_unknown":value.baseline_unknown)),
-        "access":if write {"write"} else {"read"},"scope":"repository-local-observed","binding":"legacy-observed");
-    intents(&registry["physical"]).map_err(|source| tx.error(source))?;
+        "access":if write {"write"} else {"read"},"scope":"repository-local-observed","binding":if campaign_manifest_sha256.is_some() {"campaign-observed"} else {"legacy-observed"});
+    if let Some(digest) = &campaign_manifest_sha256 {
+        request["campaign_manifest_sha256"] = digest.clone().into();
+    }
+    let intents = intents(&registry["physical"]).map_err(|source| tx.error(source))?;
     let projection = usage::load(tx.repo()).map_err(|source| tx.error(source))?;
     let receipt = projection
         .calls
-        .into_iter()
+        .iter()
         .find(|call| call.receipt.identity.call_id == identity.call_id)
-        .map(|call| call.receipt);
+        .map(|call| call.receipt.clone());
     let existing = registry["physical"]["calls"].get(&identity.call_id);
     if let Some(record) = existing {
         if record["request"] != request {
@@ -201,13 +277,14 @@ pub fn begin(
             "physical call ID already has a usage receipt; reconciliation required",
         )));
     }
+    admit(&intents, &projection).map_err(|source| tx.error(source))?;
     before(interrupted, Some(deadline)).map_err(|source| tx.error(source))?;
     let V::Object(records) = &mut registry["physical"]["calls"] else {
         return Err(tx.error(invalid("invalid physical invocation registry")));
     };
     records.insert(
         identity.call_id.as_bytes().to_vec(),
-        obj!("schema":1,"request":request,"state":"reserved","usage_ordinal":V::Null),
+        obj!("schema":if campaign_manifest_sha256.is_some() {2} else {1},"request":request,"state":"reserved","usage_ordinal":V::Null),
     );
     tx.replace(
         snapshot.as_deref(),

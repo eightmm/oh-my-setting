@@ -201,6 +201,23 @@ changed request refuses. Partial publication retains its intent and liability.
 Read-only loading creates no state. These legacy observations prove neither
 owner generations nor hard resource limits or native descendant containment.
 
+`store::campaign` validates the original canonical saved manifest, its full digest
+and the bounded complete events ledger. Logical admission and physical admission
+share its usage-policy parser and operation-state projection. It preserves the
+existing logical call/concurrency units; its active-reservation/deadline check is
+an observed budget binding, without controller or owner-generation authority.
+The canonical campaign producer remains the only manifest/event writer.
+
+`physical::begin_checked` runs the caller's policy check under the shared dispatch
+writer before any new intent. The caller retains its canonical campaign lock
+across this registration and rechecks that outer guard after nested writes. New
+campaign-bound call records use schema 2 and retain the full manifest digest in
+their immutable request; schema-1 legacy calls remain readable. Replays with
+changed binding bytes refuse. Partial records and receipts retain their liability,
+and resource/usage failure never authorizes resend. `lock_file_before` reuses the
+existing LegacyAuto lock for a target already validated by its owning store;
+the lock itself supplies no file-access or launch policy.
+
 `store::usage::begin_before` accepts the admission request's monotonic deadline.
 Receipt and ignore-file lock acquisition share that deadline and retain their
 existing LegacyAuto lock namespaces. A refused lock wait or failed preparation
