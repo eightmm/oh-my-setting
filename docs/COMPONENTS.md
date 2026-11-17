@@ -1963,8 +1963,18 @@ block, one JSON object per line (`file`, `line`, `severity` of `blocking` or
 blocks from seats that reached a verdict and checks every citation against the
 diff the seats were shown and the file it names: `in-diff` (an added line),
 `context` (an unchanged line inside a hunk), `outside-scope` (anywhere else),
-`anchor-not-found` (no such file or line, or the quote is not within three
-lines of it) and `unclassified` when no diff was attached. Rows go to
+`anchor-not-found` (missing or unverified citation) and `unclassified` when no
+diff was attached. A full quote with one occurrence in a tracked source file
+resolves to that occurrence's starting line, even beyond the reported line.
+Matching preserves case, normalizes whitespace across lines and rejects
+partial identifier tokens. `line` and scope classification use the resolved
+line; `reported_line` preserves the original, `resolved_line` and `source_sha256`
+bind the evidence, and `line_anchor_status` explains the result. Repeated,
+missing, truncated, control-stripped, unreadable or untracked quotes stay
+unverified without relocation. Head, diff and criterion digests are rechecked
+before and after citation reads; drift suppresses positive quote evidence and
+makes the gate incomplete. No-quote findings retain reported-line classification
+and a null `quote_found`. Rows go to
 `_findings-RUN.jsonl` beside the review-scope artifact with its diff digest; a
 malformed line, an absolute path or one that leaves the repository is counted
 as rejected. No model is called and the gate verdict stays the seats' `GATE:`

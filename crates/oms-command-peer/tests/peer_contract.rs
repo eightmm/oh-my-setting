@@ -1025,7 +1025,7 @@ fn peer_dry_runs_and_ml_context() {
 }
 #[test]
 fn review_classification_and_validation() {
-    isolated("review_classification_and_validation", || {
+    provider_isolated("review_classification_and_validation", "override", || {
         let repo = Repo::new();
         let artifact = "review/codex-20260101T000000Z-1.md";
         for (answer, exit, expected, state) in [
@@ -1054,6 +1054,349 @@ fn review_classification_and_validation() {
             let output = run(&repo, &repo.0, "peer-review", &values);
             assert_eq!(output.0, 2);
             assert!(String::from_utf8_lossy(&output.2).contains("requires --gate"));
+        }
+
+        struct ReviewProbe<'a> {
+            repo: &'a Repo,
+            answer: &'a str,
+            mutation: u8,
+            diffs: AtomicU64,
+        }
+        impl Executor for ReviewProbe<'_> {
+            fn execute(
+                &self,
+                request: Invocation,
+                stop: &AtomicBool,
+            ) -> oms_command_peer::Result<Completed> {
+                if request.argv[0] == "git" {
+                    if request.argv.iter().any(|arg| arg == "--no-ext-diff") {
+                        let number = self.diffs.fetch_add(1, Ordering::Relaxed) + 1;
+                        if self.mutation == 2 && number == 4 {
+                            self.repo
+                                .write("source.rs", "changed after citation reads\n");
+                        }
+                    }
+                    return Native.execute(request, stop);
+                }
+                if self.mutation == 1 {
+                    self.repo
+                        .write("source.rs", "changed during provider call\n");
+                } else if self.mutation == 3 {
+                    self.repo.git(&[
+                        "-c",
+                        "user.name=Fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                        "commit",
+                        "--allow-empty",
+                        "-qm",
+                        "changed review head",
+                    ]);
+                }
+                Ok(Completed {
+                    code: 0,
+                    stdout: self.answer.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                    complete: true,
+                    elapsed: Duration::ZERO,
+                })
+            }
+        }
+        use oms_command_peer::{obj, storage};
+        let repo = provider_repo();
+        let mut lines = (1..=40).map(|n| format!("// line {n}")).collect::<Vec<_>>();
+        for (index, line) in [
+            (13, "context_only();"),
+            (19, "multi("),
+            (20, "    second );"),
+            (24, "repeated();"),
+            (26, "repeated();"),
+            (29, "twice(); twice();"),
+            (31, "++++"),
+            (35, "outside();"),
+        ] {
+            lines[index] = line.into();
+        }
+        lines[37] = "x".repeat(500);
+        repo.write("source.rs", format!("{}\n", lines.join("\n")));
+        repo.write("binary.rs", b"invalid \xff source\n");
+        std::os::unix::fs::symlink("source.rs", repo.0.join("link.rs")).unwrap();
+        repo.git(&["add", "source.rs", "binary.rs", "link.rs"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "source anchors",
+        ]);
+        lines[14] = "changed();".into();
+        let body = format!("{}\n", lines.join("\n"));
+        repo.write("source.rs", &body);
+        repo.write(".oms/extra.rs", "extra();\n");
+        let finding = |file: &str, line: usize, summary: &str, quote: &str| {
+            obj([
+                ("file", file.into()),
+                ("line", line.into()),
+                ("summary", summary.into()),
+                ("severity", "blocking".into()),
+                ("quote", quote.into()),
+            ])
+        };
+        let cases = [
+            ("far", 2, "changed();", Some(15), "relocated", "in-diff"),
+            ("near", 14, "changed();", Some(15), "relocated", "in-diff"),
+            ("exact", 15, "changed();", Some(15), "verified", "in-diff"),
+            (
+                "context",
+                1,
+                "context_only();",
+                Some(14),
+                "relocated",
+                "context",
+            ),
+            (
+                "outside",
+                15,
+                "outside();",
+                Some(36),
+                "relocated",
+                "outside-scope",
+            ),
+            (
+                "out of range",
+                900,
+                "changed();",
+                Some(15),
+                "relocated",
+                "in-diff",
+            ),
+            (
+                "multiline",
+                2,
+                "multi(\n\tsecond );",
+                Some(20),
+                "relocated",
+                "outside-scope",
+            ),
+            (
+                "duplicate",
+                25,
+                "repeated();",
+                None,
+                "ambiguous",
+                "anchor-not-found",
+            ),
+            (
+                "same line",
+                30,
+                "twice();",
+                None,
+                "ambiguous",
+                "anchor-not-found",
+            ),
+            (
+                "overlapping",
+                32,
+                "+++",
+                None,
+                "ambiguous",
+                "anchor-not-found",
+            ),
+            (
+                "missing",
+                15,
+                "absent();",
+                None,
+                "not-found",
+                "anchor-not-found",
+            ),
+            (
+                "prefix",
+                15,
+                "changed(); missing suffix",
+                None,
+                "not-found",
+                "anchor-not-found",
+            ),
+            (
+                "token prefix",
+                15,
+                "change",
+                None,
+                "not-found",
+                "anchor-not-found",
+            ),
+            (
+                "case",
+                15,
+                "CHANGED();",
+                None,
+                "not-found",
+                "anchor-not-found",
+            ),
+            ("no quote", 15, "", None, "no-quote", "in-diff"),
+            (
+                "whitespace quote",
+                15,
+                " \n\t ",
+                None,
+                "no-quote",
+                "in-diff",
+            ),
+            (
+                "no quote missing line",
+                900,
+                "",
+                None,
+                "not-found",
+                "anchor-not-found",
+            ),
+        ];
+        let mut claims = cases
+            .iter()
+            .map(|(summary, line, quote, ..)| finding("source.rs", *line, summary, quote))
+            .collect::<Vec<_>>();
+        claims.extend([
+            finding("source.rs", 38, "truncated quote", &"x".repeat(501)),
+            finding("source.rs", 15, "stripped control", "changed\0();"),
+            finding("source.rs", 15, "control-only quote", "\0"),
+            finding("link.rs", 15, "symlink", "changed();"),
+            finding("binary.rs", 1, "invalid utf8", "source"),
+            finding(".oms/extra.rs", 1, "untracked", "extra();"),
+            finding("../source.rs", 15, "traversal", "changed();"),
+        ]);
+        let answer = format!(
+            "```findings\n{}\n```\nCONFIDENCE: 0.8\nGATE: pass",
+            claims
+                .iter()
+                .map(|row| String::from_utf8(row.json(false).unwrap()).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let review = |answer: &str, directory: &str, mutation, no_diff| {
+            let probe = ReviewProbe {
+                repo: &repo,
+                answer,
+                mutation,
+                diffs: AtomicU64::new(0),
+            };
+            let mut values = vec![
+                "--providers",
+                "codex",
+                "--model",
+                "fixture",
+                "--gate",
+                "--no-verify",
+                "--prompt",
+                "inspect source anchors",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--no-graph-context",
+                "--artifact-dir",
+                directory,
+            ];
+            if no_diff {
+                values.push("--no-diff");
+            }
+            let output = oms_command_peer::run_with_executor(
+                "peer-review",
+                &args(&values),
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &STOP,
+                &probe,
+            );
+            assert!(output.0 == 0 || output.0 == 2, "{output:?}");
+            let name = storage::names(&repo.0, Path::new(directory), ".jsonl")
+                .unwrap()
+                .into_iter()
+                .find(|name| name.starts_with("_findings-"))
+                .unwrap_or_else(|| panic!("missing findings: {output:?}"));
+            let rows = storage::load(&repo.0, &Path::new(directory).join(name)).unwrap();
+            (output, rows)
+        };
+        let (output, rows) = review(&answer, ".oms/review-anchors", 0, false);
+        assert_eq!(output.0, 0, "anchor labels never change GATE: pass");
+        assert_eq!(rows.len(), claims.len() - 1, "traversal must be rejected");
+        for ((summary, reported, quote, resolved, status, anchor), row) in cases.iter().zip(&rows) {
+            assert_eq!(row.get("summary").text(), Some(*summary));
+            assert_eq!(row.get("reported_line"), &V::from(*reported));
+            assert_eq!(row.get("line"), &V::from(resolved.unwrap_or(*reported)));
+            assert_eq!(row.get("resolved_line"), &resolved.map_or(V::Null, V::from));
+            assert_eq!(
+                row.get("line_anchor_status").text(),
+                Some(*status),
+                "{summary}"
+            );
+            assert_eq!(row.get("anchor").text(), Some(*anchor), "{summary}");
+            assert_eq!(
+                row.get("quote_found"),
+                &if quote.trim().is_empty() {
+                    V::Null
+                } else {
+                    resolved.is_some().into()
+                }
+            );
+            assert_eq!(
+                row.get("source_sha256"),
+                &if resolved.is_some() {
+                    storage::hash(body.as_bytes()).into()
+                } else {
+                    V::Null
+                }
+            );
+        }
+        for (row, status) in rows[cases.len()..].iter().zip([
+            "incomplete-quote",
+            "incomplete-quote",
+            "incomplete-quote",
+            "unavailable-source",
+            "unavailable-source",
+            "untracked-source",
+        ]) {
+            assert_eq!(row.get("line_anchor_status").text(), Some(status));
+            assert_eq!(row.get("resolved_line"), &V::Null);
+            assert_eq!(row.get("quote_found"), &false.into());
+        }
+        let one = |line| {
+            format!(
+                "```findings\n{}\n```\nGATE: pass",
+                String::from_utf8(
+                    finding("source.rs", line, "far", "changed();")
+                        .json(false)
+                        .unwrap()
+                )
+                .unwrap()
+            )
+        };
+        let (output, no_diff) = review(&one(39), ".oms/review-no-diff", 0, true);
+        assert_eq!(output.0, 0);
+        assert_eq!(no_diff[0].get("anchor").text(), Some("unclassified"));
+        assert_eq!(no_diff[0].get("resolved_line"), &15usize.into());
+        assert_eq!(
+            no_diff[0].get("id"),
+            rows[0].get("id"),
+            "line relocation preserves finding IDs"
+        );
+        for mutation in [1, 2, 3] {
+            repo.write("source.rs", &body);
+            let (output, drifted) = review(
+                &one(2),
+                &format!(".oms/review-drift-{mutation}"),
+                mutation,
+                false,
+            );
+            assert_eq!(output.0, 2, "source drift must make review incomplete");
+            let row = &drifted[0];
+            assert_eq!(row.get("line_anchor_status").text(), Some("source-changed"));
+            assert_eq!(row.get("line"), &2usize.into());
+            assert_eq!(row.get("resolved_line"), &V::Null);
+            assert_eq!(row.get("source_sha256"), &V::Null);
+            assert_eq!(row.get("quote_found"), &false.into());
+            assert_eq!(row.get("anchor").text(), Some("anchor-not-found"));
         }
     });
 }
