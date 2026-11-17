@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod async_context;
+
 use oms_context::{Json, SessionJsonError, parse_session_json};
 use oms_json::{PyString, Value as PyValue};
 use serde_json::{Value, json};
@@ -331,6 +333,7 @@ where
     let mut calls: BTreeMap<Vec<u8>, String> = BTreeMap::new();
     let mut tools: BTreeMap<String, Aggregate> = BTreeMap::new();
     let mut reads: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    let mut async_context = async_context::AsyncContext::default();
     let (mut outside, mut lines, mut unread, mut results, mut unmatched) = (0, 0, 0, 0, 0);
     for row in transcript_rows(data)? {
         lines += 1;
@@ -338,6 +341,7 @@ where
             unread += 1;
             continue;
         };
+        async_context.observe(&row);
         let Some(content) = array(field(field(&row, "message"), "content")) else {
             continue;
         };
@@ -411,9 +415,10 @@ where
     }
     Ok(
         json!({"schema":1,"kind":"oms-context-session","unit":"utf-8 bytes",
-        "format":if !calls.is_empty() || results > 0 {"claude-jsonl"} else {"unknown"},
+        "format":if !calls.is_empty() || results > 0 || async_context.observed_format() {"claude-jsonl"} else {"unknown"},
         "lines":lines,"unread_lines":unread,"tool_calls":calls.len(),"tool_results":results,"unmatched_results":unmatched,
         "result_bytes":tools.values().map(|v|v.bytes).sum::<u64>(),"by_tool":by_tool,
+        "async_context":async_context.report(),
         "file_reads":{"distinct_in_repository":reads.len(),"outside_repository":outside,"repeated":{"total":repeated.len(),"omitted":repeated.len().saturating_sub(limit),"items":repeated_items}},
         "note":"Tool-result text as it was recorded, in bytes; the provider may have cleared or summarized it since. Not tokens, not a bill and not the current context window. Only Claude Code JSONL transcripts are read; any other file reports format unknown."}),
     )
