@@ -3035,17 +3035,25 @@ guards see, derived from the `HOOK_SURFACES` table of `install-claude-hooks.sh`,
 instead of this prose.
 
 `oms doctor --extensions [--repo PATH] [--json]` is a standalone read-only inventory of
-what else the provider CLIs load: MCP servers from Claude Code's user, local and project
-configuration, Codex's `config.toml` and Antigravity's settings and plugin
-`mcp_config.json`, plus Claude's `enabledPlugins` and Antigravity's plugin and extension
-directory names. Each server is shown by name, transport, scope and the command's base
-name or the URL's scheme and host; the OMS server is marked. Files are parsed as data:
-no server starts, no provider command runs, nothing is contacted, and arguments,
-environment values, headers and URL paths are never printed (only how many environment
-names a server sets). It notes a server one CLI has and another lacks and one name with
-different targets. A file that cannot be parsed is `unread` and that CLI is left out of
-the comparison. Codex plugin state is not in a file the report parses and is reported as
-not read. Rows never change the exit status.
+configured MCP declarations: Claude Code's user `.claude.json` and project `.mcp.json`,
+Codex's user `config.toml`, and Antigravity's user, legacy, project and plugin
+configuration, plus Claude's `enabledPlugins` and Antigravity's plugin and extension
+directory names. Each server is shown by scoped name, transport and the command's base
+name or the URL's scheme and host. Files are parsed as data: no server starts, no
+provider command runs, nothing is contacted, and arguments, environment values, headers
+and URL paths are never printed (only how many environment names a server sets).
+
+Both `--extensions` and `--mcp` include `config_layers` with `parsed`, `missing` or
+`unknown` states and diagnostic reasons. Unsafe, unreadable, malformed files and invalid
+server entries make their provider `unknown`; readable peer declarations remain visible.
+`collisions` groups the same server name configured in multiple scopes of one provider,
+even when their targets match. These are configuration collisions, not proof of which
+entry a running provider uses: precedence, unparsed policy/session layers and runtime
+selection are not established, so `effective` and `runtime` remain `unknown`. A server's
+`configuration: disabled` describes an explicit `disabled: true` or `enabled: false`
+declaration; it does not prove a process stopped. Missing files likewise do not establish
+runtime absence or health. These additive diagnostics do not change the exit status,
+launch fingerprints or the opt-in requirements for pinning and probing.
 
 `oms doctor --mcp [--pin] [--repo PATH] [--json]` reads the same files and hashes each
 server's launch shape (transport, command, arguments, URL, environment variable names;
