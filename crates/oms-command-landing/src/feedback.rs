@@ -492,3 +492,326 @@ pub(crate) fn poll(
     }
     Ok(added)
 }
+
+fn fresh_pull(c: &Context<'_>, event: &V) -> Result<V> {
+    let slug = string(event, "repo");
+    let expected = string(event, "head_sha");
+    require(
+        event.get("pr").integer(true) && commit(&expected),
+        "feedback PR/head identity is unknown",
+    )?;
+    let actual = crate::report::github_remote(
+        &crate::git::Git::new(c.cwd, c.interrupted).text(&["remote", "get-url", "origin"])?,
+    )?;
+    require(
+        slug.eq_ignore_ascii_case(&actual),
+        "feedback repository changed",
+    )?;
+    require(
+        crate::git::Git::new(c.cwd, c.interrupted).commit("HEAD")? == expected,
+        "feedback local head moved",
+    )?;
+    let pull = api(
+        c,
+        &format!("repos/{slug}/pulls/{}", event.get("pr").py()),
+        Duration::from_secs(20),
+    )?;
+    require(
+        pull.get("number") == event.get("pr")
+            && string(&pull, "state") == "open"
+            && string(pull.get("base").get("repo"), "full_name").eq_ignore_ascii_case(&slug)
+            && string(pull.get("head"), "sha") == expected,
+        "feedback PR is closed, unavailable, mismatched or its head moved",
+    )?;
+    Ok(pull)
+}
+
+fn run_jobs(c: &Context<'_>, slug: &str, run: &V) -> Result<Vec<V>> {
+    require(
+        run.get("id").integer(true) && run.get("run_attempt").integer(true),
+        "CI run attempt identity is unknown",
+    )?;
+    let jobs = api(
+        c,
+        &format!(
+            "repos/{slug}/actions/runs/{}/attempts/{}/jobs?per_page=100",
+            run.get("id").py(),
+            run.get("run_attempt").py()
+        ),
+        Duration::from_secs(20),
+    )?;
+    require(
+        matches!(jobs.get("jobs"), V::Arr(_))
+            && jobs.get("jobs").array().len() <= 100
+            && jobs.get("total_count").py() == jobs.get("jobs").array().len().to_string(),
+        "CI job coverage is incomplete",
+    )?;
+    let mut names = std::collections::BTreeSet::new();
+    for job in jobs.get("jobs").array() {
+        require(
+            job.get("run_id") == run.get("id")
+                // The attempt-specific endpoint binds this response. GitHub's
+                // documented job schema does not require run_attempt per job.
+                && (!job.has("run_attempt") || job.get("run_attempt") == run.get("run_attempt"))
+                && job.get("head_sha") == run.get("head_sha")
+                && string(job, "status") == "completed"
+                && !string(job, "name").is_empty()
+                && names.insert(string(job, "name")),
+            "CI jobs are stale or ambiguous",
+        )?;
+    }
+    Ok(jobs.get("jobs").array().to_vec())
+}
+
+fn diagnosis(c: &Context<'_>, event: &V, pull: &V) -> Result<(&'static str, V)> {
+    let slug = string(event, "repo");
+    require(
+        event.get("source_id").integer(true) && event.get("source_revision").integer(true),
+        "CI run identity is unknown",
+    )?;
+    let run = api(
+        c,
+        &format!("repos/{slug}/actions/runs/{}", event.get("source_id").py()),
+        Duration::from_secs(20),
+    )?;
+    require(
+        run.get("id") == event.get("source_id")
+            && run.get("run_attempt") == event.get("source_revision")
+            && run.get("head_sha") == event.get("head_sha")
+            && string(run.get("repository"), "full_name").eq_ignore_ascii_case(&slug)
+            && string(&run, "head_branch") == string(pull.get("head"), "ref")
+            && !string(event, "branch").is_empty()
+            && string(&run, "head_branch") == string(event, "branch")
+            && run.get("workflow_id").integer(true),
+        "CI run changed or its identity is unknown",
+    )?;
+    let status = string(&run, "status");
+    let conclusion = string(&run, "conclusion");
+    if status != "completed" {
+        return Ok(("pending", V::Arr(vec![])));
+    }
+    if conclusion != "failure" {
+        return Ok((
+            match conclusion.as_str() {
+                "cancelled" => "cancelled",
+                "startup_failure" | "action_required" => "environment_failure",
+                "success" | "neutral" | "skipped" => "success",
+                _ => "unknown",
+            },
+            V::Arr(vec![]),
+        ));
+    }
+    let jobs = run_jobs(c, &slug, &run)?;
+    let failed: Vec<_> = jobs
+        .iter()
+        .filter(|j| !["success", "skipped", "neutral"].contains(&string(j, "conclusion").as_str()))
+        .collect();
+    if failed.is_empty() || failed.iter().any(|j| string(j, "conclusion") != "failure") {
+        return Ok(("unknown", V::Arr(vec![])));
+    }
+    let base_sha = string(pull.get("base"), "sha");
+    require(commit(&base_sha), "CI base head is unknown")?;
+    let bases = api(
+        c,
+        &format!(
+            "repos/{slug}/actions/workflows/{}/runs?head_sha={base_sha}&status=completed&per_page=2",
+            run.get("workflow_id").py()
+        ),
+        Duration::from_secs(20),
+    )?;
+    let Some(base) = bases.get("workflow_runs").array().first() else {
+        return Ok(("unknown", V::Arr(vec![])));
+    };
+    require(
+        string(base, "head_sha") == base_sha
+            && base.get("workflow_id") == run.get("workflow_id")
+            && string(base.get("repository"), "full_name").eq_ignore_ascii_case(&slug)
+            && string(base, "status") == "completed",
+        "CI base run is mismatched",
+    )?;
+    let base_jobs = run_jobs(c, &slug, base)?;
+    let mut rows = vec![];
+    let mut regression = true;
+    let mut preexisting = true;
+    for job in failed {
+        let name = string(job, "name");
+        let counterpart = base_jobs
+            .iter()
+            .find(|j| string(j, "name") == name)
+            .map(|j| string(j, "conclusion"))
+            .unwrap_or_default();
+        regression &= counterpart == "success";
+        preexisting &= counterpart == "failure";
+        let steps = job
+            .get("steps")
+            .array()
+            .iter()
+            .filter(|s| string(s, "conclusion") == "failure")
+            .take(10)
+            .map(|s| bounded(s, "name", 160).into())
+            .collect();
+        rows.push(obj([
+            ("job", bounded(job, "name", 160).into()),
+            ("steps", V::Arr(steps)),
+        ]));
+    }
+    rows.sort_by_key(|row| string(row, "job"));
+    let rows = V::Arr(rows);
+    let encoded = rows.json(false)?;
+    if encoded.len() > 12 * 1024 || safe(&encoded).is_err() {
+        return Ok(("unknown", V::Arr(vec![])));
+    }
+    Ok((
+        if regression {
+            "actionable_failure"
+        } else if preexisting {
+            "base_failure"
+        } else {
+            "unknown"
+        },
+        rows,
+    ))
+}
+
+fn assess(c: &Context<'_>, event: &V) -> Result<V> {
+    require(
+        event.get("evidence").get("withheld") == &false.into(),
+        "feedback evidence is withheld or unknown",
+    )?;
+    let pull = fresh_pull(c, event)?;
+    let source = string(event, "source");
+    let (class, diagnostic) = if source == "pr-review-comment" {
+        require(
+            event.get("source_id").integer(true),
+            "feedback comment identity is unknown",
+        )?;
+        let slug = string(event, "repo");
+        let item = api(
+            c,
+            &format!(
+                "repos/{slug}/pulls/comments/{}",
+                event.get("source_id").py()
+            ),
+            Duration::from_secs(20),
+        )?;
+        require(
+            string(&item, "pull_request_url").eq_ignore_ascii_case(&format!(
+                "https://api.github.com/repos/{slug}/pulls/{}",
+                event.get("pr").py()
+            )),
+            "feedback comment belongs to another PR",
+        )?;
+        let fresh = comment_event(&slug, event.get("pr"), &string(event, "head_sha"), &item)?;
+        require(
+            fresh.get("event_id") == event.get("event_id"),
+            "feedback comment was edited or moved",
+        )?;
+        (
+            string(&fresh, "classification"),
+            fresh.get("evidence").clone(),
+        )
+    } else if source == "ci-run" {
+        let (class, diagnostic) = diagnosis(c, event, &pull)?;
+        (class.into(), diagnostic)
+    } else {
+        return Err(Error::new(2, "unsupported feedback source"));
+    };
+    let failure = obj([
+        ("repo", string(event, "repo").to_ascii_lowercase().into()),
+        ("pr", event.get("pr").clone()),
+        ("source", source.into()),
+        ("diagnostic", diagnostic.clone()),
+    ]);
+    Ok(obj([
+        ("schema", 1usize.into()),
+        ("kind", "oms-feedback-repair-evidence".into()),
+        ("trust", "untrusted".into()),
+        ("event_id", event.get("event_id").clone()),
+        ("repo", event.get("repo").clone()),
+        ("pr", event.get("pr").clone()),
+        ("head_sha", event.get("head_sha").clone()),
+        ("classification", class.into()),
+        ("failure_fingerprint", digest(&canonical(&failure)?).into()),
+        ("diagnostic", diagnostic),
+        ("event", event.clone()),
+    ]))
+}
+
+/// Native host adapter for an explicitly selected event. The caller owns task
+/// scope and repair authority; this function grants neither. Fresh nonactionable
+/// diagnoses are retained as observations even when candidate selection refuses.
+pub fn repair_candidate(
+    repo: &Path,
+    state: &Path,
+    event_id: &str,
+    head: &str,
+    interrupted: &AtomicBool,
+) -> Result<V> {
+    require(
+        hex(event_id, 64) && commit(head),
+        "invalid feedback selection",
+    )?;
+    let event = observations(state)?
+        .into_iter()
+        .find(|row| string(row, "event_id") == event_id)
+        .ok_or_else(|| Error::new(2, "reviewed feedback observation is unavailable"))?;
+    require(
+        string(&event, "head_sha") == head,
+        "reviewed feedback head moved",
+    )?;
+    let c = Context {
+        cwd: repo,
+        source: repo,
+        interrupted,
+        services: &crate::Unavailable,
+    };
+    let evidence = assess(&c, &event)?;
+    let mut observation = event;
+    if let V::Obj(fields) = &mut observation {
+        for field in ["event_id", "observation_id", "observed_at"] {
+            fields.remove(field.as_bytes());
+        }
+    }
+    observation.set("classification", evidence.get("classification").clone());
+    observation.set("diagnostic", evidence.get("diagnostic").clone());
+    append(state, &[finish(observation)?], interrupted)?;
+    require(
+        ["actionable_failure", "review_required"]
+            .contains(&string(&evidence, "classification").as_str()),
+        format!(
+            "feedback is not repairable: {}",
+            string(&evidence, "classification")
+        ),
+    )?;
+    Ok(evidence)
+}
+
+pub fn revalidate_repair(repo: &Path, evidence: &V, interrupted: &AtomicBool) -> Result<()> {
+    require(
+        string(evidence, "kind") == "oms-feedback-repair-evidence"
+            && string(evidence, "trust") == "untrusted",
+        "invalid feedback repair evidence",
+    )?;
+    let c = Context {
+        cwd: repo,
+        source: repo,
+        interrupted,
+        services: &crate::Unavailable,
+    };
+    let fresh = assess(&c, evidence.get("event"))?;
+    require(
+        [
+            "event_id",
+            "repo",
+            "pr",
+            "head_sha",
+            "classification",
+            "failure_fingerprint",
+        ]
+        .iter()
+        .all(|key| fresh.get(key) == evidence.get(key))
+            && ["actionable_failure", "review_required"]
+                .contains(&string(&fresh, "classification").as_str()),
+        "feedback changed before dispatch; no repair sent",
+    )
+}

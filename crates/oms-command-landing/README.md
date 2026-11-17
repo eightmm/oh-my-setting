@@ -158,6 +158,15 @@ An ordinary failed run remains `unknown` until a separate fresh comparison
 establishes an actionable regression. External text is always untrusted
 evidence, never a command, approval, scope change or execution grant.
 
+The native autonomy adapter may explicitly select a reviewed event using
+`feedback::repair_candidate` and `feedback::revalidate_repair`. Both use fresh
+exact PR-head/source-revision reads. CI classification compares complete jobs
+from the observed run attempt with the same workflow at the PR's current base
+SHA; absent or mixed counterpart evidence stays unknown. Fresh diagnoses are
+retained in the observation journal. The adapter supplies evidence only; the
+autonomy runner owns the reviewed task scope, durable attempt claim, existing
+one-shot Repair transition, delegation and admission.
+
 ## Implementation verification and remaining scope
 
 Only Rust 1.99.1 offline compilation and formatting are authorized for this

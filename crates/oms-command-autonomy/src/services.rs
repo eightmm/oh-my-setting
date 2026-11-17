@@ -105,6 +105,32 @@ pub trait Services: oms_command_plan::Services + Sync {
             "native bounded GitHub GET service unavailable",
         ))
     }
+    /// Resolve an explicitly reviewed feedback identity through the native
+    /// landing observer and fresh exact-head GitHub GETs. This is evidence,
+    /// never a grant to dispatch or change a task's scope.
+    fn repair_feedback(
+        &self,
+        _repo: &Path,
+        _state: &Path,
+        _event_id: &str,
+        _head: &str,
+        _interrupted: &AtomicBool,
+    ) -> Result<serde_json::Value> {
+        Err(Error::new(2, "native feedback repair evidence unavailable"))
+    }
+    /// Repeat the remote head/revision/diagnosis check immediately before
+    /// dispatch. An unavailable response is unknown and must refuse a send.
+    fn revalidate_repair_feedback(
+        &self,
+        _repo: &Path,
+        _evidence: &serde_json::Value,
+        _interrupted: &AtomicBool,
+    ) -> Result<()> {
+        Err(Error::new(
+            2,
+            "native feedback repair revalidation unavailable",
+        ))
+    }
     fn work_repository(&self, path: &Path, _interrupted: &AtomicBool) -> Result<PathBuf> {
         let physical = std::fs::canonicalize(path)
             .map_err(|_| Error::new(2, "cannot resolve physical repository"))?;

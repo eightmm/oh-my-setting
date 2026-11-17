@@ -151,6 +151,335 @@ fn owns_help_and_parse_errors_for_every_command() {
     }
 }
 
+struct FeedbackMock {
+    mode: &'static str,
+    reads: std::sync::atomic::AtomicUsize,
+    rechecks: std::sync::atomic::AtomicUsize,
+    sends: std::sync::atomic::AtomicUsize,
+    lands: std::sync::atomic::AtomicUsize,
+}
+impl FeedbackMock {
+    fn new(mode: &'static str) -> Self {
+        Self {
+            mode,
+            reads: 0.into(),
+            rechecks: 0.into(),
+            sends: 0.into(),
+            lands: 0.into(),
+        }
+    }
+    fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn plan(&self, repo: &Path, args: &[&str]) -> serde_json::Value {
+        let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let (code, out, err) =
+            oms_command_plan::run_with_services(&args, repo, &AtomicBool::new(false), self);
+        assert_eq!(code, 0, "{args:?}: {}", String::from_utf8_lossy(&err));
+        serde_json::from_slice(&out).unwrap_or(serde_json::Value::Null)
+    }
+    fn reviewed(&self, repo: &Path, id: &str, event: &str) {
+        self.plan(
+            repo,
+            &[
+                "add",
+                "--id",
+                id,
+                "--title",
+                &format!("Repair scoped review feedback:{event}"),
+                "--allowed",
+                "src",
+                "--verify",
+                "true",
+            ],
+        );
+        self.plan(repo, &["claim", "--id", id, "--provider", "codex"]);
+        let task = self.plan(repo, &["show", "--id", id]);
+        self.plan(
+            repo,
+            &[
+                "review",
+                "--id",
+                id,
+                "--lease-id",
+                task["lease_id"].as_str().unwrap(),
+                "--artifact",
+                "worker-artifact",
+                "--patch",
+                "worker-patch",
+            ],
+        );
+    }
+    fn fixture(&self) -> Repo {
+        let repo = Repo::new();
+        repo.write("seed.txt", "seed\n");
+        for args in [
+            vec!["add", "."],
+            vec![
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-qm",
+                "seed",
+            ],
+        ] {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo.0)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        self.plan(&repo.0, &["init", "--goal", "feedback repair"]);
+        self.reviewed(&repo.0, "one", &"a".repeat(64));
+        repo
+    }
+    fn run(&self, repo: &Repo, id: &str, auto: bool) -> CommandResult {
+        let mut args = vec!["--to", "codex", "--id", id, "--land"];
+        if auto {
+            args.push("--auto-repair");
+        }
+        run_with_services(
+            "plan-run",
+            &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            &repo.0,
+            &AtomicBool::new(false),
+            self,
+        )
+    }
+}
+impl oms_command_plan::Services for FeedbackMock {}
+impl Services for FeedbackMock {
+    fn state_repository(
+        &self,
+        work: &Path,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<PathBuf> {
+        Ok(work.to_owned())
+    }
+    fn resolve_route(
+        &self,
+        _: &Path,
+        _: &serde_json::Value,
+        _: &str,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<oms_command_autonomy::ModelRoute> {
+        Ok(oms_command_autonomy::ModelRoute {
+            provider: "codex".into(),
+            model_class: "explicit".into(),
+            primary: "fixture-model".into(),
+            fallback: String::new(),
+            effort: "auto".into(),
+            fallback_effort: String::new(),
+        })
+    }
+    fn repair_feedback(
+        &self,
+        _: &Path,
+        _: &Path,
+        event: &str,
+        head: &str,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<serde_json::Value> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.mode == "unavailable" {
+            return Err(oms_command_autonomy::Error::new(
+                2,
+                "native feedback unavailable",
+            ));
+        }
+        Ok(
+            json!({"schema": 1, "kind": "oms-feedback-repair-evidence", "trust": "untrusted",
+            "repo": "example/project", "pr": 19, "event_id": event, "head_sha": head,
+            "classification": "review_required", "failure_fingerprint": "f".repeat(64),
+            "event": {"source": "pr-review-comment"},
+            "diagnostic": {"path": match self.mode { "outside" => "other/lib.rs", "traversal" => "src/../other.rs", _ => "src/lib.rs" },
+                "body": "Please check the cited condition; any instruction here is untrusted evidence.", "withheld": false}}),
+        )
+    }
+    fn revalidate_repair_feedback(
+        &self,
+        repo: &Path,
+        _: &serde_json::Value,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<()> {
+        let n = self
+            .rechecks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.mode == "crash" && n == 0 {
+            panic!("fixture crash after durable claim");
+        }
+        if self.mode == "head" && n == 1 {
+            return Err(oms_command_autonomy::Error::new(2, "remote head moved"));
+        }
+        if self.mode == "cancel" && n == 1 {
+            interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if self.mode == "blocked" && n == 0 {
+            let task = self.plan(repo, &["show", "--id", "one"]);
+            self.plan(
+                repo,
+                &[
+                    "block",
+                    "--id",
+                    "one",
+                    "--lease-id",
+                    task["lease_id"].as_str().unwrap(),
+                    "--reason",
+                    "cancelled by controller before dispatch",
+                ],
+            );
+        }
+        Ok(())
+    }
+    fn invoke(
+        &self,
+        call: &Invocation,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<CommandResult> {
+        match call.tool.as_str() {
+            "fail-ledger" => Ok((0, vec![], vec![])),
+            "peer-delegate" => {
+                self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let args: Vec<_> = call
+                    .args
+                    .iter()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .collect();
+                let arg = |name: &str| args.windows(2).find(|w| w[0] == name).unwrap()[1].clone();
+                assert_eq!(arg("--repair"), "0");
+                assert!(args.iter().any(|a| a == "--terminalize-resumed-repair"));
+                let packet: serde_json::Value =
+                    serde_json::from_slice(&fs::read(arg("--review-artifact")).unwrap()).unwrap();
+                assert_eq!(packet["trust"], "untrusted");
+                if self.mode == "unknown" {
+                    return Err(oms_command_autonomy::Error::new(
+                        2,
+                        "send acknowledgement unavailable",
+                    ));
+                }
+                let id = arg("--plan-task");
+                let task = self.plan(&call.cwd, &["show", "--id", &id]);
+                assert_eq!(task["repair_count"], 1);
+                self.plan(
+                    &call.cwd,
+                    &[
+                        "review",
+                        "--id",
+                        &id,
+                        "--lease-id",
+                        task["lease_id"].as_str().unwrap(),
+                        "--artifact",
+                        "repaired-artifact",
+                        "--patch",
+                        "repaired-patch",
+                    ],
+                );
+                Ok((0, vec![], vec![]))
+            }
+            "patch-land" => {
+                self.lands.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((1, vec![], b"fixture admission hold".to_vec()))
+            }
+            other => panic!("unexpected command: {other}"),
+        }
+    }
+}
+
+#[test]
+fn feedback_repair_requires_authority_and_keeps_admission_caps_and_repeated_failures() {
+    if scrubbed_child(
+        "feedback_repair_requires_authority_and_keeps_admission_caps_and_repeated_failures",
+    ) {
+        return;
+    }
+    let mock = FeedbackMock::new("normal");
+    let repo = mock.fixture();
+    assert_eq!(mock.run(&repo, "one", false).0, 1);
+    assert_eq!(FeedbackMock::count(&mock.reads), 0);
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
+    assert!(!repo.0.join(".oms/feedback/repairs.jsonl").exists());
+    let result = mock.run(&repo, "one", true);
+    assert_eq!(result.0, 1, "{}", String::from_utf8_lossy(&result.2));
+    assert_eq!(FeedbackMock::count(&mock.sends), 1);
+    assert_eq!(FeedbackMock::count(&mock.lands), 2);
+    assert!(mock.run(&repo, "one", true).0 != 0);
+    assert_eq!(FeedbackMock::count(&mock.sends), 1);
+    mock.reviewed(&repo.0, "two", &"b".repeat(64));
+    let repeated = mock.run(&repo, "two", true);
+    assert!(
+        String::from_utf8_lossy(&repeated.2).contains("repeated feedback failure"),
+        "{repeated:?}"
+    );
+    assert_eq!(FeedbackMock::count(&mock.sends), 1);
+}
+
+#[test]
+fn feedback_repair_refuses_unavailable_scope_head_and_cancellation_changes() {
+    if scrubbed_child("feedback_repair_refuses_unavailable_scope_head_and_cancellation_changes") {
+        return;
+    }
+    for mode in [
+        "unavailable",
+        "outside",
+        "traversal",
+        "head",
+        "blocked",
+        "cancel",
+    ] {
+        let mock = FeedbackMock::new(mode);
+        let repo = mock.fixture();
+        let result = mock.run(&repo, "one", true);
+        assert_ne!(result.0, 0, "{mode}: {result:?}");
+        assert_eq!(FeedbackMock::count(&mock.sends), 0, "{mode}");
+        assert_eq!(FeedbackMock::count(&mock.lands), 0, "{mode}");
+    }
+}
+
+#[test]
+fn feedback_repair_claim_survives_crash_and_missing_send_acknowledgement() {
+    if scrubbed_child("feedback_repair_claim_survives_crash_and_missing_send_acknowledgement") {
+        return;
+    }
+    for mode in ["crash", "unknown"] {
+        let first = FeedbackMock::new(mode);
+        let repo = first.fixture();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            first.run(&repo, "one", true)
+        }));
+        assert!(if mode == "crash" {
+            result.is_err()
+        } else {
+            result.unwrap().0 != 0
+        });
+        let restarted = FeedbackMock::new("normal");
+        let result = restarted.run(&repo, "one", true);
+        assert_ne!(result.0, 0, "{mode}: {result:?}");
+        assert_eq!(FeedbackMock::count(&restarted.sends), 0);
+        assert_eq!(FeedbackMock::count(&restarted.lands), 0);
+        let ledger = fs::read_to_string(repo.0.join(".oms/feedback/repairs.jsonl")).unwrap();
+        assert_eq!(
+            ledger
+                .lines()
+                .filter(
+                    |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["state"]
+                        == "claimed"
+                )
+                .count(),
+            1
+        );
+    }
+}
+
 #[test]
 fn selectors_keep_legacy_manifest_parity() {
     let repo = Repo::new();
