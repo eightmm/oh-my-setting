@@ -715,7 +715,10 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 "research",
             ],
         ),
-        ("profile", vec!["trusted-local", "isolated", "remote"]),
+        (
+            "profile",
+            vec!["trusted-local", "isolated", "apptainer", "remote"],
+        ),
         ("arm", vec!["baseline", "treatment"]),
         ("emit", vec!["", "tsv", "hydra-overrides", "sbatch-array"]),
     ] {
@@ -748,7 +751,10 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
         r.float("cpus", 2.0)?;
     }
     if r.mode == Mode::Backend && r.action != "target" {
-        choose(r.positional(0)?, &["trusted-local", "isolated", "remote"])?;
+        choose(
+            r.positional(0)?,
+            &["trusted-local", "isolated", "apptainer", "remote"],
+        )?;
     }
     if r.mode == Mode::Release && matches!(r.action.as_str(), "resolve" | "apply") {
         choose(r.positional(0)?, &["stable", "edge"])?;

@@ -63,6 +63,45 @@ impl Services for Native {
             worktree_state: String::new(),
         })
     }
+    fn backend_check(
+        &self,
+        profile: &str,
+        image: &OsStr,
+        adapter: &OsStr,
+    ) -> Result<oms_runtime::value::Value> {
+        if profile != "apptainer" {
+            return Unavailable.backend_check(profile, image, adapter);
+        }
+        assert!(Path::new(image).is_absolute() && adapter.is_empty());
+        use oms_runtime::value::*;
+        Ok(object([
+            ("ready", b(true)),
+            ("missing", a([])),
+            ("details", empty()),
+        ]))
+    }
+    fn supervise(
+        &self,
+        repo: &Path,
+        request: &oms_runtime::services::BackendRequest,
+    ) -> Result<oms_runtime::services::BackendResult> {
+        if request.profile != "apptainer" {
+            return Unavailable.supervise(repo, request);
+        }
+        use oms_runtime::value::*;
+        // This fixture verifies the public parser/producer boundary, not a launch.
+        Ok(oms_runtime::services::BackendResult {
+            exit: 7,
+            receipt: object([
+                ("profile", string(&request.profile)),
+                ("image", string(request.image.to_string_lossy())),
+                (
+                    "argv",
+                    a(request.argv.iter().map(|s| string(s.to_string_lossy()))),
+                ),
+            ]),
+        })
+    }
 }
 fn child_test(name: &str) -> bool {
     if std::env::var_os("OMS_RUNTIME_TEST_CHILD").is_some() {
@@ -212,6 +251,56 @@ fn help_parse_interruption_and_unavailable_fail_closed() {
     let response = run(&args, &f.0, &f.0, &Unavailable, &AtomicBool::new(false));
     assert_eq!(response.code, 2);
     assert!(String::from_utf8_lossy(&response.stderr).contains("unavailable"));
+    let described = f.run(&["backend", "describe", "apptainer"], false);
+    assert_eq!(described.code, 0);
+    assert!(String::from_utf8_lossy(&described.stdout).contains("cgroup enforcement"));
+    for extra in [
+        vec![],
+        vec!["--image", "docker://example/image"],
+        vec!["--image", "image.sif", "--inherit-env", "APPTAINER_BIND"],
+        vec!["--image", "image.sif", "--tmpfs-mb", "64"],
+    ] {
+        let mut words = vec!["backend", "run", "apptainer"];
+        words.extend(extra);
+        words.extend(["--", "true"]);
+        let out = f.run(&words, false);
+        assert_eq!(out.code, 2);
+        assert!(
+            !String::from_utf8_lossy(&out.stderr).contains("integration pending"),
+            "request must refuse before the producer: {:?}",
+            out.stderr
+        );
+    }
+    let response = f.run(
+        &[
+            "backend",
+            "run",
+            "apptainer",
+            "--image",
+            "local.sif",
+            "--",
+            "tool",
+            "two words",
+            "$(literal)",
+        ],
+        false,
+    );
+    assert_eq!(
+        response.code,
+        7,
+        "{}",
+        String::from_utf8_lossy(&response.stderr)
+    );
+    let receipt = oms_runtime::value::parse(&response.stdout).unwrap();
+    assert_eq!(receipt.text("profile"), "apptainer");
+    assert_eq!(
+        receipt.text("image"),
+        f.0.join("local.sif").to_str().unwrap()
+    );
+    assert_eq!(
+        receipt.get("argv").strings().unwrap(),
+        vec!["tool", "two words", "$(literal)"]
+    );
 }
 
 fn budget_contract() {
