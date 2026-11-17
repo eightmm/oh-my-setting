@@ -2,6 +2,7 @@ use oms_command_autonomy::{campaign::Ledger, value};
 use oms_command_plan::storage::Store;
 use oms_command_telemetry::store::usage::{self, Cost, Identity, Phase, Receipt, Usage};
 use serde_json::{Value, json};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -12,7 +13,10 @@ struct Fixture {
 impl Fixture {
     fn new(usage: Option<Value>) -> Self {
         let repo = std::env::temp_dir().join(value::random("oms-campaign-usage-").unwrap());
-        std::fs::create_dir(&repo).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&repo)
+            .unwrap();
         let mut manifest = json!({"problem":{"file":"problem.txt","sha256":"a".repeat(64)},"base":"b".repeat(40),
             "verify":{"command":"true","timeout_s":30,"inputs":[]},"candidate_formats":["text"],
             "groups":[{"id":"group","formulation":"fixture","k":1,"routes":[{"provider":"claude","model":"fixture-model"}]}],

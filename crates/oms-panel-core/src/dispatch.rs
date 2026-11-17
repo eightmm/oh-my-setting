@@ -171,15 +171,17 @@ fn wip_counts(
         if att["refs"]["panel_access"] != "write" || !owner_matches_attempt(att) {
             continue;
         }
-        let member = text(&att["refs"], "panel_room_participant");
-        if !member.is_empty() {
-            seen_members.insert(member);
-        }
         let state = text(att, "state");
         if state == "review" {
             awaiting += 1;
         } else if crate::state::LIVE_STATES.contains(&state.as_str()) {
             running += 1;
+        } else {
+            continue;
+        }
+        let member = text(&att["refs"], "panel_room_participant");
+        if !member.is_empty() {
+            seen_members.insert(member);
         }
     }
     for (call_member, entry) in calls.iter() {
@@ -189,7 +191,12 @@ fn wip_counts(
         {
             continue;
         }
-        if matches!(entry["state"].as_str(), Some("reserved" | "running")) {
+        // Unknown spawn/cleanup keeps its slot until native process evidence
+        // reconciles it; a task terminal event alone does not prove cleanup.
+        if matches!(
+            entry["state"].as_str(),
+            Some("reserved" | "running" | "unknown")
+        ) {
             running += 1;
         }
     }
@@ -1291,19 +1298,27 @@ mod tests {
             "call-done": {"state": "awaiting", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
             "call-stale-no-att": {"state": "awaiting", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
             "call-inflight": {"state": "reserved", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
+            "call-unconfirmed": {"state": "unknown", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
             "call-other-inflight": {"state": "reserved", "main_attempt": "att_main_2", "route": {"access": "write", "owner": "antigravity"}},
             "call-live": {"state": "running", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
             "call-rev": {"state": "awaiting", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}}
         });
         let calls = calls_val.as_object_mut().unwrap();
         let (running, awaiting) = wip_counts(&req, &attempts, calls);
-        assert_eq!(running, 2); // att_live + call-inflight
+        assert_eq!(running, 3); // att_live + call-inflight + unknown launch/cleanup
         assert_eq!(awaiting, 1); // att_rev only
         assert_eq!(calls["call-ro"]["state"], "settled");
         assert_eq!(calls["call-done"]["state"], "settled");
         assert_eq!(calls["call-stale-no-att"]["state"], "settled");
         assert_eq!(calls["call-rev"]["state"], "awaiting");
         assert_eq!(calls["call-inflight"]["state"], "reserved");
+        assert_eq!(calls["call-unconfirmed"]["state"], "unknown");
+        // A lifecycle terminal alone does not settle an unconfirmed process.
+        calls.insert(
+            "call-done".into(),
+            json!({"state":"unknown", "main_attempt":"att_main_1", "route":{"access":"write"}}),
+        );
+        assert_eq!(wip_counts(&req, &attempts, calls), (4, 1));
     }
 
     #[test]
