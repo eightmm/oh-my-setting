@@ -198,8 +198,11 @@ Reading is always local; the Notion mirror is never in the agent read path.
   daily or weekly summary for that period.
 - `oms journal show --blockers` lists deduplicated blocker and next-action
   annotations observed in the last seven days, newest occurrence first, each
-  with its event ID. Annotations have no resolution record, so "open" means
-  recently observed and not superseded.
+  with its event ID. The headings are **Recently observed blockers** and
+  **Recorded next actions**. This view does not reconcile current task, plan
+  or operation state; a completed task can still have a recent annotation.
+  Use `oms inbox --repo .` for current attention. JSON retains the existing
+  `since`, `blockers` and `next_actions` fields with the same historical meaning.
 - `oms journal show --decisions [--since YYYY-MM-DD]` lists every decision
   recorded on an active event, newest first, each text once with its date,
   task and event ID (at most 200). It is a read view of existing events, not
@@ -209,8 +212,8 @@ Reading is always local; the Notion mirror is never in the agent read path.
   `supersedes_event_id`, so the superseded event becomes inactive as a whole:
   its blocker leaves `--blockers`, and anything else it carried leaves the
   active views with it. The resolution itself reads as a decision. Another
-  event with the same blocker text keeps it open, and the command names those
-  events. Parent only.
+  event with the same blocker text remains in this history view, and the
+  command names those events. Parent only.
 - `oms journal show --recent 20` prints the most recent events one line each.
 - `oms journal show --grep TEXT` searches what OMS recorded under `.oms` for
   plain text, case-insensitively: Work Journal events and summaries
@@ -233,9 +236,10 @@ Reading is always local; the Notion mirror is never in the agent read path.
   evidence.
 - `--json` returns the same data structurally in any mode.
 
-When resuming work in a repository, read `--blockers` and `--today` before
-planning: they carry exactly the decisions, failures, and next actions that
-earlier sessions recorded.
+When resuming work in a repository, use `oms inbox --repo .` for current
+attention. Read `--blockers` and `--today` when prior decisions, failures or
+recorded next actions are missing from the current context. Journal text
+does not reopen completed work or grant permission to execute an old next step.
 
 The prompt hook's bounded once-per-local-day digest, described under capture,
 is the automatic counterpart to these commands; its marker is derived state

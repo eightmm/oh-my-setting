@@ -90,6 +90,16 @@ Update oh-my-setting and re-run its doctor.
 
 Launch `oms` (or `oms panel --watch`) to monitor live main/worker trees, unread attention items, provider quota windows, and plan progress in one flicker-free terminal view.
 
+`oms list` shows 13 entrypoints for daily work, collaboration, delivery and
+maintenance. Use `oms inbox --repo .` for current project attention and
+`oms status` for installation status. `agent-plan` tracks execution tasks;
+`agent-task` holds a short resume note. The journal records history, including
+recently observed blockers that may already have been resolved in live state.
+
+`oms list --all` also exposes optional automation, alternate harnesses,
+research/runtime tools and lower-level admission commands. Choose these for a
+specific workflow; ordinary coding does not require an experiment or campaign.
+
 <p align="center"><img src="docs/assets/panel-board.svg" alt="OMS panel board with a goal, attention items, main and role calls, status and log tabs" width="100%"></p>
 
 <details>

@@ -644,6 +644,20 @@ fn sqlite_filters_skip_unrelated_payloads_and_preserve_distill_watermark() {
         store.record_event(&parse(raw), now).unwrap();
     }
     store.materialize().unwrap();
+    let digest = store.prompt_digest(now).unwrap().unwrap();
+    assert!(digest.contains("Recently observed blockers (last 7d):"));
+    assert!(digest.contains("Historical observations; check oms inbox for current task state."));
+    assert!(!digest.contains("Open blockers"));
+    let (code, output, error) = oms_command_journal::run(
+        &["show".into(), "--blockers".into()],
+        &scratch.0,
+        &std::sync::atomic::AtomicBool::new(false),
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.starts_with("Journal observations, not current task state;"));
+    assert!(output.contains("Recorded next actions"));
+    assert!(!output.contains("Open blockers"));
     let db = rusqlite::Connection::open(&store.db_path).unwrap();
     let old_payload: String = db
         .query_row(

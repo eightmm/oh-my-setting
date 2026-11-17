@@ -539,10 +539,12 @@ fn execute_command(
                         let value = crate::json::json!({"since":rows.since,"blockers":rows.blockers.iter().map(convert).collect::<Vec<_>>(),"next_actions":rows.next_actions.iter().map(convert).collect::<Vec<_>>()});
                         return Ok((0, json_output(&value)?, Vec::new()));
                     }
-                    let mut output = String::new();
+                    let mut output = String::from(
+                        "Journal observations, not current task state; use oms inbox for current attention.\n",
+                    );
                     for (title, items) in [
-                        ("Open blockers", rows.blockers),
-                        ("Next priorities", rows.next_actions),
+                        ("Recently observed blockers", rows.blockers),
+                        ("Recorded next actions", rows.next_actions),
                     ] {
                         output.push_str(&format!("{title} (since {}):\n", rows.since));
                         if items.is_empty() {
