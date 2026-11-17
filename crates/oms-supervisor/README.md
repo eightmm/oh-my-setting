@@ -185,7 +185,17 @@ These checks detect observed races, not hostile same-UID atomic transactions.
 | Log | Only the claimed runner opens its managed log; descriptor/name checks detect replacement. | Running log appends only new captured prefix bytes up to its cap. Final head/tail rewrite happens once; a kill during that rewrite can leave a partial bounded log, never authority for success. |
 | GC log then job deletion | Queue serialization and terminal selection prevent legitimate concurrent writers. | A kill after log deletion leaves the terminal job; a repeated GC can finish the same deletion. No lifecycle deletion. |
 | Live process ownership | A second _run-one cannot claim starting/running; cancel only publishes a request. | In-memory pending reactor survives library return. Process death between spawn and child-identity publication remains a canonical crash window; no launch gate protocol is implemented. |
-| Final job then lifecycle transition | Canonical transitions fence conflicting/duplicate events. | A kill after finished runtime publication but before lifecycle settlement can leave a nonterminal lifecycle row; existing reconcile does not repair that finished-state gap. |
+| Final job then lifecycle transition | The atomic job record includes versioned finish facts (target state, original reason and canonical idempotency key). Canonical transitions fence duplicate events. | `reconcile --apply` replays settlement for finished/cancelled/interrupted records, including a kill between verifying, review and done. Success facts bind the checked command and completion contract to the immutable spec and lifecycle refs; exit zero alone is insufficient. Legacy nonzero exits/cancellation can settle conservatively; legacy exit-zero gaps block with `terminal_evidence_missing`, while an existing completed review is preserved. |
+
+Success finish facts require owned process cleanup and required output
+observation. Pre-launch refusals and identity mismatches retain their distinct
+failure facts. A lifecycle write
+failure retains those facts for reconciliation; resume clears them on the new
+child attempt. Reconciliation leaves existing terminal states alone; successful
+replay never reopens blocked work or manufactures task verification from process
+exit. Successful `done` settlement still requires the submitted explicit
+completion contract. Identity mismatch handling and orphan signaling retain
+their existing process identity checks.
 
 ## Unimplemented seams and admission blockers
 
