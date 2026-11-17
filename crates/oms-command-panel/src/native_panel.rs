@@ -1060,17 +1060,28 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
         "--model", "--task", "--count",
     ];
     while idx < words.len() {
-        let key = words[idx].as_str();
+        let word = words[idx].as_str();
+        let (key, inline) = word
+            .split_once('=')
+            .map_or((word, None), |(key, value)| (key, Some(value)));
         idx += 1;
-        if key == "--watch" {
+        if key == "--watch" && inline.is_none() {
             watch = true;
-        } else if matches!(key, "--no-animation" | "--attention-only") {
+        } else if matches!(key, "--no-animation" | "--attention-only") && inline.is_none() {
             continue;
-        } else if value_flags.contains(&key) && idx < words.len() {
-            let val = &words[idx];
-            idx += 1;
+        } else if value_flags.contains(&key) {
+            let val = if let Some(value) = inline {
+                value
+            } else {
+                let value = words.get(idx)?;
+                if value.starts_with("--") {
+                    return None;
+                }
+                idx += 1;
+                value
+            };
             if key == "--repo" {
-                pane_repo = Some(val.clone());
+                pane_repo = Some(val.to_owned());
             }
         } else {
             return None;
@@ -1325,7 +1336,11 @@ fn launch_command(
     ]);
     for (flag, val) in [("--resume", resume), ("--model", model), ("--task", task)] {
         if let Some(v) = val {
-            parts.extend([flag.into(), v.into()]);
+            if v.starts_with("--") {
+                parts.push(format!("{flag}={v}"));
+            } else {
+                parts.extend([flag.into(), v.into()]);
+            }
         }
     }
     format!(
@@ -2515,6 +2530,31 @@ mod native_lifecycle_contract {
             Some("room-1234"),
         );
         assert_eq!(super::match_panel_command(&launch_cmd, &dir.0), Some(false));
+        for task in [
+            "--foo",
+            "--help",
+            "--한글 'quoted'\nnext",
+            "ordinary task",
+            "",
+        ] {
+            let command = super::launch_command(
+                &dir.0,
+                &prefix,
+                "oms-test",
+                "codex",
+                None,
+                None,
+                Some(task),
+                Some("room-1234"),
+            );
+            let words = super::split_shell_words(&command).unwrap();
+            let panel = words.iter().position(|word| word == "panel").unwrap();
+            let args: Vec<OsString> = words[panel + 1..].iter().map(OsString::from).collect();
+            let options = crate::cli::Options::parse(&args).expect("pane reentry options");
+            assert_eq!(options.get("task"), Some(task));
+            assert!(!options.has("help"));
+            assert_eq!(super::match_panel_command(&command, &dir.0), Some(false));
+        }
         let watch_cmd = super::watch_shell(&dir.0, &prefix, Some("codex"), Some("oms-test"));
         assert_eq!(super::match_panel_command(&watch_cmd, &dir.0), Some(true));
 
