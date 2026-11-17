@@ -32,6 +32,7 @@ that producer's approval, lifecycle, room, publication and acceptance interfaces
 | `validate_context_pack` | Validate the typed graph orientation pack before any task claim. The pack grants no scope. |
 | `provider_names` | Return canonical transport names for campaign manifest validation. Local defaults cover Codex, Claude and Antigravity. |
 | `read_issue` | One bounded GitHub GET, without linked-content traversal. The local implementation uses `gh api` with a 20-second, 512-KiB bound. |
+| `repair_feedback`, `revalidate_repair_feedback` | Native landing feedback observations and fresh exact-PR/head/run-attempt or comment-revision checks. Defaults refuse; evidence never grants task, provider or publication authority. |
 | `discovery_section` | Supply native metrics, review and CI projections. Missing sections carry explicit incomplete coverage. |
 | `observe_journal` | Forward durable goal/autopilot observations to the existing native Work Journal producer; observation failures do not replace canonical outcomes. |
 | inherited plan services | Supply native approval records, producer locks/projections, acceptance execution, controller identity, and publication products where those plan operations require them. |
@@ -131,6 +132,42 @@ any apply, followed by the plan producer's locked digest/CAS check.
 | Temporary indices, merge object directories and candidate checkouts | Private indices/merge objects are removed on ordinary exit. Hard-kill leftovers grant no ref/index authority. Managed candidate checkout creation/removal belongs to the injected native scratch producer and its ownership records. |
 | `.oms/handoffs/consumed.jsonl` | Advisory pickup records use the shared durable writer under a file lock. Distinct sessions are counted by projection. No pickup hides a handoff or grants resume authority. |
 | Work Journal | The existing producer owns its files, deduplication and locks. Observation failure does not undo a completed canonical operation. |
+| `.oms/feedback/repairs.jsonl`, `repair-evidence/*.json` | A durable one-attempt claim and bounded untrusted packet precede Repair and dispatch. Event, plan/task, lease, route, head and failure signature bind the claim. Restart never refunds claims or resends an unknown acknowledgement. |
+
+## Opt-in repair from external feedback
+
+The landing observer automatically ingests PR/CI observations through the
+existing `ci-status record|tick` entries. It starts no repair. The parent reads
+`ci-status feedback --json`, includes exactly one whitespace-delimited
+`feedback:<event_id>` token in an existing task's reviewed title, and retains
+that task's allowed paths, forbidden paths and mechanical verifier. The title
+is part of the native proposal and rendered task brief; external comment text
+cannot add this selector or amend the task.
+
+An already reviewed task can consume that event only when its parent invokes
+`plan-run --to PROVIDER --id TASK --land --auto-repair`. The consumer checks
+the current task digest, scope, live review lease, cancellation and one-repair
+cap. It reads fresh GitHub PR head and source revision before claiming work,
+again before the existing `plan repair` transition, and immediately before
+`peer-delegate`. The delegate receives a bounded packet marked untrusted through
+the existing review-artifact boundary, with no repair loop of its own. The
+result returns through the existing `patch-land` admission front door. None of
+these steps commits, pushes, merges, posts or resolves comments, or increases
+publication authority.
+
+Only exact-head comments within the reviewed scope and fresh CI regressions
+qualify. CI requires complete exact-attempt job evidence and successful matching
+jobs at the PR's current base SHA. Missing comparisons, mixed results, base
+failures, cancellation, environment failures, moved heads and edited comments
+stop. A repeated failed-check/step signature or spent plan-task cap also stops,
+including after restart. A lost provider acknowledgement stays unknown and is
+never automatically resent; ordinary native task/worker evidence must be
+reconciled before further work. After an acknowledged repair whose admission
+is held, its reviewed patch can still use the existing explicit admission path.
+
+Completed tasks stay completed. Feedback on a completed/published PR requires a
+separately reviewed task under current authority; the observer never reopens a
+done task or creates a repair task from an external instruction.
 
 ## Static selectors and installation previews
 

@@ -217,7 +217,23 @@ fn child_entry() {
         raw.split(SEP).map(OsString::from).collect()
     };
     let flag = AtomicBool::new(false);
-    let (code, out, err) = if let Some(log) = std::env::var_os("OMS_CT_LOG") {
+    let (code, out, err) = if tool == "feedback-candidate" {
+        let result = oms_command_landing::feedback::repair_candidate(
+            &cwd,
+            &cwd,
+            args[0].to_str().unwrap(),
+            args[1].to_str().unwrap(),
+            &flag,
+        )
+        .and_then(|row| {
+            oms_command_landing::feedback::revalidate_repair(&cwd, &row, &flag)?;
+            row.json(false).map_err(oms_command_landing::Error::from)
+        });
+        match result {
+            Ok(bytes) => (0, bytes, vec![]),
+            Err(e) => (e.code, vec![], e.message.into_bytes()),
+        }
+    } else if let Some(log) = std::env::var_os("OMS_CT_LOG") {
         run_with_services(
             tool.to_str().unwrap(),
             &args,
@@ -933,6 +949,37 @@ esac
             ],
         )
     }
+    fn candidate(&self, event: &str, payloads: &[(&str, V)]) -> (i32, String, String) {
+        fs::write(&self.gh, r#"#!/bin/bash
+case "${@: -1}" in
+  'repos/example/project/pulls/19') printf '%s\n' "$OMS_CT_PULL";;
+  'repos/example/project/pulls/comments/42') printf '%s\n' "$OMS_CT_COMMENT";;
+  'repos/example/project/actions/runs/73') printf '%s\n' "$OMS_CT_RUN";;
+  'repos/example/project/actions/runs/73/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_JOBS";;
+  'repos/example/project/actions/workflows/7/runs?'*) printf '%s\n' "$OMS_CT_BASE_RUNS";;
+  'repos/example/project/actions/runs/74/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_BASE_JOBS";;
+  *) exit 2;;
+esac
+"#).unwrap();
+        let mut env = payloads
+            .iter()
+            .map(|(name, row)| {
+                (
+                    (*name).to_owned(),
+                    String::from_utf8(row.json(false).unwrap()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        env.push(("OMS_GH_BIN".into(), self.gh.to_str().unwrap().into()));
+        self.isolated.run_env(
+            "feedback-candidate",
+            &self.repo,
+            &[event, &self.head],
+            &env.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>(),
+        )
+    }
 }
 
 #[test]
@@ -1207,6 +1254,164 @@ fn feedback_withholds_sensitive_workflow_metadata() {
     assert_eq!(rows[0].get("branch").text(), Some(""));
     let raw = fs::read_to_string(f.repo.join(oms_command_landing::feedback::EVENTS)).unwrap();
     assert!(!raw.contains(&sensitive));
+}
+
+#[test]
+fn feedback_candidate_revalidates_exact_pr_run_attempt_and_base_jobs() {
+    let f = FeedbackFixture::new();
+    f.run("record", 1, &f.head, &V::Arr(vec![]), "failure");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    let event = rows[0].get("event_id").text().unwrap();
+    let base = "b".repeat(40);
+    let remote_run = |id: usize, sha: &str, conclusion: &str, attempt: usize| {
+        obj([
+            ("id", id.into()),
+            ("run_attempt", attempt.into()),
+            ("head_sha", sha.into()),
+            ("head_branch", "main".into()),
+            ("repository", obj([("full_name", "example/project".into())])),
+            ("workflow_id", 7usize.into()),
+            ("status", "completed".into()),
+            ("conclusion", conclusion.into()),
+        ])
+    };
+    let jobs = |id: usize, sha: &str, result: &str, name: &str| {
+        obj([
+            ("total_count", 1usize.into()),
+            (
+                "jobs",
+                V::Arr(vec![obj([
+                    ("run_id", id.into()),
+                    ("head_sha", sha.into()),
+                    ("status", "completed".into()),
+                    ("conclusion", result.into()),
+                    ("name", name.into()),
+                    (
+                        "steps",
+                        V::Arr(vec![obj([
+                            ("name", "verify".into()),
+                            ("conclusion", result.into()),
+                        ])]),
+                    ),
+                ])]),
+            ),
+        ])
+    };
+    for (conclusion, baseline, name, moved, attempt, expected) in [
+        ("failure", "success", "test", false, 1, "actionable_failure"),
+        ("failure", "failure", "test", false, 1, "base_failure"),
+        ("failure", "success", "other", false, 1, "unknown"),
+        ("cancelled", "success", "test", false, 1, "cancelled"),
+        (
+            "startup_failure",
+            "success",
+            "test",
+            false,
+            1,
+            "environment_failure",
+        ),
+        ("failure", "success", "test", true, 1, "head moved"),
+        (
+            "failure",
+            "success",
+            "test",
+            false,
+            2,
+            "identity is unknown",
+        ),
+    ] {
+        let pull = obj([
+            ("number", 19usize.into()),
+            ("state", "open".into()),
+            (
+                "head",
+                obj([
+                    (
+                        "sha",
+                        if moved { base.clone() } else { f.head.clone() }.into(),
+                    ),
+                    ("ref", "main".into()),
+                ]),
+            ),
+            (
+                "base",
+                obj([
+                    ("sha", base.clone().into()),
+                    ("repo", obj([("full_name", "example/project".into())])),
+                ]),
+            ),
+        ]);
+        let result = f.candidate(
+            event,
+            &[
+                ("OMS_CT_PULL", pull),
+                ("OMS_CT_RUN", remote_run(73, &f.head, conclusion, attempt)),
+                ("OMS_CT_JOBS", jobs(73, &f.head, "failure", "test")),
+                (
+                    "OMS_CT_BASE_RUNS",
+                    obj([(
+                        "workflow_runs",
+                        V::Arr(vec![remote_run(74, &base, baseline, 1)]),
+                    )]),
+                ),
+                ("OMS_CT_BASE_JOBS", jobs(74, &base, baseline, name)),
+            ],
+        );
+        if expected == "actionable_failure" {
+            assert_eq!(result.0, 0, "{result:?}");
+            assert_eq!(
+                V::parse(result.1.as_bytes())
+                    .unwrap()
+                    .get("classification")
+                    .text(),
+                Some(expected)
+            );
+        } else {
+            assert_eq!(result.0, 2, "{expected}: {result:?}");
+            assert!(result.2.contains(expected), "{expected}: {result:?}");
+        }
+    }
+}
+
+#[test]
+fn feedback_candidate_revalidates_comment_revision() {
+    let f = FeedbackFixture::new();
+    let comments = f.comments("Review this condition", "2026-01-01T00:00:00Z");
+    f.run("record", 1, &f.head, &comments, "success");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    let event = rows
+        .iter()
+        .find(|r| r.get("source").text() == Some("pr-review-comment"))
+        .unwrap()
+        .get("event_id")
+        .text()
+        .unwrap();
+    let pull = obj([
+        ("number", 19usize.into()),
+        ("state", "open".into()),
+        ("head", obj([("sha", f.head.clone().into())])),
+        (
+            "base",
+            obj([("repo", obj([("full_name", "example/project".into())]))]),
+        ),
+    ]);
+    let mut comment = comments.array()[0].clone();
+    comment.set(
+        "pull_request_url",
+        "https://api.github.com/repos/example/project/pulls/19",
+    );
+    let result = f.candidate(
+        event,
+        &[
+            ("OMS_CT_PULL", pull.clone()),
+            ("OMS_CT_COMMENT", comment.clone()),
+        ],
+    );
+    assert_eq!(result.0, 0, "{result:?}");
+    comment.set("body", "Edited after the task was reviewed");
+    let result = f.candidate(event, &[("OMS_CT_PULL", pull), ("OMS_CT_COMMENT", comment)]);
+    assert_eq!(result.0, 2, "{result:?}");
+    assert!(result.2.contains("edited or moved"), "{result:?}");
 }
 
 #[test]

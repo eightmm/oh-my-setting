@@ -637,6 +637,35 @@ impl oms_command_autonomy::Services for ControlServices<'_> {
     ) -> oms_command_autonomy::Result<Vec<u8>> {
         oms_command_autonomy::Services::read_issue(&self.local, endpoint, interrupted)
     }
+    fn repair_feedback(
+        &self,
+        repo: &Path,
+        state: &Path,
+        event_id: &str,
+        head: &str,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        let row = oms_command_landing::feedback::repair_candidate(
+            repo,
+            state,
+            event_id,
+            head,
+            interrupted,
+        )
+        .map_err(|e| autonomy_error(e.code, e.message))?;
+        oms_command_autonomy::value::parse(&row.json(false).map_err(|e| autonomy_error(2, e))?)
+    }
+    fn revalidate_repair_feedback(
+        &self,
+        repo: &Path,
+        evidence: &Value,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<()> {
+        let row = oms_command_landing::V::parse(&oms_command_autonomy::value::canonical(evidence)?)
+            .map_err(|e| autonomy_error(2, e))?;
+        oms_command_landing::feedback::revalidate_repair(repo, &row, interrupted)
+            .map_err(|e| autonomy_error(e.code, e.message))
+    }
     fn state_repository(
         &self,
         work: &Path,
