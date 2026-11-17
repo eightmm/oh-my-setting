@@ -11,7 +11,7 @@ It adds no external dependencies and does not enable
 | Module | Principal entrypoints |
 | --- | --- |
 | `services` | `Services`, `PeerExecutor`, `NativeCommand`, `ExecutionRequest`, `ActivityHeartbeat`, `CommandOutput`, `SubcommandServices` |
-| `dispatch` | `DispatchRequest`, `CarriedPatch`, `Overlap`; `dispatch`, `command`, `continuation`, `scope_overlaps`, `check_wip` |
+| `dispatch` | `DispatchRequest`, `CarriedPatch`, `Overlap`; `dispatch`, `command`, `continuation`, `scope_overlaps`, `check_wip`, `check_wip_with_limit`, `effective_wip_limit` |
 | `results` | `FinalizeRequest`, `AcceptRequest`, `ResultsRequest`; `results`, `results_page`, `outcomes`, `finalize`, `finalize_snapshot`, `accept`, `accept_native`, `recover_accept`, `prior_findings`, `retry_delivery`, `verified_patch`, `safe_summary`, `evidence_reference` |
 | `review` | `Candidate`, `Settlement`, `CouncilRequest`; `verdict`, `automatic_review_workload`, `council_metadata`, `council_plan`, `council_execute` |
 | `release` | `MainSwapRequest`; `swap_main`, `release`, `classify`, `heartbeat_fresh`, `identity_gone`, `prove_native_absent` |

@@ -497,8 +497,12 @@ impl Plan<'_> {
         let mut stale = Vec::new();
         let mut reviews = Vec::new();
         let mut open = Vec::new();
+        let mut contract_stale = Vec::new();
         for t in &tasks {
             let view = self.view(s, t, false)?;
+            if view.get("contract_stale").truth() {
+                contract_stale.push(t.text("id").to_owned());
+            }
             *by.entry(view.text("state").into()).or_default() += 1;
             if self.actionable(s, t)? {
                 actionable.push(t.text("id").to_owned());
@@ -584,6 +588,14 @@ impl Plan<'_> {
             ("contract", s.contract.clone()),
             ("stale", Value::Array(stale)),
             ("stale_review", Value::Array(reviews)),
+            (
+                "contract_stale_tasks",
+                list(contract_stale.iter().map(String::as_str)),
+            ),
+            (
+                "contract_count",
+                number(s.registry.get("contracts").object().map_or(0, <[_]>::len)),
+            ),
             (
                 "waves",
                 object([("count", number(max)), ("tasks", wave_tasks)]),

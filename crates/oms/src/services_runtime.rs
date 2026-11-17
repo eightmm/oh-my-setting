@@ -965,6 +965,36 @@ impl<'a> RuntimeServices<'a> {
         self.interrupted.as_ref()
     }
     fn child(&self, spec: ChildSpec<'_>) -> oms_command_plan::Result<ChildOut> {
+        #[cfg(target_os = "linux")]
+        if self.scope == Scope::WholeTree
+            && !self.control.supervise_worker().is_empty()
+            && std::fs::read_dir("/proc/self/task").is_ok_and(|entries| entries.count() != 1)
+        {
+            let mut spawn =
+                crate::services_control::Spawn::new(self.scope, spec.argv, spec.wall, spec.limit);
+            spawn.cwd = spec.cwd;
+            spawn.clear_environment = spec.clear_environment;
+            spawn.environment = spec.environment;
+            spawn.remove_environment = spec.remove_environment;
+            spawn.merged = spec.merged;
+            spawn.drain = spec.drain;
+            spawn.stdin = spec.stdin;
+            let child = crate::services_control::run_via_supervise_worker(
+                self.control.supervise_worker(),
+                &spawn,
+                self.cancel(),
+            )
+            .map_err(plan_error)?;
+            return Ok(ChildOut {
+                code: child.code,
+                stdout: child.stdout,
+                stderr: child.stderr,
+                elapsed: child.elapsed,
+                timed_out: child.timed_out,
+                cancelled: child.cancelled,
+                dropped: child.dropped,
+            });
+        }
         run_child(self.scope, spec, self.cancel()).map_err(plan_error)
     }
     /// Bounded Git child with no ambient `GIT_*` redirection or prompts.

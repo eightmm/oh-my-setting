@@ -1,11 +1,14 @@
 //! Native control-plane service adapters (`plan`, `autonomy`, `landing`, `graph`, `task`, `state`).
 //!
-//! Authority rules: an adapter only forwards to a public native producer. Where
-//! no producer exists (landing lease/approval compare-and-set, main-reviewer
-//! capture, admission context, the canonical publication fence) the trait's
-//! fail-closed default is kept; tool output, environment labels and room
-//! membership are never treated as a grant. Nothing here writes a file itself:
-//! every mutation is performed by the owning domain crate under its own lock.
+//! Authority rules: an adapter only forwards to a public native producer, and
+//! tool output, environment labels and room membership are never treated as a
+//! grant. The landing authorities (plan lease/receipt compare-and-set, approval
+//! reservation, coverage, failure reports, findings, admission context) live in
+//! [`crate::services_landing`]; inputs no native producer can prove there
+//! fail closed. Apart from host residue cleanup, which removes only proven
+//! dead, clean, owned harness worktrees and exact install links, nothing here
+//! writes a file itself: every mutation is performed by the owning domain
+//! crate under its own lock.
 //!
 //! Child processes (`invoke`, `invoke_command`, verification, the publication
 //! scan worker) always run through `oms_supervisor` with a wall deadline,
@@ -30,7 +33,7 @@ use oms_supervisor::capture::{CaptureOptions, LimitAction};
 use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -43,45 +46,58 @@ const COMMAND_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const VERIFY_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const SCAN_OUTPUT_LIMIT: usize = 64 * 1024;
 const PROBE_OUTPUT_LIMIT: usize = 64 * 1024;
+const SUPERVISE_REQUEST_LIMIT: usize = 4 * 1024 * 1024;
 /// First argument of the dedicated publication-scan worker process. The binary's
 /// entry point must route `<exe> SCAN_WORKER_FLAG ...` to [`scan_worker_main`]
 /// before any other dispatch; the parent never runs the worker in-process.
 pub(crate) const SCAN_WORKER_FLAG: &str = "--oms-publication-scan-worker";
+/// Internal single-thread child supervisor trampoline used when a Linux caller
+/// already holds extra threads (such as `patch-admit`'s live scope monitor)
+/// and still requires exclusive `Scope::WholeTree` subreaper containment.
+pub(crate) const SUPERVISE_WORKER_FLAG: &str = "--oms-supervise-worker";
 
 /// Outcome of one fully supervised child. Exit codes follow the shell
 /// convention used by the owning crates: 124 deadline, 125 output limit or
 /// supervisor stop, 130 cancellation.
-struct Child {
-    code: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    elapsed: Duration,
-    timed_out: bool,
-    output_limited: bool,
+pub(crate) struct Child {
+    pub(crate) code: i32,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) elapsed: Duration,
+    pub(crate) timed_out: bool,
+    pub(crate) output_limited: bool,
+    pub(crate) cancelled: bool,
+    pub(crate) dropped: u64,
 }
 
 /// One supervised launch. `merged` joins stderr into stdout (acceptance
 /// commands); otherwise the streams are captured separately.
-struct Spawn<'a> {
-    scope: Scope,
-    argv: Vec<OsString>,
-    cwd: Option<&'a Path>,
-    environment: Vec<(OsString, OsString)>,
-    remove_environment: Vec<OsString>,
-    merged: bool,
-    wall: Duration,
-    limit: usize,
-    terminate_grace: Duration,
+pub(crate) struct Spawn<'a> {
+    pub(crate) scope: Scope,
+    pub(crate) argv: Vec<OsString>,
+    pub(crate) cwd: Option<&'a Path>,
+    pub(crate) clear_environment: bool,
+    pub(crate) environment: Vec<(OsString, OsString)>,
+    pub(crate) remove_environment: Vec<OsString>,
+    pub(crate) merged: bool,
+    pub(crate) drain: bool,
+    pub(crate) stdin: Vec<u8>,
+    pub(crate) wall: Duration,
+    pub(crate) limit: usize,
+    pub(crate) terminate_grace: Duration,
 }
 impl<'a> Spawn<'a> {
-    fn new(scope: Scope, argv: Vec<OsString>, wall: Duration, limit: usize) -> Self {
+    pub(crate) fn new(scope: Scope, argv: Vec<OsString>, wall: Duration, limit: usize) -> Self {
         Self {
             scope,
             argv,
             cwd: None,
+            clear_environment: false,
             environment: Vec::new(),
             remove_environment: Vec::new(),
             merged: false,
+            drain: false,
+            stdin: Vec::new(),
             wall,
             limit,
             terminate_grace: Duration::from_secs(2),
@@ -106,9 +122,12 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
         scope,
         argv,
         cwd,
+        clear_environment,
         environment,
         remove_environment,
         merged,
+        drain,
+        stdin,
         wall,
         limit,
         terminate_grace,
@@ -121,11 +140,14 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
     }
     let mut request = Request::new(argv);
     request.cwd = cwd.map(Path::to_owned);
-    request.stdin = Some(Vec::new());
+    request.stdin = Some(stdin);
+    request.clear_environment = clear_environment;
     request.environment = environment;
     let mut remove_environment = remove_environment;
     for key in ["OMS_NATIVE_OUTCOME", "OMS_NATIVE_DISPATCHED"] {
-        if !remove_environment.iter().any(|v| v == key) {
+        if !remove_environment.iter().any(|v| v == key)
+            && !request.environment.iter().any(|(k, _)| k == key)
+        {
             remove_environment.push(OsString::from(key));
         }
     }
@@ -144,7 +166,11 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
     );
     request.capture = CaptureOptions {
         max_bytes: limit,
-        on_limit: LimitAction::Terminate,
+        on_limit: if drain {
+            LimitAction::Drain
+        } else {
+            LimitAction::Terminate
+        },
         lines: None,
     };
     if !merged {
@@ -155,7 +181,9 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
     } else {
         Reactor::new()
     };
-    let id = reactor.start(request).map_err(|e| e.to_string())?;
+    let id = reactor
+        .start(request)
+        .map_err(|e| format!("launch failed: {e}"))?;
     let mut cancelled = false;
     loop {
         if interrupted.load(Ordering::Acquire) && !cancelled {
@@ -182,6 +210,8 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
                     Some(_) => 125,
                     None => done.exit.map_or(125, |e| e.shell_code()),
                 };
+                let dropped =
+                    done.stdout.dropped_bytes + done.stderr.as_ref().map_or(0, |s| s.dropped_bytes);
                 return Ok(Child {
                     code,
                     stdout: done.stdout.bytes,
@@ -189,6 +219,8 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
                     elapsed: done.duration,
                     timed_out: done.stop == Some(StopReason::Deadline),
                     output_limited: done.stop == Some(StopReason::OutputLimit),
+                    cancelled: done.stop == Some(StopReason::Cancelled),
+                    dropped,
                 });
             }
         }
@@ -231,7 +263,12 @@ pub(crate) struct ControlServices<'a> {
     source: PathBuf,
     native: Vec<OsString>,
     scan_worker: Vec<OsString>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    supervise_worker: Vec<OsString>,
     scope: Scope,
+    /// Approval grant validated before admission and reserved only by the
+    /// landing fence, so a rejected admission never burns the approval.
+    landing_grant: std::sync::Mutex<Option<crate::services_landing::Grant>>,
 }
 fn staged_dispatch_launcher(exe: &Path, source: &Path) -> Vec<OsString> {
     if exe.file_name().and_then(|v| v.to_str()) != Some("oms") {
@@ -278,6 +315,11 @@ impl<'a> ControlServices<'a> {
             .filter(|p| p.is_file())
             .ok_or("cannot resolve the executing native binary")?;
         let native = staged_dispatch_launcher(&exe, &source);
+        let supervise_worker = if exe.file_name().and_then(|v| v.to_str()) == Some("oms") {
+            vec![exe.as_os_str().to_owned(), SUPERVISE_WORKER_FLAG.into()]
+        } else {
+            Vec::new()
+        };
         #[cfg(target_os = "linux")]
         let scope = Scope::WholeTree;
         #[cfg(not(target_os = "linux"))]
@@ -288,7 +330,9 @@ impl<'a> ControlServices<'a> {
             source,
             native,
             scan_worker: vec![exe.into(), SCAN_WORKER_FLAG.into()],
+            supervise_worker,
             scope,
+            landing_grant: std::sync::Mutex::new(None),
         })
     }
     /// Test constructor overriding child launchers with `ProcessGroup` scope so
@@ -307,7 +351,9 @@ impl<'a> ControlServices<'a> {
             source,
             native,
             scan_worker,
+            supervise_worker: Vec::new(),
             scope: Scope::ProcessGroup,
+            landing_grant: std::sync::Mutex::new(None),
         }
     }
     /// Opt into whole-tree containment in tests.
@@ -322,6 +368,10 @@ impl<'a> ControlServices<'a> {
             interrupted: self.interrupted,
             source: &self.source,
         }
+    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn supervise_worker(&self) -> &[OsString] {
+        &self.supervise_worker
     }
 }
 
@@ -361,7 +411,9 @@ impl oms_command_plan::Services for ControlServices<'_> {
             .iter()
             .map(OsString::from)
             .collect();
-        let child = run_child(spawn, self.interrupted).map_err(plan_error)?;
+        let child = self
+            .run_supervised(spawn, self.interrupted)
+            .map_err(plan_error)?;
         Ok(PlanExecution {
             exit: child.code.clamp(0, 255) as u8,
             runner_exit: 0,
@@ -417,9 +469,28 @@ impl oms_command_plan::Services for ControlServices<'_> {
     fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
         Some(crate::services_runtime::resolve_group_membership)
     }
+    fn read_managed_patch(
+        &self,
+        state_repo: &Path,
+        path: &Path,
+        limit: usize,
+    ) -> oms_command_plan::Result<Option<Vec<u8>>> {
+        let index = oms_reference::capture::CaptureIndex::load(state_repo).map_err(plan_error)?;
+        index.read_patch(path, limit).map(Some).map_err(plan_error)
+    }
 }
 
 impl<'a> ControlServices<'a> {
+    fn run_supervised(&self, spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String> {
+        #[cfg(target_os = "linux")]
+        if spawn.scope == Scope::WholeTree
+            && !self.supervise_worker.is_empty()
+            && std::fs::read_dir("/proc/self/task").is_ok_and(|entries| entries.count() != 1)
+        {
+            return run_via_supervise_worker(&self.supervise_worker, &spawn, interrupted);
+        }
+        run_child(spawn, interrupted)
+    }
     fn invoke_with_scope(
         &self,
         command: &oms_command_autonomy::Invocation,
@@ -438,7 +509,9 @@ impl<'a> ControlServices<'a> {
         if scope == Scope::ProcessGroup {
             spawn = spawn.terminate_grace(Duration::from_secs(5));
         }
-        let child = run_child(spawn, interrupted).map_err(|e| autonomy_error(2, e))?;
+        let child = self
+            .run_supervised(spawn, interrupted)
+            .map_err(|e| autonomy_error(2, e))?;
         Ok((child.code, child.stdout, child.stderr))
     }
 }
@@ -658,8 +731,9 @@ impl oms_command_graph::HostServices for ControlServices<'_> {
             timeout.unwrap_or(DEFAULT_WALL),
             COMMAND_OUTPUT_LIMIT,
         );
-        let child =
-            run_child(spawn.cwd(cwd).environment(environment), cancel).map_err(GraphError::new)?;
+        let child = self
+            .run_supervised(spawn.cwd(cwd).environment(environment), cancel)
+            .map_err(GraphError::new)?;
         Ok((child.code, child.stdout, child.stderr, child.timed_out))
     }
 }
@@ -678,6 +752,106 @@ impl oms_command_landing::Services for ControlServices<'_> {
     fn plan(&self) -> Option<&dyn oms_command_plan::Services> {
         Some(self)
     }
+    fn admission_context(&self) -> Option<&dyn oms_reference::binding::Context> {
+        Some(&crate::services_landing::AdmissionContext)
+    }
+    fn landing_review(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+    ) -> oms_command_landing::Result<oms_command_landing::V> {
+        crate::services_landing::landing_review(self, request, self.interrupted)
+    }
+    fn landing_approval(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+        approval: &str,
+        grant: &str,
+        version: &str,
+        request_only: bool,
+    ) -> oms_command_landing::Result<oms_command_landing::V> {
+        let (value, reserved) = crate::services_landing::landing_approval(
+            self,
+            request,
+            approval,
+            grant,
+            version,
+            request_only,
+            self.interrupted,
+        )?;
+        if let Some(reserved) = reserved {
+            *self.landing_grant.lock().map_err(|_| {
+                oms_command_landing::Error::new(2, "landing approval state is poisoned")
+            })? = Some(reserved);
+        }
+        Ok(value)
+    }
+    fn fence_landing(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+        intent: &oms_command_landing::V,
+    ) -> oms_command_landing::Result<()> {
+        let grant = self
+            .landing_grant
+            .lock()
+            .map_err(|_| oms_command_landing::Error::new(2, "landing approval state is poisoned"))?
+            .take();
+        crate::services_landing::fence_landing(self, request, intent, grant, self.interrupted)
+    }
+    fn complete_landing(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+        receipt: &oms_command_landing::V,
+    ) -> oms_command_landing::Result<()> {
+        crate::services_landing::complete_landing(self, request, receipt, self.interrupted)
+    }
+    fn recover_landing(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+        intent: &oms_command_landing::V,
+        applied: bool,
+    ) -> oms_command_landing::Result<()> {
+        crate::services_landing::recover_landing(self, request, intent, applied, self.interrupted)
+    }
+    fn coverage(
+        &self,
+        repo: &Path,
+        ids: &[String],
+        evidence: Option<&oms_command_landing::V>,
+    ) -> oms_command_landing::Result<oms_command_landing::V> {
+        let runtime = crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+            .map_err(|e| oms_command_landing::Error::new(3, e))?;
+        crate::services_landing::coverage(
+            &runtime,
+            &self.source,
+            repo,
+            ids,
+            evidence,
+            self.interrupted,
+        )
+    }
+    fn cleanup(
+        &self,
+        repo: &Path,
+        apply: bool,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<oms_command_landing::V> {
+        crate::services_landing::cleanup(&self.source, repo, apply, interrupted)
+    }
+    fn failure_report(
+        &self,
+        repo: &Path,
+        fingerprint: &str,
+    ) -> oms_command_landing::Result<oms_command_landing::V> {
+        crate::services_landing::failure_report(
+            crate::registry::PUBLIC,
+            repo,
+            fingerprint,
+            self.interrupted,
+        )
+    }
+    fn review_findings(&self, repo: &Path) -> oms_command_landing::Result<oms_command_landing::V> {
+        crate::services_landing::review_findings(repo, self.interrupted)
+    }
     fn supervise(
         &self,
         request: &VerifyRequest,
@@ -692,8 +866,9 @@ impl oms_command_landing::Services for ControlServices<'_> {
         let spawn = spawn
             .cwd(&request.cwd)
             .environment(request.environment.clone());
-        let child =
-            run_child(spawn, interrupted).map_err(|e| oms_command_landing::Error::new(2, e))?;
+        let child = self
+            .run_supervised(spawn, interrupted)
+            .map_err(|e| oms_command_landing::Error::new(2, e))?;
         Ok(LandingExecution {
             code: child.code,
             stdout: child.stdout,
@@ -718,7 +893,9 @@ impl oms_command_landing::Services for ControlServices<'_> {
         let mut argv = self.scan_worker.clone();
         argv.extend(scan_arguments(request).map_err(|e| fail(2, e))?);
         let spawn = Spawn::new(self.scope, argv, request.wall, SCAN_OUTPUT_LIMIT);
-        let child = run_child(spawn.cwd(&request.repo), interrupted).map_err(|e| fail(2, e))?;
+        let child = self
+            .run_supervised(spawn.cwd(&request.repo), interrupted)
+            .map_err(|e| fail(2, e))?;
         match child.code {
             0 => Ok(()),
             130 => Err(fail(130, "publication scan interrupted".into())),
@@ -891,14 +1068,15 @@ impl oms_command_landing::Services for ControlServices<'_> {
             Duration::from_secs(600),
             COMMAND_OUTPUT_LIMIT,
         );
-        let child = run_child(
-            spawn.cwd(repo).environment(vec![
-                ("OH_MY_SETTING_UPDATE_EXPECTED_TARGET".into(), sha.into()),
-                ("OH_MY_SETTING_UPDATE_TARGET_COMMIT".into(), sha.into()),
-            ]),
-            interrupted,
-        )
-        .map_err(|e| oms_command_landing::Error::new(2, e))?;
+        let child = self
+            .run_supervised(
+                spawn.cwd(repo).environment(vec![
+                    ("OH_MY_SETTING_UPDATE_EXPECTED_TARGET".into(), sha.into()),
+                    ("OH_MY_SETTING_UPDATE_TARGET_COMMIT".into(), sha.into()),
+                ]),
+                interrupted,
+            )
+            .map_err(|e| oms_command_landing::Error::new(2, e))?;
         let rc = usize::try_from(child.code).unwrap_or(1);
         let mut result = oms_command_landing::obj([("rc", rc.into())]);
         if child.code != 0 {
@@ -1905,6 +2083,292 @@ pub(crate) fn scan_worker_main(args: &[OsString], interrupted: &AtomicBool) -> i
     }
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[usize::from(b >> 4)] as char);
+        out.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
+fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
+    let raw = text.as_bytes();
+    if !raw.len().is_multiple_of(2) {
+        return Err("odd hex byte length".into());
+    }
+    let nibble = |b: u8| -> Result<u8, String> {
+        match b {
+            b'0'..=b'9' => Ok(b - b'0'),
+            b'a'..=b'f' => Ok(b - b'a' + 10),
+            b'A'..=b'F' => Ok(b - b'A' + 10),
+            _ => Err("invalid hex digit".into()),
+        }
+    };
+    let mut out = Vec::with_capacity(raw.len() / 2);
+    for &[hi, lo] in raw.as_chunks::<2>().0 {
+        out.push((nibble(hi)? << 4) | nibble(lo)?);
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn run_via_supervise_worker(
+    worker: &[OsString],
+    spawn: &Spawn<'_>,
+    interrupted: &AtomicBool,
+) -> Result<Child, String> {
+    let argv: Vec<String> = spawn
+        .argv
+        .iter()
+        .map(|a| hex_encode(a.as_bytes()))
+        .collect();
+    let cwd = spawn.cwd.map(|p| hex_encode(p.as_os_str().as_bytes()));
+    let environment: Vec<[String; 2]> = spawn
+        .environment
+        .iter()
+        .map(|(k, v)| [hex_encode(k.as_bytes()), hex_encode(v.as_bytes())])
+        .collect();
+    let remove_environment: Vec<String> = spawn
+        .remove_environment
+        .iter()
+        .map(|k| hex_encode(k.as_bytes()))
+        .collect();
+    let payload = serde_json::json!({
+        "schema": 1,
+        "argv": argv,
+        "cwd": cwd,
+        "clear_environment": spawn.clear_environment,
+        "environment": environment,
+        "remove_environment": remove_environment,
+        "merged": spawn.merged,
+        "drain": spawn.drain,
+        "stdin": hex_encode(&spawn.stdin),
+        "wall_ms": u64::try_from(spawn.wall.as_millis().max(1)).map_err(|_| "execution deadline overflow")?,
+        "limit": spawn.limit,
+        "terminate_grace_ms": u64::try_from(spawn.terminate_grace.as_millis()).map_err(|_| "terminate grace overflow")?,
+    });
+    let encoded = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    if encoded.len() > SUPERVISE_REQUEST_LIMIT {
+        return Err("supervised request exceeds IPC byte limit".into());
+    }
+    let outer_limit = spawn
+        .limit
+        .saturating_mul(4)
+        .saturating_add(256 * 1024)
+        .clamp(1024 * 1024, 128 * 1024 * 1024);
+    let mut outer = Spawn::new(
+        Scope::ProcessGroup,
+        worker.to_vec(),
+        spawn.wall.saturating_add(Duration::from_secs(30)),
+        outer_limit,
+    )
+    .terminate_grace(spawn.terminate_grace.saturating_add(Duration::from_secs(5)));
+    outer.cwd = spawn.cwd;
+    outer.stdin = encoded;
+    let done = run_child(outer, interrupted)?;
+    if done.output_limited || done.timed_out {
+        return Err("native supervise worker exceeded bounds".into());
+    }
+    if done.stdout.is_empty() && done.code == 130 {
+        return Ok(Child {
+            code: 130,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            elapsed: done.elapsed,
+            timed_out: false,
+            output_limited: false,
+            cancelled: true,
+            dropped: 0,
+        });
+    }
+    let result: Value = serde_json::from_slice(&done.stdout).map_err(|_| {
+        let detail = String::from_utf8_lossy(&done.stderr);
+        let detail = detail.trim();
+        if detail.is_empty() {
+            format!("native supervise worker failed (exit {})", done.code)
+        } else {
+            detail.to_owned()
+        }
+    })?;
+    if result["ok"] != true {
+        return Err(result["error"]
+            .as_str()
+            .unwrap_or("native supervise worker refused")
+            .to_owned());
+    }
+    let code = result["code"]
+        .as_i64()
+        .and_then(|v| i32::try_from(v).ok())
+        .ok_or("native supervise worker returned invalid exit code")?;
+    let stdout = hex_decode(
+        result["stdout"]
+            .as_str()
+            .ok_or("native supervise worker returned invalid stdout")?,
+    )?;
+    let stderr = hex_decode(
+        result["stderr"]
+            .as_str()
+            .ok_or("native supervise worker returned invalid stderr")?,
+    )?;
+    let elapsed_ms = result["elapsed_ms"]
+        .as_u64()
+        .ok_or("native supervise worker returned invalid elapsed time")?;
+    Ok(Child {
+        code,
+        stdout,
+        stderr,
+        elapsed: Duration::from_millis(elapsed_ms),
+        timed_out: result["timed_out"] == true,
+        output_limited: result["output_limited"] == true,
+        cancelled: result["cancelled"] == true,
+        dropped: result["dropped"].as_u64().unwrap_or(0),
+    })
+}
+
+/// Entry point of the single-threaded child supervisor trampoline
+/// ([`SUPERVISE_WORKER_FLAG`]). Reads one JSON `Spawn` descriptor from stdin,
+/// runs it inside [`Scope::WholeTree`] on Linux, and writes one JSON outcome to stdout.
+pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool) -> i32 {
+    use std::io::{Read, Write};
+    let report_json = |payload: Value| -> i32 {
+        match serde_json::to_vec(&payload) {
+            Ok(bytes) => {
+                let mut out = std::io::stdout().lock();
+                if out.write_all(&bytes).is_err() || out.flush().is_err() {
+                    return 1;
+                }
+                0
+            }
+            Err(_) => 1,
+        }
+    };
+    if !args.is_empty() {
+        return report_json(
+            serde_json::json!({"ok": false, "error": "supervise worker takes no arguments"}),
+        );
+    }
+    let mut raw = Vec::new();
+    if let Err(e) = std::io::stdin()
+        .take((SUPERVISE_REQUEST_LIMIT + 1) as u64)
+        .read_to_end(&mut raw)
+    {
+        return report_json(serde_json::json!({"ok": false, "error": e.to_string()}));
+    }
+    if raw.len() > SUPERVISE_REQUEST_LIMIT {
+        return report_json(
+            serde_json::json!({"ok": false, "error": "supervise request exceeds size limit"}),
+        );
+    }
+    let parsed: Value = match serde_json::from_slice::<Value>(&raw) {
+        Ok(v) if v["schema"] == 1 => v,
+        _ => {
+            return report_json(
+                serde_json::json!({"ok": false, "error": "invalid supervise request"}),
+            );
+        }
+    };
+    let decode_vec = |key: &str| -> Result<Vec<OsString>, String> {
+        parsed[key]
+            .as_array()
+            .ok_or_else(|| format!("missing {key}"))?
+            .iter()
+            .map(|item| {
+                let s = item
+                    .as_str()
+                    .ok_or_else(|| format!("invalid {key} entry"))?;
+                Ok(OsString::from_vec(hex_decode(s)?))
+            })
+            .collect()
+    };
+    let argv = match decode_vec("argv") {
+        Ok(v) => v,
+        Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+    };
+    let cwd = match parsed.get("cwd").and_then(|v| v.as_str()) {
+        Some(hex) => match hex_decode(hex) {
+            Ok(bytes) => Some(PathBuf::from(OsString::from_vec(bytes))),
+            Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+        },
+        None => None,
+    };
+    let environment: Vec<(OsString, OsString)> = match parsed["environment"]
+        .as_array()
+        .ok_or_else(|| "missing environment".to_owned())
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|pair| {
+                    let k = pair[0]
+                        .as_str()
+                        .ok_or_else(|| "invalid env key".to_owned())?;
+                    let v = pair[1]
+                        .as_str()
+                        .ok_or_else(|| "invalid env value".to_owned())?;
+                    Ok((
+                        OsString::from_vec(hex_decode(k)?),
+                        OsString::from_vec(hex_decode(v)?),
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()
+        }) {
+        Ok(v) => v,
+        Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+    };
+    let remove_environment = match decode_vec("remove_environment") {
+        Ok(v) => v,
+        Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+    };
+    let stdin = match parsed.get("stdin").and_then(|v| v.as_str()) {
+        Some(hex) => match hex_decode(hex) {
+            Ok(bytes) => bytes,
+            Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+        },
+        None => Vec::new(),
+    };
+    let (Some(merged), Some(wall_ms), Some(limit), Some(grace_ms)) = (
+        parsed["merged"].as_bool(),
+        parsed["wall_ms"].as_u64(),
+        parsed["limit"]
+            .as_u64()
+            .and_then(|v| usize::try_from(v).ok()),
+        parsed["terminate_grace_ms"].as_u64(),
+    ) else {
+        return report_json(serde_json::json!({"ok": false, "error": "invalid supervise bounds"}));
+    };
+    #[cfg(target_os = "linux")]
+    let scope = Scope::WholeTree;
+    #[cfg(not(target_os = "linux"))]
+    let scope = Scope::ProcessGroup;
+    let mut spawn = Spawn::new(scope, argv, Duration::from_millis(wall_ms), limit)
+        .environment(environment)
+        .terminate_grace(Duration::from_millis(grace_ms));
+    spawn.cwd = cwd.as_deref();
+    spawn.clear_environment = parsed["clear_environment"] == true;
+    spawn.remove_environment = remove_environment;
+    spawn.merged = merged;
+    spawn.drain = parsed["drain"] == true;
+    spawn.stdin = stdin;
+    match run_child(spawn, interrupted) {
+        Ok(child) => report_json(serde_json::json!({
+            "ok": true,
+            "code": child.code,
+            "stdout": hex_encode(&child.stdout),
+            "stderr": hex_encode(&child.stderr),
+            "elapsed_ms": u64::try_from(child.elapsed.as_millis()).unwrap_or(u64::MAX),
+            "timed_out": child.timed_out,
+            "output_limited": child.output_limited,
+            "cancelled": child.cancelled,
+            "dropped": child.dropped,
+        })),
+        Err(error) => report_json(serde_json::json!({
+            "ok": false,
+            "error": error,
+        })),
+    }
+}
+
 /// Native task producers: reference ownership, journal, memory, fail-ledger,
 /// verify observations and skill-forge contract hints.
 pub(crate) struct ControlTask<'a> {
@@ -2570,7 +3034,7 @@ mod tests {
                 .is_err()
         );
         assert!(oms_command_landing::Services::plan(&control).is_some());
-        assert!(oms_command_landing::Services::admission_context(&control).is_none());
+        assert!(oms_command_landing::Services::admission_context(&control).is_some());
         let pub_guard =
             oms_command_landing::Services::publication_guard(&control, repo.path(), &stop).unwrap();
         let canonical = std::fs::canonicalize(repo.path()).unwrap();

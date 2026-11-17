@@ -220,6 +220,53 @@ pub(crate) fn files(
     Ok(found)
 }
 
+/// Direct children only: every matching entry with its kind, so callers can report symlinks.
+/// A missing directory is empty; reading never creates anything.
+pub(crate) fn shallow_entries(
+    ctx: &Context<'_>,
+    directory: &Path,
+    suffix: &str,
+    limit: usize,
+) -> Result<Vec<(PathBuf, std::fs::FileType)>> {
+    checkpoint(ctx.interrupted)?;
+    match std::fs::symlink_metadata(directory) {
+        Ok(m) => require(
+            m.is_dir() && !m.is_symlink(),
+            "scan root must be a non-symlink directory",
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(error(2, e)),
+    }
+    let mut found = Vec::new();
+    for (seen, entry) in std::fs::read_dir(directory)
+        .map_err(|e| error(2, e))?
+        .enumerate()
+    {
+        let entry = entry.map_err(|e| error(2, e))?;
+        require(seen < limit, "state scan entry limit exceeded")?;
+        if entry.file_name().to_string_lossy().ends_with(suffix) {
+            found.push((entry.path(), entry.file_type().map_err(|e| error(2, e))?));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found)
+}
+
+/// Like [`files`] for one directory level: subdirectories are never entered, and symlinks are
+/// skipped.
+pub(crate) fn shallow_files(
+    ctx: &Context<'_>,
+    directory: &Path,
+    suffix: &str,
+    limit: usize,
+) -> Result<Vec<PathBuf>> {
+    Ok(shallow_entries(ctx, directory, suffix, limit)?
+        .into_iter()
+        .filter(|(_, kind)| kind.is_file())
+        .map(|(path, _)| path)
+        .collect())
+}
+
 pub fn notebook(raw: &[u8]) -> Result<Value> {
     require(raw.len() <= storage::MAX_STREAM, "notebook exceeds 32 MiB")?;
     let value = json::parse(raw)?;

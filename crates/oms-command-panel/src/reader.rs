@@ -261,6 +261,7 @@ pub fn page_with(
 ) -> Result<()> {
     let mut reader = Reader::default();
     let eol = if tty { "\r\n" } else { "\n" };
+    let colored = render::color_enabled(tty);
     type Drawn = (usize, usize, usize, bool, String, View, usize);
     let mut drawn: Option<Drawn> = None;
     let mut rows: Vec<String> = Vec::new();
@@ -277,26 +278,48 @@ pub fn page_with(
             lines.len(),
         );
         if drawn.as_ref() != Some(&state) {
-            let mut frame: Vec<String> = lines
-                .iter()
-                .skip(reader.offset)
-                .take(height.saturating_sub(2))
-                .map(|line| render::clip(line, width))
-                .collect();
-            frame.push(render::clip(
+            let has_header = height >= 5;
+            let body_rows = height.saturating_sub(if has_header { 3 } else { 2 });
+            let mut frame = Vec::new();
+            if has_header {
+                frame.push(tab_header(reader.view, width, colored));
+            }
+            for line in lines.iter().skip(reader.offset).take(body_rows) {
+                let clipped = render::clip(line, width);
+                frame.push(if colored && reader.view == View::Diff {
+                    style_diff_line(&clipped)
+                } else {
+                    clipped
+                });
+            }
+            let total_lines = lines.len().max(1);
+            let pos = (reader.offset + 1).min(total_lines);
+            let pct = (pos * 100) / total_lines;
+            let status_plain = render::clip(
                 &format!(
-                    "{} / {}{}",
+                    "View: {} · {} / {} ({pct}%){}",
+                    view_name(reader.view),
                     reader.offset + 1,
                     lines.len(),
                     if reader.searching {
-                        format!(" /{}", reader.query)
+                        format!(" · /{}", reader.query)
                     } else {
                         String::new()
                     }
                 ),
                 width,
-            ));
-            frame.push(render::clip(crate::navigation::READER_HINT, width));
+            );
+            frame.push(if colored {
+                format!("\x1b[38;5;245m{status_plain}\x1b[0m")
+            } else {
+                status_plain
+            });
+            let hint_plain = render::clip(crate::navigation::READER_HINT, width);
+            frame.push(if colored {
+                format!("\x1b[2m{hint_plain}\x1b[0m")
+            } else {
+                hint_plain
+            });
             let mut screen = String::new();
             if tty {
                 // Row overwrite inside synchronized output: no blank flash.
@@ -327,4 +350,59 @@ pub fn page_with(
         }
     }
     Ok(())
+}
+
+fn view_name(view: View) -> &'static str {
+    match view {
+        View::Summary => "Summary",
+        View::Raw => "Raw",
+        View::Events => "Events",
+        View::Diff => "Diff",
+        View::Info => "Info",
+        View::Files => "Files",
+        View::Transcript => "Transcript",
+    }
+}
+
+fn tab_header(active: View, width: usize, colored: bool) -> String {
+    let tabs = [
+        View::Summary,
+        View::Raw,
+        View::Events,
+        View::Diff,
+        View::Info,
+        View::Files,
+        View::Transcript,
+    ];
+    let items: Vec<String> = tabs
+        .iter()
+        .map(|&v| {
+            let label = view_name(v);
+            if v == active {
+                format!("[{label}]")
+            } else {
+                label.to_owned()
+            }
+        })
+        .collect();
+    let plain = render::clip(&format!("OMS Reader │ {}", items.join("  ")), width);
+    if colored {
+        format!("\x1b[1;38;5;215m{plain}\x1b[0m")
+    } else {
+        plain
+    }
+}
+
+fn style_diff_line(line: &str) -> String {
+    if line.starts_with("diff ") || line.starts_with("--- ") || line.starts_with("+++ ") {
+        format!("\x1b[1;38;5;215m{line}\x1b[0m")
+    } else if line.starts_with("@@") {
+        format!("\x1b[38;5;117m{line}\x1b[0m")
+    } else if line.starts_with('+') {
+        format!("\x1b[38;5;114m{line}\x1b[0m")
+    } else if line.starts_with('-') {
+        format!("\x1b[38;5;203m{line}\x1b[0m")
+    } else {
+        line.to_owned()
+    }
 }

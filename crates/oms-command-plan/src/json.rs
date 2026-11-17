@@ -241,6 +241,11 @@ pub fn parse(raw: &[u8]) -> Result<Value> {
         .map(|v| from_context(&v))
         .map_err(error)
 }
+pub fn parse_bounded(raw: &[u8], limit: usize) -> Result<Value> {
+    oms_context::parse_json_bounded(raw, limit)
+        .map(|v| from_context(&v))
+        .map_err(error)
+}
 pub fn parse_legacy(raw: &[u8], limit: usize) -> Result<Value> {
     oms_context::parse_experiment_json(raw, limit)
         .map(|v| from_context(&v))

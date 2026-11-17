@@ -1660,3 +1660,145 @@ fn delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree() {
         },
     );
 }
+
+#[test]
+fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
+    isolated(
+        "panel_dispatch_delegate_records_parent_refs_and_index_digests",
+        || {
+            let repo = Repo::new();
+            repo.write("README.md", "panel base\n");
+            repo.git(&["add", "README.md"]);
+            repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "init",
+            ]);
+            let fake_claude = repo.0.join(".fake-bin/claude");
+            fs::create_dir_all(fake_claude.parent().unwrap()).unwrap();
+            fs::write(
+                &fake_claude,
+                "#!/bin/sh\nprintf 'changed\\n' >> README.md\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+            let path_val = format!(
+                "{}:{}",
+                fake_claude.parent().unwrap().display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            if std::env::var_os("OMS_PANEL_DISPATCH_INNER").is_none() {
+                let mut cmd = Command::new(std::env::current_exe().unwrap());
+                clean_env_child(&mut cmd)
+                    .args([
+                        "--exact",
+                        "panel_dispatch_delegate_records_parent_refs_and_index_digests",
+                        "--nocapture",
+                    ])
+                    .env(
+                        CHILD_ENV,
+                        "panel_dispatch_delegate_records_parent_refs_and_index_digests",
+                    )
+                    .env("OMS_PANEL_DISPATCH_INNER", "1")
+                    .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+                    .env("PATH", &path_val)
+                    .env("OMS_PANEL_DISPATCH", "1")
+                    .env("OMS_PANEL_MAIN_ATTEMPT", "att_main1234")
+                    .env("OMS_PANEL_ROLE", "worker")
+                    .env("OMS_PANEL_STRATEGY", "builder")
+                    .env("OMS_PANEL_OWNER", "antigravity")
+                    .env("OMS_PANEL_PURPOSE", "implement")
+                    .env("OMS_PANEL_WORKLOAD", "routine")
+                    .env("OMS_PANEL_ACCESS", "write")
+                    .env("OMS_PANEL_LABEL", "builder test")
+                    .env("OMS_ROOM_ID", "room-1")
+                    .env("OMS_ROOM_PARTICIPANT", "call-p1");
+                let out = cmd.output().unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                return;
+            }
+            let values = args(&[
+                "--repo",
+                repo.0.to_str().unwrap(),
+                "--to",
+                "claude",
+                "--model",
+                "fixture",
+                "--task-id",
+                "t1",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--verify",
+                "true",
+                "Panel dispatch change",
+            ]);
+            let stop = AtomicBool::new(false);
+            let out = run_with_source(
+                "peer-delegate",
+                &values,
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &stop,
+            );
+            assert_eq!(
+                out.0,
+                0,
+                "panel delegate failed: {}\n{}",
+                String::from_utf8_lossy(&out.1),
+                String::from_utf8_lossy(&out.2)
+            );
+            let events_raw =
+                fs::read_to_string(repo.0.join(".oms/lifecycle/events.jsonl")).unwrap();
+            let created = events_raw
+                .lines()
+                .map(|l| V::parse(l.as_bytes()).unwrap())
+                .find(|v| v.get("event_type").text() == Some("attempt.created"))
+                .expect("attempt.created event");
+            assert_eq!(
+                created.get("parent_attempt_id").text(),
+                Some("att_main1234")
+            );
+            assert_eq!(created.get("task_id").text(), Some("t1"));
+            let refs = created.get("refs");
+            assert_eq!(refs.get("panel_role").text(), Some("worker"));
+            assert_eq!(refs.get("panel_strategy").text(), Some("builder"));
+            assert_eq!(refs.get("panel_owner").text(), Some("antigravity"));
+            assert_eq!(refs.get("panel_purpose").text(), Some("implement"));
+            assert_eq!(refs.get("panel_workload").text(), Some("routine"));
+            assert_eq!(refs.get("panel_access").text(), Some("write"));
+            assert_eq!(refs.get("panel_label").text(), Some("builder test"));
+            assert_eq!(refs.get("panel_room_id").text(), Some("room-1"));
+            assert_eq!(refs.get("panel_room_participant").text(), Some("call-p1"));
+
+            let index_raw = fs::read_to_string(repo.0.join(".oms/artifacts/index.jsonl")).unwrap();
+            let row = V::parse(index_raw.lines().last().unwrap().as_bytes()).unwrap();
+            let is_hex64 = |s: &str| {
+                s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            };
+            assert!(
+                row.get("event_id")
+                    .text()
+                    .is_some_and(|v| v.starts_with("evt_"))
+            );
+            assert_eq!(row.get("task_id").text(), Some("t1"));
+            assert!(row.get("artifact_sha256").text().is_some_and(is_hex64));
+            assert!(row.get("patch_sha256").text().is_some_and(is_hex64));
+            assert_eq!(row.get("verify_exit").py(), "0");
+            assert!(
+                !fs::read(repo.0.join(row.get("patch").text().unwrap()))
+                    .unwrap()
+                    .is_empty()
+            );
+        },
+    );
+}

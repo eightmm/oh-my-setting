@@ -217,7 +217,16 @@ fn child_entry() {
         raw.split(SEP).map(OsString::from).collect()
     };
     let flag = AtomicBool::new(false);
-    let (code, out, err) = if std::env::var_os("OMS_CT_SERVICES").is_some() {
+    let (code, out, err) = if let Some(log) = std::env::var_os("OMS_CT_LOG") {
+        run_with_services(
+            tool.to_str().unwrap(),
+            &args,
+            &cwd,
+            &cwd,
+            &flag,
+            &RecordingServices(PathBuf::from(log)),
+        )
+    } else if std::env::var_os("OMS_CT_SERVICES").is_some() {
         run_with_services(
             tool.to_str().unwrap(),
             &args,
@@ -303,6 +312,76 @@ impl Services for TestServices {
     }
     fn after_land(&self, _: &Path, _: &V, _: &AtomicBool) -> oms_command_landing::Result<V> {
         Ok(obj([("rc", 0usize.into())]))
+    }
+}
+
+/// `TestServices` plus landing authorities that accept and append each call
+/// (with the request fields under test) to a log, one line per call.
+struct RecordingServices(PathBuf);
+impl RecordingServices {
+    fn log(&self, line: String) {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.0)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+}
+impl Services for RecordingServices {
+    fn plan(&self) -> Option<&dyn oms_command_plan::Services> {
+        Some(&TestPlanServices)
+    }
+    fn supervise(
+        &self,
+        request: &oms_command_landing::services::VerifyRequest,
+        interrupted: &AtomicBool,
+    ) -> oms_command_landing::Result<Execution> {
+        TestServices.supervise(request, interrupted)
+    }
+    fn publication_guard(
+        &self,
+        _: &Path,
+        _: &AtomicBool,
+    ) -> oms_command_landing::Result<Box<dyn PublicationGuard + '_>> {
+        Ok(Box::new(NoGuard))
+    }
+    fn coverage(
+        &self,
+        _: &Path,
+        ids: &[String],
+        evidence: Option<&V>,
+    ) -> oms_command_landing::Result<V> {
+        let record = evidence.map_or(String::new(), |row| {
+            format!(
+                " covers={} status={}",
+                row.get("covers").py(),
+                row.get("status").py()
+            )
+        });
+        self.log(format!("coverage {}{record}", ids.join(",")));
+        Ok(obj([]))
+    }
+    fn landing_review(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+    ) -> oms_command_landing::Result<V> {
+        self.log(format!("review frozen={}", request.frozen_patch.display()));
+        Ok(obj([]))
+    }
+    fn fence_landing(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+        intent: &V,
+    ) -> oms_command_landing::Result<()> {
+        self.log(format!(
+            "fence frozen={} patch={} consent={}",
+            request.frozen_patch.display(),
+            intent.get("patch").py(),
+            intent.get("verifier_change_consent").truth()
+        ));
+        Ok(())
     }
 }
 
@@ -531,6 +610,57 @@ fn services_gated_commands_fail_closed() {
     );
     // no origin remote: land stops at its first Git observation
     assert_refused(&iso.run("land", &repo, &[]), "No such remote 'origin'");
+}
+
+#[test]
+fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
+    let iso = Isolated::new();
+    let repo = iso.repo("frozen");
+    let patch = real_patch(&iso, &repo);
+    fs::write(repo.join(".git/info/exclude"), "change.patch\n.oms/\n").unwrap();
+    let log = iso.tmp.join("services.log");
+    let log_env = [("OMS_CT_LOG", log.to_str().unwrap())];
+    let (code, _, err) = iso.run_env(
+        "patch-admit",
+        &repo,
+        &["--patch", patch, "--covers", "c1"],
+        &log_env,
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = iso.run_env(
+        "patch-land",
+        &repo,
+        &["--patch", patch, "--allow-verifier-change"],
+        &log_env,
+    );
+    assert_eq!(code, 0, "{err}");
+    let calls = fs::read_to_string(&log).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls[0], "coverage c1");
+    assert!(
+        calls[1].starts_with("coverage c1 covers=['c1'] status="),
+        "{calls:?}"
+    );
+    let landings = fs::read_to_string(repo.join(".oms/landings.jsonl")).unwrap();
+    let intent = landings
+        .lines()
+        .map(|l| V::parse(l.as_bytes()).unwrap())
+        .find(|r| r.get("event").text() == Some("intent"))
+        .unwrap();
+    let frozen = intent.get("patch").py();
+    assert!(
+        frozen.starts_with(&format!("{}/.oms/landing-patches/land-", repo.display())),
+        "{frozen}"
+    );
+    // Review sees the path the intent records; the fence gets the consent.
+    assert_eq!(calls[2], format!("review frozen={frozen}"));
+    assert_eq!(
+        calls[3],
+        format!("fence frozen={frozen} patch={frozen} consent=true")
+    );
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(Path::new(&frozen).is_file());
+    assert!(intent.get("verifier_change_consent").truth());
 }
 
 #[test]
