@@ -198,7 +198,7 @@ fn validate(row: &V) -> Result<()> {
 /// cannot qualify as a repair candidate.
 pub(crate) fn ci_event(repo: &str, branch: &str, head: &str, pr: &V, run: &V) -> Result<V> {
     let sha = string(run, "headSha");
-    let token = |field| {
+    let enum_field = |field| {
         let value = bounded(run, field, 32);
         if value.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
             value
@@ -206,8 +206,8 @@ pub(crate) fn ci_event(repo: &str, branch: &str, head: &str, pr: &V, run: &V) ->
             "unknown".into()
         }
     };
-    let status = token("status");
-    let conclusion = token("conclusion");
+    let status = enum_field("status");
+    let conclusion = enum_field("conclusion");
     let workflow = string(run, "workflowName");
     let withheld = safe(workflow.as_bytes()).is_err() || safe(branch.as_bytes()).is_err();
     let id = number(run.get("databaseId"));
