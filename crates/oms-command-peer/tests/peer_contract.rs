@@ -1288,7 +1288,6 @@ fn review_classification_and_validation() {
                 "--model",
                 "fixture",
                 "--gate",
-                "--no-verify",
                 "--prompt",
                 "inspect source anchors",
                 "--no-task",
@@ -1299,7 +1298,9 @@ fn review_classification_and_validation() {
                 directory,
             ];
             if no_diff {
-                values.push("--no-diff");
+                values.extend(["--no-diff", "--verify", "true"]);
+            } else {
+                values.push("--no-verify");
             }
             let output = oms_command_peer::run_with_executor(
                 "peer-review",
@@ -1432,6 +1433,23 @@ fn review_classification_and_validation() {
         let updated_seats = updated_parsed.get("seats").array();
         assert_eq!(updated_seats.len(), 2);
         assert_eq!(updated_seats[0].get("round").py(), "1");
+
+        let indexed = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
+        for kind in ["review", "review-verify", "review-outcome"] {
+            assert!(
+                indexed
+                    .iter()
+                    .any(|row| row.get("kind").text() == Some(kind))
+            );
+        }
+        let validation = oms_command_telemetry::run(&args(&["validate"]), &repo.0, &STOP);
+        assert_eq!(
+            validation.0,
+            0,
+            "{}{}",
+            String::from_utf8_lossy(&validation.1),
+            String::from_utf8_lossy(&validation.2)
+        );
     });
 }
 #[test]

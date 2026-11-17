@@ -855,6 +855,7 @@ pub(crate) fn call(
         repo,
         &obj([
             ("schema", 1usize.into()),
+            ("event_id", crate::id("evt_")?.into()),
             ("ts", now().into()),
             ("artifact_id", crate::id("art_")?.into()),
             ("kind", tool.trim_start_matches("peer-").into()),
