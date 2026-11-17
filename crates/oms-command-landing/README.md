@@ -152,8 +152,25 @@ package/version/source triples match the root lock. Reconciling this mismatch
 requires the owner to change the root lock or reference crate; both are outside
 this worker's write scope. Linux compilation does not resolve this constraint.
 
-Known integration/parity work to retain in the parent's review: host cleanup
-and main/peer review completion require the producers above; buffered report
+The native `oms` binary supplies every service above
+(`crates/oms/src/services_landing.rs`). `LandingRequest::frozen_patch` names
+the published landing patch the intent records, and `LandingRequest::patch`
+carries the admitted bytes, so the done receipt binds that exact path and
+review can check controller salvage provenance. A `--covers` admission record also
+carries top-level `covers`, `status` and `scope_digest` for the runtime
+evidence projection. Isolated and remote execution profiles always require an
+approval. Its admission context produces the task's allowed paths and fails closed on
+panel acceptance prefixes, goal batches and dispatch rework grants it cannot
+prove. Its cleanup removes only dead, clean, registered harness worktrees of
+the owning repository and exact legacy install links. On Linux the whole-tree
+`supervise` refuses while admission's reference monitor thread runs, so a
+native verify (and therefore every `--plan-task` landing) is rejected until
+verification moves to a dedicated process.
+
+Known integration/parity work to retain in the parent's review: main/peer
+review receipts are not checked natively (legacy `patch-land` did not check
+them either); host cleanup does not yet reap dead locks, prune worktrees or
+migrate backed-up skills; buffered report
 confirmation is explicit-only; admission's verification-surface and encoding
 classification needs comparison against the richer legacy selector/salvage
 fixtures; branch/history/triage text renderers need fixture parity, including

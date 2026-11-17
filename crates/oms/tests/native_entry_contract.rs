@@ -2460,3 +2460,764 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
         "setsid TERM-ignoring grandchild {grand2_pid} survived nested ProcessGroup cancellation"
     );
 }
+
+// ---- native landing services through the real binary -----------------------
+
+const UNAVAILABLE: &str = "service unavailable; parent CLI integration is required";
+
+/// A dispatch root plus an isolated host: private HOME, TMPDIR, delegate
+/// worktree root and Git identity, a PATH without `gh` or Python, and a
+/// committed work repository whose `.oms/` is ignored.
+struct Landing {
+    f: Fixture,
+    tools: PathBuf,
+    repo: PathBuf,
+}
+impl Landing {
+    fn new() -> Self {
+        use std::os::unix::fs::symlink;
+        let f = Fixture::new();
+        for dir in ["home", "tmp", "wtroot", "tools", "repo"] {
+            std::fs::create_dir(f.0.join(dir)).unwrap();
+        }
+        let tools = f.0.join("tools");
+        let paths = std::env::var_os("PATH").unwrap();
+        for name in [
+            "bash", "sh", "git", "env", "cat", "true", "uname", "dirname", "readlink",
+        ] {
+            let found = std::env::split_paths(&paths)
+                .map(|p| p.join(name))
+                .find(|p| p.is_file())
+                .unwrap();
+            symlink(std::fs::canonicalize(found).unwrap(), tools.join(name)).unwrap();
+        }
+        std::fs::write(
+            f.0.join("gitconfig"),
+            "[user]\n\tname = t\n\temail = t@example.invalid\n[init]\n\tdefaultBranch = main\n",
+        )
+        .unwrap();
+        std::fs::write(f.0.join("VERSION"), "1.2.3\n").unwrap();
+        let landing = Self {
+            repo: f.0.join("repo"),
+            tools,
+            f,
+        };
+        landing.git(&["init", "-q"]);
+        std::fs::write(landing.repo.join("a.txt"), "a\n").unwrap();
+        std::fs::write(landing.repo.join(".git/info/exclude"), ".oms/\n").unwrap();
+        landing.git(&["add", "a.txt"]);
+        landing.git(&["commit", "-qm", "init"]);
+        landing
+    }
+    fn env(&self, command: &mut Command) {
+        command
+            .env_clear()
+            .env("PATH", &self.tools)
+            .env("HOME", self.f.0.join("home"))
+            .env("TMPDIR", self.f.0.join("tmp"))
+            .env("OMS_DELEGATE_WORKTREE_ROOT", self.f.0.join("wtroot"))
+            .env("GIT_CONFIG_GLOBAL", self.f.0.join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0");
+    }
+    fn git_in(&self, dir: &std::path::Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        self.env(&mut command);
+        command.env("PATH", std::env::var_os("PATH").unwrap());
+        let out = command.arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+    fn git(&self, args: &[&str]) -> String {
+        self.git_in(&self.repo, args)
+    }
+    /// One bounded `oms` call; never answers with an unavailable service.
+    fn oms_env(&self, args: &[&str], extra: &[(&str, &str)]) -> (i32, String, String) {
+        use std::io::Read;
+        let mut command = Command::new(self.f.binary());
+        self.env(&mut command);
+        command
+            .arg("--oms-dispatch")
+            .arg(&self.f.0)
+            .args(["1111111111111111111111111111111111111111", "--"])
+            .args(args)
+            .envs(extra.iter().copied())
+            .current_dir(&self.repo)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let mut pipes = [
+            child.stdout.take().map(|mut p| {
+                std::thread::spawn(move || {
+                    let mut raw = Vec::new();
+                    p.read_to_end(&mut raw).map(|_| raw)
+                })
+            }),
+            child.stderr.take().map(|mut p| {
+                std::thread::spawn(move || {
+                    let mut raw = Vec::new();
+                    p.read_to_end(&mut raw).map(|_| raw)
+                })
+            }),
+        ];
+        let bound = std::env::var("OMS_TEST_CALL_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(120);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(bound);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("oms {args:?} exceeded OMS_TEST_CALL_TIMEOUT");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let mut text = pipes.iter_mut().map(|p| {
+            String::from_utf8_lossy(&p.take().unwrap().join().unwrap().unwrap()).into_owned()
+        });
+        let (out, err) = (text.next().unwrap(), text.next().unwrap());
+        assert!(
+            !out.contains(UNAVAILABLE) && !err.contains(UNAVAILABLE),
+            "oms {args:?}: {out}{err}"
+        );
+        (status.code().unwrap_or(-1), out, err)
+    }
+    fn oms(&self, args: &[&str]) -> (i32, String, String) {
+        self.oms_env(args, &[])
+    }
+    fn ok(&self, args: &[&str]) -> String {
+        let (code, out, err) = self.oms(args);
+        assert_eq!(code, 0, "oms {args:?}: {out}{err}");
+        out
+    }
+    /// `.oms/p/p.patch` appends `line` to a.txt; the tree is left clean.
+    fn patch(&self, line: &str) {
+        std::fs::create_dir_all(self.repo.join(".oms/p")).unwrap();
+        let old = std::fs::read_to_string(self.repo.join("a.txt")).unwrap();
+        std::fs::write(self.repo.join("a.txt"), format!("{old}{line}\n")).unwrap();
+        let diff = self.git(&["diff"]);
+        std::fs::write(self.repo.join(".oms/p/p.patch"), diff + "\n").unwrap();
+        self.git(&["checkout", "-q", "a.txt"]);
+    }
+    fn events(&self) -> Vec<String> {
+        std::fs::read_to_string(self.repo.join(".oms/landings.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["event"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .filter(|e| ["intent", "complete", "abandoned"].contains(&e.as_str()))
+            .collect()
+    }
+    fn approval(&self, id: &str) -> serde_json::Value {
+        serde_json::from_str(&self.ok(&["approval-inbox", "show", "--approval", id, "--json"]))
+            .unwrap()
+    }
+    /// A fresh approved patch-land grant: (id, grant).
+    fn approved(&self) -> (String, String) {
+        let requested: serde_json::Value = serde_json::from_str(&self.ok(&[
+            "patch-land",
+            "--patch",
+            ".oms/p/p.patch",
+            "--request-approval",
+        ]))
+        .unwrap();
+        let id = requested["approval_id"].as_str().unwrap().to_owned();
+        assert_eq!(requested["patch_sha"], self.approval(&id)["patch_sha"]);
+        let grant = self.ok(&[
+            "approval-inbox",
+            "decide",
+            "--approval",
+            &id,
+            "--decision",
+            "approve",
+            "--expected-version",
+            "1",
+            "--actor",
+            "tester",
+        ]);
+        (id, grant.trim().to_owned())
+    }
+}
+
+#[test]
+fn landing_plain_approval_and_recover_converge_through_native_services() {
+    let l = Landing::new();
+    l.patch("b");
+    let (code, out, _) = l.oms(&["patch-admit", "--patch", ".oms/p/p.patch"]);
+    assert_eq!((code, out.lines().next()), (0, Some("ADMIT")));
+    let approval_required = "requires an approved exact landing request";
+    for (name, value, message) in [
+        ("OMS_EXECUTION_PROFILE", "remote", approval_required),
+        ("OMS_EXECUTION_PROFILE", "isolated", approval_required),
+        (
+            "OMS_EXECUTION_PROFILE",
+            "bogus",
+            "invalid OMS_EXECUTION_PROFILE",
+        ),
+        ("OMS_REQUIRE_LANDING_APPROVAL", "1", approval_required),
+    ] {
+        let (code, _, err) = l.oms_env(
+            &["patch-land", "--patch", ".oms/p/p.patch"],
+            &[(name, value)],
+        );
+        assert!(code == 2 && err.contains(message), "{name}={value}: {err}");
+    }
+    assert!(l.events().is_empty());
+    l.ok(&["patch-land", "--patch", ".oms/p/p.patch"]);
+    assert_eq!(l.events(), ["intent", "complete"]);
+    l.git(&["commit", "-qam", "b"]);
+
+    // Approval-bound: approved v2 -> consuming v3 -> consumed v4.
+    l.patch("c");
+    let (id, grant) = l.approved();
+    l.ok(&[
+        "patch-land",
+        "--patch",
+        ".oms/p/p.patch",
+        "--approval",
+        &id,
+        "--approval-token",
+        &grant,
+        "--approval-version",
+        "2",
+    ]);
+    let row = l.approval(&id);
+    assert_eq!(
+        (row["state"].as_str(), row["version"].as_u64()),
+        (Some("consumed"), Some(4))
+    );
+    // A consumed grant never lands again.
+    l.git(&["commit", "-qam", "c"]);
+    l.patch("d");
+    let (code, _, err) = l.oms(&[
+        "patch-land",
+        "--patch",
+        ".oms/p/p.patch",
+        "--approval",
+        &id,
+        "--approval-token",
+        &grant,
+        "--approval-version",
+        "2",
+    ]);
+    assert_ne!(code, 0, "{err}");
+
+    // A rejected reservation leaves a durable unapplied intent; recovery
+    // abandons it without touching the still-approved grant.
+    let (id, grant) = l.approved();
+    let forged = format!("{}.AAAA", grant.split_once('.').unwrap().0);
+    let land = |grant: &str| {
+        l.oms(&[
+            "patch-land",
+            "--patch",
+            ".oms/p/p.patch",
+            "--approval",
+            &id,
+            "--approval-token",
+            grant,
+            "--approval-version",
+            "2",
+        ])
+    };
+    assert_ne!(land(&forged).0, 0);
+    assert_eq!(l.events()[4..], ["intent"]);
+    let (code, out, _) = l.oms(&["patch-land", "--recover"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "patch-land: abandoned unapplied landing\n")
+    );
+    assert_eq!(l.events()[4..], ["intent", "abandoned"]);
+    assert_eq!(l.approval(&id)["state"], "approved");
+    assert_eq!(l.git(&["status", "--porcelain"]), "");
+
+    // Applied but unreceipted (a kill after apply): recovery consumes the
+    // reservation exactly once and a second recovery is a no-op.
+    assert_ne!(land(&forged).0, 0);
+    l.ok(&[
+        "approval-inbox",
+        "begin-consume",
+        "--approval",
+        &id,
+        "--token",
+        &grant,
+        "--expected-version",
+        "2",
+        "--consumer",
+        "patch-land",
+    ]);
+    l.git(&["apply", ".oms/p/p.patch"]);
+    let (code, out, _) = l.oms(&["patch-land", "--recover"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "patch-land: recovered applied landing\n")
+    );
+    let row = l.approval(&id);
+    assert_eq!(
+        (row["state"].as_str(), row["version"].as_u64()),
+        (Some("consumed"), Some(4))
+    );
+    assert_eq!(l.events()[6..], ["intent", "complete"]);
+    l.ok(&["patch-land", "--recover"]);
+    assert_eq!(l.events().len(), 8);
+
+    // Reserved but never applied: recovery fails the reservation closed.
+    l.git(&["commit", "-qam", "d"]);
+    l.patch("e");
+    let (id, grant) = l.approved();
+    let forged = format!("{}.AAAA", grant.split_once('.').unwrap().0);
+    assert_ne!(
+        l.oms(&[
+            "patch-land",
+            "--patch",
+            ".oms/p/p.patch",
+            "--approval",
+            &id,
+            "--approval-token",
+            &forged,
+            "--approval-version",
+            "2",
+        ])
+        .0,
+        0
+    );
+    l.ok(&[
+        "approval-inbox",
+        "begin-consume",
+        "--approval",
+        &id,
+        "--token",
+        &grant,
+        "--expected-version",
+        "2",
+        "--consumer",
+        "patch-land",
+    ]);
+    l.ok(&["patch-land", "--recover"]);
+    assert_eq!(l.approval(&id)["state"], "failed");
+    assert_eq!(l.events().last().map(String::as_str), Some("abandoned"));
+}
+
+#[test]
+fn landing_admission_covers_and_plan_scope_use_native_context() {
+    let l = Landing::new();
+    std::fs::write(
+        l.repo.join("PROJECT.md"),
+        "# P\n\n## Goal\n\nShip it.\n\n## Done when\n\n- [id:crit-a] the file says b\n",
+    )
+    .unwrap();
+    l.git(&["add", "PROJECT.md"]);
+    l.git(&["commit", "-qm", "project"]);
+    l.patch("b");
+    let admit = |covers: &[&str]| {
+        let mut args = vec!["patch-admit", "--patch", ".oms/p/p.patch"];
+        for id in covers {
+            args.extend(["--covers", id]);
+        }
+        l.oms(&args)
+    };
+    let (code, out, err) = admit(&["crit-a"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let index = std::fs::read_to_string(l.repo.join(".oms/artifacts/index.jsonl")).unwrap();
+    let row: serde_json::Value = serde_json::from_str(index.lines().last().unwrap()).unwrap();
+    assert_eq!(row["covers"], serde_json::json!(["crit-a"]));
+    assert_eq!(row["coverage"]["covers"], row["covers"]);
+    assert_eq!(row["status"], row["coverage"]["status"]);
+    let projected: serde_json::Value =
+        serde_json::from_str(&l.ok(&["runtime", "evidence", "show", "--repo", "."])).unwrap();
+    assert_eq!(
+        projected["criteria"][0]["evidence"][0]["evidence_ref"],
+        row["event_id"]
+    );
+
+    let at_limit: Vec<String> = (0..15).map(|i| format!("c{i}")).collect();
+    let at_limit: Vec<&str> = at_limit.iter().map(String::as_str).collect();
+    let longest = "x".repeat(160);
+    let too_long = "x".repeat(161);
+    for (covers, message) in [
+        (vec!["nosuch"], "unknown criterion id(s): nosuch"),
+        (at_limit.clone(), "unknown criterion id(s): c0"),
+        ([at_limit.as_slice(), &["c15"]].concat(), "accepts 1 to 15"),
+        (vec![""], "--covers requires a nonempty value"),
+        (vec!["bad id!"], "invalid shape"),
+        (vec![longest.as_str()], "unknown criterion id(s)"),
+        (vec![too_long.as_str()], "invalid shape"),
+    ] {
+        let (code, out, err) = admit(&covers);
+        assert_eq!(code, 2, "{covers:?}: {out}{err}");
+        assert!(err.contains(message), "{covers:?}: {err}");
+    }
+
+    // --plan-task resolves the task's allowed paths natively: a patch
+    // outside them fails the scope gate before any landing authority.
+    l.ok(&["agent-plan", "init"]);
+    l.ok(&[
+        "agent-plan",
+        "add",
+        "--id",
+        "t1",
+        "--title",
+        "T",
+        "--allowed",
+        "b.txt",
+        "--verify",
+        "true",
+    ]);
+    l.ok(&["agent-plan", "claim", "--id", "t1", "--provider", "codex"]);
+    let task: serde_json::Value =
+        serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t1"])).unwrap();
+    std::fs::write(l.repo.join(".oms/p/r.md"), "report\n").unwrap();
+    l.ok(&[
+        "agent-plan",
+        "review",
+        "--id",
+        "t1",
+        "--lease-id",
+        task["lease_id"].as_str().unwrap(),
+        "--artifact",
+        ".oms/p/r.md",
+        "--patch",
+        ".oms/p/p.patch",
+    ]);
+    let (code, out, err) = l.oms(&[
+        "patch-admit",
+        "--patch",
+        ".oms/p/p.patch",
+        "--plan-task",
+        "t1",
+        "--covers",
+        "crit-a",
+    ]);
+    assert_eq!(code, 1, "{out}{err}");
+    let report =
+        std::fs::read_to_string(err.trim().rsplit_once('(').unwrap().1.trim_end_matches(')'))
+            .unwrap();
+    assert!(report.contains("- scope: FAIL"), "{report}");
+    // In scope, native patch-admit and patch-land --plan-task complete end to end
+    // (including Linux WholeTree verify via the single-threaded trampoline).
+    l.ok(&[
+        "agent-plan",
+        "add",
+        "--id",
+        "t2",
+        "--title",
+        "T",
+        "--allowed",
+        "a.txt",
+        "--verify",
+        "true",
+    ]);
+    l.ok(&["agent-plan", "claim", "--id", "t2", "--provider", "codex"]);
+    let task: serde_json::Value =
+        serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
+    l.ok(&[
+        "agent-plan",
+        "review",
+        "--id",
+        "t2",
+        "--lease-id",
+        task["lease_id"].as_str().unwrap(),
+        "--artifact",
+        ".oms/p/r.md",
+        "--patch",
+        ".oms/p/p.patch",
+    ]);
+    let (code, out, err) = l.oms(&[
+        "patch-admit",
+        "--patch",
+        ".oms/p/p.patch",
+        "--plan-task",
+        "t2",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("ADMIT"), "{out}");
+    let (code, out, err) = l.oms(&[
+        "patch-land",
+        "--patch",
+        ".oms/p/p.patch",
+        "--plan-task",
+        "t2",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let done: serde_json::Value =
+        serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(
+        std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
+        "a\nb\n"
+    );
+    l.git(&["commit", "-qam", "landed t2"]);
+    let (code, out, err) = l.oms(&[
+        "patch-admit",
+        "--patch",
+        ".oms/p/p.patch",
+        "--plan-task",
+        "nosuch",
+    ]);
+    assert_eq!(code, 2, "{out}{err}");
+}
+
+#[test]
+fn landing_report_from_failure_drafts_only_allowlisted_fields() {
+    let l = Landing::new();
+    let extra = [("OMS_REPORT_REPO", "example/oms")];
+    let draft = |fp: &str| {
+        l.oms_env(
+            &[
+                "report",
+                "bug",
+                "--from-failure",
+                fp,
+                "--title",
+                "t",
+                "--message",
+                "m",
+                "--dry-run",
+            ],
+            &extra,
+        )
+    };
+    let detail = "--patch private-argument";
+    l.ok(&[
+        "fail-ledger",
+        "record",
+        "--cmd",
+        &format!("oms patch-land {detail}"),
+        "--exit",
+        "1",
+        "--summary",
+        "free text",
+    ]);
+    l.ok(&[
+        "fail-ledger",
+        "record",
+        "--cmd",
+        "bash -c thing",
+        "--exit",
+        "7",
+    ]);
+    let rows: serde_json::Value =
+        serde_json::from_str(&l.ok(&["fail-ledger", "list", "--json"])).unwrap();
+    let rows = rows
+        .as_array()
+        .or_else(|| rows["failures"].as_array())
+        .unwrap()
+        .clone();
+    let fp = |prefix: &str| {
+        rows.iter()
+            .find(|r| r["cmd"].as_str().unwrap().starts_with(prefix))
+            .unwrap()["fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (code, out, err) = draft(&fp("oms "));
+    assert_eq!(code, 0, "{err}");
+    for line in [
+        "Verb: oms patch-land",
+        "Exit: 1",
+        "Failure code: unknown_failure",
+        "Repeat count: 1",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    assert!(
+        !out.contains("private-argument") && !out.contains("free text"),
+        "{out}"
+    );
+    let (code, out, _) = draft(&fp("bash "));
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("Verb: unavailable\n") && out.contains("Exit: 7\n"),
+        "{out}"
+    );
+    for (fp, message) in [
+        ("0123456789abcdef", "failure record unavailable"),
+        ("0123456789abcde", "malformed failure fingerprint"),
+        ("0123456789abcdef0", "malformed failure fingerprint"),
+        ("0123456789ABCDEF", "malformed failure fingerprint"),
+        ("", "--from-failure requires a nonempty value"),
+    ] {
+        let (code, out, err) = draft(fp);
+        assert_eq!(code, 2, "{fp:?}: {out}{err}");
+        assert!(err.contains(message), "{fp:?}: {err}");
+    }
+}
+
+#[test]
+fn landing_cleanup_removes_only_dead_owned_clean_residue() {
+    use std::os::unix::fs::symlink;
+    let l = Landing::new();
+    let dead = {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    };
+    let tmp = l.f.0.join("tmp");
+    let residue = |base: &std::path::Path,
+                   kind: &str,
+                   suffix: &str,
+                   pid: &str,
+                   repo: &std::path::Path| {
+        let dir = base.join(format!("oh-my-setting-{kind}.{suffix}"));
+        std::fs::create_dir(&dir).unwrap();
+        let worktree = dir.join(format!("wt-{suffix}"));
+        l.git_in(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(
+            dir.join(".oh-my-setting-tmp"),
+            format!(
+                "kind=oh-my-setting-temp\ntemporary=1\npid={pid}\nrepo={}\nworktree={}\nscratch=0\n",
+                repo.display(),
+                worktree.display()
+            ),
+        )
+        .unwrap();
+        dir
+    };
+    let empty = l.ok(&["cleanup", "--dry-run"]);
+    assert!(
+        empty.ends_with("\ncleanup: 0 removable item(s) found, 0 kept with work\n"),
+        "{empty}"
+    );
+
+    let dead_s = dead.to_string();
+    let live_s = std::process::id().to_string();
+    let removable = residue(&tmp, "delegate", "dead", &dead_s, &l.repo);
+    let delegate_root = residue(&l.f.0.join("wtroot"), "admit", "root", &dead_s, &l.repo);
+    let live = residue(&tmp, "delegate", "live", &live_s, &l.repo);
+    let unproven = residue(&tmp, "land", "pid", "notapid", &l.repo);
+    let dirty = residue(&tmp, "scratch", "dirty", &dead_s, &l.repo);
+    std::fs::write(dirty.join("wt-dirty/a.txt"), "changed\n").unwrap();
+    let other = l.f.0.join("other");
+    std::fs::create_dir(&other).unwrap();
+    l.git_in(&other, &["init", "-q"]);
+    l.git_in(&other, &["commit", "-q", "--allow-empty", "-m", "o"]);
+    let foreign = residue(&tmp, "delegate", "foreign", &dead_s, &other);
+    // A symlinked worktree child and a symlinked residue directory.
+    let swapped = residue(&tmp, "admit", "swap", &dead_s, &l.repo);
+    std::fs::rename(swapped.join("wt-swap"), l.f.0.join("moved")).unwrap();
+    symlink(l.f.0.join("moved"), swapped.join("wt-swap")).unwrap();
+    let target = residue(&l.f.0, "delegate", "target", &dead_s, &l.repo);
+    let linked = tmp.join("oh-my-setting-delegate.linked");
+    symlink(&target, &linked).unwrap();
+    // Install links: only one pointing exactly at this install is ours.
+    std::fs::create_dir_all(l.f.0.join("home/.claude/skills")).unwrap();
+    std::fs::create_dir_all(l.f.0.join("home/.agents/skills")).unwrap();
+    let ours = l.f.0.join("home/.claude/skills/oh-my-setting");
+    symlink(l.f.0.join("custom-skills"), &ours).unwrap();
+    let user = l.f.0.join("home/.agents/skills/oms-trace");
+    symlink(l.f.0.join("elsewhere"), &user).unwrap();
+
+    let report = l.ok(&["cleanup", "--dry-run"]);
+    let line = |verb: &str, path: &std::path::Path| {
+        report
+            .lines()
+            .any(|l| l.starts_with(&format!("{verb}: {} (", path.display())))
+    };
+    for path in [&removable, &delegate_root, &ours] {
+        assert!(line("would remove", path), "{}: {report}", path.display());
+    }
+    for path in [&unproven, &dirty, &foreign, &swapped] {
+        assert!(line("kept", path), "{}: {report}", path.display());
+    }
+    assert!(
+        report.contains("worktree has uncommitted or untracked files"),
+        "{report}"
+    );
+    assert!(report.contains("owned by another repository"), "{report}");
+    assert!(report.contains("owner pid is unproven"), "{report}");
+    assert!(report.contains("unsafe residue worktree path"), "{report}");
+    assert!(
+        !report.contains(&live.display().to_string()) && !report.contains("linked"),
+        "{report}"
+    );
+    assert!(
+        report.ends_with("\ncleanup: 3 removable item(s) found, 4 kept with work\n"),
+        "{report}"
+    );
+    assert!(removable.exists() && ours.symlink_metadata().is_ok());
+
+    let (code, _, err) = l.oms_env(&["cleanup", "--apply"], &[("OMS_HARNESS_CHILD", "1")]);
+    assert_eq!(code, 2, "{err}");
+    assert!(removable.exists());
+
+    let applied = l.ok(&["cleanup", "--apply"]);
+    assert!(
+        applied.ends_with("\ncleanup: removed 3 item(s), 4 kept with work\n"),
+        "{applied}"
+    );
+    assert!(!removable.exists() && !delegate_root.exists() && ours.symlink_metadata().is_err());
+    for path in [
+        &live, &unproven, &dirty, &foreign, &swapped, &target, &linked, &user,
+    ] {
+        assert!(path.symlink_metadata().is_ok(), "{}", path.display());
+    }
+    assert_eq!(
+        std::fs::read_to_string(dirty.join("wt-dirty/a.txt")).unwrap(),
+        "changed\n"
+    );
+    let registered = l.git(&["worktree", "list", "--porcelain"]);
+    assert!(
+        !registered.contains("wt-dead") && registered.contains("wt-dirty"),
+        "{registered}"
+    );
+}
+
+#[test]
+fn landing_front_doors_never_report_an_unavailable_service() {
+    let l = Landing::new();
+    l.patch("b");
+    let (code, _, err) = l.oms(&["patch-admit", "--patch", ".oms/p/p.patch"]);
+    assert_eq!(code, 0, "{err}");
+    l.ok(&["patch-land", "--patch", ".oms/p/p.patch"]);
+    l.ok(&["patch-land", "--recover"]);
+    l.ok(&["cleanup", "--dry-run"]);
+    // Every remaining front door either succeeds or fails on its own domain
+    // check (no remote, no gh), never on a missing native service.
+    for args in [
+        &["land"][..],
+        &["change-guard", "status"],
+        &["checkpoint", "list"],
+        &["candidate", "table"],
+        &["scratch-worktree", "list"],
+        &["sync-shared"],
+        &["draft-pr", "comments"],
+        &["ci-status"],
+        &[
+            "report",
+            "bug",
+            "--from-failure",
+            "0123456789abcdef",
+            "--message",
+            "m",
+            "--dry-run",
+        ],
+    ] {
+        l.oms_env(args, &[("OMS_REPORT_REPO", "example/oms")]);
+    }
+}

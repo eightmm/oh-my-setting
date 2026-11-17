@@ -142,3 +142,18 @@ Regression coverage lives in `tests/host_services.rs` and
 `src/storage.rs` unit module; the latter adds the previously uncovered direct
 append size, empty-batch and unsafe-target boundaries. The historical
 implementation-only verification notes above describe the earlier draft.
+
+## Multi-host and parallel-run projections
+
+`state`, `inbox`, `state-verify` and `dashboard` (`fleet`) read six optional
+record families through `src/fleet.rs`: `remote_targets`, `exec_snapshots`,
+`remote_operations`, `slurm_submissions`, `plan_contracts` and `late_results`.
+The collectors are read-only: they never create directories, files, locks or
+reconciliation records, skip symlinks, scan one directory level (at most
+10,000 entries) and never copy stored `stdout`/`stderr`, host paths or patches.
+A corrupt record degrades only its section (`healthy: false`, bounded
+`problems`) and becomes a `state-verify` finding. `inbox` reports unknown
+remote operations and Slurm submissions (P1) and stale contracts and
+quarantined late results (P2); `--fix-safe` never touches them. Recursive
+`.jsonl` scans allow 500,000 entries; single-level scans use
+`helpers::shallow_files`.

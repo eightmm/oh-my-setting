@@ -356,7 +356,7 @@ pub(crate) fn run(
                 None
             };
             let limit = opts.number("limit", 50)?;
-            let mut paths = helpers::files(ctx, &ctx.repo.join(".oms"), ".jsonl", 50000)?;
+            let mut paths = helpers::files(ctx, &ctx.repo.join(".oms"), ".jsonl", 500_000)?;
             let ledger = ctx.repo.join("docs/EXPERIMENTS.jsonl");
             if ledger.is_file() {
                 paths.push(ledger.clone());
@@ -502,7 +502,7 @@ pub(crate) fn validate(ctx: &Context<'_>, dir: &Path) -> Result<(Vec<Value>, usi
     if !dir.exists() {
         return Ok((findings, 0));
     }
-    let paths = helpers::files(ctx, dir, ".jsonl", 50000)?;
+    let paths = helpers::files(ctx, dir, ".jsonl", 500_000)?;
     let root = &ctx.repo;
     for path in &paths {
         let raw = storage::read(root, path, storage::MAX_STREAM, false)?;

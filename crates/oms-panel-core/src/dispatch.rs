@@ -7,7 +7,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
-pub const WIP_LIMIT: usize = 6;
+pub const WIP_LIMIT: usize = 10;
+pub const MAX_WIP_LIMIT: usize = 24;
 pub const MAX_PROMPT: usize = 65536;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CarriedPatch {
@@ -93,13 +94,106 @@ pub fn scope_overlaps(state: &Value, caller: &str, scopes: &[String]) -> Result<
     }
     Ok(found)
 }
+fn parse_wip_limit(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| (1..=MAX_WIP_LIMIT).contains(&v))
+        .unwrap_or(WIP_LIMIT)
+}
+pub fn effective_wip_limit() -> usize {
+    parse_wip_limit(std::env::var("OMS_PANEL_WIP_LIMIT").ok().as_deref())
+}
 pub fn check_wip(running: usize, awaiting: usize, continuing: bool) -> Result<()> {
+    check_wip_with_limit(running, awaiting, continuing, effective_wip_limit())
+}
+pub fn check_wip_with_limit(
+    running: usize,
+    awaiting: usize,
+    continuing: bool,
+    limit: usize,
+) -> Result<()> {
     require(
-        continuing || running.saturating_add(awaiting) < WIP_LIMIT,
+        continuing || running.saturating_add(awaiting) < limit,
         &format!(
-            "WIP limit 6 reached: {running} running, {awaiting} awaiting decision; review first"
+            "WIP limit {limit} reached: {running} running, {awaiting} awaiting decision; review first"
         ),
     )
+}
+fn wip_counts(
+    request: &DispatchRequest,
+    attempts: &[Value],
+    calls: &mut serde_json::Map<String, Value>,
+) -> (usize, usize) {
+    let mut by_member: std::collections::BTreeMap<String, &Value> =
+        std::collections::BTreeMap::new();
+    for att in attempts {
+        let member = text(&att["refs"], "panel_room_participant");
+        if !member.is_empty() {
+            by_member.insert(member, att);
+        }
+    }
+    for (call_member, entry) in calls.iter_mut() {
+        let state = text(entry, "state");
+        if !["reserved", "running", "awaiting"].contains(&state.as_str()) {
+            continue;
+        }
+        let att = by_member.get(call_member.as_str()).copied();
+        let terminal =
+            att.is_some_and(|a| crate::state::TERMINAL_STATES.contains(&text(a, "state").as_str()));
+        let awaiting_non_review_write = state == "awaiting"
+            && !att.is_some_and(|a| a["refs"]["panel_access"] == "write" && a["state"] == "review");
+        if terminal || awaiting_non_review_write {
+            entry["state"] = "settled".into();
+        }
+    }
+    let owner_matches_attempt = |v: &Value| -> bool {
+        if let Some(ma) = &request.main_attempt {
+            v["parent_attempt_id"] == *ma
+        } else if let Some(m) = &request.main {
+            v["refs"]["panel_main_participant"] == *m
+                || v["refs"]["panel_owner"] == request.route.owner
+        } else {
+            v["refs"]["panel_owner"] == request.route.owner
+        }
+    };
+    let owner_matches_reservation = |entry: &Value| -> bool {
+        if let Some(ma) = &request.main_attempt {
+            entry["main_attempt"] == *ma
+        } else if let Some(m) = &request.main {
+            entry["main"] == *m || entry["route"]["owner"] == request.route.owner
+        } else {
+            entry["route"]["owner"] == request.route.owner
+        }
+    };
+    let mut running = 0usize;
+    let mut awaiting = 0usize;
+    let mut seen_members = std::collections::HashSet::new();
+    for att in attempts {
+        if att["refs"]["panel_access"] != "write" || !owner_matches_attempt(att) {
+            continue;
+        }
+        let member = text(&att["refs"], "panel_room_participant");
+        if !member.is_empty() {
+            seen_members.insert(member);
+        }
+        let state = text(att, "state");
+        if state == "review" {
+            awaiting += 1;
+        } else if crate::state::LIVE_STATES.contains(&state.as_str()) {
+            running += 1;
+        }
+    }
+    for (call_member, entry) in calls.iter() {
+        if entry["route"]["access"] != "write"
+            || !owner_matches_reservation(entry)
+            || seen_members.contains(call_member.as_str())
+        {
+            continue;
+        }
+        if matches!(entry["state"].as_str(), Some("reserved" | "running")) {
+            running += 1;
+        }
+    }
+    (running, awaiting)
 }
 pub fn command(request: &DispatchRequest, store: &Store) -> Result<(NativeCommand, Vec<OsString>)> {
     let route = &request.route;
@@ -503,12 +597,8 @@ pub fn dispatch(
             registry["schema"] == 1 && registry["calls"].is_object(),
             "invalid dispatch reservations",
         )?;
-        let calls = registry["calls"].as_object().unwrap();
-        let running = calls
-            .values()
-            .filter(|v| v["state"] == "reserved" || v["state"] == "running")
-            .count();
-        let awaiting = calls.values().filter(|v| v["state"] == "awaiting").count();
+        let calls = registry["calls"].as_object_mut().unwrap();
+        let (running, awaiting) = wip_counts(request, array(&attempts), calls);
         if request.route.access == "write" {
             check_wip(running, awaiting, request.continue_task.is_some())?;
         }
@@ -615,6 +705,10 @@ pub fn dispatch(
         (
             "OMS_PANEL_PURPOSE".into(),
             request.route.purpose.clone().into(),
+        ),
+        (
+            "OMS_PANEL_WORKLOAD".into(),
+            request.route.workload.clone().into(),
         ),
         (
             "OMS_PANEL_GRAPH_SCOPES".into(),
@@ -1055,4 +1149,134 @@ pub fn continuation_defaults(
         }));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routing::Candidate;
+    use serde_json::json;
+
+    fn sample_request(main_attempt: &str) -> DispatchRequest {
+        DispatchRequest {
+            route: Route {
+                candidate: Candidate {
+                    provider: "claude".into(),
+                    model: "claude-sonnet-5-5".into(),
+                    effort: "medium".into(),
+                    public_only: false,
+                    access: None,
+                },
+                role: "builder".into(),
+                kind: "worker".into(),
+                owner: "antigravity".into(),
+                workload: "routine".into(),
+                access: "write".into(),
+                purpose: "implement".into(),
+                judged_family: None,
+                judge_note: None,
+                account: None,
+                account_reason: None,
+            },
+            task_id: "t1".into(),
+            prompt: Some("task".into()),
+            brief: None,
+            verify: Some("true".into()),
+            scopes: vec!["src/".into()],
+            room: Some("room-1".into()),
+            main: Some("main-a".into()),
+            main_attempt: Some(main_attempt.into()),
+            continue_task: None,
+            base: None,
+            carried_patch: None,
+            allow_stale_base: false,
+            from_task: vec![],
+            resume_session: None,
+            candidate: None,
+            dry_run: true,
+            execution_repo: PathBuf::from("."),
+            label: None,
+            alias: None,
+            no_web: false,
+        }
+    }
+
+    #[test]
+    fn wip_limit_defaults_bounds_and_checks() {
+        assert_eq!(WIP_LIMIT, 10);
+        assert_eq!(parse_wip_limit(None), 10);
+        assert_eq!(parse_wip_limit(Some("12")), 12);
+        assert_eq!(parse_wip_limit(Some("24")), 24);
+        assert_eq!(parse_wip_limit(Some("0")), 10);
+        assert_eq!(parse_wip_limit(Some("25")), 10);
+        assert_eq!(parse_wip_limit(Some("notanumber")), 10);
+
+        check_wip_with_limit(5, 4, false, WIP_LIMIT).unwrap();
+        let err = check_wip_with_limit(6, 4, false, WIP_LIMIT).unwrap_err();
+        assert!(
+            err.message
+                .contains("WIP limit 10 reached: 6 running, 4 awaiting")
+        );
+        check_wip_with_limit(10, 5, true, WIP_LIMIT).unwrap();
+    }
+
+    #[test]
+    fn wip_counts_excludes_readonly_settled_and_other_mains_without_review_double_count() {
+        let req = sample_request("att_main_1");
+        let attempts = vec![
+            // Read-only call under our main must be excluded.
+            json!({
+                "attempt_id": "att_ro",
+                "parent_attempt_id": "att_main_1",
+                "state": "working",
+                "refs": {"panel_access": "read", "panel_room_participant": "call-ro"}
+            }),
+            // Settled write worker under our main must release WIP.
+            json!({
+                "attempt_id": "att_done",
+                "parent_attempt_id": "att_main_1",
+                "state": "done",
+                "refs": {"panel_access": "write", "panel_room_participant": "call-done"}
+            }),
+            // Other main's write worker must not count against us.
+            json!({
+                "attempt_id": "att_other",
+                "parent_attempt_id": "att_main_2",
+                "state": "working",
+                "refs": {"panel_access": "write", "panel_room_participant": "call-other"}
+            }),
+            // Live write worker (running).
+            json!({
+                "attempt_id": "att_live",
+                "parent_attempt_id": "att_main_1",
+                "state": "working",
+                "refs": {"panel_access": "write", "panel_room_participant": "call-live"}
+            }),
+            // Write worker in review (awaiting only, not running).
+            json!({
+                "attempt_id": "att_rev",
+                "parent_attempt_id": "att_main_1",
+                "state": "review",
+                "refs": {"panel_access": "write", "panel_room_participant": "call-rev"}
+            }),
+        ];
+        let mut calls_val = json!({
+            "call-ro": {"state": "awaiting", "main_attempt": "att_main_1", "route": {"access": "read", "owner": "antigravity"}},
+            "call-done": {"state": "awaiting", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
+            "call-stale-no-att": {"state": "awaiting", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
+            "call-inflight": {"state": "reserved", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
+            "call-other-inflight": {"state": "reserved", "main_attempt": "att_main_2", "route": {"access": "write", "owner": "antigravity"}},
+            "call-live": {"state": "running", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}},
+            "call-rev": {"state": "awaiting", "main_attempt": "att_main_1", "route": {"access": "write", "owner": "antigravity"}}
+        });
+        let calls = calls_val.as_object_mut().unwrap();
+        let (running, awaiting) = wip_counts(&req, &attempts, calls);
+        assert_eq!(running, 2); // att_live + call-inflight
+        assert_eq!(awaiting, 1); // att_rev only
+        assert_eq!(calls["call-ro"]["state"], "settled");
+        assert_eq!(calls["call-done"]["state"], "settled");
+        assert_eq!(calls["call-stale-no-att"]["state"], "settled");
+        assert_eq!(calls["call-rev"]["state"], "awaiting");
+        assert_eq!(calls["call-inflight"]["state"], "reserved");
+    }
 }

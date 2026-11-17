@@ -159,12 +159,51 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
             "needs" => "blocked",
             other => other,
         };
+        let model = text(call, "model");
+        let role = text(call, "role");
+        let alias = text(call, "alias");
+        let who = match (model.is_empty(), role.is_empty()) {
+            (false, false) => format!("{model} {role}"),
+            (true, false) => {
+                if alias.is_empty() {
+                    role.into()
+                } else {
+                    format!("{alias} {role}")
+                }
+            }
+            (false, true) => model.into(),
+            (true, true) => [
+                alias,
+                text(call, "tool"),
+                text(call, "provider"),
+                text(call, "participant"),
+                text(call, "attempt"),
+            ]
+            .into_iter()
+            .find(|v| !v.is_empty())
+            .unwrap_or("call")
+            .into(),
+        };
+        let base_what = what.replace('_', " ");
+        let detail = [
+            text(call, "title"),
+            text(call, "task_id"),
+            text(call, "ending"),
+        ]
+        .into_iter()
+        .find(|v| !v.is_empty())
+        .unwrap_or("");
+        let summary = if detail.is_empty() || detail == base_what {
+            base_what
+        } else {
+            format!("{base_what}: {detail}")
+        };
         items.push(Item {
             row_id: ("call".into(), text(call, "participant").into()),
             cls: class.into(),
             stamp: text(call, "updated_at").into(),
-            who: format!("{} {}", text(call, "model"), text(call, "role")),
-            what: format!("{}: {}", what.replace('_', " "), text(call, "title")),
+            who,
+            what: summary,
             task: (!task.is_empty()).then(|| task.into()),
             unread: true,
         });

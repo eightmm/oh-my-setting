@@ -140,6 +140,16 @@ pub trait Services {
     fn acceptance_reuse_context(&self, _repo: &Path) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Verify and read a managed `.oms/landing-patches/` capture (whose
+    /// publication anchor may hold a validated 2-link identity).
+    fn read_managed_patch(
+        &self,
+        _state_repo: &Path,
+        _path: &Path,
+        _limit: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 pub struct PublicationProduct {
     pub commit: String,

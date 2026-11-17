@@ -2,6 +2,7 @@
 mod registry;
 mod services_collab;
 mod services_control;
+mod services_landing;
 mod services_runtime;
 
 use oms_context::{Json, compare_manifests, inspect_manifest, parse_json};
@@ -1716,6 +1717,15 @@ fn main() {
         .is_some_and(|v| v == services_collab::DETACH_WORKER_FLAG)
     {
         std::process::exit(services_collab::detach_worker_main());
+    }
+    if argv
+        .first()
+        .is_some_and(|v| v == services_control::SUPERVISE_WORKER_FLAG)
+    {
+        std::process::exit(services_control::supervise_worker_main(
+            &argv[1..],
+            &interrupted,
+        ));
     }
     let mut select = false;
     let mut dispatch = false;

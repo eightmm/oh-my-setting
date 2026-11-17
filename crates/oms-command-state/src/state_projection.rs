@@ -1,5 +1,6 @@
 //! Cross-family read projections and the explicitly bounded mechanical repair set.
 use super::*;
+use crate::fleet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
@@ -59,15 +60,13 @@ pub(super) fn alive(row: &Value) -> Option<bool> {
 }
 fn json_files(ctx: &Context<'_>, folder: &str) -> Result<Vec<Value>> {
     let mut result = Vec::new();
-    for path in helpers::files(ctx, &ctx.repo.join(folder), ".json", 50000)? {
-        if path.parent() == Some(ctx.repo.join(folder).as_path()) {
-            result.push(json::parse(&storage::read(
-                &ctx.repo,
-                &path,
-                storage::MAX_FILE,
-                false,
-            )?)?);
-        }
+    for path in helpers::shallow_files(ctx, &ctx.repo.join(folder), ".json", 50000)? {
+        result.push(json::parse(&storage::read(
+            &ctx.repo,
+            &path,
+            storage::MAX_FILE,
+            false,
+        )?)?);
     }
     Ok(result)
 }
@@ -355,10 +354,7 @@ pub(super) fn enrich(ctx: &Context<'_>, state: &mut Value) -> Result<()> {
         .ok()
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(86400);
-    for path in helpers::files(ctx, &ctx.repo.join(".oms/threads"), ".jsonl", 50000)? {
-        if path.parent() != Some(ctx.repo.join(".oms/threads").as_path()) {
-            continue;
-        }
+    for path in helpers::shallow_files(ctx, &ctx.repo.join(".oms/threads"), ".jsonl", 50000)? {
         let (rows, bad) = storage::rows(&ctx.repo, &path)?;
         if bad > 0 {
             continue;
@@ -546,6 +542,7 @@ pub(super) fn enrich(ctx: &Context<'_>, state: &mut Value) -> Result<()> {
             ("exposed", Value::Array(vec![])),
         ]),
     )?;
+    fleet::collect(ctx, state)?;
     state.set(
         "install",
         object([
@@ -641,6 +638,7 @@ pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>
             format!("oms thread --repo {anchor} list --stale"),
         );
     }
+    fleet::attention(state, &anchor, &mut add);
     Ok(())
 }
 pub(super) fn refresh_ci(ctx: &Context<'_>) -> Result<bool> {
@@ -905,7 +903,9 @@ pub(super) fn verify(
         );
     }
     for row in retirements {
-        if !row.get("schema").is_int(1) || row.text("kind") != "plan-retirement" {
+        if !row.get("schema").is_int(1)
+            || !matches!(row.text("kind"), "plan-retirement" | "plan-replacement")
+        {
             add(
                 "fail",
                 "plan-retirement",
@@ -929,7 +929,7 @@ pub(super) fn verify(
             }
         }
     }
-    for path in helpers::files(
+    for path in helpers::shallow_files(
         ctx,
         &ctx.repo.join(".oms/plan"),
         ".retire-intent.json",
@@ -945,6 +945,7 @@ pub(super) fn verify(
             "replay the exact oms agent-plan retire --apply command",
         );
     }
+    fleet::verify(state, findings);
     Ok(())
 }
 pub(super) fn render(report: &Value, tool: &str) -> Result<String> {
@@ -1242,6 +1243,7 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
         ("delegations", state.get("delegations").clone()),
         ("acceptance", acceptance),
         ("attention", attention),
+        ("fleet", fleet::dashboard(state)),
     ]))
 }
 fn dashboard_text(report: &Value) -> Result<String> {
@@ -1452,6 +1454,9 @@ fn dashboard_text(report: &Value) -> Result<String> {
                 row.text("text")
             ));
         }
+    }
+    for line in fleet::lines(report.get("fleet")) {
+        lines.push(format!("fleet {line}"));
     }
     let attention = report.get("attention");
     lines.push(format!(
@@ -1855,6 +1860,13 @@ fn state_text(state: &Value) -> Result<String> {
             row.text("status"),
             row.text("event_id")
         ));
+    }
+    let fleet = fleet::lines(state);
+    if !fleet.is_empty() {
+        out.push_str("\n## Fleet\n");
+        for line in fleet {
+            out.push_str(&format!("  {line}\n"));
+        }
     }
     let guard = state.get("change_guard");
     if guard.get("active").truth() {

@@ -26,6 +26,7 @@ pub fn run_with_writer(
 ) -> Result<Output> {
     let logging = options.has("log");
     let interactive = std::io::stdout().is_terminal() && !logging;
+    let colored = render::color_enabled(interactive);
     let mut terminal = if interactive {
         input::TerminalInput::open()?
     } else {
@@ -83,7 +84,8 @@ pub fn run_with_writer(
             }
         } else {
             let size = crate::layout::dimensions();
-            let frame = render::frame(&report, &nav, size.0, size.1, &read);
+            let frame =
+                render::frame_styled(&report, &nav, size.0, size.1, &read, colored, interactive);
             draw(
                 output,
                 &frame,
@@ -196,32 +198,52 @@ pub fn run_with_writer(
                                 &["show", "--id", &room, "--json"],
                                 interrupted,
                             )?;
-                            nav.notice = Some(
-                                render::value_lines(&catalog["participants"], last_size.0)
-                                    .join(" "),
-                            );
+                            nav.notice = Some(format_chats_notice(&room, &catalog));
                         }
                         navigation::Action::Controls => {
-                            let mut records = Vec::new();
-                            for kind in ["terminals", "jobs", "workspaces"] {
+                            let mut counts = Vec::new();
+                            let mut first_error = None;
+                            for (kind, label) in [
+                                ("terminals", "terminals"),
+                                ("jobs", "jobs"),
+                                ("workspaces", "workspaces"),
+                            ] {
                                 match oms_panel_core::terminals::PrivateStore::open(
                                     repo, kind, false, false,
                                 )
                                 .and_then(|s| s.list())
                                 {
-                                    Ok(mut rows) => records.append(&mut rows),
-                                    Err(e) => nav.notice = Some(e.message),
+                                    Ok(rows) => counts.push(format!("{}: {}", label, rows.len())),
+                                    Err(e) => {
+                                        if first_error.is_none() {
+                                            first_error = Some(e.message);
+                                        }
+                                    }
                                 }
                             }
                             nav.notice = Some(
-                                render::value_lines(&Value::Array(records), last_size.0).join(" "),
+                                if let Some(err) = first_error
+                                    && counts.is_empty()
+                                {
+                                    err
+                                } else {
+                                    format!("Managed — {}", counts.join(" · "))
+                                },
                             );
                         }
                         navigation::Action::None => {}
                     }
                 }
                 if changed {
-                    let frame = render::frame(&report, &nav, last_size.0, last_size.1, &read);
+                    let frame = render::frame_styled(
+                        &report,
+                        &nav,
+                        last_size.0,
+                        last_size.1,
+                        &read,
+                        colored,
+                        interactive,
+                    );
                     draw(output, &frame, interactive, &mut last_frame, false)?;
                     output.flush().map_err(Error::new)?;
                 }
@@ -231,7 +253,15 @@ pub fn run_with_writer(
                 let size = crate::layout::dimensions();
                 if size != last_size {
                     last_size = size;
-                    let frame = render::frame(&report, &nav, size.0, size.1, &read);
+                    let frame = render::frame_styled(
+                        &report,
+                        &nav,
+                        size.0,
+                        size.1,
+                        &read,
+                        colored,
+                        interactive,
+                    );
                     draw(output, &frame, interactive, &mut last_frame, true)?;
                     output.flush().map_err(Error::new)?;
                 }
@@ -246,6 +276,32 @@ pub fn run_with_writer(
     }
     Ok((status, vec![], vec![]))
 }
+
+fn format_chats_notice(room: &str, catalog: &Value) -> String {
+    let mut joined = Vec::new();
+    for p in crate::rows(&catalog["participants"]) {
+        if p["joined"] == true {
+            let name = p["alias"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .or_else(|| p["participant"].as_str())
+                .unwrap_or("member");
+            let role = crate::text(p, "role");
+            let provider = crate::text(p, "provider");
+            joined.push(format!("{name} ({role}/{provider})"));
+        }
+    }
+    if joined.is_empty() {
+        format!("Room {room}: no joined participants")
+    } else {
+        format!(
+            "Room {room} ({} joined): {}",
+            joined.len(),
+            joined.join(", ")
+        )
+    }
+}
+
 fn draw(
     output: &mut dyn Write,
     frame: &[String],

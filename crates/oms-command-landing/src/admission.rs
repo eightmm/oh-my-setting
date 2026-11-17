@@ -708,7 +708,14 @@ pub(crate) fn admit(
         .strip_prefix(&state)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| report.to_string_lossy().into_owned());
-    let row = obj([
+    let coverage_status = if verdict && !policy.verify.is_empty() {
+        "verified"
+    } else if verdict {
+        "inconclusive"
+    } else {
+        "failed"
+    };
+    let mut row = obj([
         ("schema", 1usize.into()),
         (
             "event_id",
@@ -746,20 +753,23 @@ pub(crate) fn admit(
                     "covers",
                     V::Arr(policy.covers.iter().map(|s| s.as_str().into()).collect()),
                 ),
-                (
-                    "status",
-                    if verdict && !policy.verify.is_empty() {
-                        "verified".into()
-                    } else if verdict {
-                        "inconclusive".into()
-                    } else {
-                        "failed".into()
-                    },
-                ),
+                ("status", coverage_status.into()),
                 ("scope_digest", digest(&bytes).into()),
             ]),
         ),
     ]);
+    // Runtime evidence reads criterion links from these top-level fields.
+    if !policy.covers.is_empty() {
+        row.set(
+            "covers",
+            V::Arr(policy.covers.iter().map(|s| s.as_str().into()).collect()),
+        );
+        row.set("status", coverage_status);
+        row.set("scope_digest", digest(&bytes));
+        if !policy.task.is_empty() {
+            row.set("task_id", policy.task.as_str());
+        }
+    }
     storage::append(
         &state,
         Path::new(".oms/artifacts/index.jsonl"),

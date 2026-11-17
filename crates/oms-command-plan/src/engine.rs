@@ -1765,28 +1765,48 @@ impl<'a> Plan<'a> {
         Ok(false)
     }
     pub(crate) fn evidence_read(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
-        let path = Path::new(path);
-        if path.is_absolute() && !path.starts_with(self.store.repo()) {
-            let parent = path
+        let raw_path = Path::new(path);
+        let absolute = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            self.context.state_repo.join(raw_path)
+        };
+        if absolute.parent()
+            == Some(
+                self.context
+                    .state_repo
+                    .join(".oms/landing-patches")
+                    .as_path(),
+            )
+            && let Some(bytes) =
+                self.services
+                    .read_managed_patch(&self.context.state_repo, &absolute, limit)?
+        {
+            return Ok(bytes);
+        }
+        if raw_path.is_absolute() && !raw_path.starts_with(self.store.repo()) {
+            let parent = raw_path
                 .parent()
                 .ok_or_else(|| error("evidence path has no parent"))?;
             let root =
                 Store::open(parent)?.with_group_resolver(self.services.group_membership_resolver());
             root.read(
-                path.file_name()
+                raw_path
+                    .file_name()
                     .ok_or_else(|| error("evidence path has no file name"))?,
                 limit,
             )
         } else {
-            self.store.read(path, limit)
+            let rel = raw_path.strip_prefix(self.store.repo()).unwrap_or(raw_path);
+            self.store.read(rel, limit)
         }
     }
     fn check_managed_patch(&self, path: &str) -> Result<()> {
-        let path = Path::new(path);
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
+        let raw_path = Path::new(path);
+        let absolute = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
         } else {
-            self.context.state_repo.join(path)
+            self.context.state_repo.join(raw_path)
         };
         if absolute.parent()
             == Some(
@@ -1806,7 +1826,14 @@ impl<'a> Plan<'a> {
                     }),
                 "a managed landing capture can only be referenced by a canonical retained plan",
             )?;
-            self.store.read(&absolute, MAX_PATCH)?;
+            if self
+                .services
+                .read_managed_patch(&self.context.state_repo, &absolute, MAX_PATCH)?
+                .is_none()
+            {
+                let rel = absolute.strip_prefix(self.store.repo()).unwrap_or(raw_path);
+                self.store.read(rel, MAX_PATCH)?;
+            }
         }
         Ok(())
     }

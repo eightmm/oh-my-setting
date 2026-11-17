@@ -155,6 +155,11 @@ fn seats_by_provider(report: &Value) -> BTreeMap<String, (usize, usize)> {
             if let Some(part) = attempt["panel"]["room_participant"]
                 .as_str()
                 .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    attempt["refs"]["panel_room_participant"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                })
             {
                 attempt_states
                     .entry(part.to_owned())

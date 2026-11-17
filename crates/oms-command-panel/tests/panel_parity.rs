@@ -258,6 +258,7 @@ struct Fake {
     replace_artifacts_on_tmux: std::cell::Cell<bool>,
     commands_seen: RefCell<Vec<(String, Vec<String>)>>,
     native_seen: RefCell<Vec<(NativeCommand, Vec<OsString>)>>,
+    real_catalog: std::cell::Cell<bool>,
 }
 
 impl PeerExecutor for Fake {
@@ -369,7 +370,14 @@ impl Services for Fake {
                         .filter(|v| v.provider == provider)
                         .map(|v| v.model.clone())
                         .collect::<Vec<_>>();
-                    rows.push(json!({"provider": provider, "installed": true, "models": models}));
+                    if self.real_catalog.get() {
+                        // Shape of `oms models --json`: no `installed`, `usable` unprobed, models only in `catalog_models`.
+                        rows.push(json!({"provider": provider, "present": true, "usable": null, "models": [], "catalog_models": models}));
+                    } else {
+                        rows.push(
+                            json!({"provider": provider, "installed": true, "models": models}),
+                        );
+                    }
                 }
                 Ok(json_out(json!({"providers": rows})))
             }
@@ -846,6 +854,40 @@ fn settle_review_and_recommend_parity() {
     let native_rec: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(native_rec["risk"], "high");
     assert_eq!(native_rec["diff"]["files"], 1);
+}
+
+fn routing_accepts_present_provider_catalog() {
+    let repo = TempDir::new("panel-real-catalog");
+    init_git_repo(repo.path());
+    let services = Fake::default();
+    services.real_catalog.set(true);
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--repo", repo.path().to_str().unwrap()];
+        args.extend_from_slice(extra);
+        run_with_services(
+            "panel",
+            &os(&args),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        )
+    };
+    let (code, out, err) = run(&["--routes"]);
+    assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&err));
+    let rt: Value = serde_json::from_slice(&out).unwrap();
+    assert!(rt["chosen"]["builder"]["provider"].is_string());
+    for dispatch in [
+        &["--dispatch", "researcher", "--dry-run"][..],
+        &["--dispatch", "builder", "--access", "write", "--dry-run"][..],
+    ] {
+        let (_, _, err) = run(dispatch);
+        let err = String::from_utf8_lossy(&err);
+        assert!(
+            !err.contains("no eligible installed provider"),
+            "{dispatch:?}: {err}"
+        );
+    }
 }
 
 fn usage_sessions_compare_and_routes_parity() {
@@ -1529,7 +1571,7 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 6] = [
+    let cases: [(&str, fn()); 7] = [
         (
             "missing_entry_refuses_before_mutation",
             missing_entry_refuses_before_mutation,
@@ -1545,6 +1587,10 @@ fn main() {
         (
             "settle_review_and_recommend_parity",
             settle_review_and_recommend_parity,
+        ),
+        (
+            "routing_accepts_present_provider_catalog",
+            routing_accepts_present_provider_catalog,
         ),
         (
             "usage_sessions_compare_and_routes_parity",

@@ -975,6 +975,12 @@ fn versioned_contracts_gate_scheduling() {
         "{show}"
     );
     assert!(!ok(&["ready"]).contains("downstream"));
+    let status = ok(&["status", "--json"]);
+    assert!(
+        status.contains("\"contract_stale_tasks\": [\"downstream\"]")
+            && status.contains("\"contract_count\": 1"),
+        "{status}"
+    );
     let (code, _, err) = run(&["claim", "--id", "downstream", "--provider", "codex"]);
     assert_eq!(code, 2);
     assert!(err.contains("contract_stale"), "{err}");

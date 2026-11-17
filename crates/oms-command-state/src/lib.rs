@@ -7,6 +7,7 @@ mod checkpoints;
 mod claims;
 pub mod deps;
 mod failures;
+mod fleet;
 mod gc;
 mod gpu;
 pub mod helpers;

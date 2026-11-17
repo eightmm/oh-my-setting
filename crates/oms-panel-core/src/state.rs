@@ -97,8 +97,30 @@ pub fn snapshot(
         .cloned()
         .collect();
     let recent: Vec<_> = array(&attempts).iter().rev().take(100).cloned().collect();
+    let mut room_attempts = serde_json::Map::new();
+    if let Some(rid) = room_id {
+        let main_attempt = text(&room, "main");
+        for attempt in array(&attempts) {
+            let refs = &attempt["refs"];
+            let att_room = text(refs, "panel_room_id");
+            let att_room_alt = text(refs, "panel_room");
+            let attempt_id = text(attempt, "attempt_id");
+            if att_room == rid
+                || att_room_alt == rid
+                || (!main_attempt.is_empty() && attempt_id == main_attempt)
+            {
+                if !attempt_id.is_empty() {
+                    room_attempts.insert(attempt_id, attempt.clone());
+                }
+                let participant = text(refs, "panel_room_participant");
+                if !participant.is_empty() {
+                    room_attempts.insert(participant, attempt.clone());
+                }
+            }
+        }
+    }
     let report = serde_json::json!({"schema":1,"generated_at":crate::now(),"room":room,"plan":plan,
-        "attempts":{"active":active,"recent":recent},"collection":{"ok":true},"capacity_stale":false});
+        "attempts":{"active":active,"recent":recent},"room_attempts":room_attempts,"collection":{"ok":true},"capacity_stale":false});
     Ok(Snapshot { report, status: 0 })
 }
 pub fn active_mains(attempts: &[Value], room: &str, owner: &str) -> Vec<Value> {
