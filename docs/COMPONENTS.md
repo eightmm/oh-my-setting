@@ -866,6 +866,18 @@ failing log no recogniser matches is shown as a raw head and tail and labelled
 as such, not as a diagnosis. `--file PATH [--exit-code N]` digests an existing
 capture without running or storing anything; `--json` prints schema 1.
 
+With the default `auto` strategy, Cargo's JSON `compiler-message` records
+(including Clippy diagnostics) become readable diagnostic blocks. The view
+retains rendered source spans and help; records without rendered text use their
+level, code, message, spans and child notes. Errors are selected first, then
+warnings and other diagnostics, within the same byte budget. Mixed stderr and
+unknown or malformed JSON remain ordinary output. Repeated warnings are not
+deduplicated. Oversized diagnostics and omitted records are explicitly marked;
+the `rust-diagnostics` representation is always labelled as a derived, lossy
+view, and the raw capture and command exit code are unchanged. `legacy` keeps
+the original generic line selection. Individual JSON records over 1 MiB and
+captures with more than 10,000 records use that generic fallback.
+
 No model is called. Before the capture is kept, every line the shared secret
 scan flags (the outbound scrubber's pattern and env-value check, no second
 list) is replaced by `[oms-redacted:CLASS]`, CLASS being the scrubber's pattern

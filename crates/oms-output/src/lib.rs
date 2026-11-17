@@ -7,6 +7,8 @@ use std::io::{self, Read};
 use std::sync::OnceLock;
 use unicode_general_category::{GeneralCategory as Gc, get_general_category};
 
+mod rust_diagnostics;
+
 pub const READ_CAP: usize = 64 * 1024 * 1024;
 const LINE_CHARS: usize = 300;
 const FAILURE_LINES: usize = 40;
@@ -640,6 +642,11 @@ fn build_tail(
         };
         return Ok(doc);
     }
+    if options.strategy == Strategy::Auto
+        && let Some(diagnostics) = rust_diagnostics::render(bytes, options, &doc)
+    {
+        return Ok(diagnostics);
+    }
     let whole = if bytes.len() <= options.max_bytes && skipped == 0 {
         Some(
             bytes
@@ -1073,7 +1080,13 @@ impl OutputDigest {
                 }
             ));
         } else {
-            if self.representation.algorithm != "none" {
+            if self.representation.algorithm != "none" && !self.representation.lossless {
+                out.push(format!(
+                    "shown: {} of {} source line(s) as {} v{}; a derived view; omitted {} source line(s), {} source bytes — open the raw file for the complete record",
+                    shown.lines, raw.lines, self.representation.algorithm,
+                    self.representation.version, shown.omitted_lines, shown.omitted_bytes
+                ));
+            } else if self.representation.algorithm != "none" {
                 out.push(format!(
                     "shown: all {} source line(s) as {} v{}; lossless for {}; no data omitted",
                     shown.lines,
@@ -1126,6 +1139,120 @@ impl OutputDigest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_json_retains_diagnostic_blocks_and_mixed_output() {
+        let diagnostic = serde_json::json!({
+            "reason": "compiler-message", "package_id": "path+file:///project#sample@0.1.0",
+            "message": {
+                "level": "error", "message": "mismatched types", "code": {"code": "E0308"},
+                "spans": [{"file_name": "src/main.rs", "line_start": 2, "column_start": 19}],
+                "children": [{"level": "help", "message": "use a conversion", "spans": []}],
+                "rendered": "\u{1b}[1;31merror[E0308]\u{1b}[0m: mismatched types\n --> src/main.rs:2:19\n  |\n2 | let n: usize = value;\n  |                ^^^^^ expected usize\n  = help: use a conversion\n"
+            }
+        });
+        let source = format!(
+            "build started\n{diagnostic}\n{{\"reason\":\"future-cargo-record\",\"detail\":42}}\nlinker: Permission denied\n"
+        );
+        let options = Options {
+            exit_code: Some(101),
+            ..Options::default()
+        };
+        let d = build(source.as_bytes(), &options).unwrap();
+        assert_eq!(
+            d.raw.sha256,
+            format!("{:x}", Sha256::digest(source.as_bytes()))
+        );
+        assert_eq!(d.exit_code, Some(101));
+        assert_eq!(d.representation.algorithm, "rust-diagnostics");
+        assert!(!d.representation.lossless);
+        assert_eq!(d.failures.matched, 2);
+        assert_eq!(d.failures.shown, 2);
+        assert!(
+            d.text
+                .contains("^^^^^ expected usize\n  = help: use a conversion")
+        );
+        assert!(d.text.contains("future-cargo-record"));
+        assert!(d.text.contains("linker: Permission denied"));
+        assert!(!d.text.contains('\u{1b}'));
+        assert!(!d.render().contains("no data omitted"));
+        assert!(d.shown.omitted_bytes > 0);
+        assert_eq!(
+            d.json(),
+            build_reader(source.as_bytes(), &options).unwrap().json()
+        );
+        let legacy = build(
+            source.as_bytes(),
+            &Options {
+                strategy: Strategy::Legacy,
+                ..options
+            },
+        )
+        .unwrap();
+        assert_eq!(legacy.representation.algorithm, "none");
+    }
+
+    #[test]
+    fn cargo_json_bounds_preserve_warnings_and_mark_missing_records() {
+        let warning = serde_json::json!({"reason":"compiler-message", "message":{
+            "level":"warning", "message":"unused binding", "code":{"code":"unused_variables"},
+            "spans":[{"file_name":"src/lib.rs","line_start":4,"column_start":9,"label":"unused binding"}],
+            "children":[{"level":"help","message":"prefix with an underscore","spans":[]}], "rendered":null
+        }}).to_string();
+        let source = format!(
+            "{warning}\n{warning}\n{}\n",
+            "normal compiler progress\n".repeat(100)
+        );
+        let d = build(
+            source.as_bytes(),
+            &Options {
+                max_bytes: 512,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(d.text.matches("warning[unused_variables]").count(), 2);
+        assert!(d.text.contains("src/lib.rs:4:9"));
+        assert!(d.text.contains("help: prefix with an underscore"));
+        assert_eq!(d.failures.matched, 0);
+        assert!(d.shown.omitted_lines > 0);
+        assert!(d.text.contains("source records omitted"));
+        assert!(d.text.len() <= 512);
+        let mut withheld = d.clone();
+        withheld.withhold("scan refused".into());
+        assert!(withheld.text.is_empty());
+        assert!(!withheld.render().contains("unused binding"));
+
+        let oversized = serde_json::json!({"reason":"compiler-message", "message":{
+            "level":"error","message":"large diagnostic","spans":[],"children":[],
+            "rendered":"error: large diagnostic\n".repeat(100)
+        }})
+        .to_string();
+        let d = build(
+            oversized.as_bytes(),
+            &Options {
+                max_bytes: 256,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        assert!(d.text.contains("diagnostic exceeds the view budget"));
+        assert!(d.text.len() <= 256);
+        assert!(!d.representation.lossless);
+        for invalid in [
+            "{\"reason\":\"compiler-message\",",
+            "{\"reason\":\"compiler-message\",\"message\":{}}",
+            "{\"reason\":\"build-finished\",\"success\":false}",
+        ] {
+            assert_eq!(
+                build(invalid.as_bytes(), &Options::default())
+                    .unwrap()
+                    .representation
+                    .algorithm,
+                "none"
+            );
+        }
+    }
     #[test]
     fn stream_reports_io_errors_and_matches_bytes() {
         struct Broken;
