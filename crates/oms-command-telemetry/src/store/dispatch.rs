@@ -95,7 +95,7 @@ impl<'a> Transaction<'a> {
     pub fn repo(&self) -> &Path {
         self.root.physical_root()
     }
-    fn error(&self, source: StoreError) -> Error {
+    pub(super) fn error(&self, source: StoreError) -> Error {
         let visible = matches!(&source, StoreError::Storage { phase, .. } if *phase != oms_safe_fs::MutationPhase::BeforePublication);
         if visible {
             self.published.set(true);
@@ -117,25 +117,9 @@ impl<'a> Transaction<'a> {
     pub fn snapshot(&self) -> Result<Option<Vec<u8>>> {
         let read = || -> std::result::Result<Option<Vec<u8>>, StoreError> {
             self.check()?;
-            self.validate_path(Path::new(REGISTRY))?;
-            let bytes = match self.root.read_no_follow(
-                Path::new(REGISTRY),
-                ByteReadOptions {
-                    missing_ok: false,
-                    max_bytes: MAX_REGISTRY,
-                },
-            ) {
-                Ok(bytes) => bytes,
-                Err(ByteError::Missing) => {
-                    self.check()?;
-                    return Ok(None);
-                }
-                Err(error) => return Err(error.into()),
-            };
+            let bytes = snapshot(&self.root, self.interrupted)?;
             self.check()?;
-            self.validate_path(Path::new(REGISTRY))?;
-            validate_registry(&bytes)?;
-            Ok(Some(bytes))
+            Ok(bytes)
         };
         read().map_err(|source| self.error(source))
     }
@@ -259,6 +243,40 @@ impl<'a> Transaction<'a> {
         })();
         result.map_err(|source| self.error(source))
     }
+}
+/// Read-only observation, without creating a lock or granting admission. A
+/// writer must acquire Transaction and recheck its own snapshot before a CAS.
+pub fn read_snapshot(
+    repo: &Path,
+    interrupted: &AtomicBool,
+) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+    snapshot(&Root::open(repo)?, interrupted)
+}
+fn snapshot(
+    root: &Root,
+    interrupted: &AtomicBool,
+) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+    cancelled(interrupted)?;
+    let path = root.physical_root().join(REGISTRY);
+    super::paths::validate(root, &path, false)?;
+    let bytes = match root.read_no_follow(
+        Path::new(REGISTRY),
+        ByteReadOptions {
+            missing_ok: false,
+            max_bytes: MAX_REGISTRY,
+        },
+    ) {
+        Ok(bytes) => bytes,
+        Err(ByteError::Missing) => {
+            cancelled(interrupted)?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    cancelled(interrupted)?;
+    super::paths::validate(root, &path, false)?;
+    validate_registry(&bytes)?;
+    Ok(Some(bytes))
 }
 fn validate_registry(body: &[u8]) -> std::result::Result<(), StoreError> {
     if body.len() > MAX_REGISTRY {

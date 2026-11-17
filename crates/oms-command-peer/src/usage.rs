@@ -1,5 +1,6 @@
 //! Provider envelopes, before answer decoding can discard accounting metadata.
 use crate::{Error, Result, V, text};
+use oms_command_telemetry::store::physical::{self, Registration};
 use oms_command_telemetry::store::usage::{
     self, Cost, Cumulative, Identity, Phase, Receipt, Usage,
 };
@@ -7,6 +8,30 @@ use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+pub(crate) struct Pending {
+    pub receipt: Receipt,
+    deadline: Instant,
+}
+impl Pending {
+    pub fn fence(&self, interrupted: &AtomicBool) -> Result<()> {
+        if interrupted.load(Ordering::Acquire) {
+            return Err(Error::new(
+                130,
+                "provider launch cancelled; pending intent retained",
+            ));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(Error::new(
+                75,
+                "provider admission deadline expired; pending intent retained",
+            ));
+        }
+        Ok(())
+    }
+}
 
 fn env(extra: &[(OsString, OsString)], key: &str) -> Option<String> {
     extra
@@ -44,9 +69,10 @@ pub(crate) fn begin(
     repo: &Path,
     route: &crate::providers::Route,
     account: Option<&str>,
+    write: bool,
     extra: &[(OsString, OsString)],
     interrupted: &AtomicBool,
-) -> Result<Receipt> {
+) -> Result<Pending> {
     let identity = Identity {
         call_id: crate::id("call_")?,
         operation_id: env(extra, "OMS_OPERATION_ID")
@@ -67,8 +93,21 @@ pub(crate) fn begin(
     } else {
         None
     };
-    usage::begin(repo, identity, cumulative, interrupted)
-        .map_err(|e| Error::new(e.exit_code(), e.to_string()))
+    let deadline = Instant::now() + Duration::from_secs(10);
+    match physical::begin(repo, identity, cumulative, write, interrupted, deadline).map_err(
+        |e| {
+            Error::new(
+                e.exit_code(),
+                format!("physical call registration failed; reconcile before retry: {e}"),
+            )
+        },
+    )? {
+        Registration::New(receipt) => Ok(Pending { receipt, deadline }),
+        Registration::Existing { .. } => Err(Error::new(
+            75,
+            "physical call intent already exists; no provider resend occurred",
+        )),
+    }
 }
 fn count(row: &V, key: &str) -> Option<u64> {
     match row.get(key) {

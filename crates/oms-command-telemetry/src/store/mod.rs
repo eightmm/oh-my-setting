@@ -8,6 +8,7 @@ pub(crate) mod actions;
 pub mod budget;
 pub mod dispatch;
 mod paths;
+pub mod physical;
 mod producer;
 mod recovery;
 mod retention;

@@ -6,6 +6,18 @@ use std::sync::atomic::AtomicBool;
 
 pub struct Temp(pub PathBuf);
 impl Temp {
+    pub fn private() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Self::new();
+        for path in [
+            root.0.clone(),
+            root.0.join(".oms"),
+            root.0.join(".oms/artifacts"),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        root
+    }
     pub fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

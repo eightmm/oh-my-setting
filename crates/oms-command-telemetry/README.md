@@ -190,6 +190,17 @@ The panel dispatch producer uses this shared writer and releases its guard befor
 calling external execution or room producers. This storage API supplies no
 resource policy or launch permit by itself.
 
+`store::physical` registers repository-local observed calls through that same
+writer. Its versioned `physical.calls` extension preserves existing dispatch
+records. A reserved intent precedes the pending usage receipt; an exact CAS then
+links the receipt ordinal as `ready`. A ready record proves registration only.
+The shared deadline bounds nested lock waits, and every lock is released before
+returning to execution. The caller rechecks its launch fence after registration.
+An identical call ID returns existing status without resending or rewriting; a
+changed request refuses. Partial publication retains its intent and liability.
+Read-only loading creates no state. These legacy observations prove neither
+owner generations nor hard resource limits or native descendant containment.
+
 `store::usage::begin_before` accepts the admission request's monotonic deadline.
 Receipt and ignore-file lock acquisition share that deadline and retain their
 existing LegacyAuto lock namespaces. A refused lock wait or failed preparation

@@ -197,6 +197,22 @@ fn number(n: u64) -> V {
 fn optional(n: Option<u64>) -> V {
     n.map(number).unwrap_or(V::Null)
 }
+pub(super) fn identity_value(i: &Identity) -> V {
+    obj!("call_id":i.call_id.clone(),"operation_id":i.operation_id.clone(),"provider":i.provider.clone(),
+        "selected_model":i.selected_model.clone(),"account":i.account.clone(),"goal_id":i.goal_id.clone(),
+        "task_id":i.task_id.clone(),"attempt_id":i.attempt_id.clone(),"run_id":i.run_id.clone())
+}
+pub(super) fn validate_pending(
+    identity: &Identity,
+    cumulative: &Option<Cumulative>,
+) -> Result<(), StoreError> {
+    validate(&Receipt {
+        identity: identity.clone(),
+        cumulative: cumulative.clone(),
+        ordinal: 1,
+        ..Receipt::default()
+    })
+}
 fn encode_receipt(r: &Receipt) -> Result<Vec<u8>, StoreError> {
     let i = &r.identity;
     let u = &r.usage;
@@ -207,22 +223,26 @@ fn encode_receipt(r: &Receipt) -> Result<Vec<u8>, StoreError> {
         Cost::Subscription => ("subscription", "unknown"),
         Cost::Unknown => ("unknown", "unknown"),
     };
-    encode(&obj!(
-        "schema":2, "kind":"provider-usage", "call_id":i.call_id.clone(),
-        "operation_id":i.operation_id.clone(), "provider":i.provider.clone(),
-        "selected_model":i.selected_model.clone(), "account":i.account.clone(), "goal_id":i.goal_id.clone(),
-        "task_id":i.task_id.clone(), "attempt_id":i.attempt_id.clone(), "run_id":i.run_id.clone(),
-        "ordinal":number(r.ordinal), "revision":number(r.revision),
-        "phase":match r.phase { Phase::Pending=>"pending", Phase::Partial=>"partial", Phase::Final=>"final", Phase::Unknown=>"unknown" },
-        "provider_usage":obj!("input_tokens":optional(u.input_tokens),"output_tokens":optional(u.output_tokens),
-            "cache_read_tokens":optional(u.cache_read_tokens),"cache_write_tokens":optional(u.cache_write_tokens),
-            "cache_in_input":u.cache_in_input,"total_tokens":optional(u.total_tokens)),
-        "cost":obj!("status":status,"basis":basis,"microusd":optional(r.cost.microusd())),
-        "cumulative":r.cumulative.as_ref().map(|s| obj!("session_id":s.session_id.clone(),"baseline_unknown":s.baseline_unknown)),
-        "source_sha256":r.source_sha256.clone(), "cleanup_complete":r.cleanup_complete
-    )).map_err(|_| invalid("cannot encode usage receipt"))
+    let (V::Object(mut fields), V::Object(payload)) = (
+        identity_value(i),
+        obj!(
+            "schema":2, "kind":"provider-usage",
+            "ordinal":number(r.ordinal), "revision":number(r.revision),
+            "phase":match r.phase { Phase::Pending=>"pending", Phase::Partial=>"partial", Phase::Final=>"final", Phase::Unknown=>"unknown" },
+            "provider_usage":obj!("input_tokens":optional(u.input_tokens),"output_tokens":optional(u.output_tokens),
+                "cache_read_tokens":optional(u.cache_read_tokens),"cache_write_tokens":optional(u.cache_write_tokens),
+                "cache_in_input":u.cache_in_input,"total_tokens":optional(u.total_tokens)),
+            "cost":obj!("status":status,"basis":basis,"microusd":optional(r.cost.microusd())),
+            "cumulative":r.cumulative.as_ref().map(|s| obj!("session_id":s.session_id.clone(),"baseline_unknown":s.baseline_unknown)),
+            "source_sha256":r.source_sha256.clone(), "cleanup_complete":r.cleanup_complete
+        ),
+    ) else {
+        return Err(invalid("cannot encode usage receipt"));
+    };
+    fields.extend(payload);
+    encode(&V::Object(fields)).map_err(|_| invalid("cannot encode usage receipt"))
 }
-fn uint(v: &V) -> Result<u64, StoreError> {
+pub(super) fn uint(v: &V) -> Result<u64, StoreError> {
     v.int()
         .and_then(|s| s.parse().ok())
         .ok_or(invalid("usage count must be a nonnegative u64"))
@@ -246,7 +266,7 @@ fn opt_string(v: &V) -> Result<Option<String>, StoreError> {
         string(v).map(Some)
     }
 }
-fn keys(v: &V, expected: &[&str]) -> Result<(), StoreError> {
+pub(super) fn keys(v: &V, expected: &[&str]) -> Result<(), StoreError> {
     if let V::Object(fields) = v
         && fields.len() == expected.len()
         && expected.iter().all(|key| v.get(key).is_some())
@@ -255,6 +275,19 @@ fn keys(v: &V, expected: &[&str]) -> Result<(), StoreError> {
     } else {
         Err(invalid("unknown or missing usage receipt fields"))
     }
+}
+pub(super) fn identity_from_value(v: &V) -> Result<Identity, StoreError> {
+    Ok(Identity {
+        call_id: string(&v["call_id"])?,
+        operation_id: string(&v["operation_id"])?,
+        provider: string(&v["provider"])?,
+        selected_model: opt_string(&v["selected_model"])?,
+        account: opt_string(&v["account"])?,
+        goal_id: opt_string(&v["goal_id"])?,
+        task_id: opt_string(&v["task_id"])?,
+        attempt_id: opt_string(&v["attempt_id"])?,
+        run_id: opt_string(&v["run_id"])?,
+    })
 }
 fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
     // Check framing and the row bound before the strict JSON parser.
@@ -328,17 +361,7 @@ fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
         })
     };
     let receipt = Receipt {
-        identity: Identity {
-            call_id: string(&v["call_id"])?,
-            operation_id: string(&v["operation_id"])?,
-            provider: string(&v["provider"])?,
-            selected_model: opt_string(&v["selected_model"])?,
-            account: opt_string(&v["account"])?,
-            goal_id: opt_string(&v["goal_id"])?,
-            task_id: opt_string(&v["task_id"])?,
-            attempt_id: opt_string(&v["attempt_id"])?,
-            run_id: opt_string(&v["run_id"])?,
-        },
+        identity: identity_from_value(&v)?,
         ordinal: uint(&v["ordinal"])?,
         revision: uint(&v["revision"])?,
         phase: match v["phase"].text() {

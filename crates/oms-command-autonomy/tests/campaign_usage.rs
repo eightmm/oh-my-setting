@@ -170,6 +170,63 @@ fn each_unknown_physical_retry_retains_its_own_reservation() {
     assert_eq!(ledger.reserve("claude", "seat", None).unwrap_err().code, 3);
 }
 #[test]
+fn physical_intents_without_receipts_stay_in_logical_admission_and_refusal() {
+    use oms_command_telemetry::store::{canonical_index, physical};
+    use oms_lock::{Lock, Mode, Settings};
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new(Some(json!({"max_tokens":150,"per_call":{"tokens":60}})));
+    let stop = AtomicBool::new(false);
+    let ledger = fixture.ledger(&stop);
+    let operation = ledger.reserve("claude", "seat", None).unwrap();
+    let target = canonical_index(
+        &fixture.repo,
+        Some(Path::new(usage::RECEIPTS)),
+        false,
+        false,
+    )
+    .unwrap();
+    let mut settings = Settings::from_env().unwrap();
+    settings.mode = Mode::LegacyAuto;
+    let held = Lock::for_file(&target, settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    for call in ["call_first", "call_retry"] {
+        let error = physical::begin(
+            &fixture.repo,
+            Identity {
+                call_id: call.into(),
+                operation_id: operation.clone(),
+                provider: "claude".into(),
+                ..Identity::default()
+            },
+            None,
+            false,
+            &stop,
+            Instant::now() + Duration::from_millis(70),
+        )
+        .unwrap_err();
+        assert!(error.publication_uncertain);
+    }
+    drop(held);
+    assert!(usage::load(&fixture.repo).unwrap().calls.is_empty());
+    assert_eq!(
+        ledger.reserve("claude", "seat", None).unwrap_err().code,
+        3,
+        "two unacknowledged physical intents cost 120; another logical escrow would cost 180"
+    );
+    let spent = ledger.spent().unwrap();
+    assert_eq!(spent["usage"]["tokens"]["committed"], 120);
+    assert_eq!(spent["usage"]["intent_only_calls"], 2);
+    ledger.settle(&operation, "refused").unwrap();
+    assert_eq!(
+        ledger.spent().unwrap()["usage"]["tokens"]["unresolved_reserved"],
+        120,
+        "a terminal refusal cannot erase existing physical intents"
+    );
+}
+#[test]
 fn omitted_caps_preserve_lifetime_call_caps_and_enabled_caps_require_reservations() {
     let fixture = Fixture::new(None);
     let stop = AtomicBool::new(false);

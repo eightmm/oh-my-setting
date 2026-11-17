@@ -416,6 +416,7 @@ impl<'a> Ledger<'a> {
                 &rows,
                 &reserved,
                 &settled,
+                self.interrupted,
             )?;
             policy.admit(&spent)?;
         }
@@ -514,6 +515,7 @@ impl<'a> Ledger<'a> {
                 &rows,
                 &reserved,
                 &settled,
+                self.interrupted,
             )?;
         }
         Ok(spent)

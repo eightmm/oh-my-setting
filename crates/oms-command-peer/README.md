@@ -79,6 +79,14 @@ failure stops automatic account overflow and model fallback, even when provider
 output is already available. Ordinary and budget-enforced calls share this
 strict contract so an untracked retry cannot disappear from budget admission.
 
+Registration first publishes a repository-local observed physical intent in the
+shared dispatch registry, then its pending usage receipt, then a CAS linking the
+receipt ordinal. All admission locks are released before the executor runs, and
+cancellation or expiry at the final launch fence retains the pending liability.
+A repeated physical ID returns status without resending. Partial publication
+stops continuation until reconciliation. This observed registration does not
+establish team authority, canonical owner generations or hard native limits.
+
 The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
 thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed
 sessions without a tracked baseline retain unknown per-call usage. This follows

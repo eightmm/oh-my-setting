@@ -1,9 +1,10 @@
 //! Soft campaign admission, using lifetime physical-call receipts.
 use crate::{Error, Result, require, value};
-use oms_command_telemetry::store::{budget, usage};
+use oms_command_telemetry::store::{budget, physical, usage};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Policy {
@@ -88,7 +89,10 @@ pub(crate) fn summary(
     rows: &[Value],
     reservations: &BTreeMap<String, Value>,
     settled: &BTreeSet<String>,
+    interrupted: &AtomicBool,
 ) -> Result<Value> {
+    let intents = physical::load(repo, interrupted)
+        .map_err(|error| Error::new(error.exit_code(), error.to_string()))?;
     let projection = usage::load(repo).map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
     let operations = reservations
         .keys()
@@ -106,10 +110,18 @@ pub(crate) fn summary(
             },
         })
         .collect::<Vec<_>>();
-    let spent = budget::project(&policy.inner, &projection, &operations, &[]).map_err(error)?;
+    let claims = intents
+        .iter()
+        .filter(|intent| reservations.contains_key(&intent.identity.operation_id))
+        .map(|intent| budget::PhysicalClaim {
+            call_id: &intent.identity.call_id,
+            operation_id: &intent.identity.operation_id,
+        })
+        .collect::<Vec<_>>();
+    let spent = budget::project(&policy.inner, &projection, &operations, &claims).map_err(error)?;
     Ok(
         json!({"basis":"reported usage and explicit reservations; soft admission, not a provider spending cap",
-        "physical_calls":spent.physical_calls,"conflicts":spent.conflicts,
+        "physical_calls":spent.physical_calls,"intent_only_calls":spent.intent_only_calls,"conflicts":spent.conflicts,
         "provider_estimate_calls":spent.provider_estimate_calls,
         "tokens":dimension(&spent.tokens),"cost_microusd":dimension(&spent.cost_microusd)}),
     )

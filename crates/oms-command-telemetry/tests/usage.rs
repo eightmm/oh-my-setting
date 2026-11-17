@@ -243,18 +243,10 @@ fn physical_claim_conflicts_and_overflow_refuse_projection() {
 fn dispatch_reservations_share_exact_flock_and_preserve_partial_publications() {
     use oms_command_telemetry::store::dispatch::{self, Transaction};
     use oms_lock::{Lock, Mode, Settings};
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
-    let root = Temp::new();
-    for path in [
-        root.0.clone(),
-        root.0.join(".oms"),
-        root.0.join(".oms/artifacts"),
-    ] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    let root = Temp::private();
     let stop = AtomicBool::new(false);
     let timeout = Duration::from_millis(60);
     let mut settings = Settings::from_env().unwrap();
@@ -450,6 +442,172 @@ fn pending_admission_bounds_receipt_and_ignore_lock_waits() {
         130
     );
     assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), old);
+}
+
+#[test]
+fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability() {
+    use oms_command_telemetry::store::{
+        dispatch,
+        physical::{self, Phase as IntentPhase, Registration},
+    };
+    use oms_lock::{Lock, Mode, Settings};
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+    let root = Temp::private();
+    let stop = AtomicBool::new(false);
+    let deadline = || Instant::now() + Duration::from_secs(2);
+    for changed_operation in [false, true] {
+        let existing_root = Temp::private();
+        let mut request = identity("call_receipt_only");
+        usage::begin(&existing_root.0, request.clone(), None, &stop).unwrap();
+        let before = std::fs::read(existing_root.0.join(usage::RECEIPTS)).unwrap();
+        if changed_operation {
+            request.operation_id = "op_conflicting".into();
+        }
+        let error =
+            physical::begin(&existing_root.0, request, None, false, &stop, deadline()).unwrap_err();
+        assert!(
+            !error.publication_uncertain,
+            "a known receipt-only ID must refuse before publishing another intent"
+        );
+        assert!(!existing_root.0.join(dispatch::REGISTRY).exists());
+        assert_eq!(
+            std::fs::read(existing_root.0.join(usage::RECEIPTS)).unwrap(),
+            before
+        );
+    }
+    assert!(physical::load(&root.0, &stop).unwrap().is_empty());
+    assert!(
+        !root.0.join(dispatch::LOCK).exists(),
+        "observation does not create a lock or state"
+    );
+    let invalid =
+        physical::begin(&root.0, Identity::default(), None, false, &stop, deadline()).unwrap_err();
+    assert!(!invalid.publication_uncertain);
+    assert!(!root.0.join(dispatch::REGISTRY).exists());
+    root.write(
+        dispatch::REGISTRY,
+        br#"{"schema":1,"calls":{"legacy":{"state":"unknown"}},"opaque":{"retain":true}}"#,
+    );
+    let request = identity("call_registered");
+    let Registration::New(receipt) =
+        physical::begin(&root.0, request.clone(), None, true, &stop, deadline()).unwrap()
+    else {
+        panic!("fresh registration");
+    };
+    assert_eq!(receipt.phase, Phase::Pending);
+    let intents = physical::load(&root.0, &stop).unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].identity, request);
+    assert_eq!(intents[0].phase, IntentPhase::Ready);
+    assert_eq!(intents[0].usage_ordinal, Some(receipt.ordinal));
+    assert!(intents[0].write);
+    let before = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    let replay = physical::begin(&root.0, request.clone(), None, true, &stop, deadline()).unwrap();
+    assert!(matches!(
+        replay,
+        Registration::Existing {
+            phase: IntentPhase::Ready,
+            receipt: Some(_)
+        }
+    ));
+    assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        before
+    );
+    assert!(
+        physical::begin(&root.0, request, None, false, &stop, deadline()).is_err(),
+        "changed access cannot reuse the same physical identity"
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        before
+    );
+    let target = oms_command_telemetry::store::canonical_index(
+        &root.0,
+        Some(Path::new(usage::RECEIPTS)),
+        false,
+        false,
+    )
+    .unwrap();
+    let mut settings = Settings::from_env().unwrap();
+    settings.mode = Mode::LegacyAuto;
+    let held = Lock::for_file(&target, settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    let orphan = identity("call_orphan");
+    let failed = physical::begin(
+        &root.0,
+        orphan.clone(),
+        None,
+        false,
+        &stop,
+        Instant::now() + Duration::from_millis(70),
+    )
+    .unwrap_err();
+    assert!(
+        failed.publication_uncertain,
+        "the intent survives refused pending registration"
+    );
+    assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
+    let pending = physical::load(&root.0, &stop)
+        .unwrap()
+        .into_iter()
+        .find(|intent| intent.identity == orphan)
+        .unwrap();
+    assert_eq!(pending.phase, IntentPhase::Reserved);
+    assert_eq!(pending.usage_ordinal, None);
+    drop(held);
+    let raw = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    assert!(matches!(
+        physical::begin(&root.0, orphan, None, false, &stop, deadline()).unwrap(),
+        Registration::Existing {
+            phase: IntentPhase::Reserved,
+            receipt: None
+        }
+    ));
+    assert_eq!(std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(), raw);
+    let value = oms_json::parse_strict(&raw).unwrap();
+    assert_eq!(
+        value
+            .get("opaque")
+            .unwrap()
+            .get("retain")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert!(value.get("calls").unwrap().get("legacy").is_some());
+    let mut future = oms_json::parse_strict(&raw).unwrap();
+    // Unsupported producer versions retain the existing history instead of resetting it.
+    future
+        .as_object_mut()
+        .unwrap()
+        .get_mut(&oms_json::PyString::from("physical"))
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("schema".into(), oms_json::Value::integer("99").unwrap());
+    let future = oms_json::session_call_key_json_bytes(&future).unwrap();
+    root.write(dispatch::REGISTRY, &future);
+    assert!(physical::load(&root.0, &stop).is_err());
+    assert!(
+        physical::begin(
+            &root.0,
+            identity("call_future"),
+            None,
+            false,
+            &stop,
+            deadline()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        future
+    );
 }
 #[test]
 fn receipts_are_absolute_idempotent_and_revision_ordered() {

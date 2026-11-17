@@ -1969,17 +1969,20 @@ pub(crate) fn execute_env(
                     .map_err(|e| Error::new(2, e))?;
             exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
         }
-        let usage_receipt = crate::usage::begin(
+        let pending_usage = crate::usage::begin(
             &usage_repo,
             route,
             account.as_deref(),
+            write,
             &extra_env,
             context.interrupted,
         )?;
         environment.push((
             "OMS_PROVIDER_CALL_ID".into(),
-            usage_receipt.identity.call_id.clone().into(),
+            pending_usage.receipt.identity.call_id.clone().into(),
         ));
+        pending_usage.fence(context.interrupted)?;
+        let usage_receipt = pending_usage.receipt;
         let started = std::time::Instant::now();
         let result = context.executor.execute(
             Invocation {
@@ -2394,7 +2397,11 @@ mod bridge_route_tests {
                 use oms_command_telemetry::store::usage::{self, Phase};
                 struct Reports(std::sync::atomic::AtomicUsize, PathBuf);
                 impl Executor for Reports {
-                    fn execute(&self, request: Invocation, _: &AtomicBool) -> Result<Completed> {
+                    fn execute(
+                        &self,
+                        request: Invocation,
+                        interrupted: &AtomicBool,
+                    ) -> Result<Completed> {
                         if request.argv[0] == "git" {
                             return Ok(Completed {
                                 code: 0,
@@ -2408,6 +2415,28 @@ mod bridge_route_tests {
                         let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let calls = usage::load(&self.1).unwrap().calls;
                         assert_eq!(calls.last().unwrap().receipt.phase, Phase::Pending);
+                        let intents =
+                            oms_command_telemetry::store::physical::load(&self.1, interrupted)
+                                .unwrap();
+                        assert_eq!(intents.len(), n + 1);
+                        let current = &calls.last().unwrap().receipt;
+                        let intent = intents
+                            .iter()
+                            .find(|intent| intent.identity.call_id == current.identity.call_id)
+                            .unwrap();
+                        assert_eq!(intent.identity, current.identity);
+                        assert_eq!(intent.usage_ordinal, Some(current.ordinal));
+                        assert_eq!(
+                            intent.phase,
+                            oms_command_telemetry::store::physical::Phase::Ready
+                        );
+                        assert!(intent.write);
+                        let _guard = oms_command_telemetry::store::dispatch::Transaction::acquire(
+                            &self.1,
+                            Duration::from_millis(100),
+                            interrupted,
+                        )
+                        .unwrap();
                         assert!(
                             request
                                 .environment
