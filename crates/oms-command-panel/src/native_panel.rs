@@ -277,7 +277,7 @@ fn spawn_main(
     )?;
     {
         let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-        check_legacy_main(repo, &session, services, stop)?;
+        check_legacy_main(repo, &session, None, services, stop)?;
         sess_lock.check()?;
     }
 
@@ -432,7 +432,7 @@ fn split_panel(
         )?;
         {
             let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-            check_legacy_main(repo, &session, services, stop)?;
+            check_legacy_main(repo, &session, None, services, stop)?;
             sess_lock.check()?;
         }
         start_lock.check()?;
@@ -466,7 +466,7 @@ fn split_panel(
     } else {
         {
             let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-            check_legacy_main(repo, &session, services, stop)?;
+            check_legacy_main(repo, &session, None, services, stop)?;
             sess_lock.check()?;
         }
         let ident = if let Some(resume) = options.get("resume") {
@@ -610,7 +610,8 @@ fn run_native(
     let session_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
     let session = std::env::var("OMS_PANEL_SESSION").unwrap_or_default();
     if !session.is_empty() {
-        check_legacy_main(repo, &session, services, stop)?;
+        let pending = pending_window_id(repo, services, stop);
+        check_legacy_main(repo, &session, pending.as_deref(), services, stop)?;
         session_lock.check()?;
     }
 
@@ -1951,9 +1952,26 @@ fn release_dead_mains(repo: &Path, services: &dyn Services, stop: &AtomicBool) -
     Ok(())
 }
 
+fn pending_window_id(repo: &Path, services: &dyn Services, stop: &AtomicBool) -> Option<String> {
+    if !managed_session() {
+        return None;
+    }
+    let pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|p| crate::commands::valid_target(p, '%'))?;
+    tmux_quiet(
+        services,
+        repo,
+        &["display-message", "-p", "-t", &pane, "#{window_id}"],
+        stop,
+    )
+    .filter(|w| crate::commands::valid_target(w, '@'))
+}
+
 fn check_legacy_main(
     repo: &Path,
     session: &str,
+    pending_window: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<()> {
@@ -1973,7 +1991,7 @@ fn check_legacy_main(
     )?;
     if session_owner(services, repo, session, stop).is_some() {
         require(
-            live_mains(repo, session, None, None, services, stop)? < MAX_LIVE_MAINS,
+            live_mains(repo, session, None, pending_window, services, stop)? < MAX_LIVE_MAINS,
             "another main is live or unverified; finish it before starting another",
         )?;
     }
@@ -2529,5 +2547,73 @@ mod native_lifecycle_contract {
             dir.0.display()
         );
         assert_eq!(super::match_panel_command(&malformed, &dir.0), None);
+    }
+
+    #[test]
+    fn check_legacy_main_excludes_callers_own_pending_tmux_window() {
+        struct PendingWindowMock;
+        impl PeerExecutor for PendingWindowMock {
+            fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                let args: Vec<String> = request
+                    .argv
+                    .iter()
+                    .map(|v| v.to_string_lossy().into_owned())
+                    .collect();
+                let stdout = if args.iter().any(|a| a == "has-session") {
+                    Vec::new()
+                } else if args.iter().any(|a| a == "show-options") {
+                    b"/repo\n".to_vec()
+                } else if args.iter().any(|a| a == "list-windows") {
+                    b"codex\troom-1\t\tcodex\t@1\tcodex\n".to_vec()
+                } else {
+                    return Err(oms_panel_core::Error::new("unexpected tmux command"));
+                };
+                Ok(CommandOutput {
+                    code: 0,
+                    stdout,
+                    stderr: Vec::new(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    limited: false,
+                })
+            }
+        }
+        impl Services for PendingWindowMock {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                match command {
+                    NativeCommand::Events => Ok(CommandOutput {
+                        code: 0,
+                        stdout: b"[]".to_vec(),
+                        stderr: Vec::new(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    }),
+                    NativeCommand::Room => Ok(CommandOutput {
+                        code: 0,
+                        stdout: br#"{"closed":false,"participants":[]}"#.to_vec(),
+                        stderr: Vec::new(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    }),
+                    _ => Err(oms_panel_core::Error::new("unexpected native command")),
+                }
+            }
+        }
+
+        let dir = TempRepo::new();
+        let stop = AtomicBool::new(false);
+        assert!(
+            super::check_legacy_main(&dir.0, "oms-test", None, &PendingWindowMock, &stop).is_err()
+        );
+        super::check_legacy_main(&dir.0, "oms-test", Some("@1"), &PendingWindowMock, &stop)
+            .unwrap();
     }
 }
