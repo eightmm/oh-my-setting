@@ -334,6 +334,11 @@ fn sweep_orphans(
                 continue;
             }
             let child = path.join(&name);
+            // Native dispatch owns reservation custody and its evidence. An
+            // absent artifact-index row or old mtime cannot settle those claims.
+            if depth == 0 && name_text == Some("panel-dispatch") {
+                continue;
+            }
             if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory
             {
                 if depth == 0 && name_text == Some("output-digest") {
