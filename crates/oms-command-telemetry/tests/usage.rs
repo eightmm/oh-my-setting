@@ -2,6 +2,7 @@ mod support;
 use oms_command_telemetry::store::usage::{
     self, Cost, Cumulative, Identity, Phase, Receipt, Usage,
 };
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::AtomicBool;
 use support::Temp;
 
@@ -36,7 +37,14 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
     usage::record(&root.0, &partial, &stop).unwrap();
     let final_ = observe(initial.clone(), 4, 100, Cost::Reported(90));
     assert!(usage::record(&root.0, &final_, &stop).unwrap());
+    let before_duplicate = std::fs::metadata(root.0.join(usage::RECEIPTS)).unwrap();
     assert!(!usage::record(&root.0, &final_, &stop).unwrap());
+    let after_duplicate = std::fs::metadata(root.0.join(usage::RECEIPTS)).unwrap();
+    assert_eq!(before_duplicate.ino(), after_duplicate.ino());
+    assert_eq!(
+        before_duplicate.modified().unwrap(),
+        after_duplicate.modified().unwrap()
+    );
     usage::record(
         &root.0,
         &observe(initial.clone(), 3, 80, Cost::Reported(70)),
@@ -297,21 +305,45 @@ fn malformed_or_conflicting_receipt_history_refuses_accounting() {
     let stop = AtomicBool::new(false);
     let receipt = usage::begin(&root.0, identity("call_one"), None, &stop).unwrap();
     let bytes = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
-    root.write(usage::RECEIPTS, &bytes[..bytes.len() - 1]);
-    assert!(usage::load(&root.0).is_err());
-    assert!(
-        usage::record(
-            &root.0,
-            &observe(receipt.clone(), 1, 10, Cost::Reported(1)),
-            &stop
-        )
-        .is_err()
-    );
     let text = String::from_utf8(bytes.clone()).unwrap();
     let duplicate = text.replacen("\"call_id\":", "\"call_id\": \"conflict\", \"call_id\":", 1);
     assert_ne!(text, duplicate);
-    root.write(usage::RECEIPTS, duplicate);
-    assert!(usage::load(&root.0).is_err());
+    let conflicting_ordinal = text.replace("\"call_one\"", "\"call_two\"");
+    let conflicting_revision = text.replace("\"pending\"", "\"unknown\"");
+    assert_ne!(text, conflicting_ordinal);
+    assert_ne!(text, conflicting_revision);
+    let mut oversized = bytes[..bytes.len() - 1].to_vec();
+    oversized.resize(oms_command_telemetry::store::MAX_ROW_BYTES, b' ');
+    oversized.push(b'\n');
+    for malformed in [
+        bytes[..bytes.len() - 1].to_vec(),
+        duplicate.into_bytes(),
+        format!("{text}{conflicting_ordinal}").into_bytes(),
+        format!("{text}{conflicting_revision}").into_bytes(),
+        format!("{text}\n").into_bytes(),
+        oversized,
+    ] {
+        root.write(usage::RECEIPTS, &malformed);
+        assert!(usage::load(&root.0).is_err());
+        assert!(usage::begin(&root.0, identity("call_new"), None, &stop).is_err());
+        assert!(
+            usage::record(
+                &root.0,
+                &observe(receipt.clone(), 1, 10, Cost::Reported(1)),
+                &stop
+            )
+            .is_err()
+        );
+        // An identical receipt must still validate every historical revision.
+        assert!(usage::record(&root.0, &receipt, &stop).is_err());
+        assert_eq!(
+            malformed,
+            std::fs::read(root.0.join(usage::RECEIPTS)).unwrap()
+        );
+    }
+    root.write(usage::RECEIPTS, text.replace('\n', "\r\n"));
+    assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
+    assert!(!usage::record(&root.0, &receipt, &stop).unwrap());
     root.write(usage::RECEIPTS, bytes);
     let mut impossible = observe(receipt, 1, 0, Cost::Unknown);
     impossible.usage.input_tokens = Some(10);

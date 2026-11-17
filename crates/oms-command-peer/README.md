@@ -71,6 +71,10 @@ state root, otherwise the owner repository is used. No credential or raw
 provider output is copied into the receipt: only counts, known identities and
 the output digest are stored. A receipt publication failure stops continuation
 and leaves the registered liability for reconciliation.
+Registration failure prevents that physical invocation. Completion-persistence
+failure stops automatic account overflow and model fallback, even when provider
+output is already available. Ordinary and budget-enforced calls share this
+strict contract so an untracked retry cannot disappear from budget admission.
 
 The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
 thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed
