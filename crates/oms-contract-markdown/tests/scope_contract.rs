@@ -1053,6 +1053,35 @@ fn reference_envelopes_and_classification() {
     assert!(within_envelope("a/b", &["a"]).unwrap());
     assert!(!within_envelope("a", &["a/b"]).unwrap());
     assert!(within_envelope("a", &["?"]).unwrap());
+    for (candidate, envelope, contained) in [
+        ("src/a", vec!["src/?"], false),
+        ("src/private", vec!["src/???????"], false),
+        ("src/a", vec!["src"], true),
+        ("src/[ab]*", vec!["src/a*", "src/b*"], true),
+        ("src/[abc]*", vec!["src/a*", "src/b*"], false),
+        ("src/[!a]*", vec!["src/*"], true),
+        ("src/[[:digit:]]*", vec!["src/[0-9]*"], true),
+        ("src/한글*", vec!["src/*"], true),
+        ("src/*", vec!["src/[!a]*"], false),
+        ("a", vec!["?"], false),
+        ("src/*", vec!["*"], true),
+        (".", vec!["*"], true),
+        ("src", vec![], false),
+    ] {
+        assert_eq!(
+            pattern_within_envelope(candidate, &envelope).unwrap(),
+            contained,
+            "{candidate:?} in {envelope:?}"
+        );
+    }
+    assert!(pattern_within_envelope("src/", &["src"]).is_err());
+    assert!(pattern_within_envelope("src", &["[z-a]"]).is_err());
+    let long = "a".repeat(4000);
+    assert!(pattern_within_envelope(&long, &[&long, &long]).is_err());
+    assert!(matches("src/a/private.rs", "src/a").unwrap());
+    assert!(!matches("src/a/private.rs", "src/?").unwrap());
+    assert!(matches("src/private/key.rs", "src/private").unwrap());
+    assert!(!matches("src/private/key.rs", "src/???????").unwrap());
     assert_eq!(
         classify("src/private.py", &["src/*.py"], &["src/private.py"])
             .unwrap()

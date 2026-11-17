@@ -13,7 +13,7 @@
 //! `change-guard` cutover. File opening, regular-file checks and flushing belong
 //! to consumers; these helpers never open files or mutate repository state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -478,6 +478,150 @@ pub fn within_envelope(candidate: &str, envelope: &[&str]) -> Result<bool, Scope
             p.is_match(candidate)
         }
     }))
+}
+
+/// Prove containment of the complete matched language, including literal descendants.
+/// Unlike `within_envelope`, this does not treat a declaration as one concrete path.
+/// Inputs must be normalized. Exhausting a proof bound returns an error, never a grant.
+pub fn pattern_within_envelope(candidate: &str, envelope: &[&str]) -> Result<bool, ScopeError> {
+    const MAX_UNITS: usize = 8192;
+    const MAX_STATES: usize = 4096;
+    const MAX_WORK: usize = 4_000_000;
+    struct Machine {
+        atoms: Vec<Atom>,
+        accepting: Vec<usize>,
+    }
+    impl Machine {
+        fn closure(&self, state: &mut [bool]) {
+            for (i, atom) in self.atoms.iter().enumerate() {
+                if state[i] && matches!(atom, Atom::Star) {
+                    state[i + 1] = true;
+                }
+            }
+        }
+        fn active(&self, mut state: Vec<bool>) -> Vec<usize> {
+            self.closure(&mut state);
+            state
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, yes)| yes.then_some(i))
+                .collect()
+        }
+        fn initial(&self) -> Vec<usize> {
+            let mut state = vec![false; self.atoms.len() + 1];
+            state[0] = true;
+            self.active(state)
+        }
+        fn step(&self, state: &[usize], point: u32) -> Vec<usize> {
+            let mut next = vec![false; self.atoms.len() + 1];
+            for &i in state {
+                match self.atoms.get(i) {
+                    Some(Atom::Star) => next[i] = true,
+                    Some(Atom::Any) => next[i + 1] = true,
+                    Some(Atom::Literal(c)) if *c == point => next[i + 1] = true,
+                    Some(Atom::Class { members, negated })
+                        if members.binary_search(&point).is_ok() != *negated =>
+                    {
+                        next[i + 1] = true
+                    }
+                    _ => {}
+                }
+            }
+            self.active(next)
+        }
+        fn accepts(&self, state: &[usize]) -> bool {
+            self.accepting
+                .iter()
+                .any(|i| state.binary_search(i).is_ok())
+        }
+    }
+    if envelope.len() > MAX_RULES {
+        return Err(error("scope inclusion has too many envelope patterns"));
+    }
+    let mut machines = Vec::new();
+    let mut alphabet = BTreeSet::new();
+    let mut units = 0;
+    for source in std::iter::once(candidate).chain(envelope.iter().copied()) {
+        if normalize(source)? != source {
+            return Err(error("scope inclusion requires normalized patterns"));
+        }
+        let pattern = validate_pattern(source)?;
+        let (atoms, accepting) = match pattern.atoms {
+            Some(atoms) => {
+                let end = atoms.len();
+                (atoms, vec![end])
+            }
+            None if source == "." => (vec![Atom::Star], vec![1]),
+            None => {
+                let mut atoms = source
+                    .chars()
+                    .map(|c| Atom::Literal(u32::from(c)))
+                    .collect::<Vec<_>>();
+                let exact = atoms.len();
+                atoms.extend([Atom::Literal(u32::from('/')), Atom::Star]);
+                (atoms, vec![exact, exact + 2])
+            }
+        };
+        units += atoms.len() + 1;
+        for atom in &atoms {
+            match atom {
+                Atom::Literal(c) => {
+                    alphabet.insert(*c);
+                }
+                Atom::Class { members, .. } => {
+                    units += members.len();
+                    alphabet.extend(members);
+                }
+                _ => {}
+            }
+        }
+        if units > MAX_UNITS {
+            return Err(error("scope inclusion pattern bound exceeded"));
+        }
+        machines.push(Machine { atoms, accepting });
+    }
+    if envelope.contains(&candidate) {
+        return Ok(true);
+    }
+    // Every unmentioned codepoint has identical transitions, even in negated classes.
+    let other = (0..=0x10ffff).find(|p| !alphabet.contains(p)).unwrap();
+    alphabet.insert(other);
+    let start = machines.iter().map(Machine::initial).collect::<Vec<_>>();
+    let mut seen = BTreeSet::from([start.clone()]);
+    let mut pending = VecDeque::from([start]);
+    let mut work = 0usize;
+    while let Some(state) = pending.pop_front() {
+        if machines[0].accepts(&state[0])
+            && !machines[1..]
+                .iter()
+                .zip(&state[1..])
+                .any(|(m, s)| m.accepts(s))
+        {
+            return Ok(false);
+        }
+        for &point in &alphabet {
+            work = work
+                .checked_add(units)
+                .ok_or_else(|| error("scope inclusion work overflow"))?;
+            if work > MAX_WORK {
+                return Err(error("scope inclusion work bound exceeded"));
+            }
+            let next = machines
+                .iter()
+                .zip(&state)
+                .map(|(m, s)| m.step(s, point))
+                .collect::<Vec<_>>();
+            if next[0].is_empty() || seen.contains(&next) {
+                continue;
+            }
+            if seen.len() >= MAX_STATES {
+                return Err(error("scope inclusion state bound exceeded"));
+            }
+            seen.insert(next.clone());
+            pending.push_back(next);
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
