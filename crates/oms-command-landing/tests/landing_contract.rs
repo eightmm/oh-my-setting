@@ -744,6 +744,269 @@ fn ci_status_fails_closed_without_gh() {
     }
 }
 
+struct FeedbackFixture {
+    isolated: Isolated,
+    repo: PathBuf,
+    gh: PathBuf,
+    head: String,
+}
+impl FeedbackFixture {
+    fn new() -> Self {
+        let isolated = Isolated::new();
+        let repo = isolated.repo("feedback");
+        isolated.git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project.git",
+            ],
+        );
+        let head = String::from_utf8(
+            isolated
+                .command(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let gh = isolated.bin.join("gh");
+        fs::write(
+            &gh,
+            r#"#!/bin/bash
+case "$1 $2" in
+  'run list') printf '%s\n' "$OMS_CT_FEEDBACK_RUNS";;
+  'pr list') printf '%s\n' "$OMS_CT_FEEDBACK_PULLS";;
+  'api --hostname')
+    [[ "${@: -1}" == *'/comments?sort=updated&direction=desc&per_page=50' ]] || exit 2
+    printf '%s\n' "$OMS_CT_FEEDBACK_COMMENTS";;
+  *) exit 2;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+        Self {
+            isolated,
+            repo,
+            gh,
+            head,
+        }
+    }
+    fn run(&self, action: &str, attempt: usize, head: &str, comments: &V, conclusion: &str) {
+        let result = self.observe(action, attempt, head, comments, conclusion, "CI");
+        assert!(result.0 <= 1, "{result:?}");
+    }
+    fn observe(
+        &self,
+        action: &str,
+        attempt: usize,
+        head: &str,
+        comments: &V,
+        conclusion: &str,
+        workflow: &str,
+    ) -> (i32, String, String) {
+        let runs = V::Arr(vec![obj([
+            ("databaseId", 73usize.into()),
+            ("attempt", attempt.into()),
+            ("headSha", self.head.clone().into()),
+            ("status", "completed".into()),
+            ("conclusion", conclusion.into()),
+            ("workflowName", workflow.into()),
+        ])]);
+        let pulls = V::Arr(vec![obj([
+            ("number", 19usize.into()),
+            ("headRefOid", head.into()),
+        ])]);
+        let encode = |v: &V| String::from_utf8(v.json(false).unwrap()).unwrap();
+        self.isolated.run_env(
+            "ci-status",
+            &self.repo,
+            &[action],
+            &[
+                ("OMS_GH_BIN", self.gh.to_str().unwrap()),
+                ("OMS_CI_TICK_INTERVAL", "0"),
+                ("OMS_CT_FEEDBACK_RUNS", &encode(&runs)),
+                ("OMS_CT_FEEDBACK_PULLS", &encode(&pulls)),
+                ("OMS_CT_FEEDBACK_COMMENTS", &encode(comments)),
+            ],
+        )
+    }
+    fn comments(&self, body: &str, updated: &str) -> V {
+        V::Arr(vec![obj([
+            ("id", 42usize.into()),
+            ("commit_id", self.head.clone().into()),
+            ("updated_at", updated.into()),
+            ("body", body.into()),
+            ("path", "src/lib.rs".into()),
+            ("line", 5usize.into()),
+            ("user", obj([("login", "reviewer".into())])),
+        ])])
+    }
+}
+
+#[test]
+fn ci_feedback_deduplicates_polls_and_observes_same_head_reruns() {
+    let f = FeedbackFixture::new();
+    let empty = V::Arr(vec![]);
+    f.run("record", 1, &f.head, &empty, "failure");
+    f.run("tick", 1, &f.head, &empty, "failure");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("classification").text(), Some("unknown"));
+    let first = rows[0].get("event_id").clone();
+    f.run("tick", 2, &f.head, &empty, "failure");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter().filter(|r| r.get("event_id") == &first).count(),
+        1
+    );
+    let history = fs::read_to_string(f.repo.join(".oms/ci.jsonl")).unwrap();
+    assert_eq!(history.lines().count(), 2);
+    let (code, out, err) = f
+        .isolated
+        .run("ci-status", &f.repo, &["feedback", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(V::parse(out.as_bytes()).unwrap().array().len(), 2);
+    let (code, out, err) = f.isolated.run(
+        "ci-status",
+        &f.repo,
+        &["feedback", "--json", "--limit", "1"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let recent = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(recent.array().len(), 1);
+    assert_eq!(recent.array()[0].get("source_revision"), &2usize.into());
+}
+
+#[test]
+fn pr_feedback_tracks_edits_beyond_the_excerpt_and_stale_heads() {
+    let f = FeedbackFixture::new();
+    let original = format!("{} original", "x".repeat(700));
+    let edited = format!("{} revised", "x".repeat(700));
+    f.run(
+        "record",
+        1,
+        &f.head,
+        &f.comments(&original, "2026-01-01T00:00:00Z"),
+        "success",
+    );
+    f.run(
+        "tick",
+        1,
+        &f.head,
+        &f.comments(&original, "2026-01-01T00:00:00Z"),
+        "success",
+    );
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows.len(), 2);
+    f.run(
+        "tick",
+        1,
+        &f.head,
+        &f.comments(&edited, "2026-01-01T00:01:00Z"),
+        "success",
+    );
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    let comments: Vec<_> = rows
+        .iter()
+        .filter(|r| r.get("source").text() == Some("pr-review-comment"))
+        .collect();
+    assert_eq!(comments.len(), 2);
+    assert_ne!(comments[0].get("event_id"), comments[1].get("event_id"));
+    assert_eq!(
+        comments[0].get("evidence").get("body"),
+        comments[1].get("evidence").get("body")
+    );
+    let moved = "a".repeat(40);
+    f.run(
+        "tick",
+        1,
+        &moved,
+        &f.comments(&edited, "2026-01-01T00:01:00Z"),
+        "success",
+    );
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r.get("source").text() == Some("pr-review-comment")
+                && r.get("classification").text() == Some("stale_head"))
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.get("trust").text() == Some("untrusted"))
+    );
+}
+
+#[test]
+fn ci_feedback_preserves_nonrepairable_conclusions_and_unknown_identity() {
+    let f = FeedbackFixture::new();
+    for (attempt, conclusion, classification) in [
+        (1, "cancelled", "cancelled"),
+        (2, "startup_failure", "environment_failure"),
+        (3, "timed_out", "unknown"),
+        (0, "failure", "unknown"),
+    ] {
+        f.run("record", attempt, &f.head, &V::Arr(vec![]), conclusion);
+        let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+        assert!(
+            rows.iter().any(
+                |r| r.get("evidence").get("conclusion").text() == Some(conclusion)
+                    && r.get("classification").text() == Some(classification)
+            ),
+            "{rows:?}"
+        );
+    }
+}
+
+#[test]
+fn feedback_refuses_corrupt_schema_and_identity_before_appending() {
+    let f = FeedbackFixture::new();
+    f.run("record", 1, &f.head, &V::Arr(vec![]), "failure");
+    let path = f.repo.join(oms_command_landing::feedback::EVENTS);
+    let original = fs::read_to_string(&path).unwrap();
+    let original = V::parse(original.trim().as_bytes()).unwrap();
+    for (field, changed) in [
+        ("schema", V::from(99usize)),
+        ("event_id", "a".repeat(64).into()),
+        ("classification", "success".into()),
+    ] {
+        let mut row = original.clone();
+        row.set(field, changed);
+        let mut corrupt = row.json(false).unwrap();
+        corrupt.push(b'\n');
+        fs::write(&path, &corrupt).unwrap();
+        assert!(oms_command_landing::feedback::observations(&f.repo).is_err());
+        let result = f.observe("record", 2, &f.head, &V::Arr(vec![]), "failure", "CI");
+        assert_eq!(result.0, 2, "{result:?}");
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+    }
+}
+
+#[test]
+fn feedback_withholds_sensitive_workflow_metadata() {
+    let f = FeedbackFixture::new();
+    let sensitive = ["gh", "p_", &"a".repeat(36)].concat();
+    let result = f.observe("record", 1, &f.head, &V::Arr(vec![]), "failure", &sensitive);
+    assert_eq!(result.0, 1, "{result:?}");
+    let raw = fs::read_to_string(f.repo.join(oms_command_landing::feedback::EVENTS)).unwrap();
+    assert!(!raw.contains(&sensitive));
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows[0].get("classification").text(), Some("unknown"));
+    assert_eq!(rows[0].get("evidence").get("withheld"), &true.into());
+    f.isolated.git(&f.repo, &["branch", "-m", &sensitive]);
+    f.run("record", 2, &f.head, &V::Arr(vec![]), "failure");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows[0].get("branch").text(), Some(""));
+    let raw = fs::read_to_string(f.repo.join(oms_command_landing::feedback::EVENTS)).unwrap();
+    assert!(!raw.contains(&sensitive));
+}
+
 #[test]
 fn report_dry_run_degrades_without_python() {
     let iso = Isolated::new();

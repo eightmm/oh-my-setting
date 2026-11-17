@@ -435,6 +435,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "protection",
         "triage",
         "suggest",
+        "feedback",
     ];
     let mut words = o.words.clone();
     let action = if words.first().is_some_and(|s| known.contains(&s.as_str())) {
@@ -450,8 +451,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "--sha is only read by triage",
     )?;
     require(
-        action == "suggest" || (!o.has("json") && !o.has("refresh")),
-        "--json and --refresh are only read by suggest",
+        (action == "suggest" || action == "feedback" || !o.has("json"))
+            && (action == "suggest" || !o.has("refresh")),
+        "--json is only read by suggest/feedback; --refresh is only read by suggest",
     )?;
     let limit = o
         .value("limit", "20")
@@ -477,6 +479,30 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     }
     if action == "suggest" {
         return crate::suggestions::execute(c, o, &state, &branch);
+    }
+    if action == "feedback" {
+        let rows = crate::feedback::observations(&state)?
+            .into_iter()
+            .take(limit)
+            .collect::<Vec<_>>();
+        return if o.has("json") {
+            Output::json(&V::Arr(rows))
+        } else {
+            Ok(Output::text(
+                rows.iter()
+                    .map(|row| {
+                        format!(
+                            "feedback:{} {} {} #{} {}\n",
+                            string(row, "event_id"),
+                            string(row, "classification"),
+                            string(row, "repo"),
+                            row.get("pr").py(),
+                            string(row, "head_sha")
+                        )
+                    })
+                    .collect::<String>(),
+            ))
+        };
     }
     if action == "flaky" {
         let rows = storage::rows(&state, Path::new(".oms/ci.jsonl"))?;
@@ -573,17 +599,6 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         {
             return Ok(Output::default());
         }
-        let rows = storage::read_external(&ledger, true)
-            .and_then(|r| storage::parse_rows(&r))
-            .unwrap_or_default();
-        if rows
-            .iter()
-            .rev()
-            .find(|r| string(r, "branch") == branch && string(r, "sha") == head)
-            .is_some_and(|r| string(r, "status") == "completed")
-        {
-            return Ok(Output::default());
-        }
         let mut ancestor = marker.parent().unwrap();
         while !ancestor.exists() {
             ancestor = ancestor.parent().unwrap();
@@ -622,6 +637,21 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         matches!(rows, V::Arr(_)),
         "gh returned an unreadable run list (lookup failed)",
     )?;
+    if ["record", "tick"].contains(&action.as_str()) {
+        crate::feedback::poll(
+            c,
+            &state,
+            &git,
+            &branch,
+            &head,
+            &rows,
+            if action == "tick" {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(20)
+            },
+        )?;
+    }
     let ahead = if git
         .text(&["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
@@ -692,6 +722,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             ("status", run.get("status").clone()),
             ("conclusion", concl.into()),
             ("url", run.get("url").clone()),
+            ("run_id", run.get("databaseId").clone()),
         ]);
         if run.has("attempt") {
             row.set("attempt", run.get("attempt").clone());
@@ -702,8 +733,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         let _guard = storage::lock(&ledger, c.interrupted)?;
         let raw = storage::read_external(&ledger, true)?;
         let prior = storage::parse_rows(&raw)?;
-        if prior.last().is_none_or(|r| {
-            r.get("sha") != row.get("sha") || r.get("conclusion") != row.get("conclusion")
+        if !prior.iter().any(|r| {
+            ["branch", "sha", "status", "conclusion", "run_id", "attempt"]
+                .iter()
+                .all(|key| r.get(key) == row.get(key))
         }) {
             let mut next = raw.clone();
             next.extend(row.json(false)?);

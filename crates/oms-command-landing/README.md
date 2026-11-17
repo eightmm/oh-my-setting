@@ -134,7 +134,29 @@ domain operation to reproduce.
 | Attribution notes ref | Only explicit `--export-notes` writes local notes. A second call replaces the selected commit's observation, as the existing export does |
 | Shared checkout remote-tracking ref/branch/HEAD/index | Canonical publication fence excludes live calls; clean/detached/diverged checks and a second snapshot fence precede `merge --ff-only`. An interrupted Git operation needs ordinary Git inspection; nothing is pushed |
 | Install links/copies/residue | Required native cleanup/install callbacks own their proofs, locks and reversible ownership transitions; this crate never deletes an unproven host target |
-| CI ledger/tick marker | Tick is bounded/fail-open and skips settled current SHAs. Writer locks preserve ledger prefixes; an interrupted lookup may leave only a throttling timestamp, never a successful CI observation |
+| CI ledger/tick marker | Tick is bounded and throttled, including after a completed run so same-head reruns remain observable. Writer locks preserve ledger prefixes; an interrupted lookup may leave only a throttling timestamp, never a successful CI observation |
+| `.oms/feedback/events.jsonl` | Polling and comment reads normalize untrusted observations under one writer lock with a complete-ledger CAS. Duplicate observations are suppressed across process restarts; run attempts and edited comments retain distinct identities. A partial/corrupt or full ledger refuses further writes |
+
+## External feedback observations
+
+`ci-status record` and the existing `ci-status tick` entry poll workflow runs
+and, when one open PR can be identified for the branch, bounded review comments.
+The comment window contains the 50 most recently updated comments, requested
+with GitHub's `sort=updated&direction=desc`; it is not a complete PR archive.
+`draft-pr comments` feeds the same journal. `ci-status feedback --json` exposes
+the latest 20 observed events (or `--limit N`) and their `feedback:<event_id>` identities without making
+another network request. No daemon, webhook, provider call or publication is
+introduced by observation.
+
+Each record binds the GitHub repository, PR number when known, exact source
+head and either workflow run ID plus attempt or comment ID plus update/content
+digest. An edit beyond the 600-character displayed comment excerpt still
+changes its identity. Poll time does not affect identity. Records are bounded
+and scrubbed; withheld content, unavailable run attempts, cancelled runs,
+environment failures and stale heads cannot be inferred to be repairable.
+An ordinary failed run remains `unknown` until a separate fresh comparison
+establishes an actionable regression. External text is always untrusted
+evidence, never a command, approval, scope change or execution grant.
 
 ## Implementation verification and remaining scope
 

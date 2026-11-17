@@ -977,7 +977,9 @@ fn followup(c: &Context<'_>, repo: &Path, row: &V, action: &str, json: bool) -> 
     if action == "comments" {
         let listed = ci::api(
             c,
-            &format!("repos/{slug}/pulls/{number}/comments?per_page=100"),
+            &format!(
+                "repos/{slug}/pulls/{number}/comments?sort=updated&direction=desc&per_page=100"
+            ),
         )?;
         require(
             matches!(listed, V::Arr(_)),
@@ -989,6 +991,14 @@ fn followup(c: &Context<'_>, repo: &Path, row: &V, action: &str, json: bool) -> 
         } else {
             String::new()
         };
+        crate::feedback::record_comments(
+            c,
+            &c.state(repo)?,
+            &slug,
+            row.get("pr_number"),
+            &head,
+            &listed,
+        )?;
         let mut comments = vec![];
         for item in listed.array().iter().take(50) {
             let body = oms_contract_markdown::bounded_line(&string(item, "body"), 600);
