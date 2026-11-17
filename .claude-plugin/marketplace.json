@@ -20,7 +20,8 @@
         "./oms-slurm",
         "./oms-gpu-workstation",
         "./oms-trust-boundary",
-        "./oms-careful"
+        "./oms-careful",
+        "./oms-panel-orchestrator"
       ]
     }
   ]

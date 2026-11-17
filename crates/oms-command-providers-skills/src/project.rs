@@ -181,9 +181,327 @@ fn env_flag(name: &str, default: bool) -> Result<bool> {
         _ => Err(error(format!("{name} must be 0 or 1"))),
     }
 }
+fn package_name(root: &Path, explicit: Option<&str>) -> Result<String> {
+    const RESERVED: &[&str] = &[
+        "abc",
+        "aifc",
+        "and",
+        "annotationlib",
+        "antigravity",
+        "argparse",
+        "array",
+        "as",
+        "assert",
+        "ast",
+        "async",
+        "asynchat",
+        "asyncio",
+        "asyncore",
+        "atexit",
+        "audioop",
+        "await",
+        "base64",
+        "bdb",
+        "binascii",
+        "bisect",
+        "break",
+        "build",
+        "builtins",
+        "bz2",
+        "calendar",
+        "case",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "class",
+        "cmath",
+        "cmd",
+        "code",
+        "codecs",
+        "codeop",
+        "collections",
+        "colorsys",
+        "compileall",
+        "compression",
+        "concurrent",
+        "configparser",
+        "contextlib",
+        "contextvars",
+        "continue",
+        "copy",
+        "copyreg",
+        "cprofile",
+        "crypt",
+        "csv",
+        "ctypes",
+        "curses",
+        "dataclasses",
+        "datetime",
+        "dbm",
+        "decimal",
+        "def",
+        "del",
+        "difflib",
+        "dis",
+        "distutils",
+        "doctest",
+        "elif",
+        "else",
+        "email",
+        "encodings",
+        "ensurepip",
+        "enum",
+        "errno",
+        "except",
+        "false",
+        "faulthandler",
+        "fcntl",
+        "filecmp",
+        "fileinput",
+        "finally",
+        "fnmatch",
+        "for",
+        "fractions",
+        "from",
+        "ftplib",
+        "functools",
+        "gc",
+        "genericpath",
+        "getopt",
+        "getpass",
+        "gettext",
+        "glob",
+        "global",
+        "graphlib",
+        "grp",
+        "gzip",
+        "hashlib",
+        "hatchling",
+        "heapq",
+        "hmac",
+        "html",
+        "http",
+        "idlelib",
+        "if",
+        "imaplib",
+        "imghdr",
+        "imp",
+        "import",
+        "importlib",
+        "in",
+        "inspect",
+        "io",
+        "ipaddress",
+        "is",
+        "itertools",
+        "json",
+        "keyword",
+        "lambda",
+        "lib2to3",
+        "linecache",
+        "locale",
+        "logging",
+        "lzma",
+        "mailbox",
+        "mailcap",
+        "marshal",
+        "match",
+        "math",
+        "mimetypes",
+        "mmap",
+        "modulefinder",
+        "msilib",
+        "msvcrt",
+        "multiprocessing",
+        "netrc",
+        "nis",
+        "nntplib",
+        "none",
+        "nonlocal",
+        "not",
+        "nt",
+        "ntpath",
+        "nturl2path",
+        "numbers",
+        "opcode",
+        "operator",
+        "optparse",
+        "or",
+        "os",
+        "ossaudiodev",
+        "pass",
+        "pathlib",
+        "pdb",
+        "pickle",
+        "pickletools",
+        "pip",
+        "pipes",
+        "pkgutil",
+        "platform",
+        "plistlib",
+        "poplib",
+        "posix",
+        "posixpath",
+        "pprint",
+        "profile",
+        "pstats",
+        "pty",
+        "pwd",
+        "py_compile",
+        "pyclbr",
+        "pydoc",
+        "pydoc_data",
+        "pyexpat",
+        "pytest",
+        "queue",
+        "quopri",
+        "raise",
+        "random",
+        "re",
+        "readline",
+        "reprlib",
+        "resource",
+        "return",
+        "rlcompleter",
+        "ruff",
+        "runpy",
+        "sched",
+        "secrets",
+        "select",
+        "selectors",
+        "shelve",
+        "shlex",
+        "shutil",
+        "signal",
+        "site",
+        "smtpd",
+        "smtplib",
+        "sndhdr",
+        "socket",
+        "socketserver",
+        "spwd",
+        "sqlite3",
+        "src",
+        "sre_compile",
+        "sre_constants",
+        "sre_parse",
+        "ssl",
+        "stat",
+        "statistics",
+        "string",
+        "stringprep",
+        "struct",
+        "subprocess",
+        "sunau",
+        "symtable",
+        "sys",
+        "sysconfig",
+        "syslog",
+        "tabnanny",
+        "tarfile",
+        "telnetlib",
+        "tempfile",
+        "templatelib",
+        "termios",
+        "test",
+        "tests",
+        "textwrap",
+        "this",
+        "threading",
+        "time",
+        "timeit",
+        "tkinter",
+        "token",
+        "tokenize",
+        "tomllib",
+        "trace",
+        "traceback",
+        "tracemalloc",
+        "true",
+        "try",
+        "tty",
+        "turtle",
+        "turtledemo",
+        "type",
+        "types",
+        "typing",
+        "unicodedata",
+        "unittest",
+        "urllib",
+        "uu",
+        "uuid",
+        "uv",
+        "venv",
+        "warnings",
+        "wave",
+        "weakref",
+        "webbrowser",
+        "while",
+        "winreg",
+        "winsound",
+        "with",
+        "wsgiref",
+        "xdrlib",
+        "xml",
+        "xmlrpc",
+        "yield",
+        "zipapp",
+        "zipfile",
+        "zipimport",
+        "zlib",
+        "zoneinfo",
+    ];
+    if let Some(name) = explicit {
+        let valid = Regex::new(r"^[a-z](?:[a-z0-9_]{0,62}[a-z0-9])?$").expect("package regex");
+        if !valid.is_match(name) || RESERVED.contains(&name) {
+            return Err(error("invalid Python package name"));
+        }
+        return Ok(name.into());
+    }
+    let raw = root.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let mut name = String::new();
+    for ch in raw.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            name.push(ch);
+        } else if (ch == '_' || ch == '-' || ch == '.' || ch.is_whitespace())
+            && !name.ends_with('_')
+        {
+            name.push('_');
+        }
+    }
+    name = name
+        .trim_matches('_')
+        .chars()
+        .take(64)
+        .collect::<String>()
+        .trim_end_matches('_')
+        .to_string();
+    if name.is_empty()
+        || !name.starts_with(|c: char| c.is_ascii_lowercase())
+        || RESERVED.contains(&name.as_str())
+    {
+        name = if name.is_empty() {
+            "pkg".into()
+        } else {
+            format!("pkg_{}", name.chars().take(60).collect::<String>())
+                .trim_end_matches('_')
+                .to_string()
+        };
+    }
+    Ok(name)
+}
 pub(crate) fn apply(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     use std::os::unix::fs::PermissionsExt;
-    let args = Args::parse(args, &[], &["--no-private", "--full-docs", "--python-ci"])?;
+    let args = Args::parse(
+        args,
+        &["--package"],
+        &[
+            "--no-private",
+            "--full-docs",
+            "--python-ci",
+            "--python-layout",
+        ],
+    )?;
     let selected = args
         .positional
         .first()
@@ -210,6 +528,26 @@ pub(crate) fn apply(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         raw_root.canonicalize()?
     } else {
         raw_root.clone()
+    };
+    if root
+        .to_str()
+        .is_none_or(|s| s.chars().any(char::is_control))
+    {
+        return Err(error(
+            "target path must be UTF-8 without control characters",
+        ));
+    }
+    let python = args.has("--python-layout");
+    if args.get("--package").is_some() && !python {
+        return Err(error("--package requires --python-layout"));
+    }
+    for value in args.all("--package") {
+        package_name(&root, Some(value))?;
+    }
+    let package = if python {
+        Some(package_name(&root, args.get("--package"))?)
+    } else {
+        None
     };
     let base = if selected == "auto" {
         style(&root)?
@@ -282,6 +620,87 @@ pub(crate) fn apply(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             }
         }
     }
+    if base == "general" && full && ctx.source.join("templates/general-docs").is_dir() {
+        for path in walk(&ctx.source.join("templates/general-docs"), 1, &[])? {
+            if path.extension().is_some_and(|s| s == "md") {
+                copies.push((
+                    path.clone(),
+                    PathBuf::from("docs").join(
+                        path.file_name()
+                            .ok_or_else(|| error("missing document name"))?,
+                    ),
+                    false,
+                ));
+            }
+        }
+    }
+    let (has_tests, existing_test) = if exists && package.is_some() {
+        let smoke = root.join("tests");
+        no_links(&root, safe_relative("tests")?)?;
+        if smoke.is_dir() {
+            let mut all_count = 0usize;
+            let mut safe_leaves = Vec::new();
+            let mut utf8_leaves = Vec::new();
+            for e in std::fs::read_dir(&smoke)?.filter_map(|e| e.ok()) {
+                let raw = e.file_name();
+                let lossy = raw.to_string_lossy();
+                if lossy.ends_with(".py")
+                    && (lossy.starts_with("test_") || lossy.ends_with("_test.py"))
+                {
+                    all_count += 1;
+                    if let Some(s) = raw.to_str()
+                        && !s.chars().any(char::is_control)
+                    {
+                        if s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+                        {
+                            safe_leaves.push(s.to_string());
+                        } else {
+                            utf8_leaves.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            safe_leaves.sort();
+            utf8_leaves.sort();
+            let chosen = if let Some(leaf) = safe_leaves.first() {
+                Some(format!("tests/{leaf}"))
+            } else {
+                utf8_leaves
+                    .first()
+                    .map(|leaf| format!("'tests/{}'", leaf.replace('\'', "'\\''")))
+            };
+            (all_count > 0, chosen)
+        } else {
+            (false, None)
+        }
+    } else {
+        (false, None)
+    };
+    if let Some(pkg) = &package {
+        destinations.extend([
+            "pyproject.toml".into(),
+            format!("src/{pkg}/__init__.py"),
+            format!("src/{pkg}/py.typed"),
+            ".gitignore".into(),
+            ".oms/skills".into(),
+            ".agents/skills".into(),
+            ".claude/skills".into(),
+        ]);
+        if !has_tests {
+            destinations.push("tests/test_smoke.py".into());
+        }
+        if base != "ml"
+            && !args.has("--python-ci")
+            && ctx.source.join("templates/check.sh").is_file()
+        {
+            copies.push((
+                ctx.source.join("templates/check.sh"),
+                PathBuf::from("scripts/check.sh"),
+                true,
+            ));
+        }
+    }
     if args.has("--python-ci") {
         for path in ["pyproject.toml", "uv.lock", "tests"] {
             if !root.join(path).exists() {
@@ -322,7 +741,157 @@ pub(crate) fn apply(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         destinations.push(rel_dst.to_string_lossy().into_owned());
     }
     for destination in &destinations {
-        no_links(&root, safe_relative(destination)?)?;
+        let rel = safe_relative(destination)?;
+        no_links(&root, rel)?;
+        if exists {
+            for anc in rel.ancestors().skip(1) {
+                if !anc.as_os_str().is_empty()
+                    && let Ok(m) = std::fs::symlink_metadata(root.join(anc))
+                    && !m.is_dir()
+                {
+                    return Err(error(format!(
+                        "non-directory at {} blocks template; nothing was changed (remove or rename {})",
+                        anc.display(),
+                        anc.display()
+                    )));
+                }
+            }
+            let is_dir_dest = matches!(
+                destination.as_str(),
+                ".oms/skills" | ".agents/skills" | ".claude/skills"
+            );
+            if let Ok(m) = std::fs::symlink_metadata(root.join(rel)) {
+                if is_dir_dest && !m.is_dir() {
+                    return Err(error(format!(
+                        "non-directory at {} blocks template; nothing was changed (remove or rename {})",
+                        rel.display(),
+                        rel.display()
+                    )));
+                }
+                if !is_dir_dest && m.is_dir() {
+                    return Err(error(format!(
+                        "directory at {} blocks template file; nothing was changed (remove or rename {})",
+                        rel.display(),
+                        rel.display()
+                    )));
+                }
+            }
+        }
+    }
+    if exists && (base == "ml" || package.is_some()) {
+        String::from_utf8(optional(&root.join(".gitignore"))?)
+            .map_err(|_| error(".gitignore must be UTF-8"))?;
+    }
+    if base == "ml" || python {
+        let planned: Vec<&str> = ["oms-ml-experiment", "oms-dataset-safety", "oms-python-ai"]
+            .into_iter()
+            .filter(|name| base == "ml" || (python && *name == "oms-python-ai"))
+            .collect();
+        for name in &planned {
+            let source = ctx
+                .source
+                .join("templates/project-skills")
+                .join(name)
+                .join("SKILL.md");
+            if source.is_file() {
+                let bytes = read(&source, 256 * 1024)?;
+                crate::skills::validate(&bytes, name, true)?;
+            }
+        }
+        if exists {
+            for dir_rel in [".oms", ".oms/skill-store"] {
+                if let Ok(m) = std::fs::symlink_metadata(root.join(dir_rel))
+                    && !m.is_dir()
+                {
+                    return Err(error(format!(
+                        "non-directory at {dir_rel} blocks template; nothing was changed (remove or rename {dir_rel})"
+                    )));
+                }
+            }
+            for file_rel in [
+                ".oms/.gitignore",
+                ".oms/skill-admissions.jsonl",
+                ".oms/skill-store/.authority",
+            ] {
+                no_links(&root, Path::new(file_rel))?;
+                if let Ok(m) = std::fs::symlink_metadata(root.join(file_rel))
+                    && m.is_dir()
+                {
+                    return Err(error(format!(
+                        "directory at {file_rel} blocks template; nothing was changed (remove or rename {file_rel})"
+                    )));
+                }
+            }
+            let existing = crate::skills::targets(&root)?;
+            let mut will_sync_skills = false;
+            for name in &planned {
+                let source = ctx
+                    .source
+                    .join("templates/project-skills")
+                    .join(name)
+                    .join("SKILL.md");
+                if !source.is_file() {
+                    continue;
+                }
+                let legacy = name.strip_prefix("oms-").unwrap_or(name);
+                if let Some((active, target_path)) = existing
+                    .get(*name)
+                    .map(|p| (*name, p))
+                    .or_else(|| existing.get(legacy).map(|p| (legacy, p)))
+                {
+                    if !crate::skills::has_owned_links(&root, active, target_path) {
+                        will_sync_skills = true;
+                    }
+                } else {
+                    will_sync_skills = true;
+                }
+            }
+            if will_sync_skills {
+                for skill in existing.keys() {
+                    crate::skills::preflight(&root, skill).map_err(|e| {
+                        error(format!(
+                            "{}; nothing was changed (remove or rename .agents/skills/{skill} or .claude/skills/{skill})",
+                            e.message
+                        ))
+                    })?;
+                }
+            }
+            for name in &planned {
+                let source = ctx
+                    .source
+                    .join("templates/project-skills")
+                    .join(name)
+                    .join("SKILL.md");
+                let legacy = name.strip_prefix("oms-").unwrap_or(name);
+                for candidate in [*name, legacy] {
+                    no_links(&root, Path::new(&format!(".oms/skills/{candidate}")))?;
+                    let local_dir = root.join(".oms/skills").join(candidate);
+                    if let Ok(m) = std::fs::symlink_metadata(&local_dir) {
+                        if !m.is_dir() {
+                            return Err(error(format!(
+                                "non-directory at .oms/skills/{candidate} blocks template; nothing was changed (remove or rename .oms/skills/{candidate})"
+                            )));
+                        }
+                        if !local_dir.join("SKILL.md").is_file() {
+                            return Err(error(format!(
+                                "directory at .oms/skills/{candidate} lacks SKILL.md; nothing was changed (remove or add .oms/skills/{candidate}/SKILL.md)"
+                            )));
+                        }
+                    }
+                }
+                if source.is_file()
+                    && !existing.contains_key(*name)
+                    && !existing.contains_key(legacy)
+                {
+                    crate::skills::preflight(&root, name).map_err(|e| {
+                        error(format!(
+                            "{}; nothing was changed (remove or rename .agents/skills/{name} or .claude/skills/{name})",
+                            e.message
+                        ))
+                    })?;
+                }
+            }
+        }
     }
     let mut styles = vec![];
     if base != "slurm" {
@@ -403,7 +972,29 @@ pub(crate) fn apply(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     } else if !spec.exists()
         && let Some(store) = &store
     {
-        store.write(&spec, scaffold(base, slurm).as_bytes(), true)?;
+        let mut text = scaffold(base, slurm);
+        if let Some(pkg) = &package {
+            let test_cmd = match existing_test.as_deref() {
+                Some(path_arg) => format!("bash scripts/check.sh fast {path_arg}"),
+                None if has_tests => "bash scripts/check.sh fast tests".into(),
+                None => "bash scripts/check.sh fast tests/test_smoke.py".into(),
+            };
+            text = text
+                .replace("- Setup:\n", "- Setup: uv sync\n")
+                .replace("- Test:\n", &format!("- Test: {test_cmd}\n"))
+                .replace(
+                    "- Lint/typecheck:\n",
+                    "- Lint/typecheck: uv run --no-sync ruff check src tests\n",
+                )
+                .replace(
+                    "- Data:\n",
+                    &format!("- Source: src/{pkg}/\n- Tests: tests/\n- Data:\n"),
+                );
+            if full && base == "general" {
+                text = text.replace("- References (repo-relative paths/sections):", "- References (repo-relative paths/sections): docs/ARCHITECTURE.md, docs/DECISIONS.md");
+            }
+        }
+        store.write(&spec, text.as_bytes(), true)?;
         out.push_str(&format!("created {}\n", spec.display()));
     }
     for (source, rel_dst, executable) in copies {
@@ -422,14 +1013,65 @@ pub(crate) fn apply(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             ));
         }
     }
-    if base == "ml" && !dry {
+    if let Some(pkg) = &package {
+        let files = [
+            (
+                "pyproject.toml".to_string(),
+                format!(
+                    "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[project]\nname = \"{pkg}\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\ndependencies = []\n\n[dependency-groups]\ndev = [\"pytest\", \"ruff\"]\n\n[tool.hatch.build.targets.wheel]\npackages = [\"src/{pkg}\"]\n\n[tool.ruff]\nline-length = 100\nsrc = [\"src\", \"tests\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\npythonpath = [\"src\"]\n"
+                ),
+            ),
+            (
+                format!("src/{pkg}/__init__.py"),
+                "\"\"\"Project package.\"\"\"\n\n__all__: list[str] = []\n".into(),
+            ),
+            (format!("src/{pkg}/py.typed"), String::new()),
+            (
+                "tests/test_smoke.py".into(),
+                format!(
+                    "import {pkg}\n\n\ndef test_import():\n    assert hasattr({pkg}, \"__file__\")\n"
+                ),
+            ),
+        ];
+        for (name, content) in files {
+            let path = root.join(&name);
+            if !path.exists() && !(name == "tests/test_smoke.py" && has_tests) {
+                if let Some(store) = &store {
+                    store.write(&path, content.as_bytes(), true)?;
+                }
+                out.push_str(&format!(
+                    "{}ensure {}\n",
+                    if dry { "would " } else { "" },
+                    path.display()
+                ));
+            }
+        }
+    }
+    if python && dry {
+        out.push_str(&format!(
+            "would ensure {}\n",
+            root.join(".gitignore").display()
+        ));
+    }
+    if (base == "ml" || python) && !dry {
         let store = store.as_ref().expect("non-dry store");
         let ignore = root.join(".gitignore");
         let _guard = lock(&ignore)?;
         let raw = optional(&ignore)?;
         let mut text =
             String::from_utf8(raw.clone()).map_err(|_| error(".gitignore must be UTF-8"))?;
-        for name in ML_IGNORES {
+        for name in ML_IGNORES.iter().filter(|_| base == "ml").chain(
+            [
+                ".venv/",
+                "__pycache__/",
+                ".pytest_cache/",
+                ".ruff_cache/",
+                "dist/",
+                ".oms/",
+            ]
+            .iter()
+            .filter(|_| python),
+        ) {
             if !text.lines().any(|l| l == *name) {
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
@@ -439,29 +1081,20 @@ pub(crate) fn apply(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             }
         }
         store.write_locked(&ignore, text.as_bytes(), false, Some(&raw))?;
-        for name in ["oms-ml-experiment", "oms-dataset-safety"] {
-            let source = ctx
-                .source
-                .join("templates/project-skills")
-                .join(name)
-                .join("SKILL.md");
-            let legacy = name.strip_prefix("oms-").unwrap_or(name);
-            if source.is_file()
-                && !root.join(".oms/skills").join(name).exists()
-                && !root.join(".oms/skills").join(legacy).exists()
-            {
-                let args = vec![
-                    "--repo".into(),
-                    root.as_os_str().to_owned(),
-                    "add".into(),
-                    "--name".into(),
-                    name.into(),
-                    "--file".into(),
-                    source.into_os_string(),
-                ];
-                crate::skills::run(&args, ctx)?;
-            }
-        }
+        let planned_sources: Vec<(&str, PathBuf)> =
+            ["oms-ml-experiment", "oms-dataset-safety", "oms-python-ai"]
+                .into_iter()
+                .filter(|name| base == "ml" || (python && *name == "oms-python-ai"))
+                .filter_map(|name| {
+                    let source = ctx
+                        .source
+                        .join("templates/project-skills")
+                        .join(name)
+                        .join("SKILL.md");
+                    source.is_file().then_some((name, source))
+                })
+                .collect();
+        crate::skills::ensure_template_skills(&root, &planned_sources, ctx)?;
     }
     if private && (!dry || exists) {
         let mut args: Vec<OsString> = vec!["--repo".into(), root.into_os_string(), "apply".into()];
@@ -530,6 +1163,24 @@ pub(crate) fn remove(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     }
     Ok(Output::text(out))
 }
+fn git_exclude_pattern(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 8);
+    for (index, ch) in path.chars().enumerate() {
+        if matches!(ch, '\\' | '*' | '?' | '[' | ']') || (index == 0 && matches!(ch, '#' | '!')) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    let trimmed = out.trim_end_matches(' ');
+    let trailing = out.len() - trimmed.len();
+    if trailing > 0 {
+        out.truncate(trimmed.len());
+        for _ in 0..trailing {
+            out.push_str("\\ ");
+        }
+    }
+    out
+}
 pub(crate) fn privacy(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     let args = Args::parse(
         args,
@@ -551,7 +1202,36 @@ pub(crate) fn privacy(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     if args.has("--untrack") && action != "apply" {
         return Err(error("--untrack is only supported by apply"));
     }
+    let requested_raw = ctx.path(args.get("--repo").unwrap_or("."));
+    let requested = if requested_raw.exists() {
+        requested_raw.canonicalize()?
+    } else {
+        requested_raw
+    };
     let root = ctx.repo(args.get("--repo"))?;
+    let root = root.canonicalize().unwrap_or(root);
+    let rel_prefix = requested
+        .strip_prefix(&root)
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| {
+            p.to_str()
+                .filter(|s| {
+                    !s.chars().any(char::is_control)
+                        && !std::path::Path::new(s)
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir))
+                })
+                .ok_or_else(|| {
+                    error("repository subdirectory path must be UTF-8 without control characters")
+                })
+                .map(str::to_owned)
+        })
+        .transpose()?;
+    let qualify = |value: &str| match &rel_prefix {
+        Some(prefix) => format!("{prefix}/{value}"),
+        None => value.to_owned(),
+    };
     let root_str = root
         .to_str()
         .ok_or_else(|| error("repository must be UTF-8"))?;
@@ -585,26 +1265,39 @@ pub(crate) fn privacy(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(str::to_owned)
         .collect();
-    let mut names: Vec<String> = NAMES.iter().map(|s| s.to_string()).collect();
+    let mut names: Vec<String> = NAMES.iter().map(|s| qualify(s)).collect();
     for value in args.all("--path") {
         safe_relative(value)?;
         if value.contains("..") || value.chars().any(char::is_whitespace) {
             return Err(error("--path must be relative without whitespace or '..'"));
         }
-        if !names.iter().any(|n| n == value) {
-            names.push(value.into());
+        let qualified = qualify(value);
+        if !names.iter().any(|n| n == &qualified) {
+            names.push(qualified);
         }
     }
     let dry = args.has("--dry-run") || env_flag("OH_MY_SETTING_DRY_RUN", false)?;
     let mut rows = vec![];
     let mut exposed = 0;
     for name in &names {
+        let pattern = git_exclude_pattern(name);
         let tracked = ctx
-            .command("git", &["-C", root_str, "ls-files", "--", name], 10)?
+            .command(
+                "git",
+                &[
+                    "-C",
+                    root_str,
+                    "--literal-pathspecs",
+                    "ls-files",
+                    "--",
+                    name,
+                ],
+                10,
+            )?
             .out;
         let state = if !tracked.is_empty() {
             "tracked"
-        } else if entries.contains(name) {
+        } else if entries.contains(&pattern) {
             if root.join(name).exists() {
                 "hidden"
             } else {
@@ -628,7 +1321,16 @@ pub(crate) fn privacy(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                 && ctx
                     .command(
                         "git",
-                        &["-C", root_str, "rm", "--cached", "--quiet", "--", name],
+                        &[
+                            "-C",
+                            root_str,
+                            "--literal-pathspecs",
+                            "rm",
+                            "--cached",
+                            "--quiet",
+                            "--",
+                            name,
+                        ],
                         10,
                     )?
                     .code
@@ -636,8 +1338,8 @@ pub(crate) fn privacy(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             {
                 return Err(error("git rm --cached failed"));
             }
-            if !entries.contains(name) {
-                entries.push(name.clone());
+            if !entries.contains(&pattern) {
+                entries.push(pattern);
             }
         }
     }
@@ -668,8 +1370,24 @@ pub(crate) fn privacy(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         }
         return Ok(out);
     }
+    if action == "remove" {
+        let extra: Vec<&str> = args.all("--path").collect();
+        if !extra.is_empty() {
+            let drop_set: BTreeSet<String> = extra
+                .into_iter()
+                .map(|v| git_exclude_pattern(&qualify(v)))
+                .collect();
+            entries.retain(|e| !drop_set.contains(e));
+        } else if let Some(prefix) = &rel_prefix {
+            let scope_prefix = git_exclude_pattern(&format!("{prefix}/"));
+            let drop_set: BTreeSet<String> = names.iter().map(|n| git_exclude_pattern(n)).collect();
+            entries.retain(|e| !drop_set.contains(e) && !e.starts_with(&scope_prefix));
+        } else {
+            entries.clear();
+        }
+    }
     let mut updated = outside.trim_end_matches('\n').to_owned();
-    if action == "apply" && !entries.is_empty() {
+    if !entries.is_empty() {
         if !updated.is_empty() {
             updated.push_str("\n\n");
         }
@@ -683,7 +1401,7 @@ pub(crate) fn privacy(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     Ok(Output::text(format!(
         "{}project-private: {} managed block in {}\n",
         if dry { "would " } else { "" },
-        if action == "apply" {
+        if action == "apply" || !entries.is_empty() {
             "updated"
         } else {
             "removed"
@@ -868,6 +1586,36 @@ pub(crate) fn doctor(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         warned = true;
         messages.push("warn: agent files visible to git; run: oms project-private apply".into());
     }
+    let docs = root.join("docs");
+    if docs.is_dir() {
+        let (nested, truncated_depth) = scan_nested_docs(&root, &docs)?;
+        if !nested.is_empty() {
+            warned = true;
+            messages.push(format!(
+                "warn: nested markdown under docs/ (keep docs/ 1 level shallow): {}",
+                nested.join(" ")
+            ));
+        } else if truncated_depth {
+            warned = true;
+            messages.push(
+                "warn: docs/ directory nesting exceeds depth 64; nested markdown check incomplete"
+                    .into(),
+            );
+        } else {
+            messages.push("ok: docs/ hierarchy is shallow".into());
+        }
+    }
+    if !root_ml && (root.join("pyproject.toml").is_file() || root.join("uv.lock").is_file()) {
+        doctor_hygiene(&root, &mut messages, &mut warned)?;
+        if root.join("src").is_dir() {
+            messages.push("ok: Python package sources live under src/".into());
+        } else {
+            warned = true;
+            messages.push(
+                "warn: pyproject.toml present without src/ layout (prefer src/<package>/)".into(),
+            );
+        }
+    }
     if root_ml {
         doctor_ml(
             &root,
@@ -916,6 +1664,118 @@ pub(crate) fn doctor(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     let mut out = Output::text(format!("{}\n", messages.join("\n")));
     out.code = i32::from(bad);
     Ok(out)
+}
+fn scan_nested_docs(root: &Path, docs: &Path) -> Result<(Vec<String>, bool)> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        docs: &Path,
+        depth: usize,
+        seen: &mut usize,
+        nested: &mut Vec<String>,
+        truncated: &mut bool,
+    ) -> Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            *seen += 1;
+            if *seen > 10_000 {
+                return Err(error("directory scan exceeded the entry budget"));
+            }
+            let ty = entry.file_type()?;
+            let path = entry.path();
+            if ty.is_dir() {
+                if depth == 0 {
+                    *truncated = true;
+                } else {
+                    visit(root, &path, docs, depth - 1, seen, nested, truncated)?;
+                }
+            } else if ty.is_file()
+                && path.extension().is_some_and(|e| e == "md")
+                && path.parent() != Some(docs)
+            {
+                nested.push(
+                    path.strip_prefix(root)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut seen = 0usize;
+    let mut nested = Vec::new();
+    let mut truncated = false;
+    visit(root, docs, docs, 64, &mut seen, &mut nested, &mut truncated)?;
+    Ok((nested, truncated))
+}
+fn doctor_hygiene(root: &Path, messages: &mut Vec<String>, warned: &mut bool) -> Result<()> {
+    let rel_list = |paths: Vec<PathBuf>| -> String {
+        paths
+            .iter()
+            .filter_map(|p| p.strip_prefix(root).ok())
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let stray_py: Vec<_> = walk(root, 1, PRUNE)?
+        .into_iter()
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.ends_with(".py")
+                && ![
+                    "setup.py",
+                    "conftest.py",
+                    "noxfile.py",
+                    "tasks.py",
+                    "dodo.py",
+                ]
+                .contains(&name)
+        })
+        .collect();
+    if stray_py.is_empty() {
+        messages.push("ok: no stray top-level python files".into());
+    } else {
+        *warned = true;
+        messages.push(format!(
+            "warn: top-level python files (move into src/ or scripts/): {}",
+            rel_list(stray_py)
+        ));
+    }
+    let stray_md: Vec<_> = walk(root, 2, &[".git", ".venv", "node_modules", "docs"])?
+        .into_iter()
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.ends_with(".md")
+                && !name.starts_with("README")
+                && ![
+                    "AGENTS.md",
+                    "CLAUDE.md",
+                    "GEMINI.md",
+                    "PROJECT.md",
+                    "CONTRIBUTING.md",
+                    "CHANGELOG.md",
+                    "LICENSE.md",
+                    "SECURITY.md",
+                    "CODE_OF_CONDUCT.md",
+                ]
+                .contains(&name)
+        })
+        .collect();
+    if stray_md.is_empty() {
+        messages.push("ok: markdown files live under docs/".into());
+    } else {
+        *warned = true;
+        messages.push(format!(
+            "warn: markdown outside docs/ (move there): {}",
+            rel_list(stray_md)
+        ));
+    }
+    Ok(())
 }
 fn doctor_ml(
     root: &Path,
@@ -991,58 +1851,7 @@ fn doctor_ml(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let stray_py: Vec<_> = walk(root, 1, PRUNE)?
-        .into_iter()
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.ends_with(".py")
-                && ![
-                    "setup.py",
-                    "conftest.py",
-                    "noxfile.py",
-                    "tasks.py",
-                    "dodo.py",
-                ]
-                .contains(&name)
-        })
-        .collect();
-    if stray_py.is_empty() {
-        messages.push("ok: no stray top-level python files".into());
-    } else {
-        *warned = true;
-        messages.push(format!(
-            "warn: top-level python files (move into src/ or scripts/): {}",
-            rel_list(stray_py)
-        ));
-    }
-    let stray_md: Vec<_> = walk(root, 2, &[".git", ".venv", "node_modules", "docs"])?
-        .into_iter()
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.ends_with(".md")
-                && !name.starts_with("README")
-                && ![
-                    "AGENTS.md",
-                    "CLAUDE.md",
-                    "PROJECT.md",
-                    "CONTRIBUTING.md",
-                    "CHANGELOG.md",
-                    "LICENSE.md",
-                    "SECURITY.md",
-                    "CODE_OF_CONDUCT.md",
-                ]
-                .contains(&name)
-        })
-        .collect();
-    if stray_md.is_empty() {
-        messages.push("ok: markdown files live under docs/".into());
-    } else {
-        *warned = true;
-        messages.push(format!(
-            "warn: markdown outside docs/ (move there): {}",
-            rel_list(stray_md)
-        ));
-    }
+    doctor_hygiene(root, messages, warned)?;
     let stray_nb: Vec<_> = walk(root, 3, &[".git", ".venv", "node_modules", "notebooks"])?
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "ipynb"))
@@ -1244,6 +2053,7 @@ pub(crate) fn init(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     let args = Args::parse(args, &["--repo"], &["--no-private"])?;
     args.count(0)?;
     let root = ctx.repo(args.get("--repo"))?;
+    let root = root.canonicalize().unwrap_or(root);
     let store = Store::open(&root)?;
     no_links(&root, Path::new(".oms/.gitignore"))?;
     store.write(&root.join(".oms/.gitignore"), b"*\n", true)?;

@@ -222,6 +222,23 @@
         "/oms-careful",
         "collaboration mode: careful"
       ]
+    },
+    {
+      "name": "oms-panel-orchestrator",
+      "source": "custom-skills/oms-panel-orchestrator",
+      "enabled": true,
+      "reason": "Operate the OMS terminal panel as a parallel multi-provider control tower: disjoint scoped slices, claude/codex account balancing, room visibility, isolated admission and verified landing.",
+      "triggers": [
+        "control tower",
+        "panel orchestrat",
+        "패널로 분배",
+        "일 분배",
+        "직접 다하지말고",
+        "oms panel로",
+        "멀티 계정 병렬",
+        "$oms-panel-orchestrator",
+        "/oms-panel-orchestrator"
+      ]
     }
   ]
 }

@@ -333,6 +333,17 @@ fn owned(root: &Path, path: &Path) -> bool {
 pub(crate) fn preflight(root: &Path, skill: &str) -> Result<()> {
     for base in [".agents/skills", ".claude/skills"] {
         no_links(root, Path::new(base))?;
+        if let Some(top) = base.split('/').next()
+            && let Ok(m) = std::fs::symlink_metadata(root.join(top))
+            && !m.is_dir()
+        {
+            return Err(error("non-directory blocks project skill directory"));
+        }
+        if let Ok(m) = std::fs::symlink_metadata(root.join(base))
+            && !m.is_dir()
+        {
+            return Err(error("non-directory blocks project skill directory"));
+        }
         let path = root.join(base).join(skill);
         if std::fs::symlink_metadata(&path).is_ok() && !owned(root, &path) {
             return Err(error("foreign project skill entry blocks link"));
@@ -387,6 +398,82 @@ pub(crate) fn link(root: &Path, ctx: &Context<'_>) -> Result<usize> {
     }
     Ok(valid.len())
 }
+fn check_add_target(root: &Path, skill: &str) -> Result<PathBuf> {
+    preflight(root, skill)?;
+    let destination = root.join(".oms/skills").join(skill);
+    if std::fs::symlink_metadata(&destination).is_ok() {
+        return Err(error("project skill already exists"));
+    }
+    Ok(destination)
+}
+fn add_locked(
+    root: &Path,
+    skill: &str,
+    bytes: &[u8],
+    source: &str,
+    ctx: &Context<'_>,
+) -> Result<PathBuf> {
+    let destination = check_add_target(root, skill)?;
+    validate(bytes, skill, true)?;
+    check_references(&destination, &format!(".oms/skills/{skill}"), Some(bytes))?;
+    let store = Store::open(root)?;
+    no_links(root, Path::new(".oms/.gitignore"))?;
+    store.write(&root.join(".oms/.gitignore"), b"*\n", true)?;
+    store.write(&destination.join("SKILL.md"), bytes, true)?;
+    admission(root, skill, source)?;
+    link(root, ctx)?;
+    Ok(destination)
+}
+/// Returns true when both provider discovery directories hold valid OMS-owned links to `expected_target`.
+pub(crate) fn has_owned_links(root: &Path, skill: &str, expected_target: &Path) -> bool {
+    [".agents/skills", ".claude/skills"].iter().all(|base| {
+        let p = root.join(base).join(skill);
+        owned(root, &p) && std::fs::read_link(&p).is_ok_and(|t| t == expected_target)
+    })
+}
+/// Atomically installs missing template skills and repairs missing provider links under `.authority`.
+pub(crate) fn ensure_template_skills(
+    root: &Path,
+    planned: &[(&str, PathBuf)],
+    ctx: &Context<'_>,
+) -> Result<()> {
+    if planned.is_empty() {
+        return Ok(());
+    }
+    let root = root.canonicalize()?;
+    no_links(&root, Path::new(".oms/skills"))?;
+    let _guard = lock(&root.join(".oms/skill-store/.authority"))?;
+    let mut existing = targets(&root)?;
+    let mut need_relink = false;
+    for (skill_raw, source_file) in planned {
+        let skill = name(skill_raw, true)?;
+        let legacy = skill.strip_prefix("oms-").unwrap_or(skill);
+        if let Some((active, target_path)) = existing
+            .get(skill)
+            .map(|p| (skill, p))
+            .or_else(|| existing.get(legacy).map(|p| (legacy, p)))
+        {
+            if !has_owned_links(&root, active, target_path) {
+                need_relink = true;
+            }
+        } else {
+            let bytes = read(source_file, 256 * 1024)?;
+            add_locked(
+                &root,
+                skill,
+                &bytes,
+                &source_file.display().to_string(),
+                ctx,
+            )?;
+            existing = targets(&root)?;
+            need_relink = false;
+        }
+    }
+    if need_relink {
+        link(&root, ctx)?;
+    }
+    Ok(())
+}
 pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     let args = Args::parse(
         raw,
@@ -411,7 +498,6 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         .map(String::as_str)
         .unwrap_or("help");
     let root = ctx.repo(args.get("--repo"))?;
-    let store = Store::open(&root)?;
     if [
         "preview", "import", "update", "rollback", "eval", "outdated",
     ]
@@ -434,11 +520,7 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     match command {
         "add" => {
             let skill = name(args.required("--name")?, true)?;
-            preflight(&root, skill)?;
-            let destination = root.join(".oms/skills").join(skill);
-            if std::fs::symlink_metadata(&destination).is_ok() {
-                return Err(error("project skill already exists"));
-            }
+            let _ = check_add_target(&root, skill)?;
             let bytes = if let Some(file) = args.get("--file") {
                 read(&ctx.path(file), 256 * 1024)?
             } else {
@@ -448,13 +530,13 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                     .read_to_end(&mut data)?;
                 data
             };
-            validate(&bytes, skill, true)?;
-            check_references(&destination, &format!(".oms/skills/{skill}"), Some(&bytes))?;
-            no_links(&root, Path::new(".oms/.gitignore"))?;
-            store.write(&root.join(".oms/.gitignore"), b"*\n", true)?;
-            store.write(&destination.join("SKILL.md"), &bytes, true)?;
-            admission(&root, skill, args.get("--file").unwrap_or("stdin"))?;
-            link(&root, ctx)?;
+            let destination = add_locked(
+                &root,
+                skill,
+                &bytes,
+                args.get("--file").unwrap_or("stdin"),
+                ctx,
+            )?;
             Ok(Output::text(format!(
                 "skill-forge: added {skill} ({}/SKILL.md)\n",
                 destination.display()

@@ -120,7 +120,7 @@ fn usage(tool: &str) -> String {
             "[--repo PATH] add|admit|validate|link|list|show|remove|status|contracts|preview|import|update|rollback|eval|outdated [ARGS]\nNew project skills require the oms- prefix; legacy names remain readable."
         }
         "apply-project-template" => {
-            "[auto|general|ml|slurm] [project_dir] [--full-docs] [--no-private] [--python-ci] [files...]"
+            "[auto|general|ml|slurm] [project_dir] [--full-docs] [--no-private] [--python-ci] [--python-layout] [--package NAME] [files...]"
         }
         "remove-project-template" => "[all|general|ml|slurm] [project_dir] [files...]",
         "project-doctor" => {
