@@ -3088,6 +3088,167 @@ mod tests {
     fn osv(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
     }
+    #[test]
+    fn team_contract_enrollment_uses_native_lifecycle_and_room_proofs() {
+        use oms_command_operations::value::obj;
+        use oms_command_operations::{StartRequest, append_lifecycle, create_attempt, new_event};
+        use oms_command_plan::{Context, Plan, Request, json};
+        let repo = Tmp::repo(&[
+            ("team-policy.json", "{}\n"),
+            ("src/lib.rs", "pub fn fixture() {}\n"),
+        ]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let control = services(&stop, repo.path(), Vec::new());
+        let collab = crate::services_collab::CollabServices::new(&stop, repo.path()).unwrap();
+        let room = oms_command_room::Room::open(
+            repo.path(),
+            oms_command_room::Session {
+                agent: "codex".into(),
+                ..Default::default()
+            },
+            &collab,
+            &stop,
+            true,
+            false,
+        )
+        .unwrap();
+        room.create(
+            Some("room-team"),
+            "Native team fixture",
+            Some("task-a"),
+            None,
+            None,
+        )
+        .unwrap();
+        let owner = create_attempt(
+            repo.path(),
+            &StartRequest {
+                provider: "codex".into(),
+                tool: "panel-main".into(),
+                refs: obj([
+                    ("panel_room_id", "room-team".into()),
+                    ("panel_role", "main".into()),
+                ]),
+                ..Default::default()
+            },
+            &stop,
+        )
+        .unwrap();
+        for state in ["starting", "working"] {
+            let event = new_event(
+                &owner,
+                0usize.into(),
+                "attempt.state_changed",
+                obj([("to_state", state.into())]),
+            )
+            .unwrap();
+            append_lifecycle(repo.path(), event, &stop).unwrap();
+        }
+        room.join("room-team", oms_command_room::Join::new(&owner, "codex"))
+            .unwrap();
+        let call = |values: &[&str]| {
+            let request = Request::parse(&osv(values)).unwrap();
+            let mut context = Context::from_environment(&request, repo.path()).unwrap();
+            context.execution_repo = repo.path().into();
+            context.state_repo = repo.path().into();
+            context.plan_file = repo.path().join(".oms/plan/tasks.json");
+            context.panel_main_attempt = owner.clone();
+            context.room_id = "room-team".into();
+            context.participant = owner.clone();
+            context.child = false;
+            context.delegate_depth = "0".into();
+            Plan::open(context, &control, &stop)
+                .unwrap()
+                .execute(&request)
+        };
+        call(&["init", "--goal", "bounded fixture"]).unwrap();
+        call(&[
+            "add",
+            "--id",
+            "task-a",
+            "--title",
+            "native team fixture",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ])
+        .unwrap();
+        let plan =
+            json::parse(&std::fs::read(repo.path().join(".oms/plan/tasks.json")).unwrap()).unwrap();
+        let task = plan.get("tasks").get("task-a");
+        let (events, _) = oms_command_operations::load_projection(repo.path()).unwrap();
+        let created = events
+            .iter()
+            .find(|e| {
+                e.get("attempt_id").text() == Some(&owner)
+                    && e.get("event_type").text() == Some("attempt.created")
+            })
+            .unwrap();
+        let mut spec: Value = serde_json::from_slice(include_bytes!(
+            "../../oms-command-plan/tests/fixtures/team-spec.json"
+        ))
+        .unwrap();
+        spec["root_owner"] = owner.clone().into();
+        spec["root_owner_generation"] = created.get("event_id").text().unwrap().into();
+        spec["plan_id"] = plan.text("plan_id").into();
+        spec["task_sha256"] = json::hash(task).unwrap().into();
+        spec["objective_sha256"] = json::sha(b"bounded fixture").into();
+        spec["criterion_sha256"] = oms_command_plan::team::criterion_digest(&plan, task)
+            .unwrap()
+            .into();
+        spec["base_sha"] = git(repo.path(), &["rev-parse", "HEAD"]).into();
+        let policy = json::sha(b"{}\n");
+        spec["policy_sha256"] = policy.clone().into();
+        for member in spec["members"].as_array_mut().unwrap() {
+            member["root_owner"] = owner.clone().into();
+            if member["role"] == "lead" {
+                member["logical_parent"] = owner.clone().into();
+            }
+            member["route"]["policy_sha256"] = policy.clone().into();
+        }
+        std::fs::write(
+            repo.path().join("team.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        let before = std::fs::read(oms_command_operations::event_path(repo.path())).unwrap();
+        call(&["team-register", "--team-spec", "team.json"]).unwrap();
+        let view: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        assert_eq!(view["phase"], "planned");
+        assert_eq!(view["spec"]["root_owner"], owner);
+        assert_eq!(view["verified"], Value::Null);
+        assert_eq!(
+            std::fs::read(oms_command_operations::event_path(repo.path())).unwrap(),
+            before
+        );
+        let cancel = new_event(
+            &owner,
+            0usize.into(),
+            "attempt.state_changed",
+            obj([("to_state", "cancelled".into())]),
+        )
+        .unwrap();
+        append_lifecycle(repo.path(), cancel, &stop).unwrap();
+        let held: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        assert_eq!(held["phase"], "held");
+        assert!(held["reason"].as_str().unwrap().contains("owner"));
+        let reference = view["history"][0]["path"].as_str().unwrap();
+        let mut corrupt = std::fs::read(repo.path().join(reference)).unwrap();
+        corrupt.push(b' ');
+        std::fs::write(repo.path().join(reference), corrupt).unwrap();
+        assert!(
+            call(&["team-show", "--id", "team-a"])
+                .unwrap_err()
+                .message
+                .contains("digest")
+        );
+    }
+
     /// An initialised active packet written directly: `init` itself is refused
     /// inside a harness child, which would make the tests environment-dependent.
     fn packet(repo: &Path, id: &str) -> PathBuf {

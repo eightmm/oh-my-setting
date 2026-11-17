@@ -6,6 +6,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    TeamRegister,
+    TeamShow,
+    TeamList,
+    TeamCancel,
     ContractPropose,
     ContractAccept,
     ContractList,
@@ -51,6 +55,10 @@ pub enum Action {
 }
 impl Action {
     pub const ALL: &'static [(&'static str, Action)] = &[
+        ("team-register", Self::TeamRegister),
+        ("team-show", Self::TeamShow),
+        ("team-list", Self::TeamList),
+        ("team-cancel", Self::TeamCancel),
         ("contract-propose", Self::ContractPropose),
         ("contract-accept", Self::ContractAccept),
         ("contract-list", Self::ContractList),
@@ -127,6 +135,8 @@ pub(crate) const BOOLEANS: &[&str] = &[
     "json",
 ];
 pub(crate) const NAMES: &[&str] = &[
+    "team-spec",
+    "expected-team-sha256",
     "summary",
     "scope-paths",
     "version",
@@ -233,7 +243,9 @@ impl Request {
     pub fn read_only(&self) -> bool {
         matches!(
             self.action,
-            Action::ContractList
+            Action::TeamShow
+                | Action::TeamList
+                | Action::ContractList
                 | Action::ContractShow
                 | Action::Show
                 | Action::EvidenceSnapshot
@@ -301,6 +313,28 @@ impl Request {
     }
     pub fn validate(&self) -> Result<()> {
         use Action::*;
+        if matches!(self.action, TeamRegister | TeamShow | TeamList | TeamCancel) {
+            let allowed: &[&str] = match self.action {
+                TeamRegister => &["team-spec", "expected-team-sha256"],
+                TeamShow => &["id"],
+                TeamCancel => &["id", "expected-team-sha256", "reason"],
+                TeamList => &[],
+                _ => unreachable!(),
+            };
+            require(
+                self.values
+                    .keys()
+                    .all(|key| allowed.contains(&key.as_str()))
+                    && self.flags.iter().all(|flag| flag == "json"),
+                "option is not supported by this team action",
+            )?;
+        }
+        for name in ["team-spec", "expected-team-sha256"] {
+            require(
+                !self.has(name) || matches!(self.action, TeamRegister | TeamCancel),
+                format!("--{name} requires a team mutation"),
+            )?;
+        }
         for (flag, allowed) in [
             ("check", matches!(self.action, RecoverLease | Retire)),
             ("apply", self.action == Retire),

@@ -24,6 +24,7 @@ pub mod request;
 pub mod retirement;
 pub mod services;
 pub mod storage;
+pub mod team;
 
 pub use cli::{owns, run, run_with_io, run_with_services};
 pub use engine::{Context, Plan, Snapshot};

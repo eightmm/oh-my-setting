@@ -54,6 +54,42 @@ cycle, 복수 owner, 깨진 predecessor는 실행을 거절한다.
 동명이인 member, cross-account ID collision, root-owner cycle을 추가한다. 이 단계는
 계약·projection만 제공하고 provider를 시작하지 않는다.
 
+### Native contract work in progress
+
+`agent-plan team-register --team-spec REPO_REL` captures a schema-1
+`oms-team-spec` into private content-addressed `.oms/plan/team-specs/` storage.
+The existing canonical plan stores its references and phase; no second team
+database is introduced. `team-show --id ID` and `team-list` read this state.
+`team-cancel --id ID --expected-team-sha256 SHA --reason TEXT` withdraws a
+planned, unlaunched contract. These entrypoints do not launch providers.
+
+Registration requires the enrolled Main and room, its actual creation event
+as `root_owner_generation`, the current plan/task/criterion/base and policy
+digests, normalized scope within the parent task, and a future expiry. Each
+member has a separate identity, logical parent, root owner and route snapshot.
+Display names may repeat. Planned routes retain absent resolved/served model,
+applied effort, native execution and usage evidence as null.
+
+Scope inclusion compares complete pattern languages and literal descendants;
+matching only the declaration text is insufficient. An empty allow list keeps
+the existing unrestricted meaning. Inclusion work/state limits refuse an
+unproven scope rather than granting it.
+
+The first generation has an empty `previous_sha256`. A later generation must
+name the preceding immutable artifact digest and supply the same digest as
+`--expected-team-sha256`; it starts held for new admission. Historical artifacts
+remain readable. Changed bindings project held without modifying stored state;
+settled means withdrawn execution, without verified/admitted/landed/published
+evidence. Readers reject unknown schema and broken artifact/predecessor chains.
+
+Parser bounds are 64 KiB per contract, 128 members per contract, and 256
+retained contract generations across one plan. These are storage bounds, not
+default team/concurrency budgets. Registration does not grant TM-02 admission,
+TM-03 lead-request authority, TM-04 execution, or TM-05 integration. Native
+enrollment fixtures cover the actual Main/room producers, owner termination
+and artifact tampering. The remaining TM-01/MR-A fault matrix still needs
+matching evidence before declaring TM-01 complete.
+
 ## 3. TM-02 — 하나의 admission과 명시적인 자원 범위
 
 ### 자원 종류를 분리한다

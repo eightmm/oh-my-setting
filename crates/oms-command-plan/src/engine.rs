@@ -504,6 +504,23 @@ impl<'a> Plan<'a> {
                 )?;
             }
         }
+        if matches!(req.action, TeamRegister | TeamShow | TeamList | TeamCancel) {
+            if req.read_only() {
+                return crate::team::execute(self, req);
+            }
+            self.context.parent()?;
+            require(
+                self.context.canonical(),
+                "team authority requires the canonical plan",
+            )?;
+            require(
+                room_id(&self.context.room_id),
+                "team mutation requires an enrolled room",
+            )?;
+            return self.locked(false, Some(&self.context.room_id), || {
+                crate::team::execute(self, req)
+            });
+        }
         if matches!(
             req.action,
             ContractPropose | ContractAccept | ContractList | ContractShow

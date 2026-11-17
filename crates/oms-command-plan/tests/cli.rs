@@ -1048,6 +1048,359 @@ fn versioned_contracts_gate_scheduling() {
 }
 
 #[test]
+fn team_contracts_preserve_parent_lineage_and_generation() {
+    if isolated("team_contracts_preserve_parent_lineage_and_generation") {
+        return;
+    }
+    use oms_command_plan::json::{Value, number, object, string};
+    use oms_command_plan::services::{LifecycleGuard, ProjectedLifecycle, ProjectedRoom};
+    use oms_command_plan::{Action, Context, Plan, Request, json};
+    struct Guard;
+    impl LifecycleGuard for Guard {}
+    struct TeamHost;
+    impl Services for TeamHost {
+        fn group_membership_resolver(&self) -> Option<GroupResolver> {
+            Host.group_membership_resolver()
+        }
+        fn lifecycle_writer(
+            &self,
+            _: &Path,
+        ) -> oms_command_plan::Result<Box<dyn LifecycleGuard + '_>> {
+            Ok(Box::new(Guard))
+        }
+        fn project_lifecycle(&self, raw: &[u8]) -> oms_command_plan::Result<ProjectedLifecycle> {
+            let terminal = std::str::from_utf8(raw).unwrap().contains("cancelled");
+            Ok(ProjectedLifecycle {
+                source_sha256: json::sha(raw),
+                attempts: object([(
+                    "main-a",
+                    object([
+                        ("attempt_id", string("main-a")),
+                        ("tool", string("panel-main")),
+                        ("parent_attempt_id", string("")),
+                        ("terminal", Value::Bool(terminal)),
+                        (
+                            "state",
+                            string(if terminal { "cancelled" } else { "working" }),
+                        ),
+                        ("refs", object([("panel_room_id", string("room-team"))])),
+                    ]),
+                )]),
+            })
+        }
+        fn project_room(&self, room: &str, raw: &[u8]) -> oms_command_plan::Result<ProjectedRoom> {
+            Ok(ProjectedRoom {
+                source_sha256: json::sha(raw),
+                state: object([
+                    ("schema", number(1)),
+                    ("id", string(room)),
+                    ("closed", Value::Bool(false)),
+                    (
+                        "participants",
+                        Value::Array(vec![object([
+                            ("participant", string("main-a")),
+                            ("role", string("main")),
+                            ("joined", Value::Bool(true)),
+                        ])]),
+                    ),
+                ]),
+            })
+        }
+    }
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    let stop = AtomicBool::new(false);
+    let call = |values: &[&str], child: bool| {
+        let req = Request::parse(&args(values)).unwrap();
+        let mut ctx = Context::from_environment(&req, &r).unwrap();
+        ctx.panel_main_attempt = "main-a".into();
+        ctx.room_id = "room-team".into();
+        ctx.child = child;
+        Plan::open(ctx, &TeamHost, &stop).unwrap().execute(&req)
+    };
+    call(&["init", "--goal", "bounded fixture"], false).unwrap();
+    call(
+        &[
+            "add",
+            "--id",
+            "task-a",
+            "--title",
+            "team fixture",
+            "--allowed",
+            "src/",
+            "--verify",
+            "true",
+        ],
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        call(&["team-list", "--json"], true).unwrap().stdout,
+        b"[]\n"
+    );
+    fs::create_dir_all(r.join(".oms/lifecycle")).unwrap();
+    fs::create_dir_all(r.join(".oms/threads")).unwrap();
+    let history = concat!(
+        "{\"schema\":1,\"event_id\":\"evt-owner\",\"attempt_id\":\"main-a\",\"seq\":1,\"ts\":\"2026-01-01T00:00:00Z\",\"event_type\":\"attempt.created\"}\n",
+        "{\"schema\":1,\"event_id\":\"evt-start\",\"attempt_id\":\"main-a\",\"seq\":2,\"ts\":\"2026-01-01T00:00:01Z\",\"event_type\":\"attempt.state_changed\"}\n"
+    );
+    fs::write(r.join(".oms/lifecycle/events.jsonl"), history).unwrap();
+    fs::write(
+        r.join(".oms/threads/room-team.jsonl"),
+        b"{\"schema\":1,\"thread\":\"room-team\",\"seq\":1,\"ts\":\"2026-01-01T00:00:00Z\"}\n",
+    )
+    .unwrap();
+    fs::write(r.join("team-policy.json"), b"{}\n").unwrap();
+    let plan = json::parse(&fs::read(r.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+    let task = plan.get("tasks").get("task-a");
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&r)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap()
+        .stdout;
+    let policy = json::sha(b"{}\n");
+    let mut spec = json::parse(include_bytes!("fixtures/team-spec.json")).unwrap();
+    for (key, value) in [
+        ("plan_id", plan.get("plan_id").clone()),
+        ("task_sha256", string(json::hash(task).unwrap())),
+        ("objective_sha256", string(json::sha(b"bounded fixture"))),
+        (
+            "criterion_sha256",
+            string(oms_command_plan::team::criterion_digest(&plan, task).unwrap()),
+        ),
+        (
+            "base_sha",
+            string(std::str::from_utf8(&head).unwrap().trim()),
+        ),
+        ("policy_sha256", string(&policy)),
+    ] {
+        spec.set(key, value).unwrap();
+    }
+    let mut members = spec.get("members").array().unwrap().to_vec();
+    for member in &mut members {
+        let mut route = member.get("route").clone();
+        route.set("policy_sha256", string(&policy)).unwrap();
+        member.set("route", route).unwrap();
+    }
+    spec.set("members", Value::Array(members)).unwrap();
+    let write =
+        |spec: &Value| fs::write(r.join("team.json"), json::canonical(spec).unwrap()).unwrap();
+    let register = ["team-register", "--team-spec", "team.json", "--json"];
+    for (id, allowed, forbidden, team_allow, team_deny) in [
+        ("task-glob", "src/?", "", vec!["src/a"], vec![]),
+        (
+            "task-deny",
+            "src",
+            "src/private",
+            vec!["src"],
+            vec!["src/???????"],
+        ),
+        ("task-empty", "src", "", vec![], vec![]),
+    ] {
+        call(
+            &[
+                "add",
+                "--id",
+                id,
+                "--title",
+                "scope containment",
+                "--allowed",
+                allowed,
+                "--forbidden",
+                forbidden,
+                "--verify",
+                "true",
+            ],
+            false,
+        )
+        .unwrap();
+        let parent = json::parse(&fs::read(r.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+        let task = parent.get("tasks").get(id);
+        let mut invalid = spec.clone();
+        invalid.set("task_id", string(id)).unwrap();
+        invalid
+            .set("task_sha256", string(json::hash(task).unwrap()))
+            .unwrap();
+        invalid
+            .set(
+                "allowed_paths",
+                Value::Array(team_allow.into_iter().map(string).collect()),
+            )
+            .unwrap();
+        invalid
+            .set(
+                "forbidden_paths",
+                Value::Array(team_deny.into_iter().map(string).collect()),
+            )
+            .unwrap();
+        write(&invalid);
+        let error = call(&register, false).unwrap_err();
+        assert!(error.message.contains("scope"), "{id}: {error}");
+    }
+    for (key, bad) in [
+        ("schema", number(2)),
+        ("root_owner_generation", string("evt-recycled")),
+        ("expires_at", string("2000-01-01T00:00:00Z")),
+        ("policy_sha256", string("0".repeat(64))),
+        ("root_owner", string("foreign-main")),
+    ] {
+        let mut invalid = spec.clone();
+        invalid.set(key, bad).unwrap();
+        write(&invalid);
+        assert!(call(&register, false).is_err(), "{key}");
+    }
+    call(
+        &[
+            "add",
+            "--id",
+            "unrestricted",
+            "--title",
+            "parent without an allow restriction",
+            "--verify",
+            "true",
+        ],
+        false,
+    )
+    .unwrap();
+    let parent = json::parse(&fs::read(r.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+    let unrestricted = parent.get("tasks").get("unrestricted");
+    for (id, allowed) in [
+        ("team-no-restriction", vec![]),
+        ("team-narrow-restriction", vec!["src"]),
+    ] {
+        let mut allowed_spec = spec.clone();
+        allowed_spec.set("id", string(id)).unwrap();
+        allowed_spec.set("task_id", string("unrestricted")).unwrap();
+        allowed_spec
+            .set("task_sha256", string(json::hash(unrestricted).unwrap()))
+            .unwrap();
+        allowed_spec
+            .set(
+                "allowed_paths",
+                Value::Array(allowed.into_iter().map(string).collect()),
+            )
+            .unwrap();
+        write(&allowed_spec);
+        call(&register, false).unwrap();
+    }
+    for (key, bad) in [
+        ("logical_parent", string("worker-a")),
+        ("root_owner", string("foreign-main")),
+        ("id", string("main-a")),
+    ] {
+        let mut invalid = spec.clone();
+        let mut members = invalid.get("members").array().unwrap().to_vec();
+        members[0].set(key, bad).unwrap();
+        invalid.set("members", Value::Array(members)).unwrap();
+        assert!(
+            oms_command_plan::team::TeamSpec::parse(&json::canonical(&invalid).unwrap()).is_err()
+        );
+    }
+    write(&spec);
+    assert!(call(&register, true).is_err());
+    let enrolled = call(&register, false).unwrap();
+    let record = json::parse(&enrolled.stdout).unwrap();
+    let digest = record.get("team-a").get("versions").array().unwrap()[0]
+        .text("sha256")
+        .to_owned();
+    let stored = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    assert!(call(&register, false).is_err());
+    assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), stored);
+    let shown = json::parse(&call(&["team-show", "--id", "team-a"], true).unwrap().stdout).unwrap();
+    assert_eq!(shown.text("phase"), "planned");
+    assert_eq!(shown.get("verified"), &Value::Null);
+    assert_eq!(shown.get("spec").get("members").array().unwrap().len(), 2);
+    spec.set("generation", number(2)).unwrap();
+    spec.set("previous_sha256", string(&digest)).unwrap();
+    write(&spec);
+    assert!(call(&register, false).is_err());
+    call(
+        &[
+            "team-register",
+            "--team-spec",
+            "team.json",
+            "--expected-team-sha256",
+            &digest,
+        ],
+        false,
+    )
+    .unwrap();
+    let shown = json::parse(
+        &call(&["team-show", "--id", "team-a"], false)
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(shown.text("phase"), "held");
+    assert_eq!(shown.get("history").array().unwrap().len(), 2);
+    fs::write(r.join("team-policy.json"), b"{\"changed\":true}\n").unwrap();
+    let stale = json::parse(
+        &call(&["team-show", "--id", "team-a"], false)
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(stale.text("reason").contains("policy changed"));
+    let current_digest = shown
+        .get("history")
+        .array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .text("sha256");
+    assert!(
+        call(
+            &[
+                "team-cancel",
+                "--id",
+                "team-a",
+                "--expected-team-sha256",
+                &digest,
+                "--reason",
+                "withdraw"
+            ],
+            false
+        )
+        .is_err()
+    );
+    call(
+        &[
+            "team-cancel",
+            "--id",
+            "team-a",
+            "--expected-team-sha256",
+            current_digest,
+            "--reason",
+            "withdraw unlaunched team",
+        ],
+        false,
+    )
+    .unwrap();
+    let cancelled = json::parse(
+        &call(&["team-show", "--id", "team-a"], false)
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(cancelled.text("phase"), "settled");
+    assert_eq!(
+        fs::read_to_string(r.join(".oms/lifecycle/events.jsonl")).unwrap(),
+        history
+    );
+    let req = Request::new(Action::TeamList);
+    let mut ctx = Context::from_environment(&req, &r).unwrap();
+    ctx.child = true;
+    assert!(
+        Plan::open(ctx, &TeamHost, &stop)
+            .unwrap()
+            .execute(&req)
+            .is_ok()
+    );
+}
+
+#[test]
 #[ignore = "driven by versioned_contracts_gate_scheduling"]
 fn contract_child_accept() {
     let repo = PathBuf::from(std::env::var_os("CONTRACT_TEST_REPO").unwrap());
