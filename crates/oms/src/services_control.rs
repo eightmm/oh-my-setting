@@ -3026,7 +3026,7 @@ mod tests {
         let projected = control.project_lifecycle(b"").unwrap();
         assert_eq!(
             oms_command_plan::json::canonical(&projected.attempts).unwrap(),
-            b"[]"
+            b"{}"
         );
         assert!(control.project_lifecycle(b"not json\n").is_err());
         assert!(control.group_membership_resolver().is_some());
@@ -3064,6 +3064,16 @@ mod tests {
         std::fs::write(events_dir.join("events.jsonl"), review_events).unwrap();
         let (_, projected_rows) = oms_command_operations::load_projection(&canonical).unwrap();
         assert_eq!(projected_rows.len(), 2);
+        let lifecycle = control.project_lifecycle(review_events.as_bytes()).unwrap();
+        assert_eq!(lifecycle.attempts.object().unwrap().len(), 2);
+        assert_eq!(
+            lifecycle.attempts.get("att_review1").text("state"),
+            "review"
+        );
+        assert_eq!(
+            lifecycle.attempts.get("att_stale1").text("state"),
+            "working"
+        );
         assert!(
             oms_command_landing::Services::wait_siblings(
                 &control,

@@ -200,17 +200,20 @@ impl oms_command_plan::Services for LocalServices<'_> {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(plan_error)?;
         let projection = oms_command_operations::project_attempts(&rows).map_err(plan_error)?;
-        let mut encoded = b"[".to_vec();
-        for (i, item) in projection.iter().enumerate() {
-            if i > 0 {
-                encoded.push(b',');
-            }
-            encoded.extend(item.json(false).map_err(plan_error)?);
+        let mut attempts = oms_command_plan::json::empty();
+        for item in projection {
+            let id = item
+                .get("attempt_id")
+                .text()
+                .ok_or_else(|| plan_error("missing attempt identity"))?;
+            attempts.set(
+                id,
+                oms_command_plan::json::parse(&item.json(false).map_err(plan_error)?)?,
+            )?;
         }
-        encoded.push(b']');
         Ok(ProjectedLifecycle {
             source_sha256: value::hash(raw),
-            attempts: oms_command_plan::json::parse(&encoded)?,
+            attempts,
         })
     }
     fn project_room(&self, _room: &str, raw: &[u8]) -> oms_command_plan::Result<ProjectedRoom> {
