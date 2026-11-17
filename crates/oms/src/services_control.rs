@@ -33,7 +33,9 @@ use oms_supervisor::capture::{CaptureOptions, LimitAction};
 use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
 use serde_json::Value;
 use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
