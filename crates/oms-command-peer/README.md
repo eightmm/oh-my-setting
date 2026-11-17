@@ -87,6 +87,15 @@ A repeated physical ID returns status without resending. Partial publication
 stops continuation until reconciliation. This observed registration does not
 establish team authority, canonical owner generations or hard native limits.
 
+`session resume --apply` uses the same intent, pending receipt and final launch
+fence before its native executor call; previews create no call liability.
+Registered account homes supply an account ID only on an exact registry match.
+Interactive terminal output remains unmeasured usage even after a successful
+exit. Its digest and the executor's separate cleanup acknowledgement are retained;
+an execution error without acknowledgement keeps cleanup unknown. The result
+includes `provider_call_id`. Registration or completion-persistence failures stop
+continuation and never authorize automatic resend.
+
 The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
 thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed
 sessions without a tracked baseline retain unknown per-call usage. This follows

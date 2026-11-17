@@ -218,8 +218,27 @@ pub(crate) fn finish(
             receipt.phase = Phase::Unknown;
         }
     }
+    persist(repo, &receipt)
+}
+
+/// Interactive terminal output is not the provider's accounting protocol.
+pub(crate) fn finish_unobserved(
+    repo: &Path,
+    mut receipt: Receipt,
+    raw: &[u8],
+    cleanup_complete: Option<bool>,
+) -> Result<()> {
+    receipt.revision = 1;
+    receipt.phase = Phase::Unknown;
+    receipt.usage = Usage::default();
+    receipt.cost = Cost::Unknown;
+    receipt.source_sha256 = Some(format!("{:x}", Sha256::digest(raw)));
+    receipt.cleanup_complete = cleanup_complete;
+    persist(repo, &receipt)
+}
+fn persist(repo: &Path, receipt: &Receipt) -> Result<()> {
     // Cancellation stops execution; it must not discard already observed spend.
-    usage::record(repo, &receipt, &AtomicBool::new(false))
+    usage::record(repo, receipt, &AtomicBool::new(false))
         .map(|_| ())
         .map_err(|e| Error::new(e.exit_code(), e.to_string()))
 }

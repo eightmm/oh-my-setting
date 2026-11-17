@@ -791,7 +791,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
         ),
         ("cwd", repo.to_string_lossy().into_owned().into()),
         ("provider", source.provider.clone().into()),
-        ("source_session", source.ident.into()),
+        ("source_session", source.ident.clone().into()),
         ("action", if fork { "fork" } else { "resume" }.into()),
         ("capability", "installed CLI --help".into()),
         ("dry_run", (!args.has("apply")).into()),
@@ -803,9 +803,9 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                 *provider == source.provider && source.path.starts_with(root)
             })
             .and_then(|(_, _, _, home)| home));
-        let (environment, account_remove) = match owner {
+        let (mut environment, account_remove, account) = match owner {
             Some(home) => providers::session_environment(&source.provider, &home)?,
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), None),
         };
         let mut remove_environment: Vec<OsString> = std::env::vars_os()
             .filter_map(|(k, _)| {
@@ -815,6 +815,31 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
             })
             .collect();
         remove_environment.extend(account_remove);
+        let extra = crate::usage::operation_env(&[(
+            "OMS_RESUME_SESSION".into(),
+            source.ident.clone().into(),
+        )])?;
+        let usage_repo = crate::usage::state_repository(&repo, &extra)?;
+        let route = providers::Route {
+            provider: source.provider.clone(),
+            model: "provider-default".into(),
+            effort: String::new(),
+            explicit: false,
+            account: account.clone().unwrap_or_default(),
+            account_pinned: false,
+        };
+        let pending = crate::usage::begin(
+            &usage_repo,
+            &route,
+            account.as_deref(),
+            true,
+            &extra,
+            context.interrupted,
+        )?;
+        let call_id = pending.receipt.identity.call_id.clone();
+        environment.push(("OMS_PROVIDER_CALL_ID".into(), call_id.clone().into()));
+        remove_environment.retain(|key| key != "OMS_PROVIDER_CALL_ID");
+        pending.fence(context.interrupted)?;
         let result = context.executor.execute(
             process::Invocation {
                 argv: native,
@@ -827,7 +852,29 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                 merge: false,
             },
             context.interrupted,
-        )?;
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = crate::usage::finish_unobserved(&usage_repo, pending.receipt, &[], None);
+                return Err(error);
+            }
+        };
+        crate::usage::finish_unobserved(
+            &usage_repo,
+            pending.receipt,
+            &result.stdout,
+            result.cleanup_complete,
+        )
+        .map_err(|error| {
+            Error::new(
+                error.code,
+                format!(
+                    "native resume usage accounting failed; reconcile before retrying: {error}"
+                ),
+            )
+        })?;
+        report.set("provider_call_id", call_id);
         report.set("native_returncode", V::Num(result.code.to_string()));
         return Ok((result.code, json(&report)?, Vec::new()));
     }

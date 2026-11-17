@@ -3017,45 +3017,132 @@ fn registered_pi_session_resumes_with_owning_home() {
                 ),
             )
             .unwrap();
-            fs::write(home.join("bin/pi"), "#!/bin/sh\nif [ \"$1\" = --help ]; then echo --session; exit; fi\nprintf '%s|%s' \"$PI_CODING_AGENT_DIR\" \"${PI_CODING_AGENT_SESSION_DIR-unset}\" > \"$HOME/resumed\"\n").unwrap();
+            fs::write(home.join("bin/pi"), concat!(
+                "#!/bin/sh\n",
+                "if [ \"$1\" = --help ]; then\n",
+                "  echo --session\n",
+                "  exit\n",
+                "fi\n",
+                "test -n \"$OMS_PROVIDER_CALL_ID\" || exit 77\n",
+                "test -s .oms/usage/receipts.jsonl || exit 78\n",
+                "grep -F \"$OMS_PROVIDER_CALL_ID\" .oms/artifacts/panel-dispatch/reservations.json >/dev/null || exit 79\n",
+                "printf '%s' \"$OMS_PROVIDER_CALL_ID\" > \"$HOME/resume-call\"\n",
+                "printf '%s|%s' \"$PI_CODING_AGENT_DIR\" \"${PI_CODING_AGENT_SESSION_DIR-unset}\" > \"$HOME/resumed\"\n",
+            )).unwrap();
             let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-            let out = run(
-                &repo,
-                source,
-                "session",
-                &[
-                    "resume",
-                    "--provider",
-                    "pi",
-                    "--session",
-                    "sess-1",
-                    "--apply",
-                ],
+            let resume_args = [
+                "resume",
+                "--provider",
+                "pi",
+                "--session",
+                "sess-1",
+                "--apply",
+            ];
+            let preview = run(&repo, source, "session", &resume_args[..5]);
+            assert_eq!(preview.0, 0, "{}", message(&preview));
+            assert!(
+                oms_command_telemetry::store::usage::load(&repo.0)
+                    .unwrap()
+                    .calls
+                    .is_empty()
             );
+            assert!(!home.join("resumed").exists());
+            let out = run(&repo, source, "session", &resume_args);
             assert_eq!(out.0, 0, "{}", message(&out));
+            let projection = oms_command_telemetry::store::usage::load(&repo.0).unwrap();
+            assert_eq!(
+                projection.calls.len(),
+                1,
+                "native resume must register a call"
+            );
+            let receipt = &projection.calls[0].receipt;
+            assert_eq!(receipt.identity.provider, "pi");
+            assert_eq!(receipt.identity.account.as_deref(), Some("p1"));
+            assert_eq!(
+                receipt.phase,
+                oms_command_telemetry::store::usage::Phase::Unknown
+            );
+            assert_eq!(receipt.cleanup_complete, Some(true));
+            let intents = oms_command_telemetry::store::physical::load(&repo.0, &STOP).unwrap();
+            assert_eq!(intents.len(), 1);
+            assert_eq!(intents[0].identity, receipt.identity);
+            assert_eq!(intents[0].usage_ordinal, Some(receipt.ordinal));
+            assert_eq!(
+                fs::read_to_string(home.join("resume-call")).unwrap(),
+                receipt.identity.call_id,
+                "the actual process sees its pre-published call identity"
+            );
             assert_eq!(
                 fs::read_to_string(home.join("resumed")).unwrap(),
                 format!("{}|unset", home.join("acc/pi1").display())
             );
-            fs::set_permissions(home.join("acc/pi1"), fs::Permissions::from_mode(0o777)).unwrap();
             fs::remove_file(home.join("resumed")).unwrap();
-            let bad = run(
-                &repo,
-                source,
-                "session",
-                &[
-                    "resume",
-                    "--provider",
-                    "pi",
-                    "--session",
-                    "sess-1",
-                    "--apply",
-                ],
+            let registry = repo
+                .0
+                .join(oms_command_telemetry::store::dispatch::REGISTRY);
+            let registered = fs::read(&registry).unwrap();
+            fs::write(&registry, b"{corrupt").unwrap();
+            let refused = run(&repo, source, "session", &resume_args);
+            assert_ne!(refused.0, 0);
+            assert!(
+                !home.join("resumed").exists(),
+                "failed registration must prevent resume"
             );
+            assert_eq!(fs::read(&registry).unwrap(), b"{corrupt");
+            assert_eq!(
+                oms_command_telemetry::store::usage::load(&repo.0)
+                    .unwrap()
+                    .calls
+                    .len(),
+                1
+            );
+            fs::write(&registry, registered).unwrap();
+            fs::set_permissions(home.join("acc/pi1"), fs::Permissions::from_mode(0o777)).unwrap();
+            let bad = run(&repo, source, "session", &resume_args);
             assert_ne!(bad.0, 0);
             assert!(message(&bad).contains("unavailable"), "{}", message(&bad));
             assert!(!home.join("resumed").exists());
             fs::set_permissions(home.join("acc/pi1"), fs::Permissions::from_mode(0o700)).unwrap();
+
+            struct Unacknowledged;
+            impl Executor for Unacknowledged {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if request.argv[0] == "pi"
+                        && request.argv.get(1).is_none_or(|arg| arg != "--help")
+                    {
+                        return Err(oms_command_peer::Error::new(
+                            125,
+                            "fixture: no launch acknowledgement",
+                        ));
+                    }
+                    Native.execute(request, stop)
+                }
+            }
+            let missing = oms_command_peer::run_with_executor(
+                "session",
+                &args(&resume_args),
+                &repo.0,
+                source,
+                &STOP,
+                &Unacknowledged,
+            );
+            assert_eq!(missing.0, 125, "{}", message(&missing));
+            assert!(!home.join("resumed").exists());
+            let after = oms_command_telemetry::store::usage::load(&repo.0).unwrap();
+            assert_eq!(after.calls.len(), 2);
+            let unacknowledged = &after.calls[1].receipt;
+            assert_eq!(
+                unacknowledged.phase,
+                oms_command_telemetry::store::usage::Phase::Unknown
+            );
+            assert_eq!(
+                unacknowledged.cleanup_complete, None,
+                "exit 125 is no cleanup acknowledgement"
+            );
 
             // Corrupt account registry fails closed instead of falling back to an inherited home.
             let default_sessions = home.join(".pi/agent/sessions");

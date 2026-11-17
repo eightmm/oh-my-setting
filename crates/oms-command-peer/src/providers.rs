@@ -791,15 +791,27 @@ fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bou
         id: Some(id.into()),
     })
 }
-pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>);
+pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>, Option<String>);
 
 pub(crate) fn session_environment(provider: &str, location: &Path) -> Result<SessionEnv> {
     let spec = isolated(provider).ok_or_else(|| Error::new(2, UNPROVED))?;
     if !owned_private(location) {
         return fail("requested provider account is unavailable");
     }
-    let bound = bind(spec, &home_dir()?, "", location.to_path_buf())?;
-    Ok((bound.environment, bound.remove))
+    let home = home_dir()?;
+    let registry = load_registry(&home)?;
+    let location = canonical(location);
+    let account = registry
+        .get(provider)
+        .and_then(|accounts| {
+            accounts
+                .entries
+                .iter()
+                .find(|entry| canonical(&entry.home) == location)
+        })
+        .map(|entry| entry.id.clone());
+    let bound = bind(spec, &home, account.as_deref().unwrap_or(""), location)?;
+    Ok((bound.environment, bound.remove, account))
 }
 fn owned_private(path: &Path) -> bool {
     std::fs::symlink_metadata(path).ok().is_some_and(|m| {
