@@ -37,6 +37,12 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 
+## Proposed multi-team execution
+
+[Bounded team orchestration](TEAM-ORCHESTRATION-PLAN.md) defines the proposed
+single-Main, OMS-managed/native-team boundary and ten implementation slices.
+This is a design and delivery plan, not an enabled runtime feature.
+
 ## Migration notes
 
 - [MIGRATION.md](MIGRATION.md) — upgrade notes for 0.7 through 0.4, newest first.
