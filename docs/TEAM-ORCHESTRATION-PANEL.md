@@ -81,8 +81,6 @@ Goal: Implement the approved change       snapshot: fresh
 F5 control   F9 board/chat   F12 help     Enter inspect/expand
 ```
 
-通常の team card は 2～3 行に制限する、という意味ではなく、実装では日本語表示を追加しない。
-
 Team card는 기본적으로 2~3행의 task/state/reason 요약으로 제한한다. 긴 모델명,
 모든 member 로그, 모든 quota window는 상세로 내린다. Main의 선택 모델과 실제 실행 모델이
 다르면 명시적 표시를 붙이고, served model이 없으면 selected를 served로 복사하지 않는다.
@@ -200,7 +198,7 @@ path ownership을 분리한다. `.oms` 상태를 직접 편집하거나 새 auth
 | TP-11 | rotation/truncate/partial tail; two panels | bounded incremental read; 기존 I/O 계측으로 중복 scan 확인 |
 | TP-12 | team label containing terminal escapes/private material | 안전한 렌더링·redaction; raw prompt를 footer에 노출하지 않음 |
 
-These are acceptance requirements, not tests executed by this documentation PR.
+이 표는 완료 조건이며 이 문서 PR에서 실행한 테스트가 아니다.
 Render snapshots는 fake clock/fixtures로 재현하고 실제 native terminal smoke는 별도로 기록한다.
 Cold/warm refresh의 bytes, metadata calls, subprocesses, RSS, p50/p95를 같은 환경에서
 비교한다. 변경 없는 화면에서 모델 호출·전체 transcript 재파싱·새 state write는 금지한다.
