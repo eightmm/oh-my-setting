@@ -154,7 +154,13 @@ authorize replacing the public Python panel or enabling unimplemented producers.
   Source and destination directory synchronization completes publication.
 * Dispatch writes a launch reservation before execution and updates its registry
   before its process receipt. A kill may retain an orphan launch or unresolved
-  reservation. No reservation proves execution or native exit.
+  reservation. It uses the shared telemetry dispatch transaction with the same
+  exact Flock namespace and byte limits. Settlement rechecks the admitted member
+  and immutable launch identity; missing, malformed or changed entries preserve
+  existing state and report uncertain effects. Only cleanup-confirmed awaiting
+  calls enter lifecycle WIP reconciliation. A terminal attempt alone cannot
+  settle reserved, running or unknown native custody. No reservation proves
+  execution or native exit.
 * Scheduled tick resumes append a deterministic `launch_intent` before the wake
   ledger, `launching` before the host call, and `fired` only after a positive pid
   acknowledgment. An intent without `launching` proves the host was not called:

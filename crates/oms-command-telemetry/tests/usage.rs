@@ -238,6 +238,146 @@ fn physical_claim_conflicts_and_overflow_refuse_projection() {
         .is_err()
     );
 }
+
+#[test]
+fn dispatch_reservations_share_exact_flock_and_preserve_partial_publications() {
+    use oms_command_telemetry::store::dispatch::{self, Transaction};
+    use oms_lock::{Lock, Mode, Settings};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let root = Temp::new();
+    for path in [
+        root.0.clone(),
+        root.0.join(".oms"),
+        root.0.join(".oms/artifacts"),
+    ] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let stop = AtomicBool::new(false);
+    let timeout = Duration::from_millis(60);
+    let mut settings = Settings::from_env().unwrap();
+    settings.mode = Mode::Flock;
+    let native =
+        Lock::in_root(root.0.clone(), Path::new(dispatch::LOCK), settings.clone()).unwrap();
+    let held = native.try_acquire().unwrap();
+    settings.mode = Mode::Mkdir;
+    let error = Transaction::with_settings(&root.0, settings.clone(), timeout, &stop)
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error.source,
+        oms_command_telemetry::store::StoreError::Lock(oms_lock::Error::Busy)
+    ));
+    assert!(!error.publication_uncertain);
+    drop(held);
+    let tx = Transaction::with_settings(&root.0, settings, timeout, &stop).unwrap();
+    assert!(matches!(native.try_acquire(), Err(oms_lock::Error::Busy)));
+    assert!(tx.snapshot().unwrap().is_none());
+    let seed =
+        br#"{"schema":1,"calls":{"legacy":{"state":"unknown"}},"extension":{"retained":true}}"#;
+    tx.replace(None, seed).unwrap();
+    assert_eq!(tx.snapshot().unwrap().unwrap(), seed);
+    let before = std::fs::metadata(root.0.join(dispatch::REGISTRY)).unwrap();
+    tx.replace(Some(seed), seed).unwrap();
+    assert_eq!(
+        std::fs::metadata(root.0.join(dispatch::REGISTRY))
+            .unwrap()
+            .ino(),
+        before.ino()
+    );
+    let launch = br#"{"schema":2,"member":"call_orphan"}"#;
+    let path = tx.artifact("call_orphan", "launch", launch).unwrap();
+    let foreign = br#"{"schema":1,"calls":{},"foreign":"preserve"}"#;
+    root.write(dispatch::REGISTRY, foreign);
+    let error = tx.replace(Some(seed), seed).unwrap_err();
+    assert_eq!(
+        error.source,
+        oms_command_telemetry::store::StoreError::Changed
+    );
+    assert!(
+        error.publication_uncertain,
+        "the launch artifact is already visible"
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        foreign
+    );
+    assert_eq!(std::fs::read(path).unwrap(), launch);
+    stop.store(true, Ordering::Release);
+    let error = tx.snapshot().unwrap_err();
+    assert_eq!(error.exit_code(), 130);
+    assert!(error.publication_uncertain);
+    drop(tx);
+    let error = Transaction::acquire(&root.0, timeout, &stop).err().unwrap();
+    assert_eq!(error.exit_code(), 130);
+    assert!(!error.publication_uncertain);
+    stop.store(false, Ordering::Release);
+    let tx = Transaction::acquire(&root.0, timeout, &stop).unwrap();
+    let error = tx.replace(Some(seed), seed).unwrap_err();
+    assert!(
+        !error.publication_uncertain,
+        "a fresh failed CAS has no publication effect"
+    );
+    let error = tx
+        .replace(Some(foreign), &vec![b' '; dispatch::MAX_REGISTRY + 1])
+        .unwrap_err();
+    assert!(!error.publication_uncertain);
+    root.write(dispatch::REGISTRY, b"");
+    assert!(tx.snapshot().is_err());
+    assert!(tx.replace(None, seed).is_err());
+    assert!(tx.replace(Some(b""), seed).is_err());
+    assert!(
+        std::fs::read(root.0.join(dispatch::REGISTRY))
+            .unwrap()
+            .is_empty()
+    );
+    for malformed in [
+        br#"{"schema":2,"calls":{}}"#.as_slice(),
+        br#"{"schema":1,"calls":null}"#,
+        br#"{"schema":1,"schema":1,"calls":{}}"#,
+        br#"{"schema":1,"calls":{"nested":{"x":1,"x":2}}}"#,
+        br#"{"schema":1,"calls":{"nested":{"x":NaN}}}"#,
+    ] {
+        root.write(dispatch::REGISTRY, malformed);
+        assert!(tx.snapshot().is_err());
+        assert!(tx.replace(Some(malformed), seed).is_err());
+        assert_eq!(
+            std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+            malformed
+        );
+    }
+    root.write(".oms/artifacts/panel-dispatch/call_empty-launch.json", b"");
+    assert!(
+        tx.artifact(
+            "call_empty",
+            "launch",
+            br#"{"schema":2,"member":"call_empty"}"#
+        )
+        .is_err()
+    );
+    assert!(
+        std::fs::read(
+            root.0
+                .join(".oms/artifacts/panel-dispatch/call_empty-launch.json")
+        )
+        .unwrap()
+        .is_empty()
+    );
+    std::fs::rename(
+        root.0.join(".oms/artifacts"),
+        root.0.join(".oms/artifacts-held"),
+    )
+    .unwrap();
+    root.write(dispatch::REGISTRY, foreign);
+    let error = tx.replace(Some(foreign), seed).unwrap_err();
+    assert!(!error.publication_uncertain);
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        foreign
+    );
+}
 #[test]
 fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let root = Temp::new();

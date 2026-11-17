@@ -6,6 +6,7 @@
 #[path = "../actions.rs"]
 pub(crate) mod actions;
 pub mod budget;
+pub mod dispatch;
 mod paths;
 mod producer;
 mod recovery;

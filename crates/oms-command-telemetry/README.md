@@ -177,6 +177,19 @@ or cleanup authority; callers must bind snapshots and serialize admission throug
 their canonical reservation writer. Native descendant coverage and resource
 reservations require separate execution evidence.
 
+`store::dispatch::Transaction` shares the existing physical repository's
+`.oms/artifacts/panel-dispatch.lock` using direct Flock, independently of the
+legacy lock selector. It provides a strict schema-1 `calls` snapshot and byte
+compare-and-swap at the existing 4 MiB registry path, plus immutable schema-2
+launch and schema-1 process artifacts bounded to 64 KiB. Callers retain unknown
+fields when patching their own records. Present empty or malformed state refuses
+instead of becoming an empty registry. Reads and mutations recheck the guard and
+anchored namespace, and waiting is bounded and cancellable. A prior artifact
+publication remains an uncertain effect if the subsequent registry update fails.
+The panel dispatch producer uses this shared writer and releases its guard before
+calling external execution or room producers. This storage API supplies no
+resource policy or launch permit by itself.
+
 Each new registration or observation reads and validates the complete history,
 then atomically replaces the ledger with that history plus the new receipt.
 Work and replacement bytes therefore grow with ledger size. This bound includes

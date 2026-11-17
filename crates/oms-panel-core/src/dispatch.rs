@@ -1,12 +1,13 @@
 //! Admission-safe dispatch previews, WIP accounting and durable call reservations.
 use crate::routing::{Route, WRITERS};
 use crate::services::{ExecutionRequest, NativeCommand, query};
+use crate::storage::reservation_error;
 use crate::value::{array, text};
 use crate::{Error, Result, Services, Store, Value, require};
+use oms_command_telemetry::store::dispatch::MAX_REGISTRY;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 pub const WIP_LIMIT: usize = 10;
 pub const MAX_WIP_LIMIT: usize = 24;
 pub const MAX_PROMPT: usize = 65536;
@@ -133,7 +134,9 @@ fn wip_counts(
     }
     for (call_member, entry) in calls.iter_mut() {
         let state = text(entry, "state");
-        if !["reserved", "running", "awaiting"].contains(&state.as_str()) {
+        // Only a completed native acknowledgement enters awaiting. Reserved
+        // and running calls may have lost their execution/cleanup response.
+        if state != "awaiting" {
             continue;
         }
         let att = by_member.get(call_member.as_str()).copied();
@@ -595,15 +598,15 @@ pub fn dispatch(
         return Ok(preview);
     }
     let member = format!("call-{}", crate::value::unique()?);
-    let relative = format!(".oms/artifacts/panel-dispatch/{member}-launch.json");
+    let launch = serde_json::json!({"schema":2,"member":member,"task_id":request.task_id,"main":request.main,"main_attempt":request.main_attempt,
+        "room":request.room,"route":request.route,"scopes":scopes,"verify":request.verify,"state":"reserved","execution_repo":execution.repo(),"created_at":crate::now()});
     {
-        let tx = store.transaction("panel-dispatch", Duration::from_secs(10))?;
-        let mut registry = tx
-            .json(
-                Path::new(".oms/artifacts/panel-dispatch/reservations.json"),
-                4 * 1024 * 1024,
-                true,
-            )?
+        let tx = store.dispatch_transaction(stop)?;
+        let snapshot = tx.snapshot().map_err(reservation_error)?;
+        let mut registry = snapshot
+            .as_deref()
+            .map(|raw| crate::decode(raw, MAX_REGISTRY))
+            .transpose()?
             .unwrap_or_else(|| serde_json::json!({"schema":1,"calls":{}}));
         require(
             registry["schema"] == 1 && registry["calls"].is_object(),
@@ -614,16 +617,11 @@ pub fn dispatch(
         if request.route.access == "write" {
             check_wip(running, awaiting, request.continue_task.is_some())?;
         }
-        let launch = serde_json::json!({"schema":2,"member":member,"task_id":request.task_id,"main":request.main,"main_attempt":request.main_attempt,
-            "room":request.room,"route":request.route,"scopes":scopes,"verify":request.verify,"state":"reserved","execution_repo":execution.repo(),"created_at":crate::now()});
-        tx.write_json(Path::new(&relative), &launch, true, 65536)?;
-        registry["calls"][&member] = launch;
-        tx.write_json(
-            Path::new(".oms/artifacts/panel-dispatch/reservations.json"),
-            &registry,
-            false,
-            4 * 1024 * 1024,
-        )?;
+        tx.artifact(&member, "launch", &crate::value::encoded(&launch)?)
+            .map_err(reservation_error)?;
+        registry["calls"][&member] = launch.clone();
+        tx.replace(snapshot.as_deref(), &crate::value::encoded(&registry)?)
+            .map_err(reservation_error)?;
     }
     if let Some(room) = &request.room {
         let caller = request
@@ -785,39 +783,56 @@ pub fn dispatch(
     }
     let output = service.command_context(native, &execution_request, stop).map_err(|e| Error {
         publication_uncertain:true,
+        code:e.code,
         ..Error::new(format!("dispatch {member} execution unconfirmed; preserve reservation and inspect before retry: {}",e.message))
     })?;
-    let tx = store.transaction("panel-dispatch", Duration::from_secs(10))?;
-    let mut registry = tx
-        .json(
-            Path::new(".oms/artifacts/panel-dispatch/reservations.json"),
-            4 * 1024 * 1024,
-            false,
-        )?
-        .ok_or_else(|| Error::new("dispatch reservation disappeared"))?;
-    let state = if output.cleanup_complete && output.output_complete && !output.limited {
-        "awaiting"
-    } else {
-        "unknown"
+    // Execution has returned; persist its acknowledgement even after cancellation.
+    let settlement_stop = AtomicBool::new(false);
+    let settlement = || -> Result<Value> {
+        let tx = store.dispatch_transaction(&settlement_stop)?;
+        let snapshot = tx
+            .snapshot()
+            .map_err(reservation_error)?
+            .ok_or_else(|| Error::new("dispatch reservation disappeared"))?;
+        let mut registry = crate::decode(&snapshot, MAX_REGISTRY)?;
+        let entry = registry
+            .get("calls")
+            .and_then(Value::as_object)
+            .and_then(|calls| calls.get(&member));
+        require(
+            registry["schema"] == 1
+                && entry.is_some_and(|entry| {
+                    entry.is_object()
+                        && matches!(
+                            entry["state"].as_str(),
+                            Some("reserved" | "running" | "unknown")
+                        )
+                        && launch
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .all(|(key, value)| key == "state" || entry.get(key) == Some(value))
+                }),
+            "dispatch settlement lost its admitted identity; preserve state and reconcile before retry",
+        )?;
+        let state = if output.cleanup_complete && output.output_complete && !output.limited {
+            "awaiting"
+        } else {
+            "unknown"
+        };
+        registry["calls"][&member]["state"] = state.into();
+        registry["calls"][&member]["exit"] = output.code.into();
+        tx.replace(Some(&snapshot), &crate::value::encoded(&registry)?)
+            .map_err(reservation_error)?;
+        let receipt = serde_json::json!({"schema":1,"member":member,"task_id":request.task_id,"exit":output.code,"cleanup_complete":output.cleanup_complete,"output_complete":output.output_complete,"state":state});
+        tx.artifact(&member, "process", &crate::value::encoded(&receipt)?)
+            .map_err(reservation_error)?;
+        Ok(receipt)
     };
-    registry["calls"][&member]["state"] = state.into();
-    registry["calls"][&member]["exit"] = output.code.into();
-    tx.write_json(
-        Path::new(".oms/artifacts/panel-dispatch/reservations.json"),
-        &registry,
-        false,
-        4 * 1024 * 1024,
-    )?;
-    let receipt = serde_json::json!({"schema":1,"member":member,"task_id":request.task_id,"exit":output.code,"cleanup_complete":output.cleanup_complete,"output_complete":output.output_complete,"state":state});
-    tx.write_json(
-        Path::new(&format!(
-            ".oms/artifacts/panel-dispatch/{member}-process.json"
-        )),
-        &receipt,
-        true,
-        65536,
-    )?;
-    Ok(receipt)
+    settlement().map_err(|error| Error {
+        publication_uncertain: true,
+        ..error
+    })
 }
 
 /// Resolve only the newest terminal worker owned by this main. Unpaired salvage
@@ -1187,6 +1202,7 @@ mod tests {
     use super::*;
     use crate::routing::Candidate;
     use serde_json::json;
+    use std::time::Duration;
 
     fn sample_request(main_attempt: &str) -> DispatchRequest {
         DispatchRequest {
@@ -1319,6 +1335,164 @@ mod tests {
             json!({"state":"unknown", "main_attempt":"att_main_1", "route":{"access":"write"}}),
         );
         assert_eq!(wip_counts(&req, &attempts, calls), (4, 1));
+        for state in ["reserved", "running"] {
+            calls["call-done"]["state"] = state.into();
+            assert_eq!(wip_counts(&req, &attempts, calls), (4, 1));
+            assert_eq!(
+                calls["call-done"]["state"], state,
+                "a terminal attempt cannot settle unacknowledged native execution"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_settlement_rechecks_the_admitted_identity_and_preserves_foreign_state() {
+        use crate::services::{CommandOutput, PeerExecutor};
+        use std::cell::{Cell, RefCell};
+        use std::os::unix::fs::DirBuilderExt;
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct Host {
+            mode: &'static str,
+            calls: Cell<usize>,
+            published: RefCell<Vec<u8>>,
+        }
+        impl PeerExecutor for Host {
+            fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                panic!("no process is needed");
+            }
+        }
+        impl Services for Host {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                assert_eq!(command, NativeCommand::Events);
+                Ok(CommandOutput {
+                    stdout: b"[]".to_vec(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+            fn command_context(
+                &self,
+                command: NativeCommand,
+                request: &ExecutionRequest,
+                interrupted: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                assert_eq!(command, NativeCommand::Delegate);
+                self.calls.set(self.calls.get() + 1);
+                let store = Store::open(&request.cwd)?;
+                let tx = store.transaction("panel-dispatch", Duration::from_secs(1))?;
+                let path = Path::new(".oms/artifacts/panel-dispatch/reservations.json");
+                let mut registry = tx.json(path, 4 * 1024 * 1024, false)?.unwrap();
+                let member = registry["calls"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .clone();
+                match self.mode {
+                    "missing" => {
+                        registry["calls"].as_object_mut().unwrap().remove(&member);
+                    }
+                    "null" => registry["calls"] = Value::Null,
+                    "array" => registry["calls"] = json!([]),
+                    "schema" => registry["schema"] = 2.into(),
+                    "route" => registry["calls"][&member]["route"]["owner"] = "other".into(),
+                    "metadata" => {
+                        registry["opaque"] = json!({"retain":"foreign metadata"});
+                        registry["calls"][&member]["extension"] = json!({"retained":true});
+                        registry["calls"]["other-call"] =
+                            json!({"state":"unknown","route":{"access":"write"}});
+                    }
+                    "cancel" => interrupted.store(true, std::sync::atomic::Ordering::Release),
+                    "error" => {}
+                    _ => unreachable!(),
+                }
+                tx.write_json(path, &registry, false, 4 * 1024 * 1024)?;
+                *self.published.borrow_mut() = store.read(path, 4 * 1024 * 1024, false)?;
+                if self.mode == "error" {
+                    return Err(Error {
+                        code: 125,
+                        ..Error::new("native acknowledgement unavailable")
+                    });
+                }
+                Ok(CommandOutput {
+                    code: if self.mode == "cancel" { 130 } else { 0 },
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+        for mode in [
+            "missing", "null", "array", "schema", "route", "metadata", "cancel", "error",
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "oms-dispatch-settlement-{}",
+                crate::value::unique().unwrap()
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let root = Directory(std::fs::canonicalize(root).unwrap());
+            let mut request = sample_request("att_main_1");
+            request.dry_run = false;
+            request.execution_repo = root.0.clone();
+            request.route.role = "worker".into();
+            request.route.access = "read".into();
+            request.route.purpose = "explain".into();
+            request.verify = None;
+            request.scopes.clear();
+            request.room = None;
+            let host = Host {
+                mode,
+                calls: Cell::new(0),
+                published: RefCell::new(vec![]),
+            };
+            let result = dispatch(&root.0, &request, &host, &AtomicBool::new(false));
+            assert_eq!(host.calls.get(), 1);
+            let path = root
+                .0
+                .join(".oms/artifacts/panel-dispatch/reservations.json");
+            if matches!(mode, "metadata" | "cancel") {
+                let receipt = result.unwrap();
+                let registry: Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                assert_eq!(receipt["state"], "awaiting");
+                if mode == "cancel" {
+                    assert_eq!(receipt["exit"], 130);
+                    continue;
+                }
+                assert_eq!(registry["opaque"]["retain"], "foreign metadata");
+                assert_eq!(
+                    registry["calls"][receipt["member"].as_str().unwrap()]["extension"]["retained"],
+                    true
+                );
+                assert_eq!(registry["calls"]["other-call"]["state"], "unknown");
+            } else {
+                let error = result.expect_err(mode);
+                if mode == "error" {
+                    assert_eq!(error.code, 125);
+                }
+                assert!(
+                    error.publication_uncertain,
+                    "{mode}: execution already occurred"
+                );
+                assert_eq!(std::fs::read(path).unwrap(), *host.published.borrow());
+            }
+        }
     }
 
     #[test]
