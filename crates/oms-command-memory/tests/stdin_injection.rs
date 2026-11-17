@@ -19,7 +19,7 @@ impl TempDir {
         let path =
             std::env::temp_dir().join(format!("{prefix}-{}-{seq}-{nanos}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(path.canonicalize().unwrap())
     }
 }
 
