@@ -637,21 +637,6 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         matches!(rows, V::Arr(_)),
         "gh returned an unreadable run list (lookup failed)",
     )?;
-    if ["record", "tick"].contains(&action.as_str()) {
-        crate::feedback::poll(
-            c,
-            &state,
-            &git,
-            &branch,
-            &head,
-            &rows,
-            if action == "tick" {
-                Duration::from_secs(2)
-            } else {
-                Duration::from_secs(20)
-            },
-        )?;
-    }
     let ahead = if git
         .text(&["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
@@ -717,7 +702,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         let mut row = obj([
             ("schema", 1usize.into()),
             ("ts", now().into()),
-            ("branch", branch.into()),
+            ("branch", branch.as_str().into()),
             ("sha", run.get("headSha").clone()),
             ("status", run.get("status").clone()),
             ("conclusion", concl.into()),
@@ -753,6 +738,22 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             )?;
         }
     }
+    let mut stderr = vec![];
+    if ["record", "tick"].contains(&action.as_str()) {
+        (_, stderr) = crate::feedback::optional_result(crate::feedback::poll(
+            c,
+            &state,
+            &git,
+            &branch,
+            &head,
+            &rows,
+            if action == "tick" {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(20)
+            },
+        ))?;
+    }
     drop(tick_lock);
     Ok(Output {
         code: i32::from(current.is_some_and(|r| red(&string(r, "conclusion")))),
@@ -761,7 +762,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         } else {
             out.into_bytes()
         },
-        stderr: vec![],
+        stderr,
     })
 }
 fn protection(c: &Context<'_>, git: &Git<'_>, branch: Option<&str>) -> Result<Output> {

@@ -148,6 +148,23 @@ the latest 20 observed events (or `--limit N`) and their `feedback:<event_id>` i
 another network request. No daemon, webhook, provider call or publication is
 introduced by observation.
 
+These observations are optional for the ordinary CI and comment views.
+`record`/`tick` publish the normal CI ledger first and retain their CI-derived
+exit status if feedback collection or storage fails. `draft-pr comments`
+publishes its existing comment packet first and still returns the comments.
+Both report feedback failures on stderr with a fixed diagnostic and numeric
+error code, without raw storage paths or remote error text. Interruption still
+propagates. Comment JSON adds a response-only `feedback_observation` object:
+`status: recorded` with `added`, or `status: unavailable` with `error_code`.
+This attempt status is separate from the stored comment packet and its identity.
+
+A failed poll can have preserved available CI observations before its PR or
+comment lookup failed; the warning means durable feedback may be incomplete
+or stale. Full or corrupt journals retain their prior bytes and are not
+repaired automatically. Explicit `ci-status feedback` reads still fail on
+invalid evidence. A successful ordinary view does not prove a fresh feedback
+journal or relax validation by feedback consumers.
+
 Each record binds the GitHub repository, PR number when known, exact source
 head and either workflow run ID plus attempt or comment ID plus update/content
 digest. An edit beyond the 600-character displayed comment excerpt still
