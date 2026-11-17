@@ -3,10 +3,14 @@ use crate::json::Value;
 use crate::{Result, error};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The guard owns the actual agent-events writer primitive, not a plan lock.
-pub trait LifecycleGuard {}
+pub trait LifecycleGuard {
+    fn check(&self) -> Result<()> {
+        Err(error("native lifecycle ownership check unavailable"))
+    }
+}
 pub struct ProjectedLifecycle {
     pub source_sha256: String,
     /// Exact `agent-events.project_attempts` object, including unknown refs.
@@ -61,6 +65,7 @@ pub struct ApprovalGrant {
 /// Fresh native account-database result for one group. A primary gid alone is
 /// insufficient: both the explicit member accounts and every primary member
 /// must be resolved by the actual host account provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupMembership {
     pub gid: u32,
     pub explicit_member_uids: Vec<u32>,
@@ -78,8 +83,25 @@ pub trait Services {
     fn group_membership_resolver(&self) -> Option<GroupResolver> {
         None
     }
+    fn group_membership_before(
+        &self,
+        _gid: u32,
+        _deadline: Instant,
+        _interrupted: &std::sync::atomic::AtomicBool,
+    ) -> Result<GroupMembership> {
+        Err(error("bounded native group ownership service unavailable"))
+    }
     fn lifecycle_writer(&self, _repo: &Path) -> Result<Box<dyn LifecycleGuard + '_>> {
         Err(error("native lifecycle writer service unavailable"))
+    }
+    /// Admission shares one deadline with later resource/usage reservations.
+    /// An unbounded legacy writer is not a bounded-admission implementation.
+    fn lifecycle_writer_before(
+        &self,
+        _repo: &Path,
+        _deadline: Instant,
+    ) -> Result<Box<dyn LifecycleGuard + '_>> {
+        Err(error("bounded native lifecycle writer service unavailable"))
     }
     fn project_lifecycle(&self, _raw: &[u8]) -> Result<ProjectedLifecycle> {
         Err(error("native lifecycle projection service unavailable"))

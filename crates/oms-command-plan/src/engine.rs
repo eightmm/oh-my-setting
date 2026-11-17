@@ -261,6 +261,8 @@ pub struct Plan<'a> {
     file_store: Option<Store>,
     pub services: &'a dyn Services,
     pub interrupted: &'a AtomicBool,
+    pub(crate) proof_deadline: Option<std::time::Instant>,
+    pub(crate) group_snapshot: Option<std::sync::Arc<crate::storage::GroupProofSnapshot>>,
 }
 impl<'a> Plan<'a> {
     pub fn open(
@@ -301,6 +303,8 @@ impl<'a> Plan<'a> {
             file_store,
             services,
             interrupted,
+            proof_deadline: None,
+            group_snapshot: None,
         })
     }
     pub(crate) fn plan_storage(&self) -> &Store {
@@ -316,6 +320,8 @@ impl<'a> Plan<'a> {
     }
     pub fn git(&self) -> Git<'_> {
         Git {
+            group_snapshot: self.group_snapshot.clone(),
+            deadline: self.proof_deadline,
             repo: &self.context.execution_repo,
             interrupted: self.interrupted,
             group_resolver: self.services.group_membership_resolver(),
@@ -323,6 +329,8 @@ impl<'a> Plan<'a> {
     }
     pub fn state_git(&self) -> Git<'_> {
         Git {
+            group_snapshot: self.group_snapshot.clone(),
+            deadline: self.proof_deadline,
             repo: &self.context.state_repo,
             interrupted: self.interrupted,
             group_resolver: self.services.group_membership_resolver(),

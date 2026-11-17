@@ -170,6 +170,8 @@ pub(crate) fn worktree_root(repo: &Path, interrupted: &AtomicBool) -> crate::Res
     let physical =
         canonicalize_dir(repo).map_err(|_| error("cannot resolve the physical repository"))?;
     let git = Git {
+        group_snapshot: None,
+        deadline: None,
         repo: &physical,
         interrupted,
         group_resolver: None,

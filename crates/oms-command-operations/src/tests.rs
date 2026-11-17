@@ -533,10 +533,67 @@ fn concurrent_start_lock_recovery_and_spec_repair() {
     assert!(lock::stale(&observed, 300));
     let guard = lock::FileLock::acquire(&path, &AtomicBool::new(false)).unwrap();
     let live = lock::snapshot(&directory).unwrap();
+    guard.check().unwrap();
     assert!(!lock::stale(&live, 0));
     assert!(!lock::reclaim(&directory, &observed, 0).unwrap());
+    let started = std::time::Instant::now();
+    assert!(
+        lock::FileLock::acquire_before(
+            &path,
+            &AtomicBool::new(false),
+            started + std::time::Duration::from_millis(30)
+        )
+        .is_err()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(
+        lock::snapshot(&directory).unwrap().generation,
+        live.generation
+    );
+    assert!(
+        lock::FileLock::acquire_before(
+            &path,
+            &AtomicBool::new(true),
+            std::time::Instant::now() + std::time::Duration::from_secs(2)
+        )
+        .is_err()
+    );
+    guard.check().unwrap();
     drop(guard);
     assert!(!directory.exists());
+    assert!(
+        lock::FileLock::acquire_before(&path, &AtomicBool::new(false), std::time::Instant::now())
+            .is_err()
+    );
+    assert!(!directory.exists());
+    let guard = lock::FileLock::acquire_before(
+        &path,
+        &AtomicBool::new(false),
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    )
+    .unwrap();
+    let owner = std::fs::read(directory.join("owner.json")).unwrap();
+    let retired = directory.with_extension("replaced-for-fixture");
+    std::fs::rename(&directory, &retired).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("owner.json"), &owner).unwrap();
+    assert!(guard.check().is_err());
+    drop(guard);
+    assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), owner);
+    std::fs::remove_dir_all(&directory).unwrap();
+    std::fs::remove_dir_all(&retired).unwrap();
+    let guard = lock::FileLock::acquire(&path, &AtomicBool::new(false)).unwrap();
+    let changed = obj([("owner_nonce", "changed-owner".into())])
+        .json(false)
+        .unwrap();
+    std::fs::write(directory.join("owner.json"), &changed).unwrap();
+    assert!(guard.check().is_err());
+    drop(guard);
+    assert_eq!(
+        std::fs::read(directory.join("owner.json")).unwrap(),
+        changed
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
     let mut reused = live;
     reused.owner.set("process_start", "proc:impossible");
     assert!(lock::stale(&reused, 300));
@@ -562,6 +619,88 @@ fn concurrent_start_lock_recovery_and_spec_repair() {
         ]),
     };
     assert!(!lock::stale(&huge, 1));
+
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    let program = f.0.join("ps-fixture");
+    let marker = f.0.join("ps-entered");
+    let write_probe = |body: &str| {
+        std::fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    write_probe("printf '  fixture   start  \\n'");
+    assert_eq!(
+        lock::process_start_ps_before(
+            &program,
+            1,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(2)
+        )
+        .unwrap(),
+        Some("ps:fixture start".into())
+    );
+    let script = format!(
+        "printf '%s' \"$$\" > '{}'; exec /bin/sleep 10",
+        marker.to_string_lossy().replace('\'', "'\\''")
+    );
+    write_probe(&script);
+    assert!(
+        lock::process_start_ps_before(&program, 1, &AtomicBool::new(false), Instant::now())
+            .is_err()
+    );
+    assert!(!marker.exists());
+    let started = Instant::now();
+    assert!(
+        lock::process_start_ps_before(
+            &program,
+            1,
+            &AtomicBool::new(false),
+            started + Duration::from_millis(150)
+        )
+        .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let pid = std::fs::read_to_string(&marker)
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    assert!(!lock::pid_alive(pid));
+    std::fs::remove_file(&marker).unwrap();
+    let cancelled = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !marker.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        });
+        assert!(
+            lock::process_start_ps_before(
+                &program,
+                1,
+                &cancelled,
+                Instant::now() + Duration::from_secs(2)
+            )
+            .is_err()
+        );
+    });
+    let pid = std::fs::read_to_string(&marker)
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    assert!(!lock::pid_alive(pid));
+    write_probe("while :; do printf '0123456789abcdef'; done");
+    assert!(
+        lock::process_start_ps_before(
+            &program,
+            1,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(2)
+        )
+        .unwrap_err()
+        .contains("output exceeds bound")
+    );
 }
 
 #[test]

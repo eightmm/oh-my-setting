@@ -96,6 +96,14 @@ enrollment fixtures cover the actual Main/room producers, owner termination
 and artifact tampering. The remaining TM-01/MR-A fault matrix still needs
 matching evidence before declaring TM-01 complete.
 
+The native Plan API now exposes a contract-only `team_admission_before` guard.
+It reuses the current generation/owner/task/policy checks under the existing
+writer order, shares a deadline with native lifecycle and Git proofs, and
+revalidates transient native group evidence before returning. Cancellation with
+an unchanged spec digest and expiry during owner projection refuse. This API
+does not itself reserve resources, enroll an executing member or grant launch
+authority; the shared physical consumer still needs those integrations.
+
 ## 3. TM-02 — 하나의 admission과 명시적인 자원 범위
 
 ### 자원 종류를 분리한다

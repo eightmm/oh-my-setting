@@ -162,6 +162,8 @@ impl IncomingSourceLease for Lease<'_, '_> {
             return out;
         }
         let git = oms_command_plan::repository::Git {
+            group_snapshot: None,
+            deadline: None,
             repo: &self.source,
             interrupted: stop,
             group_resolver: None,

@@ -135,6 +135,8 @@ pub trait Services: oms_command_plan::Services + Sync {
         let physical = std::fs::canonicalize(path)
             .map_err(|_| Error::new(2, "cannot resolve physical repository"))?;
         let git = oms_command_plan::repository::Git {
+            group_snapshot: None,
+            deadline: None,
             repo: &physical,
             interrupted: _interrupted,
             group_resolver: self.group_membership_resolver(),
@@ -205,8 +207,25 @@ impl<'a> LocalServices<'a> {
 struct EventsGuard {
     _lock: oms_command_operations::lock::FileLock,
 }
-impl LifecycleGuard for EventsGuard {}
+impl LifecycleGuard for EventsGuard {
+    fn check(&self) -> oms_command_plan::Result<()> {
+        self._lock.check().map_err(plan_error)
+    }
+}
 impl oms_command_plan::Services for LocalServices<'_> {
+    fn lifecycle_writer_before(
+        &self,
+        repo: &Path,
+        deadline: Instant,
+    ) -> oms_command_plan::Result<Box<dyn LifecycleGuard + '_>> {
+        oms_command_operations::lock::FileLock::acquire_before(
+            &oms_command_operations::event_path(repo),
+            self.interrupted,
+            deadline,
+        )
+        .map(|lock| Box::new(EventsGuard { _lock: lock }) as Box<dyn LifecycleGuard>)
+        .map_err(plan_error)
+    }
     fn lifecycle_writer(
         &self,
         repo: &Path,

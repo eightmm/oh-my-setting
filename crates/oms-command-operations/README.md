@@ -147,6 +147,17 @@ to its stronger intent recovery.
   a partial owner ages out. Release requires the same directory and nonce.
   A kill during stale cleanup can leave the retired stale directory.
 
+Internal admission callers use `FileLock::acquire_before` to share their remaining
+wait budget. The original `acquire` keeps its configured timeout. `check`
+revalidates the acquiring PID, directory identity and exact owner generation;
+Drop preserves a replacement owner. Acquisition expiry never ages out a live
+owner. The nearest contention/recovery fixture covers busy/expired/cancelled
+admission and directory/owner replacement without deleting the new owner.
+Process-start fallback uses an absolute system `ps`, bounded nonblocking output
+and the same acquisition deadline/cancellation. Its own child is killed and
+reaped on failure; this does not claim a hard return bound for kernel-stuck
+teardown. Standalone process proofs have a two-second execution budget.
+
 Raw OS repository paths are retained for filesystem/Git access and store/lock
 hashing; direct linked ledger parents and linked/multi-linked leaves are
 refused before reads, append or chmod. Benign ancestry aliases above the direct

@@ -1049,32 +1049,141 @@ fn versioned_contracts_gate_scheduling() {
 
 #[test]
 fn team_contracts_preserve_parent_lineage_and_generation() {
-    if isolated("team_contracts_preserve_parent_lineage_and_generation") {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if std::env::var_os("OMS_TEAM_GIT_FIXTURE_BIN").is_none() {
+        let fixture = Tmp::new();
+        let bin = fixture.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join("git"))
+            .find(|path| path.is_file())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in *'rev-parse HEAD'*) if [ -f \"${{0%/*}}/gate\" ]; then printf entered > \"${{0%/*}}/entered\"; while [ -f \"${{0%/*}}/gate\" ]; do /bin/sleep 0.02; done; fi;; esac\nexec '{}' \"$@\"\n",
+            real.to_str().unwrap().replace('\'', "'\\''")
+        );
+        fs::write(bin.join("git"), script).unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "team_contracts_preserve_parent_lineage_and_generation",
+            "--nocapture",
+        ]);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("OMS_") {
+                command.env_remove(key);
+            }
+        }
+        command.env("OMS_TEAM_GIT_FIXTURE_BIN", &bin).env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        print!("{}", String::from_utf8_lossy(&output.stdout));
         return;
     }
     use oms_command_plan::json::{Value, number, object, string};
     use oms_command_plan::services::{LifecycleGuard, ProjectedLifecycle, ProjectedRoom};
     use oms_command_plan::{Action, Context, Plan, Request, json};
-    struct Guard;
-    impl LifecycleGuard for Guard {}
+    struct Guard<'a>(&'a AtomicBool);
+    impl LifecycleGuard for Guard<'_> {
+        fn check(&self) -> oms_command_plan::Result<()> {
+            if self.0.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(oms_command_plan::Error {
+                    code: 2,
+                    message: "fixture lifecycle guard changed".into(),
+                });
+            }
+            Ok(())
+        }
+    }
     #[derive(Default)]
     struct TeamHost {
         lifecycle_reads: std::sync::atomic::AtomicUsize,
         room_reads: std::sync::atomic::AtomicUsize,
+        changed_guard: AtomicBool,
+        expire_during_projection: AtomicU64,
+        proof_gid: AtomicU64,
+        group_reads: std::sync::atomic::AtomicUsize,
+        change_group_at: std::sync::atomic::AtomicUsize,
+        change_policy_at: std::sync::atomic::AtomicUsize,
+        policy_path: std::sync::Mutex<Option<PathBuf>>,
     }
     impl Services for TeamHost {
         fn group_membership_resolver(&self) -> Option<GroupResolver> {
             Host.group_membership_resolver()
         }
+        fn group_membership_before(
+            &self,
+            gid: u32,
+            _: std::time::Instant,
+            _: &AtomicBool,
+        ) -> oms_command_plan::Result<GroupMembership> {
+            let mut proof = Host.group_membership_resolver().unwrap()(gid)?;
+            if u64::from(gid) + 1 == self.proof_gid.load(std::sync::atomic::Ordering::Acquire) {
+                let ordinal = self
+                    .group_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                    + 1;
+                if self
+                    .change_group_at
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == ordinal
+                {
+                    proof
+                        .primary_member_uids
+                        .push(proof.primary_member_uids[0].wrapping_add(1));
+                }
+                if self
+                    .change_policy_at
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == ordinal
+                {
+                    fs::write(
+                        self.policy_path.lock().unwrap().as_ref().unwrap(),
+                        b"{\"changed\":true}\n",
+                    )
+                    .unwrap();
+                }
+            }
+            Ok(proof)
+        }
         fn lifecycle_writer(
             &self,
             _: &Path,
         ) -> oms_command_plan::Result<Box<dyn LifecycleGuard + '_>> {
-            Ok(Box::new(Guard))
+            Ok(Box::new(Guard(&self.changed_guard)))
+        }
+        fn lifecycle_writer_before(
+            &self,
+            _: &Path,
+            _: std::time::Instant,
+        ) -> oms_command_plan::Result<Box<dyn LifecycleGuard + '_>> {
+            Ok(Box::new(Guard(&self.changed_guard)))
         }
         fn project_lifecycle(&self, raw: &[u8]) -> oms_command_plan::Result<ProjectedLifecycle> {
             self.lifecycle_reads
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let until = self
+                .expire_during_projection
+                .swap(0, std::sync::atomic::Ordering::AcqRel);
+            while SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                < until
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             let terminal = std::str::from_utf8(raw).unwrap().contains("cancelled");
             Ok(ProjectedLifecycle {
                 source_sha256: json::sha(raw),
@@ -1160,6 +1269,16 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     )
     .unwrap();
     fs::write(r.join("team-policy.json"), b"{}\n").unwrap();
+    fs::set_permissions(
+        r.join("team-policy.json"),
+        fs::Permissions::from_mode(0o664),
+    )
+    .unwrap();
+    host.proof_gid.store(
+        u64::from(fs::metadata(r.join("team-policy.json")).unwrap().gid()) + 1,
+        std::sync::atomic::Ordering::Release,
+    );
+    *host.policy_path.lock().unwrap() = Some(r.join("team-policy.json"));
     let plan = json::parse(&fs::read(r.join(".oms/plan/tasks.json")).unwrap()).unwrap();
     let task = plan.get("tasks").get("task-a");
     let head = Command::new("git")
@@ -1340,7 +1459,229 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
         1
     );
     assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), stored);
+    let mut admission_context =
+        Context::from_environment(&Request::new(Action::TeamShow), &r).unwrap();
+    admission_context.panel_main_attempt = "main-a".into();
+    admission_context.room_id = "room-team".into();
+    // An old Context timestamp is not the final admission clock.
+    admission_context.ts = "2201-01-01T00:00:00Z".into();
+    let admission_plan = Plan::open(admission_context.clone(), &host, &stop).unwrap();
+    let admission = oms_command_plan::team::AdmissionRequest {
+        team_id: "team-a".into(),
+        spec_sha256: digest.clone(),
+        member_id: "lead-a".into(),
+        member_generation: 1,
+        provider: "codex".into(),
+        harness: "codex".into(),
+        host: "local".into(),
+        transport: "direct".into(),
+        account: Some("work".into()),
+        selected_model: Some("fixture".into()),
+        write: false,
+    };
+    let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let guard = admission_plan
+        .team_admission_before(admission.clone(), deadline())
+        .unwrap();
+    assert_eq!(guard.binding().text("root_owner_generation"), "evt-owner");
+    assert_eq!(guard.binding().get("member").text("attempt_id"), "");
+    let before = std::time::Instant::now();
+    assert_eq!(
+        admission_plan
+            .team_admission_before(
+                admission.clone(),
+                before + std::time::Duration::from_millis(30)
+            )
+            .err()
+            .unwrap()
+            .code,
+        75
+    );
+    assert!(before.elapsed() < std::time::Duration::from_secs(1));
+    fs::write(r.join("team-policy.json"), b"{\"changed\":true}\n").unwrap();
+    assert!(
+        guard
+            .check()
+            .unwrap_err()
+            .message
+            .contains("policy changed")
+    );
+    fs::write(r.join("team-policy.json"), b"{}\n").unwrap();
+    guard.check().unwrap();
+    host.change_group_at.store(
+        host.group_reads.load(std::sync::atomic::Ordering::Acquire) + 2,
+        std::sync::atomic::Ordering::Release,
+    );
+    assert!(
+        guard
+            .check()
+            .unwrap_err()
+            .message
+            .contains("group ownership changed")
+    );
+    guard.check().unwrap();
+    host.change_policy_at.store(
+        host.group_reads.load(std::sync::atomic::Ordering::Acquire) + 2,
+        std::sync::atomic::Ordering::Release,
+    );
+    assert!(
+        guard
+            .check()
+            .unwrap_err()
+            .message
+            .contains("policy changed")
+    );
+    fs::write(r.join("team-policy.json"), b"{}\n").unwrap();
+    guard.check().unwrap();
+    host.changed_guard
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(guard.check().unwrap_err().message.contains("guard changed"));
+    host.changed_guard
+        .store(false, std::sync::atomic::Ordering::Release);
+    let mut withdrawn = json::parse(&stored).unwrap();
+    let mut teams = withdrawn.get("teams").clone();
+    let mut team = teams.get("team-a").clone();
+    team.set("phase", string("settled")).unwrap();
+    teams.set("team-a", team).unwrap();
+    withdrawn.set("teams", teams).unwrap();
+    fs::write(
+        r.join(".oms/plan/tasks.json"),
+        json::canonical(&withdrawn).unwrap(),
+    )
+    .unwrap();
+    assert!(guard.check().unwrap_err().message.contains("withdrawn"));
+    fs::write(r.join(".oms/plan/tasks.json"), &stored).unwrap();
+    fs::write(r.join(".oms/lifecycle/events.jsonl"), format!("{history}{{\"schema\":1,\"event_id\":\"evt-cancel\",\"attempt_id\":\"main-a\",\"seq\":3,\"ts\":\"2026-01-01T00:00:02Z\",\"event_type\":\"attempt.state_changed\",\"state\":\"cancelled\"}}\n")).unwrap();
+    assert!(
+        guard
+            .check()
+            .unwrap_err()
+            .message
+            .contains("owner is stale")
+    );
+    fs::write(r.join(".oms/lifecycle/events.jsonl"), history).unwrap();
+    guard.check().unwrap();
+    drop(guard);
+    let git_bin = PathBuf::from(std::env::var_os("OMS_TEAM_GIT_FIXTURE_BIN").unwrap());
+    fs::write(git_bin.join("gate"), b"wait").unwrap();
+    let started = std::time::Instant::now();
+    let refused = admission_plan
+        .team_admission_before(
+            admission.clone(),
+            started + std::time::Duration::from_millis(300),
+        )
+        .err()
+        .unwrap();
+    assert_eq!(refused.code, 75, "{refused}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(git_bin.join("entered").is_file());
+    fs::remove_file(git_bin.join("entered")).unwrap();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !git_bin.join("entered").is_file() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            admission_plan
+                .team_admission_before(admission.clone(), deadline())
+                .err()
+                .unwrap()
+                .code,
+            130
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    });
+    assert!(git_bin.join("entered").is_file());
+    stop.store(false, std::sync::atomic::Ordering::Release);
+    fs::remove_file(git_bin.join("gate")).unwrap();
+    admission_plan
+        .team_admission_before(admission.clone(), deadline())
+        .unwrap()
+        .check()
+        .unwrap();
+    for field in [
+        "spec",
+        "member",
+        "provider",
+        "harness",
+        "host",
+        "transport",
+        "account",
+        "model",
+        "access",
+    ] {
+        let mut wrong = admission.clone();
+        match field {
+            "spec" => wrong.spec_sha256 = "0".repeat(64),
+            "member" => wrong.member_generation += 1,
+            "provider" => wrong.provider = "claude".into(),
+            "harness" => wrong.harness = "claude".into(),
+            "host" => wrong.host = "foreign".into(),
+            "transport" => wrong.transport = "native".into(),
+            "account" => wrong.account = Some("other-account".into()),
+            "model" => wrong.selected_model = None,
+            "access" => wrong.write = true,
+            _ => unreachable!(),
+        }
+        assert!(
+            admission_plan
+                .team_admission_before(wrong, deadline())
+                .is_err(),
+            "{field}"
+        );
+    }
+    let mut child_context = admission_context.clone();
+    child_context.child = true;
+    assert!(
+        Plan::open(child_context, &host, &stop)
+            .unwrap()
+            .team_admission_before(admission.clone(), deadline())
+            .is_err()
+    );
+    assert!(!r.join(".oms/usage/receipts.jsonl").exists());
+    assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), stored);
+    let mut expiring = spec.clone();
+    expiring.set("id", string("team-expiring")).unwrap();
+    let expiry = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3;
+    expiring
+        .set(
+            "expires_at",
+            string(
+                chrono::DateTime::from_timestamp(expiry as i64, 0)
+                    .unwrap()
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string(),
+            ),
+        )
+        .unwrap();
+    write(&expiring);
+    call(&register, false).unwrap();
+    let mut expiry_request = admission.clone();
+    expiry_request.team_id = "team-expiring".into();
+    expiry_request.spec_sha256 = json::hash(&expiring).unwrap();
+    let guard = admission_plan
+        .team_admission_before(expiry_request, deadline())
+        .unwrap();
+    host.expire_during_projection
+        .store(expiry, std::sync::atomic::Ordering::Release);
+    assert!(guard.check().unwrap_err().message.contains("expired"));
+    drop(guard);
+
     spec.set("generation", number(2)).unwrap();
+    let mut updated_members = spec.get("members").array().unwrap().to_vec();
+    let large_generation = i128::from(u64::MAX) + 7;
+    updated_members[0]
+        .set("generation", number(large_generation))
+        .unwrap();
+    spec.set("members", Value::Array(updated_members)).unwrap();
     spec.set("previous_sha256", string(&digest)).unwrap();
     write(&spec);
     assert!(call(&register, false).is_err());
@@ -1363,6 +1704,14 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     .unwrap();
     assert_eq!(shown.text("phase"), "held");
     assert_eq!(shown.get("history").array().unwrap().len(), 2);
+    let mut next_request = admission.clone();
+    next_request.spec_sha256 = json::hash(&spec).unwrap();
+    next_request.member_generation = large_generation;
+    admission_plan
+        .team_admission_before(next_request, deadline())
+        .unwrap()
+        .check()
+        .unwrap();
     fs::write(r.join("team-policy.json"), b"{\"changed\":true}\n").unwrap();
     let stale = json::parse(
         &call(&["team-show", "--id", "team-a"], false)

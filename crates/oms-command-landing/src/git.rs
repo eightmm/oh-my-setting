@@ -193,6 +193,8 @@ impl<'a> Git<'a> {
     }
     pub fn safe(&self) -> Result<()> {
         oms_command_plan::repository::Git {
+            group_snapshot: None,
+            deadline: None,
             repo: self.repo,
             interrupted: self.interrupted,
             group_resolver: crate::storage::current_group_resolver(),

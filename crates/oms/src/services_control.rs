@@ -378,6 +378,13 @@ impl<'a> ControlServices<'a> {
 }
 
 impl oms_command_plan::Services for ControlServices<'_> {
+    fn lifecycle_writer_before(
+        &self,
+        repo: &Path,
+        deadline: Instant,
+    ) -> oms_command_plan::Result<Box<dyn LifecycleGuard + '_>> {
+        oms_command_plan::Services::lifecycle_writer_before(&self.local, repo, deadline)
+    }
     fn state_root(&self, repo: &Path) -> oms_command_plan::Result<Option<PathBuf>> {
         let state = state_repository_for(repo).map_err(plan_error)?;
         let own = std::fs::canonicalize(repo)
@@ -470,6 +477,14 @@ impl oms_command_plan::Services for ControlServices<'_> {
     }
     fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
         Some(crate::services_runtime::resolve_group_membership)
+    }
+    fn group_membership_before(
+        &self,
+        gid: u32,
+        deadline: Instant,
+        interrupted: &AtomicBool,
+    ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+        crate::services_runtime::resolve_group_membership_before(gid, deadline, interrupted)
     }
     fn read_managed_patch(
         &self,
@@ -3249,6 +3264,57 @@ mod tests {
         assert_eq!(view["phase"], "planned");
         assert_eq!(view["spec"]["root_owner"], owner);
         assert_eq!(view["verified"], Value::Null);
+        let request = Request::new(oms_command_plan::Action::TeamShow);
+        let mut context = Context::from_environment(&request, repo.path()).unwrap();
+        context.execution_repo = repo.path().into();
+        context.state_repo = repo.path().into();
+        context.plan_file = repo.path().join(".oms/plan/tasks.json");
+        context.panel_main_attempt = owner.clone();
+        context.room_id = "room-team".into();
+        context.participant = owner.clone();
+        context.child = false;
+        context.delegate_depth = "0".into();
+        let admission_plan = Plan::open(context, &control, &stop).unwrap();
+        let request = oms_command_plan::team::AdmissionRequest {
+            team_id: "team-a".into(),
+            spec_sha256: view["history"][0]["sha256"].as_str().unwrap().into(),
+            member_id: "lead-a".into(),
+            member_generation: 1,
+            provider: "codex".into(),
+            harness: "codex".into(),
+            host: "local".into(),
+            transport: "direct".into(),
+            account: Some("work".into()),
+            selected_model: Some("fixture".into()),
+            write: false,
+        };
+        let guard = admission_plan
+            .team_admission_before(request, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        guard.check().unwrap();
+        assert_eq!(guard.binding().text("root_owner"), owner);
+        assert!(
+            oms_command_operations::lock::FileLock::acquire_before(
+                &oms_command_operations::event_path(repo.path()),
+                &stop,
+                Instant::now() + Duration::from_millis(20)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(oms_command_operations::event_path(repo.path())).unwrap(),
+            before
+        );
+        assert!(!repo.path().join(".oms/usage/receipts.jsonl").exists());
+        drop(guard);
+        oms_command_operations::lock::FileLock::acquire_before(
+            &oms_command_operations::event_path(repo.path()),
+            &stop,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
         assert_eq!(
             std::fs::read(oms_command_operations::event_path(repo.path())).unwrap(),
             before

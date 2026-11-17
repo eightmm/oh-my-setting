@@ -78,6 +78,8 @@ pub fn validate_manifest(
         value::text(&manifest["problem"], "sha256"),
     )?;
     let git = oms_command_plan::repository::Git {
+        group_snapshot: None,
+        deadline: None,
         repo,
         interrupted,
         group_resolver: None,
@@ -695,6 +697,8 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
     )?;
     let result = (|| {
         let git = oms_command_plan::repository::Git {
+            group_snapshot: None,
+            deadline: None,
             repo: &scratch_path,
             interrupted: ctx.interrupted,
             group_resolver: ctx.services.group_membership_resolver(),

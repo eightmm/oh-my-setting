@@ -1,15 +1,10 @@
 # Native agent-plan domain
 
-This crate implements the schema-3 plan domain inside an isolated workspace.
-The root workspace, native CLI/selector routing, production adapters, migration
-inventory, and deployment remain owned by the parent. Existing Python and Bash
-sources and tests are unchanged. Compiling this crate does not establish parity
-or authorize retirement of the legacy implementation.
-
-The implementation phase intentionally adds no tests and runs no stored
-acceptance/verifier commands, behavioral probes, repository gates, or CI. The
-parent must independently review and verify the implementation before routing
-public traffic to it.
+This crate owns the schema-3 plan domain and `agent-plan` command in the root
+Rust workspace. Native parent services supply lifecycle, Room, permissions,
+verification and publication producers. A successful compilation alone grants
+no task completion, release or publication authority. Legacy source names below
+are historical porting anchors.
 
 ## Entry points and consumers
 
@@ -43,8 +38,8 @@ The internal consumers have one authority entry point:
 | Native runtime/work projections | `Plan::work_status_snapshot(&[&str])` calls the existing `oms-work-inspect` status validator; it cannot grant a mutation |
 | State verification / landing recovery | `retirement::validate_ledger`, `validate_receipt`, `validate_active_lineage`, `completion::validate_done` return validated domain evidence |
 
-These are integration targets, not a claim that existing scripts already call
-the crate. There is no legacy command backend or fallback.
+The native parent wires these domains directly. There is no legacy command
+backend or fallback.
 
 ## Mode/source checklist
 
@@ -76,6 +71,7 @@ returns a generic success boolean as completion authority.
 | Service | Required producer / result |
 |---|---|
 | `lifecycle_writer` | Actual native agent-events writer guard. Completion lock order is landings → room thread → marker set → canonical plan → optional custom plan → native lifecycle writer |
+| `lifecycle_writer_before`, `LifecycleGuard::check` | Admission shares one absolute acquisition deadline and rechecks the native writer generation; unavailable bounded adapters refuse |
 | `project_lifecycle` | Complete input stream digest and exact native attempt projection. The plan also validates row framing, event identities, per-attempt sequence and relevant immutable ancestry/refs |
 | `project_room` | Complete input stream digest and native room projection. The plan checks canonical timestamps/sequence, membership epochs, unique native owner, swap chain and successor membership |
 | `supervise` | Whole-tree native supervisor: raw argv/cwd, wall/output bounds, environment removals, separate command/runner exits, timeout/launch/supervision flags and raw captured output. Output formatting/capture/failure adapters belong to the parent producer; plan does not duplicate those stores |
@@ -86,6 +82,29 @@ returns a generic success boolean as completion authority.
 | `normalize_provider`, `verify_selector_warnings` | Native registry and selector services. Three known canonical transports have defaults; other transports require the registry adapter. Selector diagnostics do not establish verification |
 | `acceptance_reuse_context` | Optional fresh native context of raw tracked bytes, environment/config and executing controller. Missing context disables reuse and runs acceptance fresh |
 | `group_membership_resolver` | Fresh native account-database lookup for an observed gid. Domain checks every explicit member uid and the complete primary-member uid list; a primary gid or group membership boolean cannot prove private ownership |
+| `group_membership_before` | The same complete ownership evidence through bounded, cancellable native account probes, sharing the admission deadline |
+
+`Plan::team_admission_before(AdmissionRequest, deadline)` returns an opaque
+contract guard. It pins the canonical writer order, expected immutable spec,
+member generation, root creation event, exact task/criterion/base/policy and
+actual requested route/access. Its `check` repeats producer validation with a
+fresh clock and new binding observations. Same-SHA cancellation, stale owners,
+dependency blockers, changed policy and expiry during projection refuse.
+Member generations retain their existing i128 range.
+
+One validation pass shares complete native group proofs across descriptor
+checks, then re-queries every used group before success. No TTL or persistent
+permission cache grants authority. Fixed Git proofs receive the outer deadline
+and use the existing supervisor's process-group capture/cleanup. Ordinary Git
+callers keep their existing defaults with absent deadline/group snapshot fields.
+
+This guard supplies contract eligibility only. Resource reservation, actual
+member enrollment, usage, cleanup and publication remain separate producers.
+Callers acquire it before campaign/dispatch/usage locks, register through the
+physical producer, release those inner locks, fence again and drop producer
+guards before execution. The canonical Plan fixture covers delayed Git,
+cancellation, expiry, route/generation changes and late permission/policy
+changes; the native Root fixture verifies the real lifecycle writer and release.
 
 Persistent plan JSON preserves unknown fields and object insertion order. The
 shared `oms-context` parser preserves JSON numbers and surrogate strings;
@@ -131,17 +150,15 @@ there is no freshness TTL or persistent projection cache.
 | Retirement intent/archive/receipt/active plan | Ordered intent → exact archive → receipt → generation-checked active unlink → intent removal. Every interrupted prefix is retained. Exact replay recovers receipt-before-unlink and post-unlink intent cases; unrelated fresh lineage stays untouched. Only the deterministic legacy same-inode two-link pair is repaired |
 | Ephemeral Git product index/objects | Private TMPDIR directory and private object namespace; no repository index/object writes. Normal return/error removes it. An external hard kill can leave only that disposable directory |
 
-No live plan, receipt, event, provider state or Git ref was changed while
-implementing this crate. The implementation writes no new persistent cache or
-projection sidecar.
+The implementation creates no persistent projection cache or permission sidecar.
+Canonical plan, receipt and lifecycle producers retain their separate writers.
 
 ## Integration and verification limits
 
-The parent must supply production services above, attach native CLI/help and
-selector routing, reconcile the root workspace/lock, and update central docs,
-inventory and release artifacts. No callers outside this crate are changed.
-Native controller identity and native completed-approval capture must be wired
-together; an arbitrary controller manifest is not a grant.
+The root's native control services supply these production adapters and CLI
+routing. Other embeddings must supply the same producers. Native controller
+identity and completed-approval capture remain coupled; an arbitrary controller
+manifest is not a grant.
 
 Group-writable authority components require the native account resolver above.
 Without it they refuse explicitly. Legacy private-group permissions are accepted
@@ -150,21 +167,14 @@ list against this account. That resolver must use the actual host account
 database, including its configured providers; parsing only local account files
 would not prove completeness on an NSS-backed host.
 
-Focused compilation uses the standalone manifest, its own Cargo.lock, the
-existing pinned dependencies, and Rust 1.99.1. Formatting and outbound/source
-hygiene are implementation checks only. Functional parity, failure/edge cases,
-concurrent-writer/kill recovery, all provider paths, Ubuntu floor, WSL2 and macOS
-runtime behavior are deliberately unverified until the parent schedules tests.
-
-Nearest existing coverage was inspected in scoped ranges and left unchanged:
-`tests/scripts-smoke.sh` covers the DAG/ready and single-winner lock cases,
-lifecycle landing/main research, read validation, receipt history, satisfaction,
-cancellation/amendment/relocation, retirement proof/ledger/recovery, next/brief,
-lint and reclaim. `tests/operator/dispatch_results.py` covers reviewed-result
-acceptance composition; `tests/functional-evolution-smoke.sh` covers managed
-capture retention. Those cases, native service integration and platform/failure
-edges remain scheduled verification work. The phase instruction forbids running
-them or reversing the implementation for behavioral probes now.
+Focused checks use the root workspace lockfile and pinned Rust 1.99.1:
+`cargo +1.99.1 test -p oms-command-plan --all-targets --locked --offline`.
+`tests/cli.rs` covers plan transitions, canonical team contracts, scope,
+generation, expiry and producer fencing; `tests/completion_gc.rs` covers retained
+completion evidence. Native parent fixtures exercise actual lifecycle/Room and
+permission adapters. A Linux fixture pass alone does not prove macOS, WSL2,
+all provider paths, crash recovery or release/install correctness; their
+required gates remain separate.
 
 ## CLI entrypoint
 

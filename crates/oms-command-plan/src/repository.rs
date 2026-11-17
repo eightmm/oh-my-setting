@@ -15,6 +15,9 @@ pub struct Git<'a> {
     pub repo: &'a Path,
     pub interrupted: &'a AtomicBool,
     pub group_resolver: Option<crate::services::GroupResolver>,
+    /// An outer transaction's absolute proof deadline. None keeps legacy queries.
+    pub deadline: Option<Instant>,
+    pub group_snapshot: Option<std::sync::Arc<crate::storage::GroupProofSnapshot>>,
 }
 pub struct GitOutput {
     pub code: i32,
@@ -56,6 +59,9 @@ impl Git<'_> {
             .env("LC_ALL", "C");
         for (k, v) in environment {
             cmd.env(k, v);
+        }
+        if let Some(deadline) = self.deadline {
+            return self.output_before(cmd, input, limit, deadline);
         }
         cmd.stdin(if input.is_some() {
             Stdio::piped()
@@ -118,6 +124,99 @@ impl Git<'_> {
                 stdout: data?,
             })
         })
+    }
+    fn proof_error(&self, message: &str) -> crate::Error {
+        if self.interrupted.load(Ordering::Acquire) {
+            return crate::Error {
+                code: 130,
+                message: "local Git proof interrupted".into(),
+            };
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return crate::Error {
+                code: 75,
+                message: "local Git proof deadline expired".into(),
+            };
+        }
+        error(message)
+    }
+    fn output_before(
+        &self,
+        command: Command,
+        input: Option<&[u8]>,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<GitOutput> {
+        use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
+        if self.interrupted.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(self.proof_error("local Git proof unavailable"));
+        }
+        let mut request = Request::new(
+            std::iter::once(command.get_program().to_owned())
+                .chain(command.get_args().map(OsStr::to_owned))
+                .collect(),
+        );
+        request.stdin = input.map(<[u8]>::to_vec);
+        request.environment = command
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+            .collect();
+        request.remove_environment = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_owned())
+            .collect();
+        request.deadline = Some(deadline.min(Instant::now() + Duration::from_secs(30)));
+        request.scope = Scope::ProcessGroup;
+        request.streams = Streams::Separate;
+        request.terminate_grace = Duration::ZERO;
+        request.capture.max_bytes = limit;
+        request.capture.on_limit = oms_supervisor::capture::LimitAction::Terminate;
+        request.stderr_capture = Some(oms_supervisor::capture::CaptureOptions {
+            max_bytes: 0,
+            on_limit: oms_supervisor::capture::LimitAction::Drain,
+            lines: None,
+        });
+        let mut reactor = Reactor::new();
+        let job = reactor
+            .start(request)
+            .map_err(|_| self.proof_error("local Git proof unavailable"))?;
+        let mut cancelled = false;
+        loop {
+            if self.interrupted.load(Ordering::Acquire) && !cancelled {
+                reactor
+                    .stop(job, StopReason::Cancelled)
+                    .map_err(|_| self.proof_error("local Git cancellation unavailable"))?;
+                cancelled = true;
+            }
+            match reactor
+                .poll(job, Duration::from_millis(10))
+                .map_err(|_| self.proof_error("local Git supervision unavailable"))?
+            {
+                Progress::Pending(_) => {}
+                Progress::Complete(result) => {
+                    if self.interrupted.load(Ordering::Acquire) || Instant::now() >= deadline {
+                        return Err(self.proof_error("local Git proof unavailable"));
+                    }
+                    require(!result.stdout.limited, "Git output exceeds bound")?;
+                    require(
+                        result.stop.is_none()
+                            && result.stdout.eof
+                            && !result.stdout.cutoff
+                            && result.cleanup_complete()
+                            && result.supervision_error.is_none(),
+                        "local Git proof incomplete",
+                    )?;
+                    return Ok(GitOutput {
+                        code: result.exit.map_or(128, |exit| exit.shell_code()),
+                        stdout: result.stdout.bytes,
+                    });
+                }
+            }
+        }
     }
     pub fn run(&self, args: &[&str]) -> Result<Vec<u8>> {
         self.raw(&args.iter().map(OsStr::new).collect::<Vec<_>>())
@@ -231,7 +330,9 @@ impl Git<'_> {
                     .join(OsString::from_vec(trim(&directory).to_vec())),
             )
             .map_err(|_| error("Git config directory unavailable"))?;
-            let root = Store::open(&path)?.with_group_resolver(self.group_resolver);
+            let root = Store::open(&path)?
+                .with_group_resolver(self.group_resolver)
+                .with_group_snapshot(self.group_snapshot.clone());
             let raw = if missing {
                 root.optional(name, 1024 * 1024)?
             } else {
@@ -357,7 +458,9 @@ impl Git<'_> {
         total += untracked.len();
         hash.update(&untracked);
         hash.update([0]);
-        let store = Store::open(self.repo)?.with_group_resolver(self.group_resolver);
+        let store = Store::open(self.repo)?
+            .with_group_resolver(self.group_resolver)
+            .with_group_snapshot(self.group_snapshot.clone());
         let mut names = untracked
             .split(|b| *b == 0)
             .filter(|s| !s.is_empty())

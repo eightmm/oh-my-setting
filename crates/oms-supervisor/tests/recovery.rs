@@ -7,6 +7,7 @@ use oms_command_operations::{
     value::{V, obj},
 };
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -26,6 +27,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
             Command::new("git")
                 .args(["init", "-q"])

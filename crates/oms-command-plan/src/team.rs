@@ -6,6 +6,7 @@ use crate::storage::{MAX_STREAM, rows};
 use crate::{Action, Plan, Request, Response, Result, Snapshot, error, require};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
+use std::time::{Duration, Instant};
 
 pub const MAX_SPEC_BYTES: usize = 64 * 1024;
 const MAX_MEMBERS: usize = 128;
@@ -18,6 +19,329 @@ pub struct TeamSpec {
 #[derive(Clone, Debug)]
 pub struct MemberBinding {
     pub value: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdmissionRequest {
+    pub team_id: String,
+    pub spec_sha256: String,
+    pub member_id: String,
+    pub member_generation: i128,
+    pub provider: String,
+    pub harness: String,
+    pub host: String,
+    pub transport: String,
+    pub account: Option<String>,
+    pub selected_model: Option<String>,
+    pub write: bool,
+}
+
+/// Pins canonical contract eligibility, not resource capacity, actual member
+/// enrollment or a launch permit. Callers reserve through the existing physical
+/// producer, fence again, and drop all producer guards before external execution.
+pub struct AdmissionGuard<'p, 's> {
+    plan: &'p Plan<'s>,
+    request: AdmissionRequest,
+    deadline: Instant,
+    binding: Value,
+    lifecycle: Box<dyn crate::services::LifecycleGuard + 'p>,
+    locks: Vec<oms_lock::Guard>,
+}
+fn admission_before(plan: &Plan<'_>, deadline: Instant) -> Result<()> {
+    if plan.interrupted.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(crate::Error {
+            code: 130,
+            message: "team admission interrupted".into(),
+        });
+    }
+    if Instant::now() >= deadline {
+        return Err(crate::Error {
+            code: 75,
+            message: "team admission deadline expired".into(),
+        });
+    }
+    Ok(())
+}
+fn admission_time() -> Result<String> {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| error("invalid team admission time"))?;
+    Ok(
+        chrono::DateTime::<chrono::Utc>::from_timestamp(time.as_secs() as i64, 0)
+            .ok_or_else(|| error("invalid team admission time"))?
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
+    )
+}
+impl<'s> Plan<'s> {
+    pub fn team_admission_before<'p>(
+        &'p self,
+        request: AdmissionRequest,
+        deadline: Instant,
+    ) -> Result<AdmissionGuard<'p, 's>> {
+        self.team_admission_inner(request, deadline)
+            .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))
+    }
+    fn team_admission_inner<'p>(
+        &'p self,
+        request: AdmissionRequest,
+        deadline: Instant,
+    ) -> Result<AdmissionGuard<'p, 's>> {
+        self.context.parent()?;
+        require(
+            self.context.canonical(),
+            "team admission requires the canonical plan",
+        )?;
+        require(
+            crate::engine::room_id(&self.context.room_id),
+            "team admission requires an enrolled room",
+        )?;
+        admission_before(self, deadline)?;
+        let mut locks = Vec::new();
+        // Same writer order as Plan::locked; physical/campaign locks come later.
+        for relative in [
+            ".oms/landings.jsonl".to_owned(),
+            format!(".oms/threads/{}.jsonl", self.context.room_id),
+            ".oms/delegations/.marker-set-lock-target".into(),
+            crate::storage::ACTIVE.into(),
+        ] {
+            let mut settings = self.context.lock_settings.clone();
+            settings.timeout = settings
+                .timeout
+                .min(deadline.saturating_duration_since(Instant::now()));
+            admission_before(self, deadline)?;
+            let lock_deadline = Instant::now() + settings.timeout;
+            let authority =
+                oms_lock::Lock::for_file(&self.context.state_repo.join(relative), settings)
+                    .map_err(|e| crate::Error {
+                        code: e.exit_code(),
+                        message: e.to_string(),
+                    })?;
+            let guard = loop {
+                admission_before(self, deadline)?;
+                if Instant::now() >= lock_deadline {
+                    return Err(crate::Error {
+                        code: 75,
+                        message: "team admission writer is busy".into(),
+                    });
+                }
+                match authority.try_acquire() {
+                    Ok(guard) => break guard,
+                    Err(oms_lock::Error::Busy) => std::thread::sleep(
+                        Duration::from_millis(20)
+                            .min(lock_deadline.saturating_duration_since(Instant::now())),
+                    ),
+                    Err(error) => {
+                        return Err(crate::Error {
+                            code: error.exit_code(),
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            };
+            locks.push(guard);
+        }
+        let lifecycle = self
+            .services
+            .lifecycle_writer_before(&self.context.state_repo, deadline)
+            .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))?;
+        let mut guard = AdmissionGuard {
+            plan: self,
+            request,
+            deadline,
+            binding: Value::Null,
+            lifecycle,
+            locks,
+        };
+        guard.binding = guard.current()?;
+        guard.check()?;
+        Ok(guard)
+    }
+}
+impl AdmissionGuard<'_, '_> {
+    pub fn binding(&self) -> &Value {
+        &self.binding
+    }
+    pub fn check(&self) -> Result<()> {
+        self.check_current().map_err(|error| {
+            admission_before(self.plan, self.deadline)
+                .err()
+                .unwrap_or(error)
+        })
+    }
+    fn check_current(&self) -> Result<()> {
+        admission_before(self.plan, self.deadline)?;
+        for lock in &self.locks {
+            lock.check().map_err(|e| error(e.to_string()))?;
+        }
+        self.lifecycle.check()?;
+        require(
+            self.current()? == self.binding,
+            "team admission binding changed",
+        )?;
+        self.lifecycle.check()?;
+        for lock in &self.locks {
+            lock.check().map_err(|e| error(e.to_string()))?;
+        }
+        require(
+            parse_ts(self.binding.text("expires_at")) > parse_ts(&admission_time()?),
+            "team contract expired",
+        )?;
+        admission_before(self.plan, self.deadline)
+    }
+    fn current(&self) -> Result<Value> {
+        admission_before(self.plan, self.deadline)?;
+        let mut context = self.plan.context.clone();
+        context.ts = admission_time()?;
+        let mut plan = Plan::open(context, self.plan.services, self.plan.interrupted)?;
+        plan.proof_deadline = Some(self.deadline);
+        let groups = std::sync::Arc::new(crate::storage::GroupProofSnapshot::new());
+        plan.group_snapshot = Some(groups.clone());
+        plan.store = plan.store.with_group_snapshot(Some(groups.clone()));
+        plan.source = plan.source.with_group_snapshot(Some(groups.clone()));
+        loop {
+            admission_before(self.plan, self.deadline)?;
+            let result = self.current_binding(&plan);
+            if let Some(gid) = groups.missing()? {
+                let proof = plan.services.group_membership_before(
+                    gid,
+                    self.deadline,
+                    self.plan.interrupted,
+                )?;
+                groups.insert(gid, proof)?;
+                continue;
+            }
+            let binding = result?;
+            for proof in groups.proofs()? {
+                let current = plan.services.group_membership_before(
+                    proof.gid,
+                    self.deadline,
+                    self.plan.interrupted,
+                )?;
+                require(
+                    current == proof,
+                    "native group ownership changed during team admission",
+                )?;
+            }
+            require(
+                plan.git().text(&["rev-parse", "HEAD"])? == binding.text("base_sha"),
+                "team base changed",
+            )?;
+            require(
+                json::sha(
+                    plan.source
+                        .read(binding.text("policy_ref"), MAX_SPEC_BYTES)?,
+                ) == binding.text("policy_sha256"),
+                "team policy changed",
+            )?;
+            admission_before(self.plan, self.deadline)?;
+            return Ok(binding);
+        }
+    }
+    fn current_binding(&self, plan: &Plan<'_>) -> Result<Value> {
+        let snapshot = plan.load()?;
+        let (teams, heads, _) = registry(plan, &snapshot)?;
+        let request = &self.request;
+        let record = teams
+            .opt(&request.team_id)
+            .ok_or_else(|| error("no such team"))?;
+        let spec = &heads[&request.team_id];
+        require(
+            record.text("phase") != "settled",
+            "team admission was withdrawn",
+        )?;
+        require(
+            record.text("phase") == "planned"
+                || record.text("phase") == "held"
+                    && record.text("reason") == "new generation requires admission",
+            "team admission is held",
+        )?;
+        require(
+            record
+                .get("versions")
+                .array()?
+                .last()
+                .unwrap()
+                .text("sha256")
+                == request.spec_sha256,
+            "team admission head changed",
+        )?;
+        require(
+            plan.context.panel_main_attempt == spec.text("root_owner")
+                && plan.context.room_id == spec.text("room_id"),
+            "team admission belongs to another main",
+        )?;
+        current(&mut Bindings::new(plan), &snapshot, spec)?;
+        let task = snapshot.task(spec.text("task_id"))?;
+        require(
+            snapshot.deps_done(task)
+                && ["ready", "claimed", "running", "review"].contains(&task.text("state")),
+            "team task dependencies or state are not ready",
+        )?;
+        let member = spec
+            .get("members")
+            .array()?
+            .iter()
+            .find(|member| member.text("id") == request.member_id)
+            .ok_or_else(|| error("no such team member"))?;
+        require(
+            member.get("generation").is_int(request.member_generation),
+            "team member generation changed",
+        )?;
+        let route = member.get("route");
+        let expected_model = ["resolved_model", "requested_model", "configured_model"]
+            .iter()
+            .filter_map(|key| route.opt(key))
+            .find(|value| **value != Value::Null)
+            .map(Value::str)
+            .transpose()?;
+        require(
+            plan.services.normalize_provider(&request.provider)? == request.provider
+                && route.text("provider") == request.provider
+                && route.text("harness") == request.harness
+                && route.text("host") == request.host
+                && route.text("transport") == request.transport
+                && route
+                    .opt("account")
+                    .filter(|v| **v != Value::Null)
+                    .map(Value::str)
+                    .transpose()?
+                    == request.account.as_deref()
+                && expected_model == request.selected_model.as_deref()
+                && member.text("access") == if request.write { "write" } else { "read" },
+            "physical route or access differs from team contract",
+        )?;
+        admission_before(self.plan, self.deadline)?;
+        Ok(object([
+            ("schema", crate::json::number(1)),
+            ("team_id", string(&request.team_id)),
+            ("team_spec_sha256", string(&request.spec_sha256)),
+            ("team_generation", spec.get("generation").clone()),
+            ("member", member.clone()),
+            ("root_owner", spec.get("root_owner").clone()),
+            (
+                "root_owner_generation",
+                spec.get("root_owner_generation").clone(),
+            ),
+            ("room_id", spec.get("room_id").clone()),
+            ("plan_id", spec.get("plan_id").clone()),
+            ("task_id", spec.get("task_id").clone()),
+            ("task_sha256", spec.get("task_sha256").clone()),
+            ("criterion_sha256", spec.get("criterion_sha256").clone()),
+            ("base_sha", spec.get("base_sha").clone()),
+            ("policy_ref", spec.get("policy_ref").clone()),
+            ("policy_sha256", spec.get("policy_sha256").clone()),
+            ("budget_ref", spec.get("budget_ref").clone()),
+            ("expires_at", spec.get("expires_at").clone()),
+            ("allowed_paths", spec.get("allowed_paths").clone()),
+            ("forbidden_paths", spec.get("forbidden_paths").clone()),
+            ("resources", spec.get("resources").clone()),
+            (
+                "required_capabilities",
+                spec.get("required_capabilities").clone(),
+            ),
+        ]))
+    }
 }
 
 fn identifier(value: &Value, key: &str) -> Result<()> {
@@ -574,9 +898,8 @@ fn view(
     ]))
 }
 
-pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
-    let mut s = plan.load()?;
-    let mut teams = s.plan.opt("teams").cloned().unwrap_or_else(empty);
+fn registry(plan: &Plan<'_>, s: &Snapshot) -> Result<(Value, BTreeMap<String, Value>, usize)> {
+    let teams = s.plan.opt("teams").cloned().unwrap_or_else(empty);
     require(
         teams.object()?.len() <= MAX_TEAMS,
         "team registry exceeds bound",
@@ -589,15 +912,21 @@ pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
                 .ok_or_else(|| error("team history count overflow"))
         })?;
     require(retained <= 256, "team history exceeds aggregate bound")?;
-    let mut bindings = Bindings::new(plan);
     let mut heads = BTreeMap::new();
     // Validate retained history even when only one head is requested.
     for (id, record) in teams.object()? {
         let id = std::str::from_utf8(id).map_err(|_| error("invalid team id"))?;
         require(valid_id(id) && id.len() <= 160, "invalid stored team id")?;
         let specs = versions(plan, id, record)?;
-        heads.insert(id, specs.last().unwrap().clone());
+        heads.insert(id.to_owned(), specs.last().unwrap().clone());
     }
+    Ok((teams, heads, retained))
+}
+
+pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
+    let mut s = plan.load()?;
+    let (mut teams, heads, retained) = registry(plan, &s)?;
+    let mut bindings = Bindings::new(plan);
     if req.action == Action::TeamList {
         let values = teams
             .object()?
