@@ -41,7 +41,7 @@ jobs:
             required=false
             while IFS= read -r -d '' path; do
               case "${path,,}" in
-                rust/*|migration/*|*.py|*.pyw|*.sh|*.bash|*.zsh|*.fish|*.js|*.mjs|*.cjs|*.json|*.yaml|*.yml|*.toml)
+                Cargo.toml|Cargo.lock|rust-toolchain.toml|crates/*|*.py|*.pyw|*.sh|*.bash|*.zsh|*.fish|*.js|*.mjs|*.cjs|*.json|*.yaml|*.yml|*.toml)
                   required=true ;;
                 *)
                   name="${path##*/}"
@@ -93,7 +93,7 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
-        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+        run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
       - name: lint
         timeout-minutes: 10
         run: bash scripts/check.sh --lint-only
@@ -127,19 +127,15 @@ jobs:
           cargo +1.99.1 --version
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
-        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+        run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
       - name: Rust workspace checks and tests
         timeout-minutes: 30
         run: |
-          cargo +1.99.1 fmt --manifest-path rust/Cargo.toml --all -- --check
-          cargo +1.99.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
-          cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
-          cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --doc --locked --offline
-          cargo +1.99.1 fmt --manifest-path rust/crates/oms-migrate/Cargo.toml --all -- --check
-          cargo +1.99.1 clippy --manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline -- -D warnings
-          cargo +1.99.1 test --manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline
-          cargo +1.99.1 test --manifest-path rust/crates/oms-migrate/Cargo.toml --doc --locked --offline
-          cargo +1.99.1 run --manifest-path rust/crates/oms-migrate/Cargo.toml --locked --offline -- check --repo .
+          cargo +1.99.1 fmt --manifest-path Cargo.toml --all -- --check
+          cargo +1.99.1 clippy --manifest-path Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
+          cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline
+          cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
+          cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
 
   focused:
     needs: affected_plan
@@ -153,7 +149,7 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
-        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+        run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
       - name: focused smoke suites
         timeout-minutes: 15
         run: bash scripts/check.sh --focused-only
@@ -188,7 +184,7 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
-        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+        run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
       - name: stage native binaries
         timeout-minutes: 10
         run: |
@@ -219,7 +215,7 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: fetch locked Rust dependencies
         timeout-minutes: 5
-        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
+        run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
       - name: verify affected changes
         timeout-minutes: 15
         env:

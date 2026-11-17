@@ -56,21 +56,20 @@ scenario until it has conformance scenarios of its own.
 
 ## Style
 
-### Rust migration
+### Rust workspace
 
-The accepted target is a fully Rust OMS with no OMS-owned Python requirement
-for runtime, installation, builds, tests, parsers or evaluation. Existing
-Python and substantive Bash implementations are temporary migration sources;
-the current host and provider contracts still apply until each cutover.
-See the [migration decision and removal plan](docs/RUST-MIGRATION.md) and
-[Rust development commands](rust/README.md).
+OMS runs as a pure-Rust CLI (`Cargo.toml` + `crates/*`) with thin Bash entry
+and lifecycle wrappers on the host contract:
 
-The preparation workspace does not replace the installed `oms` command.
-Its inventory check rejects new or increased recorded Python footprint;
-removals and reductions are allowed. An intentional baseline increase needs
-a PR explanation, the affected migration milestone and a removal condition.
-Do not regenerate the baseline as an automatic CI fix. The lexical inventory
-is a migration aid; passing it does not establish a Python-free runtime.
+```bash
+cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline
+```
+
+The `oms-migrate` inventory check rejects new or increased recorded Python
+footprint; removals and reductions are allowed. An intentional baseline increase
+needs a PR explanation, the affected milestone and a removal condition. Do not
+regenerate the baseline as an automatic CI fix. The lexical inventory is a
+hygiene check; passing it does not establish a Python-free runtime.
 
 ### Current source conventions
 

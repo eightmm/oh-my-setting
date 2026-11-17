@@ -27,15 +27,15 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 |---|---|
 | [Contributing](../CONTRIBUTING.md) | Scoped checks, publication, style and compatibility |
 | [OMS runtime](OMS-RUNTIME.md) | Typed contracts, backends, evidence and adapters |
-| [Rust migration](RUST-MIGRATION.md) | Full Rust target, temporary legacy boundaries, cutover and removal criteria |
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
-| [Stabilization plan](STABILIZATION-PLAN.md) | Prioritized reliability work and bounded offline verification |
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
 | [Multi-agent and multi-host plan](MULTI-AGENT-MULTI-HOST-PLAN.md) | Proposed behavior, staged delivery and acceptance for parallel agents, Git integration and remote clusters and opt-in Stages A–F runtime implementation |
+| [Context inspection](CONTEXT-INSPECTION.md) | Saved context manifest inspection and digest verification |
+| [Pinned source intake](INTENT-SOURCE-INTAKE.md) | SHA-pinned local file and GitHub issue intake for `oms intent draft` |
+| [Run input identity](RUN-INPUT-IDENTITY.md) | Pre-command input identity and metric contract capture |
+| [Work inspection](WORK-INSPECTION.md) | Evidence matrix, next-step explanation and return briefs |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
-| [Implementation review](CONTROL-PLANE-IMPLEMENTATION-REVIEW.md) | Recent implementation findings, reproductions and UX tradeoffs |
-| [Standalone gap backlog](STANDALONE-GAPS-20261110.md) | Proposed: what OMS lacks to close work without companion tools, by area, with priorities, companions and non-goals |
 
 ## Migration notes
 

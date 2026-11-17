@@ -32,7 +32,7 @@ check_markdown_links() {
       [ -n "$clean" ] || continue
       case "$clean" in
         http://*|https://*|mailto:*|tel:*|\#*|file://*) continue ;;
-        rust/*/src/*|rust/target/*) continue ;;
+        crates/*/src/*|target/*) continue ;;
       esac
       if [ -n "$dir" ]; then
         resolved="$dir/$clean"
@@ -178,7 +178,7 @@ grep -Fq 'if: always()' "$workflow" ||
   fail "gate must evaluate all needs even on failure/cancellation"
 grep -Fq 'tests/*.sh' "$ROOT/scripts/check.sh" ||
   fail "shellcheck lint must cover tests/*.sh"
-toolchain="$ROOT/rust/rust-toolchain.toml"
+toolchain="$ROOT/rust-toolchain.toml"
 grep -Fq 'channel = "1.99.1"' "$toolchain" ||
   fail "rust-toolchain.toml must stay pinned to 1.99.1"
 

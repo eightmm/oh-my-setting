@@ -119,8 +119,8 @@ oms_bash_enter
 
 native_outcome=absent
 unset OMS_NATIVE_OUTCOME
-if [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ] ||
-   { [ -f "$ROOT/rust/Cargo.toml" ] && [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" != 1 ] && command -v cargo >/dev/null 2>&1; }; then
+if [ -e "$ROOT/target/oms-native" ] || [ -L "$ROOT/target/oms-native" ] ||
+   { [ -f "$ROOT/crates/oms/Cargo.toml" ] && [ -f "$ROOT/Cargo.toml" ] && [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" != 1 ] && command -v cargo >/dev/null 2>&1; }; then
   native_args=("$@")
   if [ "$#" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then native_args=(panel); fi
   if [ "${#native_args[@]}" -gt 0 ] && [ -n "${native_args[0]}" ]; then

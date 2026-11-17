@@ -129,10 +129,10 @@ oms_bash_enter() {
 # 2 with OMS_NATIVE_ERROR when present state cannot be trusted.
 oms_native_resolve() {  # oms_native_resolve ROOT
   local root="$1" cache revision entry binary checksum dir size expected actual
-  cache="$root/rust/target/oms-native"
+  cache="$root/target/oms-native"
   OMS_NATIVE_BINARY="" OMS_NATIVE_ROOT="" OMS_NATIVE_REVISION="" OMS_NATIVE_ERROR=""
   [ -e "$cache" ] || [ -L "$cache" ] || return 1
-  for dir in "$root/rust" "$root/rust/target" "$cache"; do
+  for dir in "$root/target" "$cache"; do
     if [ -L "$dir" ] || [ ! -d "$dir" ]; then
       OMS_NATIVE_ERROR="foreign native payload directory: $dir"
       return 2
@@ -164,9 +164,9 @@ oms_native_resolve() {  # oms_native_resolve ROOT
     OMS_NATIVE_ERROR='native executable checksum unavailable; run oms doctor --repair'
     return 2
   fi
-  if [ ! -O "$root/rust" ] || [ ! -O "$root/rust/target" ] || [ ! -O "$cache" ] ||
+  if [ ! -O "$root/target" ] || [ ! -O "$cache" ] ||
      [ ! -O "$entry" ] || [ ! -O "$binary" ] || [ ! -O "$checksum" ] ||
-     [ -n "$(find "$root/rust" "$root/rust/target" "$cache" "$entry" "$binary" "$checksum" -prune -perm -0002 -print 2>/dev/null)" ]; then
+     [ -n "$(find "$root/target" "$cache" "$entry" "$binary" "$checksum" -prune -perm -0002 -print 2>/dev/null)" ]; then
     OMS_NATIVE_ERROR="untrusted native payload ownership: $entry"
     return 2
   fi
@@ -188,11 +188,11 @@ oms_native_resolve() {  # oms_native_resolve ROOT
   OMS_NATIVE_BINARY="$binary" OMS_NATIVE_ROOT="$root" OMS_NATIVE_REVISION="$revision"
 }
 
-# Quarantine an invalid or symlinked rust/target/oms-native/<revision> entry so
+# Quarantine an invalid or symlinked target/oms-native/<revision> entry so
 # `oms doctor --repair` can re-stage a verified payload cleanly.
 oms_native_quarantine() {  # oms_native_quarantine ROOT
   local root="$1" cache revision entry quarantine
-  cache="$root/rust/target/oms-native"
+  cache="$root/target/oms-native"
   revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || return 1
   case "$revision" in *[!0-9a-f]*|'') return 1 ;; esac
   [ "${#revision}" = 40 ] || return 1
@@ -205,16 +205,16 @@ oms_native_quarantine() {  # oms_native_quarantine ROOT
   mv -f "$entry" "$quarantine"
 }
 
-# Build and publish verified release binaries into rust/target/oms-native/<HEAD>.
+# Build and publish verified release binaries into target/oms-native/<HEAD>.
 oms_native_stage() {  # oms_native_stage ROOT
   local root="$1" cache revision target_dir release_dir stage_dir entry
   local artifacts="" oms_digest="" name digest
-  [ -f "$root/rust/Cargo.toml" ] || return 1
+  [ -f "$root/crates/oms/Cargo.toml" ] && [ -f "$root/Cargo.toml" ] || return 1
   command -v cargo >/dev/null 2>&1 || return 1
   revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || return 1
   case "$revision" in *[!0-9a-f]*|'') return 1 ;; esac
   [ "${#revision}" = 40 ] || return 1
-  cache="$root/rust/target/oms-native"
+  cache="$root/target/oms-native"
   entry="$cache/$revision"
   if [ -e "$entry" ] || [ -L "$entry" ]; then
     if [ "${OMS_NATIVE_FORCE_STAGE:-0}" != 1 ] && oms_native_resolve "$root" >/dev/null 2>&1; then
@@ -224,11 +224,11 @@ oms_native_stage() {  # oms_native_stage ROOT
       return 2
     fi
   fi
-  mkdir -p "$root/rust/target" "$cache"
-  chmod go-w "$root/rust" "$root/rust/target" "$cache" 2>/dev/null || true
-  target_dir="$root/rust/target/lifecycle-build"
+  mkdir -p "$root/target" "$cache"
+  chmod go-w "$root/target" "$cache" 2>/dev/null || true
+  target_dir="$root/target/lifecycle-build"
   release_dir="$target_dir/release"
-  cargo +1.99.1 build --manifest-path "$root/rust/Cargo.toml" \
+  cargo +1.99.1 build --manifest-path "$root/Cargo.toml" \
     --locked --offline --release \
     --bin oms \
     --bin oms-mcp-peer-owner \
@@ -273,7 +273,7 @@ oms_native_route() {
   OMS_NATIVE_OUTCOME=absent
   oms_native_resolve "$root" || status=$?
   if [ "$status" -eq 1 ] && [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" != 1 ] &&
-     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ -f "$root/rust/Cargo.toml" ] &&
+     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ -f "$root/crates/oms/Cargo.toml" ] && [ -f "$root/Cargo.toml" ] &&
      command -v cargo >/dev/null 2>&1; then
     oms_native_stage "$root" || true
     status=0
@@ -283,7 +283,7 @@ oms_native_route() {
       [ "$arg" = "--repair" ] && has_repair=1
     done
     if [ "$has_repair" = 1 ] && [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" != 1 ] &&
-       [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ -f "$root/rust/Cargo.toml" ] &&
+       [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ -f "$root/crates/oms/Cargo.toml" ] && [ -f "$root/Cargo.toml" ] &&
        command -v cargo >/dev/null 2>&1; then
       oms_native_quarantine "$root" && oms_native_stage "$root" || true
       status=0

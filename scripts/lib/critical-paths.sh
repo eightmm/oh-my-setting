@@ -27,9 +27,9 @@ oms_critical_path_reason() {
     scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
     scripts/lib/platform.sh|scripts/lib/*lock*|\
     scripts/*hook*|scripts/*guard*|scripts/*permission*|scripts/*sandbox*|\
-    rust/Cargo.toml|rust/Cargo.lock|rust/crates/oms/*|rust/crates/oms-bootstrap/*|\
-    rust/crates/oms-command-hooks/*|rust/crates/oms-command-lifecycle/*|\
-    rust/crates/oms-command-landing/*|rust/crates/oms-scrub/*|\
+    Cargo.toml|Cargo.lock|rust-toolchain.toml|crates/oms/*|crates/oms-bootstrap/*|\
+    crates/oms-command-hooks/*|crates/oms-command-lifecycle/*|\
+    crates/oms-command-landing/*|crates/oms-scrub/*|\
     rules/*|config/*|templates/*|custom-skills/*|plugins/*)
       printf 'contract-boundary:%s\n' "$1"
       return 0

@@ -128,10 +128,10 @@ oms_smoke_make_update_source_fixture() {
 OMS_SMOKE_NATIVE_ARTIFACTS="oms oms-state-queue-worker oms-mcp-peer-owner oms-run-bounded-helper oms-graph-py""thon-helper"
 
 # Print the first cargo profile directory holding every native artifact under
-# ${CARGO_TARGET_DIR:-ROOT/rust/target}; fail when none does. Suites never build.
+# ${CARGO_TARGET_DIR:-ROOT/target}; fail when none does. Suites never build.
 oms_smoke_native_build_dir() {
   local dir name
-  for dir in "${CARGO_TARGET_DIR:-$1/rust/target}/release" "$1/rust/target/lifecycle-build/release" "${CARGO_TARGET_DIR:-$1/rust/target}/debug"; do
+  for dir in "${CARGO_TARGET_DIR:-$1/target}/release" "$1/target/lifecycle-build/release" "${CARGO_TARGET_DIR:-$1/target}/debug"; do
     for name in $OMS_SMOKE_NATIVE_ARTIFACTS; do
       [ -f "$dir/$name" ] && [ -x "$dir/$name" ] || continue 2
     done
@@ -141,7 +141,7 @@ oms_smoke_native_build_dir() {
   return 1
 }
 
-# Stage the artifacts present in SOURCE into ENTRY (rust/target/oms-native/REV)
+# Stage the artifacts present in SOURCE into ENTRY (target/oms-native/REV)
 # with the installer's modes and a manifest plus oms.sha256 listing each one.
 oms_smoke_stage_native() {
   local entry="$1" source="$2" name digest artifacts="" oms_digest=""

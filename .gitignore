@@ -12,3 +12,5 @@ node_modules/
 __pycache__/
 .DS_Store
 .oms/
+/target/
+/crates/*/target/
