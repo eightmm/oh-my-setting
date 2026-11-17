@@ -7,6 +7,7 @@
 
 pub mod advisory;
 pub mod campaign;
+mod campaign_usage;
 mod cli;
 pub mod conflicts;
 pub mod contract;

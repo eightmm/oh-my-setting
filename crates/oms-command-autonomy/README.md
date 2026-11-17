@@ -64,6 +64,7 @@ trusted host integrations; no CLI argument selects an alternate backend.
 | `goal` | Fresh acceptance, vacuity/stall checks, lifetime cycle reservations, serial landing and exact-tree Git publication with restartable commit intents. |
 | `receipt` | Schema-1 frozen autopilot receipts, exact proposal approval, parked/exhausted refusal, reentry/shadow evidence, one durable remainder reservation, semantic review and optional Draft PR producer calls. |
 | `campaign` | Digest-bound campaign manifests, locked lifetime reservations/settlements, bounded candidate artifacts, isolated verification, consolidation and double-verified handoff evidence. Execution is serial within the declared concurrency ceilings. |
+| `campaign_usage` | Optional soft token/cost admission against canonical provider receipts, historical settlement and retained unknown liabilities. |
 | `advisory`, `handoff`, `conflicts` | Lifecycle overlays, stall/repair projections, baseline and allocation arithmetic, mechanical handoffs, pickup markers and read-only pairwise conflict previews. These observations grant no authority. |
 | `install` | Preview calls to the owning native installation producers; unavailable previews print `not-previewed`. No install or provider-registration command is run. |
 
@@ -72,6 +73,43 @@ receipts and retirement remain owned by `oms-command-plan::Plan::execute`.
 The crate reexports native completion/decision/retirement APIs, task packet and
 consumer APIs, task verification observations/fingerprints, and work-inspection
 projections instead of creating alternate authorities for those records.
+
+## Campaign usage admission
+
+Campaigns may add `usage` inside the existing immutable manifest `budget`:
+
+```json
+{
+  "max_tokens": 100000,
+  "max_cost_microusd": 5000000,
+  "per_call": { "tokens": 20000, "cost_microusd": 1000000 }
+}
+```
+
+At least one total cap is required; each enabled cap requires its matching
+positive per-call reservation no larger than the total. Omitting `usage`
+preserves the existing lifetime call-count, concurrency and deadline behavior.
+These are soft admission limits. They do not enforce a provider hard spending
+cap or predict prices, and an admitted call can exceed its reservation.
+
+The campaign ledger lock spans usage projection, admission and reservation.
+Provider calls carry the reservation as `OMS_OPERATION_ID` and the campaign
+digest as `OMS_GOAL_ID`. Each admission counts settled usage from all previous
+attempts, active reservations and unresolved liabilities. Each unknown
+physical call in an account retry or fallback retains its own reservation;
+measured spend above a reservation is also retained. Once every call supplies
+final measured evidence, its exact reported amount replaces the reservation.
+A timeout, crash, abandoned controller or unpriced/subscription cost never
+refunds a liability. Only a pre-invocation refusal with no calls proves no
+provider spend. Later canonical receipt revisions are reconciled on the next
+admission or status read; conflicting cumulative observations block admission.
+
+`goal-drive --campaign FILE --status` includes `spent.usage`, with measured
+amounts and report coverage, historical settled amounts, active and unresolved
+reservations, admission commitments and provider estimate counts. Missing
+measured cost is `null`. Client-reported costs may be estimates and are not
+authoritative billing. The existing provider hard-budget refusal remains
+unchanged.
 
 ## Durable effects and interruption
 
