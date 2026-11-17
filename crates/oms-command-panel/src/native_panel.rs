@@ -1038,10 +1038,17 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
             2
         }
     } else if head == "oms" {
-        if words.get(1).map(String::as_str) != Some("panel") {
+        let mut start = 1;
+        if words.get(start).map(String::as_str) == Some("--oms-dispatch") {
+            if words.get(start + 3).map(String::as_str) != Some("--") {
+                return None;
+            }
+            start += 4;
+        }
+        if words.get(start).map(String::as_str) != Some("panel") {
             return None;
         }
-        2
+        start + 1
     } else {
         return None;
     };
@@ -1361,15 +1368,52 @@ fn watch_shell(
     )
 }
 
-fn entry_prefix(source: &Path) -> Result<Vec<String>> {
-    let entry = crate::executable::resolve(source)
-        .ok_or_else(|| Error::new("oms panel executable unavailable"))?;
+/// Return `(--oms-dispatch, <source>, <rev>, --)` args when `exe` is a verified
+/// staged payload under `<source>/target/oms-native/<rev>/oms`, so child panes
+/// carry source authority rather than failing as bare direct binary calls.
+fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String)> {
+    if exe.file_name().and_then(|v| v.to_str()) != Some("oms") {
+        return None;
+    }
+    let rev_dir = exe.parent()?;
+    let rev = rev_dir.file_name().and_then(|v| v.to_str())?;
+    if rev.len() != 40 || !rev.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let native_dir = rev_dir.parent()?;
+    if native_dir.file_name().and_then(|v| v.to_str()) != Some("oms-native") {
+        return None;
+    }
+    let canon_source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let canon_parent = std::fs::canonicalize(native_dir).ok()?;
+    if canon_parent != canon_source.join("target/oms-native") {
+        return None;
+    }
+    let is_file = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file());
+    if !is_file(&rev_dir.join("manifest.json")) || !is_file(exe) {
+        return None;
+    }
+    Some((canon_source.to_string_lossy().into_owned(), rev.to_owned()))
+}
+
+fn entry_prefix_for(source: &Path, entry: &crate::executable::Entry) -> Vec<String> {
     let mut prefix = Vec::new();
     if entry.script {
         prefix.push("bash".into());
     }
     prefix.push(entry.path.to_string_lossy().into_owned());
-    Ok(prefix)
+    if !entry.script
+        && let Some((dispatch_source, rev)) = staged_dispatch_args(source, &entry.path)
+    {
+        prefix.extend(["--oms-dispatch".into(), dispatch_source, rev, "--".into()]);
+    }
+    prefix
+}
+
+fn entry_prefix(source: &Path) -> Result<Vec<String>> {
+    let entry = crate::executable::resolve(source)
+        .ok_or_else(|| Error::new("oms panel executable unavailable"))?;
+    Ok(entry_prefix_for(source, &entry))
 }
 
 /// Apply or scrub `OMS_MODEL` and `OMS_ANTIGRAVITY_SETTINGS` for a spawned main process.
@@ -2429,5 +2473,61 @@ mod native_lifecycle_contract {
         .unwrap();
         assert_eq!(shown["state"], Value::from("done"));
         assert_eq!(shown["terminal"], Value::from(true));
+    }
+
+    #[test]
+    fn staged_entry_prefix_carries_oms_dispatch_and_matches_panes() {
+        let dir = TempRepo::new();
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let staged_dir = dir.0.join("target/oms-native").join(rev);
+        fs::create_dir_all(&staged_dir).unwrap();
+        let exe = staged_dir.join("oms");
+        fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(staged_dir.join("manifest.json"), "{}").unwrap();
+
+        let prefix = super::entry_prefix_for(
+            &dir.0,
+            &crate::executable::Entry {
+                path: exe.clone(),
+                script: false,
+            },
+        );
+        assert_eq!(
+            prefix,
+            vec![
+                exe.to_string_lossy().into_owned(),
+                "--oms-dispatch".to_owned(),
+                dir.0.to_string_lossy().into_owned(),
+                rev.to_owned(),
+                "--".to_owned(),
+            ]
+        );
+        assert!(super::test_entry_matches(&dir.0, &prefix));
+
+        let launch_cmd = super::launch_command(
+            &dir.0,
+            &prefix,
+            "oms-test",
+            "codex",
+            None,
+            None,
+            None,
+            Some("room-1234"),
+        );
+        assert_eq!(super::match_panel_command(&launch_cmd, &dir.0), Some(false));
+        let watch_cmd = super::watch_shell(&dir.0, &prefix, Some("codex"), Some("oms-test"));
+        assert_eq!(super::match_panel_command(&watch_cmd, &dir.0), Some(true));
+
+        let hud = super::hud_status_right(&prefix, &dir.0);
+        assert!(hud.contains("--oms-dispatch"));
+        assert!(hud.contains("hud --tmux --repo"));
+
+        // Incomplete --oms-dispatch prefix is rejected instead of misreading flags.
+        let malformed = format!(
+            "'{}' --oms-dispatch panel --repo '{}'",
+            exe.display(),
+            dir.0.display()
+        );
+        assert_eq!(super::match_panel_command(&malformed, &dir.0), None);
     }
 }
