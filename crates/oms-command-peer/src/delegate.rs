@@ -15,6 +15,8 @@ struct CargoSlot {
     target_dir: PathBuf,
 }
 
+const CARGO_SLOTS: usize = 12;
+
 fn acquire_cargo_slot(repo: &Path, provider: &str) -> Option<CargoSlot> {
     if !(repo.join("Cargo.toml").is_file() || repo.join("rust/Cargo.toml").is_file()) {
         return None;
@@ -51,7 +53,7 @@ fn acquire_cargo_slot(repo: &Path, provider: &str) -> Option<CargoSlot> {
     builder.create(&base).ok()?;
     let mut settings = oms_lock::Settings::from_env().ok()?;
     settings.cwd = repo.to_owned();
-    for slot in 0..8 {
+    for slot in 0..CARGO_SLOTS {
         let slot_dir = base.join(format!("slot-{slot}"));
         let _ = builder.create(&slot_dir);
         let lock = oms_lock::Lock::for_file(&slot_dir.join("slot.lock"), settings.clone()).ok()?;
@@ -703,8 +705,79 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 .into(),
         ),
     ]);
+    let env_nonempty = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
+    let task_id = {
+        let cli = args.get("task-id");
+        if !cli.is_empty() {
+            cli.to_owned()
+        } else {
+            env_nonempty("OMS_TASK_ID").unwrap_or_default()
+        }
+    };
     let mut parent_attempt_id = String::new();
-    if std::env::var_os("OMS_PANEL_DISPATCH").as_deref() != Some(OsStr::new("1")) {
+    if std::env::var_os("OMS_PANEL_DISPATCH").as_deref() == Some(OsStr::new("1")) {
+        if let Some(main_id) = env_nonempty("OMS_PANEL_MAIN_ATTEMPT") {
+            parent_attempt_id = main_id;
+        }
+        attempt_refs.set(
+            "panel_role",
+            V::from(
+                env_nonempty("OMS_PANEL_ROLE")
+                    .unwrap_or_else(|| if read { "researcher" } else { "worker" }.to_owned()),
+            ),
+        );
+        attempt_refs.set(
+            "panel_purpose",
+            V::from(
+                env_nonempty("OMS_PANEL_PURPOSE")
+                    .unwrap_or_else(|| if read { "research" } else { "implement" }.to_owned()),
+            ),
+        );
+        attempt_refs.set(
+            "panel_workload",
+            V::from(env_nonempty("OMS_PANEL_WORKLOAD").unwrap_or_else(|| "routine".to_owned())),
+        );
+        attempt_refs.set(
+            "panel_access",
+            V::from(
+                env_nonempty("OMS_PANEL_ACCESS")
+                    .unwrap_or_else(|| if read { "read" } else { "write" }.to_owned()),
+            ),
+        );
+        attempt_refs.set("panel_model", V::from(route.model.as_str()));
+        attempt_refs.set("panel_effort", V::from(route.effort.as_str()));
+        attempt_refs.set(
+            "panel_label",
+            V::from(env_nonempty("OMS_PANEL_LABEL").unwrap_or_else(|| brief_label(&question))),
+        );
+        for (key, env_key) in [
+            ("panel_strategy", "OMS_PANEL_STRATEGY"),
+            ("panel_owner", "OMS_PANEL_OWNER"),
+            ("panel_alias", "OMS_PANEL_ALIAS"),
+            ("panel_room_id", "OMS_ROOM_ID"),
+            ("panel_room_participant", "OMS_ROOM_PARTICIPANT"),
+            ("panel_lease_id", "OMS_PLAN_LEASE_ID"),
+        ] {
+            if let Some(val) = env_nonempty(env_key) {
+                attempt_refs.set(key, V::from(val));
+            }
+        }
+        if let Some(cont) = env_nonempty("OMS_PANEL_CONTINUES")
+            && cont.strip_prefix("att_").is_some_and(|hex| {
+                !hex.is_empty()
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+        {
+            attempt_refs.set("panel_continues", V::from(cont));
+        }
+    } else {
         attempt_refs.set(
             "panel_alias",
             V::from(format!("{}-delegate", target.provider)),
@@ -715,15 +788,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         );
         attempt_refs.set("panel_model", V::from(route.model.as_str()));
         attempt_refs.set("panel_label", V::from(brief_label(&question)));
-        if let Ok(room_id) = std::env::var("OMS_ROOM_ID")
-            && !room_id.trim().is_empty()
-        {
-            attempt_refs.set("panel_room_id", V::from(room_id.trim()));
+        if let Some(room_id) = env_nonempty("OMS_ROOM_ID") {
+            attempt_refs.set("panel_room_id", V::from(room_id));
         }
-        if let Ok(main_id) = std::env::var("OMS_PANEL_MAIN_ATTEMPT")
-            && !main_id.trim().is_empty()
-        {
-            parent_attempt_id = main_id.trim().to_owned();
+        if let Some(main_id) = env_nonempty("OMS_PANEL_MAIN_ATTEMPT") {
+            parent_attempt_id = main_id;
         }
     }
     let attempt = oms_command_operations::create_attempt(
@@ -731,7 +800,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         &oms_command_operations::StartRequest {
             provider: target.provider.clone(),
             tool: "peer-delegate".into(),
-            task_id: args.get("task-id").into(),
+            task_id: task_id.clone(),
             parent_attempt_id,
             refs: attempt_refs,
             ..Default::default()
@@ -743,7 +812,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut code = 1;
     let mut body = header.into_bytes();
     let mut captured = Vec::new();
+    let mut written_patch = Vec::new();
     let mut verified = "not_run";
+    let mut verify_exit_code: Option<i32> = None;
     let mut needs_keep = args.has("keep-worktree");
     let mut interactive_stdout = String::new();
     let cargo_slot = acquire_cargo_slot(&repo, &target.provider);
@@ -758,6 +829,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         .unwrap_or_default();
     for round in 0..=repair {
         crate::check(context.interrupted)?;
+        verify_exit_code = None;
         worktree.identity(context)?;
         if interactive && round == 0 {
             let mut turn_history = String::new();
@@ -951,14 +1023,15 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             needs_keep = true;
             body.extend_from_slice(b"\nRead-only worker changed files; worktree retained.\n");
         }
+        written_patch = if needs_keep && code != 0 {
+            Vec::new()
+        } else {
+            captured.clone()
+        };
         storage::write(
             &repo,
             &patch,
-            if needs_keep && code != 0 {
-                Vec::new()
-            } else {
-                captured.clone()
-            },
+            written_patch.clone(),
             true,
             context.interrupted,
         )?;
@@ -993,6 +1066,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 needs_keep = true;
                 body.extend_from_slice(b"\nVerifier changed the pinned tracked state; worktree retained and success withheld.\n");
             }
+            verify_exit_code = Some(code);
             verified = if code == 0 { "passed" } else { "failed" };
             let clean = safety::redact(&checked.stdout)?;
             body.extend_from_slice(
@@ -1045,22 +1119,32 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     ]);
     transition(&repo, &attempt, state, refs, context)?;
     body.extend_from_slice(format!("\n## Exit\n\n{code}\n\n- outcome: {}\n- verification: {verified}\n- admission: pending\n",if no_change{"no_change"}else if code==0{"review"}else{"failed"}).as_bytes());
+    let artifact_sha256 = storage::hash(&body);
+    let patch_sha256 = storage::hash(&written_patch);
     storage::write(&repo, &artifact, body, true, context.interrupted)?;
     peer::index(
         &repo,
         &obj([
             ("schema", 1usize.into()),
+            ("event_id", crate::id("evt_")?.into()),
             ("kind", "delegate".into()),
             ("ts", now().into()),
             ("artifact_id", crate::id("art_")?.into()),
             ("attempt_id", attempt.into()),
+            ("task_id", task_id.into()),
             ("provider", target.provider.into()),
             ("model", route.model.into()),
             ("artifact", artifact.to_string_lossy().into_owned().into()),
+            ("artifact_sha256", artifact_sha256.into()),
             ("patch", patch.to_string_lossy().into_owned().into()),
+            ("patch_sha256", patch_sha256.into()),
             ("base_sha", base.into()),
             ("exit", V::Num(code.to_string())),
             ("verification", verified.into()),
+            (
+                "verify_exit",
+                verify_exit_code.map_or(V::Null, |n| V::Num(n.to_string())),
+            ),
             ("state", state.into()),
             ("admit", "pending".into()),
             ("no_change", no_change.into()),

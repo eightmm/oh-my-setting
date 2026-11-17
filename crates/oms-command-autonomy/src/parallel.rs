@@ -174,7 +174,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         !args.flag("dry-run"),
         "--dry-run is not supported with --parallel",
     )?;
-    let writers = args.number("max-writers", 2, 1, 8)? as usize;
+    let writers = args.number("max-writers", 2, 1, 16)? as usize;
     let backlog = if args.has("max-review-backlog") {
         Some(args.number("max-review-backlog", 1, 1, 64)? as usize)
     } else {

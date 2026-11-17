@@ -14,7 +14,7 @@ pub(crate) const HELP: &str = "Usage: oms state [--repo PATH] [--json] [--refres
 
 fn decoded(output: Output) -> Result<Value> {
     require(output.0 == 0, String::from_utf8_lossy(&output.2))?;
-    json::parse(&output.1)
+    json::parse_bounded(&output.1, storage::MAX_STREAM)
 }
 
 fn collector(result: Result<Value>, present: bool) -> Value {

@@ -282,7 +282,11 @@ fn decode(adapted: &[u8], leaves: &[Leaf], session: bool) -> Result<Json, &'stat
 }
 /// Parse bounded raw JSON, retaining numeric spellings and WTF-8 strings.
 pub fn parse_json(input: &[u8]) -> Result<Json, &'static str> {
-    parse_mode(input, false, 4 * 1024 * 1024).map_err(|e| {
+    parse_json_bounded(input, 4 * 1024 * 1024)
+}
+/// Parse bounded raw JSON with an explicit byte limit, retaining numeric spellings and WTF-8 strings.
+pub fn parse_json_bounded(input: &[u8], limit: usize) -> Result<Json, &'static str> {
+    parse_mode(input, false, limit).map_err(|e| {
         if e == "parser infrastructure failure" {
             INVALID
         } else {

@@ -179,10 +179,12 @@ fn candidates(ctx: &Context<'_>) -> Result<BTreeMap<&'static str, Vec<Candidate>
     for (kind, dir, recursive, exts) in FAMILIES {
         let root = ctx.repo.join(dir);
         let mut found = Vec::new();
-        for abs in helpers::files(ctx, &root, "", SCAN_LIMIT)? {
-            if !recursive && abs.parent() != Some(root.as_path()) {
-                continue;
-            }
+        let scanned = if *recursive {
+            helpers::files(ctx, &root, "", SCAN_LIMIT)?
+        } else {
+            helpers::shallow_files(ctx, &root, "", SCAN_LIMIT)?
+        };
+        for abs in scanned {
             let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let stem = abs.file_stem().and_then(|n| n.to_str()).unwrap_or("");
             let ext = abs.extension().and_then(|n| n.to_str()).unwrap_or("");

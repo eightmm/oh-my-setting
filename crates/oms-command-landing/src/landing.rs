@@ -107,6 +107,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         task: &policy.task,
         admission: &V::Null,
         policy: &policy,
+        frozen_patch: Path::new(""),
+        patch: &raw,
     };
     let approval_key = concat!("approval-", "to", "ken");
     let grants = [
@@ -168,9 +170,16 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             false,
         )?;
     } else {
+        // Isolated and remote profiles always land through an approval.
+        let profile = std::env::var("OMS_EXECUTION_PROFILE").unwrap_or_default();
+        require(
+            ["", "trusted-local", "isolated", "remote"].contains(&profile.as_str()),
+            format!("invalid OMS_EXECUTION_PROFILE: {profile}"),
+        )?;
         require(
             !std::env::var("OMS_REQUIRE_LANDING_APPROVAL")
-                .is_ok_and(|v| ["1", "true", "yes", "on"].contains(&v.as_str())),
+                .is_ok_and(|v| ["1", "true", "yes", "on"].contains(&v.as_str()))
+                && !["isolated", "remote"].contains(&profile.as_str()),
             "this execution policy requires an approved exact landing request",
         )?;
     }
@@ -200,6 +209,8 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         admitted.bytes == raw && admitted.snapshot == before,
         "frozen patch or source tree changed during admission",
     )?;
+    let relative_frozen = Path::new(".oms/landing-patches").join(format!("{landing}.patch"));
+    let frozen = state.join(&relative_frozen);
     let request = LandingRequest {
         state_repo: &state,
         execution_repo: &repo,
@@ -208,10 +219,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         task: &policy.task,
         admission: &admitted.record,
         policy: &policy,
+        frozen_patch: &frozen,
+        patch: &raw,
     };
     let review = c.services.landing_review(&request)?;
-    let relative_frozen = Path::new(".oms/landing-patches").join(format!("{landing}.patch"));
-    let frozen = state.join(&relative_frozen);
     oms_reference::producer::Producer::open(&state, c.interrupted)?.publish(
         &captured,
         &frozen,
@@ -260,6 +271,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     ]);
     if let Some(plan) = &plan {
         intent.set("plan_id", plan.get("plan_id").clone());
+    }
+    // Outside the receipt hash: recovery replays the finish with the consent.
+    if policy.allow_verifier_change {
+        intent.set("verifier_change_consent", true);
     }
     intent.set("receipt_sha", receipt_digest(&intent)?);
     append(&state, &intent, c.interrupted)?;
@@ -399,6 +414,8 @@ fn recover(c: &Context<'_>, repo: &Path, state: &Path, task: &str) -> Result<Out
             task: &task,
             admission: &V::Null,
             policy: &Policy::default(),
+            frozen_patch: &path,
+            patch: &[],
         };
         if applied {
             c.services.recover_landing(&request, intent, true)?;

@@ -807,16 +807,23 @@ fn routing_inputs(
     };
     for provider in rows(providers) {
         let name = text(provider, "provider");
-        if provider["installed"] == true {
+        // `oms models --json` reports `present`/`usable` (usable null = unprobed); `installed` is the doctor-row spelling.
+        if provider["installed"] == true
+            || (provider["present"] == true && provider["usable"] != false)
+        {
             inputs.installed.as_mut().unwrap().insert(name.into());
         }
-        inputs.catalogs.insert(
-            name.into(),
-            rows(&provider["models"])
+        let strings = |key: &str| -> Vec<String> {
+            rows(&provider[key])
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect(),
-        );
+                .collect()
+        };
+        let mut models = strings("models");
+        if models.is_empty() {
+            models = strings("catalog_models");
+        }
+        inputs.catalogs.insert(name.into(), models);
     }
 
     let mut report_stub = Value::Null;

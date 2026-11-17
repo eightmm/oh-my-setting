@@ -34,6 +34,12 @@ pub struct LandingRequest<'a> {
     pub task: &'a str,
     pub admission: &'a V,
     pub policy: &'a crate::admission::Policy,
+    /// Published landing patch the intent records; empty before admission.
+    /// A task-bound done receipt binds this exact path.
+    pub frozen_patch: &'a Path,
+    /// Admitted patch bytes hashing to `patch_sha256`; empty in recovery,
+    /// which replays receipts and never re-reviews.
+    pub patch: &'a [u8],
 }
 pub trait PublicationGuard {}
 /// A production adapter must bind these checks to native lifecycle, immutable

@@ -379,7 +379,7 @@ fn one_controller_per_state_repository_and_flag_validation() {
     for bad in [
         &["--parallel", "--id", "s1"][..],
         &["--parallel", "--dry-run"],
-        &["--parallel", "--max-writers", "9"],
+        &["--parallel", "--max-writers", "17"],
         &["--parallel", "--max-review-backlog", "65"],
         &["--max-writers", "2", "--next"],
         &["--max-review-backlog", "2", "--next"],
@@ -441,4 +441,9 @@ fn overlapping_resources_never_run_together() {
     for id in ["res1", "res2", "res3"] {
         assert_eq!(state(&repo, id)["state"], "review");
     }
+    // Widened --max-writers (up to 16) is accepted as valid range (failing
+    // cleanly on "no ready tasks", never on argument range validation).
+    let (code, _, err) = run(&repo, &mock, &["--parallel", "--max-writers", "12"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(!err.contains("max-writers"), "{err}");
 }
