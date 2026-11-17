@@ -744,6 +744,471 @@ fn ci_status_fails_closed_without_gh() {
     }
 }
 
+struct FeedbackFixture {
+    isolated: Isolated,
+    repo: PathBuf,
+    gh: PathBuf,
+    head: String,
+}
+impl FeedbackFixture {
+    fn new() -> Self {
+        let isolated = Isolated::new();
+        let repo = isolated.repo("feedback");
+        isolated.git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project.git",
+            ],
+        );
+        let head = String::from_utf8(
+            isolated
+                .command(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let gh = isolated.bin.join("gh");
+        fs::write(
+            &gh,
+            r#"#!/bin/bash
+case "$1 $2" in
+  'run list') printf '%s\n' "$OMS_CT_FEEDBACK_RUNS";;
+  'pr list')
+    [[ "$OMS_CT_FEEDBACK_PULLS" != null ]] || { printf '%s\n' 'private feedback transport detail' >&2; exit 2; }
+    printf '%s\n' "$OMS_CT_FEEDBACK_PULLS";;
+  'api --hostname')
+    [[ "${@: -1}" == *'/comments?sort=updated&direction=desc&per_page=50' ]] || exit 2
+    [[ "$OMS_CT_FEEDBACK_COMMENTS" != null ]] || { printf '%s\n' 'private feedback transport detail' >&2; exit 2; }
+    printf '%s\n' "$OMS_CT_FEEDBACK_COMMENTS";;
+  'api --method')
+    case "${@: -1}" in
+      'repos/example/project/pulls/19') printf '{"head":{"sha":"%s"}}\n' "$OMS_CT_FEEDBACK_HEAD";;
+      'repos/example/project/pulls/19/comments?sort=updated&direction=desc&per_page=100') printf '%s\n' "$OMS_CT_FEEDBACK_COMMENTS";;
+      *) exit 2;;
+    esac;;
+  *) exit 2;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+        Self {
+            isolated,
+            repo,
+            gh,
+            head,
+        }
+    }
+    fn run(&self, action: &str, attempt: usize, head: &str, comments: &V, conclusion: &str) {
+        let result = self.observe(action, attempt, head, comments, conclusion, "CI");
+        assert!(result.0 <= 1 && result.2.is_empty(), "{result:?}");
+    }
+    fn runs(&self, attempt: usize, conclusion: &str, workflow: &str) -> V {
+        V::Arr(vec![obj([
+            ("databaseId", 73usize.into()),
+            ("attempt", attempt.into()),
+            ("headSha", self.head.clone().into()),
+            ("status", "completed".into()),
+            ("conclusion", conclusion.into()),
+            ("workflowName", workflow.into()),
+        ])])
+    }
+    fn observe(
+        &self,
+        action: &str,
+        attempt: usize,
+        head: &str,
+        comments: &V,
+        conclusion: &str,
+        workflow: &str,
+    ) -> (i32, String, String) {
+        let runs = self.runs(attempt, conclusion, workflow);
+        let pulls = V::Arr(vec![obj([
+            ("number", 19usize.into()),
+            ("headRefOid", head.into()),
+        ])]);
+        self.poll(action, &runs, &pulls, comments)
+    }
+    fn poll(&self, action: &str, runs: &V, pulls: &V, comments: &V) -> (i32, String, String) {
+        let encode = |v: &V| String::from_utf8(v.json(false).unwrap()).unwrap();
+        self.isolated.run_env(
+            "ci-status",
+            &self.repo,
+            &[action],
+            &[
+                ("OMS_GH_BIN", self.gh.to_str().unwrap()),
+                ("OMS_CI_TICK_INTERVAL", "0"),
+                ("OMS_CT_FEEDBACK_RUNS", &encode(runs)),
+                ("OMS_CT_FEEDBACK_PULLS", &encode(pulls)),
+                ("OMS_CT_FEEDBACK_COMMENTS", &encode(comments)),
+            ],
+        )
+    }
+    fn comments(&self, body: &str, updated: &str) -> V {
+        V::Arr(vec![obj([
+            ("id", 42usize.into()),
+            ("commit_id", self.head.clone().into()),
+            ("updated_at", updated.into()),
+            ("body", body.into()),
+            ("path", "src/lib.rs".into()),
+            ("line", 5usize.into()),
+            ("user", obj([("login", "reviewer".into())])),
+        ])])
+    }
+    fn draft_comments(&self, comments: &V, json: bool) -> (i32, String, String) {
+        let path = self.repo.join(".oms/publish/feedback.json");
+        if !path.exists() {
+            let tree = String::from_utf8(
+                self.isolated
+                    .command(&self.repo)
+                    .args(["rev-parse", "HEAD^{tree}"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            let mut intent = obj([
+                ("schema", 1usize.into()),
+                ("kind", "draft-pr-intent".into()),
+                ("phase", "complete".into()),
+                ("created_at", "2026-01-01T00:00:00Z".into()),
+                ("updated_at", "2026-01-01T00:00:00Z".into()),
+                (
+                    "repo_id",
+                    oms_reference::digest(self.repo.as_os_str().as_encoded_bytes()).into(),
+                ),
+                ("head_sha", self.head.clone().into()),
+                ("tree_sha", tree.trim().into()),
+                ("base_sha", self.head.clone().into()),
+                ("branch", "main".into()),
+                ("base", "main".into()),
+                ("remote", "origin".into()),
+                ("repo_slug", "example/project".into()),
+                ("fetch_url", "https://github.com/example/project.git".into()),
+                ("push_url", "https://github.com/example/project.git".into()),
+                ("viewer_login", "reviewer".into()),
+                ("spec_sha256", "".into()),
+                ("draft", true.into()),
+                ("create_only", true.into()),
+                ("merge", false.into()),
+                ("release", false.into()),
+                (
+                    "pr_url",
+                    "https://github.com/example/project/pull/19".into(),
+                ),
+                ("pr_number", 19usize.into()),
+                ("push_attempted", true.into()),
+            ]);
+            for key in ["verify", "title", "body"] {
+                intent.set(key, "fixture");
+                intent.set(&format!("{key}_sha256"), oms_reference::digest(b"fixture"));
+            }
+            oms_command_landing::review::validate_intent(&intent, &self.repo).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, intent.json(false).unwrap()).unwrap();
+            strip_group_world_write(path.parent().unwrap());
+        }
+        let mut args = vec!["comments", "--intent", path.to_str().unwrap()];
+        if json {
+            args.push("--json");
+        }
+        self.isolated.run_with_services(
+            "draft-pr",
+            &self.repo,
+            &args,
+            &[
+                ("OMS_GH_BIN", self.gh.to_str().unwrap()),
+                ("OMS_CT_FEEDBACK_HEAD", &self.head),
+                (
+                    "OMS_CT_FEEDBACK_COMMENTS",
+                    &String::from_utf8(comments.json(false).unwrap()).unwrap(),
+                ),
+            ],
+        )
+    }
+}
+
+#[test]
+fn ci_feedback_deduplicates_polls_and_observes_same_head_reruns() {
+    let f = FeedbackFixture::new();
+    let empty = V::Arr(vec![]);
+    f.run("record", 1, &f.head, &empty, "failure");
+    f.run("tick", 1, &f.head, &empty, "failure");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("classification").text(), Some("unknown"));
+    let first = rows[0].get("event_id").clone();
+    f.run("tick", 2, &f.head, &empty, "failure");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter().filter(|r| r.get("event_id") == &first).count(),
+        1
+    );
+    let history = fs::read_to_string(f.repo.join(".oms/ci.jsonl")).unwrap();
+    assert_eq!(history.lines().count(), 2);
+    let (code, out, err) = f
+        .isolated
+        .run("ci-status", &f.repo, &["feedback", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(V::parse(out.as_bytes()).unwrap().array().len(), 2);
+    let (code, out, err) = f.isolated.run(
+        "ci-status",
+        &f.repo,
+        &["feedback", "--json", "--limit", "1"],
+    );
+    assert_eq!(code, 0, "{err}");
+    let recent = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(recent.array().len(), 1);
+    assert_eq!(recent.array()[0].get("source_revision"), &2usize.into());
+}
+
+#[test]
+fn pr_feedback_tracks_edits_beyond_the_excerpt_and_stale_heads() {
+    let f = FeedbackFixture::new();
+    let original = format!("{} original", "x".repeat(700));
+    let edited = format!("{} revised", "x".repeat(700));
+    f.run(
+        "record",
+        1,
+        &f.head,
+        &f.comments(&original, "2026-01-01T00:00:00Z"),
+        "success",
+    );
+    f.run(
+        "tick",
+        1,
+        &f.head,
+        &f.comments(&original, "2026-01-01T00:00:00Z"),
+        "success",
+    );
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows.len(), 2);
+    f.run(
+        "tick",
+        1,
+        &f.head,
+        &f.comments(&edited, "2026-01-01T00:01:00Z"),
+        "success",
+    );
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    let comments: Vec<_> = rows
+        .iter()
+        .filter(|r| r.get("source").text() == Some("pr-review-comment"))
+        .collect();
+    assert_eq!(comments.len(), 2);
+    assert_ne!(comments[0].get("event_id"), comments[1].get("event_id"));
+    assert_eq!(
+        comments[0].get("evidence").get("body"),
+        comments[1].get("evidence").get("body")
+    );
+    let moved = "a".repeat(40);
+    f.run(
+        "tick",
+        1,
+        &moved,
+        &f.comments(&edited, "2026-01-01T00:01:00Z"),
+        "success",
+    );
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r.get("source").text() == Some("pr-review-comment")
+                && r.get("classification").text() == Some("stale_head"))
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.get("trust").text() == Some("untrusted"))
+    );
+}
+
+#[test]
+fn ci_feedback_preserves_nonrepairable_conclusions_and_unknown_identity() {
+    let f = FeedbackFixture::new();
+    for (attempt, conclusion, classification) in [
+        (1, "cancelled", "cancelled"),
+        (2, "startup_failure", "environment_failure"),
+        (3, "timed_out", "unknown"),
+        (0, "failure", "unknown"),
+    ] {
+        f.run("record", attempt, &f.head, &V::Arr(vec![]), conclusion);
+        let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+        assert!(
+            rows.iter().any(
+                |r| r.get("evidence").get("conclusion").text() == Some(conclusion)
+                    && r.get("classification").text() == Some(classification)
+            ),
+            "{rows:?}"
+        );
+    }
+}
+
+#[test]
+fn feedback_refusal_preserves_ci_and_comment_views() {
+    let f = FeedbackFixture::new();
+    f.run("record", 1, &f.head, &V::Arr(vec![]), "failure");
+    let path = f.repo.join(oms_command_landing::feedback::EVENTS);
+    let original = fs::read_to_string(&path).unwrap();
+    let original_row = V::parse(original.trim().as_bytes()).unwrap();
+    let mut ledgers = vec![];
+    for (field, changed) in [
+        ("schema", V::from(99usize)),
+        ("event_id", "a".repeat(64).into()),
+        ("classification", "success".into()),
+    ] {
+        let mut row = original_row.clone();
+        row.set(field, changed);
+        let mut corrupt = row.json(false).unwrap();
+        corrupt.push(b'\n');
+        ledgers.push((corrupt, true));
+    }
+    // Whitespace fills the byte bound without making the existing record invalid.
+    let mut full = original.as_bytes().to_vec();
+    full.resize(16 * 1024 * 1024 - 1, b' ');
+    full.push(b'\n');
+    ledgers.push((full, false));
+    let comments = f.comments("check this source", "2026-01-01T00:00:00Z");
+    let warning = "warning: feedback observation unavailable (code 2); durable feedback may be incomplete or stale\n";
+    let mut attempt = 1;
+    let mut packet_path = None;
+    for (ledger, corrupt) in ledgers {
+        fs::write(&path, &ledger).unwrap();
+        assert_eq!(
+            oms_command_landing::feedback::observations(&f.repo).is_err(),
+            corrupt
+        );
+        let read = f
+            .isolated
+            .run("ci-status", &f.repo, &["feedback", "--json"]);
+        assert_eq!(read.0, if corrupt { 2 } else { 0 }, "{read:?}");
+        if corrupt {
+            assert!(read.1.is_empty(), "{read:?}");
+        }
+        for (action, conclusion, code) in [("record", "success", 0), ("tick", "failure", 1)] {
+            attempt += 1;
+            let result = f.observe(action, attempt, &f.head, &V::Arr(vec![]), conclusion, "CI");
+            assert_eq!(result.0, code, "{result:?}");
+            assert_eq!(result.2, warning);
+            if action == "tick" {
+                assert!(result.1.is_empty(), "{result:?}");
+            } else {
+                assert!(result.1.contains("completed success"), "{result:?}");
+            }
+            let history = fs::read_to_string(f.repo.join(".oms/ci.jsonl")).unwrap();
+            let current = V::parse(history.lines().last().unwrap().as_bytes()).unwrap();
+            assert_eq!(current.get("attempt"), &attempt.into());
+            assert_eq!(current.get("conclusion").text(), Some(conclusion));
+            assert_eq!(fs::read(&path).unwrap(), ledger);
+        }
+        let result = f.draft_comments(&comments, true);
+        assert_eq!(result.0, 0, "{result:?}");
+        assert_eq!(result.2, warning);
+        let view = V::parse(result.1.as_bytes()).unwrap();
+        assert_eq!(
+            view.get("feedback_observation").get("status").text(),
+            Some("unavailable")
+        );
+        assert_eq!(
+            view.get("feedback_observation").get("error_code"),
+            &2usize.into()
+        );
+        assert_eq!(
+            view.get("comments").array()[0].get("body").text(),
+            Some("check this source")
+        );
+        let packet = view.get("packet").text().unwrap();
+        let saved = V::parse(&fs::read(f.repo.join(packet)).unwrap()).unwrap();
+        assert_eq!(saved.get("comments"), view.get("comments"));
+        assert!(!saved.has("feedback_observation"));
+        if let Some(previous) = &packet_path {
+            assert_eq!(packet, previous);
+        }
+        packet_path = Some(packet.to_owned());
+        let text = f.draft_comments(&comments, false);
+        assert_eq!(text.0, 0, "{text:?}");
+        assert!(text.1.contains("1 untrusted review comment(s)"), "{text:?}");
+        assert_eq!(text.2, warning);
+        assert_eq!(fs::read(&path).unwrap(), ledger);
+    }
+    fs::write(&path, original).unwrap();
+    for added in [1usize, 0] {
+        let result = f.draft_comments(&comments, true);
+        assert_eq!(result.0, 0, "{result:?}");
+        assert!(result.2.is_empty(), "{result:?}");
+        let view = V::parse(result.1.as_bytes()).unwrap();
+        assert_eq!(
+            view.get("feedback_observation").get("status").text(),
+            Some("recorded")
+        );
+        assert_eq!(view.get("feedback_observation").get("added"), &added.into());
+        assert_eq!(view.get("packet").text(), packet_path.as_deref());
+    }
+}
+
+#[test]
+fn feedback_poll_errors_are_explicit_and_preserve_available_ci_evidence() {
+    let f = FeedbackFixture::new();
+    let pull = V::Arr(vec![obj([
+        ("number", 19usize.into()),
+        ("headRefOid", f.head.clone().into()),
+    ])]);
+    for (index, (pulls, comments)) in [
+        (V::Null, V::Arr(vec![])),
+        (obj([]), V::Arr(vec![])),
+        (pull, V::Null),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = f.poll(
+            "record",
+            &f.runs(index + 1, "success", "CI"),
+            &pulls,
+            &comments,
+        );
+        assert_eq!(result.0, 0, "{result:?}");
+        assert!(result.1.contains("completed success"), "{result:?}");
+        assert_eq!(
+            result.2,
+            "warning: feedback observation unavailable (code 2); durable feedback may be incomplete or stale\n"
+        );
+        let history = fs::read_to_string(f.repo.join(".oms/ci.jsonl")).unwrap();
+        assert_eq!(history.lines().count(), index + 1);
+        let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+        assert_eq!(rows.len(), index + 1);
+        assert!(
+            rows.iter()
+                .all(|row| row.get("source").text() == Some("ci-run"))
+        );
+    }
+}
+
+#[test]
+fn feedback_withholds_sensitive_workflow_metadata() {
+    let f = FeedbackFixture::new();
+    let sensitive = ["gh", "p_", &"a".repeat(36)].concat();
+    let result = f.observe("record", 1, &f.head, &V::Arr(vec![]), "failure", &sensitive);
+    assert_eq!(result.0, 1, "{result:?}");
+    let raw = fs::read_to_string(f.repo.join(oms_command_landing::feedback::EVENTS)).unwrap();
+    assert!(!raw.contains(&sensitive));
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows[0].get("classification").text(), Some("unknown"));
+    assert_eq!(rows[0].get("evidence").get("withheld"), &true.into());
+    f.isolated.git(&f.repo, &["branch", "-m", &sensitive]);
+    f.run("record", 2, &f.head, &V::Arr(vec![]), "failure");
+    let rows = oms_command_landing::feedback::observations(&f.repo).unwrap();
+    assert_eq!(rows[0].get("branch").text(), Some(""));
+    let raw = fs::read_to_string(f.repo.join(oms_command_landing::feedback::EVENTS)).unwrap();
+    assert!(!raw.contains(&sensitive));
+}
+
 #[test]
 fn report_dry_run_degrades_without_python() {
     let iso = Isolated::new();
