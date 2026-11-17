@@ -370,7 +370,18 @@ pub fn parse_findings(answer: &str) -> (Vec<V>, usize) {
         }
         row.set("file", path);
         row.set("summary", clean(text(&row, "summary"), 500));
-        row.set("quote", clean(text(&row, "quote"), 500));
+        let quote = clean(text(&row, "quote"), 500);
+        // Keep the legacy stored quote and finding identity, but never treat a
+        // truncated or control-stripped prefix as the provider's full evidence.
+        row.set(
+            "quote_complete",
+            text(&row, "quote")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                == quote,
+        );
+        row.set("quote", quote);
         if !row.has("severity") {
             row.set("severity", "blocking");
         }
@@ -412,51 +423,135 @@ fn diff_lines(patch: &[u8]) -> Lines {
     }
     files
 }
-fn classify(row: &V, repo: &Path, diff: Option<&Lines>) -> (&'static str, V) {
-    let Ok(bytes) = storage::read(repo, Path::new(text(row, "file")), false) else {
-        return (
-            "anchor-not-found",
-            if text(row, "quote").is_empty() {
+struct Citation {
+    anchor: &'static str,
+    quote_found: V,
+    resolved_line: Option<usize>,
+    status: &'static str,
+    source_sha256: Option<String>,
+}
+impl Citation {
+    fn unverified(row: &V, status: &'static str) -> Self {
+        Self {
+            anchor: "anchor-not-found",
+            quote_found: if text(row, "quote").is_empty() && row.get("quote_complete").truth() {
                 V::Null
             } else {
                 false.into()
             },
-        );
-    };
-    let body = String::from_utf8_lossy(&bytes);
-    let lines = body.lines().collect::<Vec<_>>();
-    let number = crate::number(row.get("line")).unwrap_or(0.0) as usize;
-    if number == 0 || number > lines.len() {
-        return (
-            "anchor-not-found",
-            if text(row, "quote").is_empty() {
-                V::Null
-            } else {
-                false.into()
-            },
-        );
-    }
-    let quote = normalized(text(row, "quote"));
-    let found = if quote.is_empty() {
-        V::Null
-    } else {
-        let found = lines[number.saturating_sub(4)..(number + 3).min(lines.len())]
-            .iter()
-            .any(|s| normalized(s).contains(&quote));
-        if !found {
-            return ("anchor-not-found", false.into());
+            resolved_line: None,
+            status,
+            source_sha256: None,
         }
-        true.into()
+    }
+}
+fn scope_changed(original: &V, current: &V) -> bool {
+    ["head", "diff_sha256", "criteria_sha256"]
+        .iter()
+        .any(|key| original.get(key) != current.get(key))
+}
+fn quote_line(body: &str, quote: &str) -> std::result::Result<usize, &'static str> {
+    let mut normalized = String::new();
+    let mut starts = Vec::new();
+    for (index, line) in body.lines().enumerate() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            continue;
+        }
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        starts.push((normalized.len(), index + 1));
+        normalized.push_str(&line);
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut resolved = None;
+    let mut offset = 0;
+    while let Some(hit) = normalized[offset..].find(quote) {
+        let start = offset + hit;
+        let end = start + quote.len();
+        let left = normalized[..start].chars().next_back();
+        let right = normalized[end..].chars().next();
+        let partial = left.is_some_and(is_word) && quote.starts_with(is_word)
+            || right.is_some_and(is_word) && quote.ends_with(is_word);
+        if !partial {
+            if resolved.is_some() {
+                return Err("ambiguous");
+            }
+            resolved = Some(starts[starts.partition_point(|(at, _)| *at <= start) - 1].1);
+        }
+        // Include overlapping occurrences, including duplicates on one line.
+        offset = start + normalized[start..].chars().next().unwrap().len_utf8();
+    }
+    resolved.ok_or("not-found")
+}
+fn classify(row: &V, repo: &Path, diff: Option<&Lines>, tracked: bool) -> Citation {
+    let quoted = !text(row, "quote").is_empty();
+    if !row.get("quote_complete").truth() {
+        return Citation::unverified(row, "incomplete-quote");
+    }
+    if quoted && !tracked {
+        return Citation::unverified(row, "untracked-source");
+    }
+    let Ok(bytes) = storage::read(repo, Path::new(text(row, "file")), false) else {
+        return Citation::unverified(row, "unavailable-source");
     };
-    let Some(diff) = diff else {
-        return ("unclassified", found);
+    let reported = crate::number(row.get("line")).unwrap_or(0.0) as usize;
+    let number = if quoted {
+        let Ok(body) = std::str::from_utf8(&bytes) else {
+            return Citation::unverified(row, "unavailable-source");
+        };
+        match quote_line(body, text(row, "quote")) {
+            Ok(number) => number,
+            Err(status) => return Citation::unverified(row, status),
+        }
+    } else {
+        if reported == 0 || reported > String::from_utf8_lossy(&bytes).lines().count() {
+            return Citation::unverified(row, "not-found");
+        }
+        reported
     };
-    let anchor = match diff.get(text(row, "file")) {
-        Some((added, _)) if added.contains(&number) => "in-diff",
-        Some((_, context)) if context.contains(&number) => "context",
-        _ => "outside-scope",
+    let anchor = if let Some(diff) = diff {
+        match diff.get(text(row, "file")) {
+            Some((added, _)) if added.contains(&number) => "in-diff",
+            Some((_, context)) if context.contains(&number) => "context",
+            _ => "outside-scope",
+        }
+    } else {
+        "unclassified"
     };
-    (anchor, found)
+    Citation {
+        anchor,
+        quote_found: if quoted { true.into() } else { V::Null },
+        resolved_line: quoted.then_some(number),
+        status: if !quoted {
+            "no-quote"
+        } else if number == reported {
+            "verified"
+        } else {
+            "relocated"
+        },
+        source_sha256: quoted.then(|| storage::hash(&bytes)),
+    }
+}
+fn record_citation(row: &mut V, citation: Citation) {
+    row.set(
+        "line",
+        citation
+            .resolved_line
+            .map_or_else(|| row.get("reported_line").clone(), V::from),
+    );
+    row.set("anchor", citation.anchor);
+    row.set("quote_found", citation.quote_found);
+    row.set(
+        "resolved_line",
+        citation.resolved_line.map_or(V::Null, V::from),
+    );
+    row.set("line_anchor_status", citation.status);
+    row.set(
+        "source_sha256",
+        citation.source_sha256.map_or(V::Null, V::from),
+    );
 }
 pub(crate) fn finish(
     args: &Args,
@@ -495,8 +590,15 @@ pub(crate) fn finish(
     )?)?;
     let (current, patch) = scope(args, repo, context)?;
     let diff = diff_lines(&patch);
+    let mut changed = scope_changed(&original, &current);
+    let tracked = process::git(context, repo, &["ls-files", "-z"])?
+        .split(|b| *b == 0)
+        .filter(|b| !b.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect::<BTreeSet<_>>();
     let mut states = Vec::new();
     let mut seat_rows = Vec::new();
+    let mut finding_rows = Vec::new();
     for seat in seats {
         let (state, confidence) = verdict(&seat.answer, Some(seat.code), seat.complete);
         states.push(state);
@@ -541,41 +643,53 @@ pub(crate) fn finish(
             if !seen.insert(ident.clone()) {
                 continue;
             }
-            let (anchor, quote) = classify(
-                &finding,
-                repo,
-                if args.has("no-diff") {
-                    None
-                } else {
-                    Some(&diff)
-                },
-            );
+            let citation = if changed {
+                Citation::unverified(&finding, "source-changed")
+            } else {
+                classify(
+                    &finding,
+                    repo,
+                    if args.has("no-diff") {
+                        None
+                    } else {
+                        Some(&diff)
+                    },
+                    tracked.contains(text(&finding, "file").as_bytes()),
+                )
+            };
+            finding.set("reported_line", finding.get("line").clone());
+            record_citation(&mut finding, citation);
             for (key, value) in [
                 ("schema", 1usize.into()),
                 ("kind", "review-finding".into()),
                 ("id", ident.into()),
                 ("run", run.into()),
                 ("seat", seat.target.provider.clone().into()),
-                ("anchor", anchor.into()),
-                ("quote_found", quote),
                 ("scope", format!("_scope-{run}.json").into()),
                 ("diff_sha256", original.get("diff_sha256").clone()),
                 ("ts", now().into()),
             ] {
                 finding.set(key, value);
             }
-            storage::append(
-                repo,
-                &dir.join(format!("_findings-{run}.jsonl")),
-                &finding,
-                context.interrupted,
-            )?;
+            finding_rows.push(finding);
         }
     }
+    // Reads are bounded and descriptor checked; also bind their classification
+    // to the captured repository generation before publishing positive evidence.
+    changed |= scope_changed(&current, &scope(args, repo, context)?.0);
+    for mut finding in finding_rows {
+        if changed {
+            let citation = Citation::unverified(&finding, "source-changed");
+            record_citation(&mut finding, citation);
+        }
+        storage::append(
+            repo,
+            &dir.join(format!("_findings-{run}.jsonl")),
+            &finding,
+            context.interrupted,
+        )?;
+    }
     let mut code = overall(&states);
-    let changed = original.get("diff_sha256") != current.get("diff_sha256")
-        || original.get("head") != current.get("head")
-        || original.get("criteria_sha256") != current.get("criteria_sha256");
     if changed {
         code = 2;
         output.push_str("review scope changed during provider calls; gate incomplete\n");
