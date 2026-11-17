@@ -171,18 +171,25 @@ fn database(args: &[OsString], cwd: &Path, flag: &AtomicBool) -> Result<Output> 
         "context" => {
             let (n, p) = s.logs()?;
             let status = records::states(&n, &p);
+            let eligible = crate::review::context_filter(&s)?;
             let mut out = String::new();
             match value("--view").as_str() {
                 "full" => {
                     for e in &n {
-                        if e.kind != "retirement" && !status.contains_key(&e.event_id) {
+                        if e.kind != "retirement"
+                            && !status.contains_key(&e.event_id)
+                            && eligible(e)
+                        {
                             out.push_str(&format!("{}\n\n", e.rendered));
                         }
                     }
                 }
                 "pins" => {
                     for e in &p {
-                        if e.kind != "retirement" && !status.contains_key(&e.event_id) {
+                        if e.kind != "retirement"
+                            && !status.contains_key(&e.event_id)
+                            && eligible(e)
+                        {
                             out.push_str(&format!("{}\n", e.rendered));
                         }
                     }
@@ -235,6 +242,7 @@ fn database(args: &[OsString], cwd: &Path, flag: &AtomicBool) -> Result<Output> 
                     include_superseded: flags.contains("--include-superseded"),
                     targets: &value("--target-path"),
                     drop_scoped: scoped == "drop",
+                    context_only: false,
                     handoffs: if handoffs.as_os_str().is_empty() {
                         None
                     } else {
@@ -303,6 +311,7 @@ pub fn provider_context(repo: &Path, query: &str, interrupted: &AtomicBool) -> O
                         include_superseded: false,
                         targets: &std::env::var("OMS_MEMORY_TARGET_PATHS").unwrap_or_default(),
                         drop_scoped: true,
+                        context_only: true,
                         handoffs: None,
                     },
                     interrupted,

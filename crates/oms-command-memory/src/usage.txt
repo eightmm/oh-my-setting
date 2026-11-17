@@ -8,10 +8,13 @@ Files:
   shared.md   Human-readable source log; not sent to providers by default.
               Append-only: correct a note by appending another, never by
               editing or trimming it. The worker-authority guard enforces this.
-  pins.md     Short high-signal notes always eligible for provider context.
+  pins.md     Explicitly authored high-signal notes eligible for provider context.
               Append-only, same contract.
   summary.md  Compact recent notes generated from shared.md; regenerated in
               place by `compact`, so it is derived state, not a record.
+              Task-close, distill and imported notes need review acceptance
+              before summary or provider context includes them. Explicitly
+              authored and legacy manual notes remain eligible.
   memory.sqlite3
               Derived project index for exact search and ranked FTS recall.
               Existing Markdown logs are imported automatically and remain the
@@ -24,7 +27,7 @@ Options:
   --agent NAME      Agent label for appended notes / search author filter.
   --text TEXT       Note text for append/pin; query for search/recall.
   --stdin           Read append/pin note from stdin.
-  --full            context: emit full source tail instead of compact view.
+  --full            context: emit eligible source tail instead of compact view.
   --limit N         Limit search/recall results. Search is unlimited by default;
                     recall defaults to 20.
   --json            search/recall: emit JSONL with provenance metadata;
@@ -102,6 +105,8 @@ Commands:
                     Never edits, retires or synchronizes anything.
   review [--kind task-close|distill|imported|correction] [--json]
          [--accept ID | --retire ID --reason TEXT | --reject ID]
-                    List notes that reached shared memory unread (task-close
-                    promotions, journal distillation, imports) and captured
-                    corrections; accept or turn one down. Project memory only.
+                    List pending task-close, distill, imported and correction
+                    proposals. Accept enables automatic notes in context;
+                    retire turns down a stored note, reject a correction.
+                    Show/search/recall still expose stored proposals for review.
+                    Acceptance is not verification. Project memory only.

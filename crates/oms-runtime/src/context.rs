@@ -203,13 +203,6 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             "pins",
         ),
         (
-            ".oms/memory/summary.md",
-            "compacted project memory",
-            55,
-            "tail",
-            "memory-summary",
-        ),
-        (
             ".oms/work-journal/today.md",
             "current work journal",
             35,

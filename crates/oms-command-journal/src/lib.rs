@@ -441,7 +441,7 @@ fn execute_command(
             {
                 let mut counts = Vec::new();
                 if report.promoted > 0 {
-                    counts.push(format!("{} promoted", report.promoted));
+                    counts.push(format!("{} queued for memory review", report.promoted));
                 }
                 if report.deduped > 0 {
                     counts.push(format!("{} already in shared memory", report.deduped));
@@ -751,16 +751,16 @@ fn execute_command(
                     out.push('\n');
                 }
                 out.push_str(&format!(
-                    "journal distill: {} lesson(s) would be promoted\n",
+                    "journal distill: {} lesson(s) would be proposed for memory review\n",
                     report.promoted
                 ));
             } else if report.promoted > 0 {
                 out.push_str(&format!(
-                    "journal distill: {} lesson(s) promoted, marker advanced\n",
+                    "journal distill: {} lesson(s) queued for memory review, marker advanced\n",
                     report.promoted
                 ));
             } else {
-                out.push_str("journal distill: nothing to promote\n");
+                out.push_str("journal distill: nothing to propose\n");
             }
             if report.deduped > 0 {
                 out.push_str(&format!(
@@ -776,7 +776,7 @@ fn execute_command(
             }
             if report.dropped > 0 {
                 out.push_str(&format!(
-                    "journal distill: {} candidate(s) beyond the per-run cap were not promoted\n",
+                    "journal distill: {} candidate(s) beyond the per-run cap were not proposed\n",
                     report.dropped
                 ));
             }

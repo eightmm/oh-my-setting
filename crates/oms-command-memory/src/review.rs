@@ -30,6 +30,30 @@ fn decided(s: &Store) -> Result<HashSet<String>> {
         .map(|r| text(r, "id"))
         .collect())
 }
+pub(crate) fn context_filter(s: &Store) -> Result<impl Fn(&records::Entry) -> bool> {
+    let mut accepted = HashSet::new();
+    for row in s.rows("reviews.jsonl")? {
+        match text(&row, "decision").as_str() {
+            "accepted" => {
+                accepted.insert(text(&row, "id"));
+            }
+            "rejected" => {
+                accepted.remove(&text(&row, "id"));
+            }
+            _ => {}
+        }
+    }
+    Ok(move |e: &records::Entry| {
+        let correction = e.field("accepted_correction");
+        if !correction.is_empty() {
+            // The correction note can survive a crash before its decision receipt.
+            accepted.contains(correction)
+        } else {
+            // Explicitly authored and legacy manual notes need no review migration.
+            !auto(e) || accepted.contains(&e.event_id)
+        }
+    })
+}
 fn pending(s: &Store) -> Result<Vec<Value>> {
     let decisions = decided(s)?;
     let mut items: Vec<_> = s.active()?.iter().filter(|e| auto(e) && !decisions.contains(&e.event_id)).map(|e| json!({"id":e.event_id,"origin":origin(e),"recorded":e.occurred_at,"agent":e.agent,"text":preview(&e.body,160)})).collect();
@@ -182,6 +206,9 @@ pub(crate) fn review(s: &Store, o: &Options, author: &str, flag: &AtomicBool) ->
         out.extend(&bytes);
         Ok(out)
     })?;
+    if let Err(Error(_, message)) = s.compact(flag) {
+        s.warning(&format!("warning: {message}"));
+    }
     Ok(output(if action == "--accept" {
         format!(
             "memory: accepted {id}{}",
