@@ -2,15 +2,17 @@
 
 Choose the narrowest front door.
 
-`oms list` exposes entrypoints; `oms list --all` exposes primitives. Start with
-SKILL.md's six work families.
+`oms list` exposes daily work, collaboration, delivery and maintenance.
+`oms list --all` includes optional workflows and lower-level tools. Start with
+SKILL.md's six work families; choose optional automation only for an explicitly
+authorized goal that needs it.
 
 ## Orient and resume
 
 | Need | Use | Boundary |
 |---|---|---|
 | Ranked attention and one next command | `oms inbox --repo .` | When injected state is insufficient; only `--fix-safe` repairs. |
-| Missing prior decisions/blockers | Relevant `oms journal show --blockers` or `--today` | Reuse injected history first; not authority. |
+| Missing prior decisions/blockers | Relevant `oms journal show --blockers` or `--today` | Historical observations; current attention comes from `inbox`. |
 | Effective goal, next action, or completion evidence | `oms runtime envelope show`, `next`, or `evidence show` | Typed projection; never mutation authority. |
 | Full underlying dashboard | `oms state --repo .` | Drill down for source detail. |
 | State consistency verdict | `oms state-verify --repo .` | Diagnosis only; never repairs state. |
@@ -60,6 +62,11 @@ reader; review remains typed.
 `autopilot -> goal-drive -> plan-run` is an execution hierarchy, not parallel
 loops. `agent-plan` owns tasks/leases. Start the required layer; retain
 its stop/publication boundary and reviewed task contract.
+
+`agent-task` holds the current resume note: goal, decisions and next step.
+It does not replace `agent-plan` execution tasks, claims or review state.
+Problem campaigns add candidate groups and evaluation rounds; use them only
+when the goal requires comparing several candidate solutions.
 
 Use Execution Graph only for explicit branching or an existing graph run,
 not ordinary tasks. GPU/Slurm/experiments stay project-specific.

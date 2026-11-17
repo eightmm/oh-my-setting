@@ -90,6 +90,16 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 
 `oms` (또는 `oms panel --watch`)를 실행하면 main/worker/council 호출 계층, 미확인 알림, provider 쿼터, 계획 진행도를 깜빡임 없는 터미널 UI로 실시간 확인할 수 있습니다.
 
+`oms list`에는 일상 작업·협업·반영·설치 관리에 쓰는 명령 13개를 표시합니다.
+현재 프로젝트에서 확인할 일은 `oms inbox --repo .`, 설치 상태는 `oms status`로
+확인합니다. `agent-plan`은 실행 작업과 검토 상태를 관리하고, `agent-task`는
+작업을 이어 갈 때 읽는 짧은 메모를 보관합니다. 저널은 과거 기록이므로 최근
+관찰한 장애가 현재 작업에서는 이미 해결됐을 수 있습니다.
+
+`oms list --all`에서 선택적 자동화, 대체 하네스, 연구·런타임 도구와 세부 반영
+명령을 볼 수 있습니다. 각 기능은 해당 작업에 필요할 때 사용하며, 일반적인
+코딩에 실험 등록이나 캠페인 실행이 필수인 것은 아닙니다.
+
 <p align="center"><img src="docs/assets/panel-board.svg" alt="목표, attention 항목, main과 역할 호출, 상태와 로그 탭을 보여 주는 OMS 패널 보드" width="100%"></p>
 
 <details>

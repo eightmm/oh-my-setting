@@ -8,9 +8,10 @@ const USAGE: &[u8] = br#"Usage: oms <tool> [args...]
        oms list [--all]
        oms help
 
-Dispatch to an oh-my-setting harness tool by name. `list` prints the compact
-subsystem entrypoints; `list --all` reveals core primitives. The command-routing
-reference selects intent variants behind those entries. Docs/COMPONENTS.md
+Dispatch to an oh-my-setting harness tool by name. `list` prints daily work,
+collaboration, delivery and maintenance entrypoints; `list --all` also reveals
+optional workflows and lower-level tools. The command-routing reference selects
+intent variants behind those entries. docs/COMPONENTS.md
 describes the existing subsystems and docs/OMS-RUNTIME.md explains the typed
 runtime projection.
 
@@ -19,7 +20,7 @@ hands; give your coding agent the goal instead of composing harness commands.
 "#;
 
 pub(crate) const PUBLIC: &str = "advise\nagent-call\nagent-events\nagent-memory\nagent-plan\nagent-role\nagent-supervisor\nagent-task\napply-project-template\napproval-inbox\nartifact-index\nartifact-view\nauto-update\nautopilot\ncandidate\nchange-guard\ncheckpoint\nci-status\ncite\ncleanup\nconnect-services\nconsult\ndashboard\ndata-manifest\ndeps\ndoctor\ndraft-pr\nexperiment-board\nexternal\nfail-ledger\ngc\ngoal-drive\ngraph\nharness\nhud\ninbox\ninit\ninput\ninstall-profile\nintent\njob-digest\njournal\nland\nlease\nmodel-doctor\nmodels\noutput-digest\npanel\npatch-admit\npatch-land\npeer-ask\npeer-delegate\npeer-review\nplan-from-spec\nplan-run\nproject-doctor\nproject-private\nprovider-permissions\nrecipe\nremove-project-template\nreport\nroom\nrun\nrun-ledger\nrun-reconcile\nruntime\nscratch-worktree\nsession\nsession-handoff\nskill-doctor\nskill-forge\nslurm-lint\nslurm-submit\nsnapshot\nstate\nstate-verify\nstatus\nsync-shared\nthread\ntick\ntsp-queue\nuninstall\nupdate";
-const FRONTDOOR: &str = "# Setup and capabilities\ninit\ninstall-profile\nconnect-services\n# Goals and daily work\npanel\nagent-plan\nautopilot\nharness\ninbox\nstatus\nhud\ndashboard\nruntime\njournal\ntick\n# Collaboration and review\nroom\nconsult\npeer-delegate\npeer-review\n# Admission and delivery\npatch-admit\npatch-land\nland\nlease\n# Maintenance and removal\nreport\ndoctor\nupdate\nuninstall";
+const FRONTDOOR: &str = "# Daily work\npanel\ninbox\nagent-plan\njournal\n# Collaboration and delivery\nconsult\npeer-delegate\npeer-review\nland\n# Setup and maintenance\ninit\nstatus\ndoctor\nupdate\nuninstall";
 
 const DESCRIPTIONS: &[(&str, &str)] = &[
     (
@@ -40,7 +41,7 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     ),
     (
         "agent-plan",
-        "A small, shared task graph for multi-agent work.",
+        "Execution tasks, dependencies, claims and review state for multi-agent work.",
     ),
     (
         "agent-role",
@@ -52,7 +53,7 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     ),
     (
         "agent-task",
-        "Maintain the active handoff packet shared by Codex, Claude Code, and Antigravity.",
+        "Maintain the current resume note; agent-plan owns execution tasks and claims.",
     ),
     (
         "apply-project-template",
@@ -70,7 +71,7 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     ("auto-update", "Check for or apply oh-my-setting updates."),
     (
         "autopilot",
-        "Bounded coding autopilot over the existing plan/drive/landing contracts.",
+        "Optional bounded execution of an explicitly approved goal over existing plan/drive/landing contracts.",
     ),
     (
         "candidate",
@@ -135,7 +136,7 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     ),
     (
         "harness",
-        "Run Codex models with the Codex, Pi, or Claude Code harness and existing ChatGPT login.",
+        "Optional experimental bridge to run Codex models in Pi or Claude Code, or launch native Codex.",
     ),
     (
         "hud",
@@ -292,7 +293,7 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     ),
     (
         "status",
-        "Print install status: link identity, tools, active task, and update state.",
+        "Installation summary: link identity, tools, active task and update state; use inbox for project attention.",
     ),
     (
         "sync-shared",
@@ -390,10 +391,32 @@ mod tests {
         }
         let (code, front, _) = run(&["list".into()], missing);
         assert_eq!(code, 0);
-        assert!(front.starts_with(b"Setup and capabilities:\n"));
+        assert!(front.starts_with(b"Daily work:\n"));
+        let front = std::str::from_utf8(&front).unwrap();
+        assert_eq!(
+            front.lines().filter(|line| !line.ends_with(':')).count(),
+            13
+        );
+        for advanced in [
+            "autopilot",
+            "harness",
+            "dashboard",
+            "hud",
+            "runtime",
+            "tick",
+            "patch-land",
+            "lease",
+        ] {
+            assert!(is_public(std::ffi::OsStr::new(advanced)));
+            assert!(
+                !front
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{advanced:<26} ")))
+            );
+        }
         let (code, help, _) = run(&["help".into()], missing);
         assert_eq!(code, 0);
-        assert!(help.ends_with(&front));
+        assert!(help.ends_with(front.as_bytes()));
         assert_eq!(run(&["list".into(), "bad".into()], missing).0, 2);
     }
 }
