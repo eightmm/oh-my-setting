@@ -1163,6 +1163,12 @@ fn migrate(
             }
         }
         r["schema"] = 1.into();
+        if r.get("provider").is_none()
+            && matches!(text(&r, "kind"), "review-outcome" | "review-verify")
+        {
+            // These receipts are produced by the owner, not a provider seat.
+            r["provider"] = "local".into();
+        }
         if r.get("event_id").is_none() {
             r["event_id"] = deterministic("evt_legacy_", &r, pos + 1)?.into();
         }
