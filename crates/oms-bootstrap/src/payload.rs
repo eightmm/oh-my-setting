@@ -369,6 +369,20 @@ mod tests {
         assert!(payload.companion("oms-supervisor").is_some());
         assert!(payload.companion("oms-mcp-peer-owner").is_none());
         assert!(payload.helper().is_some());
+        // Artifact hashes remain valid while the source contract changes.
+        write(&root.join("README.md"), b"new source", 0o644);
+        assert!(
+            load(&root).is_err(),
+            "the old inventory cannot attest new source"
+        );
+        let discovery = Discovery::from_source_root(&root).unwrap();
+        let digest = sum(b"new source");
+        let files = [(b"README.md".as_slice(), digest.as_str())];
+        assert!(
+            ValidatedPayload::load(&discovery, &SourceInventory::reviewed(&files))
+                .unwrap()
+                .is_some()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

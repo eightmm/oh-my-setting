@@ -259,6 +259,18 @@ pub(crate) fn stage(paths: &Paths, tx: &mut Transaction, flag: &AtomicBool) -> R
         verify(paths, flag)?;
         return Ok(());
     }
+    let release = build(paths, &revision, flag)?;
+    let cache = paths.source.join("target");
+    secure_dir(&cache)?;
+    secure_dir(&cache.join("oms-native"))?;
+    publish(&dir, &release, &revision, tx)?;
+    verify(paths, flag)?.recheck()
+}
+
+fn build(paths: &Paths, revision: &str, flag: &AtomicBool) -> Result<PathBuf> {
+    if r::git(&paths.source, &["rev-parse", "HEAD"], flag)? != revision {
+        return r::fail("source revision changed before build");
+    }
     let cargo = r::find("cargo", &paths.cwd)
         .ok_or_else(|| r::Error(2, "native payload missing and cargo unavailable".into()))?;
     let result = r::command(
@@ -298,16 +310,143 @@ pub(crate) fn stage(paths: &Paths, tx: &mut Transaction, flag: &AtomicBool) -> R
     if r::git(&paths.source, &["rev-parse", "HEAD"], flag)? != revision {
         return r::fail("source revision changed during build");
     }
-    let cache = paths.source.join("target");
-    secure_dir(&cache)?;
-    secure_dir(&cache.join("oms-native"))?;
-    publish(
-        &dir,
-        &paths.source.join("target/lifecycle-build/release"),
-        &revision,
-        tx,
-    )?;
-    verify(paths, flag)?.recheck()
+    Ok(paths.source.join("target/lifecycle-build/release"))
+}
+
+fn prepared(out: crate::Output, phase: &str) -> Result<()> {
+    if out.0 == 0 {
+        Ok(())
+    } else {
+        Err(r::Error(
+            out.0,
+            format!("incoming source {phase} failed; source output withheld"),
+        ))
+    }
+}
+
+/// A cold target is built and self-checked outside the live checkout. Only its
+/// frozen payload enters the outer journal; disposable paths never enter it.
+pub(crate) fn prepare_incoming(
+    paths: &Paths,
+    revision: &str,
+    tx: &mut Transaction,
+    services: &dyn crate::Services,
+    flag: &AtomicBool,
+) -> Result<bool> {
+    let destination = paths.source.join("target/oms-native").join(revision);
+    match fs::symlink_metadata(&destination) {
+        // Existing caches, including invalid ones, belong to strict Preflight.
+        Ok(_) => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    r::check(flag)?;
+    let original_head = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
+    let lease = services
+        .prepare_incoming_source(&paths.source, revision, flag)
+        .map_err(|out| {
+            r::Error(
+                if out.0 == 0 { 2 } else { out.0 },
+                "native incoming source preparation failed; installation unchanged".into(),
+            )
+        })?;
+    let result = (|| {
+        let source = r::physical(lease.source_root())?;
+        if source == paths.source {
+            return r::fail("incoming build must use a separate managed checkout");
+        }
+        let check = || -> Result<()> {
+            lease.recheck(flag).map_err(|out| {
+                r::Error(
+                    if out.0 == 0 { 2 } else { out.0 },
+                    "incoming source ownership changed".into(),
+                )
+            })?;
+            if r::physical(lease.source_root())? != source
+                || r::git(&source, &["rev-parse", "HEAD"], flag)? != revision
+                || !r::git(
+                    &source,
+                    &["status", "--porcelain", "--untracked-files=normal"],
+                    flag,
+                )?
+                .is_empty()
+            {
+                return r::fail("incoming source revision or tracked checkout changed");
+            }
+            Ok(())
+        };
+        check()?;
+        secure_dir(&source)?;
+        let mut scratch = paths.clone();
+        scratch.source = source.clone();
+        scratch.cwd = source.clone();
+        scratch.config = source.join("target/native-preparation");
+        let release = build(&scratch, revision, flag)?;
+        check()?;
+        let built = BuiltPayload::capture(&release, revision)?;
+        secure_dir(&source.join("target"))?;
+        secure_dir(&source.join("target/oms-native"))?;
+        let staged = source.join("target/oms-native").join(revision);
+        {
+            let mut local = Transaction::begin(&scratch)?;
+            built.publish_new(&staged, &mut local)?;
+            local.commit()?;
+        }
+        // The old updater's embedded inventory cannot attest changed source.
+        // `link --plan` validates with the incoming binary's own inventory.
+        built.recheck(&staged)?;
+        let out = r::command(
+            staged.join("oms"),
+            &[
+                "--oms-dispatch".into(),
+                source.as_os_str().to_owned(),
+                revision.into(),
+                "--".into(),
+                "link".into(),
+                "--plan".into(),
+            ],
+            &source,
+            None,
+            flag,
+            std::time::Duration::from_secs(120),
+        )?;
+        prepared(out, "self-validation")?;
+        check()?;
+        built.recheck(&staged)?;
+        if r::git(&paths.source, &["rev-parse", "HEAD"], flag)? != original_head
+            || !r::git(
+                &paths.source,
+                &["status", "--porcelain", "--untracked-files=normal"],
+                flag,
+            )?
+            .is_empty()
+        {
+            return r::fail("live checkout changed during incoming preparation");
+        }
+        secure_dir(&paths.source.join("target"))?;
+        secure_dir(&paths.source.join("target/oms-native"))?;
+        // Refuse a cache that appeared while the build was running.
+        match fs::symlink_metadata(&destination) {
+            Ok(_) => return r::fail("incoming target cache appeared during preparation"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        built.publish_new(&destination, tx)?;
+        Ok(true)
+    })();
+    let cleanup = lease.close(&AtomicBool::new(false));
+    match (result, cleanup.0) {
+        (Ok(value), 0) => Ok(value),
+        (Err(error), 0) => Err(error),
+        (Ok(_), _) => Err(r::Error(
+            75,
+            "incoming source cleanup unconfirmed; ownership record retained".into(),
+        )),
+        (Err(r::Error(code, message)), _) => Err(r::Error(
+            code,
+            format!("{message}; incoming source cleanup unconfirmed; ownership record retained"),
+        )),
+    }
 }
 
 /// Cargo output: `release/<name>` is a hard link to `deps/<name>-<hash>` and
@@ -345,27 +484,71 @@ fn secure_dir(path: &Path) -> Result<()> {
 
 /// Hash every built binary and commit them with the manifest in one journaled replace.
 fn publish(dir: &Path, release: &Path, revision: &str, tx: &mut Transaction) -> Result<()> {
-    let mut built = Vec::new();
-    for name in std::iter::once("oms").chain(BUILT) {
-        let path = release.join(name);
-        build_output(&path)?;
-        let raw = crate::transaction::external_read(&path)?;
-        built.push((name, r::hash(&raw), raw));
+    BuiltPayload::capture(release, revision)?.publish(dir, tx)
+}
+
+struct BuiltPayload {
+    built: Vec<(&'static str, String, Vec<u8>)>,
+    checksum: String,
+    manifest: Vec<u8>,
+}
+impl BuiltPayload {
+    fn capture(release: &Path, revision: &str) -> Result<Self> {
+        let mut built = Vec::new();
+        for name in std::iter::once("oms").chain(BUILT) {
+            let path = release.join(name);
+            build_output(&path)?;
+            let raw = crate::transaction::external_read(&path)?;
+            built.push((name, r::hash(&raw), raw));
+        }
+        let checksum = format!("{}\n", built[0].1);
+        let artifacts: serde_json::Map<String, serde_json::Value> = built
+            .iter()
+            .map(|(name, digest, _)| ((*name).to_owned(), digest.clone().into()))
+            .collect();
+        let row = serde_json::json!({"schema":1,"source_commit":revision,"artifacts":artifacts});
+        let manifest = r::bytes(&row)?;
+        Ok(Self {
+            built,
+            checksum,
+            manifest,
+        })
     }
-    let checksum = format!("{}\n", built[0].1);
-    let artifacts: serde_json::Map<String, serde_json::Value> = built
-        .iter()
-        .map(|(name, digest, _)| ((*name).to_owned(), digest.clone().into()))
-        .collect();
-    let row = serde_json::json!({"schema":1,"source_commit":revision,"artifacts":artifacts});
-    let manifest = r::bytes(&row)?;
-    let mut files: Vec<(&str, &[u8], u32)> = built
-        .iter()
-        .map(|(name, _, raw)| (*name, raw.as_slice(), 0o755))
-        .collect();
-    files.push(("oms.sha256", checksum.as_bytes(), 0o600));
-    files.push(("manifest.json", &manifest, 0o600));
-    tx.files(dir, &files)
+    fn files(&self) -> Vec<(&str, &[u8], u32)> {
+        let mut files: Vec<(&str, &[u8], u32)> = self
+            .built
+            .iter()
+            .map(|(name, _, raw)| (*name, raw.as_slice(), 0o755))
+            .collect();
+        files.push(("oms.sha256", self.checksum.as_bytes(), 0o600));
+        files.push(("manifest.json", &self.manifest, 0o600));
+        files
+    }
+    fn publish(&self, dir: &Path, tx: &mut Transaction) -> Result<()> {
+        tx.files(dir, &self.files())
+    }
+    fn publish_new(&self, dir: &Path, tx: &mut Transaction) -> Result<()> {
+        tx.create_files(dir, &self.files())
+    }
+    fn recheck(&self, dir: &Path) -> Result<()> {
+        let files = self.files();
+        for (name, body, _) in &files {
+            protected(
+                &dir.join(name),
+                *name != "manifest.json" && *name != "oms.sha256",
+            )?;
+            if r::read(&dir.join(name), 1024 * 1024 * 1024)? != *body {
+                return r::fail("incoming native payload changed during source validation");
+            }
+        }
+        for entry in fs::read_dir(dir)? {
+            let name = entry?.file_name();
+            if !files.iter().any(|(expected, _, _)| name == *expected) {
+                return r::fail("foreign incoming native payload content");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -455,6 +638,17 @@ mod tests {
         assert!(secure_dir(&root.join("file")).is_err());
         let mut tx = Transaction::begin(&paths).unwrap();
         publish(&dir, &release, &rev, &mut tx).unwrap();
+        let frozen = BuiltPayload::capture(&release, &rev).unwrap();
+        frozen.recheck(&dir).unwrap();
+        assert!(frozen.publish_new(&dir, &mut tx).is_err());
+        assert_eq!(fs::read(dir.join("oms")).unwrap(), b"oms");
+        fs::write(dir.join("oms"), b"changed").unwrap();
+        assert!(frozen.recheck(&dir).is_err());
+        fs::write(dir.join("oms"), b"oms").unwrap();
+        fs::write(dir.join("foreign"), b"foreign").unwrap();
+        assert!(frozen.recheck(&dir).is_err());
+        fs::remove_file(dir.join("foreign")).unwrap();
+        frozen.recheck(&dir).unwrap();
         let bin = release.join("oms-run-bounded-helper");
         // Missing, symlinked, world-writable and non-executable outputs fail before any write.
         let saved = fs::read(&bin).unwrap();

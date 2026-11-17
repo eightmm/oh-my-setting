@@ -15,6 +15,8 @@
 //! `install --star` has no native producer and is refused; and
 //! `incoming_lifecycle` needs the incoming revision already staged under
 //! `target/oms-native/<rev>/` (this adapter never builds it).
+#[path = "services_incoming.rs"]
+mod incoming;
 use crate::services_control::ControlServices;
 use oms_command_autonomy::receipt;
 use oms_command_hooks::HostServices as HookHostServices;
@@ -1563,8 +1565,17 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
         oms_command_hooks::run_with_services(name, &[], input, cwd, source, interrupted, &host)
     }
 
+    fn prepare_incoming_source(
+        &self,
+        source: &Path,
+        revision: &str,
+        interrupted: &AtomicBool,
+    ) -> Result<Box<dyn oms_command_lifecycle::IncomingSourceLease + '_>, Output> {
+        incoming::prepare(self, source, revision, interrupted)
+    }
+
     /// Preflight proves the incoming revision is already staged and dispatchable
-    /// before any Git mutation. Reconcile, Verify and RefreshTools run that
+    /// before live checkout mutation. Reconcile, Verify and RefreshTools run that
     /// checkout's own staged `--oms-dispatch` frontdoor to completion with
     /// `OMS_NATIVE_UPDATE_PARENT` in the child's environment only.
     fn incoming_lifecycle(

@@ -1,6 +1,15 @@
 use crate::Output;
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
+/// A parent-owned managed checkout for one exact incoming revision. A path or
+/// environment value alone cannot replace its marker and Git registration proof.
+pub trait IncomingSourceLease {
+    fn source_root(&self) -> &Path;
+    fn recheck(&self, interrupted: &AtomicBool) -> std::result::Result<(), Output>;
+    /// Explicit cleanup reports failure and preserves unproven ownership/work.
+    fn close(self: Box<Self>, interrupted: &AtomicBool) -> Output;
+}
+
 /// Native domains owned by the embedding dispatcher. Implementations must call
 /// native producers with their normal locks and authority checks, and must
 /// preserve cancellation. An unavailable service never counts as a clean sweep.
@@ -47,8 +56,21 @@ pub trait Services {
         unavailable("native hook host routing unavailable")
     }
 
-    /// Native incoming-checkout handoff. Preflight must prove the host can build
-    /// and dispatch the selected checkout before any Git mutation. Reconcile
+    /// Prepare an exact managed incoming checkout without changing the live
+    /// checkout, local refs or installed targets. Core owns build/publication.
+    fn prepare_incoming_source(
+        &self,
+        _source: &Path,
+        _revision: &str,
+        _interrupted: &AtomicBool,
+    ) -> std::result::Result<Box<dyn IncomingSourceLease + '_>, Output> {
+        Err(unavailable(
+            "native incoming source preparation unavailable",
+        ))
+    }
+
+    /// Native incoming-checkout handoff. Preflight proves the prepared payload
+    /// is dispatchable before live checkout/local-ref/install mutation. Reconcile
     /// validates that checkout's own payload and converges recorded components,
     /// returning its schema-2 install receipt as JSON. Verify runs its doctor.
     /// RefreshTools runs after the core transaction commits. Implementations

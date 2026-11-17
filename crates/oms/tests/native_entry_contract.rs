@@ -225,6 +225,43 @@ fn files(root: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>>
 }
 
 #[test]
+fn dispatch_availability_does_not_replace_incoming_source_proof() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let bin = f.tool_path();
+    for name in ["data", "home", "global", "config", "state", "cache"] {
+        std::fs::create_dir(f.0.join(name)).unwrap();
+        std::fs::set_permissions(f.0.join(name), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::set_permissions(&f.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let run = |args: &[&str]| {
+        f.private(&bin, "--oms-dispatch")
+            .env("XDG_CONFIG_HOME", f.0.join("config"))
+            .env("XDG_DATA_HOME", f.0.join("data"))
+            .env("XDG_STATE_HOME", f.0.join("state"))
+            .env("XDG_CACHE_HOME", f.0.join("cache"))
+            .env("OMS_INSTALL_RECEIPT", f.0.join("config/install.json"))
+            .env("TMPDIR", &f.0)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["list"]).status.success());
+    let before = files(&f.0.join("home"));
+    let out = run(&["link", "--plan"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("native payload/source proof failed"));
+    assert_eq!(files(&f.0.join("home")), before);
+    assert!(!f.0.join("config/install.json").exists());
+    assert!(files(&f.0.join("data")).is_empty());
+}
+
+#[test]
 fn public_entry_dispatches_without_python() {
     let f = Fixture::new();
     use std::os::unix::fs::PermissionsExt;

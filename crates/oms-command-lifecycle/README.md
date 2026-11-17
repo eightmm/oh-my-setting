@@ -82,8 +82,16 @@ embedding binary must use `run_with_services` and route the crate's owned comman
 names, including the private `agy-hook` adapter. Default methods return nonzero
 when their producer is unavailable.
 
-- `incoming_lifecycle`: `Preflight` proves incoming payload/build/dispatch
-  availability before checkout mutation; `Reconcile` invokes that checkout's
+- `prepare_incoming_source`: returns an exact parent-owned managed scratch lease
+  with marker, live owner generation and Git registration checks. A cold update
+  builds there with the pinned, locked, offline toolchain. The incoming binary's
+  `link --plan` verifies its own embedded source inventory before the frozen
+  payload is journaled into the original cache. Existing caches remain subject
+  to strict validation. Preparation preserves the live checkout, local refs and
+  installed files; explicit cleanup failure retains the ownership record and
+  refuses the update. Disposable paths never enter the outer recovery journal.
+- `incoming_lifecycle`: `Preflight` proves prepared payload/dispatch availability
+  before live checkout mutation; `Reconcile` invokes that checkout's
   native `--oms-dispatch` frontdoor to converge recorded components and returns a
   schema-2 receipt; `Verify` invokes its native doctor; `RefreshTools` runs after
   core commit. Child processes must finish before returning. The child receives

@@ -758,6 +758,8 @@ fn apply_update(
             flag,
         )?;
     }
+    let staged_incoming =
+        crate::payload::prepare_incoming(paths, &target, &mut tx, services, flag)?;
     gate(
         paths,
         options,
@@ -811,7 +813,9 @@ fn apply_update(
         let mut known = managed_paths(paths, &old)?;
         if old["native"]["revision"] != target {
             known.push(paths.data.join("libexec").join(&target));
-            known.push(paths.source.join("target/oms-native").join(&target));
+            if !staged_incoming {
+                known.push(paths.source.join("target/oms-native").join(&target));
+            }
         }
         let fresh = known
             .into_iter()
