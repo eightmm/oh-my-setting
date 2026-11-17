@@ -25,6 +25,9 @@ pub struct Completed {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub complete: bool,
+    /// Cleanup of the executor's supervision scope, not proof of bounded native
+    /// fanout. Missing execution acknowledgement stays unknown even with an exit code.
+    pub cleanup_complete: Option<bool>,
     pub elapsed: Duration,
 }
 pub trait Executor: Sync {
@@ -95,11 +98,13 @@ impl Executor for Native {
                         && result.output_complete()
                         && result.cleanup_complete()
                         && result.supervision_error.is_none();
+                    let cleanup_complete = Some(result.cleanup_complete());
                     return Ok(Completed {
                         code,
                         stdout: result.stdout.bytes,
                         stderr: result.stderr.map_or_else(Vec::new, |s| s.bytes),
                         complete,
+                        cleanup_complete,
                         elapsed: result.duration,
                     });
                 }

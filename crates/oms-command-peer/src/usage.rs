@@ -136,7 +136,13 @@ fn observation(provider: &str, raw: &[u8]) -> (Usage, Cost, Option<String>, bool
     }
     (usage, cost, session, reported)
 }
-pub(crate) fn finish(repo: &Path, mut receipt: Receipt, raw: &[u8], complete: bool) -> Result<()> {
+pub(crate) fn finish(
+    repo: &Path,
+    mut receipt: Receipt,
+    raw: &[u8],
+    complete: bool,
+    cleanup_complete: Option<bool>,
+) -> Result<()> {
     let (usage, cost, session, reported) = observation(&receipt.identity.provider, raw);
     receipt.revision = 1;
     receipt.phase = if complete && reported {
@@ -147,6 +153,7 @@ pub(crate) fn finish(repo: &Path, mut receipt: Receipt, raw: &[u8], complete: bo
     receipt.usage = usage;
     receipt.cost = cost;
     receipt.source_sha256 = Some(format!("{:x}", Sha256::digest(raw)));
+    receipt.cleanup_complete = cleanup_complete;
     if receipt.identity.provider == "codex" {
         if let Some(session_id) = session {
             if receipt

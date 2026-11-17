@@ -71,6 +71,9 @@ state root, otherwise the owner repository is used. No credential or raw
 provider output is copied into the receipt: only counts, known identities and
 the output digest are stored. A receipt publication failure stops continuation
 and leaves the registered liability for reconciliation.
+Schema-2 receipts separately retain the executor's native cleanup evidence;
+timeout or incomplete provider usage never manufactures zero spend. Missing
+execution acknowledgements retain unknown cleanup. Schema-1 history stays readable.
 Registration failure prevents that physical invocation. Completion-persistence
 failure stops automatic account overflow and model fallback, even when provider
 output is already available. Ordinary and budget-enforced calls share this

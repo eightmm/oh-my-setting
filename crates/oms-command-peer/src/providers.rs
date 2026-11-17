@@ -1997,7 +1997,7 @@ pub(crate) fn execute_env(
         let mut result = match result {
             Ok(result) => result,
             Err(error) => {
-                let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false);
+                let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false, None);
                 return Err(error);
             }
         };
@@ -2008,6 +2008,7 @@ pub(crate) fn execute_env(
             usage_receipt,
             &result.stdout,
             result.complete && terminal,
+            result.cleanup_complete,
         )
         .map_err(|error| {
             Error::new(
@@ -2361,6 +2362,7 @@ mod bridge_route_tests {
                 stdout: b"fixture answer\n".to_vec(),
                 stderr: Vec::new(),
                 complete: true,
+                cleanup_complete: Some(true),
                 elapsed: Duration::ZERO,
             })
         }
@@ -2399,6 +2401,7 @@ mod bridge_route_tests {
                                 stdout: vec![],
                                 stderr: vec![],
                                 complete: true,
+                                cleanup_complete: Some(true),
                                 elapsed: Duration::ZERO,
                             });
                         }
@@ -2415,7 +2418,7 @@ mod bridge_route_tests {
                         code:if n == 0 {1} else if n == 2 {124} else {0},
                         stdout:format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fixture answer\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":2,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":0}},\"total_cost_usd\":0.0000{}}}\n",n+1).into_bytes(),
                         stderr:if n == 0 {b"rate limit".to_vec()} else {vec![]},
-                        complete:n != 2,elapsed:Duration::ZERO,
+                        complete:n != 2,cleanup_complete:Some(true),elapsed:Duration::ZERO,
                     })
                     }
                 }
@@ -2475,6 +2478,7 @@ mod bridge_route_tests {
                 let calls = usage::load(&state).unwrap().calls;
                 assert_eq!(calls[2].receipt.phase, Phase::Unknown);
                 assert_eq!(calls[2].cost_microusd, Some(30));
+                assert_eq!(calls[2].receipt.cleanup_complete, Some(true));
             },
         );
     }

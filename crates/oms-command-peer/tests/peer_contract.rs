@@ -294,6 +294,7 @@ impl Executor for ProviderProbe {
             stdout: b"fixture answer\n".to_vec(),
             stderr: Vec::new(),
             complete: true,
+            cleanup_complete: Some(true),
             elapsed: Duration::ZERO,
         })
     }
@@ -1107,6 +1108,7 @@ fn review_classification_and_validation() {
                     stdout: self.answer.as_bytes().to_vec(),
                     stderr: Vec::new(),
                     complete: true,
+                    cleanup_complete: Some(true),
                     elapsed: Duration::ZERO,
                 })
             }
@@ -1826,6 +1828,7 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                         stdout: b"ok\n".to_vec(),
                         stderr: Vec::new(),
                         complete: true,
+                        cleanup_complete: Some(true),
                         elapsed: std::time::Duration::ZERO,
                     });
                 }

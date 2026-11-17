@@ -761,6 +761,7 @@ pub(crate) fn call(
             stdout: Vec::new(),
             stderr: error.message.into_bytes(),
             complete: false,
+            cleanup_complete: None,
             elapsed: std::time::Duration::ZERO,
         },
     };

@@ -73,7 +73,10 @@ the quarantine already exists. A mismatch at an existing quarantine refuses.
 
 `delete_orphans` returns `OrphanReport` and owns only `.oms/artifacts` regular,
 owned, single-link bodies. It preserves indexed/completion paths, output-digest,
-lock names and standard index/ignore names. It validates the kept snapshot
+the canonical panel-dispatch namespace, lock names and standard index/ignore
+names. Dispatch reservations and receipts belong to their native writers; age
+and an absent artifact-index row cannot settle their execution custody.
+It validates the kept snapshot
 under the lock and refuses uncertain receipts. Scans exceeding 65536 entries
 or depth 64 refuse before unlinking. Nonnegative grace is measured in seconds;
 zero allows immediate deletion. Dry runs report candidates without unlinking.
@@ -168,7 +171,7 @@ Reaching the ceiling or finding malformed history refuses further accounting
 and provider continuation. Deleting history would erase spend and unresolved
 liabilities, so storage failure must be reconciled before another call.
 
-Schema 1 records immutable `call_id`, `operation_id`, provider and any known
+Schema 2 records immutable `call_id`, `operation_id`, provider and any known
 selected-model/account/goal/task/attempt/run identities. `selected_model` names
 the selected route and makes no claim about an unreported served model.
 The store allocates `ordinal`
@@ -180,6 +183,15 @@ has integer `microusd`. Reported amounts identify `provider-reported` or
 `provider-estimate` provenance. Zero is accepted only as an explicitly reported
 amount. Decimal conversion uses integer arithmetic, rounding a sub-microUSD
 remainder upward. OMS never computes a rate-card price from tokens.
+
+The nullable `cleanup_complete` field carries separate native process-owner
+evidence. A timeout may have confirmed cleanup while usage remains unknown;
+final usage does not prove cleanup. Cleanup is limited to the executor's
+supervision scope and does not prove bounded native fanout. Pending registrations
+and schema-1 history retain null. Both schemas remain readable without rewriting
+historical rows.
+Once cleanup is confirmed, later usage corrections must preserve that fact.
+This field alone grants no budget, dispatch or publication authority.
 
 Repeated identical receipts are idempotent; changed data at the same revision
 refuses publication. A higher revision is an explicit correction, including a

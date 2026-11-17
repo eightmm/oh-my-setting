@@ -631,11 +631,13 @@ impl PeerProcessExecutor for CollabServices<'_> {
             && done.output_complete()
             && done.cleanup_complete()
             && done.supervision_error.is_none();
+        let cleanup_complete = Some(done.cleanup_complete());
         Ok(Completed {
             code: stop_code(&done),
             stdout: done.stdout.bytes,
             stderr: done.stderr.map_or_else(Vec::new, |s| s.bytes),
             complete,
+            cleanup_complete,
             elapsed: done.duration,
         })
     }
@@ -2554,6 +2556,7 @@ mod tests {
         );
         let done = invoke("sleep 30", Duration::from_millis(200)).expect("deadline");
         assert_eq!((done.code, done.complete), (124, false));
+        assert_eq!(done.cleanup_complete, Some(true));
         assert!(invoke("true", Duration::ZERO).is_err());
     }
 

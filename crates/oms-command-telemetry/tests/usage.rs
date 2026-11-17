@@ -31,6 +31,35 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let root = Temp::new();
     let stop = AtomicBool::new(false);
     let initial = usage::begin(&root.0, identity("call_one"), None, &stop).unwrap();
+    let raw = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let row = oms_context::parse_json(&raw).unwrap();
+    assert_eq!(
+        support::field(&row, "schema"),
+        &oms_context::Json::Number("2".into())
+    );
+    assert_eq!(
+        support::field(&row, "cleanup_complete"),
+        &oms_context::Json::Null
+    );
+    // Schema 1 remains readable with unknown cleanup, and identical recording
+    // preserves those historical bytes before schema-2 revisions are appended.
+    let mut legacy = oms_json::parse_strict(&raw).unwrap();
+    let oms_json::Value::Object(ref mut fields) = legacy else {
+        panic!("receipt object");
+    };
+    fields.remove(&oms_json::PyString::from("cleanup_complete"));
+    fields.insert("schema".into(), oms_json::Value::integer("1").unwrap());
+    let mut legacy = oms_json::session_call_key_json_bytes(&legacy).unwrap();
+    legacy.push(b'\n');
+    root.write(usage::RECEIPTS, &legacy);
+    assert_eq!(
+        usage::load(&root.0).unwrap().calls[0]
+            .receipt
+            .cleanup_complete,
+        None
+    );
+    assert!(!usage::record(&root.0, &initial, &stop).unwrap());
+    assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), legacy);
     assert_eq!(usage::load(&root.0).unwrap().calls[0].tokens, None);
     let mut partial = observe(initial.clone(), 2, 40, Cost::Unknown);
     partial.phase = Phase::Partial;
@@ -262,6 +291,7 @@ fn unknown_cost_and_interrupted_completion_remain_explicit() {
         let mut r = usage::begin(&root.0, identity(&format!("call_{n}")), None, &stop).unwrap();
         r = observe(r, 1, 9, cost);
         r.phase = Phase::Unknown;
+        r.cleanup_complete = [Some(true), Some(false), None][n];
         usage::record(&root.0, &r, &stop).unwrap();
     }
     let calls = usage::load(&root.0).unwrap().calls;
@@ -269,6 +299,33 @@ fn unknown_cost_and_interrupted_completion_remain_explicit() {
         calls
             .iter()
             .all(|c| c.cost_microusd.is_none() && c.receipt.phase == Phase::Unknown)
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|c| c.receipt.cleanup_complete)
+            .collect::<Vec<_>>(),
+        vec![Some(true), Some(false), None]
+    );
+    let before = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let mut correction = calls[0].receipt.clone();
+    correction.revision += 1;
+    correction.cleanup_complete = None;
+    assert!(usage::record(&root.0, &correction, &stop).is_err());
+    assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), before);
+    correction.cleanup_complete = Some(true);
+    correction.phase = Phase::Final;
+    correction.cost = Cost::Reported(1);
+    usage::record(&root.0, &correction, &stop).unwrap();
+    let mut known_usage = calls[1].receipt.clone();
+    known_usage.revision += 1;
+    known_usage.phase = Phase::Final;
+    usage::record(&root.0, &known_usage, &stop).unwrap();
+    assert_eq!(
+        usage::load(&root.0).unwrap().calls[1]
+            .receipt
+            .cleanup_complete,
+        Some(false)
     );
     let initial = usage::begin(&root.0, identity("call_interrupted"), None, &stop).unwrap();
     assert!(
@@ -283,6 +340,20 @@ fn unknown_cost_and_interrupted_completion_remain_explicit() {
         usage::load(&root.0).unwrap().calls[3].receipt.phase,
         Phase::Pending
     );
+    let report = root.call(&["--json"]);
+    assert_eq!(report.0, 0);
+    let report = oms_context::parse_json(&report.1).unwrap();
+    let lifetime = support::field(&report, "lifetime_provider_usage");
+    for (key, count) in [
+        ("cleanup_confirmed_calls", "1"),
+        ("cleanup_incomplete_calls", "1"),
+        ("cleanup_unknown_calls", "2"),
+    ] {
+        assert_eq!(
+            support::field(lifetime, key),
+            &oms_context::Json::Number(count.into())
+        );
+    }
 }
 #[test]
 fn decimal_microdollars_do_not_use_floating_point_or_unknown_as_zero() {
@@ -310,6 +381,13 @@ fn malformed_or_conflicting_receipt_history_refuses_accounting() {
     assert_ne!(text, duplicate);
     let conflicting_ordinal = text.replace("\"call_one\"", "\"call_two\"");
     let conflicting_revision = text.replace("\"pending\"", "\"unknown\"");
+    let unsupported = text.replace("\"schema\": 2", "\"schema\": 3");
+    let invalid_cleanup = text.replace("\"cleanup_complete\": null", "\"cleanup_complete\": 1");
+    let premature_cleanup =
+        text.replace("\"cleanup_complete\": null", "\"cleanup_complete\": true");
+    for modified in [&unsupported, &invalid_cleanup, &premature_cleanup] {
+        assert_ne!(modified, &text);
+    }
     assert_ne!(text, conflicting_ordinal);
     assert_ne!(text, conflicting_revision);
     let mut oversized = bytes[..bytes.len() - 1].to_vec();
@@ -322,6 +400,9 @@ fn malformed_or_conflicting_receipt_history_refuses_accounting() {
         format!("{text}{conflicting_revision}").into_bytes(),
         format!("{text}\n").into_bytes(),
         oversized,
+        unsupported.into_bytes(),
+        invalid_cleanup.into_bytes(),
+        premature_cleanup.into_bytes(),
     ] {
         root.write(usage::RECEIPTS, &malformed);
         assert!(usage::load(&root.0).is_err());
