@@ -18,6 +18,10 @@ Commands:
   telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
                  over the retained window (default 1000). This does not infer
                  semantic task success.
+                 When canonical provider receipts exist, JSON and ungrouped
+                 text also report lifetime observed usage independently of
+                 this artifact window. Unknown costs stay unknown; reported
+                 client estimates are labeled, never priced from tokens.
   --by KEY       telemetry: group routed operations by day, model, provider,
                  task, role or effort and print calls, provider-reported tokens,
                  complete input/cached/output reports and provider-reported

@@ -689,7 +689,22 @@ pub(crate) fn call(
     } else {
         None
     };
-    let result = providers::execute_with_fallback(
+    let mut usage_env = crate::usage::operation_env(&[])?;
+    if let Some(id) = &live_attempt {
+        usage_env.push(("OMS_ATTEMPT_ID".into(), id.into()));
+    }
+    if !args.get("task-id").is_empty() {
+        usage_env.push(("OMS_TASK_ID".into(), args.get("task-id").into()));
+    }
+    let operation_id = usage_env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "OMS_OPERATION_ID")
+        .unwrap()
+        .1
+        .to_string_lossy()
+        .into_owned();
+    let result = providers::execute_with_fallback_env(
         &mut route,
         args.get("fallback-model"),
         body.as_bytes(),
@@ -697,6 +712,7 @@ pub(crate) fn call(
         false,
         timeout(args, tool)?,
         repo,
+        &usage_env,
         context,
     );
     let mut result = match result {
@@ -797,6 +813,7 @@ pub(crate) fn call(
             ("artifact_id", crate::id("art_")?.into()),
             ("kind", tool.trim_start_matches("peer-").into()),
             ("run", run.into()),
+            ("operation_id", operation_id.into()),
             ("provider", target.provider.clone().into()),
             ("model", route.model.clone().into()),
             (

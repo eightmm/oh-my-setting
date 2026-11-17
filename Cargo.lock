@@ -811,6 +811,7 @@ dependencies = [
  "oms-command-plan",
  "oms-command-room",
  "oms-command-task",
+ "oms-command-telemetry",
  "oms-context",
  "oms-context-session",
  "oms-context-source",

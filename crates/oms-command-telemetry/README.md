@@ -149,3 +149,53 @@ retention and mechanical resolution against the public legacy oracle, and
 exercise batch atomicity, concurrent resolution, salvage and native import.
 JSON comparison ignores object ordering; telemetry's existing golden-byte
 fixtures continue to check its exact sorted output.
+
+## Lifetime provider usage receipts
+
+`store::usage::{begin, record, load}` owns `.oms/usage/receipts.jsonl` under the
+same confined path validation, writer lock, atomic replacement and durability
+rules as the artifact store. This ledger is independent of artifact retention:
+it is never silently pruned. The existing 256 MiB storage ceiling refuses a
+write rather than forgetting lifetime spend. A pending receipt is durable
+before each physical provider invocation; a crash can therefore leave an
+unresolved liability without needing a completed artifact.
+
+Schema 1 records immutable `call_id`, `operation_id`, provider and any known
+selected-model/account/goal/task/attempt/run identities. `selected_model` names
+the selected route and makes no claim about an unreported served model.
+The store allocates `ordinal`
+under its lock before invocation. Each `revision` is an absolute observation
+with phase `pending`, `partial`, `final` or `unknown`, nullable integer input,
+output, cache-read, cache-write and total tokens, and the cache inclusion basis.
+Cost is `reported`, `unpriced`, `subscription` or `unknown`; only reported cost
+has integer `microusd`. Reported amounts identify `provider-reported` or
+`provider-estimate` provenance. Zero is accepted only as an explicitly reported
+amount. Decimal conversion uses integer arithmetic, rounding a sub-microUSD
+remainder upward. OMS never computes a rate-card price from tokens.
+
+Repeated identical receipts are idempotent; changed data at the same revision
+refuses publication. A higher revision is an explicit correction, including a
+downward correction, and supersedes rather than adds to prior observations.
+Older revisions remain auditable without replacing newer evidence. Calls with
+conflicting immutable identity or ordinal refuse publication.
+
+Cumulative snapshots retain provider/account/session identity. Projection
+differences successive snapshots in invocation order, not completion order,
+and refuses to infer a per-call amount for a first-seen resumed session with an
+unknown baseline. A session may first be discovered from an unmeasured pending
+registration; later revisions cannot remove or change its scope or baseline.
+All monetary snapshots in one provider/account/session must use the same known
+cost provenance, including revisions: client estimates cannot be differenced
+against reported charges. These conflicts refuse publication before mutation.
+A decreasing cumulative total is exposed as a conflict and
+unknown delta. Overlapping starts of a known session with pending/partial
+usage refuse because the snapshot ordering would be uncertain. A later
+measured correction can reconcile an unknown completion; timeout, process exit
+and artifact resolution alone do not establish zero spend.
+
+The existing `artifact-index telemetry` JSON adds `lifetime_provider_usage`
+when receipts exist, and ungrouped text includes the same summary. This scope
+is explicitly independent of index retention, N and date filters. Known totals,
+unknown coverage, unsettled calls, conflicts and provider estimate counts stay
+separate. Legacy artifact metrics remain the advisory retained-window view;
+they are not imported as authoritative lifetime receipts.

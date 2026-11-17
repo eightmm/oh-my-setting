@@ -36,6 +36,7 @@ unavailable request remains unverified.
 | `storage` | Physical roots, descriptor-anchored reads, locks, atomic files and stable-inode logs |
 | `safety` | Shared scrubber, outbound refusal, redaction, hidden Unicode markers and untrusted quotation fences |
 | `providers` | Targets, families, configured models, account validation/ranking, bounded capacity fallback and native result envelopes |
+| `usage` | Canonical pre-invocation liabilities and provider usage receipts before native output decoding |
 | `peer` | `peer-ask`, `agent-call`, `consult`, `advise`, prompt artifacts, threads, debate and synthesis |
 | `delegate` | Detached worktrees, role defaults, patch capture before verification, repair and lifecycle review state |
 | `review` | Criterion coverage, singleton confirmation, incremental review outcomes, finding anchors/dispositions, pinned verification scopes and advisory security pass |
@@ -59,6 +60,29 @@ Gemini and Qwen. Other registered transports are refused. Read calls in a Git
 repository use a detached disposable worktree with the current tracked diff;
 their tracked content and untracked files are checked before successful return.
 This is an execution boundary check, not a whole-machine containment claim.
+
+Every physical invocation in `providers::execute_env` now registers and
+completes a canonical `oms-command-telemetry::store::usage` receipt. Account
+overflow, model fallback, interactive turns and repair calls each receive a
+distinct call identity while retaining their logical operation identity.
+Artifacts link that operation; known task and attempt identities travel in the
+explicit invocation environment. `OMS_STATE_REPO` selects the existing shared
+state root, otherwise the owner repository is used. No credential or raw
+provider output is copied into the receipt: only counts, known identities and
+the output digest are stored. A receipt publication failure stops continuation
+and leaves the registered liability for reconciliation.
+
+The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
+thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed
+sessions without a tracked baseline retain unknown per-call usage. This follows
+the [Codex exec event producer](https://github.com/openai/codex/blob/main/codex-rs/exec/src/event_processor_with_jsonl_output.rs),
+whose current implementation reads the thread total. Claude `result` usage is
+the total for one query, so assistant-step events are not added again.
+`total_cost_usd` is labeled a provider client estimate, following the
+[Claude SDK cost contract](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+Other transports, incomplete envelopes, timeouts and missing measurements
+retain explicit unknowns. Arbitrary answer text is not parsed as accounting
+evidence, and an absent amount is never replaced with zero.
 
 ## Installation data read
 
