@@ -1,4 +1,146 @@
 use oms_context_session::{inspect_session, inspect_timeline};
+use serde_json::{Value, json};
+
+fn async_attachment(session: Option<&str>, uuid: Option<&str>, context: Value) -> Value {
+    json!({
+        "type": "attachment", "sessionId": session, "uuid": uuid,
+        "attachment": {
+            "type": "async_hook_response", "hookName": "private-hook-name",
+            "response": {"hookSpecificOutput": {
+                "hookEventName": "PostToolUse", "additionalContext": context
+            }}
+        }
+    })
+}
+
+fn context_observations(rows: &[Value]) -> Value {
+    let data = rows
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    inspect_session(data.as_bytes(), 10, |_| None).unwrap()
+}
+
+#[test]
+fn async_context_requires_typed_attachments_and_never_returns_text() {
+    let mut spoof = async_attachment(None, Some("spoof"), json!("not-delivery"));
+    spoof["type"] = json!("user");
+    let value = context_observations(&[
+        json!({"message":{"content":"async_hook_response additionalContext fake"}}),
+        spoof,
+        async_attachment(
+            Some("session-a"),
+            Some("entry-a"),
+            json!("한글 private-context"),
+        ),
+        async_attachment(None, Some("entry-b"), json!("")),
+        async_attachment(None, Some("entry-c"), Value::Null),
+        async_attachment(None, Some("entry-d"), json!({"text":"invalid-context"})),
+    ]);
+    let observed = &value["async_context"];
+    assert_eq!(value["format"], "claude-jsonl");
+    assert_eq!(observed["status"], "observed");
+    assert_eq!(observed["response_rows"], 4);
+    assert_eq!(observed["context_rows"], 1);
+    assert_eq!(observed["recorded_bytes"], "한글 private-context".len());
+    assert_eq!(observed["identified_contexts"], 1);
+    assert_eq!(observed["without_context_rows"], 2);
+    assert_eq!(observed["invalid_context_rows"], 1);
+    assert_eq!(observed["producer_attribution"], "unknown");
+    assert_eq!(observed["model_use"], "unknown");
+    let output = value.to_string();
+    for withheld in [
+        "private-context",
+        "private-hook-name",
+        "entry-a",
+        "invalid-context",
+        "not-delivery",
+    ] {
+        assert!(!output.contains(withheld));
+    }
+    let empty = context_observations(&[]);
+    assert_eq!(empty["format"], "unknown");
+    assert_eq!(empty["async_context"]["status"], "not_observed");
+    assert_eq!(empty["async_context"]["model_use"], "unknown");
+}
+
+#[test]
+fn async_context_separates_replay_conflict_and_missing_identity() {
+    let repeated = async_attachment(Some("session-a"), Some("entry-a"), json!("observed"));
+    let value = context_observations(&[
+        repeated.clone(),
+        repeated,
+        async_attachment(Some("session-b"), Some("entry-a"), json!("observed")),
+        async_attachment(Some("session-a"), Some("entry-b"), json!("first")),
+        async_attachment(Some("session-a"), Some("entry-b"), json!("changed")),
+        async_attachment(Some("session-a"), None, json!("unidentified")),
+        async_attachment(Some("bad\nsession"), Some("entry-c"), json!("unidentified")),
+    ]);
+    let observed = &value["async_context"];
+    assert_eq!(observed["context_rows"], 7);
+    assert_eq!(observed["recorded_bytes"], 60);
+    assert_eq!(observed["identified_contexts"], 2);
+    assert_eq!(observed["identified_bytes"], 16);
+    assert_eq!(observed["duplicate_rows"], 1);
+    assert_eq!(observed["conflicting_identities"], 1);
+    assert_eq!(observed["unidentified_rows"], 2);
+    assert!(!value.to_string().contains("session-a"));
+}
+
+#[test]
+fn async_context_reused_identity_without_context_is_conflicting_in_either_order() {
+    for absent in [json!(""), Value::Null, json!({"text": "invalid"})] {
+        let valid = async_attachment(Some("session-a"), Some("reused"), json!("context"));
+        let changed = async_attachment(Some("session-a"), Some("reused"), absent);
+        for rows in [[valid.clone(), changed.clone()], [changed, valid]] {
+            let value = context_observations(&rows);
+            let observed = &value["async_context"];
+            assert_eq!(observed["context_rows"], 1);
+            assert_eq!(observed["identified_contexts"], 0);
+            assert_eq!(observed["identified_bytes"], 0);
+            assert_eq!(observed["conflicting_identities"], 1);
+        }
+    }
+}
+
+#[test]
+fn async_context_missing_session_cannot_double_identified_bytes() {
+    let named = async_attachment(Some("session-a"), Some("entry-a"), json!("context"));
+    let incomplete = async_attachment(None, Some("entry-a"), json!("context"));
+    for rows in [[named.clone(), incomplete.clone()], [incomplete, named]] {
+        let value = context_observations(&rows);
+        let observed = &value["async_context"];
+        assert_eq!(observed["context_rows"], 2);
+        assert_eq!(observed["recorded_bytes"], 14);
+        assert_eq!(observed["identified_contexts"], 1);
+        assert_eq!(observed["identified_bytes"], 7);
+        assert_eq!(observed["unidentified_rows"], 1);
+    }
+}
+
+#[test]
+fn async_context_reports_identity_limit_without_losing_existing_deduplication() {
+    let mut rows = (0..oms_context_session::MAX_KEYS + 2)
+        .map(|i| async_attachment(Some("session-a"), Some(&format!("entry-{i}")), json!("x")))
+        .collect::<Vec<_>>();
+    rows.push(rows[0].clone());
+    let value = context_observations(&rows);
+    let observed = &value["async_context"];
+    assert_eq!(observed["context_rows"], 4099);
+    assert_eq!(observed["identified_contexts"], 4096);
+    assert_eq!(observed["identified_bytes"], 4096);
+    assert_eq!(observed["identity_limit_rows"], 2);
+    assert_eq!(observed["duplicate_rows"], 1);
+    rows.push(async_attachment(
+        Some("session-a"),
+        Some("entry-0"),
+        Value::Null,
+    ));
+    let conflicted = context_observations(&rows);
+    assert_eq!(conflicted["async_context"]["identified_contexts"], 4095);
+    assert_eq!(conflicted["async_context"]["conflicting_identities"], 1);
+}
 
 #[test]
 fn transcript_projections() {
