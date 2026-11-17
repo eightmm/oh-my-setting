@@ -117,19 +117,44 @@ fn cancelled(interrupted: &AtomicBool) -> Result<(), StoreError> {
     }
 }
 fn acquire(target: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Guard, StoreError> {
+    acquire_before(target, interrupted, None)
+}
+fn before(interrupted: &AtomicBool, deadline: Option<Instant>) -> Result<(), StoreError> {
+    cancelled(interrupted)?;
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(StoreError::Lock(oms_lock::Error::Busy));
+    }
+    Ok(())
+}
+fn acquire_before(
+    target: &Path,
+    interrupted: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<oms_lock::Guard, StoreError> {
+    before(interrupted, deadline)?;
     let mut settings = oms_lock::Settings::from_env().map_err(StoreError::Lock)?;
     settings.mode = oms_lock::Mode::LegacyAuto;
-    let timeout = settings.timeout;
+    let timeout = deadline.map_or(settings.timeout, |deadline| {
+        settings
+            .timeout
+            .min(deadline.saturating_duration_since(Instant::now()))
+    });
+    if timeout.is_zero() {
+        return Err(StoreError::Lock(oms_lock::Error::Busy));
+    }
+    settings.timeout = timeout;
     let lock = oms_lock::Lock::for_file(target, settings).map_err(StoreError::Lock)?;
     let start = Instant::now();
     loop {
-        cancelled(interrupted)?;
+        before(interrupted, deadline)?;
         match lock.try_acquire() {
             Ok(guard) => return Ok(guard),
             Err(oms_lock::Error::Busy) if start.elapsed() < timeout => {
-                std::thread::sleep(
-                    Duration::from_millis(50).min(timeout.saturating_sub(start.elapsed())),
-                );
+                let remaining = timeout.saturating_sub(start.elapsed());
+                let remaining = deadline.map_or(remaining, |deadline| {
+                    remaining.min(deadline.saturating_duration_since(Instant::now()))
+                });
+                std::thread::sleep(Duration::from_millis(50).min(remaining));
             }
             Err(error) => return Err(StoreError::Lock(error)),
         }
@@ -159,9 +184,17 @@ pub fn ensure_oms_ignore(repo: &Path) -> Result<(), StoreError> {
     ensure_ignore(repo, &AtomicBool::new(false))
 }
 fn ensure_ignore(repo: &Path, interrupted: &AtomicBool) -> Result<(), StoreError> {
+    ensure_ignore_before(repo, interrupted, None)
+}
+fn ensure_ignore_before(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<(), StoreError> {
+    before(interrupted, deadline)?;
     let root = Root::open(repo)?;
     let path = root.physical_root().join(".oms/.gitignore");
-    let _guard = acquire(&path, interrupted)?;
+    let _guard = acquire_before(&path, interrupted, deadline)?;
     paths::validate(&root, &path, true)?;
     root.atomic_mutate(
         &path,
@@ -176,7 +209,7 @@ fn ensure_ignore(repo: &Path, interrupted: &AtomicBool) -> Result<(), StoreError
             ..MutationOptions::default()
         },
         |_| {
-            cancelled(interrupted)?;
+            before(interrupted, deadline)?;
             Ok::<_, StoreError>(b"*\n".to_vec())
         },
     )?;

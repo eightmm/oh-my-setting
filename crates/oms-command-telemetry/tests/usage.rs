@@ -378,6 +378,79 @@ fn dispatch_reservations_share_exact_flock_and_preserve_partial_publications() {
         foreign
     );
 }
+
+#[test]
+fn pending_admission_bounds_receipt_and_ignore_lock_waits() {
+    use oms_command_telemetry::store::{StoreError, canonical_index};
+    use oms_lock::{Lock, Mode, Settings};
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    usage::begin(&root.0, identity("call_initial"), None, &stop).unwrap();
+    for (index, relative) in [usage::RECEIPTS, ".oms/.gitignore"].into_iter().enumerate() {
+        let target = canonical_index(&root.0, Some(Path::new(relative)), false, false).unwrap();
+        let mut settings = Settings::from_env().unwrap();
+        settings.mode = Mode::LegacyAuto;
+        let lock = Lock::for_file(&target, settings).unwrap();
+        let held = lock.try_acquire().unwrap();
+        let old = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+        let started = Instant::now();
+        let identity = identity(&format!("call_blocked_{index}"));
+        let error = usage::begin_before(
+            &root.0,
+            identity.clone(),
+            None,
+            &stop,
+            started + Duration::from_millis(70),
+        )
+        .unwrap_err();
+        assert!(matches!(error, StoreError::Lock(oms_lock::Error::Busy)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a nested lock must not reset to the legacy 300s default"
+        );
+        assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), old);
+        drop(held);
+        let receipt = usage::begin_before(
+            &root.0,
+            identity,
+            None,
+            &stop,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt.ordinal,
+            index as u64 + 2,
+            "refused registration did not consume an ordinal"
+        );
+    }
+    let old = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    assert!(
+        usage::begin_before(
+            &root.0,
+            identity("call_expired"),
+            None,
+            &stop,
+            Instant::now()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        usage::begin_before(
+            &root.0,
+            identity("call_cancelled"),
+            None,
+            &AtomicBool::new(true),
+            Instant::now() + Duration::from_secs(2)
+        )
+        .unwrap_err()
+        .exit_code(),
+        130
+    );
+    assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), old);
+}
 #[test]
 fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let root = Temp::new();

@@ -190,6 +190,13 @@ The panel dispatch producer uses this shared writer and releases its guard befor
 calling external execution or room producers. This storage API supplies no
 resource policy or launch permit by itself.
 
+`store::usage::begin_before` accepts the admission request's monotonic deadline.
+Receipt and ignore-file lock acquisition share that deadline and retain their
+existing LegacyAuto lock namespaces. A refused lock wait or failed preparation
+check appends no receipt and consumes no ordinal. Filesystem persistence may finish
+after the deadline; the caller must recheck its launch fence before executing.
+Ordinary `begin` keeps the existing configured timeout contract.
+
 Each new registration or observation reads and validates the complete history,
 then atomically replaces the ledger with that history plus the new receipt.
 Work and replacement bytes therefore grow with ledger size. This bound includes

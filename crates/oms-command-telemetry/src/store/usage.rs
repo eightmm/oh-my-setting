@@ -505,12 +505,34 @@ pub fn begin(
     cumulative: Option<Cumulative>,
     interrupted: &AtomicBool,
 ) -> Result<Receipt, StoreError> {
+    begin_inner(repo, identity, cumulative, interrupted, None)
+}
+/// Shared admission bounds nested receipt/ignore lock waits by one monotonic
+/// deadline. Persistence may finish later; the caller must fence external launch.
+pub fn begin_before(
+    repo: &Path,
+    identity: Identity,
+    cumulative: Option<Cumulative>,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<Receipt, StoreError> {
+    begin_inner(repo, identity, cumulative, interrupted, Some(deadline))
+}
+fn begin_inner(
+    repo: &Path,
+    identity: Identity,
+    cumulative: Option<Cumulative>,
+    interrupted: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<Receipt, StoreError> {
+    before(interrupted, deadline)?;
     let root = Root::open(repo)?;
     let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
-    let _guard = acquire(&target, interrupted)?;
-    ensure_ignore(root.physical_root(), interrupted)?;
+    let _guard = acquire_before(&target, interrupted, deadline)?;
+    ensure_ignore_before(root.physical_root(), interrupted, deadline)?;
     let mut result = None;
     mutate(&root, &target, true, None, interrupted, |old| {
+        before(interrupted, deadline)?;
         let rows = current(&receipts(old)?)?;
         if rows.iter().any(|r| r.identity.call_id == identity.call_id) {
             return Err(invalid("usage call already exists"));
@@ -542,6 +564,7 @@ pub fn begin(
         validate(&receipt)?;
         let mut new = old.to_vec();
         new.extend(encode_receipt(&receipt)?);
+        before(interrupted, deadline)?;
         result = Some(receipt);
         Ok(new)
     })?;
