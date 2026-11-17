@@ -700,6 +700,11 @@ pub(super) trait ReadGraph {
             if !s(node, "summary").is_empty() {
                 row["summary"] = node["summary"].clone();
             }
+            for key in ["data_contract", "callable_contract"] {
+                if node["metadata"][key].is_object() {
+                    row[key] = node["metadata"][key].clone();
+                }
+            }
             symbols.push(row);
         }
         symbols.sort_by(|a, b| {

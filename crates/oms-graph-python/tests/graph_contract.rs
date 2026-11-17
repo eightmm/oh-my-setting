@@ -67,6 +67,13 @@ fn as_legacy_value(result: &ParseResult) -> Value {
     if let Some(map) = value.as_object_mut() {
         map.remove("syntax_valid");
     }
+    // Native declared-source contracts extend legacy metadata. Compare all
+    // legacy keys unchanged; the additive contracts have dedicated cases below.
+    for node in value["nodes"].as_array_mut().unwrap() {
+        let metadata = node["metadata"].as_object_mut().unwrap();
+        metadata.remove("data_contract");
+        metadata.remove("callable_contract");
+    }
     value
 }
 
@@ -99,12 +106,165 @@ fn matches_every_legacy_case_exactly() {
 #[test]
 fn output_is_deterministic_and_round_trips() {
     for case in legacy_cases() {
+        let old: ParseResult = serde_json::from_value(case["expected"].clone())
+            .expect("legacy metadata remains readable");
+        assert!(
+            old.nodes
+                .iter()
+                .all(|node| node.metadata.data_contract.is_none()
+                    && node.metadata.callable_contract.is_none())
+        );
         let (path, source) = (text_of(&case, "path"), text_of(&case, "source"));
         let first = parse_json(&path, &source, "digest");
         assert_eq!(first, parse_json(&path, &source, "digest"), "{path}");
         let decoded: ParseResult = serde_json::from_str(&first).expect("round trip");
         assert_eq!(decoded, parse(&path, &source, "digest"), "{path}");
     }
+}
+
+#[test]
+fn declared_class_contracts_keep_kinds_fields_and_provenance() {
+    let source = "@dataclasses.dataclass(frozen=True)\nclass Batch:\n    atoms: list[float]\n    count: int = 0\n    raw = 3\n    def method(self):\n        local: str\nclass Record(typing.NamedTuple):\n    label: str\nclass Options(typing.TypedDict):\n    enabled: bool\nclass Config(pydantic.BaseModel):\n    width: int\nclass Network(torch.nn.Module):\n    pass\nclass Indirect(Config):\n    depth: int\nclass Aliased(ModelAlias):\n    value: 'Tensor[B, N]'\nclass NotAModel(FakeBaseModel):\n    value: int\n";
+    let value = as_value(&parse("pkg\\contracts.py", source, "source-hash"));
+    let class = |name| {
+        value["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["name"] == name)
+            .unwrap()["metadata"]["data_contract"]
+            .clone()
+    };
+    assert_eq!(
+        class("Batch"),
+        json!({
+            "basis":"declared_source", "class_kind":"dataclass",
+            "classification":"direct_marker_spelling_only", "bases":[],
+            "decorators":["dataclasses.dataclass"],
+            "fields":[
+                {"name":"atoms","annotation":"list[float]","line":3,"has_default":false},
+                {"name":"count","annotation":"int","line":4,"has_default":true}
+            ],
+            "evidence":{"path":"pkg/contracts.py","source_digest":"source-hash","line":2}
+        })
+    );
+    for (name, kind) in [
+        ("Record", "namedtuple"),
+        ("Options", "typeddict"),
+        ("Config", "pydantic"),
+        ("Network", "torch_module"),
+        ("Indirect", "unknown"),
+        ("Aliased", "unknown"),
+        ("NotAModel", "unknown"),
+    ] {
+        assert_eq!(class(name)["class_kind"], kind, "{name}");
+    }
+    assert_eq!(
+        class("Aliased")["fields"][0]["annotation"],
+        "'Tensor[B, N]'"
+    );
+    assert_eq!(class("Network")["fields"], json!([]));
+    assert_eq!(class("Indirect")["bases"], json!(["Config"]));
+    // Function-form factories and comments never become inferred contracts.
+    let factories = parse(
+        "m.py",
+        "Record = NamedTuple('Record', [('x', int)])\n# (B, N, D)\n",
+        "d",
+    );
+    assert!(
+        factories
+            .nodes
+            .iter()
+            .all(|node| node.metadata.data_contract.is_none())
+    );
+}
+
+#[test]
+fn annotated_forward_contract_preserves_all_parameter_kinds_without_shape_inference() {
+    let source = "class Model(nn.Module):\n    async def forward(self, x: 'Tensor', /, y: int = 1, *parts: float, mask: bool, scale=1, **extras: str) -> tuple[int, ...]:\n        # (B, N, D)\n        return x\n";
+    let value = as_value(&parse("model.py", source, "hash"));
+    let contract = &value["nodes"][2]["metadata"]["callable_contract"];
+    assert_eq!(
+        contract,
+        &json!({
+            "basis":"declared_source", "returns":"tuple[int, ...]",
+            "parameters":[
+                {"name":"self","kind":"positional_only","annotation":null,"line":2,"has_default":false},
+                {"name":"x","kind":"positional_only","annotation":"'Tensor'","line":2,"has_default":false},
+                {"name":"y","kind":"positional_or_keyword","annotation":"int","line":2,"has_default":true},
+                {"name":"parts","kind":"var_positional","annotation":"float","line":2,"has_default":false},
+                {"name":"mask","kind":"keyword_only","annotation":"bool","line":2,"has_default":false},
+                {"name":"scale","kind":"keyword_only","annotation":null,"line":2,"has_default":true},
+                {"name":"extras","kind":"var_keyword","annotation":"str","line":2,"has_default":false}
+            ],
+            "evidence":{"path":"model.py","source_digest":"hash","line":2}
+        })
+    );
+    assert!(contract.get("shapes").is_none());
+    let plain = parse("m.py", "def f(x):\n    return x\n", "d");
+    assert!(plain.nodes[1].metadata.callable_contract.is_none());
+    let function = parse("m.py", "def f(x: int) -> str:\n    return str(x)\n", "d");
+    assert_eq!(
+        function.nodes[1]
+            .metadata
+            .callable_contract
+            .as_ref()
+            .unwrap()
+            .returns
+            .as_deref(),
+        Some("str")
+    );
+}
+
+#[test]
+fn declared_contract_text_withholds_sensitive_and_oversized_expressions() {
+    let private_path = ["/usr", "/private", "/payload"].concat();
+    let credential = ["sk-", "abcdefghijklmnop"].concat();
+    // Only decoded AST strings reveal these escaped paths and token prefixes.
+    let escaped_path = "'\\u002fusr\\u002fprivate\\u002fpayload'";
+    let escaped_credential = ["'\\x73k-", "abcdefghijklmnop'"].concat();
+    let long = format!("Literal[{:?}]", "a".repeat(1100));
+    for annotation in [
+        format!("Literal[{private_path:?}]"),
+        format!("Annotated[int, {credential:?}]"),
+        format!("Literal[{escaped_path}]"),
+        format!("Literal[{escaped_credential}]"),
+        format!("Literal[b{escaped_credential}]"),
+        format!("Literal[{:?} {:?}]", "sk-", "abcdefghijklmnop"),
+        long.clone(),
+    ] {
+        let source = format!(
+            "class C(factory({annotation})):\n    value: {annotation}\ndef f(x: {annotation}) -> {annotation}:\n    pass\n"
+        );
+        let value = as_value(&parse("m.py", &source, "d"));
+        let expected = if annotation == long {
+            "[omitted: declaration exceeds 1024 bytes]"
+        } else {
+            "[redacted: sensitive declaration]"
+        };
+        let data = &value["nodes"][1]["metadata"]["data_contract"];
+        let callable = &value["nodes"][2]["metadata"]["callable_contract"];
+        assert_eq!(data["fields"][0]["annotation"], expected);
+        assert_eq!(data["bases"][0], expected);
+        assert_eq!(callable["parameters"][0]["annotation"], expected);
+        assert_eq!(callable["returns"], expected);
+        let output = value.to_string();
+        assert!(!output.contains(&private_path));
+        assert!(!output.contains(&credential));
+        assert!(!output.contains(&"a".repeat(1100)));
+    }
+    let dynamic = parse("m.py", "def f(x: f'{T}'):\n    pass\n", "d");
+    assert_eq!(
+        dynamic.nodes[1]
+            .metadata
+            .callable_contract
+            .as_ref()
+            .unwrap()
+            .parameters[0]
+            .annotation
+            .as_deref(),
+        Some("[omitted: dynamic string declaration]")
+    );
 }
 
 #[test]

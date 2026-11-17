@@ -17,9 +17,14 @@ use ruff_text_size::{Ranged, TextSize};
 
 use crate::LANGUAGE;
 use crate::literal::doc_units;
-use crate::model::{Edge, Evidence, Metadata, Node, ParseResult, Reference};
+use crate::model::{
+    CallableContract, DataContract, DeclaredField, DeclaredParameter, Edge, Evidence, Metadata,
+    Node, ParseResult, Reference,
+};
 use crate::scan::exceeds_cpython_limits;
-use crate::text::compact_units;
+use crate::text::{compact_units, sensitive_text};
+
+const DECLARATION_MAX_BYTES: usize = 1024;
 
 /// `dir(builtins)` of CPython 3.12 with `site` loaded, as the legacy parser saw it.
 const BUILTIN_NAMES: &[&str] = &[
@@ -849,6 +854,199 @@ impl<'a> Extractor<'a> {
         self.line(end.checked_sub(TextSize::new(1)).unwrap_or(end))
     }
 
+    fn annotation(&self, expr: &Expr) -> String {
+        let source = &self.text[usize::from(expr.start())..usize::from(expr.end())];
+        if source.len() > DECLARATION_MAX_BYTES {
+            return "[omitted: declaration exceeds 1024 bytes]".to_owned();
+        }
+        // Raw spans alone miss escaped/implicitly concatenated literals. Ruff
+        // provides their decoded value without evaluating Python expressions.
+        let mut sensitive = sensitive_text(source);
+        let mut dynamic_string = false;
+        walk_all(Item::Expr(expr), &mut |item| match item {
+            Item::Expr(Expr::StringLiteral(literal)) => {
+                sensitive |= sensitive_text(literal.value.to_str());
+            }
+            Item::Expr(Expr::BytesLiteral(literal)) => {
+                let bytes: Vec<u8> = literal.value.bytes().collect();
+                sensitive |= sensitive_text(&String::from_utf8_lossy(&bytes));
+            }
+            Item::Expr(Expr::FString(_) | Expr::TString(_)) => dynamic_string = true,
+            _ => {}
+        });
+        if sensitive {
+            "[redacted: sensitive declaration]".to_owned()
+        } else if dynamic_string {
+            "[omitted: dynamic string declaration]".to_owned()
+        } else {
+            source.to_owned()
+        }
+    }
+
+    fn declaration_evidence(&self, line: u64) -> Evidence {
+        Evidence {
+            path: normalized(self.path),
+            source_digest: self.digest.to_owned(),
+            line: Some(line),
+        }
+    }
+
+    fn data_contract(
+        &self,
+        node: &ruff_python_ast::StmtClassDef,
+        line: u64,
+    ) -> Option<DataContract> {
+        let bases: Vec<String> = node
+            .arguments
+            .as_ref()
+            .map(|args| args.args.iter().map(|base| self.annotation(base)).collect())
+            .unwrap_or_default();
+        let decorators: Vec<String> = node
+            .decorator_list
+            .iter()
+            .map(|decorator| {
+                let expr = match &decorator.expression {
+                    Expr::Call(call) => &*call.func,
+                    expr => expr,
+                };
+                dotted_name(expr)
+            })
+            .filter(|name| !name.is_empty())
+            .collect();
+        // These are spelling-based markers, never a claim that an import or
+        // an object's runtime identity was resolved. Keep exact matches: e.g.
+        // `NotABaseModel` and unrelated `*Module` classes are not evidence.
+        let has = |names: &[String], markers: &[&str]| {
+            names.iter().any(|name| markers.contains(&name.as_str()))
+        };
+        let class_kind = if has(
+            &decorators,
+            &[
+                "dataclass",
+                "dataclasses.dataclass",
+                "pydantic.dataclass",
+                "pydantic.dataclasses.dataclass",
+            ],
+        ) {
+            "dataclass"
+        } else if has(&bases, &["BaseModel", "pydantic.BaseModel"]) {
+            "pydantic"
+        } else if has(
+            &bases,
+            &[
+                "TypedDict",
+                "typing.TypedDict",
+                "typing_extensions.TypedDict",
+            ],
+        ) {
+            "typeddict"
+        } else if has(
+            &bases,
+            &[
+                "NamedTuple",
+                "typing.NamedTuple",
+                "typing_extensions.NamedTuple",
+            ],
+        ) {
+            "namedtuple"
+        } else if has(&bases, &["nn.Module", "torch.nn.Module"]) {
+            "torch_module"
+        } else {
+            "unknown"
+        };
+        let fields: Vec<DeclaredField> = node
+            .body
+            .iter()
+            .filter_map(|statement| {
+                let Stmt::AnnAssign(field) = statement else {
+                    return None;
+                };
+                let Expr::Name(name) = &*field.target else {
+                    return None;
+                };
+                Some(DeclaredField {
+                    name: name.id.to_string(),
+                    annotation: self.annotation(&field.annotation),
+                    line: self.line(field.start()),
+                    has_default: field.value.is_some(),
+                })
+            })
+            .collect();
+        if class_kind == "unknown" && fields.is_empty() {
+            return None;
+        }
+        Some(DataContract {
+            basis: "declared_source".to_owned(),
+            class_kind: class_kind.to_owned(),
+            classification: "direct_marker_spelling_only".to_owned(),
+            bases,
+            decorators,
+            fields,
+            evidence: self.declaration_evidence(line),
+        })
+    }
+
+    fn callable_contract(
+        &self,
+        node: &ruff_python_ast::StmtFunctionDef,
+        line: u64,
+    ) -> Option<CallableContract> {
+        let mut parameters = Vec::new();
+        let mut push = |parameter: &Parameter, kind: &str, has_default| {
+            parameters.push(DeclaredParameter {
+                name: parameter.name.to_string(),
+                kind: kind.to_owned(),
+                annotation: parameter
+                    .annotation
+                    .as_ref()
+                    .map(|expr| self.annotation(expr)),
+                line: self.line(parameter.start()),
+                has_default,
+            });
+        };
+        for parameter in &node.parameters.posonlyargs {
+            push(
+                &parameter.parameter,
+                "positional_only",
+                parameter.default.is_some(),
+            );
+        }
+        for parameter in &node.parameters.args {
+            push(
+                &parameter.parameter,
+                "positional_or_keyword",
+                parameter.default.is_some(),
+            );
+        }
+        if let Some(parameter) = &node.parameters.vararg {
+            push(parameter, "var_positional", false);
+        }
+        for parameter in &node.parameters.kwonlyargs {
+            push(
+                &parameter.parameter,
+                "keyword_only",
+                parameter.default.is_some(),
+            );
+        }
+        if let Some(parameter) = &node.parameters.kwarg {
+            push(parameter, "var_keyword", false);
+        }
+        let returns = node.returns.as_ref().map(|expr| self.annotation(expr));
+        if returns.is_none()
+            && parameters
+                .iter()
+                .all(|parameter| parameter.annotation.is_none())
+        {
+            return None;
+        }
+        Some(CallableContract {
+            basis: "declared_source".to_owned(),
+            parameters,
+            returns,
+            evidence: self.declaration_evidence(line),
+        })
+    }
+
     fn source(&self) -> String {
         if self.symbol.is_empty() {
             self.file_id.clone()
@@ -924,6 +1122,7 @@ impl<'a> Extractor<'a> {
                 end_line: Some(end_line),
                 qualname: Some(qualname.clone()),
                 line: Some(line),
+                ..Metadata::default()
             },
         });
         let parent = if kind == "method" {
@@ -1040,6 +1239,8 @@ impl<'a> Extractor<'a> {
             self.end_line(node.end()),
             &node.body,
         );
+        let contract = self.data_contract(node, line);
+        self.result.nodes.last_mut().unwrap().metadata.data_contract = contract;
         for decorator in &node.decorator_list {
             self.visit(Item::Expr(&decorator.expression));
         }
@@ -1100,6 +1301,13 @@ impl<'a> Extractor<'a> {
             self.end_line(node.end()),
             &node.body,
         );
+        let contract = self.callable_contract(node, line);
+        self.result
+            .nodes
+            .last_mut()
+            .unwrap()
+            .metadata
+            .callable_contract = contract;
         for decorator in &node.decorator_list {
             self.visit(Item::Expr(&decorator.expression));
         }

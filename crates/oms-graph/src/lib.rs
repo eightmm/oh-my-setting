@@ -27,7 +27,7 @@ pub enum Selection {
 impl Selection {
     pub fn language_version(self) -> Option<(&'static str, u32)> {
         match self {
-            Self::Python => Some(("python", 6)),
+            Self::Python => Some(("python", oms_graph_python::VERSION)),
             Self::Shell => Some(("shell", 8)),
             Self::Markdown => Some(("markdown", 2)),
             Self::Config => Some(("config", 1)),

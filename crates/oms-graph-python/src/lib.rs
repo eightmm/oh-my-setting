@@ -55,6 +55,11 @@
 //! source yields only the module node and its `contains` edge, as the legacy
 //! parser does.
 //!
+//! Symbol metadata additionally exposes declared class fields and annotated
+//! callable contracts. These preserve source text and provenance, never
+//! runtime type/shape validation. Class kinds are direct marker spellings;
+//! imports, aliases and inherited fields are not resolved.
+//!
 //! Grammar: Ruff parses with target version Python 3.12 (PEP 701 f-strings,
 //! PEP 695 generics), the baseline whose output is matched exactly. Newer
 //! syntax Ruff understands (3.13 type-parameter defaults, 3.14 t-strings,
@@ -82,13 +87,16 @@ mod text;
 
 use std::fmt;
 
-pub use model::{Edge, Evidence, Metadata, Node, ParseResult, Reference};
+pub use model::{
+    CallableContract, DataContract, DeclaredField, DeclaredParameter, Edge, Evidence, Metadata,
+    Node, ParseResult, Reference,
+};
 pub use protocol::{MAX_RESPONSE_BYTES, MAX_SOURCE_BYTES};
 pub use session::{CancelFlag, Options, Parser, Session};
 pub use text::{compact_summary, sensitive_text};
 
 /// Parser version recorded by the graph builder; bump with any output change.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 pub const LANGUAGE: &str = "python";
 pub const EXTENSIONS: &[&str] = &[".py"];
 /// The graph builder's default source cap.

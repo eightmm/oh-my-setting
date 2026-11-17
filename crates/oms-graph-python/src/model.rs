@@ -1,5 +1,5 @@
-//! Serialized parse result, shaped exactly like the dictionaries the Python
-//! parsers emit (`parsers/base.py`, `model.py`): absent optional keys stay
+//! Serialized parse result, extending the dictionaries the Python parsers
+//! emit (`parsers/base.py`, `model.py`): absent optional keys stay
 //! absent, `summary` and `crux` are always present and may be null.
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,48 @@ pub struct Metadata {
     pub qualname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_contract: Option<DataContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callable_contract: Option<CallableContract>,
+}
+
+/// Source declarations only: no import resolution, inheritance expansion,
+/// runtime validation, or tensor shape inference is performed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DataContract {
+    pub basis: String,
+    pub class_kind: String,
+    pub classification: String,
+    pub bases: Vec<String>,
+    pub decorators: Vec<String>,
+    pub fields: Vec<DeclaredField>,
+    pub evidence: Evidence,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeclaredField {
+    pub name: String,
+    pub annotation: String,
+    pub line: u64,
+    pub has_default: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CallableContract {
+    pub basis: String,
+    pub parameters: Vec<DeclaredParameter>,
+    pub returns: Option<String>,
+    pub evidence: Evidence,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeclaredParameter {
+    pub name: String,
+    pub kind: String,
+    pub annotation: Option<String>,
+    pub line: u64,
+    pub has_default: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

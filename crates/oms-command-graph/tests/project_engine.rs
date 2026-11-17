@@ -200,6 +200,21 @@ fn sqlite_queries_match_graph_and_fall_back_without_sidecars() {
     f.build();
     let mut payload = project::load(&f.state()).unwrap();
     let db = rusqlite::Connection::open(f.state().join("index.sqlite3")).unwrap();
+    // Keep additive source contracts intact in both query backends. The
+    // extraction/annotation semantics are exercised by graph-python's cases.
+    let contract = json!({"basis":"declared_source","parameters":[{"name":"record","kind":"positional_or_keyword","annotation":"Record","line":2,"has_default":false}],"returns":"bool","evidence":{"path":"lib.sh","source_digest":"fixture","line":2}});
+    let symbol = payload["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "symbol:lib.sh::parseRecord")
+        .unwrap();
+    symbol["metadata"]["callable_contract"] = contract.clone();
+    db.execute(
+        "UPDATE nodes SET data=?1 WHERE id=?2",
+        rusqlite::params![symbol.to_string(), "symbol:lib.sh::parseRecord"],
+    )
+    .unwrap();
     for (source, target, relation, confidence) in [
         (
             "symbol:lib.sh::parse_again",
@@ -232,6 +247,10 @@ fn sqlite_queries_match_graph_and_fall_back_without_sidecars() {
     drop(db);
     fs::write(f.state().join("graph.json"), payload.to_string()).unwrap();
     let graph = f.graph();
+    assert_eq!(
+        graph.file_api("lib.sh", 500).unwrap()["symbols"][0]["callable_contract"],
+        contract
+    );
     let cancel = AtomicBool::new(false);
     let mut cases = vec![];
     for name in [
