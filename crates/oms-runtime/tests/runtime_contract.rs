@@ -72,7 +72,15 @@ fn child_test(name: &str) -> bool {
     if std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1") {
         assert_eq!(f.run(&["profile", "install", "core"], false).code, 2);
     }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
+    let status = std::process::Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "umask 077; exec \"$@\"",
+            "--",
+        ])
+        .arg(std::env::current_exe().unwrap())
         .args(["--exact", name])
         .env_remove("OMS_HARNESS_CHILD")
         .env_remove("OMS_HARNESS_DELEGATE_DEPTH")

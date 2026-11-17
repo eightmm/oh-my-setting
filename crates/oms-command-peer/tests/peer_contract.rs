@@ -28,7 +28,13 @@ fn isolated(name: &str, body: impl FnOnce()) {
     // Create private fixtures without inheriting a shared-host umask.
     let mut command = Command::new("bash");
     let output = clean_env_child(&mut command)
-        .args(["--noprofile", "--norc", "-c", "umask 077; exec \"$@\"", "--"])
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "umask 077; exec \"$@\"",
+            "--",
+        ])
         .arg(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture"])
         .env("HOME", &home.0)
