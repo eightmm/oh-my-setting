@@ -321,6 +321,11 @@ pub(crate) fn dispatch(
                             .map(|s| format!(" — {s}"))
                             .unwrap_or_default()
                     ));
+                    for key in ["data_contract", "callable_contract"] {
+                        if row[key].is_object() {
+                            text.push_str(&format!("  {key} (declared source): {}\n", row[key]));
+                        }
+                    }
                 }
                 result
             }

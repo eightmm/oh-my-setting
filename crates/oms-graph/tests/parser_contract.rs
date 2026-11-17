@@ -21,7 +21,11 @@ impl Parser for Fake {
 #[test]
 fn selection_and_config() {
     for (name, selection, version) in [
-        ("x.PY", Selection::Python, Some(("python", 6))),
+        (
+            "x.PY",
+            Selection::Python,
+            Some(("python", oms_graph_python::VERSION)),
+        ),
         ("x.BASH", Selection::Shell, Some(("shell", 8))),
         ("x.sh", Selection::Shell, Some(("shell", 8))),
         ("x.MARKDOWN", Selection::Markdown, Some(("markdown", 2))),
