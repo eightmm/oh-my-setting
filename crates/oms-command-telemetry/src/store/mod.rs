@@ -5,6 +5,7 @@
 //! A publication-phase storage error requires reconciliation before retrying.
 #[path = "../actions.rs"]
 pub(crate) mod actions;
+pub mod budget;
 mod paths;
 mod producer;
 mod recovery;

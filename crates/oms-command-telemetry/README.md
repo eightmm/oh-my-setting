@@ -163,6 +163,20 @@ write rather than forgetting lifetime spend. A pending receipt is durable
 before each physical provider invocation; a crash can therefore leave an
 unresolved liability without needing a completed artifact.
 
+`store::budget` projects those receipts with canonical logical operations and
+outstanding physical intents. A matching call/operation identity is counted
+once, including an intent whose pending receipt was never published. The first
+physical claim replaces its logical escrow; a retry adds its own liability.
+Unknown dimensions retain the per-call floor after operation settlement, while
+later measured corrections replace earlier amounts. Proven pre-invocation
+refusal releases a no-call escrow only when no physical intent or receipt exists.
+The candidate check compares the complete after-projection with explicit caps.
+Campaign admission reuses this calculation and preserves its existing logical
+call limits and output fields. This API performs no writes and grants no launch
+or cleanup authority; callers must bind snapshots and serialize admission through
+their canonical reservation writer. Native descendant coverage and resource
+reservations require separate execution evidence.
+
 Each new registration or observation reads and validates the complete history,
 then atomically replaces the ledger with that history plus the new receipt.
 Work and replacement bytes therefore grow with ledger size. This bound includes

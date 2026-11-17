@@ -1,4 +1,7 @@
 mod support;
+use oms_command_telemetry::store::budget::{
+    self, Limit, Operation, OperationState, PhysicalClaim, Policy,
+};
 use oms_command_telemetry::store::usage::{
     self, Cost, Cumulative, Identity, Phase, Receipt, Usage,
 };
@@ -25,6 +28,215 @@ fn observe(mut receipt: Receipt, revision: u64, tokens: u64, cost: Cost) -> Rece
     };
     receipt.cost = cost;
     receipt
+}
+
+#[test]
+fn physical_candidates_replace_escrow_and_join_durable_receipts() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let policy = Policy {
+        tokens: Some(Limit {
+            max: 100,
+            per_call: 60,
+        }),
+        cost_microusd: Some(Limit {
+            max: 100,
+            per_call: 60,
+        }),
+    };
+    let operations = [Operation {
+        id: "op_one",
+        state: OperationState::Active,
+    }];
+    let first = PhysicalClaim {
+        call_id: "call_first",
+        operation_id: "op_one",
+    };
+    let retry = PhysicalClaim {
+        call_id: "call_retry",
+        operation_id: "op_one",
+    };
+    let empty = usage::Projection::default();
+    let logical = budget::project(&policy, &empty, &operations, &[]).unwrap();
+    assert_eq!(logical.tokens.committed, 60);
+    assert!(policy.admit_next_logical(logical.commitment()).is_err());
+    let admitted = budget::admit_candidate(&policy, &empty, &operations, &[], first).unwrap();
+    assert_eq!(
+        admitted.tokens.committed, 60,
+        "first physical claim replaces its escrow"
+    );
+    assert_eq!(admitted.intent_only_calls, 1);
+    assert_eq!(
+        budget::admit_candidate(&policy, &empty, &operations, &[first], retry).unwrap_err(),
+        budget::Error::Exhausted("tokens")
+    );
+    let replay =
+        budget::admit_candidate(&policy, &empty, &operations, &[first, first], first).unwrap();
+    assert_eq!(replay, admitted);
+    let receipt = usage::begin(
+        &root.0,
+        Identity {
+            call_id: first.call_id.into(),
+            operation_id: first.operation_id.into(),
+            ..identity("unused")
+        },
+        None,
+        &stop,
+    )
+    .unwrap();
+    let projection = usage::load(&root.0).unwrap();
+    let pending = budget::project(&policy, &projection, &operations, &[first]).unwrap();
+    assert_eq!(
+        pending.physical_calls, 1,
+        "intent and pending receipt join once"
+    );
+    assert_eq!(pending.intent_only_calls, 0);
+    assert_eq!(pending.tokens.committed, 60);
+    let two_owners = [
+        operations[0],
+        Operation {
+            id: "op_other",
+            state: OperationState::Active,
+        },
+    ];
+    assert_eq!(
+        budget::project(
+            &policy,
+            &projection,
+            &two_owners,
+            &[PhysicalClaim {
+                operation_id: "op_other",
+                ..first
+            }]
+        )
+        .unwrap_err(),
+        budget::Error::Conflict,
+        "a receipt and intent cannot assign one call to different operations"
+    );
+    let mut final_ = observe(receipt, 1, 20, Cost::Subscription);
+    usage::record(&root.0, &final_, &stop).unwrap();
+    let projection = usage::load(&root.0).unwrap();
+    assert_eq!(
+        budget::admit_candidate(&policy, &projection, &operations, &[first], retry).unwrap_err(),
+        budget::Error::Exhausted("cost_microusd"),
+        "final usage without measured cost retains cost liability"
+    );
+    final_.revision = 2;
+    final_.cost = Cost::Reported(20);
+    usage::record(&root.0, &final_, &stop).unwrap();
+    let projection = usage::load(&root.0).unwrap();
+    let after =
+        budget::admit_candidate(&policy, &projection, &operations, &[first], retry).unwrap();
+    assert_eq!(after.tokens.committed, 80);
+    assert_eq!(after.cost_microusd.committed, 80);
+    assert_eq!(after.physical_calls, 2);
+    final_.revision = 3;
+    final_.usage.total_tokens = Some(10);
+    final_.cost = Cost::Reported(10);
+    usage::record(&root.0, &final_, &stop).unwrap();
+    let projection = usage::load(&root.0).unwrap();
+    let corrected =
+        budget::admit_candidate(&policy, &projection, &operations, &[first], retry).unwrap();
+    assert_eq!(corrected.tokens.committed, 70);
+    let settled = [Operation {
+        id: "op_one",
+        state: OperationState::Settled,
+    }];
+    let spent = budget::project(&policy, &projection, &settled, &[first]).unwrap();
+    assert_eq!(spent.tokens.settled, 10);
+    assert_eq!(spent.tokens.committed, 10);
+    assert!(budget::admit_candidate(&policy, &projection, &settled, &[first], retry).is_err());
+    let unknown = budget::project(&policy, &empty, &settled, &[first]).unwrap();
+    assert_eq!(
+        unknown.tokens.unresolved_reserved, 60,
+        "orphan intent survives missing receipt and terminal operation"
+    );
+    let refused = [Operation {
+        id: "op_one",
+        state: OperationState::RefusedBeforeInvocation,
+    }];
+    assert_eq!(
+        budget::project(&policy, &empty, &refused, &[])
+            .unwrap()
+            .tokens
+            .committed,
+        0
+    );
+    assert_eq!(
+        budget::project(&policy, &empty, &refused, &[first])
+            .unwrap()
+            .tokens
+            .committed,
+        60,
+        "an existing physical intent invalidates no-call refusal proof"
+    );
+}
+
+#[test]
+fn physical_claim_conflicts_and_overflow_refuse_projection() {
+    let policy = Policy {
+        tokens: Some(Limit {
+            max: u64::MAX,
+            per_call: u64::MAX,
+        }),
+        cost_microusd: None,
+    };
+    let operations = [
+        Operation {
+            id: "one",
+            state: OperationState::Active,
+        },
+        Operation {
+            id: "two",
+            state: OperationState::Active,
+        },
+    ];
+    let one = PhysicalClaim {
+        call_id: "call_one",
+        operation_id: "one",
+    };
+    let two = PhysicalClaim {
+        call_id: "call_two",
+        operation_id: "one",
+    };
+    let changed = PhysicalClaim {
+        operation_id: "two",
+        ..one
+    };
+    let missing = PhysicalClaim {
+        operation_id: "missing",
+        ..one
+    };
+    let empty = usage::Projection::default();
+    assert_eq!(
+        budget::project(&policy, &empty, &operations, &[one, changed]).unwrap_err(),
+        budget::Error::Conflict
+    );
+    assert_eq!(
+        budget::project(&policy, &empty, &operations[..1], &[one, two]).unwrap_err(),
+        budget::Error::Overflow
+    );
+    assert!(budget::project(&policy, &empty, &operations, &[missing]).is_err());
+    assert!(budget::project(&policy, &empty, &[operations[0], operations[0]], &[]).is_err());
+    assert!(
+        Policy {
+            tokens: None,
+            cost_microusd: None
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        Policy {
+            tokens: Some(Limit {
+                max: 0,
+                per_call: 0
+            }),
+            cost_microusd: None
+        }
+        .validate()
+        .is_err()
+    );
 }
 #[test]
 fn receipts_are_absolute_idempotent_and_revision_ordered() {
