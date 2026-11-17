@@ -464,7 +464,7 @@ fn quote_line(body: &str, quote: &str) -> std::result::Result<usize, &'static st
         starts.push((normalized.len(), index + 1));
         normalized.push_str(&line);
     }
-    let token = |c: char| c.is_alphanumeric() || c == '_';
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut resolved = None;
     let mut offset = 0;
     while let Some(hit) = normalized[offset..].find(quote) {
@@ -472,8 +472,8 @@ fn quote_line(body: &str, quote: &str) -> std::result::Result<usize, &'static st
         let end = start + quote.len();
         let left = normalized[..start].chars().next_back();
         let right = normalized[end..].chars().next();
-        let partial = left.is_some_and(token) && quote.starts_with(token)
-            || right.is_some_and(token) && quote.ends_with(token);
+        let partial = left.is_some_and(is_word) && quote.starts_with(is_word)
+            || right.is_some_and(is_word) && quote.ends_with(is_word);
         if !partial {
             if resolved.is_some() {
                 return Err("ambiguous");
