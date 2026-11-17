@@ -7,7 +7,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--repo"],"default":".","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","help":"pretty-print JSON"},
     {"names":["--version"],"action":"version","version":"0.7.0"}
-   ],"children":[{"name":"envelope","help":"project the effective TaskEnvelope"},{"name":"evidence","help":"criterion-level evidence coverage"},{"name":"next","help":"return the smallest currently valid internal actions"},{"name":"brief","help":"read a return brief, optionally comparing a saved envelope"},{"name":"failure","help":"classify failures and inspect recovery metadata"},{"name":"context","help":"compile a bounded context manifest and bundle"},{"name":"context-inspect","help":"inspect saved context metadata and optionally verify source files"},{"name":"profile","help":"optional capability contracts"},{"name":"release","help":"stable/edge update channel handling"},{"name":"capsule","help":"sanitized cross-machine continuity state"},{"name":"backend","help":"trusted-local, isolated, or remote execution"},{"name":"experiment","help":"ExperimentContract v2 and invariant packs"},{"name":"benchmark","help":"harness effectiveness telemetry"},{"name":"doctor","help":"validate the runtime projection without replacing OMS doctor"}],"groups":[]},
+   ],"children":[{"name":"envelope","help":"project the effective TaskEnvelope"},{"name":"evidence","help":"criterion-level evidence coverage"},{"name":"next","help":"return the smallest currently valid internal actions"},{"name":"brief","help":"read a return brief, optionally comparing a saved envelope"},{"name":"failure","help":"classify failures and inspect recovery metadata"},{"name":"context","help":"compile a bounded context manifest and bundle"},{"name":"context-inspect","help":"inspect saved context metadata and optionally verify source files"},{"name":"profile","help":"optional capability contracts"},{"name":"release","help":"stable/edge update channel handling"},{"name":"capsule","help":"sanitized cross-machine continuity state"},{"name":"backend","help":"trusted-local, isolated, apptainer, or remote execution"},{"name":"experiment","help":"ExperimentContract v2 and invariant packs"},{"name":"benchmark","help":"harness effectiveness telemetry"},{"name":"doctor","help":"validate the runtime projection without replacing OMS doctor"}],"groups":[]},
   {"path":["envelope"],"description":"",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
@@ -328,7 +328,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
-    {"names":["profile"],"choices":["trusted-local","isolated","remote"]},
+    {"names":["profile"],"choices":["trusted-local","isolated","apptainer","remote"]},
     {"names":["--image"],"default":""},
     {"names":["--adapter"],"default":"","group":0}
    ],"children":[],"groups":[{}]},
@@ -337,7 +337,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
-    {"names":["profile"],"choices":["trusted-local","isolated","remote"]},
+    {"names":["profile"],"choices":["trusted-local","isolated","apptainer","remote"]},
     {"names":["--image"],"default":""},
     {"names":["--adapter"],"default":null,"group":0},
     {"names":["--target"],"help":"remote target; offline check always reports unready until SSH execution is supported","group":0}
@@ -347,7 +347,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
-    {"names":["profile"],"choices":["trusted-local","isolated","remote"]},
+    {"names":["profile"],"choices":["trusted-local","isolated","apptainer","remote"]},
     {"names":["--worktree"],"default":""},
     {"names":["--image"],"default":""},
     {"names":["--adapter"],"default":null,"group":0},
@@ -436,7 +436,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--arm"],"required":true,"choices":["baseline","treatment"]},
     {"names":["--seed"],"required":true,"type":"int"},
     {"names":["--metrics"],"required":true},
-    {"names":["--profile"],"default":"trusted-local","choices":["trusted-local","isolated","remote"]},
+    {"names":["--profile"],"default":"trusted-local","choices":["trusted-local","isolated","apptainer","remote"]},
     {"names":["--image"],"default":""},
     {"names":["--adapter"],"default":""},
     {"names":["--worktree"],"default":""},
@@ -480,7 +480,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
     {"names":["contract"]},
-    {"names":["--profile"],"default":"trusted-local","choices":["trusted-local","isolated","remote"]},
+    {"names":["--profile"],"default":"trusted-local","choices":["trusted-local","isolated","apptainer","remote"]},
     {"names":["--image"],"default":""},
     {"names":["--adapter"],"default":""},
     {"names":["--timeout-seconds"],"type":"int","default":1200}
