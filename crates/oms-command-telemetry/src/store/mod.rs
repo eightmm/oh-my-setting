@@ -9,6 +9,7 @@ mod paths;
 mod producer;
 mod recovery;
 mod retention;
+pub mod usage;
 #[path = "../waste.rs"]
 pub(crate) mod waste;
 

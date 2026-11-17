@@ -818,7 +818,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut needs_keep = args.has("keep-worktree");
     let mut interactive_stdout = String::new();
     let cargo_slot = acquire_cargo_slot(&repo, &target.provider);
-    let extra_env: Vec<(OsString, OsString)> = cargo_slot
+    let mut extra_env: Vec<(OsString, OsString)> = cargo_slot
         .as_ref()
         .map(|slot| {
             vec![(
@@ -827,6 +827,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             )]
         })
         .unwrap_or_default();
+    extra_env = crate::usage::operation_env(&extra_env)?;
+    extra_env.push(("OMS_ATTEMPT_ID".into(), attempt.clone().into()));
+    if !task_id.is_empty() {
+        extra_env.push(("OMS_TASK_ID".into(), task_id.clone().into()));
+    }
     for round in 0..=repair {
         crate::check(context.interrupted)?;
         verify_exit_code = None;
@@ -1131,6 +1136,18 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             ("ts", now().into()),
             ("artifact_id", crate::id("art_")?.into()),
             ("attempt_id", attempt.into()),
+            (
+                "operation_id",
+                extra_env
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == "OMS_OPERATION_ID")
+                    .unwrap()
+                    .1
+                    .to_string_lossy()
+                    .into_owned()
+                    .into(),
+            ),
             ("task_id", task_id.into()),
             ("provider", target.provider.into()),
             ("model", route.model.into()),

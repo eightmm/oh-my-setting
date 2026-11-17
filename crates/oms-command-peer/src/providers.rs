@@ -1416,6 +1416,8 @@ pub(crate) fn execute_env(
         return fail("provider does not support read access through this transport");
     }
     let transport = transport(route, prompt, cwd, write, timeout)?;
+    let extra_env = crate::usage::operation_env(extra_env)?;
+    let usage_repo = crate::usage::state_repository(account_repo, &extra_env)?;
     let remove_environment: Vec<OsString> = std::env::vars_os()
         .map(|(k, _)| k)
         .filter(|k| {
@@ -1489,8 +1491,19 @@ pub(crate) fn execute_env(
                     .map_err(|e| Error::new(2, e))?;
             exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
         }
+        let usage_receipt = crate::usage::begin(
+            &usage_repo,
+            route,
+            account.as_deref(),
+            &extra_env,
+            context.interrupted,
+        )?;
+        environment.push((
+            "OMS_PROVIDER_CALL_ID".into(),
+            usage_receipt.identity.call_id.clone().into(),
+        ));
         let started = std::time::Instant::now();
-        let mut result = context.executor.execute(
+        let result = context.executor.execute(
             Invocation {
                 argv: exec_argv,
                 cwd: cwd.to_owned(),
@@ -1502,9 +1515,28 @@ pub(crate) fn execute_env(
                 merge: false,
             },
             context.interrupted,
-        )?;
+        );
+        let mut result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false);
+                return Err(error);
+            }
+        };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let (decoded, terminal) = decode_output(&route.provider, &result.stdout);
+        crate::usage::finish(
+            &usage_repo,
+            usage_receipt,
+            &result.stdout,
+            result.complete && terminal,
+        )
+        .map_err(|error| {
+            Error::new(
+                error.code,
+                format!("provider usage accounting failed; reconcile before retrying: {error}"),
+            )
+        })?;
         result.stdout = decoded.into_bytes();
         if !result.stdout.is_empty()
             && let Some(model) = configured
@@ -1538,30 +1570,6 @@ pub(crate) fn execute_env(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_with_fallback(
-    route: &mut Route,
-    fallback: &str,
-    prompt: &[u8],
-    cwd: &Path,
-    write: bool,
-    timeout: u64,
-    account_repo: &Path,
-    context: &Context<'_>,
-) -> Result<Completed> {
-    execute_with_fallback_env(
-        route,
-        fallback,
-        prompt,
-        cwd,
-        write,
-        timeout,
-        account_repo,
-        &[],
-        context,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_with_fallback_env(
     route: &mut Route,
     fallback: &str,
@@ -1573,6 +1581,7 @@ pub(crate) fn execute_with_fallback_env(
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
+    let extra_env = crate::usage::operation_env(extra_env)?;
     let result = execute_env(
         route,
         prompt,
@@ -1580,7 +1589,7 @@ pub(crate) fn execute_with_fallback_env(
         write,
         timeout,
         account_repo,
-        extra_env,
+        &extra_env,
         context,
     )?;
     if !fallback.is_empty() && fallback != route.model && capacity(&result) {
@@ -1594,7 +1603,7 @@ pub(crate) fn execute_with_fallback_env(
             write,
             timeout,
             account_repo,
-            extra_env,
+            &extra_env,
             context,
         )
     } else {
@@ -1872,6 +1881,97 @@ mod bridge_route_tests {
             executor: capture,
         };
         execute_env(route, prompt, cwd, write, 12, repo, &[], &context)
+    }
+    #[test]
+    fn physical_provider_calls_record_fallback_and_timeout_usage() {
+        isolated_transport(
+            "physical_provider_calls_record_fallback_and_timeout_usage",
+            "normal",
+            |repo, cwd| {
+                use oms_command_telemetry::store::usage::{self, Phase};
+                struct Reports(std::sync::atomic::AtomicUsize, PathBuf);
+                impl Executor for Reports {
+                    fn execute(&self, request: Invocation, _: &AtomicBool) -> Result<Completed> {
+                        if request.argv[0] == "git" {
+                            return Ok(Completed {
+                                code: 1,
+                                stdout: vec![],
+                                stderr: vec![],
+                                complete: true,
+                                elapsed: Duration::ZERO,
+                            });
+                        }
+                        let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let calls = usage::load(&self.1).unwrap().calls;
+                        assert_eq!(calls.last().unwrap().receipt.phase, Phase::Pending);
+                        assert!(
+                            request
+                                .environment
+                                .iter()
+                                .any(|(k, _)| k == "OMS_PROVIDER_CALL_ID")
+                        );
+                        Ok(Completed {
+                        code:if n == 0 {1} else if n == 2 {124} else {0},
+                        stdout:format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fixture answer\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":2,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":0}},\"total_cost_usd\":0.0000{}}}\n",n+1).into_bytes(),
+                        stderr:if n == 0 {b"rate limit".to_vec()} else {vec![]},
+                        complete:n != 2,elapsed:Duration::ZERO,
+                    })
+                    }
+                }
+                let stop = AtomicBool::new(false);
+                let state = repo.join("shared-state");
+                std::fs::create_dir(&state).unwrap();
+                let reports = Reports(std::sync::atomic::AtomicUsize::new(0), state.clone());
+                let context = Context {
+                    cwd,
+                    source: repo,
+                    interrupted: &stop,
+                    executor: &reports,
+                };
+                let mut route = Route {
+                    provider: "claude".into(),
+                    model: "first".into(),
+                    effort: String::new(),
+                    explicit: true,
+                };
+                let extra = vec![
+                    ("OMS_STATE_REPO".into(), state.as_os_str().to_owned()),
+                    ("OMS_OPERATION_ID".into(), "op_campaign".into()),
+                    ("OMS_GOAL_ID".into(), "goal_campaign".into()),
+                    ("OMS_TASK_ID".into(), "task_one".into()),
+                    ("OMS_ATTEMPT_ID".into(), "att_one".into()),
+                ];
+                let result = execute_with_fallback_env(
+                    &mut route, "second", b"fixture", cwd, true, 12, repo, &extra, &context,
+                )
+                .unwrap();
+                assert_eq!(result.code, 0);
+                let calls = usage::load(&state).unwrap().calls;
+                assert!(usage::load(repo).unwrap().calls.is_empty());
+                assert_eq!(calls.len(), 2);
+                assert_ne!(
+                    calls[0].receipt.identity.call_id,
+                    calls[1].receipt.identity.call_id
+                );
+                assert!(
+                    calls
+                        .iter()
+                        .all(|c| c.receipt.identity.operation_id == "op_campaign"
+                            && c.receipt.identity.attempt_id.as_deref() == Some("att_one"))
+                );
+                assert_eq!(
+                    calls.iter().map(|c| c.cost_microusd.unwrap()).sum::<u64>(),
+                    30
+                );
+                assert!(calls.iter().all(|c| c.receipt.phase == Phase::Final));
+                let timed =
+                    execute_env(&route, b"fixture", cwd, true, 12, repo, &extra, &context).unwrap();
+                assert_eq!(timed.code, 124);
+                let calls = usage::load(&state).unwrap().calls;
+                assert_eq!(calls[2].receipt.phase, Phase::Unknown);
+                assert_eq!(calls[2].cost_microusd, Some(30));
+            },
+        );
     }
     #[test]
     fn native_write_transports() {

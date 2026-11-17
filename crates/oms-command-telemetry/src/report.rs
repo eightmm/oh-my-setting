@@ -607,6 +607,50 @@ pub(crate) fn report(
         report["waste"] =
             crate::waste::report(root, selected, rows, &admitted, options.top, interrupted)?;
     }
+    let calls = crate::store::usage::load(root.physical_root())
+        .map_err(|e| e.to_string())?
+        .calls;
+    if !calls.is_empty() {
+        use crate::store::usage::{Cost, Phase};
+        let mut lifetime = obj!("scope":"lifetime-OMS-provider-calls", "calls":calls.len(),
+            "tokens":V::Null,"cost_microusd":V::Null,"token_reports":0,"cost_reports":0,
+            "unknown_token_calls":0,"unknown_cost_calls":0,"unsettled_calls":0,"conflicts":0,
+            "provider_estimate_calls":0,
+            "basis":"absolute receipt revisions; cumulative session differences with known baselines; independent of artifact window; costs are reported values, not authoritative billing");
+        for call in calls {
+            for (value, total, reports, unknown) in [
+                (
+                    call.tokens,
+                    "tokens",
+                    "token_reports",
+                    "unknown_token_calls",
+                ),
+                (
+                    call.cost_microusd,
+                    "cost_microusd",
+                    "cost_reports",
+                    "unknown_cost_calls",
+                ),
+            ] {
+                if let Some(n) = value {
+                    lifetime.add(total, &V::Int(n.to_string()));
+                    lifetime.inc(reports);
+                } else {
+                    lifetime.inc(unknown);
+                }
+            }
+            if call.receipt.phase != Phase::Final {
+                lifetime.inc("unsettled_calls");
+            }
+            if call.conflict {
+                lifetime.inc("conflicts");
+            }
+            if matches!(call.receipt.cost, Cost::ProviderEstimate(_)) {
+                lifetime.inc("provider_estimate_calls");
+            }
+        }
+        report["lifetime_provider_usage"] = lifetime;
+    }
     Ok(report)
 }
 type RouteKey = (Vec<u8>, Vec<u8>, Vec<u8>);

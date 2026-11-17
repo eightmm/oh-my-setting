@@ -11,6 +11,7 @@ oms-command-graph = { path = "../oms-command-graph" }
 oms-command-plan = { path = "../oms-command-plan" }
 oms-toml = { path = "../oms-toml" }
 oms-command-operations = { path = "../oms-command-operations" }
+oms-command-telemetry = { path = "../oms-command-telemetry" }
 oms-command-room = { path = "../oms-command-room" }
 oms-command-attempt-bundle = { path = "../oms-command-attempt-bundle" }
 oms-command-agent-role = { path = "../oms-command-agent-role" }
