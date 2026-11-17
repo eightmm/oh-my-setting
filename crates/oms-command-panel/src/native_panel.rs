@@ -703,11 +703,20 @@ fn run_native(
     if let Some(model) = &resolution.model {
         join_args.extend(["--model", model]);
     }
-    join_args.extend(["--label", &label]);
+    let label_arg = format!("--label={label}");
+    join_args.push(&label_arg);
     if let Some(sid) = &native_session {
-        join_args.extend(["--consumer", sid]);
+        join_args.extend(["--native-session", sid]);
     }
-    if let Err(err) = crate::commands::query(services, NativeCommand::Room, repo, &join_args, stop)
+    join_args.push("--json");
+    if let Err(err) = services
+        .command(
+            NativeCommand::Room,
+            repo,
+            &crate::commands::strings(&join_args),
+            stop,
+        )
+        .and_then(|out| out.success())
     {
         let _ = transition_attempt(
             repo,
@@ -840,13 +849,7 @@ fn wait_with_heartbeat(
             }
             Ok(None) => {
                 if last_beat.elapsed() >= Duration::from_secs(60) {
-                    let _ = crate::commands::query(
-                        services,
-                        NativeCommand::Events,
-                        repo,
-                        &["heartbeat", "--attempt", attempt, "--actor", "panel-main"],
-                        stop,
-                    );
+                    let _ = heartbeat_attempt(repo, attempt, services, stop);
                     last_beat = Instant::now();
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -856,22 +859,49 @@ fn wait_with_heartbeat(
     }
 }
 
+fn heartbeat_attempt(
+    repo: &Path,
+    attempt: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    services
+        .command(
+            NativeCommand::Events,
+            repo,
+            &crate::commands::strings(&[
+                "heartbeat",
+                "--attempt",
+                attempt,
+                "--actor",
+                "panel-main",
+            ]),
+            stop,
+        )?
+        .success()
+}
+
 fn event_id(
     repo: &Path,
     args: &[String],
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<String> {
-    let mut os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    os_args.push("--json".into());
+    let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
     let out = services.command(NativeCommand::Events, repo, &os_args, stop)?;
-    let val = out.json()?;
-    let id = text(&val, "attempt_id");
-    if id.is_empty() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    } else {
-        Ok(id.to_owned())
+    out.success()?;
+    let raw = String::from_utf8(out.stdout).map_err(Error::new)?;
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{')
+        && let Ok(val) = oms_panel_core::decode(trimmed.as_bytes(), 1024 * 1024)
+    {
+        let id = text(&val, "attempt_id");
+        if !id.is_empty() {
+            return Ok(id.to_owned());
+        }
     }
+    require(!trimmed.is_empty(), "event start returned no attempt id")?;
+    Ok(trimmed.to_owned())
 }
 
 fn transition_attempt(
@@ -900,8 +930,14 @@ fn transition_attempt(
     if let Some(r) = reason {
         argv.extend(["--reason-code", r]);
     }
-    let _ = crate::commands::query(services, NativeCommand::Events, repo, &argv, stop)?;
-    Ok(())
+    services
+        .command(
+            NativeCommand::Events,
+            repo,
+            &crate::commands::strings(&argv),
+            stop,
+        )?
+        .success()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1846,7 +1882,7 @@ fn ensure_room(
         services,
         NativeCommand::Room,
         repo,
-        &["new", "--title", "Shared work", "--json"],
+        &["new", "--topic", "Shared work", "--json"],
         stop,
     )?;
     let id = text(&created, "id");
@@ -2210,5 +2246,188 @@ mod hud_status {
             hud_status_right(&["/o/#oms".into()], Path::new("/w")),
             "oms"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_lifecycle_contract {
+    use super::{event_id, heartbeat_attempt, transition_attempt};
+    use oms_panel_core::{
+        NativeCommand, Result, Services, Value,
+        services::{CommandOutput, ExecutionRequest, PeerExecutor},
+    };
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct TempRepo(PathBuf);
+    impl TempRepo {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "oms-panel-real-parsers-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&p).unwrap();
+            let p = p.canonicalize().unwrap();
+            let init = std::process::Command::new("git")
+                .args(["-C", p.to_str().unwrap(), "init", "-q"])
+                .status()
+                .unwrap();
+            assert!(init.success());
+            Self(p)
+        }
+    }
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct RealCliParsers;
+    impl PeerExecutor for RealCliParsers {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            Err(oms_panel_core::Error::new("unexpected subprocess"))
+        }
+    }
+    impl Services for RealCliParsers {
+        fn command(
+            &self,
+            command: NativeCommand,
+            repo: &Path,
+            args: &[OsString],
+            stop: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            let (code, stdout, stderr) = match command {
+                NativeCommand::Events => oms_command_operations::run(
+                    oms_command_operations::App::Events,
+                    args,
+                    repo,
+                    stop,
+                ),
+                NativeCommand::Room => oms_command_room::run(args, repo, stop),
+                _ => return Err(oms_panel_core::Error::new("unsupported test command")),
+            };
+            if code != 0 {
+                return Err(oms_panel_core::Error::new(format!(
+                    "command exit {code}: {}",
+                    String::from_utf8_lossy(&stderr)
+                )));
+            }
+            Ok(CommandOutput {
+                code,
+                stdout,
+                stderr,
+                cleanup_complete: true,
+                output_complete: true,
+                limited: false,
+            })
+        }
+    }
+
+    #[test]
+    fn native_main_event_and_room_calls_match_real_cli_parsers() {
+        const CHILD: &str = "OMS_NATIVE_LIFECYCLE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = TempRepo::new();
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.env_clear();
+            for key in ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ"] {
+                if let Some(val) = std::env::var_os(key) {
+                    cmd.env(key, val);
+                }
+            }
+            let output = cmd
+                .args([
+                    "--exact",
+                    "native_panel::native_lifecycle_contract::native_main_event_and_room_calls_match_real_cli_parsers",
+                    "--nocapture",
+                ])
+                .env("HOME", &home.0)
+                .env("XDG_CACHE_HOME", home.0.join(".cache"))
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let body = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{body}");
+            assert!(body.contains("1 passed;"), "{body}");
+            return;
+        }
+        let repo = TempRepo::new();
+        let stop = AtomicBool::new(false);
+        let svc = RealCliParsers;
+        let room_id = super::ensure_room(&repo.0, None, &svc, &stop).unwrap();
+        assert!(room_id.starts_with("room-"), "{room_id}");
+
+        let start_args = vec![
+            "start".into(),
+            "--provider".into(),
+            "claude".into(),
+            "--tool".into(),
+            "panel-main".into(),
+            "--ref".into(),
+            "panel_role=main".into(),
+            "--ref".into(),
+            format!("panel_room_id={room_id}"),
+            "--then".into(),
+            "starting".into(),
+            "--then".into(),
+            "working".into(),
+        ];
+        let attempt = event_id(&repo.0, &start_args, &svc, &stop).unwrap();
+        assert!(attempt.starts_with("att_"), "{attempt}");
+
+        svc.command(
+            NativeCommand::Room,
+            &repo.0,
+            &crate::commands::strings(&[
+                "join",
+                "--id",
+                &room_id,
+                "--participant",
+                &attempt,
+                "--provider",
+                "claude",
+                "--role",
+                "main",
+                "--label=-dash-safe",
+                "--native-session",
+                "11111111-1111-1111-1111-111111111111",
+                "--json",
+            ]),
+            &stop,
+        )
+        .unwrap()
+        .success()
+        .unwrap();
+
+        heartbeat_attempt(&repo.0, &attempt, &svc, &stop).unwrap();
+        transition_attempt(
+            &repo.0,
+            &attempt,
+            &["verifying", "review", "done"],
+            Some("native_exit"),
+            &svc,
+            &stop,
+        )
+        .unwrap();
+
+        let shown = crate::commands::query(
+            &svc,
+            NativeCommand::Events,
+            &repo.0,
+            &["show", "--attempt", &attempt, "--json"],
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(shown["state"], Value::from("done"));
+        assert_eq!(shown["terminal"], Value::from(true));
     }
 }
