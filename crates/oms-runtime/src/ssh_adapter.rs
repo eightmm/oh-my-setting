@@ -3885,6 +3885,40 @@ exec sh -c "$last"
             assert_eq!(pending.join().unwrap().code, 0);
         });
         assert_eq!(std::fs::read(&exclusive).unwrap(), payload);
+        // Losing a lock during an external fetch must precede any checkpoint write.
+        std::fs::remove_file(root.join("resume_ready")).unwrap();
+        let lost = dest_dir.join("lost-lock.bin");
+        std::fs::write(&lost, b"original").unwrap();
+        let lost_args = args(&lost, &digest, payload.len());
+        std::fs::write(root.join("resume_hold"), "2").unwrap();
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| request(&lost_args));
+            let started = std::time::Instant::now();
+            while !root.join("resume_ready").exists() && started.elapsed() < Duration::from_secs(3)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(root.join("resume_ready").exists());
+            let cache = std::fs::read_dir(&cache_parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    std::fs::read(path.join("manifest.json"))
+                        .ok()
+                        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+                        .is_some_and(|row| row["identity"]["dest"] == lost.to_str().unwrap())
+                })
+                .unwrap();
+            let manifest = cache.join("manifest.json");
+            let before = std::fs::read(&manifest).unwrap();
+            std::fs::rename(cache.join("transfer.lock"), cache.join("detached.lock")).unwrap();
+            std::fs::create_dir(cache.join("transfer.lock")).unwrap();
+            std::fs::remove_file(root.join("resume_hold")).unwrap();
+            assert_ne!(pending.join().unwrap().code, 0);
+            assert_eq!(std::fs::read(&manifest).unwrap(), before);
+            assert!(!cache.join("00002.chunk").exists());
+            assert_eq!(std::fs::read(&lost).unwrap(), b"original");
+        });
         std::fs::write(&source, []).unwrap();
         let empty = dest_dir.join("empty.bin");
         assert_eq!(request(&args(&empty, &sha256(b""), 0)).code, 0);
