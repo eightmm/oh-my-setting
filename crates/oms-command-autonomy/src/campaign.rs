@@ -1,6 +1,6 @@
 //! Problem campaigns: immutable manifests, lifetime reservations and evidence.
 use crate::cli::Args;
-use crate::planning::{artifact, invoke, scan, strings};
+use crate::planning::{artifact, invoke, invoke_configured, scan, strings};
 use crate::storage::{Context, MAX_FILE};
 use crate::{Error, Output, Result, checkpoint, require, value, verify};
 use oms_command_plan::services::SupervisedCommand;
@@ -120,8 +120,9 @@ pub fn validate_manifest(
             "stall_waves",
             "verifier",
         ],
-        &["per_provider"],
+        &["per_provider", "usage"],
     )?;
+    crate::campaign_usage::policy(budget)?;
     for (key, low, high) in [
         ("max_concurrent", 1, 16),
         ("total_calls", 1, 200),
@@ -301,6 +302,7 @@ impl<'a> Ledger<'a> {
             &["public_data", "consolidator"],
         )?;
         let budget = &manifest["budget"];
+        crate::campaign_usage::policy(budget)?;
         for (key, high) in [
             ("total_calls", 200),
             ("max_concurrent", 16),
@@ -373,6 +375,12 @@ impl<'a> Ledger<'a> {
                     "invalid reservation event",
                 )?;
                 reservations.insert(id.to_owned(), row.clone());
+                if let Some(policy) = crate::campaign_usage::policy(&manifest["budget"])? {
+                    require(
+                        row["reserved_usage"] == policy.reservation(),
+                        "campaign usage reservation differs from manifest",
+                    )?;
+                }
             } else if row["type"] == "settled" {
                 require(
                     reservations.contains_key(id) && settled.insert(id.to_owned()),
@@ -394,12 +402,23 @@ impl<'a> Ledger<'a> {
     pub fn reserve(&self, provider: &str, kind: &str, limit: Option<u64>) -> Result<String> {
         let _lock = self.lock()?;
         let manifest = self.manifest()?;
-        let (_, reserved, settled) = self.view()?;
+        let (rows, reserved, settled) = self.view()?;
         require(
             providers(&manifest).contains(&provider.to_owned()) && KINDS.contains(&kind),
             "invalid provider or reservation kind",
         )?;
         let budget = &manifest["budget"];
+        let usage_policy = crate::campaign_usage::policy(budget)?;
+        if let Some(policy) = &usage_policy {
+            let spent = crate::campaign_usage::summary(
+                self.store.repo(),
+                policy,
+                &rows,
+                &reserved,
+                &settled,
+            )?;
+            policy.admit(&spent)?;
+        }
         let total = budget["total_calls"].as_u64().unwrap();
         let fail = |reason| Error::new(3, reason);
         if reserved.len() as u64 >= total
@@ -446,7 +465,12 @@ impl<'a> Ledger<'a> {
             return Err(fail("verifier concurrency exhausted"));
         }
         let id = value::random("res_")?;
-        self.append(&json!({"type": "reservation", "id": id, "provider": provider, "kind": kind}))?;
+        let mut reservation =
+            json!({"type": "reservation", "id": id, "provider": provider, "kind": kind});
+        if let Some(policy) = usage_policy {
+            reservation["reserved_usage"] = policy.reservation();
+        }
+        self.append(&reservation)?;
         Ok(id)
     }
     pub fn settle(&self, id: &str, outcome: &str) -> Result<bool> {
@@ -475,14 +499,24 @@ impl<'a> Ledger<'a> {
     }
     pub fn spent(&self) -> Result<Value> {
         let _lock = self.lock()?;
-        let (_, reserved, _) = self.view()?;
+        let (rows, reserved, settled) = self.view()?;
         let mut counts = BTreeMap::new();
         for row in reserved.values() {
             *counts
                 .entry(value::text(row, "provider").to_owned())
                 .or_insert(0u64) += 1;
         }
-        Ok(json!({"total_calls": reserved.len(), "per_provider": counts}))
+        let mut spent = json!({"total_calls": reserved.len(), "per_provider": counts});
+        if let Some(policy) = crate::campaign_usage::policy(&self.manifest()?["budget"])? {
+            spent["usage"] = crate::campaign_usage::summary(
+                self.store.repo(),
+                &policy,
+                &rows,
+                &reserved,
+                &settled,
+            )?;
+        }
+        Ok(spent)
     }
     pub fn abandon_unsettled(&self) -> Result<()> {
         let _lock = self.lock()?;
@@ -595,11 +629,18 @@ fn consolidate(
         }
         let answer = artifact(
             ctx,
-            &invoke(
+            &invoke_configured(
                 ctx,
                 "agent-call",
                 call,
                 Duration::from_secs(remaining.min(1200)),
+                vec![
+                    ("OMS_OPERATION_ID".into(), reservation.clone().into()),
+                    (
+                        "OMS_GOAL_ID".into(),
+                        ledger.directory.rsplit('/').next().unwrap().into(),
+                    ),
+                ],
             )?,
             4 * MAX_FILE,
         )?;
@@ -984,11 +1025,15 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                         value::text(route, "effort").into(),
                     ]);
                 }
-                let answer = invoke(
+                let answer = invoke_configured(
                     ctx,
                     "agent-call",
                     call,
                     Duration::from_secs((deadline - current_time()).clamp(1, 1200) as u64),
+                    vec![
+                        ("OMS_OPERATION_ID".into(), reservation.clone().into()),
+                        ("OMS_GOAL_ID".into(), cid.into()),
+                    ],
                 )
                 .and_then(|out| artifact(ctx, &out, 4 * MAX_FILE));
                 let answer = match answer {
