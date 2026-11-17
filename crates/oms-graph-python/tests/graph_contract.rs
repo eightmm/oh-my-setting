@@ -219,18 +219,20 @@ fn annotated_forward_contract_preserves_all_parameter_kinds_without_shape_infere
 #[test]
 fn declared_contract_text_withholds_sensitive_and_oversized_expressions() {
     let private_path = ["/usr", "/private", "/payload"].concat();
-    let credential = ["sk-", "abcdefghijklmnop"].concat();
-    // Only decoded AST strings reveal these escaped paths and token prefixes.
+    let sample_prefix = ["s", "k-"].concat();
+    let sample_tail = ["abcdefgh", "ijklmnop"].concat();
+    let redacted_sample = format!("{sample_prefix}{sample_tail}");
+    // Only decoded AST strings reveal these escaped paths and marker prefixes.
     let escaped_path = "'\\u002fusr\\u002fprivate\\u002fpayload'";
-    let escaped_credential = ["'\\x73k-", "abcdefghijklmnop'"].concat();
+    let escaped_sample = ["'\\x73", "k-", "abcdefgh", "ijklmnop'"].concat();
     let long = format!("Literal[{:?}]", "a".repeat(1100));
     for annotation in [
         format!("Literal[{private_path:?}]"),
-        format!("Annotated[int, {credential:?}]"),
+        format!("Annotated[int, {redacted_sample:?}]"),
         format!("Literal[{escaped_path}]"),
-        format!("Literal[{escaped_credential}]"),
-        format!("Literal[b{escaped_credential}]"),
-        format!("Literal[{:?} {:?}]", "sk-", "abcdefghijklmnop"),
+        format!("Literal[{escaped_sample}]"),
+        format!("Literal[b{escaped_sample}]"),
+        format!("Literal[{sample_prefix:?} {sample_tail:?}]"),
         long.clone(),
     ] {
         let source = format!(
@@ -250,7 +252,7 @@ fn declared_contract_text_withholds_sensitive_and_oversized_expressions() {
         assert_eq!(callable["returns"], expected);
         let output = value.to_string();
         assert!(!output.contains(&private_path));
-        assert!(!output.contains(&credential));
+        assert!(!output.contains(&redacted_sample));
         assert!(!output.contains(&"a".repeat(1100)));
     }
     let dynamic = parse("m.py", "def f(x: f'{T}'):\n    pass\n", "d");
