@@ -328,58 +328,109 @@ pub fn criterion_digest(plan: &Value, task: &Value) -> Result<String> {
     ]))
 }
 
-fn owner(plan: &Plan<'_>, spec: &Value) -> Result<()> {
-    let raw = plan.store.read(".oms/lifecycle/events.jsonl", MAX_STREAM)?;
-    let attempts = crate::provenance::lifecycle_projection(plan, &raw)?;
-    let root = attempts.get(spec.text("root_owner"));
-    require(
-        root.text("tool") == "panel-main"
-            && root.text("parent_attempt_id").is_empty()
-            && root.get("terminal") == &Value::Bool(false)
-            && ["working", "blocked"].contains(&root.text("state"))
-            && root.get("refs").text("panel_room_id") == spec.text("room_id"),
-        "team root owner is stale or foreign",
-    )?;
-    let events = rows(&raw)?;
-    require(
-        events.iter().any(|e| {
-            e.text("attempt_id") == spec.text("root_owner")
-                && e.text("event_type") == "attempt.created"
-                && e.text("event_id") == spec.text("root_owner_generation")
-        }),
-        "team owner generation changed",
-    )?;
-    require(
-        attempts
-            .object()?
-            .iter()
-            .filter(|(_, a)| {
-                a.text("tool") == "panel-main"
-                    && a.get("terminal") == &Value::Bool(false)
-                    && a.get("refs").text("panel_room_id") == spec.text("room_id")
+// One command sees each shared producer once. This cache is invocation-local;
+// the next command revalidates current bytes and never reads cached authority.
+struct Bindings<'a, 'p> {
+    plan: &'a Plan<'p>,
+    lifecycle: Option<Result<(Value, Vec<Value>)>>,
+    rooms: BTreeMap<String, Result<Value>>,
+    policies: BTreeMap<String, Result<String>>,
+    head: Option<Result<String>>,
+}
+impl<'a, 'p> Bindings<'a, 'p> {
+    fn new(plan: &'a Plan<'p>) -> Self {
+        Self {
+            plan,
+            lifecycle: None,
+            rooms: BTreeMap::new(),
+            policies: BTreeMap::new(),
+            head: None,
+        }
+    }
+    fn head(&mut self) -> Result<&str> {
+        self.head
+            .get_or_insert_with(|| self.plan.git().text(&["rev-parse", "HEAD"]))
+            .as_ref()
+            .map(String::as_str)
+            .map_err(Clone::clone)
+    }
+    fn policy(&mut self, path: &str) -> Result<&str> {
+        self.policies
+            .entry(path.into())
+            .or_insert_with(|| self.plan.source.read(path, MAX_SPEC_BYTES).map(json::sha))
+            .as_ref()
+            .map(String::as_str)
+            .map_err(Clone::clone)
+    }
+    fn owner(&mut self, spec: &Value) -> Result<()> {
+        let plan = self.plan;
+        let (attempts, events) = self
+            .lifecycle
+            .get_or_insert_with(|| {
+                let raw = plan.store.read(".oms/lifecycle/events.jsonl", MAX_STREAM)?;
+                Ok((
+                    crate::provenance::lifecycle_projection(plan, &raw)?,
+                    rows(&raw)?,
+                ))
             })
-            .count()
-            == 1,
-        "team room has multiple root owners",
-    )?;
-    let room_id = spec.text("room_id");
-    let room_raw = plan
-        .store
-        .read(format!(".oms/threads/{room_id}.jsonl"), MAX_STREAM)?;
-    let room = crate::provenance::room_projection(plan, room_id, &room_raw)?;
-    require(
-        room.get("closed") == &Value::Bool(false)
-            && room.get("participants").array()?.iter().any(|p| {
-                p.text("participant") == spec.text("root_owner")
-                    && p.text("role") == "main"
-                    && p.get("joined") == &Value::Bool(true)
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let root = attempts.get(spec.text("root_owner"));
+        require(
+            root.text("tool") == "panel-main"
+                && root.text("parent_attempt_id").is_empty()
+                && root.get("terminal") == &Value::Bool(false)
+                && ["working", "blocked"].contains(&root.text("state"))
+                && root.get("refs").text("panel_room_id") == spec.text("room_id"),
+            "team root owner is stale or foreign",
+        )?;
+        require(
+            events.iter().any(|e| {
+                e.text("attempt_id") == spec.text("root_owner")
+                    && e.text("event_type") == "attempt.created"
+                    && e.text("event_id") == spec.text("root_owner_generation")
             }),
-        "team root owner is not enrolled in the current room",
-    )?;
-    Ok(())
+            "team owner generation changed",
+        )?;
+        require(
+            attempts
+                .object()?
+                .iter()
+                .filter(|(_, a)| {
+                    a.text("tool") == "panel-main"
+                        && a.get("terminal") == &Value::Bool(false)
+                        && a.get("refs").text("panel_room_id") == spec.text("room_id")
+                })
+                .count()
+                == 1,
+            "team room has multiple root owners",
+        )?;
+        let room_id = spec.text("room_id");
+        let room = self
+            .rooms
+            .entry(room_id.into())
+            .or_insert_with(|| {
+                let raw = plan
+                    .store
+                    .read(format!(".oms/threads/{room_id}.jsonl"), MAX_STREAM)?;
+                crate::provenance::room_projection(plan, room_id, &raw)
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        require(
+            room.get("closed") == &Value::Bool(false)
+                && room.get("participants").array()?.iter().any(|p| {
+                    p.text("participant") == spec.text("root_owner")
+                        && p.text("role") == "main"
+                        && p.get("joined") == &Value::Bool(true)
+                }),
+            "team root owner is not enrolled in the current room",
+        )?;
+        Ok(())
+    }
 }
 
-fn current(plan: &Plan<'_>, s: &Snapshot, spec: &Value) -> Result<()> {
+fn current(bindings: &mut Bindings<'_, '_>, s: &Snapshot, spec: &Value) -> Result<()> {
     let task = s.task(spec.text("task_id"))?;
     require(
         s.contract.get("satisfied") == &Value::Bool(true),
@@ -431,19 +482,18 @@ fn current(plan: &Plan<'_>, s: &Snapshot, spec: &Value) -> Result<()> {
         )?;
     }
     require(
-        plan.git().text(&["rev-parse", "HEAD"])? == spec.text("base_sha"),
+        bindings.head()? == spec.text("base_sha"),
         "team base changed",
     )?;
     require(
-        json::sha(plan.source.read(spec.text("policy_ref"), MAX_SPEC_BYTES)?)
-            == spec.text("policy_sha256"),
+        bindings.policy(spec.text("policy_ref"))? == spec.text("policy_sha256"),
         "team policy changed",
     )?;
     require(
-        parse_ts(spec.text("expires_at")) > parse_ts(&plan.context.ts),
+        parse_ts(spec.text("expires_at")) > parse_ts(&bindings.plan.context.ts),
         "team contract expired",
     )?;
-    owner(plan, spec)
+    bindings.owner(spec)
 }
 
 fn versions(plan: &Plan<'_>, id: &str, record: &Value) -> Result<Vec<Value>> {
@@ -491,10 +541,14 @@ fn versions(plan: &Plan<'_>, id: &str, record: &Value) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-fn view(plan: &Plan<'_>, s: &Snapshot, id: &str, record: &Value) -> Result<Value> {
-    let specs = versions(plan, id, record)?;
-    let spec = specs.last().unwrap();
-    let refusal = current(plan, s, spec).err();
+fn view(
+    bindings: &mut Bindings<'_, '_>,
+    s: &Snapshot,
+    id: &str,
+    record: &Value,
+    spec: &Value,
+) -> Result<Value> {
+    let refusal = current(bindings, s, spec).err();
     Ok(object([
         ("id", string(id)),
         ("spec", spec.clone()),
@@ -535,27 +589,34 @@ pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
                 .ok_or_else(|| error("team history count overflow"))
         })?;
     require(retained <= 256, "team history exceeds aggregate bound")?;
+    let mut bindings = Bindings::new(plan);
+    let mut heads = BTreeMap::new();
     // Validate retained history even when only one head is requested.
     for (id, record) in teams.object()? {
         let id = std::str::from_utf8(id).map_err(|_| error("invalid team id"))?;
         require(valid_id(id) && id.len() <= 160, "invalid stored team id")?;
-        versions(plan, id, record)?;
+        let specs = versions(plan, id, record)?;
+        heads.insert(id, specs.last().unwrap().clone());
     }
     if req.action == Action::TeamList {
         let values = teams
             .object()?
             .iter()
-            .map(|(id, record)| view(plan, &s, std::str::from_utf8(id).unwrap(), record))
+            .map(|(id, record)| {
+                let id = std::str::from_utf8(id).unwrap();
+                view(&mut bindings, &s, id, record, &heads[id])
+            })
             .collect::<Result<Vec<_>>>()?;
         return Response::json(&Value::Array(values));
     }
     if req.action == Action::TeamShow {
         let id = req.value("id")?;
         return Response::json(&view(
-            plan,
+            &mut bindings,
             &s,
             id,
             teams.opt(id).ok_or_else(|| error("no such team"))?,
+            &heads[id],
         )?);
     }
     if req.action == Action::TeamCancel {
@@ -564,14 +625,13 @@ pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
             .opt(id)
             .cloned()
             .ok_or_else(|| error("no such team"))?;
-        let specs = versions(plan, id, &record)?;
-        let spec = specs.last().unwrap();
+        let spec = &heads[id];
         require(
             plan.context.panel_main_attempt == spec.text("root_owner")
                 && plan.context.room_id == spec.text("room_id"),
             "team cancellation belongs to another main",
         )?;
-        owner(plan, spec)?;
+        bindings.owner(spec)?;
         let reference = record.get("versions").array()?.last().unwrap();
         require(
             req.value("expected-team-sha256")? == reference.text("sha256"),
@@ -593,7 +653,7 @@ pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
                 && plan.context.room_id == spec.text("room_id"),
             "team registration belongs to another main",
         )?;
-        current(plan, &s, &spec)?;
+        current(&mut bindings, &s, &spec)?;
         let mut record = teams.opt(id).cloned().unwrap_or_else(|| {
             object([
                 ("versions", Value::Array(vec![])),

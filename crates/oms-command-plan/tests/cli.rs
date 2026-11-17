@@ -1057,7 +1057,11 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     use oms_command_plan::{Action, Context, Plan, Request, json};
     struct Guard;
     impl LifecycleGuard for Guard {}
-    struct TeamHost;
+    #[derive(Default)]
+    struct TeamHost {
+        lifecycle_reads: std::sync::atomic::AtomicUsize,
+        room_reads: std::sync::atomic::AtomicUsize,
+    }
     impl Services for TeamHost {
         fn group_membership_resolver(&self) -> Option<GroupResolver> {
             Host.group_membership_resolver()
@@ -1069,6 +1073,8 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
             Ok(Box::new(Guard))
         }
         fn project_lifecycle(&self, raw: &[u8]) -> oms_command_plan::Result<ProjectedLifecycle> {
+            self.lifecycle_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let terminal = std::str::from_utf8(raw).unwrap().contains("cancelled");
             Ok(ProjectedLifecycle {
                 source_sha256: json::sha(raw),
@@ -1089,6 +1095,8 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
             })
         }
         fn project_room(&self, room: &str, raw: &[u8]) -> oms_command_plan::Result<ProjectedRoom> {
+            self.room_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(ProjectedRoom {
                 source_sha256: json::sha(raw),
                 state: object([
@@ -1110,13 +1118,14 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     let tmp = Tmp::new();
     let r = repo(&tmp);
     let stop = AtomicBool::new(false);
+    let host = TeamHost::default();
     let call = |values: &[&str], child: bool| {
         let req = Request::parse(&args(values)).unwrap();
         let mut ctx = Context::from_environment(&req, &r).unwrap();
         ctx.panel_main_attempt = "main-a".into();
         ctx.room_id = "room-team".into();
         ctx.child = child;
-        Plan::open(ctx, &TeamHost, &stop).unwrap().execute(&req)
+        Plan::open(ctx, &host, &stop).unwrap().execute(&req)
     };
     call(&["init", "--goal", "bounded fixture"], false).unwrap();
     call(
@@ -1312,6 +1321,25 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     assert_eq!(shown.text("phase"), "planned");
     assert_eq!(shown.get("verified"), &Value::Null);
     assert_eq!(shown.get("spec").get("members").array().unwrap().len(), 2);
+    host.lifecycle_reads
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    host.room_reads
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    let listed = call(&["team-list", "--json"], true).unwrap();
+    assert_eq!(
+        json::parse(&listed.stdout).unwrap().array().unwrap().len(),
+        3
+    );
+    assert_eq!(
+        host.lifecycle_reads
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        host.room_reads.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), stored);
     spec.set("generation", number(2)).unwrap();
     spec.set("previous_sha256", string(&digest)).unwrap();
     write(&spec);
@@ -1392,12 +1420,7 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     let req = Request::new(Action::TeamList);
     let mut ctx = Context::from_environment(&req, &r).unwrap();
     ctx.child = true;
-    assert!(
-        Plan::open(ctx, &TeamHost, &stop)
-            .unwrap()
-            .execute(&req)
-            .is_ok()
-    );
+    assert!(Plan::open(ctx, &host, &stop).unwrap().execute(&req).is_ok());
 }
 
 #[test]

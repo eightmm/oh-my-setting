@@ -82,6 +82,12 @@ remain readable. Changed bindings project held without modifying stored state;
 settled means withdrawn execution, without verified/admitted/landed/published
 evidence. Readers reject unknown schema and broken artifact/predecessor chains.
 
+Each command validates every retained artifact once and reuses its lifecycle,
+room, policy and HEAD observations across the teams in that command. The next
+command reads current producer bytes again; this cache grants no persistent
+authority. Canonical fixtures count shared producer projections and check that
+listing teams leaves the plan unchanged.
+
 Parser bounds are 64 KiB per contract, 128 members per contract, and 256
 retained contract generations across one plan. These are storage bounds, not
 default team/concurrency budgets. Registration does not grant TM-02 admission,
