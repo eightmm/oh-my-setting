@@ -620,13 +620,14 @@ fn fallback(
                     String::from_utf8_lossy(&status).trim()
                 )));
             }
-            if row
+            let pid = row
                 .text("id")
                 .parse::<i32>()
                 .ok()
+                .filter(|pid| *pid > 0)
                 .and_then(rustix::process::Pid::from_raw)
-                .is_some_and(|pid| rustix::process::test_kill_process(pid).is_err())
-            {
+                .ok_or_else(|| error(2, "invalid fallback worker pid"))?;
+            if rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH) {
                 return Err(error(
                     2,
                     "fallback worker exited without a status receipt; reconcile before retry",

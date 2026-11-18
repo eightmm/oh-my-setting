@@ -84,6 +84,7 @@ pub fn render_report(report: &Value) -> Result<String, Error> {
     let mut lines = match report.get("kind").and_then(Value::as_str) {
         Some("oms-context-inspection") => inspection(report)?,
         Some("oms-context-comparison") => comparison(report)?,
+        Some("oms-context-request-inspection") => request(report)?,
         _ => return Err(Error("unsupported context report kind")),
     };
     lines.extend(
@@ -96,6 +97,39 @@ pub fn render_report(report: &Value) -> Result<String, Error> {
         .map(str::to_owned),
     );
     Ok(lines.join("\n"))
+}
+fn request(r: &Value) -> Result<Vec<String>, Error> {
+    let a = field(r, "attribution")?;
+    let mut lines = vec![
+        "OMS physical-call context (recorded metadata)".into(),
+        format!(
+            "Operation: {}; call: {}",
+            text(r, "operation_id")?,
+            text(r, "call_id")?
+        ),
+        format!(
+            "Provider: {}; dispatch: {}",
+            text(r, "provider")?,
+            text(r, "dispatch")?
+        ),
+        "Provider delivery and model use: unknown".into(),
+        format!(
+            "Prepared primary prompt: {} bytes; {} attributed; {} unmeasured",
+            num(a, "request_bytes")?,
+            num(a, "measured_bytes")?,
+            num(a, "unattributed_bytes")?
+        ),
+        format!("Renderer: {}", text(a, "renderer_version")?),
+        "Provider-added context, layer tokens and cache hit: unknown".into(),
+    ];
+    let layers = field(a, "layers")?
+        .as_object()
+        .ok_or(Error("invalid context report projection"))?;
+    for (name, row) in layers {
+        lines.push(format!("  {}: {} bytes", label(name), num(row, "bytes")?));
+    }
+    lines.push("Usage and late corrections remain in the canonical provider receipt.".into());
+    Ok(lines)
 }
 fn inspection(r: &Value) -> Result<Vec<String>, Error> {
     let d = field(r, "debt")?;
@@ -178,6 +212,15 @@ fn inspection(r: &Value) -> Result<Vec<String>, Error> {
         ),
         String::new(),
     ]);
+    if let Some(a) = r.get("request_attribution") {
+        l.push(format!(
+            "Attributed serialized bytes: {}; unmeasured: {}; renderer: {}",
+            num(a, "measured_bytes")?,
+            num(a, "unattributed_bytes")?,
+            text(a, "renderer_version")?
+        ));
+        l.push("Truncation markers are framing in this attribution; provider-added context and tokens remain unknown.".into());
+    }
     paths(&mut l, "Targets", field(r, "targets")?, "")?;
     let s = field(r, "sources")?;
     section(

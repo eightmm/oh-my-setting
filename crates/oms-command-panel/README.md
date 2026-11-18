@@ -86,3 +86,10 @@ reported age alone proves neither freshness nor account entitlement. Billing,
 entitlement and quota remain unknown without a source. The view performs no
 launch, approval, fallback, catalog refresh or model call. Default calls and
 non-TTY output retain their existing behavior.
+
+Optional producer-reported capability scope includes its alias/endpoint,
+observation and expiry. The inspector separates freshness at read time from
+selected-account matching, and leaves selected endpoint binding unknown.
+Missing scope/time evidence stays unknown; a reported fresh source grants no
+route eligibility. The native catalog currently supplies no scoped observation,
+so known fresh/stale examples cover injected catalog ingestion and rendering only.

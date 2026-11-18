@@ -103,9 +103,9 @@ behavior changes. Allocation now adds a schema-1 `Route.snapshot`; legacy routes
 without it remain readable and receive explicit unknown policy/catalog provenance
 when dispatch freezes them. Configured, explicitly requested, resolved and served
 identities are separate. Selected/requested account aliases remain distinct from
-unreported served account; catalog and capability account/endpoint bindings
-remain null because the current producer supplies none. Unreported served
-model/effort/source and unproven single/composite execution profile remain null. Identifier-derived family is
+unreported served account. Catalog account/endpoint bindings remain null. Unreported
+served model/effort/source and unproven single/composite execution profile remain
+null. Identifier-derived family is
 marked `identifier_derived_unverified`, never served-family or native fanout proof.
 
 `RoutingInputs.provider_evidence` retains bounded fields from the existing
@@ -120,6 +120,25 @@ reported ages, so stale/failed cached evidence remains visibly bounded evidence.
 Metadata text is limited to 256 bytes, effort sets to 16 entries, scale maps to
 2048 entries and launch snapshots to 32 KiB. The existing model-list selection
 and read-only catalog query are preserved; no refresh or provider call is added.
+
+An optional catalog-row `capability_evidence` object carries schema 1, a bounded
+`source`, nullable `account_alias`, `endpoint`, `observed_at` and `expires_at`
+(Unix seconds). Its expiry must follow observation; no TTL is supplied by OMS.
+Only complete scope/time metadata can yield `reported_fresh` or `reported_stale`
+at the recorded read time. Missing scope, missing expiry or future observation
+stays `unknown`. The snapshot separately records whether the reported alias
+matches the selected account. A fresh observation for another account remains
+visibly mismatched; it grants no eligibility, authentication or entitlement.
+Endpoint credentials, query strings and fragments are refused. Legacy snapshots
+without these fields retain unknown freshness and the same serialized bytes and
+digest; unreported fields are omitted. Alias/endpoint claims without source
+evidence are refused.
+
+The current native `oms models` producer provides no such scoped observation;
+its normal path therefore remains unknown. Known-scope examples in the existing
+Core/Panel fixtures test catalog ingestion, projection and rendering, not native
+account/endpoint capability. The next producer must bind the actual model-list context and exact
+cache generation to an observed registry alias/endpoint and explicit expiry.
 
 Requested effort is applied before allocation and snapshot capture. Known
 exact-model effort exclusions, including a reported native-fixed scale, refuse

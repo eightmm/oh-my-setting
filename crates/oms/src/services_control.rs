@@ -1311,19 +1311,7 @@ fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        match std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            Ok(out) if out.status.success() => true,
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
-                stderr.contains("operation not permitted") || stderr.contains("eperm")
-            }
-            Err(_) => true,
-        }
+        oms_command_operations::lock::pid_alive(i64::from(pid))
     }
 }
 
@@ -3180,7 +3168,7 @@ mod tests {
                 .unwrap();
             let collab = crate::services_collab::CollabServices::new(&stop, source).unwrap();
             let digest = std::env::var("OMS_TEAM_REQUEST_SPEC").unwrap();
-            let args = osv(&[
+            let mut args = osv(&[
                 "--providers",
                 "fixture",
                 "--prompt",
@@ -3207,6 +3195,12 @@ mod tests {
                     "15s"
                 },
             ]);
+            if mode.to_str().unwrap().contains("proposal") && mode != "protocol-proposal-disabled" {
+                args.extend(osv(&[
+                    "--team-request-actions",
+                    "report_blocker,propose_tasks",
+                ]));
+            }
             let handler = if mode == "protocol-cancel" {
                 Some(
                     signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&stop))
@@ -3247,7 +3241,10 @@ mod tests {
                     })
                 );
             }
-            if (mode == "protocol-positive" || mode == "protocol-fragment") && output.0 != 0 {
+            let success = mode == "protocol-positive"
+                || mode == "protocol-fragment"
+                || mode == "protocol-proposal-positive";
+            if success && output.0 != 0 {
                 for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
                     .unwrap()
                     .flatten()
@@ -3260,7 +3257,7 @@ mod tests {
                     }
                 }
             }
-            if mode == "protocol-positive" || mode == "protocol-fragment" {
+            if success {
                 assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
             } else {
                 assert_ne!(output.0, 0, "invalid protocol succeeded");
@@ -4187,13 +4184,35 @@ for sequence in 1 2; do
   text=bounded-blocker
   case "$prompt:$sequence" in *protocol-conflict*:2) text=changed;; esac
   request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":1,"request_id":"report-one","action":"%s","text":"%s","expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$action" "$text" "$expiry")
+  request_id=report-one
+  case "$prompt" in *protocol-proposal-*)
+    request_id=proposal-one
+    case "$prompt" in
+      *protocol-proposal-disabled*) context=$(cat "$OMS_NATIVE_PHYSICAL_FIXTURE/.oms/plan/team-specs/$OMS_TEAM_SPEC_SHA256.json"); task_sha=$(field task_sha256 "$context"); [ "$(field task_id "$context")" = task-a ];;
+      *) task_sha=$(field task_sha256); [ "$(field task_id)" = task-a ];;
+    esac
+    proposed_id=proposed-a
+    proposed_title=Inspect-source
+    allowed=src/lib.rs
+    depends='[]'
+    case "$prompt" in
+      *protocol-proposal-stale*) task_sha=$(printf '%064d' 0); request_id=proposal-stale;;
+      *protocol-proposal-wide*) allowed=outside/file.rs; request_id=proposal-wide;;
+      *protocol-proposal-forbidden*) allowed=src/secret/private; request_id=proposal-forbidden;;
+      *protocol-proposal-existing*) proposed_id=task-a; request_id=proposal-existing;;
+      *protocol-proposal-cycle*) depends='["proposed-a"]'; request_id=proposal-cycle;;
+      *protocol-proposal-conflict*) if [ "$sequence" = 2 ]; then proposed_title=Changed; fi;;
+    esac
+    request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":2,"request_id":"%s","action":"propose_tasks","summary":"Bounded-decomposition","expected_task_sha256":"%s","tasks":[{"id":"%s","title":"%s","allowed":["%s"],"depends":%s}],"expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$request_id" "$task_sha" "$proposed_id" "$proposed_title" "$allowed" "$depends" "$expiry")
+    ;;
+  esac
   case "$prompt" in *protocol-fragment*) printf '%s' "$request" | cut -c 1-20 | tr -d '\n'; sleep 0.02; printf '%s\n' "$request" | cut -c 21-;; *) printf '%s\n' "$request";; esac
   case "$prompt" in *protocol-early*) printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"predicted"}\n' "$session" "$nonce" "$generation" "$sequence";; esac
   IFS= read -r response || exit 3
   case "$response" in *'"response"'*) :;; *) exit 4;; esac
-  case "$prompt" in *protocol-lost*) exit 0;; esac
+  case "$prompt" in *protocol-lost*|*protocol-proposal-lost*) exit 0;; esac
   challenge=$(field receipt_challenge "$response")
-  printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"%s"}\n' "$session" "$nonce" "$generation" "$sequence" "$challenge"
+  printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"%s","receipt_challenge":"%s"}\n' "$session" "$nonce" "$generation" "$sequence" "$request_id" "$challenge"
 done
 "#;
         std::fs::write(&adapter, script).unwrap();
@@ -4206,6 +4225,7 @@ done
         )
         .unwrap();
         spec["generation"] = 4.into();
+        spec["forbidden_paths"] = serde_json::json!(["src/secret"]);
         spec["previous_sha256"] = active_team.spec_sha256.clone().into();
         for member in spec["members"].as_array_mut().unwrap() {
             if member["id"] == "lead-a" {
@@ -4301,6 +4321,115 @@ done
             ),
             (2, 2),
             "only earlier unknown liabilities remain"
+        );
+        let mut proposal_expiry = None;
+        for (index, mode) in [
+            "protocol-proposal-disabled",
+            "protocol-proposal-positive",
+            "protocol-proposal-lost",
+            "protocol-proposal-conflict",
+            "protocol-proposal-stale",
+            "protocol-proposal-wide",
+            "protocol-proposal-forbidden",
+            "protocol-proposal-cycle",
+            "protocol-proposal-existing",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs", "--nocapture"])
+                .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN", mode).env_remove("OMS_TEAM_REQUEST_EXPIRY").env("OMS_TEAM_REQUEST_SPEC", &head).env("OMS_PANEL_MAIN_ATTEMPT", &owner).env("OMS_ROOM_ID", "room-team").env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters);
+            if matches!(index, 2 | 3) {
+                child.env("OMS_TEAM_REQUEST_EXPIRY", proposal_expiry.as_ref().unwrap());
+            }
+            let status = child.status().unwrap();
+            assert!(status.success(), "native Team proposal case {mode} failed");
+            let ledger =
+                json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+            assert_eq!(
+                json::hash(ledger.get("tasks")).unwrap(),
+                task_before,
+                "proposals must not mutate the canonical task graph"
+            );
+            let record = ledger.get("teams").get("team-a");
+            assert_eq!(
+                record.get("requests").array().unwrap().len(),
+                if index == 0 { 1 } else { 2 },
+                "proposal replay/invalid input must not create another effect"
+            );
+            assert!(
+                record
+                    .get("request_schema")
+                    .is_int(if index == 0 { 2 } else { 3 })
+            );
+            if index > 0 {
+                assert_eq!(
+                    record
+                        .get("requests")
+                        .array()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .get("outcome")
+                        .text("status"),
+                    "proposed"
+                );
+                if index == 1 {
+                    proposal_expiry = Some(
+                        record
+                            .get("requests")
+                            .array()
+                            .unwrap()
+                            .last()
+                            .unwrap()
+                            .get("request")
+                            .get("expires_at")
+                            .int()
+                            .unwrap()
+                            .to_string(),
+                    );
+                }
+            }
+            if matches!(index, 1 | 8) {
+                let normal: Value =
+                    serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                        .unwrap();
+                assert!(
+                    normal.get("requests").is_none(),
+                    "legacy Team view bytes stay opt-in"
+                );
+                let before_read = std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap();
+                let with_requests: Value = serde_json::from_slice(
+                    &call(&["team-show", "--id", "team-a", "--requests"])
+                        .unwrap()
+                        .stdout,
+                )
+                .unwrap();
+                assert_eq!(
+                    with_requests["requests"].as_array().unwrap().len(),
+                    if index == 0 { 1 } else { 2 }
+                );
+                assert_eq!(
+                    std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap(),
+                    before_read,
+                    "request projection must not write"
+                );
+            }
+            let projection =
+                oms_command_room::project(&room.records("room-team").unwrap()).unwrap();
+            assert!(
+                projection
+                    .list("participants")
+                    .iter()
+                    .filter(|p| p.text("participant").starts_with("team-call_"))
+                    .all(|p| !p.flag("joined"))
+            );
+        }
+        assert_eq!(
+            physical::load(repo.as_path(), &stop).unwrap().len(),
+            physical_before + 20,
+            "proposal replay must not resend providers"
         );
         let retained = updated.get("teams").get("team-a").opt("requests").cloned();
         assert!(

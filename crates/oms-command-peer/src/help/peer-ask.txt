@@ -84,4 +84,9 @@ ADAPTER.oms-team-request-v1.json that is not group/other writable. It contains
 schema 1, protocol oms-team-request-v1, and binary_sha256. Built-in transports
 are unsupported. The native parent authenticates its actual owned stdio
 session; flags and manifest grant no controller credential. Only report_blocker
-is supported; no task-state change, dispatch, wakeup, or automatic resend.
+is enabled by default; no task-state change, dispatch, wakeup, or automatic resend.
+  --team-request-actions LIST  Explicit report_blocker/propose_tasks allow list;
+                               requires --team-requests. No other action is supported.
+propose_tasks records a bounded decomposition for parent review. It does not add
+tasks or select verifiers/routes. Read retained requests with
+`oms agent-plan team-show --id ID --requests`.

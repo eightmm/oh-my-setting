@@ -561,13 +561,15 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let base = String::from_utf8_lossy(&process::git(context, &repo, &["rev-parse", "HEAD"])?)
         .trim()
         .to_owned();
-    let mut prompt = format!(
-        "You are a delegated worker in an isolated repository worktree. Follow repository contracts. Do not run git commit or git push. Do not recursively delegate. The owner retains review, admission and publication.\nGoal:\n{question}\n\nOutput: return patch artifacts and concise changed files, checks, uncertainty and blockers.\nDone when: the authorized task and its required verification are complete, or no work can advance without the owner.\nBase revision: {base}\n"
+    let mut prompt = crate::request_context::Prompt::framing(
+        "You are a delegated worker in an isolated repository worktree. Follow repository contracts. Do not run git commit or git push. Do not recursively delegate. The owner retains review, admission and publication.\nGoal:\n",
     );
+    prompt.push_layer("task", &question);
+    prompt.push_layer("framing", &format!("\n\nOutput: return patch artifacts and concise changed files, checks, uncertainty and blockers.\nDone when: the authorized task and its required verification are complete, or no work can advance without the owner.\nBase revision: {base}\n"));
     if args.has("task") && !args.has("no-task") || !read && !args.has("no-task") {
         let packet = storage::read(&repo, Path::new(".oms/task/current.md"), true)?;
         if !packet.is_empty() {
-            prompt.push_str(&safety::untrusted("task", "recorded context", &packet)?);
+            prompt.untrusted("task", "task", "recorded context", &packet)?;
         }
     }
     if args.has("memory") && !args.has("no-memory") {
@@ -576,34 +578,37 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         if code != 0 {
             return fail("shared memory context failed");
         }
-        prompt.push_str(&safety::untrusted("memory", "recorded context", &bytes)?);
+        prompt.untrusted("retrieved", "memory", "recorded context", &bytes)?;
     }
     if args.has("ml-context") && !args.has("no-ml-context") {
         let digest = crate::ml_context::build(&repo, context)?;
         if !digest.is_empty() {
-            prompt.push_str(&safety::untrusted(
+            prompt.untrusted(
+                "retrieved",
                 "ML project",
                 "context digest",
                 digest.as_bytes(),
-            )?);
+            )?;
         }
     }
     if let Some(orientation) = orientation {
-        prompt.push_str(&safety::untrusted(
+        prompt.untrusted(
+            "retrieved",
             "parent graph",
             "orientation metadata",
             orientation.as_bytes(),
-        )?);
+        )?;
     } else if args.has("graph-context")
         && !args.has("no-graph-context")
         && !args.has("context-pack")
         && let Some(graph_text) = build_graph_context(&repo, &question, context.interrupted)
     {
-        prompt.push_str(&safety::untrusted(
+        prompt.untrusted(
+            "retrieved",
             "project graph",
             "task signatures",
             graph_text.as_bytes(),
-        )?);
+        )?;
     }
     if read {
         prompt.push_str(
@@ -629,14 +634,15 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         if code != 0 {
             return fail("role profile could not be resolved");
         }
-        prompt.push_str(&String::from_utf8_lossy(&bytes));
+        prompt.push_layer("contract", &String::from_utf8_lossy(&bytes));
     }
     if args.has("review-artifact") {
-        prompt.push_str(&safety::untrusted(
+        prompt.untrusted(
+            "history",
             "reviewer",
             "review claims",
             &storage::file(&args.path("review-artifact", context.cwd))?,
-        )?);
+        )?;
     }
     safety::outbound(prompt.as_bytes())?;
     let header = format!(
@@ -866,16 +872,18 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 let mut full_prompt = prompt.clone();
                 if !turn_history.is_empty() {
                     full_prompt.push_str("\n## Prior Interactive Turns\n");
-                    full_prompt.push_str(&turn_history);
+                    full_prompt.push_layer("history", &turn_history);
                 }
                 if !turn_prompt.is_empty() {
-                    full_prompt.push_str(&format!("\n## Turn {} Input\n{turn_prompt}\n", idx + 1));
+                    full_prompt.push_layer("framing", &format!("\n## Turn {} Input\n", idx + 1));
+                    full_prompt.push_layer("task", &turn_prompt);
+                    full_prompt.push_layer("framing", "\n");
                 }
                 safety::outbound(full_prompt.as_bytes())?;
                 let res = providers::execute_with_fallback_env(
                     &mut route,
                     args.get("fallback-model"),
-                    full_prompt.as_bytes(),
+                    &full_prompt,
                     &worktree.path,
                     !read,
                     timeout,
@@ -944,7 +952,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             let result = providers::execute_with_fallback_env(
                 &mut route,
                 args.get("fallback-model"),
-                prompt.as_bytes(),
+                &prompt,
                 &worktree.path,
                 !read,
                 peer::timeout(args, "peer-delegate")?,

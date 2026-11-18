@@ -7,7 +7,7 @@ Commands:
   team-register --team-spec REPO_REL [--expected-team-sha256 SHA] [--json]
                                      Enrolled parent only. Capture an immutable
                                      planned team; never launches a provider.
-  team-show --id ID [--json] | team-list [--json]
+  team-show --id ID [--requests] [--json] | team-list [--json]
                                      Read current contracts and stale bindings.
   team-cancel --id ID --expected-team-sha256 SHA --reason TEXT [--json]
                                      Withdraw an unlaunched planned team.

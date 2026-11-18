@@ -133,6 +133,7 @@ pub(crate) const BOOLEANS: &[&str] = &[
     "include-review",
     "approve-reviewed-bundle",
     "json",
+    "requests",
 ];
 pub(crate) const NAMES: &[&str] = &[
     "team-spec",
@@ -325,10 +326,16 @@ impl Request {
                 self.values
                     .keys()
                     .all(|key| allowed.contains(&key.as_str()))
-                    && self.flags.iter().all(|flag| flag == "json"),
+                    && self.flags.iter().all(|flag| {
+                        flag == "json" || flag == "requests" && self.action == TeamShow
+                    }),
                 "option is not supported by this team action",
             )?;
         }
+        require(
+            !self.has("requests") || self.action == TeamShow,
+            "--requests requires team-show",
+        )?;
         for name in ["team-spec", "expected-team-sha256"] {
             require(
                 !self.has(name) || matches!(self.action, TeamRegister | TeamCancel),

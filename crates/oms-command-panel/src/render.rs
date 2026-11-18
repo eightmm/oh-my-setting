@@ -1577,6 +1577,22 @@ pub fn routes(report: &Value, columns: usize) -> String {
                 value(&capabilities["account_alias"]),
                 value(&capabilities["endpoint"])
             ));
+            let evidence = &capabilities["evidence"];
+            lines.push(format!(
+                "Capability lifetime: source {} · observed {} · expires {} (Unix seconds)",
+                value(&evidence["source"]),
+                value(&evidence["observed_at"]),
+                value(&evidence["expires_at"])
+            ));
+            lines.push(format!(
+                "Reported scope freshness at read: {} · selected account matches {}",
+                value(&capabilities["freshness"]),
+                value(&capabilities["selected_account_matches"])
+            ));
+            lines.push(
+                "Selected endpoint binding: unknown; source freshness grants no route eligibility."
+                    .into(),
+            );
             lines.push("Entitlement: unknown · billing: unknown · quota: unknown".into());
             lines.push(format!(
                 "Policy digest: {} · snapshot schema {}",

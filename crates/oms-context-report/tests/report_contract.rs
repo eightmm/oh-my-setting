@@ -33,3 +33,16 @@ fn unsupported_and_malformed_reports_are_safe_errors() {
         );
     }
 }
+
+#[test]
+fn physical_call_report_preserves_unknown_delivery_and_usage() {
+    let report = json!({"schema":1,"kind":"oms-context-request-inspection","operation_id":"op-ctx","call_id":"call-ctx",
+        "provider":"fixture","dispatch":"prepared","provider_delivery":null,
+        "attribution":{"request_bytes":7,"measured_bytes":3,"unattributed_bytes":4,"renderer_version":"fixture-v1",
+            "layers":{"task":{"bytes":3,"tokens":null},"framing":{"bytes":0,"tokens":null}}}});
+    let text = render_report(&report).unwrap();
+    assert!(text.contains("3 attributed; 4 unmeasured"));
+    assert!(text.contains("Provider delivery and model use: unknown"));
+    assert!(text.contains("Usage and late corrections remain in the canonical provider receipt"));
+    assert!(!text.contains("cache hit: 0"));
+}

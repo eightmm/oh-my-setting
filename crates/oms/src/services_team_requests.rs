@@ -1,7 +1,7 @@
-//! Native-owned report-only channel. Public locators and capability declarations
+//! Native-owned read-only request channel. Public locators and capability declarations
 //! select data; only this actual New/child/pipe issuer creates a session.
 use super::{CollabServices, Job, prelaunch_error, supervise};
-use oms_command_peer::process::{Completed, Invocation, TeamLaunchBinding};
+use oms_command_peer::process::{Completed, Invocation, TeamLaunchBinding, TeamRequestAction};
 use oms_command_peer::{Error, Result};
 use oms_command_plan::{
     Action, Context, Plan, Request,
@@ -139,6 +139,7 @@ pub(super) struct Channel<'a, 's> {
     buffer: Vec<u8>,
     responses: Vec<(String, i128, String)>,
     consumed: usize,
+    actions: Vec<TeamRequestAction>,
     private: Option<PrivateBinding>,
 }
 impl<'a, 's> Channel<'a, 's> {
@@ -276,6 +277,7 @@ impl<'a, 's> Channel<'a, 's> {
             buffer: vec![],
             responses: vec![],
             consumed: 0,
+            actions: launch.actions().to_vec(),
             private: None,
         })
     }
@@ -313,6 +315,15 @@ impl<'a, 's> Channel<'a, 's> {
             ("connection_generation", number(self.generation as i128)),
             ("pid", number(owner.pid as i128)),
             ("process_birth", string(&owner.birth)),
+            (
+                "allowed_actions",
+                Value::Array(
+                    self.actions
+                        .iter()
+                        .map(|action| string(action.name()))
+                        .collect(),
+                ),
+            ),
         ]);
         let raw = json::canonical(&record).map_err(plan_error)?;
         let private = oms_panel_core::terminals::controller_store(&self.context.state_repo, true)
@@ -336,7 +347,7 @@ impl<'a, 's> Channel<'a, 's> {
             .write(&relative, &raw, true, 8192)
             .map_err(|e| err(e.message))?;
         self.private = Some(PrivateBinding::open(private.repo().join(relative), raw)?);
-        let hello = object([
+        let mut hello = object([
             ("schema", number(1)),
             ("kind", string("hello")),
             ("session", string(&self.session)),
@@ -345,6 +356,25 @@ impl<'a, 's> Channel<'a, 's> {
             ("binding_sha256", string(&self.binding_sha)),
             ("expires_at", number(self.expiry()?)),
         ]);
+        if self.actions != [TeamRequestAction::ReportBlocker] {
+            hello
+                .set(
+                    "allowed_actions",
+                    Value::Array(
+                        self.actions
+                            .iter()
+                            .map(|action| string(action.name()))
+                            .collect(),
+                    ),
+                )
+                .map_err(plan_error)?;
+            hello
+                .set("task_id", self.binding.get("task_id").clone())
+                .map_err(plan_error)?;
+            hello
+                .set("task_sha256", self.binding.get("task_sha256").clone())
+                .map_err(plan_error)?;
+        }
         self.send(reactor, job, &hello)
     }
     fn expiry(&self) -> Result<i128> {
@@ -471,6 +501,13 @@ impl<'a, 's> Channel<'a, 's> {
         if value.text("binding_sha256") != self.binding_sha {
             return Err(err("Team request names another contract"));
         }
+        if !self
+            .actions
+            .iter()
+            .any(|action| action.name() == value.get("body").text("action"))
+        {
+            return Err(err("Team request action was not enabled by its parent"));
+        }
         self.controller.check().map_err(err)?;
         let owner = self
             .owner
@@ -517,7 +554,7 @@ impl<'a, 's> Channel<'a, 's> {
         let plan = Plan::open(self.context.clone(), &self.service.control, self.stop)
             .map_err(plan_error)?;
         let outcome = plan
-            .record_team_report_before(
+            .record_team_request_before(
                 self.admission.clone(),
                 &self.binding_sha,
                 value.get("body"),
@@ -686,7 +723,11 @@ impl CollabServices<'_> {
                 75
             },
             stdout: if complete {
-                b"Team blocker report recorded\n".to_vec()
+                if channel.actions == [TeamRequestAction::ReportBlocker] {
+                    b"Team blocker report recorded\n".to_vec()
+                } else {
+                    b"Team requests recorded\n".to_vec()
+                }
             } else {
                 vec![]
             },

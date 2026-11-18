@@ -1023,13 +1023,19 @@ pub(crate) fn execute(plan: &Plan<'_>, req: &Request) -> Result<Response> {
     }
     if req.action == Action::TeamShow {
         let id = req.value("id")?;
-        return Response::json(&view(
-            &mut bindings,
-            &s,
-            id,
-            teams.opt(id).ok_or_else(|| error("no such team"))?,
-            &heads[id],
-        )?);
+        let record = teams.opt(id).ok_or_else(|| error("no such team"))?;
+        let mut result = view(&mut bindings, &s, id, record, &heads[id])?;
+        if req.has("requests") {
+            result.set(
+                "request_schema",
+                record.opt("request_schema").cloned().unwrap_or(Value::Null),
+            )?;
+            result.set(
+                "requests",
+                record.opt("requests").cloned().unwrap_or(Value::Null),
+            )?;
+        }
+        return Response::json(&result);
     }
     if req.action == Action::TeamCancel {
         let id = req.value("id")?;

@@ -47,6 +47,12 @@ impl Drop for Fixture {
 }
 struct Native;
 impl Services for Native {
+    fn task_status(&self, _: &Path, _: &Path, _: &[u8]) -> Result<Vec<u8>> {
+        Ok(
+            br#"{"schema":1,"present":true,"status":"unknown","verification":"unverified","stale":false}"#
+                .to_vec(),
+        )
+    }
     fn resource_action(
         &self,
         repo: &Path,
@@ -196,6 +202,32 @@ fn context_keeps_cached_memory_summary_explicit() {
         );
         let manifest = oms_runtime::value::parse(&response.stdout).unwrap();
         let bundle = std::fs::read_to_string(f.0.join(manifest.text("bundle_path"))).unwrap();
+        let saved = std::fs::read(f.0.join(manifest.text("manifest_path"))).unwrap();
+        let inspected = oms_context::inspect_manifest(&saved, 100).unwrap();
+        let a = &inspected["request_attribution"];
+        assert_eq!(a["request_bytes"], bundle.len());
+        assert_eq!(
+            a["request_sha256"],
+            oms_runtime::value::sha(bundle.as_bytes())
+        );
+        assert_eq!(
+            a["phase_policy_sha256"],
+            manifest.text("phase_rules_sha256")
+        );
+        assert_eq!(a["measured_bytes"], bundle.len());
+        assert_eq!(a["unattributed_bytes"], 0);
+        for span in a["spans"]["items"].as_array().unwrap() {
+            let start = span["start"].as_u64().unwrap() as usize;
+            let end = span["end"].as_u64().unwrap() as usize;
+            assert_eq!(
+                span["sha256"],
+                oms_runtime::value::sha(&bundle.as_bytes()[start..end])
+            );
+            assert_eq!(
+                span["prefix_sha256"],
+                oms_runtime::value::sha(&bundle.as_bytes()[..end])
+            );
+        }
         assert!(bundle.contains("Explicitly authored pin"), "{bundle}");
         assert_eq!(
             bundle.contains("Cached unreviewed task outcome"),
@@ -207,6 +239,120 @@ fn context_keeps_cached_memory_summary_explicit() {
             b"Cached unreviewed task outcome\n"
         );
     }
+    std::fs::create_dir(f.0.join(".oms/task")).unwrap();
+    let source = (0..4000)
+        .map(|i| format!("문맥 {i} 🙂\n"))
+        .collect::<String>();
+    let mut observed = Vec::new();
+    for (path, policy) in [
+        ("PROJECT.md", "head"),
+        (".oms/task/current.md", "tail"),
+        ("AGENTS.md", "middle"),
+    ] {
+        std::fs::write(f.0.join(path), &source).unwrap();
+        let response = f.run(&["context", "--max-bytes", "4096"], false);
+        assert_eq!(
+            response.code,
+            if path == ".oms/task/current.md" { 0 } else { 3 },
+            "{}",
+            String::from_utf8_lossy(&response.stderr)
+        );
+        let manifest = oms_runtime::value::parse(&response.stdout).unwrap();
+        let bundle = std::fs::read(f.0.join(manifest.text("bundle_path"))).unwrap();
+        let saved = std::fs::read(f.0.join(manifest.text("manifest_path"))).unwrap();
+        let inspected = oms_context::inspect_manifest(&saved, 100).unwrap();
+        let a = &inspected["request_attribution"];
+        assert_eq!(a["request_bytes"], bundle.len());
+        assert_eq!(a["measured_bytes"], bundle.len());
+        assert!(
+            a["layers"]["framing"]["bytes"].as_u64().unwrap()
+                > inspected["budget"]["framing_bytes"].as_u64().unwrap()
+        );
+        let mut ranges = Vec::new();
+        for span in a["spans"]["items"].as_array().unwrap() {
+            let start = span["start"].as_u64().unwrap() as usize;
+            let end = span["end"].as_u64().unwrap() as usize;
+            assert_eq!(span["sha256"], oms_runtime::value::sha(&bundle[start..end]));
+            assert_eq!(
+                span["prefix_sha256"],
+                oms_runtime::value::sha(&bundle[..end])
+            );
+            if span["source_sha256"] == oms_runtime::value::sha(source.as_bytes()) {
+                let r = span["source_range"].as_array().unwrap();
+                let lo = r[0].as_u64().unwrap() as usize;
+                let hi = r[1].as_u64().unwrap() as usize;
+                assert_eq!(&bundle[start..end], &source.as_bytes()[lo..hi]);
+                ranges.push((lo, hi));
+            }
+        }
+        assert_eq!(ranges.len(), if policy == "middle" { 2 } else { 1 });
+        observed.push(ranges);
+        let inspected_again = f.run(&["context-inspect", manifest.text("manifest_path")], false);
+        assert_eq!(inspected_again.code, 0);
+        assert_eq!(
+            inspected["debt"]["reported"],
+            manifest.get("context_debt").int().unwrap() as u64
+        );
+        std::fs::remove_file(f.0.join(path)).unwrap();
+    }
+    assert_ne!(observed[0], observed[1]);
+    assert_ne!(observed[0], observed[2]);
+    let attributed = oms_context::attribution::describe(
+        "작업 🙂".as_bytes(),
+        "fixture-v1",
+        &[],
+        |raw| oms_runtime::value::sha(raw),
+        None,
+        None,
+    )
+    .unwrap();
+    let request = serde_json::json!({"schema":1,"kind":"oms-context-request","operation_id":"op-fixture","call_id":"call-fixture",
+        "provider":"fixture","dispatch":"prepared","provider_delivery":null,"attribution":attributed});
+    std::fs::write(
+        f.0.join("call-context.json"),
+        serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    let response = f.run(&["context-inspect", "call-context.json"], false);
+    assert_eq!(
+        response.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&response.stderr)
+    );
+    let projection: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
+    assert_eq!(projection["kind"], "oms-context-request-inspection");
+    assert!(projection["provider_delivery"].is_null());
+    let response = f.run(
+        &["context-inspect", "call-context.json", "--format", "text"],
+        false,
+    );
+    assert_eq!(response.code, 0);
+    assert!(
+        String::from_utf8_lossy(&response.stdout)
+            .contains("Provider delivery and model use: unknown")
+    );
+    assert_eq!(
+        f.run(
+            &["context-inspect", "call-context.json", "--verify-current"],
+            false
+        )
+        .code,
+        2
+    );
+    assert_eq!(
+        f.run(
+            &[
+                "context-inspect",
+                "call-context.json",
+                "--compare",
+                "call-context.json"
+            ],
+            false
+        )
+        .code,
+        2
+    );
 }
 
 #[test]

@@ -170,6 +170,7 @@ struct Manifest {
     bundle: String,
     contract: Option<String>,
     rules: Option<String>,
+    attribution: Option<Value>,
 }
 fn validate(v: &Json) -> Result<Manifest> {
     if !matches!(v, Json::Object(_)) || integer(get(v, "schema"), "schema").ok() != Some(1) {
@@ -326,7 +327,25 @@ fn validate(v: &Json) -> Result<Manifest> {
         } else {
             None
         },
+        attribution: None,
     })
+}
+fn parsed_manifest(raw: &[u8]) -> Result<Manifest> {
+    let parsed = manifest_json(raw)?;
+    let has_attribution = get(&parsed, "request_attribution").is_some();
+    let validated = validate(&parsed);
+    discard_json(parsed);
+    let mut manifest = validated?;
+    if has_attribution {
+        let value: Value = serde_json::from_slice(raw).map_err(|_| error("request attribution"))?;
+        let attribution = &value["request_attribution"];
+        crate::attribution::validate(attribution, manifest.used, &manifest.bundle)?;
+        if attribution["phase_policy_sha256"].as_str() != manifest.rules.as_deref() {
+            return Err(error("attribution phase policy differs"));
+        }
+        manifest.attribution = Some(attribution.clone());
+    }
+    Ok(manifest)
 }
 fn bounded<T: serde::Serialize>(items: &[T], limit: usize) -> Value {
     json!({"total":items.len(),"items":&items[..items.len().min(limit)],"omitted":items.len().saturating_sub(limit)})
@@ -351,10 +370,14 @@ pub fn inspection_limit_value(value: &Value) -> usize {
 pub fn inspect_manifest(raw: &[u8], limit: usize) -> Result<Value> {
     check_limit(limit)?;
     let parsed = manifest_json(raw)?;
-    let validated = validate(&parsed);
+    let request =
+        matches!(get(&parsed, "kind"), Some(Json::String(s)) if s == b"oms-context-request");
     discard_json(parsed);
-    let m = validated?;
-    Ok(inspect(&m, limit))
+    if request {
+        let value: Value = serde_json::from_slice(raw).map_err(|_| error("request attribution"))?;
+        return crate::attribution::inspect_request(&value, limit);
+    }
+    Ok(inspect(&parsed_manifest(raw)?, limit))
 }
 fn inspect(m: &Manifest, limit: usize) -> Value {
     let mut rows = m.selected.clone();
@@ -382,18 +405,18 @@ fn inspect(m: &Manifest, limit: usize) -> Value {
     if let Some(rules) = &m.rules {
         result["phase_rules_sha256"] = json!(rules);
     }
+    if let Some(attribution) = &m.attribution {
+        let mut attribution = attribution.clone();
+        let spans = attribution["spans"].as_array().expect("validated spans");
+        attribution["spans"] = bounded(spans, limit);
+        result["request_attribution"] = attribution;
+    }
     result
 }
 /// Compare two raw manifests; deltas describe recorded metadata only.
 pub fn compare_manifests(left: &[u8], right: &[u8], limit: usize) -> Result<Value> {
-    fn parse_and_validate(raw: &[u8]) -> Result<Manifest> {
-        let parsed = manifest_json(raw)?;
-        let validated = validate(&parsed);
-        discard_json(parsed);
-        validated
-    }
-    let before = parse_and_validate(left)?;
-    let after = parse_and_validate(right)?;
+    let before = parsed_manifest(left)?;
+    let after = parsed_manifest(right)?;
     check_limit(limit)?;
     let mut reasons = Vec::new();
     if before.phase != after.phase {

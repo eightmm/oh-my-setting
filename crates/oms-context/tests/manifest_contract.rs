@@ -2,6 +2,53 @@ use oms_context::{compare_manifests, inspect_manifest};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+#[test]
+fn physical_request_metadata_keeps_unknowns_and_rejects_forged_ranges() {
+    use oms_context::attribution::{Span, describe};
+    let hash = |_: &[u8]| "a".repeat(64);
+    let payload = "가🙂".as_bytes();
+    let span = Span {
+        layer: "task",
+        start: 0,
+        end: 3,
+        sha256: hash(&[]),
+        prefix_sha256: hash(&[]),
+        source_sha256: Some(hash(&[])),
+        source_bytes: Some(3),
+        source_range: Some((0, 3)),
+    };
+    let a = describe(payload, "fixture-v1", &[span], hash, None, None).unwrap();
+    let record = json!({"schema":1,"kind":"oms-context-request","operation_id":"op-fixture","call_id":"call-fixture",
+        "provider":"fixture","dispatch":"prepared","provider_delivery":null,"attribution":a});
+    let result = inspect_manifest(&raw(&record), 1).unwrap();
+    assert_eq!(result["attribution"]["measured_bytes"], 3);
+    assert_eq!(result["attribution"]["unattributed_bytes"], 4);
+    assert!(result["provider_delivery"].is_null());
+    assert!(result["attribution"]["tokenizer"].is_null());
+    assert!(result["attribution"]["context_manifest_sha256"].is_null());
+    for field in ["request_bytes", "measured_bytes", "unattributed_bytes"] {
+        let mut bad = record.clone();
+        bad["attribution"][field] = json!(999);
+        assert!(inspect_manifest(&raw(&bad), 1).is_err());
+    }
+    let mut bad = record.clone();
+    bad["attribution"]["spans"][0]["source_range"] = json!([0, 4]);
+    assert!(inspect_manifest(&raw(&bad), 1).is_err());
+    let mut bad = record.clone();
+    bad["attribution"]["spans"]
+        .as_array_mut()
+        .unwrap()
+        .push(record["attribution"]["spans"][0].clone());
+    assert!(inspect_manifest(&raw(&bad), 1).is_err());
+    let mut bad = record.clone();
+    bad["attribution"]["provider_added_unknown"]["bytes"] = json!(0);
+    assert!(inspect_manifest(&raw(&bad), 1).is_err());
+    let mut bad = record.clone();
+    bad["provider_delivery"] = json!(true);
+    assert!(inspect_manifest(&raw(&bad), 1).is_err());
+    assert!(compare_manifests(&raw(&record), &raw(&record), 1).is_err());
+}
+
 fn corpus(kind: &str) -> Value {
     let root = std::env::var_os("OMS_CONTRACT_REPO")
         .map(PathBuf::from)
