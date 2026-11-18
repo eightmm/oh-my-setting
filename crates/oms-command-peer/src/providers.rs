@@ -1985,6 +1985,13 @@ pub(crate) fn execute_env(
     } else {
         None
     };
+    let team_actions = crate::process::TeamRequestAction::parse_list(
+        extra_env
+            .iter()
+            .find(|(key, _)| key == "OMS_TEAM_REQUEST_ACTIONS")
+            .and_then(|(_, value)| value.to_str())
+            .unwrap_or(""),
+    )?;
     let extra_env = crate::usage::operation_env(extra_env)?;
     let usage_repo = crate::usage::state_repository(account_repo, &extra_env)?;
     let remove_environment: Vec<OsString> = std::env::vars_os()
@@ -2156,6 +2163,7 @@ pub(crate) fn execute_env(
                     pending: &pending_usage,
                     attempt: &attempt,
                     protocol,
+                    actions: &team_actions,
                 },
                 context.interrupted,
             )

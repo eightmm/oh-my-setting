@@ -1,4 +1,4 @@
-//! Bounded report receipts in the canonical Team record. Inputs are data;
+//! Bounded request receipts in the canonical Team record. Inputs are data;
 //! sender authentication belongs to the owning native channel, never this API.
 use crate::json::{self, Value, number, object, string};
 use crate::team::AdmissionRequest;
@@ -8,6 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const MAX_REQUEST_BYTES: usize = 8192;
 pub const MAX_RECEIPTS: usize = 64;
 pub const MAX_RECEIPT_BYTES: usize = 512 * 1024;
+pub const MAX_PROPOSED_TASKS: usize = 8;
 
 /// Correlation facts supplied by the authenticated native consumer, not a
 /// credential. This writer independently checks current lifecycle and Room.
@@ -44,7 +45,7 @@ pub fn validate_record(record: &Value) -> Result<()> {
         &[],
     )?;
     require(
-        record.get("request_schema").is_int(2),
+        matches!(record.get("request_schema").int()?, 2 | 3),
         "unsupported Team request record version",
     )?;
     let receipts = record.get("requests").array()?;
@@ -72,6 +73,11 @@ pub fn validate_record(record: &Value) -> Result<()> {
         )?;
         validate_request(receipt.get("request"))?;
         require(
+            record.get("request_schema").is_int(3)
+                || receipt.get("request").text("action") == "report_blocker",
+            "task proposals require Team request record version 3",
+        )?;
+        require(
             receipt.text("key")
                 == json::hash(&object([
                     ("binding", receipt.get("binding_sha256").clone()),
@@ -87,7 +93,11 @@ pub fn validate_record(record: &Value) -> Result<()> {
             "Team request receipt digest changed",
         )?;
         require(
-            receipt.get("outcome") == &outcome(receipt.text("request_sha256")),
+            receipt.get("outcome")
+                == &outcome(
+                    receipt.get("request").text("action"),
+                    receipt.text("request_sha256"),
+                ),
             "invalid Team request outcome",
         )?;
     }
@@ -96,29 +106,124 @@ pub fn validate_record(record: &Value) -> Result<()> {
         "Team request bytes limit",
     )
 }
-fn outcome(digest: &str) -> Value {
+fn outcome(action: &str, digest: &str) -> Value {
     object([
         ("schema", number(1)),
-        ("status", string("recorded")),
+        (
+            "status",
+            string(if action == "propose_tasks" {
+                "proposed"
+            } else {
+                "recorded"
+            }),
+        ),
         ("request_sha256", string(digest)),
-        ("action", string("report_blocker")),
+        ("action", string(action)),
     ])
 }
 pub fn validate_request(request: &Value) -> Result<()> {
-    crate::engine::screen(&json::canonical(request)?)?;
+    let raw = json::canonical(request)?;
+    crate::engine::screen(&raw)?;
     require(
-        json::canonical(request)?.len() <= MAX_REQUEST_BYTES,
+        raw.len() <= MAX_REQUEST_BYTES,
         "Team request exceeds frame bound",
     )?;
-    json::keys(
-        request,
-        &["schema", "request_id", "action", "text", "expires_at"],
-        &[],
-    )?;
-    require(
-        request.get("schema").is_int(1) && request.text("action") == "report_blocker",
-        "unsupported Team request schema/action",
-    )?;
+    match (request.get("schema").int()?, request.text("action")) {
+        (1, "report_blocker") => {
+            json::keys(
+                request,
+                &["schema", "request_id", "action", "text", "expires_at"],
+                &[],
+            )?;
+            bounded_text(request.get("text").str()?, 4000)?;
+        }
+        (2, "propose_tasks") => {
+            json::keys(
+                request,
+                &[
+                    "schema",
+                    "request_id",
+                    "action",
+                    "summary",
+                    "expected_task_sha256",
+                    "tasks",
+                    "expires_at",
+                ],
+                &[],
+            )?;
+            json::digest(request.get("expected_task_sha256"))?;
+            bounded_text(request.get("summary").str()?, 1000)?;
+            let tasks = request.get("tasks").array()?;
+            require(
+                !tasks.is_empty() && tasks.len() <= MAX_PROPOSED_TASKS,
+                "task proposal needs 1..8 tasks",
+            )?;
+            let mut ids = std::collections::BTreeSet::new();
+            for task in tasks {
+                json::keys(task, &["id", "title", "allowed", "depends"], &[])?;
+                let id = task.get("id").str()?;
+                require(
+                    crate::engine::valid_id(id) && id.len() <= 160 && ids.insert(id),
+                    "invalid or duplicate proposed task id",
+                )?;
+                bounded_text(task.get("title").str()?, 300)?;
+                crate::engine::plain(task.text("title"), "proposed task title")?;
+                let paths = task
+                    .get("allowed")
+                    .strings()?
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect::<Vec<_>>();
+                require(
+                    !paths.is_empty()
+                        && paths.len() <= 32
+                        && paths.iter().all(|p| p.len() <= 240)
+                        && crate::engine::clean_paths(&paths)? == paths
+                        && paths
+                            .iter()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                            == paths.len(),
+                    "proposed task paths must be bounded, normalized and unique",
+                )?;
+            }
+            for task in tasks {
+                let depends = task.get("depends").strings()?;
+                require(
+                    depends.len() <= MAX_PROPOSED_TASKS
+                        && depends
+                            .iter()
+                            .all(|id| ids.contains(id) && *id != task.text("id"))
+                        && depends
+                            .iter()
+                            .copied()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                            == depends.len(),
+                    "proposal dependencies must name unique other proposed tasks",
+                )?;
+            }
+            let mut resolved = std::collections::BTreeSet::new();
+            loop {
+                let before = resolved.len();
+                for task in tasks {
+                    if task
+                        .get("depends")
+                        .strings()?
+                        .iter()
+                        .all(|id| resolved.contains(id))
+                    {
+                        resolved.insert(task.text("id"));
+                    }
+                }
+                if resolved.len() == tasks.len() {
+                    break;
+                }
+                require(resolved.len() > before, "task proposal dependency cycle")?;
+            }
+        }
+        _ => return Err(crate::error("unsupported Team request schema/action")),
+    }
     let id = request.text("request_id");
     require(
         !id.is_empty()
@@ -128,24 +233,41 @@ pub fn validate_request(request: &Value) -> Result<()> {
                 .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)),
         "invalid Team request identity",
     )?;
-    let text = request.get("text").str()?;
-    require(
-        !text.trim().is_empty()
-            && text.len() <= 4000
-            && !text
-                .chars()
-                .any(|c| c.is_control() && c != '\n' && c != '\t'),
-        "invalid Team blocker text",
-    )?;
     require(
         request.get("expires_at").int()? > 0,
         "invalid Team request expiry",
+    )
+}
+fn bounded_text(text: &str, maximum: usize) -> Result<()> {
+    require(
+        !text.trim().is_empty()
+            && text.len() <= maximum
+            && !text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t'),
+        "invalid bounded Team request text",
     )
 }
 impl Plan<'_> {
     /// Parent-only report metadata, not sender authentication or launch authority.
     /// The native consumer must authenticate its actual owned channel first.
     pub fn record_team_report_before(
+        &self,
+        admission: AdmissionRequest,
+        expected_binding: &str,
+        request: &Value,
+        source: &RequestEnrollment<'_>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        require(
+            request.text("action") == "report_blocker",
+            "report writer accepts only report_blocker",
+        )?;
+        self.record_team_request_before(admission, expected_binding, request, source, deadline)
+    }
+    /// Records an authenticated consumer's bounded proposal/report as data.
+    /// Proposed tasks do not enter the task graph or authorize their execution.
+    pub fn record_team_request_before(
         &self,
         admission: AdmissionRequest,
         expected_binding: &str,
@@ -242,6 +364,44 @@ impl Plan<'_> {
             guard.check()?;
             return Ok(prior.get("outcome").clone());
         }
+        if request.text("action") == "propose_tasks" {
+            require(
+                request.text("expected_task_sha256") == guard.binding().text("task_sha256"),
+                "task proposal parent task changed",
+            )?;
+            let declared = guard.binding().get("allowed_paths").strings()?;
+            let envelope = if declared.is_empty() {
+                vec!["."]
+            } else {
+                declared
+            };
+            let forbidden = guard.binding().get("forbidden_paths").strings()?;
+            for task in request.get("tasks").array()? {
+                require(
+                    !snapshot
+                        .tasks()?
+                        .iter()
+                        .any(|(id, _)| id == task.text("id").as_bytes()),
+                    "proposed task id already exists in the canonical plan",
+                )?;
+                let paths = task.get("allowed").strings()?;
+                for path in &paths {
+                    require(
+                        oms_contract_markdown::scope::pattern_within_envelope(path, &envelope)
+                            .map_err(crate::error)?,
+                        "task proposal widens Team scope",
+                    )?;
+                }
+                require(
+                    forbidden.is_empty()
+                        || !oms_contract_markdown::scope::scopes_overlap(
+                            Some(&paths),
+                            Some(&forbidden),
+                        ),
+                    "task proposal intersects or cannot prove separation from forbidden scope",
+                )?;
+            }
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| crate::error("Team request clock unavailable"))?
@@ -252,7 +412,7 @@ impl Plan<'_> {
                     <= guard.expires_at_unix()?.unwrap_or(0) as i128,
             "Team request expired or exceeds contract expiry",
         )?;
-        let result = outcome(&digest);
+        let result = outcome(request.text("action"), &digest);
         let receipt = object([
             ("key", string(&key)),
             ("request_sha256", string(&digest)),
@@ -267,7 +427,14 @@ impl Plan<'_> {
             "Team request history full; existing dedup receipts retained",
         )?;
         receipts.push(receipt);
-        record.set("request_schema", number(2))?;
+        let version = if request.text("action") == "propose_tasks"
+            || record.get("request_schema").is_int(3)
+        {
+            3
+        } else {
+            2
+        };
+        record.set("request_schema", number(version))?;
         record.set("requests", Value::Array(receipts))?;
         teams.set(&admission.team_id, record)?;
         validate_aggregate(&teams)?;
@@ -290,7 +457,7 @@ impl Plan<'_> {
         guard.check().map_err(|e| crate::Error {
             code: e.code,
             message: format!(
-                "Team report may already be recorded; reconcile retained receipt before retry: {}",
+                "Team request may already be recorded; reconcile retained receipt before retry: {}",
                 e.message
             ),
         })?;
@@ -329,7 +496,7 @@ mod tests {
             ("request_sha256", string(&digest)),
             ("source_sha256", string("b".repeat(64))),
             ("request", request),
-            ("outcome", outcome(&digest)),
+            ("outcome", outcome("report_blocker", &digest)),
         ]);
         let mut record = legacy;
         record.set("request_schema", number(2)).unwrap();
@@ -356,8 +523,67 @@ mod tests {
                 .message
                 .contains("key changed")
         );
-        record.set("request_schema", number(3)).unwrap();
+        record.set("request_schema", number(4)).unwrap();
         assert!(validate_record(&record).is_err());
+        let proposal = object([
+            ("schema", number(2)),
+            ("request_id", string("proposal-one")),
+            ("action", string("propose_tasks")),
+            ("summary", string("Review a bounded decomposition")),
+            ("expected_task_sha256", string("d".repeat(64))),
+            ("expires_at", number(100)),
+            (
+                "tasks",
+                Value::Array(vec![object([
+                    ("id", string("proposed-a")),
+                    ("title", string("Inspect the assigned source")),
+                    ("allowed", Value::Array(vec![string("src/lib.rs")])),
+                    ("depends", Value::Array(vec![])),
+                ])]),
+            ),
+        ]);
+        validate_request(&proposal).unwrap();
+        let mut bad = proposal.clone();
+        bad.set("dispatch", Value::Bool(true)).unwrap();
+        assert!(validate_request(&bad).is_err());
+        let mut task = proposal.get("tasks").array().unwrap()[0].clone();
+        task.set("depends", Value::Array(vec![string("proposed-a")]))
+            .unwrap();
+        bad = proposal.clone();
+        bad.set("tasks", Value::Array(vec![task])).unwrap();
+        assert!(validate_request(&bad).is_err());
+        bad.set(
+            "tasks",
+            Value::Array(vec![proposal.get("tasks").array().unwrap()[0].clone(); 9]),
+        )
+        .unwrap();
+        assert!(validate_request(&bad).is_err());
+        let digest = json::hash(&proposal).unwrap();
+        let receipt = object([
+            (
+                "key",
+                string(
+                    json::hash(&object([
+                        ("binding", string(&binding)),
+                        ("request_id", proposal.get("request_id").clone()),
+                    ]))
+                    .unwrap(),
+                ),
+            ),
+            ("binding_sha256", string(&binding)),
+            ("request_sha256", string(&digest)),
+            ("source_sha256", string("b".repeat(64))),
+            ("request", proposal),
+            ("outcome", outcome("propose_tasks", &digest)),
+        ]);
+        record.set("requests", Value::Array(vec![receipt])).unwrap();
+        record.set("request_schema", number(2)).unwrap();
+        assert!(
+            validate_record(&record).is_err(),
+            "version 2 cannot carry task proposals"
+        );
+        record.set("request_schema", number(3)).unwrap();
+        validate_record(&record).unwrap();
     }
     fn padded_receipt(index: usize, text: &str) -> Value {
         let binding = "a".repeat(64);
@@ -384,7 +610,7 @@ mod tests {
             ("request_sha256", string(&digest)),
             ("source_sha256", string("b".repeat(64))),
             ("request", request),
-            ("outcome", outcome(&digest)),
+            ("outcome", outcome("report_blocker", &digest)),
         ])
     }
     #[test]

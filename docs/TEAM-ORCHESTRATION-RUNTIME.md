@@ -217,8 +217,8 @@ controller가 되면 안 된다. Main 재시작 후 미확정 wakeup을 자동 �
 ### TM-03A native report channel: bounded implementation
 
 An explicit `peer-ask --team-requests --providers ADAPTER` uses the existing
-four Team locator flags and `--task-id`. It supports only an actual read-only
-lead and `report_blocker`. Registered custom adapters require a strict schema-1
+four Team locator flags and `--task-id`. Its default supports only an actual
+read-only lead and `report_blocker`. Registered custom adapters require a strict schema-1
 `ADAPTER.oms-team-request-v1.json` declaration with `protocol` equal to
 `oms-team-request-v1` and the observed `binary_sha256`. The declaration and
 binary are owned, no-follow, single-link regular files, bounded at 8 KiB and
@@ -269,6 +269,47 @@ Plan fixtures reject altered receipt keys and an exact 512-KiB comma overflow.
 Only sealed owned cleanup for the exact call/scope allows checked enrollment
 leave; missing or stale authority preserves the enrollment for reconciliation.
 No paid model or live provider capability is claimed by these fixtures.
+
+### TM-03B scoped task proposals: explicit opt-in
+
+The same native channel additionally accepts `propose_tasks` only when its parent
+passes `--team-request-actions propose_tasks` or an explicit comma list including
+`report_blocker`. The default remains report-only. The typed selection is retained
+by the opaque New launch binding and private session metadata; it is policy data,
+not a controller credential. A non-default hello lists `allowed_actions` and the
+guard-checked `task_id`/`task_sha256`; the actor obtains its exact parent-task
+digest from that owned channel rather than guessing it from local metadata. The
+existing custom-adapter declaration describes the wire transport; no built-in
+provider capability, model call or new transport is inferred from this action.
+
+A proposal body has schema 2, request_id, action `propose_tasks`, summary,
+expected_task_sha256, tasks and expires_at. It contains 1..8 proposed tasks, each
+exactly id, title, allowed and depends. Summary is at most 1,000 UTF-8 bytes, title
+300 bytes, and the existing 8-KiB body/frame limits still apply. IDs and dependency
+edges are unique; dependencies name only other proposed tasks and must be acyclic.
+Each allowed list contains 1..32 normalized unique paths of at most 240 bytes.
+The current parent-task digest must match, IDs must be absent from the canonical
+task graph, and scope must be provably within the Team's allowed envelope and
+disjoint from forbidden scope. Unproven overlap refuses the proposal.
+
+The canonical Team request record opts into version 3 upon its first proposal.
+Version 2 remains report-only; older readers refuse version 3. The existing 64-row /
+512-KiB Plan-wide history cap, stable semantic identity, changed-body conflict,
+generation/cancel retention, challenged ACK and post-CAS reconciliation apply.
+An exact replay returns the recorded proposal outcome rather than reapplying new
+task eligibility checks or creating another effect. `agent-plan team-show --id ID
+--requests` explicitly reads the bounded receipt history; default Team views keep
+their existing fields. A missing request ledger is shown as null by this opt-in
+reader, and reading it does not write state or call a provider.
+
+The response status `proposed` means only that parent-review data was recorded.
+It does not add tasks, change their state/scope/criterion/verifier, select a route,
+dispatch, wake a model, cancel a member or accept a result. Applying any reviewed
+decomposition remains a separate existing parent operation with its own digest
+CAS and acceptance rules. Other TeamRequest actions and full TM-03 completion
+remain unsupported. Local fixtures cover proposal/replay/lost ACK, explicit
+action refusal, stale digest, scope/forbidden boundaries and cyclic/existing IDs;
+they are not live-provider support evidence.
 
 ## 5. TM-04 — OMS-managed 실행과 복구
 

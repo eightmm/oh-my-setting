@@ -275,6 +275,39 @@ pub struct TeamLaunchBinding<'a> {
     pub(crate) pending: &'a crate::usage::Pending,
     pub(crate) attempt: &'a PhysicalAttempt<'a>,
     pub(crate) protocol: &'a TeamProtocol,
+    pub(crate) actions: &'a [TeamRequestAction],
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum TeamRequestAction {
+    ReportBlocker,
+    ProposeTasks,
+}
+impl TeamRequestAction {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ReportBlocker => "report_blocker",
+            Self::ProposeTasks => "propose_tasks",
+        }
+    }
+    pub(crate) fn parse_list(value: &str) -> Result<Vec<Self>> {
+        if value.is_empty() {
+            return Ok(vec![Self::ReportBlocker]);
+        }
+        let mut actions = Vec::new();
+        for action in value.split(',') {
+            let action = match action {
+                "report_blocker" => Self::ReportBlocker,
+                "propose_tasks" => Self::ProposeTasks,
+                _ => return Err(Error::new(2, "unsupported Team request action")),
+            };
+            if actions.contains(&action) {
+                return Err(Error::new(2, "duplicate Team request action"));
+            }
+            actions.push(action);
+        }
+        actions.sort();
+        Ok(actions)
+    }
 }
 #[derive(Clone, Debug)]
 pub struct TeamProtocol {
@@ -300,6 +333,10 @@ impl TeamProtocol {
     }
 }
 impl TeamLaunchBinding<'_> {
+    /// Selected parent policy data; this list does not authenticate a channel.
+    pub fn actions(&self) -> &[TeamRequestAction] {
+        self.actions
+    }
     pub fn attempt(&self) -> &PhysicalAttempt<'_> {
         self.attempt
     }
@@ -530,6 +567,28 @@ mod tests {
 
     #[test]
     fn explicit_team_locators_preserve_large_generations_and_reject_ambiguous_metadata() {
+        assert_eq!(
+            TeamRequestAction::parse_list("").unwrap(),
+            [TeamRequestAction::ReportBlocker]
+        );
+        assert_eq!(
+            TeamRequestAction::parse_list("propose_tasks,report_blocker").unwrap(),
+            [
+                TeamRequestAction::ReportBlocker,
+                TeamRequestAction::ProposeTasks
+            ]
+        );
+        for invalid in [
+            "request_dispatch",
+            "report_blocker,report_blocker",
+            "propose_tasks,",
+            "all",
+        ] {
+            assert!(TeamRequestAction::parse_list(invalid).is_err());
+        }
+        assert!(
+            crate::peer::parse(&["--team-request-actions".into(), "propose_tasks".into()]).is_err()
+        );
         let valid = vec![
             "--team-id".into(),
             "team-a".into(),

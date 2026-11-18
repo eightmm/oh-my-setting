@@ -58,6 +58,7 @@ pub(crate) const VALUES: &[&str] = &[
     "team-spec-sha256",
     "team-member",
     "team-member-generation",
+    "team-request-actions",
 ];
 pub(crate) const FLAGS: &[&str] = &[
     "dry-run",
@@ -117,6 +118,13 @@ pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
     }
     let args = Args::parse(&expanded, VALUES, FLAGS)?;
     let team = process::TeamLocator::from_args(&args)?;
+    if args.has("team-request-actions") && !args.has("team-requests") {
+        return fail("--team-request-actions requires --team-requests");
+    }
+    if args.has("team-request-actions") && args.get("team-request-actions").is_empty() {
+        return fail("--team-request-actions must name an explicit bounded action list");
+    }
+    process::TeamRequestAction::parse_list(args.get("team-request-actions"))?;
     if args.has("team-requests")
         && (team.is_none()
             || args.has("fallback-model")
@@ -125,7 +133,7 @@ pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
             || args.has("dry-run"))
     {
         return fail(
-            "--team-requests requires an explicit Team and one report-only read transport",
+            "--team-requests requires an explicit Team and one read-only request transport",
         );
     }
     Ok(args)
@@ -758,6 +766,12 @@ pub(crate) fn call(
             "OMS_TEAM_REQUEST_PROTOCOL".into(),
             "oms-team-request-v1".into(),
         ));
+        if args.has("team-request-actions") {
+            usage_env.push((
+                "OMS_TEAM_REQUEST_ACTIONS".into(),
+                args.get("team-request-actions").into(),
+            ));
+        }
     }
     process::TeamLocator::append_args(args, &mut usage_env)?;
     if let Some(id) = &live_attempt {
