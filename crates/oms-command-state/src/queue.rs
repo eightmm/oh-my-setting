@@ -625,7 +625,9 @@ fn fallback(
                 .parse::<i32>()
                 .ok()
                 .and_then(rustix::process::Pid::from_raw)
-                .is_some_and(|pid| rustix::process::test_kill_process(pid).is_err())
+                .is_some_and(|pid| {
+                    rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH)
+                })
             {
                 return Err(error(
                     2,

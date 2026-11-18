@@ -1311,19 +1311,7 @@ fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        match std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            Ok(out) if out.status.success() => true,
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
-                stderr.contains("operation not permitted") || stderr.contains("eperm")
-            }
-            Err(_) => true,
-        }
+        oms_command_operations::lock::pid_alive(i64::from(pid))
     }
 }
 
