@@ -10,7 +10,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]";
+mod resumable;
+
+const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]\ncollect: --host HOST --repo REPO --remote-dir DIR --remote-path PATH --dest PATH [--expected-sha256 HEX] [--max-bytes N] [--resume --expected-size N [--chunk-bytes N]]";
 const DEFAULT_COLLECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COLLECT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_LEDGER_OUTPUT: usize = 512 * 1024;
@@ -98,6 +100,9 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     let mut remote_path_arg = None;
     let mut dest = None;
     let mut expected_sha256 = None;
+    let mut expected_size = None;
+    let mut chunk_bytes = None;
+    let mut resume = false;
     let mut max_bytes = None;
     let mut pretty = false;
     let mut tail = Vec::new();
@@ -110,6 +115,12 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         }
         if flag == "--pretty" {
             pretty = true;
+            i += 1;
+            continue;
+        }
+        if flag == "--resume" && action == "collect" {
+            require(!resume, "duplicate option: --resume")?;
+            resume = true;
             i += 1;
             continue;
         }
@@ -130,6 +141,8 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             "--remote-path" if action == "collect" => &mut remote_path_arg,
             "--dest" if action == "collect" => &mut dest,
             "--expected-sha256" if action == "collect" => &mut expected_sha256,
+            "--expected-size" if action == "collect" => &mut expected_size,
+            "--chunk-bytes" if action == "collect" => &mut chunk_bytes,
             "--max-bytes" if action == "collect" => &mut max_bytes,
             _ => return Err(error(format!("unknown option: {flag}"))),
         };
@@ -195,12 +208,42 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     if let Some(digest) = expected_sha256.as_deref() {
         validate_sha256_hex(digest, "--expected-sha256")?;
     }
+    let resume = if resume {
+        require(
+            expected_sha256.is_some(),
+            "--resume requires --expected-sha256",
+        )?;
+        let size = expected_size
+            .as_deref()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|n| *n <= max_bytes)
+            .ok_or_else(|| error("--resume requires --expected-size in 0..=--max-bytes"))?;
+        let chunk_bytes = chunk_bytes
+            .map(|raw| raw.parse::<u64>().map_err(error))
+            .transpose()?
+            .unwrap_or(resumable::DEFAULT_CHUNK_BYTES);
+        require(
+            (resumable::MIN_CHUNK_BYTES..=resumable::MAX_CHUNK_BYTES).contains(&chunk_bytes),
+            "--chunk-bytes must be in 65536..=8388608",
+        )?;
+        Some(resumable::Options { size, chunk_bytes })
+    } else {
+        require(
+            expected_size.is_none() && chunk_bytes.is_none(),
+            "--expected-size and --chunk-bytes require --resume",
+        )?;
+        None
+    };
     if let Some(rp) = remote_path_arg.as_deref() {
         validate_remote_rel_path(rp)?;
     }
     let control = ssh_control_path(&host, port)?;
     assert!(control.len() <= 80);
-    require(!interrupted.load(Ordering::Relaxed), "interrupted")?;
+    if resume.is_some() {
+        resumable::check_cancelled(interrupted)?;
+    } else {
+        require(!interrupted.load(Ordering::Relaxed), "interrupted")?;
+    }
     let mut ssh = build_ssh(&host, port, &control);
     let mut value = serde_json::json!({"schema":1,"action":action,"host":host});
     let code;
@@ -273,9 +316,11 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             remote_path_rel,
             dest_raw,
             expected_sha256: expected_sha256.as_deref(),
+            resume,
             max_bytes,
             control: &control,
             pretty,
+            interrupted,
         });
     }
     value["remote_dir"] = remote.clone().into();
@@ -2090,9 +2135,11 @@ struct CollectRequest<'a> {
     remote_path_rel: &'a str,
     dest_raw: &'a str,
     expected_sha256: Option<&'a str>,
+    resume: Option<resumable::Options>,
     max_bytes: u64,
     control: &'a str,
     pretty: bool,
+    interrupted: &'a AtomicBool,
 }
 
 struct TempFileGuard {
@@ -2180,7 +2227,10 @@ fn prepare_collect_dest(cwd: &Path, raw: &str) -> Result<(PathBuf, PathBuf)> {
         }
         Err(e) => return Err(error(e)),
     }
-    Ok((parent, abs))
+    // Alternate spellings must select the same destination lock and cache.
+    let parent = std::fs::canonicalize(&parent).map_err(error)?;
+    let dest = parent.join(abs.file_name().expect("validated file name"));
+    Ok((parent, dest))
 }
 
 fn create_private_temp(parent: &Path) -> Result<(std::fs::File, TempFileGuard)> {
@@ -2210,9 +2260,8 @@ fn create_private_temp(parent: &Path) -> Result<(std::fs::File, TempFileGuard)> 
     Err(error("cannot create private collection temporary file"))
 }
 
-fn run_collect(req: CollectRequest<'_>) -> Result<Response> {
-    let (parent, dest_abs) = prepare_collect_dest(req.cwd, req.dest_raw)?;
-    let script = format!(
+fn collect_target_script(remote: &str, remote_path_rel: &str) -> String {
+    format!(
         r#"set -eu
 rd={rd}
 rp={rp}
@@ -2240,10 +2289,21 @@ if [ -L "$target" ] || [ ! -f "$target" ]; then
   printf '%s\n' 'remote path must be a regular non-symlink file' >&2
   exit 2
 fi
-exec cat -- "$target"
 "#,
-        rd = remote_path(req.remote),
-        rp = quote(req.remote_path_rel),
+        rd = remote_path(remote),
+        rp = quote(remote_path_rel),
+    )
+}
+
+fn run_collect(req: CollectRequest<'_>) -> Result<Response> {
+    let (parent, dest_abs) = prepare_collect_dest(req.cwd, req.dest_raw)?;
+    let destination_lock = resumable::destination_lock(req.cwd, &dest_abs)?;
+    if let Some(options) = req.resume {
+        return resumable::run(req, options, &parent, &dest_abs, &destination_lock);
+    }
+    let script = format!(
+        "{}exec cat -- \"$target\"\n",
+        collect_target_script(req.remote, req.remote_path_rel)
     );
     let mut child = build_ssh(req.host, req.port, req.control)
         .arg(format!("sh -lc {}", quote(&script)))
@@ -2316,6 +2376,7 @@ exec cat -- "$target"
     }
     tmp_file.sync_all().map_err(error)?;
     drop(tmp_file);
+    destination_lock.check().map_err(error)?;
     match std::fs::symlink_metadata(&dest_abs) {
         Ok(meta) => require(
             meta.is_file() && !meta.file_type().is_symlink(),
@@ -3389,6 +3450,24 @@ if [ -f "$OMS_TEST_FAIL_STREAM" ]; then
   printf 'partial-chunk'
   exit 23
 fi
+case "$last" in
+  *'exec dd '*)
+    index=$(printf '%s\n' "$last" | sed -n 's/.* skip=\([0-9]*\) count=.*/\1/p')
+    printf '%s\n' "$index" >> "$OMS_TEST_DIR/chunks.log"
+    if [ -f "$OMS_TEST_DIR/resume_fail" ] && [ "$index" = 1 ]; then
+      printf 'partial-chunk'
+      exit 23
+    fi
+    if [ -f "$OMS_TEST_DIR/resume_hold" ] && [ "$index" = "$(cat "$OMS_TEST_DIR/resume_hold")" ]; then
+      : > "$OMS_TEST_DIR/resume_ready"
+      tries=0
+      while [ -f "$OMS_TEST_DIR/resume_hold" ] && [ "$tries" -lt 100 ]; do
+        sleep 0.05
+        tries=$((tries + 1))
+      done
+    fi
+    ;;
+esac
 exec sh -c "$last"
 "#;
             std::fs::write(&fake, script).unwrap();
@@ -3402,6 +3481,7 @@ exec sh -c "$last"
                 .env("OMS_TEST_SCENARIO8", "1")
                 .env("OMS_SSH_BIN", &fake)
                 .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_LOCK_DIR", temp.0.join("locks"))
                 .env("OMS_TEST_FAIL_STREAM", temp.0.join("fail_stream"))
                 .env_remove("OMS_HARNESS_CHILD")
                 .status()
@@ -3563,6 +3643,259 @@ exec sh -c "$last"
             .filter(|e| e.file_name().to_string_lossy().starts_with(".oms-collect-"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        collect_resumable_contract(&root, &repo, &remote, &dest_dir);
+    }
+
+    fn collect_resumable_contract(root: &Path, repo: &Path, remote: &Path, dest_dir: &Path) {
+        let chunk = resumable::MIN_CHUNK_BYTES as usize;
+        let payload: Vec<_> = (0..2 * chunk + 17).map(|n| (n % 251) as u8).collect();
+        let digest = sha256(&payload);
+        let source = remote.join("outputs/resume.bin");
+        std::fs::write(&source, &payload).unwrap();
+        let args = |dest: &Path, hash: &str, size: usize| -> Vec<OsString> {
+            [
+                "collect",
+                "--host",
+                "example",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--remote-dir",
+                remote.to_str().unwrap(),
+                "--remote-path",
+                "outputs/resume.bin",
+                "--dest",
+                dest.to_str().unwrap(),
+                "--resume",
+                "--expected-sha256",
+                hash,
+                "--expected-size",
+                &size.to_string(),
+                "--chunk-bytes",
+                &chunk.to_string(),
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect()
+        };
+        let request = |argv: &[OsString]| run(argv, root, &AtomicBool::new(false));
+        let log = || std::fs::read_to_string(root.join("chunks.log")).unwrap_or_default();
+        let dest = dest_dir.join("resume.bin");
+        std::fs::write(&dest, b"original").unwrap();
+        let argv = args(&dest, &digest, payload.len());
+        for name in ["--expected-size", "--expected-sha256", "--resume"] {
+            let mut bad = argv.clone();
+            let index = bad.iter().position(|a| a == name).unwrap();
+            bad.remove(index);
+            if name != "--resume" {
+                bad.remove(index);
+            }
+            assert_eq!(request(&bad).code, 2, "{name}");
+        }
+        for (flag, value) in [("--chunk-bytes", "1"), ("--expected-size", "536870913")] {
+            let mut bad = argv.clone();
+            let index = bad.iter().position(|a| a == flag).unwrap();
+            bad[index + 1] = value.into();
+            assert_eq!(request(&bad).code, 2);
+        }
+        assert!(log().is_empty());
+        assert_eq!(run(&argv, root, &AtomicBool::new(true)).code, 130);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+        assert!(log().is_empty());
+        std::fs::write(root.join("resume_fail"), "1").unwrap();
+        assert_eq!(request(&argv).code, 23);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+        assert_eq!(log(), "0\n1\n");
+        let cache_parent = dest_dir.join(".oms-collect-cache");
+        let cache = std::fs::read_dir(&cache_parent)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let manifest = cache.join("manifest.json");
+        let saved = std::fs::read(&manifest).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(original["chunks"].as_object().unwrap().len(), 1);
+        for field in ["schema", "transfer_id", "identity", "chunks", "extra"] {
+            let mut corrupt = original.clone();
+            match field {
+                "schema" => corrupt[field] = 99.into(),
+                "transfer_id" => corrupt[field] = "0".repeat(64).into(),
+                "identity" => corrupt[field]["port"] = 23.into(),
+                "chunks" => corrupt[field]["0"]["bytes"] = 1.into(),
+                _ => corrupt[field] = true.into(),
+            }
+            std::fs::write(&manifest, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+            assert_eq!(request(&argv).code, 2, "{field}");
+            assert_eq!(log(), "0\n1\n");
+            assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+        }
+        std::fs::write(&manifest, b"{").unwrap();
+        assert_eq!(request(&argv).code, 2);
+        std::fs::write(&manifest, &saved).unwrap();
+        let cached_chunk = cache.join("00000.chunk");
+        let saved_chunk = std::fs::read(&cached_chunk).unwrap();
+        let mut corrupt_chunk = saved_chunk.clone();
+        corrupt_chunk[0] ^= 1;
+        std::fs::write(&cached_chunk, &corrupt_chunk).unwrap();
+        assert_eq!(request(&argv).code, 2);
+        std::fs::write(&cached_chunk, b"short").unwrap();
+        assert_eq!(request(&argv).code, 2);
+        std::fs::remove_file(&cached_chunk).unwrap();
+        std::os::unix::fs::symlink(&source, &cached_chunk).unwrap();
+        assert_eq!(request(&argv).code, 2);
+        std::fs::remove_file(&cached_chunk).unwrap();
+        std::fs::write(&cached_chunk, &saved_chunk).unwrap();
+        std::fs::set_permissions(&cached_chunk, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&cache_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(request(&argv).code, 2);
+        std::fs::set_permissions(&cache_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(log(), "0\n1\n");
+        std::fs::remove_file(root.join("resume_fail")).unwrap();
+        let complete = request(&argv);
+        assert_eq!(
+            complete.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&complete.stderr)
+        );
+        let row: serde_json::Value = serde_json::from_slice(&complete.stdout).unwrap();
+        assert_eq!(row["chunks_reused"], 1);
+        assert_eq!(row["chunks_fetched"], 2);
+        assert_eq!(row["bytes_reused"], chunk);
+        assert_eq!(row["bytes_fetched"], chunk + 17);
+        assert_eq!(row["verified"], true);
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert_eq!(log(), "0\n1\n1\n2\n");
+
+        // Effective port and physical destination spelling retain cache identity.
+        let mut same = args(
+            &dest_dir.join("../dests/resume.bin"),
+            &digest,
+            payload.len(),
+        );
+        same.extend([OsString::from("--port"), OsString::from("22")]);
+        let cached = request(&same);
+        assert_eq!(
+            cached.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&cached.stderr)
+        );
+        let cached: serde_json::Value = serde_json::from_slice(&cached.stdout).unwrap();
+        assert_eq!(cached["transfer_id"], row["transfer_id"]);
+        assert_eq!(cached["chunks_reused"], 3);
+        assert_eq!(cached["chunks_fetched"], 0);
+        assert_eq!(log(), "0\n1\n1\n2\n");
+
+        let wrong = dest_dir.join("wrong-hash.bin");
+        assert_eq!(
+            request(&args(&wrong, &"0".repeat(64), payload.len())).code,
+            2
+        );
+        assert!(!wrong.exists());
+        for size in [payload.len() - 1, payload.len() + 1, 2 * chunk] {
+            let wrong = dest_dir.join(format!("wrong-size-{size}.bin"));
+            assert_eq!(request(&args(&wrong, &digest, size)).code, 2);
+            assert!(!wrong.exists());
+        }
+        // Remote mutation between attempts is detected by the full caller hash.
+        let changed = dest_dir.join("changed.bin");
+        let changed_args = args(&changed, &digest, payload.len());
+        std::fs::write(root.join("resume_fail"), "1").unwrap();
+        assert_eq!(request(&changed_args).code, 23);
+        std::fs::remove_file(root.join("resume_fail")).unwrap();
+        let mut changed_payload = payload.clone();
+        changed_payload[chunk] ^= 1;
+        std::fs::write(&source, changed_payload).unwrap();
+        assert_eq!(request(&changed_args).code, 2);
+        assert!(!changed.exists());
+        std::fs::write(&source, &payload).unwrap();
+
+        let cancelled_dest = dest_dir.join("cancelled.bin");
+        let cancelled_args = args(&cancelled_dest, &digest, payload.len());
+        let interrupted = AtomicBool::new(false);
+        let before_cancel = log();
+        std::fs::write(root.join("resume_hold"), "1").unwrap();
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| run(&cancelled_args, root, &interrupted));
+            let started = std::time::Instant::now();
+            while !root.join("resume_ready").exists() && started.elapsed() < Duration::from_secs(3)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(root.join("resume_ready").exists());
+            interrupted.store(true, Ordering::Relaxed);
+            assert_eq!(pending.join().unwrap().code, 130);
+        });
+        assert!(!cancelled_dest.exists());
+        assert_eq!(log(), format!("{before_cancel}0\n1\n"));
+        std::fs::remove_file(root.join("resume_hold")).unwrap();
+        std::fs::remove_file(root.join("resume_ready")).unwrap();
+        let resumed = request(&cancelled_args);
+        assert_eq!(
+            resumed.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let resumed: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+        assert_eq!(resumed["chunks_reused"], 1);
+        assert_eq!(log(), format!("{before_cancel}0\n1\n1\n2\n"));
+
+        // A live resumable writer excludes both another transfer and legacy collect.
+        let exclusive = dest_dir.join("exclusive.bin");
+        let exclusive_args = args(&exclusive, &digest, payload.len());
+        std::fs::write(root.join("resume_hold"), "0").unwrap();
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| request(&exclusive_args));
+            let started = std::time::Instant::now();
+            while !root.join("resume_ready").exists() && started.elapsed() < Duration::from_secs(3)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(root.join("resume_ready").exists());
+            let before = log();
+            let other = args(
+                &dest_dir.join("../dests/exclusive.bin"),
+                &"0".repeat(64),
+                payload.len(),
+            );
+            assert_eq!(request(&other).code, 75);
+            let legacy = invoke(
+                &[
+                    "collect",
+                    "--host",
+                    "example",
+                    "--repo",
+                    repo.to_str().unwrap(),
+                    "--remote-dir",
+                    remote.to_str().unwrap(),
+                    "--remote-path",
+                    "outputs/resume.bin",
+                    "--dest",
+                    exclusive.to_str().unwrap(),
+                ],
+                root,
+            );
+            assert_eq!(legacy.code, 75);
+            assert_eq!(log(), before);
+            assert!(!exclusive.exists());
+            std::fs::remove_file(root.join("resume_hold")).unwrap();
+            assert_eq!(pending.join().unwrap().code, 0);
+        });
+        assert_eq!(std::fs::read(&exclusive).unwrap(), payload);
+        std::fs::write(&source, []).unwrap();
+        let empty = dest_dir.join("empty.bin");
+        assert_eq!(request(&args(&empty, &sha256(b""), 0)).code, 0);
+        assert_eq!(std::fs::read(&empty).unwrap(), b"");
+        assert!(std::fs::read_dir(dest_dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[test]
@@ -4665,6 +4998,7 @@ exec sh -c "$last"
                 .env("OMS_TEST_COLLECT_HARDENING", "1")
                 .env("OMS_SSH_BIN", &fake)
                 .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_LOCK_DIR", temp.0.join("locks"))
                 .env("OMS_TEST_OPEN_STDERR_FLOOD", temp.0.join("flood"))
                 .env_remove("OMS_HARNESS_CHILD")
                 .status()
