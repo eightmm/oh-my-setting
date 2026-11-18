@@ -73,6 +73,56 @@ pub fn describe(profile: &str) -> Result<Value> {
                 ),
             ),
         ]),
+        "apptainer" => object([
+            ("profile", string(profile)),
+            (
+                "declared",
+                object([
+                    (
+                        "repo",
+                        string("read-only unless explicitly selected as worktree"),
+                    ),
+                    ("worktree", string("explicit-read-write")),
+                    (
+                        "network",
+                        string("none-by-default; host only when requested"),
+                    ),
+                    (
+                        "privileges",
+                        string("user namespace; drop all capabilities; no privileged fallback"),
+                    ),
+                    (
+                        "devices",
+                        string("default contained devices; GPU support not implemented"),
+                    ),
+                ]),
+            ),
+            (
+                "enforced",
+                object([
+                    ("wall_clock", b(true)),
+                    ("process_group", b(true)),
+                    ("environment_filter", b(true)),
+                ]),
+            ),
+            (
+                "unknown",
+                list([
+                    "Apptainer namespace and mount enforcement",
+                    "kernel isolation",
+                    "image contents and concurrent mutation",
+                    "cgroup enforcement",
+                    "tmpfs size (unsupported)",
+                    "administrator runtime configuration",
+                ]),
+            ),
+            (
+                "warning",
+                string(
+                    "Local prebuilt SIF only. Readiness is preflight evidence; execution may refuse host namespace or cgroup policy.",
+                ),
+            ),
+        ]),
         "remote" => object([
             ("profile", string(profile)),
             (
@@ -106,12 +156,15 @@ pub fn describe(profile: &str) -> Result<Value> {
 }
 pub fn check(rt: &Runtime<'_>, profile: &str, image: &OsStr, adapter: &OsStr) -> Result<Value> {
     let mut row = describe(profile)?;
-    let image = if image.is_empty() {
+    let image = if profile == "apptainer" {
+        require(adapter.is_empty(), "--adapter does not apply to Apptainer")?;
+        apptainer_image_path(rt, image)?
+    } else if image.is_empty() {
         std::env::var_os("OMS_ISOLATED_IMAGE").unwrap_or_default()
     } else {
         image.to_owned()
     };
-    let adapter = if adapter.is_empty() {
+    let adapter = if adapter.is_empty() && profile != "apptainer" {
         std::env::var_os("OMS_REMOTE_ADAPTER").unwrap_or_default()
     } else {
         adapter.to_owned()
@@ -131,6 +184,48 @@ pub fn check(rt: &Runtime<'_>, profile: &str, image: &OsStr, adapter: &OsStr) ->
         row.set(key, readiness.get(key).clone())?;
     }
     Ok(row)
+}
+fn apptainer_image_path(rt: &Runtime<'_>, raw: &OsStr) -> Result<std::ffi::OsString> {
+    if raw.is_empty() {
+        return Ok(raw.to_owned());
+    }
+    require(
+        !raw.to_string_lossy().contains("://"),
+        "Apptainer requires a local prebuilt SIF; image pulls are not supported",
+    )?;
+    let path = rt.user_path(raw)?;
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        rt.repo.join(path)
+    }
+    .into_os_string())
+}
+/// Explicit container keys cannot redirect the host launcher or its policy.
+pub fn apptainer_environment_name(key: &OsStr) -> Result<()> {
+    let name = key
+        .to_str()
+        .ok_or_else(|| error("invalid container environment name"))?;
+    require(
+        !name.is_empty()
+            && name
+                .bytes()
+                .enumerate()
+                .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || i > 0 && c.is_ascii_digit()),
+        "invalid container environment name",
+    )?;
+    let upper = name.to_ascii_uppercase();
+    require(
+        !upper.starts_with("APPTAINER")
+            && !upper.starts_with("SINGULARITY")
+            && !["HOME", "OMS_RUNTIME_BACKEND"].contains(&upper.as_str()),
+        "container environment name is reserved by the Apptainer policy",
+    )?;
+    require(
+        crate::capsule::sanitize(&object([(name, number(0))]), "")
+            .is_some_and(|v| v.opt(name).is_some()),
+        "refusing sensitive container environment name",
+    )
 }
 pub fn request(
     rt: &Runtime<'_>,
@@ -182,6 +277,9 @@ pub fn request(
     )?;
     let inherit = r.all("inherit-env");
     for key in &inherit {
+        if profile == "apptainer" {
+            apptainer_environment_name(key)?;
+        }
         let name = key
             .to_str()
             .ok_or_else(|| error("invalid environment name"))?;
@@ -220,22 +318,36 @@ pub fn request(
         "execution directory must be a real directory",
     )?;
     let cwd = std::fs::canonicalize(cwd).map_err(error)?;
+    let (image, adapter) = if profile == "apptainer" {
+        let image = r
+            .os("image")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| error("Apptainer requires explicit --image PATH"))?;
+        require(
+            !r.has("adapter") && !r.has("tmpfs-mb"),
+            "Apptainer does not support --adapter or --tmpfs-mb",
+        )?;
+        (apptainer_image_path(rt, image)?, std::ffi::OsString::new())
+    } else {
+        (
+            r.os("image")
+                .map(OsStr::to_os_string)
+                .or_else(|| std::env::var_os("OMS_ISOLATED_IMAGE"))
+                .unwrap_or_default(),
+            r.os("adapter")
+                .filter(|s| !s.is_empty())
+                .map(OsStr::to_os_string)
+                .or_else(|| std::env::var_os("OMS_REMOTE_ADAPTER"))
+                .unwrap_or_default(),
+        )
+    };
     Ok(BackendRequest {
         profile: profile.into(),
         argv,
         cwd,
         worktree,
-        image: r
-            .os("image")
-            .map(OsStr::to_os_string)
-            .or_else(|| std::env::var_os("OMS_ISOLATED_IMAGE"))
-            .unwrap_or_default(),
-        adapter: r
-            .os("adapter")
-            .filter(|s| !s.is_empty())
-            .map(OsStr::to_os_string)
-            .or_else(|| std::env::var_os("OMS_REMOTE_ADAPTER"))
-            .unwrap_or_default(),
+        image,
+        adapter,
         allow_network: r.has("allow-network"),
         inherit_env: inherit,
         wall: Duration::from_secs(wall as u64),
