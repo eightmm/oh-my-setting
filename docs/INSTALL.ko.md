@@ -198,6 +198,10 @@ auto-update trigger)는 그 단계 자신의 코드로 미리 본다. 나머지�
 commit이 아니라 현재 commit을 다시 link하는 경우를 설명한다. checkout이 아직 없으면(첫 설치 전 curl 형태)
 그렇게 말하고 멈춘다.
 
+기존 checkout의 상세 설치 계획을 출력하려면 검증된 네이티브 payload가 준비되어 있어야 한다.
+payload가 없으면 `install.sh --plan`은 준비가 필요하다고 알리고, 바이너리 빌드나 의존성
+다운로드를 실행하지 않는다.
+
 ## 서비스와 화면
 
 GitHub나 Notion capability를 고르면, 대화형 설치기는 브라우저 로그인을

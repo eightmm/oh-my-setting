@@ -8,6 +8,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
 
+PLAN_ONLY=0
+case "${1:-}" in
+  "") ;;
+  --plan-only) PLAN_ONLY=1 ;;
+  *) echo "usage: install-lifecycle-smoke.sh [--plan-only]" >&2; exit 2 ;;
+esac
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-install-lifecycle.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 TMP="$(cd "$TMP" && pwd -P)"
@@ -16,6 +23,72 @@ fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
+
+check_install_plan_without_staging() (
+  plan_dir="$TMP/plan"
+  checkout="$plan_dir/checkout"
+  mkdir -p "$checkout/scripts/lib" "$checkout/crates/oms" "$plan_dir/bin" "$plan_dir/home"
+  cp "$ROOT/install.sh" "$checkout/install.sh"
+  cp "$ROOT/scripts/lib/platform.sh" "$checkout/scripts/lib/platform.sh"
+  cp "$ROOT/Cargo.toml" "$ROOT/rust-toolchain.toml" "$checkout/"
+  cp "$ROOT/crates/oms/Cargo.toml" "$checkout/crates/oms/Cargo.toml"
+  oms_smoke_make_repo "$checkout"
+  git -C "$checkout" add .
+  git -C "$checkout" commit -qm fixture
+  revision="$(git -C "$checkout" rev-parse HEAD)"
+  ln -s "$BASH" "$plan_dir/bin/bash"
+  for blocked in cargo rustup curl wget codex claude agy; do
+    cat > "$plan_dir/bin/$blocked" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${0##*/}" >> "$OMS_PLAN_FORBIDDEN_LOG"
+exit 99
+EOF
+    chmod +x "$plan_dir/bin/$blocked"
+  done
+  run_plan() {
+    env -i HOME="$plan_dir/home" PATH="$plan_dir/bin:/usr/bin:/bin" \
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 OH_MY_SETTING_DIR="$checkout" \
+      OMS_LOCK_DIR="$plan_dir/locks" OMS_NATIVE_NO_AUTO_STAGE=0 \
+      OMS_PLAN_FORBIDDEN_LOG="$plan_dir/forbidden.log" \
+      bash "$checkout/install.sh" --plan
+  }
+  status=0
+  out="$(run_plan 2>&1)" || status=$?
+  [ "$status" -eq 2 ] || fail "cold install plan must require explicit payload preparation: $out"
+  grep -Fq -- '--plan does not build or download' <<< "$out" || fail "cold plan omitted its preparation prerequisite"
+  [ ! -s "$plan_dir/forbidden.log" ] || fail "cold plan invoked Cargo, a download, or a provider"
+  [ ! -e "$checkout/target" ] || fail "cold plan created a native staging/build directory"
+  [ ! -e "$plan_dir/locks" ] || fail "cold plan acquired a lifecycle lock"
+  [ -z "$(find "$plan_dir/home" -mindepth 1 -print)" ] || fail "cold plan wrote user state"
+
+  # A caller can still preview an already prepared, checksum-verified payload.
+  mkdir -p "$plan_dir/built"
+  cat > "$plan_dir/built/oms" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" = 1 ] || exit 98
+[ "${4:-}" = -- ] && [ "${5:-}" = install ] && [ "${6:-}" = --plan ] || exit 98
+case "${1:-}" in
+  --oms-select) exit 0 ;;
+  --oms-dispatch) printf 'fixture install plan\n' ;;
+  *) exit 98 ;;
+esac
+EOF
+  chmod +x "$plan_dir/built/oms"
+  oms_smoke_stage_native "$checkout/target/oms-native/$revision" "$plan_dir/built"
+  out="$(run_plan 2>&1)" || fail "verified warm install plan failed: $out"
+  [ "$out" = 'fixture install plan' ] || fail "warm plan did not dispatch the verified payload: $out"
+  [ ! -s "$plan_dir/forbidden.log" ] || fail "warm plan invoked Cargo, a download, or a provider"
+  [ ! -e "$checkout/target/lifecycle-build" ] || fail "warm plan rebuilt the payload"
+  [ ! -e "$plan_dir/locks" ] || fail "warm plan acquired a lifecycle lock"
+  [ -z "$(find "$plan_dir/home" -mindepth 1 -print)" ] || fail "warm plan wrote user state"
+)
+
+check_install_plan_without_staging
+if [ "$PLAN_ONLY" = 1 ]; then
+  echo "install-lifecycle-smoke (--plan-only): ok"
+  exit 0
+fi
 
 build_dir="$(oms_smoke_native_build_dir "$ROOT")" ||
   fail "pre-built native artifacts missing in $ROOT/target/{release,debug}"

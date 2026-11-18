@@ -357,8 +357,8 @@ prepare_affected_gate() {
       README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md|custom-skills/*.md|templates/*.md|roles/*.md) ;;
       *) scoped_only=0 ;;
     esac
-    if reason="$(oms_critical_path_reason "$path")"; then
-      AFFECTED_MODE=full; AFFECTED_REASONS="$reason"; break
+    if [ "$AFFECTED_MODE" != full ] && reason="$(oms_critical_path_reason "$path")"; then
+      AFFECTED_MODE=full; AFFECTED_REASONS="$reason"
     fi
   done < "$changes"
   if [ "${OMS_AFFECTED_FULL:-0}" = 1 ]; then

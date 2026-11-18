@@ -83,6 +83,20 @@ EOF
   print_plan --changed-from "$docs" --changed-to "$native" --ci-output "$check_probe/native.out"
   printf 'mode=full\nnative=true\npython=false\noperator=\n' > "$check_probe/expected.out"
   cmp -s "$check_probe/native.out" "$check_probe/expected.out" || fail "native CI selection changed"
+
+  # The first critical path selects the reason, but later paths still contribute
+  # native CI coverage even when an earlier contract file already selected full.
+  printf 'security policy\n' > "$repo/SECURITY.md"
+  printf 'fn helper() {}\n' >> "$repo/crates/oms/src/main.rs"
+  git -C "$repo" add .
+  git -C "$repo" commit -qm mixed-contract-native
+  mixed="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$native" --changed-to "$mixed" --ci-output "$check_probe/mixed.out" \
+    2> "$check_probe/mixed.err"
+  cmp -s "$check_probe/mixed.out" "$check_probe/expected.out" || fail "earlier critical path hid later native changes"
+  grep -Fxq 'affected: full test fallback (contract-boundary:SECURITY.md)' "$check_probe/mixed.err" \
+    || fail "mixed planning did not preserve the first critical reason"
+
   git -C "$repo" checkout -q --detach "$docs"
   printf 'untracked\n' > "$repo/dirty"
   selected="$(print_plan --changed-from "$base" --changed-to "$docs")"

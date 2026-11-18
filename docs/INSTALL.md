@@ -219,6 +219,10 @@ update plan describes relinking the current commit, not the one a fetch would
 bring; with no checkout yet (the curl form before a first install) it says so
 and stops.
 
+An existing checkout needs a verified native payload to produce the detailed
+install plan. If that payload has not been prepared, `install.sh --plan`
+reports it unavailable without building binaries or downloading dependencies.
+
 ### Verification policy
 
 The entry points intentionally accept different evidence. A successful workflow

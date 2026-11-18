@@ -335,8 +335,8 @@ if [ "$PLAN_ONLY" = 1 ]; then
   # shellcheck disable=SC1091
   . "$plan_root/scripts/lib/platform.sh"
   oms_bash_enter
-  oms_native_route strict "$plan_root" install --plan "${install_original_args[@]}" || exit $?
-  echo "error: native payload unavailable for --plan; install the Rust toolchain declared in $plan_root/rust-toolchain.toml or verify the staged payload" >&2
+  OMS_NATIVE_NO_AUTO_STAGE=1 oms_native_route strict "$plan_root" install --plan "${install_original_args[@]}" || exit $?
+  echo "error: native payload unavailable for --plan; explicitly build/stage this checkout or verify its staged payload first; --plan does not build or download" >&2
   exit 2
 fi
 export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"

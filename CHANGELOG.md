@@ -1060,6 +1060,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   accidentally pinning a commit. Missing release configuration no longer
   invents an old stable promotion. Doctor and fingerprints describe observed
   tool releases without treating them as default pins or installation proof.
+- Affected-mode planning skips maintenance registration and native builds.
+  `install.sh --plan` also refuses to auto-build a missing native payload,
+  preserving its write-free preview contract when Cargo can fetch dependencies.
 - CI jobs run on `ubuntu-24.04` instead of `ubuntu-latest`: the rollout of
   the Ubuntu 26.04 runner image failed `core/room-protocol`, `draft-pr` and
   `runtime-core` on every branch while the same commits passed on 24.04 and
