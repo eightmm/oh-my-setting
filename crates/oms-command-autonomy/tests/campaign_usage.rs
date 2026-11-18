@@ -228,6 +228,7 @@ fn physical_intents_without_receipts_stay_in_logical_admission_and_refusal() {
     use oms_command_telemetry::store::{canonical_index, physical};
     use oms_lock::{Lock, Mode, Settings};
     use std::path::Path;
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
     let fixture = Fixture::new(Some(json!({"max_tokens":150,"per_call":{"tokens":60}})));
     let stop = AtomicBool::new(false);
@@ -247,21 +248,54 @@ fn physical_intents_without_receipts_stay_in_logical_admission_and_refusal() {
         .try_acquire()
         .unwrap();
     for call in ["call_first", "call_retry"] {
-        let error = physical::begin(
-            &fixture.repo,
-            Identity {
-                call_id: call.into(),
-                operation_id: operation.clone(),
-                provider: "claude".into(),
-                ..Identity::default()
-            },
-            None,
-            false,
-            &stop,
-            Instant::now() + Duration::from_millis(70),
-        )
-        .unwrap_err();
-        assert!(error.publication_uncertain);
+        let cancel = AtomicBool::new(false);
+        // The deadline only bounds a failed publication; cancellation follows
+        // an actual atomic intent observation while receipt admission is held.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                physical::begin(
+                    &fixture.repo,
+                    Identity {
+                        call_id: call.into(),
+                        operation_id: operation.clone(),
+                        provider: "claude".into(),
+                        ..Identity::default()
+                    },
+                    None,
+                    false,
+                    &cancel,
+                    deadline,
+                )
+            });
+            let intent = loop {
+                // A concurrent atomic replacement can invalidate a read; an
+                // unsuccessful observation supplies no cancellation evidence.
+                if let Some(intent) = physical::load(&fixture.repo, &stop)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .find(|intent| intent.identity.call_id == call)
+                {
+                    break intent;
+                }
+                assert!(
+                    !writer.is_finished(),
+                    "registration ended before publication"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "physical intent was not published"
+                );
+                std::thread::yield_now();
+            };
+            assert_eq!(intent.phase, physical::Phase::Reserved);
+            assert_eq!(intent.usage_ordinal, None);
+            held.check().unwrap();
+            cancel.store(true, Ordering::Release);
+            let error = writer.join().unwrap().unwrap_err();
+            assert!(error.publication_uncertain);
+        });
     }
     drop(held);
     assert!(usage::load(&fixture.repo).unwrap().calls.is_empty());
