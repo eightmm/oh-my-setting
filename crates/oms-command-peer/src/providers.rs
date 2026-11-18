@@ -1277,6 +1277,7 @@ impl Drop for ProviderScratch {
 }
 struct Transport {
     argv: Vec<OsString>,
+    selected_effort: Option<String>,
     input: Option<Vec<u8>>,
     environment: Vec<(OsString, OsString)>,
     scratch: Option<ProviderScratch>,
@@ -1296,6 +1297,7 @@ impl Transport {
     fn effort(&mut self, route: &Route, flag: &str) {
         if !route.effort.is_empty() {
             self.option(flag, &route.effort);
+            self.selected_effort = Some(route.effort.clone());
         }
     }
     fn prompt_file(&mut self, provider: &str, prompt: &[u8]) -> Result<PathBuf> {
@@ -1315,6 +1317,7 @@ fn transport(
     let provider = route.provider.as_str();
     let mut cmd = Transport {
         argv: vec![binary_path(provider).into_os_string()],
+        selected_effort: None,
         input: Some(prompt.to_vec()),
         environment: Vec::new(),
         scratch: None,
@@ -1376,6 +1379,7 @@ fn transport(
             cmd.model(route);
             if !route.effort.is_empty() {
                 cmd.option("-c", format!("model_reasoning_effort=\"{}\"", route.effort));
+                cmd.selected_effort = Some(route.effort.clone());
             }
             cmd.args(&["--json"]);
             if !write {
@@ -1993,6 +1997,7 @@ pub(crate) fn execute_env(
             provider: &route.provider,
             account: account.as_deref().filter(|id| *id != "default"),
             selected_model: (route.model != "provider-default").then_some(route.model.as_str()),
+            selected_effort: transport.selected_effort.as_deref(),
             task_id: physical_task.as_deref(),
             write,
             persistent_session: false,
@@ -2396,8 +2401,23 @@ mod bridge_route_tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
     }
     #[derive(Default)]
-    struct Capture(Mutex<Vec<Invocation>>);
+    struct Capture(Mutex<Vec<Invocation>>, Mutex<Vec<Option<String>>>);
     impl Executor for Capture {
+        fn with_physical_contract(
+            &self,
+            attempt: &crate::process::PhysicalAttempt<'_>,
+            _: std::time::Instant,
+            stop: &AtomicBool,
+            register: crate::process::RegisterPhysical<'_>,
+        ) -> Result<()> {
+            crate::check(stop)?;
+            assert!(attempt.team.is_none());
+            self.1
+                .lock()
+                .unwrap()
+                .push(attempt.selected_effort.map(str::to_owned));
+            register(crate::process::PhysicalContract::default()).map(|_| ())
+        }
         fn execute(&self, request: Invocation, _: &AtomicBool) -> Result<Completed> {
             let git = request.argv[0] == "git";
             if !git {
@@ -2475,6 +2495,8 @@ mod bridge_route_tests {
                             Some(if count < 2 { "first" } else { "second" })
                         );
                         assert!(attempt.team.is_none() && attempt.root.is_none());
+                        assert_eq!(attempt.selected_effort, Some("high"));
+                        assert_eq!(attempt.owned().borrow().selected_effort, Some("high"));
                         if self.mode == "missing" || (self.mode == "missing-final" && count == 1) {
                             return Ok(());
                         }
@@ -2580,7 +2602,7 @@ mod bridge_route_tests {
                     let mut route = Route {
                         provider: "claude".into(),
                         model: "first".into(),
-                        effort: String::new(),
+                        effort: "high".into(),
                         explicit: true,
                         account: String::new(),
                         account_pinned: false,
@@ -3225,6 +3247,12 @@ mod bridge_route_tests {
                             })
                             .collect();
                         assert_eq!(request.argv[1..], expected, "{provider} exact={exact}");
+                        let selected_effort = (exact && !flag.is_empty()).then(|| "high".into());
+                        assert_eq!(
+                            *capture.1.lock().unwrap(),
+                            vec![selected_effort.clone(), selected_effort],
+                            "{provider} exact={exact}"
+                        );
                         if file.is_some() {
                             assert!(!scratch.exists());
                         }

@@ -112,6 +112,7 @@ pub fn begin_interactive_with_executor(
         provider: &route.provider,
         account: request.account.filter(|account| *account != "default"),
         selected_model: request.selected_model,
+        selected_effort: None,
         task_id: context.task_id,
         write: true,
         persistent_session: false,

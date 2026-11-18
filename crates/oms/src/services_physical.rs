@@ -92,6 +92,7 @@ impl super::CollabServices<'_> {
                     transport: "direct".into(),
                     account: attempt.account.map(str::to_owned),
                     selected_model: attempt.selected_model.map(str::to_owned),
+                    selected_effort: attempt.selected_effort.map(str::to_owned),
                     write: attempt.write,
                 },
                 deadline,

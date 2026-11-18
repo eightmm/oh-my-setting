@@ -33,6 +33,9 @@ pub struct AdmissionRequest {
     pub transport: String,
     pub account: Option<String>,
     pub selected_model: Option<String>,
+    /// Literal forwarded by the transport, not an applied observation. Only an
+    /// explicit non-null contract effort constrains this requested value.
+    pub selected_effort: Option<String>,
     pub write: bool,
 }
 
@@ -335,6 +338,12 @@ impl AdmissionGuard<'_, '_> {
                     .transpose()?
                     == request.account.as_deref()
                 && expected_model == request.selected_model.as_deref()
+                && route
+                    .opt("requested_effort")
+                    .filter(|v| **v != Value::Null)
+                    .map(Value::str)
+                    .transpose()?
+                    .is_none_or(|effort| Some(effort) == request.selected_effort.as_deref())
                 && member.text("access") == if request.write { "write" } else { "read" },
             "physical route or access differs from team contract",
         )?;

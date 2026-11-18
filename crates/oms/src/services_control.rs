@@ -3208,6 +3208,7 @@ mod tests {
                 provider: "codex",
                 account: Some("work"),
                 selected_model: Some("fixture"),
+                selected_effort: None,
                 task_id: None,
                 write: true,
                 persistent_session: false,
@@ -3446,6 +3447,8 @@ mod tests {
             member["route"]["policy_sha256"] = policy.clone().into();
             if member["role"] == "worker" {
                 member["access"] = "write".into();
+                // The interactive launcher supplies no per-call effort override.
+                member["route"]["requested_effort"] = Value::Null;
             }
         }
         std::fs::write(
@@ -3481,6 +3484,7 @@ mod tests {
             transport: "direct".into(),
             account: Some("work".into()),
             selected_model: Some("fixture".into()),
+            selected_effort: Some("high".into()),
             write: false,
         };
         let guard = admission_plan
@@ -3559,6 +3563,40 @@ mod tests {
                 .all(|call| call.receipt.cleanup_complete == Some(true)
                     && call.receipt.cost == usage::Cost::Unknown)
         );
+        let lead = TeamLocator {
+            member_id: "lead-a".into(),
+            ..team.clone()
+        };
+        for selected_effort in [None, Some("medium")] {
+            let attempt = PhysicalAttempt {
+                state_root: repo.as_path(),
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                team: Some(&lead),
+                root: Some(root),
+                provider: "codex",
+                account: Some("work"),
+                selected_model: Some("fixture"),
+                selected_effort,
+                task_id: Some("task-a"),
+                write: false,
+                persistent_session: false,
+            };
+            let before_calls = physical::load(repo.as_path(), &stop).unwrap().len();
+            let error = collab
+                .with_physical_contract(
+                    &attempt,
+                    Instant::now() + Duration::from_secs(5),
+                    &stop,
+                    Box::new(|_| panic!("effort mismatch reached registration")),
+                )
+                .unwrap_err();
+            assert!(error.message.contains("physical route"), "{error:?}");
+            assert_eq!(
+                physical::load(repo.as_path(), &stop).unwrap().len(),
+                before_calls
+            );
+        }
         let reject = |member: &TeamLocator,
                       selected: RootLocator<'_>,
                       account: &str,
@@ -3576,6 +3614,7 @@ mod tests {
                 provider: "codex",
                 account: Some(account),
                 selected_model: Some(model),
+                selected_effort: None,
                 task_id: Some(task),
                 write: true,
                 persistent_session: false,
@@ -3727,6 +3766,7 @@ mod tests {
             provider: "codex",
             account: Some("other-account"),
             selected_model: Some("fixture"),
+            selected_effort: None,
             task_id: Some("task-a"),
             write: true,
             persistent_session: false,

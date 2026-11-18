@@ -124,6 +124,9 @@ Team metadata supplies no admission authority. The root native executor pins the
 canonical Main creation/Room and Team/spec/member generation, task dependencies,
 actual selected account/model/access, execution base and active observed host
 policy around physical registration. A Main can qualify before a Plan exists;
+Explicit Team effort constraints match only the literal the transport adds to
+its argv. Missing or different effort refuses before registration. An unspecified
+contract or interactive effort remains unknown, without applied/support evidence.
 actual child/depth guards still apply. Unsupported native-team, required native
 capabilities, resource requests and Team budget references refuse.
 

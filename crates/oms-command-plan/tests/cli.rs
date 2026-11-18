@@ -1543,6 +1543,7 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
         transport: "direct".into(),
         account: Some("work".into()),
         selected_model: Some("fixture".into()),
+        selected_effort: Some("high".into()),
         write: false,
     };
     let deadline = || std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1678,6 +1679,8 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
         "transport",
         "account",
         "model",
+        "effort",
+        "unknown-effort",
         "access",
     ] {
         let mut wrong = admission.clone();
@@ -1690,6 +1693,8 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
             "transport" => wrong.transport = "native".into(),
             "account" => wrong.account = Some("other-account".into()),
             "model" => wrong.selected_model = None,
+            "effort" => wrong.selected_effort = Some("medium".into()),
+            "unknown-effort" => wrong.selected_effort = None,
             "access" => wrong.write = true,
             _ => unreachable!(),
         }
