@@ -138,6 +138,26 @@ impl Worktree {
         }
         Ok(())
     }
+    fn pristine(&self, context: &Context<'_>) -> Result<()> {
+        self.identity(context)?;
+        let state = process::git(
+            context,
+            &self.path,
+            &[
+                "-c",
+                "core.fsmonitor=false",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
+        )?;
+        if !state.is_empty() {
+            return fail("context snapshot changed; worktree preserved for inspection");
+        }
+        Ok(())
+    }
     pub(crate) fn remove(self, context: &Context<'_>) -> Result<()> {
         self.identity(context)?;
         let path = self
@@ -496,9 +516,6 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if args.has("resume-session") {
         return fail("native session relocation must be bound before resuming a delegation");
     }
-    if args.has("context-manifest") {
-        return fail("typed context compilation is not integrated; no worktree created");
-    }
     let orientation = if args.has("context-pack") {
         Some(crate::context_pack::orientation(
             &args.path("context-pack", context.cwd),
@@ -591,12 +608,12 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             )?;
         }
     }
-    if let Some(orientation) = orientation {
+    if let Some(orientation) = &orientation {
         prompt.untrusted(
             "retrieved",
             "parent graph",
             "orientation metadata",
-            orientation.as_bytes(),
+            orientation.orientation.as_bytes(),
         )?;
     } else if args.has("graph-context")
         && !args.has("no-graph-context")
@@ -645,7 +662,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         )?;
     }
     safety::outbound(prompt.as_bytes())?;
-    let header = format!(
+    let mut header = format!(
         "# OMS peer-delegate\n\n- provider: {}\n- base_sha: {base}\n- access: {}\n\n## Prompt\n\n{prompt}\n",
         target.provider,
         if read { "read" } else { "write" }
@@ -699,6 +716,49 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         return fail("--interactive requires NDJSON turn input on stdin; no worktree created");
     }
     let worktree = Worktree::create(&repo, &base, context)?;
+    let compiled = if args.has("context-manifest") {
+        let prepare = || -> Result<_> {
+            worktree.pristine(context)?;
+            let compiled = crate::compiled_context::Compiled::build(
+                &repo,
+                &worktree.path,
+                orientation
+                    .as_ref()
+                    .map_or(&[], |pack| pack.targets.as_slice()),
+                context,
+            )?;
+            worktree.pristine(context)?;
+            Ok(compiled)
+        };
+        let prepared = prepare().and_then(|compiled| {
+            let prior = prompt.len();
+            prompt.compiled_context(&compiled)?;
+            safety::outbound(prompt.as_bytes())?;
+            header.push_str(&prompt[prior..]);
+            Ok(compiled)
+        });
+        match prepared {
+            Ok(compiled) => Some(compiled),
+            Err(error) => {
+                let cleanup = worktree
+                    .pristine(context)
+                    .and_then(|()| worktree.remove(context));
+                storage::write(&repo, &artifact,
+                    format!("{header}\n## Context preparation\n\nCompilation or outbound validation failed; no worker started.\n").into_bytes(),
+                    true, context.interrupted)?;
+                return Err(Error::new(
+                    error.code,
+                    if cleanup.is_err() {
+                        format!("{}; snapshot cleanup deferred", error.message)
+                    } else {
+                        error.message
+                    },
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let mut attempt_refs = obj([
         ("artifact", artifact.to_string_lossy().into_owned().into()),
         ("patch", patch.to_string_lossy().into_owned().into()),
@@ -1148,47 +1208,47 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let artifact_sha256 = storage::hash(&body);
     let patch_sha256 = storage::hash(&written_patch);
     storage::write(&repo, &artifact, body, true, context.interrupted)?;
-    peer::index(
-        &repo,
-        &obj([
-            ("schema", 1usize.into()),
-            ("event_id", crate::id("evt_")?.into()),
-            ("kind", "delegate".into()),
-            ("ts", now().into()),
-            ("artifact_id", crate::id("art_")?.into()),
-            ("attempt_id", attempt.into()),
-            (
-                "operation_id",
-                extra_env
-                    .iter()
-                    .rev()
-                    .find(|(k, _)| k == "OMS_OPERATION_ID")
-                    .unwrap()
-                    .1
-                    .to_string_lossy()
-                    .into_owned()
-                    .into(),
-            ),
-            ("task_id", task_id.into()),
-            ("provider", target.provider.into()),
-            ("model", route.model.into()),
-            ("artifact", artifact.to_string_lossy().into_owned().into()),
-            ("artifact_sha256", artifact_sha256.into()),
-            ("patch", patch.to_string_lossy().into_owned().into()),
-            ("patch_sha256", patch_sha256.into()),
-            ("base_sha", base.into()),
-            ("exit", V::Num(code.to_string())),
-            ("verification", verified.into()),
-            (
-                "verify_exit",
-                verify_exit_code.map_or(V::Null, |n| V::Num(n.to_string())),
-            ),
-            ("state", state.into()),
-            ("admit", "pending".into()),
-            ("no_change", no_change.into()),
-        ]),
-        context,
-    )?;
+    let mut index = obj([
+        ("schema", 1usize.into()),
+        ("event_id", crate::id("evt_")?.into()),
+        ("kind", "delegate".into()),
+        ("ts", now().into()),
+        ("artifact_id", crate::id("art_")?.into()),
+        ("attempt_id", attempt.into()),
+        (
+            "operation_id",
+            extra_env
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "OMS_OPERATION_ID")
+                .unwrap()
+                .1
+                .to_string_lossy()
+                .into_owned()
+                .into(),
+        ),
+        ("task_id", task_id.into()),
+        ("provider", target.provider.into()),
+        ("model", route.model.into()),
+        ("artifact", artifact.to_string_lossy().into_owned().into()),
+        ("artifact_sha256", artifact_sha256.into()),
+        ("patch", patch.to_string_lossy().into_owned().into()),
+        ("patch_sha256", patch_sha256.into()),
+        ("base_sha", base.into()),
+        ("exit", V::Num(code.to_string())),
+        ("verification", verified.into()),
+        (
+            "verify_exit",
+            verify_exit_code.map_or(V::Null, |n| V::Num(n.to_string())),
+        ),
+        ("state", state.into()),
+        ("admit", "pending".into()),
+        ("no_change", no_change.into()),
+    ]);
+    if let Some(compiled) = &compiled {
+        compiled.index(&mut index);
+    }
+    peer::index(&repo, &index, context)?;
     let mut note = String::new();
     if needs_keep {
         note.push_str(&format!("worktree retained: {}\n", worktree.path.display()));

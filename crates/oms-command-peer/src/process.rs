@@ -349,6 +349,23 @@ impl TeamLaunchBinding<'_> {
     }
 }
 pub trait Executor: Sync {
+    /// Read-only discovery preserves the host's qualified parser and group proof.
+    fn context_dependencies(
+        &self,
+        repo: &Path,
+        targets: &[std::path::PathBuf],
+        interrupted: &AtomicBool,
+    ) -> oms_command_plan::Result<Vec<oms_runtime::services::RelatedSource>> {
+        oms_command_graph::project::context_dependencies(repo, targets, None, interrupted).map_err(
+            |e| oms_command_plan::Error {
+                code: 2,
+                message: e.to_string(),
+            },
+        )
+    }
+    fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        None
+    }
     fn with_physical_contract(
         &self,
         attempt: &PhysicalAttempt<'_>,

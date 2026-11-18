@@ -708,6 +708,20 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn context_dependencies(
+        &self,
+        repo: &Path,
+        targets: &[PathBuf],
+        _: &AtomicBool,
+    ) -> oms_command_plan::Result<Vec<oms_runtime::services::RelatedSource>> {
+        let services =
+            crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                .map_err(|message| oms_command_plan::Error { code: 2, message })?;
+        oms_runtime::Services::context_dependencies(&services, repo, targets)
+    }
+    fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        Some(crate::services_runtime::resolve_group_membership)
+    }
     fn execute_team_requests(
         &self,
         input: Invocation,
