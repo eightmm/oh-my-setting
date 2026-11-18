@@ -2503,6 +2503,106 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
 
 const UNAVAILABLE: &str = "service unavailable; parent CLI integration is required";
 
+#[test]
+fn native_delegate_context_manifest_reaches_the_physical_provider_boundary() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Landing::new();
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    std::fs::create_dir(fixture.f.0.join("config")).unwrap();
+    for entry in std::fs::read_dir(source.join("config")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(
+                &path,
+                fixture.f.0.join("config").join(path.file_name().unwrap()),
+            )
+            .unwrap();
+        }
+    }
+    std::fs::write(
+        fixture.repo.join("PROJECT.md"),
+        "# Project\nnative snapshot contract\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.repo.join("target.rs"), "fn target() {}\n").unwrap();
+    fixture.git(&["add", "PROJECT.md", "target.rs"]);
+    fixture.git(&["commit", "-qm", "context snapshot"]);
+    std::fs::write(fixture.repo.join("PROJECT.md"), "dirty parent contract\n").unwrap();
+    std::fs::write(
+        fixture.repo.join("pack.json"),
+        format!(
+            "{{\"pack_digest\":\"{}\",\"files\":[\"target.rs\"]}}",
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let provider = fixture.tools.join("claude");
+    std::fs::write(&provider, "#!/bin/sh\ncat > \"$CONTEXT_CAPTURE\"\nprintf 'changed\\n' >> a.txt\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n").unwrap();
+    std::fs::set_permissions(provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let capture = fixture.f.0.join("captured-prompt.txt");
+    let (code, out, err) = fixture.oms_env(
+        &[
+            "peer-delegate",
+            "--repo",
+            fixture.repo.to_str().unwrap(),
+            "--to",
+            "claude",
+            "--model",
+            "fixture",
+            "--no-task",
+            "--no-memory",
+            "--no-ml-context",
+            "--context-manifest",
+            "--context-pack",
+            "pack.json",
+            "--scope",
+            "a.txt",
+            "--verify",
+            "true",
+            "Change a.txt",
+        ],
+        &[("CONTEXT_CAPTURE", capture.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let prompt = std::fs::read(capture).unwrap();
+    let directory = fixture.repo.join(".oms/runtime/context");
+    let manifest_path = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|s| s == "json"))
+        .unwrap();
+    let raw = std::fs::read(&manifest_path).unwrap();
+    let bundle = std::fs::read(manifest_path.with_extension("txt")).unwrap();
+    assert!(prompt.windows(bundle.len()).any(|bytes| bytes == bundle));
+    assert!(
+        std::str::from_utf8(&bundle)
+            .unwrap()
+            .contains("native snapshot contract")
+    );
+    assert!(
+        !std::str::from_utf8(&bundle)
+            .unwrap()
+            .contains("dirty parent contract")
+    );
+    let recorded = std::fs::read_dir(directory.join("calls"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let row: serde_json::Value = serde_json::from_slice(&std::fs::read(recorded).unwrap()).unwrap();
+    assert_eq!(
+        row["attribution"]["request_sha256"],
+        format!("{:x}", Sha256::digest(&prompt))
+    );
+    assert_eq!(
+        row["attribution"]["context_manifest_sha256"],
+        format!("{:x}", Sha256::digest(&raw))
+    );
+    assert_eq!(row["dispatch"], "executor-returned");
+    assert!(row["provider_delivery"].is_null());
+}
+
 /// A dispatch root plus an isolated host: private HOME, TMPDIR, delegate
 /// worktree root and Git identity, a PATH without `gh` or Python, and a
 /// committed work repository whose `.oms/` is ignored.

@@ -118,6 +118,18 @@ impl oms_command_task::Services for TaskRead {
     }
 }
 impl oms_runtime::Services for Services<'_, '_> {
+    fn context_dependencies(
+        &self,
+        repo: &Path,
+        targets: &[PathBuf],
+    ) -> oms_command_plan::Result<Vec<oms_runtime::services::RelatedSource>> {
+        self.0
+            .executor
+            .context_dependencies(repo, targets, self.0.interrupted)
+    }
+    fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        self.0.executor.group_resolver()
+    }
     fn repository_view(
         &self,
         repo: &Path,

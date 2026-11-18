@@ -118,38 +118,70 @@ fn moved(priority: i32, class: &str, rule: &Value) -> i32 {
         (priority + delta).clamp(1, 119)
     }
 }
-pub fn slice(data: &[u8], budget: usize, policy: &str) -> (Vec<u8>, usize, String) {
+struct Selection {
+    bytes: Vec<u8>,
+    omitted: usize,
+    policy: String,
+    ranges: Vec<(usize, usize, usize, usize)>,
+}
+fn selection(data: &[u8], budget: usize, policy: &str) -> Selection {
     if data.len() <= budget {
-        return (data.to_vec(), 0, "full".into());
+        return Selection {
+            bytes: data.to_vec(),
+            omitted: 0,
+            policy: "full".into(),
+            ranges: vec![(0, data.len(), 0, data.len())],
+        };
     }
     if budget == 0 {
-        return (vec![], data.len(), "omitted".into());
+        return Selection {
+            bytes: vec![],
+            omitted: data.len(),
+            policy: "omitted".into(),
+            ranges: vec![],
+        };
     }
     let marker = format!(
         "\n[TRUNCATED: {} bytes omitted]\n",
         data.len().saturating_sub(budget)
-    )
-    .into_bytes();
+    );
     let usable = budget.saturating_sub(marker.len());
-    let mut out = Vec::with_capacity(budget);
-    match policy {
-        "tail" => {
-            out.extend(&marker);
-            out.extend(&data[data.len().saturating_sub(usable)..]);
+    let (mut left, mut right) = match policy {
+        "head" => (usable, data.len()),
+        "tail" => (0, data.len() - usable),
+        _ => (usable / 2, data.len() - (usable - usable / 2)),
+    };
+    // Source ranges must remain exact while text prompts preserve UTF-8.
+    if let Ok(text) = std::str::from_utf8(data) {
+        while !text.is_char_boundary(left) {
+            left -= 1;
         }
-        "head" => {
-            out.extend(&data[..usable.min(data.len())]);
-            out.extend(&marker)
-        }
-        _ => {
-            let left = usable / 2;
-            out.extend(&data[..left]);
-            out.extend(&marker);
-            out.extend(&data[data.len() - (usable - left)..]);
+        while !text.is_char_boundary(right) {
+            right += 1;
         }
     }
-    out.truncate(budget);
-    (out, data.len() - usable.min(data.len()), policy.into())
+    let mut bytes = Vec::with_capacity(budget);
+    let mut ranges = Vec::new();
+    if left > 0 {
+        bytes.extend_from_slice(&data[..left]);
+        ranges.push((0, left, 0, left));
+    }
+    bytes.extend_from_slice(&marker.as_bytes()[..marker.len().min(budget)]);
+    if right < data.len() {
+        let start = bytes.len();
+        bytes.extend_from_slice(&data[right..]);
+        ranges.push((start, bytes.len(), right, data.len()));
+    }
+    Selection {
+        bytes,
+        omitted: right - left,
+        policy: policy.into(),
+        ranges,
+    }
+}
+pub fn slice(data: &[u8], budget: usize, policy: &str) -> (Vec<u8>, usize, String) {
+    let part = selection(data, budget, policy);
+    (part.bytes, part.omitted, part.policy)
 }
 fn default_source_refusal(e: &crate::Error) -> bool {
     // Store exposes flattened diagnostics. Only its explicit safety and size
@@ -395,7 +427,12 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             omitted.push(row);
             continue;
         }
-        let (part, omitted_bytes, policy) = slice(data, allocation, candidate.policy);
+        let Selection {
+            bytes: part,
+            omitted: omitted_bytes,
+            policy,
+            ranges,
+        } = selection(data, allocation, candidate.policy);
         if header.len() + part.len() + footer.len() > remaining {
             row.set("reason", string("budget exhausted"))?;
             omitted.push(row);
@@ -415,8 +452,6 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             "retrieved"
         };
         let payload = start + header.len();
-        let usable = data.len() - omitted_bytes;
-        let marker = part.len().saturating_sub(usable);
         let source_sha256 = sha(data);
         let mut add = |a: usize, b: usize, original: Option<(usize, usize)>| {
             if b <= a || attribution.len() >= 4096 {
@@ -436,30 +471,13 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             });
         };
         add(start, payload, None);
-        match policy.as_str() {
-            "full" | "head" => {
-                add(payload, payload + usable, Some((0, usable)));
-                add(payload + usable, payload + part.len(), None);
-            }
-            "tail" => {
-                add(payload, payload + marker, None);
-                add(
-                    payload + marker,
-                    payload + part.len(),
-                    Some((data.len() - usable, data.len())),
-                );
-            }
-            _ => {
-                let left = usable / 2;
-                add(payload, payload + left, Some((0, left)));
-                add(payload + left, payload + left + marker, None);
-                add(
-                    payload + left + marker,
-                    payload + part.len(),
-                    Some((data.len() - (usable - left), data.len())),
-                );
-            }
+        let mut cursor = payload;
+        for (a, b, lo, hi) in ranges {
+            add(cursor, payload + a, None);
+            add(payload + a, payload + b, Some((lo, hi)));
+            cursor = payload + b;
         }
+        add(cursor, payload + part.len(), None);
         add(payload + part.len(), bundle.len(), None);
         included.insert(candidate.label.clone());
         if omitted_bytes > 0 && required.contains(&candidate.label) {

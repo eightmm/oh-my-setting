@@ -1257,6 +1257,21 @@ pub fn accept_native<S: Services + ?Sized>(
     validate_accept(request)?;
     crate::acceptance::run(repo, request, service, stop)
 }
+/// Checks Git content against the parent acceptance. The native caller must
+/// authenticate publication receipts separately; these arguments grant no authority.
+pub fn verify_publication_contents<S: Services + ?Sized>(
+    execution: &Path,
+    published: &str,
+    record: &Value,
+    patch: &[u8],
+    push_base: &str,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    crate::acceptance::verify_publication_contents(
+        execution, published, record, patch, push_base, service, stop,
+    )
+}
 /// Explicitly reconcile a saved acceptance. This never reapplies the patch.
 pub fn recover_accept(
     repo: &Path,

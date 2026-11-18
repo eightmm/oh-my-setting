@@ -486,6 +486,72 @@ impl oms_command_plan::Services for ControlServices<'_> {
     ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
         crate::services_runtime::resolve_group_membership_before(gid, deadline, interrupted)
     }
+    fn publication_product(
+        &self,
+        repo: &Path,
+        commit: &str,
+        record: &oms_command_plan::json::Value,
+        patch: &[u8],
+    ) -> oms_command_plan::Result<oms_command_plan::services::PublicationProduct> {
+        use oms_command_plan::{Action, Context, Plan, Request, completion, json};
+        if self.interrupted.load(Ordering::Acquire) {
+            return Err(oms_command_plan::Error {
+                code: 130,
+                message: "publication proof interrupted".into(),
+            });
+        }
+        let execution = std::fs::canonicalize(repo).map_err(|e| plan_error(e.to_string()))?;
+        let state = state_repository_for(&execution).map_err(plan_error)?;
+        let cwd = std::env::current_dir().map_err(|e| plan_error(e.to_string()))?;
+        let context = Context::from_environment_before(
+            &Request::new(Action::Status),
+            &execution,
+            &cwd,
+            Some(&state),
+            self.interrupted,
+            Instant::now() + Duration::from_secs(10),
+        )?;
+        if context.execution_repo != execution {
+            return Err(plan_error("publication execution repository differs"));
+        }
+        let plan = Plan::open(context, self, self.interrupted)?;
+        let proof = completion::commit_landing(&plan, commit, None)?;
+        let push_base = proof.receipt.get("push").get("base").str()?;
+        let captured = serde_json::from_slice(&json::canonical(record)?)
+            .map_err(|e| plan_error(e.to_string()))?;
+        let native = crate::services_collab::CollabServices::new(self.interrupted, &self.source)
+            .map_err(plan_error)?;
+        oms_panel_core::results::verify_publication_contents(
+            &execution,
+            commit,
+            &captured,
+            patch,
+            push_base,
+            &native,
+            self.interrupted,
+        )
+        .map_err(|e| oms_command_plan::Error {
+            code: e.code,
+            message: e.message,
+        })?;
+        let again = completion::commit_landing(&plan, commit, Some(&json::sha(&proof.raw)))?;
+        if self.interrupted.load(Ordering::Acquire) {
+            return Err(oms_command_plan::Error {
+                code: 130,
+                message: "publication proof interrupted".into(),
+            });
+        }
+        if again.raw != proof.raw {
+            return Err(plan_error("publication proof changed"));
+        }
+        Ok(oms_command_plan::services::PublicationProduct {
+            commit: commit.into(),
+            patch_sha256: json::sha(patch),
+            accepted_tree: record.text("tree").into(),
+            base: record.text("base").into(),
+            raw_proof: proof.raw,
+        })
+    }
     fn read_managed_patch(
         &self,
         state_repo: &Path,

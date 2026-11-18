@@ -58,7 +58,11 @@ fn inspect(value: &V, expression: &regex::Regex) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn orientation(location: &Path) -> Result<String> {
+pub(crate) struct Pack {
+    pub orientation: String,
+    pub targets: Vec<std::ffi::OsString>,
+}
+pub(crate) fn orientation(location: &Path) -> Result<Pack> {
     let parent = location
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -167,5 +171,11 @@ pub(crate) fn orientation(location: &Path) -> Result<String> {
         }
     }
     safety::outbound(output.as_bytes())?;
-    Ok(output)
+    Ok(Pack {
+        orientation: output,
+        targets: list(&pack, "files")?
+            .iter()
+            .map(|value| path(value).map(std::ffi::OsString::from))
+            .collect::<Result<_>>()?,
+    })
 }

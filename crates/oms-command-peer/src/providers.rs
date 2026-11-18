@@ -1932,6 +1932,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
+    prompt.validate()?;
     crate::safety::outbound(prompt.bytes())?;
     if !discovered(&route.provider) {
         return Err(Error::new(127, "provider command not found"));

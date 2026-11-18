@@ -12,6 +12,7 @@ macro_rules! cached_regex {
 
 mod board;
 pub mod cli;
+mod compiled_context;
 mod context_pack;
 mod delegate;
 pub use delegate::buffer_interactive_stdout;

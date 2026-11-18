@@ -128,8 +128,23 @@ can leave the prepared record even after execution. `provider_delivery`, layer
 tokens, tokenizer, cache hit and provider-added context bytes remain null.
 Compiled-manifest and phase-policy links are null when the actual producer has
 no checked link; inspection does not infer them by matching text or searching
-for a recent manifest. The existing unsupported native
-`peer-delegate --context-manifest` selection remains unsupported.
+for a recent manifest. With `peer-delegate --context-manifest`, the native producer
+compiles once from the pristine detached HEAD with the existing implementation
+phase and 65,536-byte budget. Checked pack targets and their ancestor contracts
+use the native graph dependency adapter; stale or linked targets are skipped.
+The exact UTF-8 bundle is retained in initial and repair prompts, with a partial
+bundle warning when required context is missing or truncated. The saved manifest
+and phase-policy digests are bound to those actual prompt bytes and recorded on
+each physical call; the delegation index retains the existing four context fields.
+Snapshot-local state does not import the parent's uncommitted task or memory.
+
+Compilation, manifest/bundle mismatch, unsupported parser discovery and outbound
+validation fail before worker registration. Compilation failure retains its
+snapshot and reports the exact path, without a status/remove cleanup window.
+Dry-run and export-only keep their existing pre-worktree behavior. The installed
+adapter uses the existing qualified graph helper and native private-group proof;
+standalone adapters without them refuse sources that require those services. This wiring
+does not implement automatic graph selection, plan-task claims or patch admission.
 
 Fallback attempts retain separate call manifests under the same operation.
 Usage, cumulative scope and late corrections remain exclusively in the canonical

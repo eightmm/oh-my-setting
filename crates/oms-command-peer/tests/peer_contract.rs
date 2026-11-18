@@ -164,7 +164,21 @@ fn provider_isolated(name: &str, layout: &str, body: impl FnOnce()) {
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = if layout == "private" {
+        let mut command = Command::new("bash");
+        command
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                "umask 077; exec \"$@\"",
+                "--",
+            ])
+            .arg(std::env::current_exe().unwrap());
+        command
+    } else {
+        Command::new(std::env::current_exe().unwrap())
+    };
     let output = clean_env_child(&mut command)
         .args(["--exact", name, "--nocapture"])
         .env(CHILD_ENV, name)
@@ -2067,6 +2081,515 @@ fn delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree() {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(md.contains("## Turn 1") && md.contains("## Turn 2"), "{md}");
+        },
+    );
+}
+
+#[test]
+fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
+    provider_isolated(
+        "delegate_context_manifest_binds_snapshot_bundle_across_repair",
+        "private",
+        || {
+            struct Repair(ProviderProbe);
+            impl Executor for Repair {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if request.argv[0] != "codex" {
+                        return Native.execute(request, stop);
+                    }
+                    let round = self.0.calls.lock().unwrap().len() + 1;
+                    fs::write(request.cwd.join("tracked.txt"), format!("round {round}\n")).unwrap();
+                    self.0.execute(request, stop)
+                }
+            }
+            let source = Repo::new();
+            for entry in fs::read_dir(Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../config"
+            )))
+            .unwrap()
+            {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    source.write(
+                        &format!("config/{}", path.file_name().unwrap().to_str().unwrap()),
+                        fs::read(&path).unwrap(),
+                    );
+                }
+            }
+            let repo = provider_repo();
+            repo.write(".gitignore", ".oms/\n");
+            repo.write("PROJECT.md", "# Project\ncommitted contract marker\n");
+            repo.write("AGENTS.md", "문맥 🙂\n".repeat(12000));
+            repo.write("src/main.rs", "fn main() {}\n");
+            repo.write("src/AGENTS.md", "Target contract marker\n");
+            std::os::unix::fs::symlink("src/main.rs", repo.0.join("alias.rs")).unwrap();
+            std::os::unix::fs::symlink("src", repo.0.join("linked")).unwrap();
+            repo.git(&[
+                "add",
+                ".gitignore",
+                "PROJECT.md",
+                "AGENTS.md",
+                "src",
+                "alias.rs",
+                "linked",
+            ]);
+            repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "context snapshot",
+            ]);
+            repo.write("PROJECT.md", "dirty parent contract marker\n");
+            repo.write(
+                ".oms/task/current.md",
+                "parent task must not enter snapshot bundle\n",
+            );
+            repo.write("pack.json", format!("{{\"pack_digest\":\"{}\",\"files\":[\"src/main.rs\",\"stale.rs\",\"alias.rs\",\"linked/main.rs\"]}}", "a".repeat(64)));
+            let values = args(&[
+                "--repo",
+                repo.0.to_str().unwrap(),
+                "--to",
+                "codex",
+                "--model",
+                "fixture",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--context-manifest",
+                "--context-pack",
+                "pack.json",
+                "--scope",
+                "tracked.txt",
+                "--repair",
+                "1",
+                "--verify",
+                "grep -q 'round 2' tracked.txt",
+                "Change tracked.txt",
+            ]);
+            let probe = Repair(ProviderProbe::default());
+            let output = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &values,
+                &repo.0,
+                &source.0,
+                &STOP,
+                &probe,
+            );
+            assert_eq!(
+                output.0,
+                0,
+                "{}{}",
+                String::from_utf8_lossy(&output.1),
+                String::from_utf8_lossy(&output.2)
+            );
+            let directory = repo.0.join(".oms/runtime/context");
+            let manifests: Vec<_> = fs::read_dir(&directory)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|s| s == "json"))
+                .collect();
+            assert_eq!(manifests.len(), 1, "compile only once");
+            let raw = fs::read(&manifests[0]).unwrap();
+            let manifest = V::parse(&raw).unwrap();
+            oms_context::inspect_manifest(&raw, 100).unwrap();
+            let bundle = fs::read(manifests[0].with_extension("txt")).unwrap();
+            let text = std::str::from_utf8(&bundle).unwrap();
+            assert!(text.contains("committed contract marker"));
+            assert!(text.contains("Target contract marker"));
+            assert!(text.contains("fn main()"));
+            assert!(!text.contains("dirty parent contract marker"));
+            assert!(!text.contains("parent task must not enter"));
+            assert!(!manifest.get("sufficient").truth());
+            assert!(
+                manifest
+                    .get("targets")
+                    .array()
+                    .iter()
+                    .all(|v| v.text() == Some("src/main.rs"))
+            );
+            let calls = probe.0.calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            for call in calls.iter() {
+                assert!(call.prompt.windows(bundle.len()).any(|w| w == bundle));
+                assert!(
+                    std::str::from_utf8(&call.prompt)
+                        .unwrap()
+                        .contains("this bounded bundle is partial")
+                );
+            }
+            let recorded: Vec<_> = fs::read_dir(directory.join("calls"))
+                .unwrap()
+                .map(|e| V::parse(&fs::read(e.unwrap().path()).unwrap()).unwrap())
+                .collect();
+            assert_eq!(recorded.len(), 2);
+            for call in calls.iter() {
+                let hash = oms_command_peer::storage::hash(&call.prompt);
+                let row = recorded
+                    .iter()
+                    .find(|row| row.get("attribution").get("request_sha256").text() == Some(&hash))
+                    .unwrap();
+                let attribution = row.get("attribution");
+                assert_eq!(
+                    attribution.get("context_manifest_sha256").text(),
+                    Some(oms_command_peer::storage::hash(&raw).as_str())
+                );
+                assert_eq!(
+                    attribution.get("phase_policy_sha256"),
+                    manifest.get("phase_rules_sha256")
+                );
+                assert_eq!(row.get("dispatch").text(), Some("executor-returned"));
+                assert_eq!(row.get("provider_delivery"), &V::Null);
+                for span in attribution.get("spans").array() {
+                    let integer = |key| match span.get(key) {
+                        V::Num(s) => s.parse::<usize>().unwrap(),
+                        _ => panic!("span byte offset must be an integer"),
+                    };
+                    let (start, end) = (integer("start"), integer("end"));
+                    assert_eq!(
+                        span.get("sha256").text(),
+                        Some(oms_command_peer::storage::hash(&call.prompt[start..end]).as_str())
+                    );
+                    assert_eq!(
+                        span.get("prefix_sha256").text(),
+                        Some(oms_command_peer::storage::hash(&call.prompt[..end]).as_str())
+                    );
+                }
+            }
+            let index = fs::read_to_string(repo.0.join(".oms/artifacts/index.jsonl")).unwrap();
+            let row = index
+                .lines()
+                .map(|s| V::parse(s.as_bytes()).unwrap())
+                .find(|v| v.get("kind").text() == Some("delegate"))
+                .unwrap();
+            assert_eq!(
+                row.get("context_manifest_digest").text(),
+                Some(oms_command_peer::storage::hash(&raw).as_str())
+            );
+            assert_eq!(
+                row.get("context_bundle_sha256"),
+                manifest.get("bundle_sha256")
+            );
+            assert_eq!(
+                row.get("context_selected_bytes"),
+                manifest.get("selected_bytes")
+            );
+            assert_eq!(row.get("context_debt"), manifest.get("context_debt"));
+            assert!(calls.iter().all(|call| !call.request.cwd.exists()));
+            let prepare = |case: &Repo, extra: &[&str]| {
+                let probe = ProviderProbe::default();
+                let mut values = args(&[
+                    "--repo",
+                    case.0.to_str().unwrap(),
+                    "--to",
+                    "codex",
+                    "--model",
+                    "fixture",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--context-manifest",
+                    "--verify",
+                    "true",
+                ]);
+                values.extend(args(extra));
+                values.push("Change tracked.txt".into());
+                let result = oms_command_peer::run_with_executor(
+                    "peer-delegate",
+                    &values,
+                    &case.0,
+                    &source.0,
+                    &STOP,
+                    &probe,
+                );
+                assert!(
+                    probe.calls.lock().unwrap().is_empty(),
+                    "preparation must not start a worker"
+                );
+                assert!(!case.0.join(".oms/lifecycle/events.jsonl").exists());
+                let worktrees = Command::new("git")
+                    .arg("-C")
+                    .arg(&case.0)
+                    .args(["worktree", "list", "--porcelain"])
+                    .output()
+                    .unwrap();
+                let retained =
+                    String::from_utf8_lossy(&result.2).contains("context snapshot retained: ");
+                assert_eq!(
+                    String::from_utf8_lossy(&worktrees.stdout)
+                        .matches("worktree ")
+                        .count(),
+                    if retained { 2 } else { 1 }
+                );
+                result
+            };
+            let rules = fs::read(source.0.join("config/context-phases.json")).unwrap();
+            source.write("config/context-phases.json", "{\"schema\":9}");
+            let dry = provider_repo();
+            assert_eq!(prepare(&dry, &["--dry-run"]).0, 0);
+            assert!(!dry.0.join(".oms/runtime/context").exists());
+            let invalid = provider_repo();
+            assert_eq!(prepare(&invalid, &[]).0, 2);
+            source.write("config/context-phases.json", rules);
+            let oversized = provider_repo();
+            oversized.write("large.rs", vec![b'a'; oms_runtime::storage::MAX_STATE + 1]);
+            oversized.git(&["add", "large.rs"]);
+            oversized.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "oversized context",
+            ]);
+            oversized.write(
+                "pack.json",
+                format!(
+                    "{{\"pack_digest\":\"{}\",\"files\":[\"large.rs\"]}}",
+                    "d".repeat(64)
+                ),
+            );
+            assert_eq!(prepare(&oversized, &["--context-pack", "pack.json"]).0, 2);
+            let linked = provider_repo();
+            let outside = Repo::new();
+            fs::create_dir_all(linked.0.join(".oms/runtime")).unwrap();
+            std::os::unix::fs::symlink(&outside.0, linked.0.join(".oms/runtime/context")).unwrap();
+            let before = fs::read_dir(&outside.0).unwrap().count();
+            assert_eq!(prepare(&linked, &[]).0, 2);
+            assert_eq!(fs::read_dir(&outside.0).unwrap().count(), before);
+            let private_pack = provider_repo();
+            private_pack.write(
+                "pack.json",
+                format!(
+                    "{{\"pack_digest\":\"{}\",\"note\":\"{}{}\"}}",
+                    "c".repeat(64),
+                    "sk-",
+                    "A".repeat(48)
+                ),
+            );
+            assert_eq!(
+                prepare(&private_pack, &["--context-pack", "pack.json"]).0,
+                3
+            );
+            let missing_parser = provider_repo();
+            missing_parser.write("target.py", "def target(): pass\n");
+            missing_parser.git(&["add", "target.py"]);
+            missing_parser.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "python context",
+            ]);
+            missing_parser.write(
+                "pack.json",
+                format!(
+                    "{{\"pack_digest\":\"{}\",\"files\":[\"target.py\"]}}",
+                    "b".repeat(64)
+                ),
+            );
+            assert_eq!(
+                prepare(&missing_parser, &["--context-pack", "pack.json"]).0,
+                2
+            );
+            struct CleanupRace {
+                snapshot: Mutex<Option<PathBuf>>,
+                statuses: std::sync::atomic::AtomicUsize,
+                removals: std::sync::atomic::AtomicUsize,
+            }
+            impl Executor for CleanupRace {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    assert_eq!(
+                        request.argv[0], "git",
+                        "compile failure must not start a provider"
+                    );
+                    let added = request
+                        .argv
+                        .windows(2)
+                        .any(|p| p[0] == "worktree" && p[1] == "add");
+                    let removing = request
+                        .argv
+                        .windows(2)
+                        .any(|p| p[0] == "worktree" && p[1] == "remove");
+                    let pristine = request.argv.iter().any(|arg| arg == "--ignored=matching");
+                    let snapshot =
+                        added.then(|| PathBuf::from(&request.argv[request.argv.len() - 2]));
+                    let result = Native.execute(request, stop)?;
+                    if let Some(path) = snapshot {
+                        *self.snapshot.lock().unwrap() = Some(path);
+                    }
+                    if pristine && self.statuses.fetch_add(1, Ordering::Relaxed) == 1 {
+                        assert!(
+                            result.stdout.is_empty(),
+                            "inject only after status observed a clean snapshot"
+                        );
+                        let snapshot = self.snapshot.lock().unwrap().clone().unwrap();
+                        fs::create_dir(snapshot.join(".oms")).unwrap();
+                        fs::write(
+                            snapshot.join(".oms/late-marker.txt"),
+                            "after clean status\n",
+                        )
+                        .unwrap();
+                    }
+                    if removing {
+                        self.removals.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(result)
+                }
+            }
+            let raced = provider_repo();
+            raced.write(".gitignore", ".oms/\n");
+            raced.git(&["add", ".gitignore"]);
+            raced.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "ignored race state",
+            ]);
+            let values = args(&[
+                "--repo",
+                raced.0.to_str().unwrap(),
+                "--to",
+                "codex",
+                "--model",
+                "fixture",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--context-manifest",
+                "--verify",
+                "true",
+                "Change tracked.txt",
+            ]);
+            let valid_rules = fs::read(source.0.join("config/context-phases.json")).unwrap();
+            source.write("config/context-phases.json", "{\"schema\":9}");
+            let race = CleanupRace {
+                snapshot: Mutex::new(None),
+                statuses: std::sync::atomic::AtomicUsize::new(0),
+                removals: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let failed = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &values,
+                &raced.0,
+                &source.0,
+                &STOP,
+                &race,
+            );
+            source.write("config/context-phases.json", valid_rules);
+            assert_eq!(failed.0, 2);
+            let snapshot = race.snapshot.lock().unwrap().clone().unwrap();
+            assert!(
+                snapshot.exists(),
+                "snapshot and late marker lost: {} status checks, {} removal(s)",
+                race.statuses.load(Ordering::Relaxed),
+                race.removals.load(Ordering::Relaxed)
+            );
+            assert_eq!(
+                race.removals.load(Ordering::Relaxed),
+                0,
+                "compile failure must retain its snapshot"
+            );
+            assert_eq!(
+                race.statuses.load(Ordering::Relaxed),
+                1,
+                "failure must not enter a status/remove cleanup window"
+            );
+            assert!(String::from_utf8_lossy(&failed.2).contains(&format!(
+                "context snapshot retained: {}",
+                snapshot.display()
+            )));
+            assert_eq!(
+                fs::read_to_string(snapshot.join("tracked.txt")).unwrap(),
+                "baseline\n"
+            );
+            struct ChangedSnapshot(Mutex<Option<PathBuf>>);
+            impl Executor for ChangedSnapshot {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    assert_eq!(
+                        request.argv[0], "git",
+                        "changed snapshot must not start a provider"
+                    );
+                    let added = request
+                        .argv
+                        .windows(2)
+                        .any(|pair| pair[0] == "worktree" && pair[1] == "add");
+                    let snapshot =
+                        added.then(|| PathBuf::from(&request.argv[request.argv.len() - 2]));
+                    let result = Native.execute(request, stop)?;
+                    if let Some(path) = snapshot {
+                        fs::create_dir(path.join(".oms")).unwrap();
+                        fs::write(path.join(".oms/preserve.txt"), "external ignored data\n")
+                            .unwrap();
+                        *self.0.lock().unwrap() = Some(path);
+                    }
+                    Ok(result)
+                }
+            }
+            let changed = provider_repo();
+            changed.write(".gitignore", ".oms/\n");
+            changed.git(&["add", ".gitignore"]);
+            changed.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "ignored state",
+            ]);
+            let values = args(&[
+                "--repo",
+                changed.0.to_str().unwrap(),
+                "--to",
+                "codex",
+                "--model",
+                "fixture",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--context-manifest",
+                "--verify",
+                "true",
+                "Change tracked.txt",
+            ]);
+            let probe = ChangedSnapshot(Mutex::new(None));
+            let result = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &values,
+                &changed.0,
+                &source.0,
+                &STOP,
+                &probe,
+            );
+            assert_eq!(result.0, 2);
+            assert!(String::from_utf8_lossy(&result.2).contains("preserved for inspection"));
+            let snapshot = probe.0.lock().unwrap().take().unwrap();
+            assert_eq!(
+                fs::read_to_string(snapshot.join(".oms/preserve.txt")).unwrap(),
+                "external ignored data\n"
+            );
         },
     );
 }

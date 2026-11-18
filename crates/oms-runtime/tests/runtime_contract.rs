@@ -259,6 +259,10 @@ fn context_keeps_cached_memory_summary_explicit() {
         );
         let manifest = oms_runtime::value::parse(&response.stdout).unwrap();
         let bundle = std::fs::read(f.0.join(manifest.text("bundle_path"))).unwrap();
+        assert!(
+            std::str::from_utf8(&bundle).is_ok(),
+            "{policy} split a UTF-8 character"
+        );
         let saved = std::fs::read(f.0.join(manifest.text("manifest_path"))).unwrap();
         let inspected = oms_context::inspect_manifest(&saved, 100).unwrap();
         let a = &inspected["request_attribution"];

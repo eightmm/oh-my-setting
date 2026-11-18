@@ -284,8 +284,13 @@ The remaining behavior is still refused or incomplete:
   shared-state, lease and landing producer wiring. `patch-admit`, `patch-land`,
   `candidate`, `change-guard` and `draft-pr` remain owned by the landing crate;
   the peer command ownership set is unchanged.
-- Automatic `--graph-context`/`--context-manifest` compilation is not wired to
-  `oms-command-graph`. Only the supplied typed pack path above is implemented.
+- Automatic `--graph-context` selection remains incomplete. The opt-in
+  `--context-manifest` path uses the native Runtime compiler once from detached
+  HEAD, including validated pack file targets and graph dependencies. Initial and
+  repair prompts retain the exact bounded UTF-8 bundle; checked saved-manifest
+  and policy digests bind it to per-call attribution. Valid partial bundles carry
+  debt warnings; compilation or outbound failure starts no worker. This does not
+  enable plan-task claims, candidate admission or automatic apply.
 - Session checkpoint/fork/launch/compare/file restore, managed panel relocation,
   full status projection and complete handoff-prompt synthesis need the native
   checkpoint/panel interfaces. Native resume uses physical registration and its
