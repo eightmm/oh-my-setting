@@ -39,11 +39,30 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 
-## Proposed multi-team execution
+## Overall Main and provider orchestration
 
-[Bounded team orchestration](TEAM-ORCHESTRATION-PLAN.md) defines the proposed
-single-Main, OMS-managed/native-team boundary and ten implementation slices.
-This is a design and delivery plan, not an enabled runtime feature.
+[Current implementation and reuse audit](ORCHESTRATOR-COMPLETION-AUDIT.md)
+maps the November 18 source to existing PRs, native provider sessions, managed
+Team contracts and the remaining implementation work. Read this before creating
+another Team implementation plan.
+
+[Lifecycle implementation packet](ORCHESTRATOR-LIFECYCLE-IMPLEMENTATION.md)
+specifies the missing native consumers for managed Team/write-WIP retirement,
+active cancellation and held-domain recovery, with reusable producers and fixtures.
+
+[Implementation work queue](ORCHESTRATOR-WORK-QUEUE.md) connects the existing
+P0 work to 17 additional source-backed performance, reliability, verification
+and optional remote-artifact packets in PRs #260–#263. It records dependencies,
+shared-file ownership and an implementation-agent handoff; these are specifications.
+The [graph retrieval comparison in PR #264](https://github.com/eightmm/oh-my-setting/pull/264)
+adds 13 correctness, delivery, evaluation and conditional semantic/hybrid packets,
+linked to the same queue and the existing lexical-cache optimization work.
+
+[Bounded team orchestration](TEAM-ORCHESTRATION-PLAN.md) retains the original
+architecture and ten implementation slices. Some contract/admission/projection
+slices are now implemented; interactive native provider sessions remain a separate
+unmanaged path. Neither code presence nor a pane proves complete native child
+control, usage coverage or multi-member acceptance.
 
 ## Migration notes
 

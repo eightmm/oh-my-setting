@@ -7,6 +7,11 @@
 아니다. 기존 Rust parent runtime, room, plan, supervisor, usage, admission writer를
 확장한다. 별도 scheduler/DB/daemon, 직접 provider CLI 실행, Python runtime은 추가하지 않는다.
 
+현재 상태: 이 문서는 초기 설계와 이후 native 구현 subsection을 함께 보존한다.
+[2026-11-18 구현 감사](ORCHESTRATOR-COMPLETION-AUDIT.md)에서 구현/미연결 범위를,
+[lifecycle 패킷](ORCHESTRATOR-LIFECYCLE-IMPLEMENTATION.md)에서 예약 반환·취소·복구의
+남은 native consumer를 확인한다. 첫머리의 설계 표시는 모든 기능이 미구현이라는 뜻이 아니다.
+
 ## 1. 보존해야 할 현재 경계
 
 [safety.rs](../crates/oms-command-peer/src/safety.rs)의 `parent()`는 harness child의
