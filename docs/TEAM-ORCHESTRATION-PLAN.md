@@ -6,6 +6,10 @@
 구현 완료 목록이 아니다. 문서 병합은 모델 호출, 새 권한, 설치, 원격 실행,
 유료 평가, 자동 merge/release를 승인하지 않는다.
 
+현재 구현 상태는 [2026-11-18 source 감사](ORCHESTRATOR-COMPLETION-AUDIT.md)를 따른다.
+아래 baseline/PR 상태 표는 최초 설계 당시의 기록이다. #254–#257의 후속 구현과
+native unmanaged provider pane을 이 문서의 설계 완료 목록으로 혼동하지 않는다.
+
 ## 1. 결정과 목표
 
 **Single Main + bounded teams + one existing execution/verification plane**을 채택한다.
