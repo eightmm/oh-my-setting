@@ -2179,8 +2179,10 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     assert_eq!(git_text(&["rev-parse", "HEAD^{tree}"]), product_tree);
 
     REFUSE_ORDINARY_GROUP.store(true, Ordering::Release);
+    // One guard spans all of the Git and receipt mutations below.
+    let proof_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let guard = admission_plan
-        .team_admission_before(dependent_request.clone(), deadline())
+        .team_admission_before(dependent_request.clone(), proof_deadline)
         .unwrap();
     guard.check().unwrap();
     fs::write(&receipt_path, b"{}\n").unwrap();
