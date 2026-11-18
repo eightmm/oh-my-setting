@@ -1,6 +1,6 @@
 # OMS model tiers, task profiles and resolved-route policy
 
-작성: 2026-11-17. **DESIGN ONLY / NOT AN ACTIVE CONFIGURATION**.
+작성: 2026-11-17. **설계와 MR-A 선택 snapshot 구현 / 기본값·운영 승격 없음**.
 Source audit: `81cbee84d32b14d7737c01a1995f64ec7e182ac5`.
 관련: [Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md),
 [team panel](TEAM-ORCHESTRATION-PANEL.md),
@@ -12,6 +12,15 @@ Source audit: `81cbee84d32b14d7737c01a1995f64ec7e182ac5`.
 모델/effort/계정/과금/권한/default 변경, catalog refresh, native agent 실행,
 추가 model benchmark, 설치 또는 자동 merge를 수행하거나 승인하지 않는다.
 벤더 설명에 기초한 초기 후보는 OMS 실측 성능 순위가 아니다.
+
+2026-11-18 구현 범위: 기존 [routing producer](../crates/oms-panel-core/src/routing.rs)와
+[dispatch writer](../crates/oms-panel-core/src/dispatch.rs)가 schema-1 route snapshot을
+연결한다. Policy/Candidate의 schema 2와 unknown-field 거절은 유지한다. Policy digest,
+configured/requested/resolved 구분, 실제 catalog 반환 metadata, unreported served null을
+기존 launch/reservation/process receipt에 보존하고 `panel --routes`에서 읽는다.
+Family 문자열은 identifier-derived/unverified이며 composite/fanout은 unknown이다.
+이는 MR-A의 로컬 fixture 구현 범위다. MR-B의 공유 예산·과금 승인 전체, MR-C UI 전체,
+MR-D 평가·기본값 승격, 실제 provider capability 검증의 완료를 뜻하지 않는다.
 
 ## 1. 현재 구현과 제안의 경계
 
@@ -289,6 +298,7 @@ Accepted-task rate, false acceptance, regression, wall-time p50/p95, 총 usage/c
 - [A1: Claude Code model configuration](https://code.claude.com/docs/en/model-config)
 - [G1: Antigravity model and Orchestrator configuration](https://antigravity.google/docs/models)
 
-이번 변경은 문서 작성과 pinned source/공식 문서의 정적 대조다. Rust 실행,
-실제 계정/CLI 조회, 유료 모델 평가, 설치 및 runtime config 변경은 수행하지 않았다.
+원래 설계 조사는 문서 작성과 pinned source/공식 문서의 정적 대조였다. 위 MR-A 구현은
+로컬 fixture로 별도 검증하며, 실제 계정/CLI capability 조회, 유료 모델 평가, 설치 및
+runtime config 변경을 수행했다는 증거로 사용하지 않는다.
 게시된 문서 확인과 exact-head CI 결과는 PR 본문 또는 후속 기록에서 별도로 보고한다.

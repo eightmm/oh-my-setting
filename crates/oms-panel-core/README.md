@@ -20,7 +20,7 @@ It adds no external dependencies and does not enable
 | `workspaces` | `list_workspaces`, `workspace_proof`, `open_workspace`, `focus`, `workspace_gone`, `forget_workspace` |
 | `jobs` | `Jobs::{open,run_job,restart_job,poll,interrupt_job,stop_job,list_jobs}`, `job_logs`, `archivable`, `forget_job` |
 | `history` | `capacity`, `transfer`, `archive`, `restore`, `forget_record` |
-| `routing` | `Policy`, `Candidate`, `Route`, `RoutingInputs`, `Accounts`; allocation, catalog/model-family and quota helpers |
+| `routing` | `Policy`, `Candidate`, `Route`, `RouteSnapshot`, `ProviderEvidence`, `RoutingInputs`, `Accounts`; allocation, catalog/model-family and quota helpers |
 | `state` | `Snapshot`; acquisition, save/load, main selection and work-report projections |
 | Other projections | `activity`, `cache`, `eventlog`, `export`, `files`, `health`, `host`, `metrics`, `since` |
 
@@ -94,6 +94,50 @@ in this crate.
   inventories indexed/unindexed patches, retained provenance and matching
   registered worktrees. Continuation rechecks an empty receipt against current
   evidence; a marker alone cannot discard reappearing work.
+
+## Route identity snapshots
+
+Routing policy remains schema 2 and rejects unsupported fields, versions and
+candidate efforts. No configured model, tier, Main effort or catalog-refresh
+behavior changes. Allocation now adds a schema-1 `Route.snapshot`; legacy routes
+without it remain readable and receive explicit unknown policy/catalog provenance
+when dispatch freezes them. Configured, explicitly requested, resolved and served
+identities are separate. Selected/requested account aliases remain distinct from
+unreported served account; catalog and capability account/endpoint bindings
+remain null because the current producer supplies none. Unreported served
+model/effort/source and unproven single/composite execution profile remain null. Identifier-derived family is
+marked `identifier_derived_unverified`, never served-family or native fanout proof.
+
+`RoutingInputs.provider_evidence` retains bounded fields from the existing
+`oms models --json` result through `ProviderEvidence::from_catalog_row`: reported
+probe, catalog/probe ages, harness version when supplied, effort mechanism,
+provider-reported efforts and exact-model effort scales. List hashes identify the
+actual resolver input, including an empty or display-subset list; they establish
+neither freshness nor live support. Read time is local receipt time. Missing age,
+probe or exact-model scale stays unknown; provider-wide efforts do not prove that
+a selected model supports them. The snapshot keeps the exact-model scale and
+reported ages, so stale/failed cached evidence remains visibly bounded evidence.
+Metadata text is limited to 256 bytes, effort sets to 16 entries, scale maps to
+2048 entries and launch snapshots to 32 KiB. The existing model-list selection
+and read-only catalog query are preserved; no refresh or provider call is added.
+
+Requested effort is applied before allocation and snapshot capture. Known
+exact-model effort exclusions, including a reported native-fixed scale, refuse
+that candidate. Final resolved candidates recheck valid route, daily-cap and
+Fable explicit-use restrictions before existing account selection checks the
+resolved model. Public-only, role/access, account and independence checks remain
+separate from tier ranking. These checks do not implement new billing approval,
+shared quota pools, native-child caps or automatic escalation authority.
+
+`Route::freeze_snapshot` binds the final candidate/account/role/access selection;
+changing it after allocation refuses. A launch cannot reuse served observations
+from an earlier call. The existing dispatch preview, immutable launch artifact
+and reservation retain the snapshot and SHA-256; the process receipt retains the
+same snapshot/hash. Settlement checks their admitted bytes before acknowledging
+execution. Policy/catalog changes and rollback do not rewrite prior snapshots.
+`panel --routes` exposes each chosen route's snapshot without launching a model.
+Actual served observations must still come from the existing physical receipt
+producer; this selection snapshot does not manufacture them from process exit.
 
 ## Native adapter prerequisites
 

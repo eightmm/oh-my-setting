@@ -491,6 +491,8 @@ pub fn dispatch(
         )?;
         String::new()
     };
+    resolved.route.freeze_snapshot()?;
+    let route_snapshot_sha256 = resolved.route.snapshot_sha256()?;
     let request = &resolved;
     let (native, mut argv) = command(request, &execution)?;
     let scratch = if request.dry_run {
@@ -593,13 +595,13 @@ pub fn dispatch(
         overlaps.is_empty(),
         "Scope overlap: write dispatch refused; wait for delivery/read or release declarations",
     )?;
-    let preview = serde_json::json!({"schema":1,"kind":"oms-panel-route","route":request.route,"task_id":request.task_id,"command":native.verb(),"argv":argv.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>(),"overlaps":overlaps,"continuation_note":continuation_note,"carried_patch":request.carried_patch,"executes":false});
+    let preview = serde_json::json!({"schema":1,"kind":"oms-panel-route","route":request.route,"route_snapshot_sha256":route_snapshot_sha256,"task_id":request.task_id,"command":native.verb(),"argv":argv.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>(),"overlaps":overlaps,"continuation_note":continuation_note,"carried_patch":request.carried_patch,"executes":false});
     if request.dry_run {
         return Ok(preview);
     }
     let member = format!("call-{}", crate::value::unique()?);
     let launch = serde_json::json!({"schema":2,"member":member,"task_id":request.task_id,"main":request.main,"main_attempt":request.main_attempt,
-        "room":request.room,"route":request.route,"scopes":scopes,"verify":request.verify,"state":"reserved","execution_repo":execution.repo(),"created_at":crate::now()});
+        "room":request.room,"route":request.route,"route_snapshot_sha256":route_snapshot_sha256,"scopes":scopes,"verify":request.verify,"state":"reserved","execution_repo":execution.repo(),"created_at":crate::now()});
     {
         let tx = store.dispatch_transaction(stop)?;
         let snapshot = tx.snapshot().map_err(reservation_error)?;
@@ -824,7 +826,7 @@ pub fn dispatch(
         registry["calls"][&member]["exit"] = output.code.into();
         tx.replace(Some(&snapshot), &crate::value::encoded(&registry)?)
             .map_err(reservation_error)?;
-        let receipt = serde_json::json!({"schema":1,"member":member,"task_id":request.task_id,"exit":output.code,"cleanup_complete":output.cleanup_complete,"output_complete":output.output_complete,"state":state});
+        let receipt = serde_json::json!({"schema":1,"member":member,"task_id":request.task_id,"exit":output.code,"cleanup_complete":output.cleanup_complete,"output_complete":output.output_complete,"state":state,"route_snapshot":request.route.snapshot,"route_snapshot_sha256":route_snapshot_sha256});
         tx.artifact(&member, "process", &crate::value::encoded(&receipt)?)
             .map_err(reservation_error)?;
         Ok(receipt)
@@ -1226,6 +1228,7 @@ mod tests {
                 account_reason: None,
                 account_pinned: false,
                 explicit_target: false,
+                snapshot: None,
             },
             task_id: "t1".into(),
             prompt: Some("task".into()),
@@ -1409,6 +1412,10 @@ mod tests {
                     "array" => registry["calls"] = json!([]),
                     "schema" => registry["schema"] = 2.into(),
                     "route" => registry["calls"][&member]["route"]["owner"] = "other".into(),
+                    "snapshot" => {
+                        registry["calls"][&member]["route"]["snapshot"]["catalog"]["reported_probe"] =
+                            "forged".into()
+                    }
                     "metadata" => {
                         registry["opaque"] = json!({"retain":"foreign metadata"});
                         registry["calls"][&member]["extension"] = json!({"retained":true});
@@ -1416,7 +1423,7 @@ mod tests {
                             json!({"state":"unknown","route":{"access":"write"}});
                     }
                     "cancel" => interrupted.store(true, std::sync::atomic::Ordering::Release),
-                    "error" => {}
+                    "error" | "policy" => {}
                     _ => unreachable!(),
                 }
                 tx.write_json(path, &registry, false, 4 * 1024 * 1024)?;
@@ -1436,7 +1443,8 @@ mod tests {
             }
         }
         for mode in [
-            "missing", "null", "array", "schema", "route", "metadata", "cancel", "error",
+            "missing", "null", "array", "schema", "route", "snapshot", "metadata", "cancel",
+            "error", "policy",
         ] {
             let root = std::env::temp_dir().join(format!(
                 "oms-dispatch-settlement-{}",
@@ -1456,6 +1464,25 @@ mod tests {
             request.verify = None;
             request.scopes.clear();
             request.room = None;
+            if mode == "policy" {
+                request.route = crate::routing::allocate(
+                    &crate::routing::Policy::bundled().unwrap(),
+                    "antigravity",
+                    "worker",
+                    None,
+                    "read",
+                    None,
+                    &crate::routing::RoutingInputs {
+                        installed: Some(["claude".into()].into()),
+                        catalogs: std::collections::BTreeMap::from([(
+                            "claude".into(),
+                            vec!["claude-sonnet-5-6".into()],
+                        )]),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
             let host = Host {
                 mode,
                 calls: Cell::new(0),
@@ -1466,13 +1493,41 @@ mod tests {
             let path = root
                 .0
                 .join(".oms/artifacts/panel-dispatch/reservations.json");
-            if matches!(mode, "metadata" | "cancel") {
+            if matches!(mode, "metadata" | "cancel" | "policy") {
                 let receipt = result.unwrap();
                 let registry: Value =
                     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
                 assert_eq!(receipt["state"], "awaiting");
+                let admitted = &registry["calls"][receipt["member"].as_str().unwrap()];
+                assert_eq!(receipt["route_snapshot"], admitted["route"]["snapshot"]);
+                assert_eq!(
+                    receipt["route_snapshot_sha256"],
+                    admitted["route_snapshot_sha256"]
+                );
+                assert_eq!(receipt["route_snapshot"]["served_model"], Value::Null);
+                if mode == "policy" {
+                    assert_eq!(receipt["route_snapshot"]["policy_schema"], 2);
+                    assert_eq!(
+                        receipt["route_snapshot"]["configured"]["model"],
+                        "claude-sonnet-5-5"
+                    );
+                    assert_eq!(
+                        receipt["route_snapshot"]["resolved"]["model"],
+                        "claude-sonnet-5-6"
+                    );
+                    assert!(receipt["route_snapshot"]["policy_sha256"].is_string());
+                } else {
+                    assert_eq!(receipt["route_snapshot"]["policy_sha256"], Value::Null);
+                }
+                assert_eq!(
+                    receipt["route_snapshot"]["capabilities"]["effort_support"],
+                    "unknown"
+                );
                 if mode == "cancel" {
                     assert_eq!(receipt["exit"], 130);
+                    continue;
+                }
+                if mode == "policy" {
                     continue;
                 }
                 assert_eq!(registry["opaque"]["retain"], "foreign metadata");

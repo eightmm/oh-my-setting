@@ -372,7 +372,7 @@ impl Services for Fake {
                         .collect::<Vec<_>>();
                     if self.real_catalog.get() {
                         // Shape of `oms models --json`: no `installed`, `usable` unprobed, models only in `catalog_models`.
-                        rows.push(json!({"provider": provider, "present": true, "usable": null, "models": [], "catalog_models": models}));
+                        rows.push(json!({"provider": provider, "present": true, "usable": null, "models": [], "catalog_models": models, "catalog_probe":"failed", "catalog_age_seconds":86401, "snapshot_age_seconds":172801, "effort_values":["low","medium","high"]}));
                     } else {
                         rows.push(
                             json!({"provider": provider, "installed": true, "models": models}),
@@ -915,6 +915,82 @@ fn routing_accepts_present_provider_catalog() {
     assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&err));
     let rt: Value = serde_json::from_slice(&out).unwrap();
     assert!(rt["chosen"]["builder"]["provider"].is_string());
+    let snapshot = &rt["chosen"]["builder"]["snapshot"];
+    assert_eq!(snapshot["schema"], 1);
+    assert_eq!(snapshot["policy_schema"], 2);
+    assert!(
+        snapshot["policy_sha256"]
+            .as_str()
+            .is_some_and(|v| v.len() == 64)
+    );
+    assert_eq!(snapshot["served_model"], Value::Null);
+    assert_eq!(snapshot["execution_profile"], Value::Null);
+    assert_eq!(snapshot["catalog"]["reported_probe"], "failed");
+    assert_eq!(snapshot["catalog"]["catalog_age_seconds"], 86401);
+    assert_eq!(snapshot["capabilities"]["probe_age_seconds"], 172801);
+    assert_eq!(snapshot["capabilities"]["effort_support"], "unknown");
+    assert_eq!(
+        services
+            .native_seen
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == NativeCommand::ProviderCatalog)
+            .count(),
+        1
+    );
+    let (code, out, err) = run(&[
+        "--dispatch",
+        "worker",
+        "--owner",
+        "codex",
+        "--prompt",
+        "inspect source",
+        "--to",
+        "claude",
+        "--model",
+        "claude-sonnet-5-5",
+        "--reasoning-effort",
+        "low",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let preview: Value = serde_json::from_slice(&out).unwrap();
+    let selected = &preview["route"]["snapshot"];
+    assert_eq!(selected["requested_model"], "claude-sonnet-5-5");
+    assert_eq!(selected["requested_effort"], "low");
+    assert_eq!(selected["configured"]["effort"], "medium");
+    assert_eq!(selected["resolved"]["effort"], "low");
+    assert_eq!(selected["served_effort"], Value::Null);
+    assert_eq!(preview["executes"], false);
+    assert!(preview["route_snapshot_sha256"].is_string());
+    assert_eq!(
+        services
+            .native_seen
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == NativeCommand::ProviderCatalog)
+            .count(),
+        2
+    );
+    assert!(
+        !services
+            .native_seen
+            .borrow()
+            .iter()
+            .any(|(command, _)| matches!(
+                command,
+                NativeCommand::Delegate | NativeCommand::Review | NativeCommand::Advise
+            ))
+    );
+    assert!(
+        services
+            .native_seen
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == NativeCommand::ProviderCatalog)
+            .all(|(_, args)| args == &os(&["--json"]))
+    );
+
     for dispatch in [
         &["--dispatch", "researcher", "--dry-run"][..],
         &["--dispatch", "builder", "--access", "write", "--dry-run"][..],

@@ -772,6 +772,7 @@ fn routes_output(
                         "provider": alloc.candidate.provider,
                         "model": alloc.candidate.model,
                         "effort": alloc.candidate.effort,
+                        "snapshot": alloc.snapshot,
                     }),
                 );
             }
@@ -866,6 +867,10 @@ fn routing_inputs(
         if models.is_empty() {
             models = strings("catalog_models");
         }
+        inputs.provider_evidence.insert(
+            name.into(),
+            routing::ProviderEvidence::from_catalog_row(provider)?,
+        );
         inputs.catalogs.insert(name.into(), models);
     }
 
@@ -1204,7 +1209,8 @@ fn dispatch_command(
     }
     inputs.requested_account = flag_account.or(continued);
     inputs.requested_model = options.get("model").map(str::to_owned);
-    let mut route = routing::allocate(
+    inputs.requested_effort = options.get("reasoning-effort").map(str::to_owned);
+    let route = routing::allocate(
         &policy,
         &owner,
         &role,
@@ -1225,12 +1231,6 @@ fn dispatch_command(
                 route.candidate.provider
             ),
         )?;
-    }
-    if let Some(model) = options.get("model") {
-        route.candidate.model = model.into();
-    }
-    if let Some(effort) = options.get("reasoning-effort") {
-        route.candidate.effort = effort.into();
     }
     routing::valid_route(&route.candidate)?;
     let mut request = dispatch::DispatchRequest {
