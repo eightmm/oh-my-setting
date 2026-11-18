@@ -344,7 +344,6 @@ impl Options {
                 "view",
                 &["auto", "summary", "compact", "detail", "graph", "tree"][..],
             ),
-            ("reasoning-effort", &["low", "medium", "high"][..]),
             ("access", &["read", "write"][..]),
             ("purpose", &["explain", "investigate", "implement"][..]),
             (
@@ -356,6 +355,25 @@ impl Options {
             ("size", &["small", "medium", "large"][..]),
         ] {
             self.choice(key, choices)?;
+        }
+        if self.has("orchestrator") {
+            require(
+                !self.has("task") || !(self.has("model") || self.has("reasoning-effort")),
+                "orchestrator model and effort apply only when opening a new session",
+            )?;
+            if let Some(effort) = self.get("reasoning-effort") {
+                require(
+                    !effort.is_empty()
+                        && effort.len() <= 32
+                        && effort.as_bytes()[0].is_ascii_lowercase()
+                        && effort.bytes().all(|c| {
+                            c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-".contains(&c)
+                        }),
+                    "invalid native reasoning effort token",
+                )?;
+            }
+        } else {
+            self.choice("reasoning-effort", &["low", "medium", "high"])?;
         }
         self.choice("dispatch", oms_panel_core::routing::ROLES)?;
         self.choice("workload", oms_panel_core::routing::TIERS)?;
@@ -463,7 +481,7 @@ impl Options {
         self.needs(&["follow"], &["log"])?;
         self.needs(
             &["reasoning-effort"],
-            &["dispatch", "continue", "recommend"],
+            &["dispatch", "continue", "recommend", "orchestrator"],
         )?;
         self.needs(
             &[
@@ -528,6 +546,7 @@ impl Options {
                 "dispatch",
                 "continue",
                 "recommend",
+                "orchestrator",
             ],
         )?;
         self.needs(&["compare"], &["compare"])?;
@@ -718,7 +737,7 @@ pub fn usage() -> String {
     let mut text = String::from(
         "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nBare interactive panel opens or reuses the native Codex Main on tmux. Use --watch for the board alone.\n\n",
     );
-    text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--task TEXT]\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
+    text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--model MODEL] [--reasoning-effort EFFORT]\nModel and effort apply to new sessions only; the native CLI validates availability.\nAssign an existing provider: --orchestrator PROVIDER --task TEXT\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
     for key in FLAGS {
         text.push_str(&format!("  --{key}\n"));
@@ -743,5 +762,51 @@ mod tests {
             assert!(parse(&["--focus-orchestrator", provider, "--resume", uuid]).is_err());
         }
         assert!(parse(&["--launch", "codex", "--resume", "legacy-session"]).is_ok());
+    }
+
+    #[test]
+    fn orchestrator_selection_is_explicit_and_start_only() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        for provider in crate::orchestrator::PROVIDERS {
+            assert!(
+                parse(&[
+                    "--orchestrator",
+                    provider,
+                    "--model",
+                    "fixture-model",
+                    "--reasoning-effort",
+                    "xhigh",
+                ])
+                .is_ok()
+            );
+            for flag in ["--model", "--reasoning-effort"] {
+                assert!(
+                    parse(&[
+                        "--orchestrator",
+                        provider,
+                        "--task",
+                        "inspect",
+                        flag,
+                        "high",
+                    ])
+                    .is_err()
+                );
+                assert!(parse(&["--focus-orchestrator", provider, flag, "high"]).is_err());
+            }
+            for effort in ["", "HIGH", " high", "high\n", "high\"", "high\\", "-high"] {
+                assert!(
+                    parse(&[
+                        "--orchestrator",
+                        provider,
+                        &format!("--reasoning-effort={effort}"),
+                    ])
+                    .is_err()
+                );
+            }
+        }
+        for mode in ["--dispatch", "--recommend"] {
+            assert!(parse(&[mode, "worker", "--reasoning-effort", "high"]).is_ok());
+            assert!(parse(&[mode, "worker", "--reasoning-effort", "xhigh"]).is_err());
+        }
     }
 }

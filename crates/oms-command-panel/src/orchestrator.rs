@@ -22,8 +22,8 @@ for work authorized by the assignment. Keep each child within its assigned scope
 OMS parent-only actions to Overall Main, and preserve the project's approval requirements. \
 Report effective child permissions as unverified when the provider does not confirm them.";
 
-fn orchestrator_command(provider: &str) -> Result<Vec<OsString>> {
-    let (program, model, permission_flag, prompt_option) = match provider {
+fn orchestrator_command(provider: &str, options: &Options) -> Result<Vec<OsString>> {
+    let (program, default_model, permission_flag, prompt_option) = match provider {
         "codex" => (
             "codex",
             "gpt-6.2-sol",
@@ -44,14 +44,26 @@ fn orchestrator_command(provider: &str) -> Result<Vec<OsString>> {
         ),
         _ => return Err(Error::new("unsupported provider orchestrator")),
     };
-    Ok(commands::strings(&[
-        program,
-        "--model",
-        model,
-        permission_flag,
-        prompt_option,
-        STARTUP_PROMPT,
-    ]))
+    let model = options.get("model").unwrap_or(default_model);
+    let mut argv = commands::strings(&[program, "--model", model, permission_flag]);
+    if let Some(effort) = options.get("reasoning-effort") {
+        require(
+            provider != "antigravity" || !model.starts_with("gemini-pro-orchestrator"),
+            "Antigravity Orchestrator has fixed effort; omit --reasoning-effort or select an adjustable model",
+        )?;
+        // Match the existing peer transport. Requested tokens do not prove the
+        // native CLI accepted them or that the service applied this effort.
+        if provider == "codex" {
+            argv.extend(commands::strings(&[
+                "-c",
+                &format!("model_reasoning_effort=\"{effort}\""),
+            ]));
+        } else {
+            argv.extend(commands::strings(&["--effort", effort]));
+        }
+    }
+    argv.extend(commands::strings(&[prompt_option, STARTUP_PROMPT]));
+    Ok(argv)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -485,12 +497,12 @@ impl<'a> Panel<'a> {
         Ok(())
     }
 
-    fn open(&self, provider: &str) -> Result<String> {
+    fn open(&self, provider: &str, options: &Options) -> Result<String> {
         require(
             !self.live_providers.contains(provider),
             "provider already has a live pane in this panel",
         )?;
-        let command = orchestrator_command(provider)?;
+        let command = orchestrator_command(provider, options)?;
         let global = self.tmux(&["show-environment", "-g"])?;
         let session = self.tmux(&["show-environment", "-t", &self.session])?;
         let strip: std::collections::BTreeSet<_> = global
@@ -824,9 +836,13 @@ pub fn run(
             ))?;
             "submitted"
         } else if panel.leads.contains_key(provider) {
+            require(
+                !(options.has("model") || options.has("reasoning-effort")),
+                "provider session is already connected; model and effort cannot be changed by reconnecting",
+            )?;
             "connected"
         } else {
-            panel.open(provider)?;
+            panel.open(provider, options)?;
             "started"
         }
     };
@@ -843,6 +859,7 @@ mod tests {
         STARTUP_PROMPT, input_ready, literal_tmux_arg, live_provider, observed_model,
         orchestrator_command, weekly_from_usage,
     };
+    use crate::{cli::Options, commands};
 
     #[test]
     fn provider_commands_apply_model_permissions_and_startup_role() {
@@ -870,7 +887,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                orchestrator_command(provider).unwrap(),
+                orchestrator_command(provider, &Options::default()).unwrap(),
                 [
                     program,
                     "--model",
@@ -880,6 +897,56 @@ mod tests {
                     STARTUP_PROMPT,
                 ]
             );
+            for (selected_model, effort) in [
+                (Some("fixture-model"), None),
+                (Some("fixture-model"), Some("xhigh")),
+                (None, Some("xhigh")),
+            ] {
+                let mut args = commands::strings(&["--orchestrator", provider]);
+                if let Some(selected_model) = selected_model {
+                    args.extend(commands::strings(&["--model", selected_model]));
+                }
+                if let Some(effort) = effort {
+                    args.extend(commands::strings(&["--reasoning-effort", effort]));
+                }
+                let options = Options::parse(&args).unwrap();
+                if provider == "antigravity" && selected_model.is_none() {
+                    assert!(orchestrator_command(provider, &options).is_err());
+                    continue;
+                }
+                let mut expected = commands::strings(&[
+                    program,
+                    "--model",
+                    selected_model.unwrap_or(model),
+                    permission_flag,
+                ]);
+                if effort.is_some() {
+                    expected.extend(if provider == "codex" {
+                        commands::strings(&["-c", "model_reasoning_effort=\"xhigh\""])
+                    } else {
+                        commands::strings(&["--effort", "xhigh"])
+                    });
+                }
+                expected.extend(commands::strings(&[prompt_option, STARTUP_PROMPT]));
+                assert_eq!(orchestrator_command(provider, &options).unwrap(), expected);
+            }
+        }
+        for model in [
+            None,
+            Some("gemini-pro-orchestrator"),
+            Some("gemini-pro-orchestrator-argon"),
+        ] {
+            let mut args = commands::strings(&[
+                "--orchestrator",
+                "antigravity",
+                "--reasoning-effort",
+                "high",
+            ]);
+            if let Some(model) = model {
+                args.extend(commands::strings(&["--model", model]));
+            }
+            let options = Options::parse(&args).unwrap();
+            assert!(orchestrator_command("antigravity", &options).is_err());
         }
     }
 

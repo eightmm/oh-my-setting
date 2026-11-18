@@ -47,7 +47,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 
 ## Quick start
 
-1. Run `oms` in a terminal and choose Claude, Codex or Agy. Enter or EOF opens control only; Ctrl-C exits with 130. Missing CLIs show their reasons. The panel starts at most one live main. Pi remains an explicit alternative (`OMS_PANEL_MAIN=pi` or the Pi start key).
+1. Run `oms` in a terminal to open or reuse the native Codex Main with its tmux board. Use `oms panel --watch` for the board alone, or an explicit `--launch` to choose another supported main. Non-terminal invocations retain the read-only watcher path. The panel starts at most one live main.
 2. The main window keeps the board on the left whenever the window is wide enough (above the CLI only when it is too narrow); the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
 3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The bottom box contains Log, Detail, Plan, Messages, Past and Attention tabs (Past and Attention stay even when empty), plus Debate while a debate exists. The pinned **Needs you** attention strip stays above activity when the inbox has items.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
@@ -113,6 +113,39 @@ integration, required checks and owner finalization. A worker's exit or review
 handoff is an intermediate step. The main continues actionable work within the
 user's scope, or records a concrete blocker and the next action. Publication
 still requires the user's authority; a local result can be completed first.
+
+### Provider orchestrator launch selection
+
+The live Overall Main can open Codex, Claude or Antigravity provider sessions in
+its Room. On a **new** session, `--model MODEL` requests an exact native model ID
+or provider alias, and `--reasoning-effort EFFORT` requests that provider's effort
+token. Omitting them preserves the existing launch defaults and native effort
+settings. For example, the Main can select a locally available model and effort
+with `oms panel --orchestrator codex --room ROOM --model MODEL --reasoning-effort EFFORT`.
+`MODEL`, `EFFORT` and `ROOM` are placeholders, not installed model claims.
+
+Native effort tokens are bounded syntax, not the managed router's
+`low`/`medium`/`high` tier mapping. Codex receives its existing
+`model_reasoning_effort` configuration override; Claude and Antigravity receive
+their native `--effort` flag. Model/account availability and model-specific effort
+support still belong to the native CLI. The default Antigravity Orchestrator
+model has fixed effort, so specifying effort for it is refused; select an
+adjustable model explicitly if effort control is needed.
+
+A connected session cannot be retuned by reopening it. Model/effort options are
+refused on reconnect, task submission or focus, avoiding an ignored selection or
+an accidental conversation restart. Use `--orchestrator PROVIDER --room ROOM`
+without selection flags to reuse the session, and add `--task TEXT` to submit an
+assignment to its idle input.
+
+`started` confirms pane creation, not the served model or applied effort.
+These interactive provider sessions remain outside managed campaign accounting;
+selection does not create a TeamSpec, a new account binding or child usage proof.
+The existing permission settings and parent/child ownership guards remain in force.
+
+Native flag references: [Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
+[Claude CLI](https://code.claude.com/docs/en/cli-reference),
+[Antigravity effort](https://antigravity.google/docs/cli/commands/effort).
 
 ### Swap the main
 
