@@ -54,6 +54,9 @@ active cancellation and held-domain recovery, with reusable producers and fixtur
 P0 work to 17 additional source-backed performance, reliability, verification
 and optional remote-artifact packets in PRs #260–#263. It records dependencies,
 shared-file ownership and an implementation-agent handoff; these are specifications.
+The [graph retrieval comparison in PR #264](https://github.com/eightmm/oh-my-setting/pull/264)
+adds 13 correctness, delivery, evaluation and conditional semantic/hybrid packets,
+linked to the same queue and the existing lexical-cache optimization work.
 
 [Bounded team orchestration](TEAM-ORCHESTRATION-PLAN.md) retains the original
 architecture and ten implementation slices. Some contract/admission/projection

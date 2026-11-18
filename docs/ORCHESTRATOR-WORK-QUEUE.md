@@ -15,10 +15,12 @@
 | [#261](https://github.com/eightmm/oh-my-setting/pull/261) | [REL-01~04](https://github.com/eightmm/oh-my-setting/blob/244d4aae3df598bee04b16028b6932a13526b568/docs/ORCHESTRATOR-RELIABILITY-WORK-PACKETS.md) | 명세. native 관측·실패 분류·총 deadline·Broker supervision |
 | [#262](https://github.com/eightmm/oh-my-setting/pull/262) | [VW-01~05](https://github.com/eightmm/oh-my-setting/blob/72a9e793243a5165695ceb39fed0025bd30c363f/docs/ORCHESTRATOR-VERIFICATION-WORK-PACKETS.md) | 명세. 범위 판정·검증 중복·실패 진단·fixture 효율 |
 | [#263](https://github.com/eightmm/oh-my-setting/pull/263) | [AR-01~04](https://github.com/eightmm/oh-my-setting/blob/78c8d3c260a6aec1d08525032961b75282d2c86e/docs/REMOTE-ARTIFACT-WORK-PACKETS.md) | 명세. 선택형 원격 수집·bundle 재개·cache 공간 관리 |
+| [#264](https://github.com/eightmm/oh-my-setting/pull/264) | [Graph retrieval 비교](https://github.com/eightmm/oh-my-setting/blob/e99406531630a8001846be142595c9d577ed9987/docs/GRAPH-RETRIEVAL-COMPARISON.md)와 [GR-01~13](https://github.com/eightmm/oh-my-setting/blob/e99406531630a8001846be142595c9d577ed9987/docs/GRAPH-RETRIEVAL-WORK-PACKETS.md), native README 교정 | 비교·명세. Rust/Python/shell/notebook 정확성, worker 전달, 평가, 조건부 semantic/hybrid 실험 |
 
-추가 조사 결과는 **17개 패킷**이다. 패킷 하나는 하나 이상의 작은 코드 PR로 나눌 수 있다.
+추가 조사 명세는 성능·신뢰성·검증·원격 산출물 **17개**와 graph retrieval **13개**,
+총 **30개 패킷**이다. 패킷 하나는 하나 이상의 작은 코드 PR로 나눌 수 있다.
 예를 들어 REL-03의 총 deadline과 cooldown admission, PERF-03의 계측과 저장 형식 변경은
-같은 코드 PR에 강제로 묶지 않는다. 네 명세 PR은 main에서 독립적으로 검토 가능하다.
+같은 코드 PR에 강제로 묶지 않는다. #260–#264는 main에서 독립적으로 검토 가능하다.
 
 ## 2. 먼저 이어갈 기존 핵심 연결 작업
 
@@ -54,12 +56,34 @@
 | VW-03 | P1 | 측정된 build/install 중복 제거와 coverage label 정렬 | VW-04 측정; exact-SHA/full-proof classifier와 동시 변경 |
 | VW-05 | P1 | 실제 clock 대기 축소와 deterministic native fixture | 실제 child ownership/cleanup 시험은 유지 |
 | AR-01 | P1, 원격 경로 사용 시 | collect의 취소·총 deadline·게시 불명 처리 | local client cleanup과 remote job 취소 구분 |
-| PERF-04 | P2 | graph lexical 전처리 재사용 | 기존 순위/점수/source validation oracle 보존 |
+| PERF-04 | P2 | graph lexical 전처리 재사용 | GR-05/06의 identity·품질 기준과 연결; 기존 순위/점수/source validation oracle 보존 |
 | PERF-03 | P2 | usage write amplification 계측과 필요한 작은 개선 | LC lock 순서·durable pending 보존; 저장 형식 변경은 별도 근거 |
 | VW-02 | P2 | noncritical leaf의 안전한 affected test closure | VW-01 이후; advisory 비교 후 executor 연결, 불명은 full |
 | AR-02 | P2, 선택형 | run/snapshot에 묶인 bounded artifact manifest | 실제 묶음 수집 필요; 파일·총량·경로 상한 |
 | AR-03 | P2, 선택형 | partial/resume과 묶음 완료 receipt | AR-01 + AR-02; 모든 필수 artifact 확인 전 완료 금지 |
 | AR-04 | P2, 선택형 | cache 공간 inventory·정리 계획 | inventory 독립; 삭제 apply는 durable completion producer 선행 |
+
+### Graph retrieval 후속 큐
+
+[GR 상세 패킷](https://github.com/eightmm/oh-my-setting/blob/e99406531630a8001846be142595c9d577ed9987/docs/GRAPH-RETRIEVAL-WORK-PACKETS.md)은
+owner, source, canonical fixture와 완료 조건을 지정한다. 비교 분석은 새 DB보다 기존
+SQLite/graph/context 경계의 정확성 보완을 우선하며 검색 성능 수치는 아직 측정하지 않았다.
+
+| ID | 우선순위 | 구체적 결과 | 선행 / 보존할 조건 |
+|---|---|---|---|
+| GR-01 | P0 | Rust scope별 symbol ID·본문 span·signature | 동명 impl method 손실 방지; 기존 API/query 재사용 |
+| GR-02 | P0 | Rust nested module·`#[path]` 관계 | GR-01과 같은 parser 파일은 순차; 잘못된 EXTRACTED edge 금지 |
+| GR-03 | P0 | Worker에 no-match/partial/오류와 snapshot 근거 전달 | 정상 no-match로 Python 제외 rebuild 금지; 기존 bundle/pack 사용 |
+| GR-04 | P0 | Parse·resolve·query coverage | 이미 있는 syntax_valid 재사용; invalid/unsupported/unknown 구분 |
+| GR-05 | P1 | Freshness 근거·engine fingerprint | stat reuse와 byte verification 구분; PERF-04 cache identity 선행 |
+| GR-06 | P0 | 동일 corpus/budget의 retrieval 평가 | 기존 history/parity 보존; 한영 seed와 holdout, entry/file/shown-symbol 분리 |
+| GR-07 | P1 | 관련 선언을 먼저 싣는 byte budget | GR-01/03/06; truncation·omission을 consumer까지 전달 |
+| GR-08 | P1 | Rust test metadata의 탐색 분류 | production file 전체를 test-only로 만들지 않음; 실행 범위 축소는 별도 |
+| GR-09 | P1 | Notebook code-only 검색·좌표 정합성 | 기존 cell 추출 재사용; output은 검색 제외 |
+| GR-10 | P1 | Python lexical binding·nested identity | legacy golden의 의도적 semantic correction 명시 |
+| GR-11 | P1 | Shell command 위치와 data argument 구분 | 기존 lexical/heredoc 처리 재사용; false call 방지 |
+| GR-12 | P2, 조건부 | Rust LSP/SCIP enrichment | identity/coverage/평가 이후; 설치된 도구·bounded supervisor·fallback |
+| GR-13 | P2, 조건부 | 한국어·본문 hybrid 검색 실험 | GR-06/07과 PERF-04; measured gain 전 새 의존성 채택 보류 |
 
 ## 4. 병렬 작업과 직렬 연결
 
@@ -70,7 +94,7 @@
 | Provider execution | REL-02 분류와 REL-04 Broker의 독립 fixture | 같은 `providers.rs`의 REL-02 → REL-03; supervisor 변경 시 아래와 조정 |
 | Transport | Broker와 collect 각 caller의 재현·계약 조사 | REL-04/AR-01이 공통 Reactor API를 바꾸면 한 선행 PR로 추출 후 연결 |
 | Verification | VW-01 planning과 VW-05의 다른 fixture | `check.sh`/workflow/CI classifier를 바꾸는 VW-01/04/03/02는 순차 반영 |
-| Graph | PERF-04는 panel/CI/source gate 변경과 분리 검토 | lexical schema/cache version 변화와 관련 oracle를 같은 PR에 유지 |
+| Graph | GR-06 평가 corpus와 GR-03/04 interface 설계, 다른 언어 fixture 조사 | GR-01 → GR-02; GR-05/06 → PERF-04; resolver/index/context의 공통 writer는 한 owner |
 | Remote artifacts | AR-02 manifest와 AR-04 inventory 설계 | AR-01/02 → AR-03; 삭제 apply는 완료 증거 producer 이후 |
 
 한 작업에서 발견한 새 필요를 다른 worker의 owned file에 바로 섞지 않는다.
@@ -79,11 +103,13 @@
 
 ## 5. 구현 에이전트 전달문
 
-> 최신 main과 #258~#263의 병합 여부를 확인하고, 이미 구현된 패킷은 건너뛰세요.
+> 최신 main과 #258~#264의 병합 여부를 확인하고, 이미 구현된 패킷은 건너뛰세요.
 > 우선 #259의 LC-01/02와 native assignment 연결을 유지하면서 VW-01, PERF-02, REL-01,
 > REL-02를 각기 좁은 코드 PR로 진행하세요. 같은 파일의 writer는 한 명으로 고정합니다.
 > 기존 Plan/Room/peer/supervisor/usage/landing과 canonical fixture를 재사용하세요.
 > REL-01 다음에 PERF-01, REL-02 다음에 cooldown 정책, AR-01/02 다음에 AR-03을 연결하세요.
+> Graph는 GR-06의 기준선을 고정하며 GR-03/04 전달 계약, GR-01/02 Rust 정확성을 먼저 보완하세요.
+> GR-05의 source/engine identity를 PERF-04에 연결하고 GR-12/13은 평가 후 선택하세요.
 > 기능의 존재, 실제 public caller 연결, fixture 통과, live provider 증거를 구분해 보고하세요.
 > 빠진 usage·cleanup·관측을 성공이나 0으로 채우지 마세요. 성능은 동일 workload의 bytes,
 > metadata/subprocess/fsync, lock hold, RSS, p50/p95를 cold/warm으로 나눠 비교하세요.
