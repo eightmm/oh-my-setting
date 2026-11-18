@@ -1,15 +1,18 @@
-# Native state commands — reviewed integration draft
+# Native state commands
 
 This crate provides native routes for all fourteen state/run/lease command
-names. It remains an integration candidate: source checks do not establish
-behavioral admission, exact output parity, process recovery or NFS durability.
-The original draft's private `process` module blocker is resolved.
+names. [Root dispatch](../oms/src/main.rs) calls `run_with_host` with native
+Runs services and [ControlServices](../oms/src/services_control.rs) for Plan,
+task and retention producers. Source wiring does not establish exact output
+parity, process recovery or NFS durability on a particular installation.
 
-Recipe host execution remains refused before any spawn or recipe state write.
-`oms-command-runs::process::{ProcessPolicy, Output}` does not expose the
-post-spawn PID receipt needed to refuse replay of a still-live prior child.
-Recipe validation, planning, resources, worksets and request creation do not
-require that hook and are implemented separately.
+Recipe execution is implemented in [recipe.rs](src/recipe.rs): `run`, `resume`,
+workspace execution and trigger execution require explicit `--execute` and the
+parent boundary. Steps use Runs `execute_with_hooks` to record the spawned PID;
+companions have their own owned process-group lifetime. Planning and request
+creation remain separate from execution. The current local fixture is
+`tests/recipe_and_gc.rs::recipe_execute_resume_limits_companions_and_trigger_run`;
+its existence is not a fresh execution result from this documentation audit.
 
 ## Public interfaces and native reuse
 
@@ -38,7 +41,17 @@ and the root lockfile are unchanged; no arbitrary-precision serde feature
 is enabled. The standalone queue worker must be installed beside the parent
 executable, or selected explicitly by `OMS_TSP_WORKER`.
 
-## Carbon findings and source changes
+Ordinary native state views use bounded source-health projections.
+`run_with_runtime_host` can accept a full runtime envelope, but the root's
+`run_with_host` route does not inject one. An empty criteria/action list in the
+state fallback is not proof that the canonical runtime has no work; use
+`oms runtime envelope show` or `oms runtime evidence matrix` for that contract view.
+
+## Historical migration findings and source changes
+
+This ledger records the original component review. Then-missing callbacks and
+recipe execution are superseded by the current native wiring described above;
+retained findings are not a current support matrix.
 
 | Finding | Source response |
 | --- | --- |
@@ -63,7 +76,13 @@ as source. The review's repeated prior diff was already in context; the actual
 review findings and complete 15-row findings ledger were read. No behavioral
 suite or negative-control test was run in this implementation-only phase.
 
-## Remaining owner integration and admission
+## Historical owner integration and admission notes
+
+These requirements belonged to the original integration candidate. Current
+`ControlServices` implements the proof-dependent GC hooks, and the native
+payload includes `oms-state-queue-worker`. Missing or unproven retention evidence
+still defers deletion. Recipe's post-spawn hook is now implemented; the older
+refusals below describe the earlier phase, not current command behavior.
 
 - `f-814cf30307b2` remains open for managed capture generations, completion
   capture/transaction-pin retention and dispatch-call artifact settlement.
@@ -106,7 +125,7 @@ published bytes whose durability is uncertain. Reconcile before retrying an
 uncertain effect. These are static implementation invariants, not measured
 XFS/NFS or crash-test claims.
 
-## Verification scope
+## Historical verification scope
 
 The permitted source checks are:
 

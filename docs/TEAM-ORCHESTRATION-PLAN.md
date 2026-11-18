@@ -9,6 +9,9 @@
 현재 구현 상태는 [2026-11-18 source 감사](ORCHESTRATOR-COMPLETION-AUDIT.md)를 따른다.
 아래 baseline/PR 상태 표는 최초 설계 당시의 기록이다. #254–#257의 후속 구현과
 native unmanaged provider pane을 이 문서의 설계 완료 목록으로 혼동하지 않는다.
+제품 범위는 [FEATURE-SCOPE](FEATURE-SCOPE.md), 현재 착수 순서와 남은 구현은
+[통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다. 아래 TM ID는 원래 설계의
+acceptance 참조이며, 이미 구현된 부분을 다시 만드는 별도 실행 backlog가 아니다.
 
 ## 1. 결정과 목표
 
@@ -20,6 +23,10 @@ Single Main은 같은 목표/room/통합 대상의 소유권 경계다. 독립 �
 하나의 전역 LLM에 직렬화하지 않는다. Team Lead는 하위 과제의 논리적 조정자이며
 두 번째 Main이 아니다. 실제 launch/claim/approval/state mutation은 기존 부모
 runtime이 수행한다. Lead 자신에게 자기 승인·재귀 spawn·범위 확대 권한을 주지 않는다.
+
+Provider orchestrator pane은 기존 native session이고 managed Team Lead는 논리 역할이다.
+Provider별 session과 task별 Team을 고정된 상하 계층으로 연결하지 않는다. 작은 작업은
+Main의 direct dispatch로 처리하며 별도 provider lead와 Team Lead를 모두 만들 필요가 없다.
 
 목표 지표는 agent 수가 아니라 **동일 품질 기준에서 검증되어 통합된 작업의 처리량**이다.
 팀을 쓰지 않는 기존 단일 호출·peer-delegate 경로는 변경 없이 유지한다.
@@ -135,10 +142,11 @@ version과 영향 분석을 요구하고 기존 진행 작업의 evidence를 조
 `landed`, `published`는 기존 evidence/receipt를 그대로 읽는다. 팀 전체 green을
 구성원 상태의 다수결이나 문자열 요약으로 생성하지 않는다.
 
-## 6. 구현 PR 분할과 선행 관계
+## 6. 원래 TM 구현 계약과 선행 관계
 
-아래 10개는 **후속 구현 PR의 작업 패킷**이다. 이 문서 PR이 이를 구현하지 않는다.
-검증 전 이름만 있는 code PR이나 placeholder/stub를 만들지 않는다.
+아래 10개는 **원래 설계의 구현 범위와 acceptance 묶음**이다. 현재 source의 부분 구현과
+남은 연결은 위 감사와 통합 작업 큐에서 확인한다. 새 작업은 현재 큐의 좁은 범위로
+착수하고 해당 TM의 acceptance를 재사용한다. 이름만 있는 code PR이나 placeholder/stub를 만들지 않는다.
 
 | ID | 범위 / 산출물 | 선행 | 완료 조건 |
 |---|---|---|---|
@@ -169,9 +177,9 @@ provider마다 복사한 supervisor/budget/room 코드를 먼저 올리지 않�
 
 ## 7. 코딩 에이전트용 실행 지시
 
-각 TM 작업은 다음 조건을 그대로 brief에 포함한다.
+현재 큐에서 선택한 작업은 해당 TM의 acceptance와 다음 조건을 brief에 포함한다.
 
-> 지정된 TM 한 개만 구현한다. 최신 main과 선행 PR 상태·SHA를 확인하고 source,
+> 현재 큐에서 지정한 남은 범위만 구현한다. 최신 main과 선행 PR 상태·SHA를 확인하고 source,
 > caller, canonical test를 대조해 이미 있는 기능은 재사용한다. Rust runtime을
 > 유지하며 Python/TypeScript runtime 또는 새 orchestrator/DB/daemon을 도입하지
 > 않는다. Parent mutation guard, single-owner, existing admission/verification,
@@ -200,11 +208,10 @@ single을 선택하되 승인되지 않은 유료 계정/모델로 자동 우회
 
 ## 9. 동반 명세와 완료 선언
 
-별도 문서 작업 범위는 `TEAM-ORCHESTRATION-RUNTIME.md`(TM-01~05),
-`TEAM-ORCHESTRATION-ADAPTERS.md`(TM-07~09),
-`TEAM-ORCHESTRATION-VALIDATION.md`(TM-06/10 및 전체 fault matrix)다.
-동반 문서가 아직 병합되지 않은 branch에서 깨진 상대 링크를 만들지 않도록 파일명을
-이름으로만 적었다. 실제 PR 연결은 이 문서의 PR 본문에서 제공한다.
+계약 상세는 [runtime](TEAM-ORCHESTRATION-RUNTIME.md)(TM-01~05),
+[adapters](TEAM-ORCHESTRATION-ADAPTERS.md)(TM-07~09),
+[validation](TEAM-ORCHESTRATION-VALIDATION.md)(TM-06/10 및 전체 fault matrix)에 있다.
+이 문서들은 acceptance의 근거를 보존하고 현재 실행 순서는 통합 작업 큐가 소유한다.
 
 문서의 완료는 설계·선행 관계·수락 기준을 검토 가능한 형태로 제출했다는 뜻이다.
 Runtime 구현, native 상호운용, 성능 향상, OS containment, published-head CI의

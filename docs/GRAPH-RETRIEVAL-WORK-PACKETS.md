@@ -2,30 +2,32 @@
 
 기준: 2026-11-18, main `f9a695ea2de90a160754252c1ee9cbaa4dd7a488`.
 [비교 분석](GRAPH-RETRIEVAL-COMPARISON.md)의 소스 근거를 구현 가능한 단위로 나눈다.
-**이 문서의 GR-01–13은 미구현 제안이다.** P0는 현재 사용 경로의 정확성·평가를 먼저
-확보할 작업, P1은 이어서 보완할 범위, P2는 측정 후 선택할 실험이다.
+**이 문서의 GR-01–13은 미구현 제안이다.** 현재 채택 범위와 우선순위는
+[통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다. ID는 계약과 검증 근거의 참조이며
+13개 독립 기능을 모두 구현하라는 지시가 아니다.
 
 ## 작업 순서와 소유권
 
-| ID | 우선순위 | 결과 | 주 변경 지점 | 선행·연계 |
+| ID | 채택 상태 | 결과 | 주 변경 지점 | 선행·연계 |
 |---|---|---|---|---|
-| GR-01 | P0 | Rust scope별 ID, body span, signature | `oms-graph::polyglot`, graph API fixture | GR-06 fixture와 함께 |
-| GR-02 | P0 | Rust module 경로와 `#[path]` | `polyglot`, resolver | GR-01과 같은 파일이므로 순차 |
-| GR-03 | P0 | Worker까지 typed retrieval 상태·snapshot 근거 전달 | peer delegate/context pack, panel caller | GR-04와 interface 합의 |
-| GR-04 | P0 | Parse·resolve·query coverage 보존 | parser result, builder, context projection | GR-03 consumer와 동시 설계 |
-| GR-05 | P1 | Freshness 등급과 engine identity | graph build/cache/projection | #260 PERF-04의 cache key보다 먼저 |
-| GR-06 | P0 | 재현 가능한 품질 평가 | 기존 benchmark·engine·peer fixtures | 다른 작업과 병렬로 baseline 고정 |
-| GR-07 | P1 | 필요한 symbol을 먼저 싣는 budget projection | signature map, peer renderer | GR-01/03/06 |
-| GR-08 | P1 | Rust test metadata의 retrieval 재사용 | graph index/context | GR-01/04; test-run narrowing은 별도 |
-| GR-09 | P1 | Notebook code-only 검색과 일관된 provenance | notebook adapter, source view | GR-04/06 |
-| GR-10 | P1 | Python lexical binding·nested identity 교정 | Python extract, resolver | GR-04/06; legacy 의미 변경 명시 |
-| GR-11 | P1 | Shell command 위치에 근거한 path-call | shell parser, resolver fixture | GR-04/06 |
-| GR-12 | P2 | 선택적 Rust semantic enrichment | 기존 parser/graph seam, supervisor | GR-01–06의 identity·coverage 이후 |
-| GR-13 | P2 | 한국어·본문 질문의 hybrid 비교 실험 | 기존 retrieval/ranking seam | GR-06/07, #260 PERF-04 |
+| GR-01 | 유지 | Rust scope별 ID, body span, signature | `oms-graph::polyglot`, graph API fixture | GR-06의 작은 회귀 fixture와 함께 |
+| GR-02 | 유지 | Rust module 경로와 `#[path]` | `polyglot`, resolver | GR-01과 같은 파일이므로 순차 |
+| GR-03 | 유지 | Worker까지 typed retrieval 상태·snapshot 근거 전달 | peer delegate/context pack, panel caller | GR-04와 한 end-to-end 계약 |
+| GR-04 | 유지 | Parse·resolve·query coverage 보존 | parser result, builder, context projection | GR-03 consumer와 동시 설계 |
+| GR-05 | 유지 | Freshness 등급과 engine identity | graph build/cache/projection | 조건부 PERF-04의 cache key보다 먼저 |
+| GR-06 | 검증에 흡수 / 확대 평가 조건부 | 작은 회귀 fixture와 필요 시 품질 비교 | 기존 benchmark·engine·peer fixtures | 각 fix의 회귀 사례; ranking/실험 채택 시 held-out 비교 |
+| GR-07 | GR-03 전달에 흡수 | 필요한 symbol을 먼저 싣는 budget projection | signature map, peer renderer | GR-01/03과 작은 전달 fixture |
+| GR-08 | GR-01/04에 흡수 | Rust test metadata의 retrieval 재사용 | graph index/context | test-run narrowing은 별도 |
+| GR-09 | 좌표 교정 유지 / 검색 확대 조건부 | Notebook provenance와 필요 시 code-only 검색 | notebook adapter, source view | GR-04; body 검색은 실제 필요·평가 후 |
+| GR-10 | 유지 | Python lexical binding·nested identity 교정 | Python extract, resolver | GR-04와 회귀 fixture; legacy 의미 변경 명시 |
+| GR-11 | 유지 | Shell command 위치에 근거한 path-call | shell parser, resolver fixture | GR-04와 회귀 fixture |
+| GR-12 | 보류 | 선택적 Rust semantic enrichment | 기존 parser/graph seam, supervisor | syntax 개선 후에도 semantic 관계가 필요한 실패 corpus |
+| GR-13 | 보류 | 한국어·본문 질문의 hybrid 비교 실험 | 기존 retrieval/ranking seam | 실제 실패 평가 후 기존 body search/query expansion부터 |
 
 현재 [#260 PERF-04](https://github.com/eightmm/oh-my-setting/pull/260)는 graph lexical
 전처리 재사용 작업을 이미 정의한다. 새 cache/store 작업을 중복 생성하지 않는다.
 GR-05는 invalidation/validation 계약, GR-06은 평가, PERF-04는 결과를 보존하는 최적화다.
+PERF-04는 반복 query 비용이 확인될 때만 채택하며 GR-05의 정확성 수정을 기다리게 하지 않는다.
 Provider lifecycle 작업은 [#259](https://github.com/eightmm/oh-my-setting/pull/259)에
 유지한다. Graph 개선은 Team 예약·취소·정산·acceptance 누락을 해결한 것으로 세지 않는다.
 
@@ -128,6 +130,11 @@ Corrupt cache row의 miss와 DB 자체의 open/schema 실패를 구분한다. Re
 
 ## GR-06 — retrieval evaluation
 
+작은 adversarial·전달 회귀 fixture는 GR-01/02/03/04 및 각 언어 수정의 기존 suite에 흡수한다.
+현재 오류를 고치는 PR이 아래의 광범위 held-out·성능 비교 전체를 먼저 완료할 필요는 없다.
+Ranking 변경이나 GR-12/13 채택을 판단할 때 필요한 비교 범위를 정하고, 그때 아래 corpus·측정
+계약을 적용한다. 별도 평가 플랫폼·상주 service·자동 CI matrix를 만들지 않는다.
+
 **재사용:** [history benchmark][benchmark], [analytics][analytics],
 [frozen lexical reference][lexical-reference], [engine fixture][engine-tests]를 확장한다.
 현재 parity fixture는 작은 node 집합과 lexical 결과를 고정하며 graph 확장의 품질 corpus가 아니다.
@@ -176,6 +183,9 @@ CI에는 작은 결정적 fixture만 추가하고 반복 성능·외부 제품 �
 
 ## GR-07 — 질문에 맞는 signature budget
 
+GR-03의 실제 전달 품질에 흡수한다. 기존 renderer의 bounded 결과를 개선하는 범위이며
+별도 retrieval engine이나 독립 state store를 만들지 않는다.
+
 **문제와 재사용:** [signature_map][context]은 선택 파일의 [file_api][index]를 source 순서로
 출력한다. 첫 파일에서 잘리면 이후 파일을 생략한다. 기존 `entries`와 `evidence.reason`에
 남아 있는 winning symbol, `truncated/omitted`와 byte counter를 재사용한다.
@@ -189,6 +199,8 @@ engine/peer fixture로 검증한다. 선택한 파일의 hit와 실제 표시된
 기존 정확한 `--entry-path` 선택 의미, deterministic tie-break, total byte cap을 보존한다.
 
 ## GR-08 — Rust test 분류
+
+GR-01/04의 parser-index 계약에 흡수해 이미 있는 metadata를 소비한다.
 
 **문제와 재사용:** [polyglot][polyglot]의 `metadata.test`는 있지만 [index][index]의
 `is_test`와 `blast.test_cases`는 file kind/경로 및 `test_` 이름에 의존한다.
@@ -209,6 +221,8 @@ data/callable contract의 evidence/field/parameter line은 joined-cell 좌표에
 **구현:** 기존 code-cell extractor를 source view로 공유하고 raw output/Markdown을 검색에
 섞지 않는다. Cell ID/index, cell-local line, physical JSON line의 뜻을 구분해 모든 anchor를
 같은 계약으로 변환한다. Source view와 cache key에는 notebook digest와 extractor version을 넣는다.
+현재 반환하는 anchor의 좌표 교정은 유지한다. 새로운 code-only body 검색 노출은 실제 작업
+질문의 필요와 평가를 확인한 경우에만 추가하며, 좌표 교정을 그 기능 확대에 묶어 미루지 않는다.
 
 **완료 조건:** 여러 cell, source 배열/문자열, pretty JSON, magic·비 Python cell,
 annotated class/function의 nested provenance를 확인한다. Output-only marker는 검색되지 않아야 한다.
@@ -243,7 +257,8 @@ command substitution, heredoc, case pattern을 구분한다. Quotes를 모두 �
 ## GR-12 — 선택적 Rust semantic enrichment
 
 Serena의 LSP 탐색과 Sourcegraph의 SCIP occurrence/snapshot 방식을 참고한다.
-**조건부 실험**이며 mandatory daemon/새 DB 도입은 범위 밖이다.
+**기본 실행 큐에서 보류한 조건부 실험**이다. Syntax 정확성을 고친 뒤에도 semantic 관계가
+필요한 실제 실패 corpus가 있을 때 검토한다. Mandatory daemon/새 DB 도입은 범위 밖이다.
 기존 graph parser seam, source evidence와 [supervisor](../crates/oms-supervisor/src/process.rs)를 재사용한다.
 
 설치된 rust-analyzer 또는 검토한 SCIP producer 하나부터 query/snapshot adapter를 비교한다.
@@ -257,6 +272,8 @@ Sourcegraph 공식 표의 Rust cross-repository 제한을 고려해 외부 crate
 새 semantic edge를 `affected`의 test 생략 증거로 승격하려면 별도 검증이 필요하다.
 
 ## GR-13 — 한국어·본문 검색 개선 실험
+
+**기본 실행 큐에서는 보류한다.** 실제 질문에서 확인한 실패와 필요한 품질 개선이 활성화 조건이다.
 
 현재 Unicode 보존과 한국어 token 일치 fixture는 한영 의미 검색을 증명하지 않는다.
 먼저 GR-06에서 body-only/동의어/한영 쌍의 실패를 분류한다. 현재 exact lookup,

@@ -50,12 +50,17 @@ Unsupported capability를 다른 이름의 가짜 성공으로 바꾸지 않는�
 사용자가 허용한 mode/model/account와 새 admission 안에서만 가능하다. Provider 설정,
 인증 경로, 결제 방식 또는 글로벌 hooks를 암묵적으로 바꾸지 않는다.
 
-## 3. 공통 transport 선행: #244와 공유
+## 3. 현재 supervisor 재사용과 provider별 연결
 
-[#244 RF-01](https://github.com/eightmm/oh-my-setting/pull/244)의 bounded duplex
-supervision을 공유한다. 현재 one-shot stdin/completion 경계에 live JSON-RPC를
-억지로 붙이거나 별도 reader process/reaper를 생성하지 않는다. 기존 supervisor가
-stdio, process identity, signals, deadlines, cleanup의 유일한 소유자다.
+[#244 RF-01](https://github.com/eightmm/oh-my-setting/pull/244)은 공통 transport의 설계 근거다.
+2026-11-18 source에는 이미 [Reactor의 `Request.duplex`](../crates/oms-supervisor/src/process.rs)와
+[native TeamRequest consumer](../crates/oms/src/services_team_requests.rs)가 있다. 기존 core를
+재사용하고 provider별 protocol/권한/관측 caller를 연결한다. 이 사실은 built-in provider의
+TeamRequest나 native team control이 구현되었다는 뜻이 아니다.
+
+고정 stdin/completion adapter에 live JSON-RPC를 억지로 붙이거나 별도 reader process/reaper를
+생성하지 않는다. 기존 supervisor가 stdio, process identity, signals, deadlines, cleanup의
+유일한 소유자다. 공통 API 변경은 REL-04/CC-06과 같은 owner 아래 조정한다.
 
 공통 연결은 frame/partial-frame/queue bytes, pending requests, events per poll,
 output retention에 유한한 상한을 요구한다. Slow consumer에서도 cancellation과
@@ -194,7 +199,9 @@ rate limit을 API 결제 전환·다른 계정 자동 로그인·무제한 fallb
 
 ## 8. PR 전달과 미완료 표기
 
-TM-07/08/09는 각 provider의 capability/fixture/parser 경계를 독립 PR로 나눈다.
+TM-07/08/09는 각 provider의 capability/fixture/parser 경계를 기록한다. 현재 실행 순서는
+[통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따르며 필요한 built-in 한 경로부터 연결한다.
+세 provider의 native control 전체를 첫 managed 경로의 필수 선행 작업으로 만들지 않는다.
 공통 frame/supervisor/usage/registry는 RF-01 및 TM-01~05에서 재사용하며 병렬로 같은
 핵심 파일을 수정하지 않는다. Code PR에는 exact binary/schema/source version,
 지원/미지원 표, canonical test와 public wiring, permission·output·cleanup 한계,

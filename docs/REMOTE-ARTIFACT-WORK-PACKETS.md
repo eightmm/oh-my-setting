@@ -6,6 +6,11 @@
 이 문서는 runtime, 전송 한도, 설치 의존성, SSH 설정이나 자동 삭제 정책을 바꾸지 않는다.
 원격 장비·Slurm·GPU·유료 provider는 실행하지 않았다. 아래 완료 조건은 미래 구현의 검증 조건이다.
 
+채택 상태는 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다. AR-01은 원격 collect를 사용하는
+경로의 교정이다. AR-02/03은 실제 여러 산출물의 전달·완료 consumer가 필요한 경우 함께 채택하는
+한 선택 기능이며, AR-04는 cache 공간 문제가 확인된 경우의 inventory부터 검토한다.
+일반 coding/provider orchestration의 필수 선행 작업으로 이 네 ID를 모두 구현하지 않는다.
+
 ## 1. 기존 구현과 이번에 추가할 범위
 
 [#243](https://github.com/eightmm/oh-my-setting/pull/243)의 단일 파일 재개 수집은 이미 병합됐다.
@@ -29,7 +34,7 @@ Overall Main과 provider 사이의 task·worktree·결과 연결은
 
 ## 2. AR-01 — ordinary collect의 취소·deadline·cleanup 일치
 
-**우선순위 P1. 의존성 없음.** 기능 확대 전에 기존 수집 경로의 응답성을 정리한다.
+**원격 collect 경로 사용 시 P1. 의존성 없음.** 기능 확대 전에 기존 수집 경로의 응답성을 정리한다.
 
 ### 변경 지점과 구현 계약
 
@@ -67,6 +72,9 @@ Rename 직후 directory fsync 실패와 응답 손실에서는 게시 불명 상
 
 **우선순위 P2. 선택형 원격 결과 묶음이 실제 필요한 과제에서 구현한다.**
 예시는 하나의 실행이 만든 `metrics.json`, `summary.json`, 제한된 로그, 선택형 checkpoint다.
+먼저 프로젝트가 만든 immutable bundle 하나를 기존 단일 파일 수집으로 전달해 충분한지 확인한다.
+별도 manifest가 필요하면 AR-03의 전달·완료 consumer와 한 기능으로 채택한다. Consumer 없이
+manifest 규약만 추가하지 않으며, 구현 PR은 계약과 전송 단계로 나눌 수 있다.
 
 ### 변경 지점과 구현 계약
 
@@ -96,7 +104,7 @@ Legacy 단일 파일 collect의 호출과 출력은 호환되게 유지한다.
 
 ## 4. AR-03 — 묶음 단위 partial/resume/완료 receipt
 
-**우선순위 P2. AR-01 + AR-02 이후.**
+**조건부 P2. 실제 결과 묶음이 필요한 경우 AR-01 + AR-02 이후.**
 
 ### 변경 지점과 구현 계약
 
@@ -127,7 +135,7 @@ AR-01의 publication-unknown/reconcile 계약으로 처리하며, 성공으로 �
 
 ## 5. AR-04 — 재개 cache의 공간 예산과 검토 가능한 정리
 
-**우선순위 P2. 공간 inventory·dry-run은 기존 단일 파일에 독립 적용 가능하다.**
+**조건부 P2. Cache 공간 문제가 확인되면 inventory·dry-run부터 기존 단일 파일에 독립 적용 가능하다.**
 삭제 apply에는 아래 durable completion producer가 선행하고 bundle 통합은 AR-03 이후다.
 
 ### 현재 비용과 변경 계약
@@ -176,10 +184,10 @@ Dry-run은 mutation이 없어야 하며 삭제 후에도 artifact evidence와 �
 
 | 작업 | 선행 | 첫 구현의 합격 증거 |
 |---|---|---|
-| AR-01 | 없음 | ordinary/resume 취소·deadline·cleanup, 기존 destination 보존 |
-| AR-02 | 실제 결과 묶음 필요 | bounded manifest와 run/snapshot 바인딩, legacy 호환 |
-| AR-03 | AR-01, AR-02 | partial/resume, exact bundle completion receipt, 무중복 재개 |
-| AR-04 | inventory 독립; apply는 completion producer 이후 | 공간 inventory와 무변경 정리 계획; 승인된 apply의 경합 보호 |
+| AR-01 | 원격 collect 경로 사용 | ordinary/resume 취소·deadline·cleanup, 기존 destination 보존 |
+| AR-02 | 실제 결과 묶음 필요; 기존 단일 bundle로 충분한지 확인 | AR-03 consumer에 연결된 bounded manifest와 run/snapshot 바인딩, legacy 호환 |
+| AR-03 | 실제 결과 묶음 필요; AR-01, AR-02 | partial/resume, exact bundle completion receipt, 무중복 재개 |
+| AR-04 | cache 공간 문제 확인; apply는 completion producer 이후 | 공간 inventory와 무변경 정리 계획; 승인된 apply의 경합 보호 |
 
 구현 에이전트는 최신 HEAD를 재확인하고 기존 runtime/SSH canonical test를 먼저 확장한다.
 선택한 코드 경로에 맞는 Rust·Linux/macOS 검증을 실행하며, 새 SSH 서버·GPU·유료 CI matrix는 추가하지 않는다.

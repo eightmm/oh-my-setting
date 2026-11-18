@@ -2,7 +2,15 @@
 
 작성일: 2026-11-09 (KST)
 기준: [`20ce1be`](https://github.com/eightmm/oh-my-setting/commit/20ce1be31fb5175f4d431d9e98f53557a3219a0b), v0.7.0
-상태: **제안 / 문서 전용. 아래 구현 항목은 모두 미완료이며, 이 문서의 병합은 기능 구현·설치·권한 확대 승인이 아니다.**
+상태: **2026-11-09 제안의 설계·acceptance 기록. 문서 병합은 기능 구현·설치·권한 확대 승인이 아니다.**
+
+2026-11-18 정리: 제품 범위는 [Feature scope](FEATURE-SCOPE.md), 현재 착수 순서는
+[통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)가 소유한다. 아래 Python 파일·과거 test command와
+I1–I11 순서는 당시 근거다. 현재 Rust source에서 이미 연결된 producer를 다시 만들거나
+모든 CP를 미완료로 재등록하지 않는다. CP-01~05/08의 관측·읽기는 REL-01/PERF-01/02,
+CP-09의 lifecycle은 LC/CC-09, CP-10은 기존 evidence/acceptance owner에 연결한다.
+CP-06/07의 UX는 실제 사용 문제에 맞춰 선택하고 CP-11~15는 필요한 host/연구 경로에서만 검토한다.
+웹/모바일·모든 provider 관측·새 host parity를 일반 작업의 공통 선행으로 만들지 않는다.
 
 ## 1. 목표와 경계
 
@@ -89,7 +97,7 @@ Projection의 필드 이름은 **설계안**이며 새로운 public schema가 �
 ## 4. 작업 목록과 우선순위
 
 P0/P1은 로컬 MVP, P2는 독립적인 선택형 확장, P3는 보류된 권한 확장이다.
-우선순위는 보안 심각도가 아니라 구현 순서다. 모두 미구현 계획이며 CP-13은 보류다.
+우선순위는 당시 제안한 구현 순서다. 현재 미완료 판정은 Rust caller와 통합 큐를 따르며 CP-13은 보류다.
 CP-16/17은 별도 거대 테스트·문서 PR이 아니라 각 구현 PR에 함께 적용한다.
 
 | ID | 우선 | 작업 | 선행 조건 | 기본 범위 |
@@ -209,7 +217,7 @@ Repo/role/provider/status/source별 검색·필터, 선택 유지, graph depende
 - [ ] Ctrl-C, pane loss, Main exit, 중단된 worker, 재시작 후 stale binding의 복구 시나리오를 검사한다.
 - [ ] Dirty worktree·partial patch·실패 결과는 보존되고 active landing/lease 중 위험한 전환이 거부된다.
 - [ ] Pi/Agy resume은 native identity·ownership·capability 검증이 없으면 기존대로 거부하고 fresh restart와 구분한다.
-- [ ] 복구 전후 sole-Main·room lineage·주간 quota swap·live-worker update deferral 계약이 유지된다.
+- [ ] 복구 전후 sole-Main·room lineage·live-worker update deferral 계약이 유지된다. Native quota swap은 현재 host 미지원이며 CC-09의 별도 조건을 따른다.
 
 ### CP-10 — 결과·리뷰·evidence 연결
 
@@ -372,8 +380,9 @@ provider history 복사, 새로운 외부 메신저/Notion 동기화는 이 계�
 
 ## 8. 구현자·리뷰어 인계
 
-구현자는 현재 main과 이 기준 SHA의 차이를 먼저 대조하고 I1부터 가장 작은 미완료
-묶음 하나를 선택한다. 테스트를 먼저 확장하고 기존 helper를 재사용한다.
+구현자는 현재 main과 이 기준 SHA의 차이를 먼저 대조하고 통합 큐에서 채택한 가장 작은
+미완료 범위를 선택한다. I1부터 전체 순서를 재실행하지 않는다. 해당 CP의 acceptance와
+현재 Rust canonical fixture를 연결하고 기존 helper를 재사용한다.
 각 PR에 CP ID, 범위/비범위, base/head SHA, source anchors, 변경 전후 fixture,
 실행 명령과 결과, 미검증 환경, 계약 변경 여부 및 rollback을 기록한다.
 

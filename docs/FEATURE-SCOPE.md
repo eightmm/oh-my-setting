@@ -4,6 +4,14 @@ OMS coordinates a main agent and bounded workers. Its core owns the path from
 an authorized task through isolated work, review, verification and publication.
 Add a subsystem only when an existing workflow cannot meet a named need.
 
+Current concept review: 2026-11-18, source
+[`189bfdaa`](https://github.com/eightmm/oh-my-setting/commit/189bfdaa28b6b628f0d4d50a4ca3d0df28396b88).
+This page owns feature scope; the [implementation queue](ORCHESTRATOR-WORK-QUEUE.md)
+owns the remaining work and its admission conditions. Earlier CP/TM/MR/UX/NF
+documents preserve design evidence and acceptance criteria, not parallel queues
+that every agent must complete. A merged design is not an implemented feature;
+an implemented optional feature is not a new default requirement.
+
 ## Core behavior
 
 Keep task scopes, leases, isolated worktrees, exact evidence, approval and
@@ -20,6 +28,45 @@ The journal is historical observation, not a second issue tracker. Curated memor
 holds stable knowledge; task history and proposed lessons do not become current
 instructions just because they were recorded.
 
+## Roles and authority
+
+Ordinary work can use one Main and a direct worker. A Team is useful when a
+bounded task needs several coordinated members; a separate Lead is not required
+for every call. Provider sessions and managed Teams are different execution paths.
+
+| Concept | Existing responsibility | Do not infer |
+|---|---|---|
+| Overall Main | Root owner for the room and integration target; decides within the user's authority | A provider coordinator can approve or publish on its own |
+| Native provider orchestrator | Interactive provider session bound to the current Main | Managed Team admission, hard child limits or verified descendant cleanup |
+| Managed Team Lead | Scoped role submitting requests for the parent to validate | A second root owner or permission to launch arbitrary nested Teams |
+| Worker / reviewer | Bounded work or independent evidence under the existing contract | Self-acceptance, publication rights or independence from a role name |
+| Panel / dashboard / inbox / runtime views | Projections over domain-owned records | Another mutable task database or an approval from reading a row |
+
+The native [orchestrator guard](../crates/oms-command-panel/src/orchestrator.rs)
+currently requires an unmanaged Main outside a managed campaign. Keep this UX,
+but do not relabel its pane as a managed Team. The
+[Team plan](TEAM-ORCHESTRATION-PLAN.md) keeps direct/single execution available.
+
+One owner per state transition does not mean one database for all state:
+
+| Information | Existing owner / relationship |
+|---|---|
+| Resume note; execution tasks and claims | `agent-task`; `agent-plan` respectively |
+| Messages and participant lineage | Room/thread; delivery or acknowledgement is not approval |
+| Runs and experiments | Run ledger owns executions; experiment-board owns study intent/claims; runtime links evidence |
+| History, stable knowledge and continuity | Journal, memory, local handoff and portable capsule retain their different provenance/retention contracts |
+| Process, candidate and publication state | Owned cleanup, candidate disposition and exact-tree landing remain separate decisions |
+| Source graph and execution graph | Retrieval/index relationships versus an explicitly requested branching workflow |
+
+Share validation and read projections where their contracts agree. Preserve
+domain locks, CAS, receipts, generations and unknown states. Fewer files or verbs
+alone are not a reason to combine these owners.
+
+Current views do not all consume the complete runtime envelope. The native
+[state route](../crates/oms-command-state/README.md) uses a source-health fallback
+with empty criteria/next-actions when that envelope is not injected. Empty
+fallback fields do not prove that no work or acceptance criteria remain.
+
 ## Optional workflows
 
 | Capability | Use it when | Keep the boundary |
@@ -31,17 +78,29 @@ instructions just because they were recorded.
 | SSH and Slurm | Work must run on a named remote resource | Retain once-only submission, unknown outcomes and explicit reconciliation |
 | Fleet views | The owner needs a bounded view across existing jobs | Read and reconcile existing records; do not become a cluster scheduler |
 | Campaign usage budgets | Unattended work needs a soft token/spend admission bound | Unknown use is a liability; this is not a provider-side hard spending cap |
-| Apptainer proposal | A recurring local CPU job uses an existing SIF on a compatible Linux host | Require the host/session capabilities; GPU, Slurm integration and immutable image pinning are separate work |
-| Resumable SSH collection proposal | Finalized single-file results repeatedly fail during transfer | Require exact size and SHA-256; account for chunk round trips and retained cache space |
+| Apptainer CPU backend | A local CPU job uses an explicit existing SIF on a compatible Linux host | Require the host/session capabilities; GPU, Slurm integration and immutable image pinning are separate work |
+| Resumable SSH collection | Finalized single-file results need transfer recovery | Require exact size and SHA-256; account for chunk round trips and retained cache space |
+| Recipe execution | An existing explicit recipe needs bounded steps, resume or companions | Reuse its current runner; do not make a recipe or another scheduler mandatory for ordinary tasks |
 | Codex inference through Pi/Claude | A recurring workflow needs that UI with Codex inference | Keep the bridge experimental and separate from native provider support |
 
-The Apptainer and collection proposals are [#242](https://github.com/eightmm/oh-my-setting/pull/242)
-and [#243](https://github.com/eightmm/oh-my-setting/pull/243). Passing fixtures does
-not establish real host resource enforcement, account access or transfer speed.
-Their optional invocation does not make them default installation requirements.
+The Apptainer and collection designs originated in
+[#242](https://github.com/eightmm/oh-my-setting/pull/242) and
+[#243](https://github.com/eightmm/oh-my-setting/pull/243). Native consumers now exist:
+[RuntimeServices](../crates/oms/src/services_runtime.rs) connects explicit
+Apptainer readiness/execution, and the [SSH adapter](../crates/oms-runtime/src/ssh_adapter.rs)
+connects `collect --resume` to its bounded reader. The generic `remote` and
+`isolated` backend profiles still report unavailable; a separate SSH adapter
+does not complete those profiles. [Recipe execution](../crates/oms-command-state/src/recipe.rs)
+also has a native runner and companion path. These source/fixture boundaries
+do not establish real host containment, account access or transfer speed, and
+optional invocation does not make them default installation requirements.
 
-Research budget fields describe different evidence. Run reservations enforce
-the run count. GPU-hour projections depend on reported usage. `final_evals.used`
+Research budget fields describe different evidence. Run reservations participate
+in admission, but the [experiment producer](../crates/oms-runtime/src/experiment.rs)
+can exclude stale dead-owner reservations and release an execution that failed
+without a run record. This is not a permanent count of physical consumption or
+the campaign's unknown-spend liability policy. GPU-hour projections depend on
+reported usage. `final_evals.used`
 is unknown where the current producer does not count final-split evaluations;
 it must not be presented as an enforced evaluation budget.
 
@@ -57,6 +116,21 @@ New built-in transports need a named recurring workflow, a maintained owner,
 explicit capability limits and a native fixture that exercises the claimed
 behavior. Prefer the existing explicit custom-adapter boundary for experiments.
 Do not remove a transport merely because repository-wide usage data is absent.
+
+For the proposed exact model picker, expose the account-scoped catalog and its
+supported effort choices, then apply explicit selection and the required
+capability, data, billing, scope and reviewer-independence constraints. Tiers
+can recommend a profile; they are not a second authoritative model inventory or
+a universal permission rule. The current schema-2 router and role restrictions
+remain in force until a versioned consumer migration. See
+[model selection](TEAM-ORCHESTRATION-MODEL-TIERS.md#5-선택-순서와-재현성).
+
+Main swapping is also a capability, not a property of the model picker. The
+native host currently keeps the unsupported `swap_main_host` default in
+[CollabServices](../crates/oms/src/services_collab.rs). Keep current sessions
+stable; CC-09's host work needs a concrete handoff requirement and lifecycle
+evidence. A core/Fake fixture or a quota reading does not establish native swap
+support or an automatic replacement policy.
 
 ## Durable observations and budgets
 
@@ -77,11 +151,15 @@ spend, corrections and unresolved calls under any future retention policy.
 
 ## Deferred expansion
 
-The bounded feedback repair proposal [#239](https://github.com/eightmm/oh-my-setting/pull/239)
-remains deferred. Its useful window is an explicitly reviewed task with a live
-review lease and one unused repair attempt. Same-PR failure signatures can block
-a later task as well. First establish recurring eligible cases and saved review
-work; do not weaken duplicate-send or ownership guards to manufacture usefulness.
+Bounded external-feedback repair from
+[#239](https://github.com/eightmm/oh-my-setting/pull/239) already has an
+[opt-in native consumer](../crates/oms-command-autonomy/README.md#opt-in-repair-from-external-feedback).
+Its window is an explicitly reviewed task with `--land --auto-repair`, exact
+head/event/scope binding, a live review lease and one unused repair attempt.
+Observation alone starts no repair. Same-PR failure signatures can block a
+later task as well. Broader automatic adoption remains deferred until recurring
+eligible cases and saved review work are established; do not weaken duplicate-send
+or ownership guards to manufacture usefulness.
 
 The research designs in [#244](https://github.com/eightmm/oh-my-setting/pull/244)
 are separate proposals, not a bundled implementation commitment:
@@ -97,3 +175,34 @@ are separate proposals, not a bundled implementation commitment:
 Use existing local evidence before adding telemetry, daemons, stores or paid
 benchmark runs. Review each slice independently. Byte reduction is not measured
 quality improvement, and static compatibility is not live verification.
+
+## Consolidation decisions
+
+The queue classifies all 40 follow-up packets as retained work, work absorbed
+into an existing owner, or conditional work. Those labels change scheduling,
+not API compatibility or the evidence needed to retire existing behavior.
+
+| Expansion excluded from the default plan | Sufficient existing path or condition |
+|---|---|
+| Mandatory Main → provider lead → Team lead → worker for every task | Direct worker first; add a bounded Team only for actual coordination |
+| New authoritative task/approval store, universal router or provider-specific scheduler | Existing Plan/Room/admission owners and caller-specific adapters |
+| Reimplement TeamSpec, route snapshots, context compiler, work inspector or duplex supervision | Reuse current producers; implement only the missing consumer or verified semantic correction |
+| Maintain a fixed vendor model ranking in every document | One current catalog with explicit selection; frozen model tables are historical evaluation inputs |
+| Require every CLI verb to become an MCP tool | Expose a named workflow with bounded schema, permissions and response limits |
+| New vector/graph service, LSP dependency or multilingual benchmark before every retrieval fix | Local adversarial acceptance first; measured retrieval need admits GR-12/13 and broader evaluation |
+| Bundle/resume/cache deletion, web/mobile controls or all provider-native adapters as MVP prerequisites | Use an existing concrete workflow and its activation conditions; retain optional implementations |
+| A generic operation SLA, hard cooldown or automatic model escalation inferred from existing timeout/ranking fields | Separate opt-in policy with a named caller; preserve current per-call and ranking semantics |
+
+Verification cost has a concrete unresolved conflict: the current
+[workflow classifier](../.github/workflows/test.yml) treats `crates/*` as Rust
+changes, while [check.sh](../scripts/check.sh) also stages native tooling before
+affected planning and performs native checks in the docs path. VW-01 owns this
+correction; docs must keep required status reporting without triggering unrelated
+runtime preparation. This review does not change those classifiers or claim that
+hosted CI is currently free or skipped. Reuse measured timing in VW-03/04 rather
+than adding a new CI/benchmark subsystem.
+
+The review covers the current entrypoint/owner map, seven Team documents, all
+40 follow-up packets and the decisive native callers. It is not a proof that
+every workspace function is redundant or equivalent. No transport or state
+store is removed on the basis of missing usage telemetry.

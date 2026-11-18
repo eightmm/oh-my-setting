@@ -86,11 +86,14 @@ these features add no store and never write plan, task, receipt or approval stat
 
 ## Tests and remaining scope
 
-`tests/test_work_inspect.py` tests the actual pure projections and renderers.
-The existing `context-core` suite invokes it with `--cli`, which additionally
-uses `scripts/runtime.sh`, a private Git repository and actual envelope output.
-It checks old `next` compatibility, child read access, text/JSON, invalid flags,
-unsafe baseline paths, source changes and repository-file invariance.
+The native pure projections and renderers are covered by
+[`crates/oms-work-inspect/tests/work_contract.rs`](../crates/oms-work-inspect/tests/work_contract.rs):
+`views_and_render`, `boundary`, `legacy_parity`, and `bounds_unicode_and_lineage`
+cover read views, frozen report/text cases, limits, Unicode and baseline lineage.
+The native [runtime router](../crates/oms-runtime/src/router.rs) supplies the
+fresh envelope and bounded prior-envelope reader. The retired Python test and
+`scripts/runtime.sh` are migration history, not current test entrypoints. This
+documentation audit did not run Rust fixtures or a native CLI round-trip.
 
 The first implementation provides agent-facing JSON/text views. Automatic tmux
 panel integration, navigation focus tests, human-only decision classification,

@@ -4,8 +4,9 @@
   current agent has not already loaded the installed global rules.
 - Keep language/ML/data/HPC policy in templates/contracts, not in the global
   rules every session loads.
-- This repository maintains a Bash harness shared by Codex, Claude Code, and
-  Antigravity. Preserve behavior across all three providers.
+- This repository maintains a native Rust harness shared by Codex, Claude Code,
+  and Antigravity, with Bash installation and verification entrypoints.
+  Preserve behavior across all three providers.
 - Supported hosts are Linux (Ubuntu 20.04 floor), WSL2 and macOS; native
   Windows is retired and refused. Require Bash 5.0+ and keep scripts compatible
   with GNU/BSD userlands for the documented core lifecycle; resolve paths with
@@ -18,8 +19,8 @@
   files referenced by path (`roles/`, `prompts/`, `config/`).
 - The single PATH entry is `oms`, so its subcommands already sit inside
   the marker: name them `oms <verb>`, never `oms oms-<verb>`. One spelling
-  per verb — the dispatcher holds no aliases, and the verb is the script
-  filename.
+  per verb — the dispatcher holds no aliases. Public verbs are described in
+  the native registry and dispatched to their owning command crate.
 - Preserve regression coverage when changing scripts or install contracts.
   Extend the canonical test or fixture first; add one only for a path no test
   exercises, and say which. Tests grew faster than code (ratio 0.54 to 0.70 in

@@ -1,9 +1,8 @@
 # Native agent memory
 
-This domain crate implements the `oms agent-memory` command. It has a temporary
-standalone workspace and domain Cargo.lock so the owner can admit it without
-concurrent edits to the production workspace or router. It does not register a
-second PATH command and does not invoke an interpreter or a shell backend.
+This domain crate implements the `oms agent-memory` command in the root Rust
+workspace. The [root CLI](../oms/src/main.rs) routes it through `run_with_source`;
+it does not register a second PATH command or invoke an interpreter or shell backend.
 `source_root` is supplied by the validated parent adapter; records cannot select
 an executable installation. Git is the only subprocess, for repository identity,
 committed citations, and provenance.
@@ -35,13 +34,12 @@ from context. A correction copied before an interrupted acceptance also waits
 for its acceptance receipt. Review reads the existing receipt log; no notes
 are deleted or new database schema introduced.
 
-The owner still must register this crate in the production workspace, remove
-its temporary workspace boundary, serialize the lockfile, and wire the public
-router and direct consumers. Callers include `scripts/lib/peer-common.sh`
-(provider injection), `scripts/agent-task.sh`, `scripts/lib/work_journal.py`,
-`scripts/resume-hook.sh`, `scripts/skill-router.sh` (private correction capture),
-and `scripts/state.sh` (stat-only provider inventory). The crate alone does not
-retire these consumers or their old backends.
+Current consumers include peer consultation/delegation through `provider_context`,
+the task service through `append_project_note`, and the root journal adapter's
+memory callback. They are wired in [peer](../oms-command-peer/src/peer.rs),
+[delegate](../oms-command-peer/src/delegate.rs), [task services](../oms/src/services_control.rs)
+and the root CLI. Script/helper names in the entry-point descriptions are
+historical porting anchors, not current runtime backends or missing router work.
 
 ## Public mode checklist
 
@@ -122,6 +120,10 @@ hygiene, sources, graduation, import preview, redaction preview and all-reposito
 recall create no OMS record or synchronization receipt.
 
 ## Evidence and verification boundary
+
+The following records describe the original isolated migration phase. They do
+not establish fresh CI, installation or live-provider results for the current
+revision; the native source wiring above is a separate claim.
 
 The implementation was compared with the full public parser and the database,
 review, promotion, hygiene, sources, contradiction, and handoff helpers. Relevant

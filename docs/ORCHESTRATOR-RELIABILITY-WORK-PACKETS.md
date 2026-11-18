@@ -2,10 +2,15 @@
 
 **상태: DESIGN ONLY — 구현·실 provider 실행·성능 검증 완료를 의미하지 않는다.**
 소스 기준은 `f9a695ea2de90a160754252c1ee9cbaa4dd7a488`, 공식 문서 확인일은 2026-11-18이다.
-이 문서는 현재 Rust 경로에서 확인한 빈틈을 독립적으로 검토할 수 있는 코드 PR 단위로 나눈다.
+이 문서는 현재 Rust 경로의 결함과 선택 정책을 계약별로 나눈다.
 [PR #259](https://github.com/eightmm/oh-my-setting/pull/259)의 retirement, task/worktree receipt,
 proposal apply, composite acceptance 설계는 별도 선행 작업이다. 여기서 다시 정의하지 않는다.
 새 daemon, Python 구현, 두 번째 scheduler/DB, provider 권한·과금 기본값 변경을 제안하지 않는다.
+
+현재 채택 범위는 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다.
+REL-01/02/04의 현재 경로 교정은 유지한다. REL-03은 caller가 logical operation 전체 한도나
+hard cooldown admission을 요구할 때만 검토하는 선택 정책이다. ID마다 새 기능이나 독립 PR을
+만들 필요는 없으며 공통 supervisor 변경은 CC-06/AR-01의 해당 owner와 조정한다.
 
 ## 1. 기존 구현과 추가할 부분
 
@@ -107,7 +112,7 @@ model fallback, pinned account, unchanged-tree 검사, physical admission·usage
 **의존성:** 독립 코드 PR로 시작한다. REL-03의 cooldown admission에는 이 분류 근거를 전달한다.
 기존 synthetic stderr fixture를 그대로 authoritative provider 오류로 취급하지 않고 출처를 명시한다.
 
-## 4. REL-03 — 총 operation 시간과 cooldown admission을 제한한다
+## 4. REL-03 — 선택적 총 operation 시간과 cooldown admission
 
 ### 근거와 재사용
 
@@ -121,6 +126,8 @@ Campaign 경로의 physical admission과 deadline 검사는 이미 있으므로 
 cooldown을 정렬 우선순위로 사용한다. 모두 cooldown 중이어도 첫 eligible account를 고를 수 있다.
 이는 현재 문서화된 동작이며 cooldown 기록이 없는 것이 아니다.
 해당 health는 repository별 상태이므로 다른 repository까지 적용되는 전역 provider 제한이 아니다.
+이 두 동작은 현재 per-call timeout과 adaptive ranking의 계약이다. 새 총 한도·hard admission은
+기존 동작의 단순 중복 제거가 아니므로 caller 요구 없이 기본 실행 큐에 넣지 않는다.
 
 ### 구현 범위
 
@@ -209,7 +216,9 @@ Catalog schema 전체 개편이나 built-in Team bridge 활성화는 이 PR 범�
 
 ## 7. 실행 순서와 검증 범위
 
-REL-01 → PERF-01, REL-02 → REL-03 cooldown 정책 순으로 진행한다. REL-04는 별도 코드 PR로 검토한다.
+REL-01과 REL-02의 현재 경로 교정을 먼저 진행한다. PERF-01은 관측 비용이 확인된 경우에만,
+REL-03은 해당 caller의 정책 요구가 있고 REL-02 근거가 준비된 경우에만 연결한다.
+REL-04는 auth/catalog 계약을 유지하며 공통 Reactor 변경 owner와 조정한다.
 현재 문서는 source와 기존 fixture를 대조한 설계이며 Rust test·live native session 검증 결과가 아니다.
 각 코드 PR은 구현한 한 경로, 재사용한 계약, 실제 실행한 fixture, 남은 provider 제한을 명시한다.
 관측 fixture가 통과한 것을 native Team 생성·제어·acceptance 검증으로 보고하지 않는다.

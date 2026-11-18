@@ -26,12 +26,13 @@ receipt 기록, evidence freshness와 승인 검사는 Rust runtime이 담당한
 단순 상태 확인마다 LLM을 깨우거나 모든 Worker 메시지를 Main prompt에 복사하지 않는다.
 Native provider의 agent/tool loop를 OMS 안에 다시 구현하지 않는다.
 
-## 2. 초기 운영 추천과 그 한계
+## 2. 초기 평가 후보의 기록과 한계
 
-권장 시작점은 **Codex harness + `gpt-6.1-sol`**이다. 일반적인 조정은 해당 client의
-supported default effort부터 시작하고, scope·설계·충돌 판단은 지원될 때 `high`를
-선택한다. 이는 고정 프로젝트 실행 전 명시하는 정책이며 토큰마다 모델을 바꾸는
-자동 router가 아니다. 출시 버전·계정 catalog가 해당 모델/effort를 실제로 허용해야 한다.
+아래 표는 2026-11-17 설계에서 정한 **평가 후보의 기록**이다. 현재 계정의 선택 가능
+집합이나 강제 기본값을 정하지 않는다. 새로운 명시 선택은 실제 계정 catalog와 지원 effort,
+권한·과금 조건을 기준으로 하며 기존 사용자 선택을 우선한다. 모델명 표를 갱신하는 것만으로
+설정이나 실행 모델을 바꾸지 않는다. Tier는 [선택 정책](TEAM-ORCHESTRATION-MODEL-TIERS.md)의
+추천 profile로 사용할 수 있고, 현재 schema-2 router의 호환 제약은 별도로 유지한다.
 
 | 역할/상황 | 초기 후보 | 선택 이유 및 조건 |
 |---|---|---|
@@ -110,8 +111,11 @@ Worker는 새로 생성하지 않으며 pending approval, dirty worktree, unreso
 cleanup obligation, budget reservation과 publication intent를 보존한다. Active landing이
 있으면 현재 구현의 receipt/status 경로를 인계하며 별도 재실행하지 않는다.
 
-현재 panel의 자동 quota swap은 기존 동작이다. 이 문서는 이를 끄거나 threshold를
-바꾸지 않는다. UI는 manual/pinned/automatic policy와 마지막 swap 이유를 정확히 보여 준다.
+2026-11-18 source에서 swap CLI와 core 검증은 있지만 실제 `CollabServices`는
+`swap_main_host`를 구현하지 않아 native host 경로가 거절된다. 자동 quota swap을 현재
+지원 기능으로 표시하지 않는다. [CC-09](CALLABLE-CONSOLIDATION-WORK-PACKETS.md#cc-09--native-main-swap-host-연결)는
+지원 상태 표시와 실제 host handshake를 구분한다. 향후 지원된 조작만 기존 권한·receipt에
+연결하고, Main 교체를 새 orchestrator의 model/effort 선택과 혼동하지 않는다.
 Budget unknown을 free로 간주하거나 credit/API 결제로 자동 승격하지 않는다.
 새 adaptive router와 자동 기본값 승격은 TM-10의 평가·승인 뒤에만 별도 도입한다.
 

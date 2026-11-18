@@ -5,6 +5,18 @@
 관련: [기존 완료 감사·lifecycle 패킷 PR #259](https://github.com/eightmm/oh-my-setting/pull/259),
 [Team 측정 원칙](TEAM-ORCHESTRATION-VALIDATION.md).
 
+## 채택 상태
+
+현재 실행 범위는 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다.
+아래 ID는 재사용 계약의 참조이며 네 최적화를 모두 구현하라는 지시가 아니다.
+
+| ID | 채택 조건 |
+|---|---|
+| PERF-02 | 유지. 동일 refresh의 Plan 읽기와 projection 일관성을 작은 변경으로 정리 |
+| PERF-01 | 조건부. REL-01의 관측 상태를 먼저 고정하고 반복 transcript 읽기의 비용을 확인한 뒤 같은 observer에서 진행 |
+| PERF-03 | 조건부. Lifecycle 작업에 필요한 계측부터 재사용; 실제 batch caller와 persistence 병목이 확인된 범위만 변경 |
+| PERF-04 | 조건부. GR-05의 identity 계약과 동일 workload의 반복 query 측정 뒤 채택 |
+
 ## 1. 무엇을 다시 만들지 않는가
 
 Rust 전환은 parser·process startup 비용을 바꿀 수 있지만 동일 파일 전체를 반복해서 읽거나
@@ -63,6 +75,7 @@ AGY는 parent를 찾지 못하면 2048개 directory entry를 보고 최근 후�
 ### 선행과 완료 조건
 
 관측 coverage/status를 명시하는 REL-01의 interface를 먼저 확정한다.
+REL-01의 정확성 수정은 이 최적화나 성능 평가가 끝날 때까지 기다리지 않는다.
 missing/invalid/oversize/PID mismatch를 빈 child 배열로 숨기는 기존 의미를 cache에 고정하지 않는다.
 코드 PR은 같은 `native_children.rs`를 바꾸므로 REL-01 → PERF-01 순서로 병합한다.
 두 명세 PR 자체는 서로 독립적으로 검토할 수 있다.
@@ -172,6 +185,8 @@ field token counts와 inverted postings를 다시 만든다.
 
 ### 구현 지시
 
+반복 query의 전처리 비용을 확인해 PERF-04를 채택한 경우 다음 범위를 적용한다.
+
 1. query와 무관한 lexical fields/postings를 graph revision, source digest,
    extraction/ranking version에 결합해 기존 `cache.sqlite3` 또는 graph projection 안에서 재사용한다.
    새 검색 DB/service를 만들지 않고 현재 disposable projection의 versioning을 확장한다.
@@ -214,8 +229,9 @@ page cache가 따뜻한 wall-time만으로 Disk I/O 개선을 선언하지 않�
 OS 계측이 불가능하면 가능한 counter와 그 한계를 보고하고 physical-I/O 결론을 보류한다.
 CI에는 결정적 regression/count assertions만 넣는다. 비싼 성능 반복은 opt-in으로 둔다.
 
-권장 순서는 PERF-02 → REL-01 관측 interface → PERF-01, PERF-04 병렬 검토,
-PERF-03은 계측 뒤 작은 persistence 개선부터다. 동일 파일을 수정하는 코드 PR은 순차 병합한다.
+PERF-02는 현재 호출 경로의 작은 정리로 진행한다. PERF-01은 REL-01 이후 측정 근거가 있을 때,
+PERF-04는 GR-05 이후 반복 query 비용이 확인될 때 채택한다. PERF-03의 batch나 저장 형식 변경은
+실제 caller와 persistence 비용이 요구하는 범위만 진행한다. 동일 파일의 코드 PR은 순차 병합한다.
 Lifecycle P0의 종료·예약 정산 누락을 성능 작업으로 대체하지 않는다.
 
 확인 범위: Reader 전체, watch refresh caller, Session/snapshot, native child collector 전체,

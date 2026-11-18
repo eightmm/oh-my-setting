@@ -2,27 +2,31 @@
 
 작성일: 2026-11-18. 기준 소스:
 [`f9a695ea2de90a160754252c1ee9cbaa4dd7a488`](https://github.com/eightmm/oh-my-setting/commit/f9a695ea2de90a160754252c1ee9cbaa4dd7a488).
-PR 기준 main `283ab6c1`까지의 추가 변경은 문서이며 이 소스 근거를 바꾸지 않는다.
+#265 작성 기준은 main `283ab6c1`이며, 이번 채택 재분류의 main `189bfdaa`까지 runtime은 동일하다.
 [조사와 source 근거](CALLABLE-CONSOLIDATION-AUDIT.md)를 먼저 읽는다.
 **CC-01~10은 후속 구현 명세이며 이 문서 PR의 runtime 변경이 아니다.**
 
-## 우선순위와 의존 관계
+## 채택 상태와 의존 관계
 
-| ID | 우선순위 | 결과 | 선행·충돌 조정 |
+2026-11-18 개념 점검 뒤 [통합 큐](ORCHESTRATOR-WORK-QUEUE.md)의 유지/흡수/조건부를 먼저 적용한다.
+아래 상세 구현 계약은 채택했을 때의 범위다. 모든 중복 helper를 당장 통합하거나 10개 독립 PR을
+만드는 지시가 아니다. 기존 기능의 삭제·호환 축소는 실제 consumer와 동등성 근거가 있어야 한다.
+
+| ID | 채택 | 결과 | 선행·충돌 조정 |
 |---|---|---|---|
-| CC-02 | P0 | routing이 전체 catalog를 소비 | 독립적인 작은 fix; CC-01/03을 기다릴 필요 없음 |
-| CC-04 | P0 | 광고된 output reader를 실제로 호출하고 같은 reference 사용 | 기존 capture core; native/MCP 연결과 fixture를 한 계약으로 검토 |
-| CC-01 | P1 | provider identity/discovery 한 구현 | peer/providers.rs의 REL-02/03 작업과 writer 조정 |
-| CC-05 | P1 | hook ownership/convergence의 production owner 하나 | 현재 installed native/legacy corpus 먼저; lifecycle required gate |
-| CC-06 | P1, 단계별 | Plan Git부터 공통 supervisor로 전환 | plan → graph → task; REL-04/AR-01과 공통 API writer 조정 |
-| CC-03 | P1 | account read/validation 공유 | CC-01과 API 경계 조정; preview와 실행 재선택 유지 |
-| CC-10 | P1 | callable 설명·owner·parser의 정합성 | CC-04/09의 실제 지원 여부를 반영; 새 routing engine 없음 |
-| CC-07 | P2 | lock cancellation watcher 제거 | lock protocol·release 의미 보존; 별도 작은 PR |
-| CC-08 | P2 | current-source 집계 한 구현 | CLI raw-path와 runtime state/work root adapter 유지 |
-| CC-09 | P1, host 연결 별도 | native Main swap의 실제 지원 계약 | unsupported 표시 우선; host handshake와 기존 cleanup/lineage 연결 |
+| CC-02 | 유지, 우선 | routing이 전체 catalog를 소비 | 독립적인 작은 fix; CC-01/03을 기다릴 필요 없음 |
+| CC-04 | 유지, 우선 | 광고된 output reader를 실제로 호출하고 같은 reference 사용 | 기존 capture core; native/MCP 연결과 fixture를 한 계약으로 검토 |
+| CC-01 | 유지 | provider identity/discovery 한 구현 | peer/providers.rs의 REL-02 작업과 writer 조정; target/권한 유지 |
+| CC-05 | 조건부 | hook ownership/convergence의 production owner 정리 | installer 수정/실제 drift가 있을 때; current native/legacy corpus와 rollback 선행 |
+| CC-06 | 흡수 | REL-04와 공통 supervisor API owner | caller별 plan → graph → task 작은 PR; domain 계약과 task API 동등성 보존 |
+| CC-03 | 흡수 | CC-01의 provider 계약 owner | read/validation만 공유; preview와 실행 재선택·오류 정책 유지 |
+| CC-10 | 흡수 | 실제 CLI/MCP consumer 변경의 정합성 | CC-01/04와 변경된 항목의 기존 fixture; 새 routing engine 없음 |
+| CC-07 | 조건부 | lock cancellation watcher 제거 | 실제 contention/thread 비용 또는 관련 lock 변경 때; 순수 line 감소는 근거가 아님 |
+| CC-08 | 조건부 | current-source 집계 공유 | 실제 결과 drift/두 production consumer의 필요; path/root adapter 유지 |
+| CC-09 | 조건부 | 지원 상태 교정; native host 연결은 별도 | 구체적 handoff 수요와 lifecycle 증거; unsupported를 현재 지원으로 표시하지 않음 |
 
-P0는 이 조사에서 바로 수정할 consumer/callable 계약을 뜻한다. 기존 #259의 LC-01~04와
-native assignment를 낮추는 새 우선순위 체계는 아니다. CC-06의 단계들은 별도 코드 PR로
+CC-02/04는 바로 수정할 consumer/callable 계약이다. 기존 #259의 LC-01~04와
+native assignment의 우선순위는 유지한다. CC-06의 단계들은 별도 코드 PR로
 나누고, 같은 `providers.rs`/`services_collab.rs`/supervisor를 여러 worker가 동시에 편집하지 않는다.
 
 ## CC-01 — Provider identity와 discovery
@@ -275,8 +279,9 @@ private peer owner, schema/argv golden의 독립성. 이름 목록을 합쳐 새
 MCP `tests/native.rs::{discovery_protocols,fixed_argv,executor_injection}`와
 `tests/definitions.json`, `tests/fixed-argv.json`.
 
-**완료:** 83 public 이름의 owner가 중복/누락 없이 결정되고 bounded parse/help 또는 existing fixture로
-진입을 확인한다. 고정 argv 23개와 동적 handler 8개의 조건부 인자도 실제 parser에 맞는다.
+**완료:** 현재 inventory인 83 public 이름·고정 argv 23개·동적 handler 8개를 참조하되,
+변경하는 caller의 owner·필수 인자·bounded 진입을 기존 fixture로 확인한다. 등록 목록과 전체
+inventory의 중복/누락 검사는 재사용하고 매 기능 PR에 별도 83-command 실행 suite를 만들지 않는다.
 CC-04의 새 reader가 추가되면 변경된 수·discovery·callability를 동시에 갱신한다. 코드에서 fixture를
 자동 재생성해 자기 자신과 비교하는 검증은 하지 않는다. 실제 host unavailable은 별도 표시한다.
 
@@ -286,7 +291,8 @@ CC-04의 새 reader가 추가되면 변경된 수·discovery·callability를 동
 
 > 최신 main과 관련 코드 PR을 확인하고 실제 구현이 완료된 작업은 건너뛰세요. CC-02의 작은
 > consumer fix와 CC-04의 producer→registered reader 계약부터 착수하세요. CC-01/03은
-> provider 파일의 writer를 한 명으로 정하고, CC-06은 Plan Git부터 단계별로 진행하세요.
+> provider 파일의 writer를 한 명으로 정하세요. CC-06은 REL-04와 API owner를 조정하고
+> caller별로 나누세요. 조건부 항목은 실제 trigger를 기록한 뒤 진행하며 CC-10은 변경한 caller에 흡수하세요.
 > 기존 callable core·canonical fixture를 재사용하고 각 PR에 실제 caller와 삭제한 중복을 적으세요.
 > public helper가 존재하는 것, production wiring, fixture 성공, 실 host/provider 성공을 구분하세요.
 > 단순 count·line 감소나 fixture-only API를 사용자 기능 완료로 보고하지 마세요.

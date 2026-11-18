@@ -6,6 +6,11 @@
 Workflow, required checks, protection, runner, 설치 정책은 변경하지 않는다.
 아래 acceptance는 후속 구현의 완료 조건이며 이번에 실행한 테스트 결과가 아니다.
 
+현재 채택 범위는 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다. VW-01은 유지한다.
+VW-03/04는 같은 CI 정리 owner의 중복 제거·필요 계측 단계로, VW-05는 변경 중인 lifecycle 및
+canonical fixture 작업에 흡수한다. VW-02는 실제 leaf 변경과 test closure 근거가 있을 때만
+활성화한다. 다섯 ID를 별도 플랫폼이나 모두 수행할 독립 프로젝트로 만들지 않는다.
+
 ## 1. 목표와 현재 관측
 
 목표는 필요한 검증을 유지하면서 불필요한 build·재실행·로그 재수집을 줄이는 것이다.
@@ -43,9 +48,9 @@ CI 실행시간과 job 누적시간은 과금액이 아니다. 실제 청구, �
 - 이미 실행한 같은 검증은 변경 입력·남은 위험이 있을 때만 반복한다. 로그 수집만을 위한 재실행은 없다.
 - Full fallback과 실패 상태는 유지한다. Unknown coverage를 green이나 비용 0으로 채우지 않는다.
 
-작업 순서는 **VW-01 → VW-04의 측정 → VW-03 → VW-02**를 권장한다.
-VW-05는 lifecycle 구현의 nearest fixture에 병행할 수 있다. 다섯 개는 별도 review 단위이며,
-모두 구현한다는 약속이나 CI 설정 변경의 묶음 승인이 아니다.
+VW-01의 planning/docs 경계를 먼저 정리한다. 그 뒤 실제 중복을 확인하는 데 필요한 VW-04 계측과
+VW-03 제거를 같은 owner가 작은 단계로 진행한다. VW-04 전체 구현이 VW-01의 선행 조건은 아니다.
+VW-05는 해당 fixture를 수정할 때 함께 적용하며, VW-02의 실행 범위 축소는 별도 근거가 필요하다.
 
 ## VW-01 — P0: scope planning과 docs 검증에서 native build를 분리
 
@@ -55,6 +60,12 @@ VW-05는 lifecycle 구현의 nearest fixture에 병행할 수 있다. 다섯 개
 준비한다. 그 뒤 `prepare_affected_gate`와 `--print-affected-mode`가 처리된다.
 `oms_native_stage`는 payload가 없으면 pinned Rust로 release binaries를 build한다.
 따라서 path만 판단하는 `affected_plan`이 native build 시도와 state 준비에 의존한다.
+
+또한 workflow `rust_scope`는 `crates/*` 전체를 Rust 대상으로 고르고,
+`prepare_affected_gate`도 같은 경로를 native 대상으로 고르면서 docs 예외에는 넣지 않는다.
+따라서 `crates/oms-mcp-server/README.md` 같은 일반 설명 문서도 full 검증으로 확대된다.
+Workflow의 Rust 판정과 local gate의 docs/native 판정 두 곳을 함께 맞춰야 한다.
+Affected job도 현재 mode와 관계없이 toolchain 설치와 Cargo fetch를 준비한다.
 
 Docs-only가 선택되어도 `RUN_QUICK`은 skill manifest, doc references, migration Cargo run,
 source-distribution 전체를 실행한다. 이미 존재하는
@@ -66,14 +77,17 @@ runtime/install 검증의 bootstrap·payload 검증을 생략하는 변경은 �
 
 1. Git base/head와 path·critical boundary 판단을 side-effect 없는 초기 단계로 분리한다.
 2. Mode-only 결과가 결정되면 native staging·maintenance 등록·provider discovery 없이 반환한다.
-3. Ordinary docs는 reference check로, skill/template/role prose는 기존 bounded contract suite로 보낸다.
+3. Top-level 및 crate README를 포함한 ordinary docs는 reference check로, skill/template/role prose는
+   기존 bounded contract suite로 보낸다. 일반 설명 문서와 아래 policy/contract 경계의 사례를 명시한다.
 4. `AGENTS.md`, policy/workflow/selector 변경과 해석 불명은 기존 full 경계를 유지한다.
-5. Workflow와 local gate가 같은 계획을 읽는다. 두 번째 path classifier를 만들지 않는다.
+5. Workflow의 Rust 선택과 local gate의 docs/native 선택이 같은 계획을 읽는다.
+   Affected job의 준비도 그 계획에 맞추며 별도 path classifier를 추가하지 않는다.
 
 ### 완료 조건
 
 - `cargo`/provider 실행을 거부하는 fixture에서도 mode-only가 정확한 mode/reason을 반환한다.
 - Docs-only 실행에는 native build, Cargo fetch, model 호출이 없고 깨진 relative link는 실패한다.
+- Top-level/crate README, policy 파일, mixed 변경을 대조해 workflow와 local gate의 선택이 일치한다.
 - Mixed docs+code, deleted/renamed path, invalid base, untracked/dirty tree, force-full을 구분한다.
 - 계획 stdout/CI outputs는 machine-readable하며 source `.oms`에 새 상태를 남기지 않는다.
 - 현재 기능의 test selection과 다른 점을 fixture 표로 설명한다. 실제 CI 소요시간은 별도 측정한다.
@@ -104,7 +118,7 @@ Graph의 `affected`라는 이름만으로 이 Rust workspace의 안전한 test c
 - Default matrix/job 수는 증가하지 않으며 gate·`ci::full_scope`가 새로운 scope를 오인하지 않는다.
 - Scope 축소는 full installation proof로 승격되지 않는다. 생략된 범위는 receipt에 남는다.
 
-## VW-03 — P1: build·install 반복과 CI proof 이름을 정렬
+## VW-03 — CI 정리 내 build·install 반복과 proof 이름 정렬
 
 ### 문제와 재사용
 
@@ -138,7 +152,7 @@ Linux jobs의 runner label은 `ubuntu-24.04`와 `ubuntu-latest`이므로 동일 
 - Canonical `full_scope` fixture에서 success/failed/skipped/unknown/new job-name 처리를 검증한다.
 - 같은 workload의 build 횟수와 suite 중복 횟수를 비교한다. 절감 달러나 host portability를 추정하지 않는다.
 
-## VW-04 — P1: 실패 evidence와 timing을 기존 gate에 연결
+## VW-04 — CI 정리에 필요한 실패 evidence와 timing 연결
 
 ### 문제와 재사용
 
@@ -151,6 +165,8 @@ Linux jobs의 runner label은 `ubuntu-24.04`와 `ubuntu-latest`이므로 동일 
 stage/test/TSV 형태를 읽고, [output-digest](../crates/oms-command-peer/README.md)와
 [`oms-scrub`](../crates/oms-scrub/Cargo.toml)가 bounded output 및 scrubber 경계를 제공한다.
 이를 연결하며 새 telemetry DB·daemon은 만들지 않는다.
+필요한 producer부터 VW-03과 같은 owner가 연결한다. VW-01의 순수 docs/mode 경로에
+timing helper 실행을 위한 native build나 별도 evidence 수집을 다시 요구하지 않는다.
 
 ### 구현 범위
 
@@ -171,7 +187,7 @@ stage/test/TSV 형태를 읽고, [output-digest](../crates/oms-command-peer/READ
 - Mode-only/stdout JSON 계약은 유지하고 추가 model/network/test 실행을 만들지 않는다.
 - 디스크 bytes는 실제 계측한 범위만 보고한다. 알 수 없는 metric은 null이며 0으로 대체하지 않는다.
 
-## VW-05 — P1: native fixture의 대기·환경·포터빌리티 증거 정리
+## VW-05 — 기존 native fixture에 흡수할 대기·환경·포터빌리티 정리
 
 ### 문제와 재사용
 

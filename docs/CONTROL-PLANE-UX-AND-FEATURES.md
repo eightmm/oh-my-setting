@@ -1,9 +1,15 @@
 # OMS UI/UX 비교와 신기능 설계
 
-검토일: 2026-11-09 (KST). 상태: **제안 / 문서 전용 / 미구현**.
+검토일: 2026-11-09 (KST). 상태: **당시 UX 가설·acceptance 기록 / 기본 채택 아님**.
 [확장 계획](CONTROL-PLANE-EVOLUTION.md)의 CP-01–18 및 72개 수락 조건을 보존하고,
 UX-01–06과 NF-01–06의 세부 설계·48개 수락 조건을 추가한다.
 이 12개 명세는 12개 독립 엔진이나 자동 구현 승인이 아니다.
+
+2026-11-18 정리: [Feature scope](FEATURE-SCOPE.md)와 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를
+먼저 적용한다. 아래 Python 수정 후보와 과거 구현 단계는 역사적 근거이며 현재 Rust wiring을
+다시 만드는 지시가 아니다. NF-01/02/03/04는 기존 brief/next/context/work-inspect의 consumer를
+재사용한다. 존재하는 projection과 해당 TUI UX의 완료는 별도로 확인한다. UX/NF 전체를 구현해야
+일상 코딩이나 correctness fix를 완료할 수 있는 것은 아니다.
 
 원 계획 기준은 `20ce1be`; 이번 확인의 main은
 [`3979588`](https://github.com/eightmm/oh-my-setting/commit/39795883459e902d1b5f1f0514e229b834fd3219)다.
@@ -288,7 +294,8 @@ focus loss, 잘못된 대상 action 시도, 실제 추가 모델 호출 수다.
 
 ## 9. 구현자 인계와 범위
 
-수정 후보는 기존 `panel_view.py`,
+아래는 원 제안 당시의 수정 후보다. 현재는 해당 행동의 Rust owner와 실제 caller를 찾아
+통합 큐에서 채택한 범위만 수정한다. `panel_view.py`,
 `room_view.py`, `panel_state.py`,
 `panel_chats.py`, `panel_metrics.py`,
 `dashboard_projection.py`와 runtime read API다.
