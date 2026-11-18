@@ -3899,6 +3899,7 @@ exec sh -c "$last"
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(root.join("resume_ready").exists());
+            let physical_dest = lost.canonicalize().unwrap();
             let cache = std::fs::read_dir(&cache_parent)
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
@@ -3906,7 +3907,9 @@ exec sh -c "$last"
                     std::fs::read(path.join("manifest.json"))
                         .ok()
                         .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-                        .is_some_and(|row| row["identity"]["dest"] == lost.to_str().unwrap())
+                        .is_some_and(|row| {
+                            row["identity"]["dest"] == physical_dest.to_str().unwrap()
+                        })
                 })
                 .unwrap();
             let manifest = cache.join("manifest.json");
