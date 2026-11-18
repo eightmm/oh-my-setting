@@ -1,8 +1,10 @@
 # oms-command-graph
 
-Native migration implementation for the `graph` command. This standalone
-crate compiles independently of the root dispatcher. The current patch is an
-implementation draft; full Python behavior parity has not been established.
+Native implementation for the `graph` command. This crate can be compiled
+independently of the root dispatcher. Its source contracts do not by themselves
+establish retrieval quality or complete parity with the retired Python engine.
+See the [retrieval comparison and work packets](../../docs/GRAPH-RETRIEVAL-COMPARISON.md)
+for the current language coverage, source-backed gaps and evaluation plan.
 
 The buffered entrypoints are `owns(args)`, `run(args, cwd, interrupted)`, and
 `run_with_helper(args, cwd, interrupted, python_helper)`. Arguments start at
@@ -37,8 +39,9 @@ front doors. The graph command does not implement their authority transitions.
 
 `OMS_PROJECT_GRAPH_STATE` selects an absolute project-state directory;
 otherwise state lives in `.oms/project-graph`. `OMS_GRAPH_AUTOBUILD=0` and the
-supported `--no-refresh` flags disable reader refreshes. The child-action
-policy follows `scripts/lib/oms_graph/child_policy.py`.
+supported `--no-refresh` flags disable reader refreshes. The native child-action
+policy is enforced in `src/lib.rs`; `execution_commit.rs` also checks its
+exact-commit boundary.
 
 ## Implementation map
 
@@ -77,13 +80,23 @@ interactive template (staying synchronized with
 zoom-tier label thresholds, and `/` + `Escape` search shortcuts. Without D3,
 a deterministic SVG grid uses the same search, filters, node inspection and
 zoom/reset controls; the CDN script loads asynchronously.
-Changes to those Python contracts require updating the corresponding native
-asset and reviewing callers. The native schema additionally exposes `project
+The captured grammar is migration history; current CLI changes update the native
+schema, assets and callers together. The native schema exposes `project
 benchmark --count N --revision REF --output FILE --snapshot FILE` and `project
 benchmark --compare LEFT RIGHT`. At least one output is required for a run;
 comparison runs no extraction and exits 1 for incomparable cases or regressions.
-The result and snapshot schemas match `oms_graph/project/benchmark.py`; the
-native benchmark uses uncompressed JSON for its private parent cache.
+`project_benchmark.rs` and `project_analytics.rs` own the current result,
+snapshot and comparison contracts. The native benchmark uses uncompressed JSON
+for its private parent cache. From an installed native entrypoint, run:
+
+```bash
+oms graph project benchmark --count 10 --revision HEAD --output /tmp/oms-graph-recall.json --snapshot /tmp/oms-graph-recall-snapshot.json
+oms graph project benchmark --compare /tmp/oms-graph-before.json /tmp/oms-graph-after.json
+```
+
+The comparison inputs must have been recorded separately for the same cases.
+History recall measures entry files selected from each fix's parent tree;
+it does not measure caller accuracy, delivered signature coverage or latency.
 
 Affected selection narrows modified indexed Python/shell cases only when both
 revisions and every diff hunk prove containment. Unindexed modified runnable
@@ -99,7 +112,9 @@ Build discovery retains source digests, lengths and optional `mtime_sec`,
 `mtime_nsec` and `ino` metadata in `manifest.json` file entries. Freshness reuses
 a digest only when all four stat fields match and the mtime second precedes
 `build_started_sec`. Legacy or malformed metadata and racy timestamps trigger
-full hashing; `build --force` always hashes and reparses. Non-code files are
+full hashing; `build --force` always hashes and reparses. A stat-cache hit is
+not a fresh byte comparison: the canonical engine fixture explicitly preserves
+that shortcut when same-size bytes and the old mtime are restored. Non-code files are
 classified from at most 8192 bytes without hashing. Unchanged binary/unparsed
 classifications are cached in skipped rows. Source size caps still apply.
 Cache misses reread and verify one source at a time, bounding discovery memory
@@ -108,14 +123,16 @@ source bound up to the helper's ceiling.
 
 `symbol`, `api`, `neighbors` and bounded `trace` use prepared SQLite lookups
 when the read-only immutable projection has matching revision/schema metadata.
-Missing, corrupt, old-schema, stale or linked projections fall back to JSON;
-queries create no SQLite journals or sidecars. Shared query algorithms preserve
+Missing, corrupt, old-schema, stale or linked projections fall back to JSON.
+Immutable projection reads create no SQLite journals or sidecars; an automatic
+refresh can write the separate extraction cache. Shared query algorithms preserve
 ordering, duplicate edges, Unicode case folding and result limits. Symbol text
 scans still verify source digests. Other queries reuse the graph and manifest
 loaded during freshness rather than parsing them again. The compact graph
 shares one JSON arena through integer CSR adjacency views, with path/test
 indexes and inverted lexical postings. Context BM25 builds term frequencies
-once and scores matching postings, preserving its existing field weights.
+once per query and scores matching postings, preserving its existing field
+weights. That preprocessing is not currently persisted between context queries.
 Canonical JSON writes traverse the existing value directly with sorted object
 keys and the shared Python-compatible float formatter.
 Normalization and validation traverse nested graph definitions iteratively, so
@@ -129,7 +146,7 @@ CLI execution step budgets retain arbitrary-size decimal integers through
 | Written artifact | Concurrent call or interruption behavior |
 | --- | --- |
 | `.oms/.gitignore` | The atomic preserve-existing operation keeps an existing marker unchanged. A failed creation can leave private parent directories. |
-| `cache/<digest>.json` | Entries are regenerable and atomically replaced. The project build lock excludes another native build. Pruning follows publication and removes only safely snapshotted stale files using descriptor-relative generation checks. A kill may leave reusable stale entries; the next build prunes them. |
+| `cache.sqlite3` and its WAL/SHM sidecars | Regenerable per-file extractions are keyed by path, source digest, parser version and schema. One transaction under the project build lock inserts and prunes entries; it commits and checkpoints after graph/manifest publication. Losing an uncommitted cache transaction requires re-extraction, not new authority. Legacy file-cache entries are not imported: misses re-extract source, and the legacy `cache/` directory is removed after the transaction commits. |
 | `graph.json`, `index.sqlite3`, `manifest.json` | Each publication is atomic, under the project build lock. SQLite is constructed in memory. Manifest publication follows graph and SQLite publication; a kill between them leaves a revision mismatch that freshness checking rejects. Readers verify the projection revision against the manifest and otherwise use JSON; immutable SQLite readers retain an opened inode across atomic replacement. |
 | `orientation.json` | Derived after manifest publication. A missing orientation can be regenerated; it grants no authority. |
 | `context/<digest>.json` | Content-addressed atomic writes can be repeated. A kill leaves an older complete file or no published file. |
@@ -153,29 +170,12 @@ session.
 
 ## External boundaries
 
-- `oms-graph-python/src/model.rs::ParseResult` currently contains only `nodes`,
-  `edges` and `refs`. The Ruff helper calls `has_invalid_syntax()` internally,
-  but does not return it. Notebook validity still uses the existing contained
-  declaration probe. Full tokenizer/f-string validity requires an upstream
-  serialized `syntax_valid: bool` field, initialized false for BOM/NUL/limit
-  refusals and invalid syntax, and true after a successful module parse. Update
-  `protocol.rs`'s result description/version (and the helper/session model
-  validation and fixtures) together; source limits remain separate refusals.
-  No upstream file was edited here. The model change required upstream is:
-
-  ```diff
-   pub struct ParseResult {
-  +    #[serde(default)]
-  +    pub syntax_valid: bool,
-       pub nodes: Vec<Node>,
-  ```
-
-  The coordinated `protocol.rs` change is to document `syntax_valid` in the
-  kind-2 JSON result and increment `VERSION` from 1 to 2. The producer must set
-  the flag from the existing parse-validity decision; merely defaulting it
-  would not provide valid-source evidence. The flag follows the helper's
-  pinned Python grammar, so ambient interpreter-version differences remain
-  an upstream compatibility decision.
+- `oms-graph-python/src/model.rs::ParseResult` includes `syntax_valid` alongside
+  `nodes`, `edges` and `refs`. The helper frame protocol is version 2; the Ruff
+  producer sets validity after its parse checks, and `notebook.rs` consumes it.
+  An absent field defaults to false. Syntax validity does not establish complete
+  reference resolution or notebook retrieval coverage. Future protocol changes
+  still require coordinated helper/session/model fixtures.
 - The helper's `protocol.rs::MAX_SOURCE_BYTES` is 64 MiB and
   `MAX_RESPONSE_BYTES` is 128 MiB. Changing those ceilings requires coordinated
   helper protocol, request-length and memory-containment changes outside this
@@ -190,9 +190,9 @@ session.
   blocking native operation requires a host process-isolation/supervision
   boundary. No thread is abandoned while it can still write state.
 
-These external boundaries and the unrun behavioral parity suites preclude
-claiming the complete native migration ready. Compilation proves neither
-behavioral equivalence nor cross-platform execution.
+These are implementation boundaries. Behavioral and platform claims require
+test evidence tied to the evaluated commit; compilation and source inspection
+alone do not establish them.
 
 ## Verification phase
 
@@ -208,7 +208,10 @@ Legacy inspection covered context, affected selection, suite cases, benchmark,
 CODEOWNERS, validation, routing, parser, freshness, event, journal, rendering and
 cache contracts. It was source inspection, not behavioral test-pass evidence.
 
-Relevant legacy contracts include `tests/test_oms_graph_integration.py`,
-`tests/test_oms_graph_project.py`, `tests/test_oms_graph_parsers.py`,
-`tests/graph-smoke.sh`, `docs/GRAPH-ENGINEERING.md`, and the project-graph
-consumers in `oms-mcp-server` and `scripts/oms_project_graph_*`.
+Current canonical suites include this crate's `tests/project_engine.rs` and
+`tests/host_adapter.rs`, `oms-graph/tests/parser_contract.rs`,
+`oms-graph-resolve/tests/resolve_contract.rs`, and the Python/shell parser crates'
+`tests/graph_contract.rs`. Consumer coverage lives in `oms-command-peer` and
+`oms-mcp-server`. Run affected native checks through the repository's pinned
+toolchain and CI; the retired `tests/test_oms_graph_*.py` and `graph-smoke.sh`
+paths are historical references, not runnable suites in this tree.

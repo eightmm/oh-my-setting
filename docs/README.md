@@ -29,6 +29,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Contributing](../CONTRIBUTING.md) | Scoped checks, publication, style and compatibility |
 | [OMS runtime](OMS-RUNTIME.md) | Typed contracts, backends, evidence and adapters |
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
+| [Graph retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md) | Current Rust/search gaps, five reference projects, reusable implementation packets and retrieval evaluation |
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
 | [Multi-agent and multi-host plan](MULTI-AGENT-MULTI-HOST-PLAN.md) | Proposed behavior, staged delivery and acceptance for parallel agents, Git integration and remote clusters and opt-in Stages A–F runtime implementation |
 | [Context inspection](CONTEXT-INSPECTION.md) | Saved context manifest inspection and digest verification |
