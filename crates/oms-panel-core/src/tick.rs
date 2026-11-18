@@ -2153,8 +2153,8 @@ fn screen_cells(text: &str) -> Vec<Vec<Cell>> {
 /// cursor at column 0 of an otherwise blank input line, or at column 0 directly over the first
 /// character before dim or grey placeholder text; anywhere else it is a typed character or draft.
 /// Ambiguous screens refuse.
-fn screen_input_empty(text: &str) -> (bool, String) {
-    let mark_re = Regex::new(r"^(?:\s*[│┃|])?\s*[>❯›](?: |$)").expect("static pattern");
+pub fn screen_input_empty(text: &str) -> (bool, String) {
+    let mark_re = Regex::new(r"^(?:\s*[│┃|])?\s*[>❯›](?:[ \x{A0}]|$)").expect("static pattern");
     let lines = screen_cells(&text.replace('\r', ""));
     let plain: Vec<String> = lines
         .iter()

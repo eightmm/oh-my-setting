@@ -8,8 +8,10 @@ mod executable;
 pub mod input;
 pub mod layout;
 pub mod managed;
+mod native_children;
 pub mod native_panel;
 pub mod navigation;
+mod orchestrator;
 pub mod reader;
 pub mod recommend;
 pub mod render;
@@ -19,6 +21,7 @@ pub mod watch;
 
 pub use oms_panel_core::{Error, Result, Services};
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 pub use wakeup::notify_wakeup;
@@ -64,7 +67,11 @@ pub fn run_with_services(
     if interrupted.load(Ordering::Acquire) {
         return (130, vec![], vec![]);
     }
-    match commands::run(&options, cwd, source, services, interrupted) {
+    let default_main = args.is_empty()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && parent_only().is_ok();
+    match commands::run_mode(&options, default_main, cwd, source, services, interrupted) {
         Ok(v) => v,
         Err(e) => failure(e),
     }

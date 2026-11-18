@@ -275,13 +275,13 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if job.timeout.is_zero() || job.timeout > MAX_WALL || job.limit == 0 || job.limit > MAX_OUTPUT {
         return Err("invalid process limits".into());
     }
-    let allow_whole_tree = !matches!(
-        job.argv
-            .first()
-            .and_then(|a| Path::new(a).file_name())
-            .and_then(|n| n.to_str()),
-        Some("git" | "ssh")
-    );
+    let program = job.argv.first().and_then(|a| Path::new(a).file_name());
+    // A detached tmux session owns a persistent server when no server exists yet.
+    let detached_tmux = program.is_some_and(|name| name == "tmux")
+        && job.argv.get(1).is_some_and(|arg| arg == "new-session")
+        && job.argv.get(2).is_some_and(|arg| arg == "-d");
+    let allow_whole_tree =
+        !detached_tmux && !matches!(program.and_then(|name| name.to_str()), Some("git" | "ssh"));
     let mut request = Request::new(job.argv);
     request.cwd = Some(std::fs::canonicalize(job.cwd).map_err(|e| e.to_string())?);
     request.stdin = job.stdin;

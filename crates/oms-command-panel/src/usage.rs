@@ -226,9 +226,18 @@ fn provider_snapshot(
     now: f64,
     warn_pct: Option<u8>,
 ) -> Value {
-    let observed_at = metrics::stamp(&ps["observed_at"]);
+    let native_weekly = metrics::stamp(&ps["weekly_native_observed_at"]);
+    let observed_at = native_weekly.or_else(|| metrics::stamp(&ps["observed_at"]));
     let age_seconds = observed_at.map(|ts| (now - ts).max(0.0));
-    let raw_source = ps["source"].as_str().unwrap_or("unavailable");
+    let raw_source = if native_weekly.is_some() {
+        if provider == "antigravity" {
+            "AGY Gemini quota"
+        } else {
+            "Claude native usage"
+        }
+    } else {
+        ps["source"].as_str().unwrap_or("unavailable")
+    };
     let stale = raw_source == "cache stale"
         || age_seconds.is_some_and(|age| age > metrics::READING_FRESH_SECONDS);
     let source_label = match provider {
@@ -362,6 +371,21 @@ fn provider_snapshot(
                     json!("Codex session log has no weekly rate limit reading"),
                 );
             }
+        }
+        "antigravity" if native_weekly.is_some() => {
+            if let Some(used) = metrics::percent(&ps["weekly_used"]) {
+                windows.push(build_window(
+                    "weekly",
+                    used,
+                    None,
+                    source_label,
+                    stale,
+                    age_seconds,
+                    now,
+                    warn_pct,
+                ));
+            }
+            unreported.insert("5h".into(), json!("not sampled"));
         }
         _ => {
             let label = if provider == "antigravity" {

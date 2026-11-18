@@ -73,8 +73,8 @@ The view projects at most 64 Teams, 32 members per Team, 512 physical intents an
 8 intents per member, and reports omitted counts. Plan responses use the existing
 16 MiB bound; native resource/intent reads use their existing bounded registry.
 Plain output and the existing Reader sanitize terminal text and redact content.
-The default panel layout, refresh, keys and actions remain unchanged. TM-06B
-controls and TM-06C live-refresh/I/O calibration are separate work.
+The Team inspector does not add Team controls or Team live refresh to the board.
+TM-06B controls and TM-06C live-refresh/I/O calibration are separate work.
 
 `oms panel --routes` preserves its existing JSON output, including with `--json`.
 With `OMS_PANEL_READER_BOARD` and a foreground TTY, the non-JSON request opens the
@@ -93,3 +93,28 @@ selected-account matching, and leaves selected endpoint binding unknown.
 Missing scope/time evidence stays unknown; a reported fresh source grants no
 route eligibility. The native catalog currently supplies no scoped observation,
 so known fresh/stale examples cover injected catalog ingestion and rendering only.
+
+Tree and graph folding is currently library-only state; the interactive board
+does not yet provide fold or unfold keys.
+
+The Auto overview keeps Main and Goal above one weekly-usage row and groups
+recorded work by provider. Provider headers are display rows, never participants
+or control targets. Only an explicit live lead role identifies an orchestrator;
+missing lead and quota evidence remain unreported. Terminal calls collapse into
+history; Tab opens the existing all-calls views, and explicit search or Attention
+also includes matching history. Narrow boards retain the flat summary fallback.
+
+
+On a foreground terminal with tmux available, bare `oms panel` opens a split
+board and a native Codex Main for the current repository. If its managed Main
+already exists, it reopens that pane and restores its board if needed. Use
+`oms panel --watch` for a standalone board. Non-terminal invocations keep the
+watcher output path.
+
+The managed Main can open provider orchestrators with
+`oms panel --orchestrator PROVIDER --room ROOM`. Use that command with
+`--task TEXT` to submit a one-line assignment to an idle, connected provider.
+The board can dock that provider's existing native input pane without restarting
+the conversation. Only live panes from the selected repository and Room can
+receive board usage refreshes. Native provider scheduling is outside OMS campaign
+accounting and requires an Overall Main recorded outside a managed campaign.

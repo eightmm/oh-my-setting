@@ -23,6 +23,8 @@ pub enum Key {
     Repaint,
     Function(u8),
     Click(u16, u16),
+    Drag(u16),
+    Release(u16),
     Scroll(i32),
     Paste,
     Eof,
@@ -108,12 +110,15 @@ impl Decoder {
                         .collect::<std::result::Result<Vec<_>, _>>();
                     if let Ok(v) = values
                         && v.len() == 3
-                        && self.pending[end] == b'M'
+                        && v[1] > 0
+                        && v[2] > 0
                     {
-                        found = match v[0] {
-                            0 => Key::Click(v[1], v[2]),
-                            64 => Key::Scroll(-3),
-                            65 => Key::Scroll(3),
+                        found = match (v[0], self.pending[end]) {
+                            (0, b'M') => Key::Click(v[1], v[2]),
+                            (32, b'M') => Key::Drag(v[2]),
+                            (0 | 3, b'm') => Key::Release(v[2]),
+                            (64, b'M') => Key::Scroll(-3),
+                            (65, b'M') => Key::Scroll(3),
                             _ => Key::Unbound,
                         };
                     }
@@ -243,6 +248,9 @@ impl TerminalInput {
             .map_err(Error::new)?;
         Ok(Some(guard))
     }
+    pub fn enable_drag(&mut self) -> Result<()> {
+        self.file.write_all(b"\x1b[?1002h").map_err(Error::new)
+    }
     pub fn wait(&mut self, duration: Duration) -> Result<Vec<Key>> {
         self.wait_woken(duration, None).map(|(keys, _)| keys)
     }
@@ -300,7 +308,26 @@ impl Drop for TerminalInput {
     fn drop(&mut self) {
         let _ = self
             .file
-            .write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l");
+            .write_all(b"\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l");
         let _ = rustix::termios::tcsetattr(&self.file, OptionalActions::Now, &self.original);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sgr_mouse_drag_and_release_keep_scroll_and_click() {
+        use super::{Decoder, Key};
+        let mut decoder = Decoder::default();
+        assert!(decoder.feed(b"\x1b[<0;15;").is_empty());
+        assert_eq!(
+            decoder.feed(b"24M\x1b[<32;16;17M\x1b[<0;16;17m\x1b[<64;16;17M"),
+            [
+                Key::Click(15, 24),
+                Key::Drag(17),
+                Key::Release(17),
+                Key::Scroll(-3)
+            ],
+        );
     }
 }
