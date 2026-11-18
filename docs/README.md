@@ -36,6 +36,8 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Pinned source intake](INTENT-SOURCE-INTAKE.md) | SHA-pinned local file and GitHub issue intake for `oms intent draft` |
 | [Run input identity](RUN-INPUT-IDENTITY.md) | Pre-command input identity and metric contract capture |
 | [Work inspection](WORK-INSPECTION.md) | Evidence matrix, next-step explanation and return briefs |
+| [Callable consolidation audit](CALLABLE-CONSOLIDATION-AUDIT.md) | Actual CLI/MCP/core wiring, duplication and boundaries to preserve |
+| [Consolidation work packets](CALLABLE-CONSOLIDATION-WORK-PACKETS.md) | Ten scoped follow-ups with reusable APIs, callers and canonical fixtures |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |

@@ -1,10 +1,32 @@
 # Native MCP component
 
-This crate implements the persistent stdio server and all 31 tools from
-`oms-mcp-server.py`. It is an unintegrated
-component, **not a Python retirement or installation claim**. Root workspace,
-lockfile, CLI routing, provider configuration, packaging and lifecycle changes
-belong to the parent. The private owner must be bundled before peer starts work.
+This crate implements the native persistent stdio server and 31 OMS tools.
+At source revision `f9a695ea` (2026-11-18), the root executable already connects
+it through `serve_with_services`; lifecycle integration registers the installed
+absolute `oms` executable with the `mcp-server` argument. The private
+`oms-mcp-peer-owner` is part of the validated native payload. These are source
+wiring facts, not a claim that a particular user's installation or provider was
+exercised by the documentation audit.
+
+## Current native consumers
+
+| Boundary | Current owner |
+|---|---|
+| Service entry and configuration | [root dispatch](../oms/src/main.rs), `mcp-server` branch; pins `oms_program` and the sibling peer owner |
+| Command execution | [CollabServices](../oms/src/services_collab.rs), `CommandExecutor::execute`; staged native command under supervisor timeout, cancellation and output bounds |
+| Provider registration | [lifecycle integrations](../oms-command-lifecycle/src/integrations.rs), `mcp`; preserves foreign configuration ownership |
+| Definitions and handlers | [tools.json](src/tools.json), [lib.rs](src/lib.rs), [command.rs](src/command.rs), [peer.rs](src/peer.rs), [extra.rs](src/extra.rs) |
+| Public boundary fixtures | Root `mcp_executor_runs_staged_native_and_honors_timeout_and_cancel`, `mcp_executor_reports_output_limit_distinctly`; this crate's `tests/native.rs` |
+
+Core discovery lists 12 tools and full discovery lists 31. Both profiles accept
+the same 31 tool names through `tools/call`, subject to their request and child
+restrictions; discovery is not authorization. There is one graph UI resource and
+no prompt API. The advertised `oms_output_read` from output-digest metadata is
+not registered here at this revision; its existing reader core and missing
+adapter are tracked in the [callable consolidation audit](../../docs/CALLABLE-CONSOLIDATION-AUDIT.md).
+
+Unqualified reference line numbers and retired Python/Bash paths below describe
+frozen migration evidence. The Rust files above own current production behavior.
 
 ## Consumer ABI
 
@@ -27,8 +49,8 @@ non-finite ids. `Value` display produces ASCII JSON, including escaped surrogate
 code points and the canonical non-finite constants; `value::encode` supplies the
 internal pretty/sorted string-domain encodings. Native consumers are `serve`
 (for framed requests), `Server::handle` (for embedding and the compiled client),
-and the private `peer_owner` entry (for stored launch/receipt values). The future
-root native front door must preserve this return choice when it embeds them.
+and the private `peer_owner` entry (for stored launch/receipt values). The root
+native front door preserves this return choice when embedding the server.
 `serve` retains the ABI above and owns the strict UTF-8 reader, byte bound,
 parsing and output framing. `Config` contains a typed `ToolProfile::{Core,Full}`,
 a task extension
@@ -86,9 +108,12 @@ order: `Config::oms_program` when set (authoritative; an invalid pin is an
 error, never skipped); the running executable when named `oms`; an `oms` beside
 an absolute private peer owner; absolute `PATH` entries. Relative locations and
 non-executable files are ignored; nothing found is an error, not a bare `oms`.
-A parent that routes verbs in-process implements `CommandExecutor` and calls
-`serve_with_services` / `Server::with_executor`; no child is then spawned for
-the 24 command-backed tools. `oms_peer_start` still launches the private
+Embedding callers can implement `CommandExecutor` with
+`serve_with_services` / `Server::with_executor`. The current root host uses a
+supervised staged native process; the trait does not imply in-process dispatch.
+There are 23 literal `argv` descriptors and eight specialized tool handlers.
+Legacy `bash scripts/*.sh` descriptor spellings are converted to native verbs by
+`command.rs`; they do not launch Bash scripts. `oms_peer_start` launches the private
 `peer_owner` process; it receives `Config::oms_program` as an optional fourth
 argument (`SOURCE_ROOT REPO OPERATION [OMS_PROGRAM]`) and resolves the same
 way, so the parent must point `Config::peer_owner` at a native bundled helper.
@@ -145,14 +170,16 @@ Interruption/timeout kills the owned process group and reaps the direct child.
 No pid recovered from disk is signalled; stored pids are liveness probes only.
 
 Peer launches preserve context flags, provider/model validation, consult thread
-choices and ask preparation. Native provider aliases follow
-`provider-registry.sh:113`; discovery of custom adapter executables never invokes
-them or proves availability. Provider roles, effort and read isolation remain
-owned by the fixed downstream verbs; MCP exposes no new knobs for them.
-The native owner supplies the existing cancellation directory to those verbs.
-Their per-seat deadline, process-group escalation and observed-cancellation
-contract still uses `peer-common.sh:797` and `run-bounded.py:89–171`. The native
-crate does not replace that supervision with an invented whole-council timeout.
+choices and ask preparation. MCP alias validation is in `src/peer.rs`; the
+provider executor is in `oms-command-peer`. Their identity/discovery duplication
+is tracked as CC-01. Discovery of a custom executable does not invoke it or
+prove authentication or runtime support. Provider roles, effort and read
+isolation remain owned by the fixed downstream verbs; MCP exposes no new knobs
+for them. The native owner supplies the existing cancellation directory. Current
+per-seat execution uses the Rust peer executor and `oms-supervisor`, injected by
+`CollabServices`; retained `peer-common.sh`/`run-bounded.py` references are historical
+compatibility evidence. An entire council still does not acquire an invented
+single-call timeout from this adapter.
 
 ## Filesystem authority, concurrency and interrupted writes
 
@@ -182,7 +209,11 @@ Mutation opens require owned, real ancestry. Existing directory modes are
 preserved; newly created directories use 0700. Receipt files cannot follow links.
 A completed result does not promote its data into approval or verification.
 
-## Evidence and unresolved admission requirements
+## Historical component admission evidence
+
+This section records the original migration review and its then-unresolved
+integration work. Its past check results are not new test runs for the current
+source revision; current native wiring and boundary fixtures are listed above.
 
 The reference server was read in full (1–2243), including the complete handler
 (1945–2183). Direct helper coverage: `peer_artifacts.py:14–73,260–271`, all of
@@ -278,13 +309,15 @@ an 8 MiB refusal no longer becomes successful answer text. A malformed artifact
 without a completed section remains an empty answer with the canonical note;
 its bytes are never fabricated. These bounds are not silently claimed as parity.
 
-Linux development checks do not prove native macOS, WSL2, Ubuntu 20.04 binaries,
-installed MCP registration, provider cancellation escalation, real room membership
-or live model availability. The parent owns those tests and the independent
-trust-boundary review. Existing install/doctor/provider-contract consumers remain
-unchanged. No existing tests are superseded while that public entry remains.
+### Historical reconstruction checks
 
-Focused verification uses isolated scratch workspaces, Rust 1.99.1, two build
+The component-era Linux checks did not prove native macOS, WSL2, Ubuntu 20.04
+binaries, installed registration, provider cancellation escalation, real room
+membership or live model availability. Integration and host checks were then
+parent work. These historical results must not be substituted for the current
+revision's CI or native entry fixtures.
+
+That focused verification used isolated scratch workspaces, Rust 1.99.1, two build
 jobs and the offline dependency cache. Package check, Clippy with warnings
 denied, all MCP tests, the shared context tests and pinned formatting are the
 component checks. The complete admission verifier, installed entry and host

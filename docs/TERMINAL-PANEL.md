@@ -116,6 +116,16 @@ still requires the user's authority; a local result can be completed first.
 
 ### Swap the main
 
+**Current native status (2026-11-18, `f9a695ea`):** the CLI and core validation
+exist, but the installed `CollabServices` does not implement `swap_main_host`.
+After the caller satisfies the Main/Room/tmux preconditions, the native host
+boundary refuses with `native main swap host adapter unavailable`. The swap and
+automatic-quota flow below records the intended/legacy workflow, not a supported
+native replacement path. The core's injected-host fixture does not prove native
+host support. See [CC-09](CALLABLE-CONSOLIDATION-WORK-PACKETS.md#cc-09--native-main-swap-host-연결)
+for the existing contract to connect; model/effort selection at a new orchestrator
+launch is a separate operation.
+
 The `s` board key lists installed main targets and their weekly quota readings, then
 requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER [--model
 MODEL]` is the command form. It requires an existing tmux panel, one verified live main.
