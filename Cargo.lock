@@ -998,6 +998,7 @@ dependencies = [
  "oms-json",
  "oms-lock",
  "oms-safe-fs",
+ "oms-supervisor",
  "regex",
  "rustix",
  "sha2",

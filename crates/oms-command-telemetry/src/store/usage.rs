@@ -528,7 +528,7 @@ pub fn begin(
     cumulative: Option<Cumulative>,
     interrupted: &AtomicBool,
 ) -> Result<Receipt, StoreError> {
-    begin_inner(repo, identity, cumulative, interrupted, None)
+    begin_inner(repo, identity, cumulative, interrupted, None, false)
 }
 /// Shared admission bounds nested receipt/ignore lock waits by one monotonic
 /// deadline. Persistence may finish later; the caller must fence external launch.
@@ -539,7 +539,38 @@ pub fn begin_before(
     interrupted: &AtomicBool,
     deadline: Instant,
 ) -> Result<Receipt, StoreError> {
-    begin_inner(repo, identity, cumulative, interrupted, Some(deadline))
+    begin_inner(
+        repo,
+        identity,
+        cumulative,
+        interrupted,
+        Some(deadline),
+        false,
+    )
+}
+pub(super) fn writer_before(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<oms_lock::Guard, StoreError> {
+    let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
+    acquire_before(&target, interrupted, Some(deadline))
+}
+pub(super) fn begin_registered_before(
+    tx: &super::dispatch::Transaction<'_>,
+    identity: Identity,
+    cumulative: Option<Cumulative>,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<Receipt, StoreError> {
+    begin_inner(
+        tx.repo(),
+        identity,
+        cumulative,
+        interrupted,
+        Some(deadline),
+        true,
+    )
 }
 fn begin_inner(
     repo: &Path,
@@ -547,11 +578,26 @@ fn begin_inner(
     cumulative: Option<Cumulative>,
     interrupted: &AtomicBool,
     deadline: Option<Instant>,
+    registered: bool,
 ) -> Result<Receipt, StoreError> {
     before(interrupted, deadline)?;
     let root = Root::open(repo)?;
     let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
     let _guard = acquire_before(&target, interrupted, deadline)?;
+    // Activation holds dispatch then this same receipt writer across its CAS.
+    // A direct writer only observes dispatch, preserving the legacy lock contract.
+    if !registered
+        && let Some(raw) = super::dispatch::read_snapshot(root.physical_root(), interrupted)?
+    {
+        let registry =
+            crate::value::parse(&raw, true).map_err(|_| invalid("invalid dispatch registry"))?;
+        if registry["schema"] == V::from(2) {
+            return Err(invalid(
+                "resource domain requires physical intent admission",
+            ));
+        }
+    }
+    before(interrupted, deadline)?;
     ensure_ignore_before(root.physical_root(), interrupted, deadline)?;
     let mut result = None;
     mutate(&root, &target, true, None, interrupted, |old| {

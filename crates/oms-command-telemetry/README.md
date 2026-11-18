@@ -179,7 +179,7 @@ reservations require separate execution evidence.
 
 `store::dispatch::Transaction` shares the existing physical repository's
 `.oms/artifacts/panel-dispatch.lock` using direct Flock, independently of the
-legacy lock selector. It provides a strict schema-1 `calls` snapshot and byte
+legacy lock selector. It provides strict legacy/schema-2 resource snapshots and byte
 compare-and-swap at the existing 4 MiB registry path, plus immutable schema-2
 launch and schema-1 process artifacts bounded to 64 KiB. Callers retain unknown
 fields when patching their own records. Present empty or malformed state refuses
@@ -224,6 +224,42 @@ existing LegacyAuto lock namespaces. A refused lock wait or failed preparation
 check appends no receipt and consumes no ordinal. Filesystem persistence may finish
 after the deadline; the caller must recheck its launch fence before executing.
 Ordinary `begin` keeps the existing configured timeout contract.
+Direct usage registration keeps its existing receipt writer and checks the domain
+while holding it. Activation holds dispatch then that same receipt writer across
+its history check and CAS, so a racing direct receipt is either retained before
+activation refuses or refused after activation. An active resource domain requires the
+physical producer's private registered-receipt path; a receipt-only registration
+cannot bypass capacity. Normal receipt revisions remain independent.
+
+`store::resources` adds an explicit `repository-host-local-observed` policy to
+that same registry. Activation compares exact expected bytes and refuses all
+legacy dispatch, physical or receipt history whose custody has not been
+reconciled. It never deletes history or starts a new empty epoch over unknown
+work. Schema 2 blocks schema-1-only writers; bound physical records use schema 3.
+Missing domains/claims, changed immutable bindings and unsupported outer legacy
+dispatch custody refuse while preserving bytes. No policy activates by default.
+
+Team slots, running invocations, open processes and write WIP are independent
+counts derived from retained claims. Reviewer headroom bounds ordinary admission;
+WIP is shared by exact owner/operation retries and outlives process exit. A new
+physical intent and its claims publish in one CAS before the separate pending
+receipt/ready acknowledgement. A later failure retains the reservation and
+liability. Exact replay grants no resend. Holding a domain blocks new work while
+allowing observations and settlement. Capacity refusal returns 3; held returns 75.
+
+`begin_bound_checked` requires the native parent to validate the actual host,
+root creation, Team/member generation, role and selected route. `Binding` itself
+is correlation data. Execution settlement accepts only the sealed reactor proof
+for the expected call and an explicitly pinned cleanup scope, with revision CAS
+and idempotent replay. Usage/spend, persistent sessions, Team slots and candidate
+WIP remain separate; a usage cleanup Boolean cannot release a resource claim.
+
+These are internal producer primitives. Native factory/CLI and full Team launch
+integration, session/WIP/Team retirement and epoch recovery remain to be wired.
+Unknown native descendants, provider-account capacity and cross-host global hard
+bounds are unsupported. Current unbound/legacy panel paths refuse in an active
+domain. The existing usage fixture covers mixed-call concurrency, partial writes,
+headroom, direct-receipt activation races, tampering and independent custody.
 
 Each new registration or observation reads and validates the complete history,
 then atomically replaces the ledger with that history plus the new receipt.

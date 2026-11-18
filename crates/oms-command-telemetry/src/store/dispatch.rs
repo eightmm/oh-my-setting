@@ -283,10 +283,17 @@ fn validate_registry(body: &[u8]) -> std::result::Result<(), StoreError> {
         return Err(StoreError::Invalid("dispatch registry exceeds byte limit"));
     }
     let value = decode(body, MAX_REGISTRY)?;
-    if !has_schema(&value, "1") || value.get("calls").and_then(Value::as_object).is_none() {
+    if !(has_schema(&value, "1") || has_schema(&value, "2"))
+        || value.get("calls").and_then(Value::as_object).is_none()
+    {
         return Err(StoreError::Invalid(
             "unsupported dispatch registry schema or calls",
         ));
+    }
+    if has_schema(&value, "2") || super::resources::has_contract(&value) {
+        let registry = crate::value::parse(body, true)
+            .map_err(|_| StoreError::Invalid("invalid resource registry"))?;
+        super::resources::validate(&registry)?;
     }
     Ok(())
 }

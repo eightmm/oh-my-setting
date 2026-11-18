@@ -12,6 +12,7 @@ mod paths;
 pub mod physical;
 mod producer;
 mod recovery;
+pub mod resources;
 mod retention;
 pub mod usage;
 #[path = "../waste.rs"]
@@ -43,6 +44,8 @@ pub const DEFAULT_INDEX: &str = ".oms/artifacts/index.jsonl";
 pub enum StoreError {
     Invalid(&'static str),
     Budget(budget::Error),
+    ResourceCapacity(&'static str),
+    ResourceHeld,
     Changed,
     Interrupted,
     Lock(oms_lock::Error),
@@ -58,6 +61,8 @@ impl StoreError {
             Self::Interrupted => 130,
             Self::Lock(error) => error.exit_code(),
             Self::Budget(error) => error.exit_code(),
+            Self::ResourceCapacity(_) => 3,
+            Self::ResourceHeld => 75,
             Self::Changed
             | Self::Storage {
                 phase: MutationPhase::PublicationUncertain | MutationPhase::Published,

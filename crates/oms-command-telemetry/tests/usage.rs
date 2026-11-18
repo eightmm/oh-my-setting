@@ -29,6 +29,44 @@ fn observe(mut receipt: Receipt, revision: u64, tokens: u64, cost: Cost) -> Rece
     receipt.cost = cost;
     receipt
 }
+fn physical_request(
+    identity: Identity,
+    write: bool,
+) -> oms_command_telemetry::store::physical::Request {
+    oms_command_telemetry::store::physical::Request {
+        identity,
+        cumulative: None,
+        write,
+        campaign_manifest_sha256: None,
+    }
+}
+
+fn resource_policy() -> oms_command_telemetry::store::resources::Policy {
+    oms_command_telemetry::store::resources::Policy {
+        domain: "fixture-domain".into(),
+        epoch: "epoch-one".into(),
+        host_generation_sha256: "a".repeat(64),
+        max_teams: 1,
+        max_invocations: 1,
+        max_open_processes: 1,
+        max_write_wip: 1,
+        reviewer_headroom: 0,
+    }
+}
+fn resource_binding(
+    policy: &oms_command_telemetry::store::resources::Policy,
+) -> oms_command_telemetry::store::resources::Binding {
+    oms_command_telemetry::store::resources::Binding {
+        policy_sha256: policy.sha256().unwrap(),
+        host_generation_sha256: policy.host_generation_sha256.clone(),
+        root_owner: "main-one".into(),
+        root_generation: "created-one".into(),
+        team: None,
+        reviewer: false,
+        persistent_session: false,
+        cleanup_scopes: vec![oms_supervisor::process::Scope::ProcessGroup],
+    }
+}
 
 #[test]
 fn physical_candidates_replace_escrow_and_join_durable_receipts() {
@@ -609,6 +647,687 @@ fn physical_intents_replay_without_resending_and_keep_unacknowledged_liability()
         future
     );
 }
+#[test]
+fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
+    use oms_command_telemetry::store::{
+        dispatch,
+        physical::{self, Registration},
+        resources::{self, Binding, Policy, Team},
+    };
+    use oms_supervisor::process::{OwnedCleanup, PhysicalCall, Progress, Reactor, Request, Scope};
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+    fn cleanup(call: &str, scope: Scope) -> OwnedCleanup {
+        let mut reactor = Reactor::new();
+        let mut request = Request::new(vec!["/bin/sh".into(), "-c".into(), "true".into()]);
+        request.scope = scope;
+        request.physical_call = Some(PhysicalCall::new(call).unwrap());
+        request.deadline = Some(Instant::now() + Duration::from_secs(2));
+        request.terminate_grace = Duration::ZERO;
+        let job = reactor.start(request).unwrap();
+        let until = Instant::now() + Duration::from_secs(4);
+        loop {
+            match reactor.poll(job, Duration::from_millis(10)).unwrap() {
+                Progress::Complete(done) => return done.owned_cleanup().unwrap().clone(),
+                Progress::Pending(_) => assert!(Instant::now() < until),
+            }
+        }
+    }
+    let stop = AtomicBool::new(false);
+    let deadline = || Instant::now() + Duration::from_secs(3);
+    let policy = resource_policy();
+    let legacy = resource_binding(&policy);
+    let team = Binding {
+        team: Some(Team {
+            id: "team-one".into(),
+            spec_sha256: "b".repeat(64),
+            member: "worker-one".into(),
+            member_generation: i128::from(u64::MAX) + 1,
+        }),
+        ..legacy.clone()
+    };
+    let root = Temp::private();
+    assert!(resources::snapshot(&root.0, &stop).unwrap().is_none());
+    assert!(!root.0.join(dispatch::LOCK).exists());
+    resources::activate(&root.0, &policy, None, &stop, deadline()).unwrap();
+    let initial = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    resources::activate(&root.0, &policy, Some(&initial), &stop, deadline()).unwrap();
+    assert!(
+        usage::begin(&root.0, identity("call_direct_receipt"), None, &stop).is_err(),
+        "an active resource domain must not admit a receipt-only call"
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        initial
+    );
+    assert!(
+        physical::begin(
+            &root.0,
+            identity("call_unbound"),
+            None,
+            false,
+            &stop,
+            deadline()
+        )
+        .is_err()
+    );
+    assert!(!root.0.join(usage::RECEIPTS).exists());
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        initial
+    );
+    resources::reserve_team(&root.0, &team, &stop, deadline()).unwrap();
+    let team_reserved = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    resources::reserve_team(&root.0, &team, &stop, deadline()).unwrap();
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        team_reserved
+    );
+    let mut other_team = team.clone();
+    other_team.team.as_mut().unwrap().spec_sha256 = "c".repeat(64);
+    assert!(resources::reserve_team(&root.0, &other_team, &stop, deadline()).is_err());
+    let barrier = Arc::new(Barrier::new(3));
+    let results = std::thread::scope(|scope| {
+        let workers = [legacy.clone(), team.clone()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, binding)| {
+                let barrier = barrier.clone();
+                let repo = &root.0;
+                let stop = &stop;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let identity = identity(&format!("call_mixed_{index}"));
+                    let result = physical::begin_bound_checked(
+                        repo,
+                        physical_request(identity.clone(), true),
+                        &binding,
+                        stop,
+                        deadline(),
+                        |_, _| Ok(()),
+                    );
+                    (identity, binding, result)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, _, result)| matches!(result, Ok(Registration::New(_))))
+            .count(),
+        1
+    );
+    let (winning, binding, result) = results
+        .into_iter()
+        .find(|(_, _, result)| result.is_ok())
+        .unwrap();
+    assert!(matches!(result, Ok(Registration::New(_))));
+    let total = resources::occupancy(&root.0, &stop).unwrap().unwrap();
+    assert_eq!(
+        (
+            total.teams,
+            total.invocations,
+            total.open_processes,
+            total.write_wip
+        ),
+        (1, 1, 1, 1)
+    );
+    assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
+    let admitted = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    for damage in [
+        "downgrade",
+        "missing-claims",
+        "missing-intents",
+        "legacy-dispatch",
+    ] {
+        let mut value = oms_json::parse_strict(&admitted).unwrap();
+        let fields = value.as_object_mut().unwrap();
+        match damage {
+            "downgrade" => {
+                fields.insert("schema".into(), oms_json::Value::integer("1").unwrap());
+                fields.remove(&oms_json::PyString::from("resources"));
+            }
+            "missing-claims" => {
+                fields
+                    .get_mut(&oms_json::PyString::from("resources"))
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("claims".into(), oms_json::parse_strict(b"{}").unwrap());
+            }
+            "missing-intents" => {
+                fields.remove(&oms_json::PyString::from("physical"));
+            }
+            "legacy-dispatch" => {
+                fields.insert(
+                    "calls".into(),
+                    oms_json::parse_strict(br#"{"legacy":{"state":"unknown"}}"#).unwrap(),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let damaged = oms_json::session_call_key_json_bytes(&value).unwrap();
+        root.write(dispatch::REGISTRY, &damaged);
+        assert!(dispatch::read_snapshot(&root.0, &stop).is_err(), "{damage}");
+        assert!(physical::load(&root.0, &stop).is_err(), "{damage}");
+        assert!(resources::snapshot(&root.0, &stop).is_err(), "{damage}");
+        assert!(
+            physical::begin(
+                &root.0,
+                identity("call_after_damage"),
+                None,
+                false,
+                &stop,
+                deadline()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+            damaged
+        );
+        root.write(dispatch::REGISTRY, &admitted);
+    }
+    assert!(matches!(
+        physical::begin_bound_checked(
+            &root.0,
+            physical_request(winning.clone(), true),
+            &binding,
+            &stop,
+            deadline(),
+            |_, _| panic!("replay never readmits")
+        ),
+        Ok(Registration::Existing { .. })
+    ));
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        admitted
+    );
+    let mut changed = binding.clone();
+    changed.root_generation = "changed-generation".into();
+    assert!(
+        physical::begin_bound_checked(
+            &root.0,
+            physical_request(winning.clone(), true),
+            &changed,
+            &stop,
+            deadline(),
+            |_, _| Ok(())
+        )
+        .is_err()
+    );
+    let call = PhysicalCall::new(&winning.call_id).unwrap();
+    resources::fence(&root.0, &binding, &call, &stop, deadline()).unwrap();
+    let acknowledgement = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    root.write(usage::RECEIPTS, b"");
+    assert!(
+        resources::fence(&root.0, &binding, &call, &stop, deadline()).is_err(),
+        "ready intent cannot replace its missing usage acknowledgement"
+    );
+    let mut changed_ordinal = oms_json::parse_strict(&acknowledgement).unwrap();
+    changed_ordinal
+        .as_object_mut()
+        .unwrap()
+        .insert("ordinal".into(), oms_json::Value::integer("9").unwrap());
+    let mut changed_ordinal = oms_json::session_call_key_json_bytes(&changed_ordinal).unwrap();
+    changed_ordinal.push(b'\n');
+    root.write(usage::RECEIPTS, &changed_ordinal);
+    assert!(resources::fence(&root.0, &binding, &call, &stop, deadline()).is_err());
+    root.write(usage::RECEIPTS, &acknowledgement);
+    let foreign = cleanup("call_foreign", Scope::ProcessGroup);
+    assert!(
+        resources::settle_execution(&root.0, &binding, &call, &foreign, 1, &stop, deadline())
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        admitted
+    );
+    let receipt_bytes = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let proof = cleanup(&winning.call_id, Scope::ProcessGroup);
+    resources::settle_execution(&root.0, &binding, &call, &proof, 1, &stop, deadline()).unwrap();
+    assert_eq!(
+        std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(),
+        receipt_bytes
+    );
+    let settled = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    resources::settle_execution(&root.0, &binding, &call, &proof, 1, &stop, deadline()).unwrap();
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        settled
+    );
+    let total = resources::occupancy(&root.0, &stop).unwrap().unwrap();
+    assert_eq!(
+        (total.invocations, total.open_processes, total.write_wip),
+        (0, 0, 1)
+    );
+    assert!(
+        physical::begin_bound_checked(
+            &root.0,
+            physical_request(identity("call_new_writer"), true),
+            &binding,
+            &stop,
+            deadline(),
+            |_, _| Ok(())
+        )
+        .is_err()
+    );
+    let retry = Identity {
+        call_id: "call_same_operation_retry".into(),
+        ..winning.clone()
+    };
+    physical::begin_bound_checked(
+        &root.0,
+        physical_request(retry.clone(), true),
+        &binding,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        resources::occupancy(&root.0, &stop)
+            .unwrap()
+            .unwrap()
+            .write_wip,
+        1
+    );
+    resources::hold(&root.0, &policy.sha256().unwrap(), &stop, deadline()).unwrap();
+    assert_eq!(
+        resources::fence(
+            &root.0,
+            &binding,
+            &PhysicalCall::new(&retry.call_id).unwrap(),
+            &stop,
+            deadline()
+        )
+        .unwrap_err()
+        .exit_code(),
+        75
+    );
+    assert!(!resources::snapshot(&root.0, &stop).unwrap().unwrap().active);
+    assert!(
+        physical::begin_bound_checked(
+            &root.0,
+            physical_request(identity("call_held"), false),
+            &binding,
+            &stop,
+            deadline(),
+            |_, _| Ok(())
+        )
+        .is_err()
+    );
+    let proof = cleanup(&retry.call_id, Scope::ProcessGroup);
+    resources::settle_execution(
+        &root.0,
+        &binding,
+        &PhysicalCall::new(&retry.call_id).unwrap(),
+        &proof,
+        1,
+        &stop,
+        deadline(),
+    )
+    .unwrap();
+    assert_eq!(
+        resources::occupancy(&root.0, &stop)
+            .unwrap()
+            .unwrap()
+            .invocations,
+        0
+    );
+
+    let sessions = Temp::private();
+    let session_policy = Policy {
+        max_invocations: 2,
+        ..policy.clone()
+    };
+    resources::activate(&sessions.0, &session_policy, None, &stop, deadline()).unwrap();
+    let session_binding = Binding {
+        policy_sha256: session_policy.sha256().unwrap(),
+        persistent_session: true,
+        ..legacy.clone()
+    };
+    let session_id = identity("call_persistent");
+    physical::begin_bound_checked(
+        &sessions.0,
+        physical_request(session_id.clone(), false),
+        &session_binding,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    let proof = cleanup(&session_id.call_id, Scope::ProcessGroup);
+    resources::settle_execution(
+        &sessions.0,
+        &session_binding,
+        &PhysicalCall::new(&session_id.call_id).unwrap(),
+        &proof,
+        1,
+        &stop,
+        deadline(),
+    )
+    .unwrap();
+    let total = resources::occupancy(&sessions.0, &stop).unwrap().unwrap();
+    assert_eq!((total.invocations, total.open_processes), (0, 1));
+    assert!(
+        physical::begin_bound_checked(
+            &sessions.0,
+            physical_request(identity("call_open_cap"), false),
+            &session_binding,
+            &stop,
+            deadline(),
+            |_, _| Ok(())
+        )
+        .is_err()
+    );
+
+    let strict = Temp::private();
+    resources::activate(&strict.0, &policy, None, &stop, deadline()).unwrap();
+    let strict_binding = Binding {
+        cleanup_scopes: vec![Scope::WholeTree],
+        ..legacy.clone()
+    };
+    let strict_id = identity("call_narrow_proof");
+    physical::begin_bound_checked(
+        &strict.0,
+        physical_request(strict_id.clone(), false),
+        &strict_binding,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    let proof = cleanup(&strict_id.call_id, Scope::ProcessGroup);
+    assert!(
+        resources::settle_execution(
+            &strict.0,
+            &strict_binding,
+            &PhysicalCall::new(&strict_id.call_id).unwrap(),
+            &proof,
+            1,
+            &stop,
+            deadline()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        resources::occupancy(&strict.0, &stop)
+            .unwrap()
+            .unwrap()
+            .invocations,
+        1
+    );
+
+    for only_receipt in [false, true] {
+        let old = Temp::private();
+        if only_receipt {
+            usage::begin(&old.0, identity("call_old_receipt"), None, &stop).unwrap();
+        } else {
+            physical::begin(
+                &old.0,
+                identity("call_old_main"),
+                None,
+                true,
+                &stop,
+                deadline(),
+            )
+            .unwrap();
+        }
+        let old_registry = dispatch::read_snapshot(&old.0, &stop).unwrap();
+        let old_usage = std::fs::read(old.0.join(usage::RECEIPTS)).unwrap();
+        assert!(
+            resources::activate(&old.0, &policy, old_registry.as_deref(), &stop, deadline())
+                .is_err()
+        );
+        assert_eq!(
+            dispatch::read_snapshot(&old.0, &stop).unwrap(),
+            old_registry
+        );
+        assert_eq!(
+            std::fs::read(old.0.join(usage::RECEIPTS)).unwrap(),
+            old_usage
+        );
+    }
+}
+
+#[test]
+fn resource_partial_registration_and_reviewer_headroom_keep_liability() {
+    use oms_command_telemetry::store::{
+        dispatch,
+        physical::{self, Registration},
+        resources::{self, Policy},
+    };
+    use oms_lock::{Lock, Mode, Settings};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+    let stop = AtomicBool::new(false);
+    let deadline = || Instant::now() + Duration::from_secs(3);
+    let policy = resource_policy();
+    let binding = resource_binding(&policy);
+    assert_eq!(Policy::parse(&policy.to_json().unwrap()).unwrap(), policy);
+    let unsupported = String::from_utf8(policy.to_json().unwrap())
+        .unwrap()
+        .replace("repository-host-local-observed", "provider-account-global");
+    assert!(Policy::parse(unsupported.as_bytes()).is_err());
+    assert!(
+        Policy {
+            max_invocations: 0,
+            ..policy.clone()
+        }
+        .sha256()
+        .is_err()
+    );
+    let root = Temp::private();
+    assert!(resources::activate(&root.0, &policy, None, &stop, Instant::now()).is_err());
+    assert!(
+        resources::activate(&root.0, &policy, None, &AtomicBool::new(true), deadline()).is_err()
+    );
+    assert!(!root.0.join(dispatch::REGISTRY).exists());
+    resources::activate(&root.0, &policy, None, &stop, deadline()).unwrap();
+    root.write(usage::RECEIPTS, b"");
+    std::fs::set_permissions(
+        root.0.join(".oms/usage"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        root.0.join(usage::RECEIPTS),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let target = oms_command_telemetry::store::canonical_index(
+        &root.0,
+        Some(Path::new(usage::RECEIPTS)),
+        false,
+        false,
+    )
+    .unwrap();
+    let mut settings = Settings::from_env().unwrap();
+    settings.mode = Mode::LegacyAuto;
+    let held = Lock::for_file(&target, settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    let request = || physical_request(identity("call_partial_resource"), false);
+    let failed = physical::begin_bound_checked(
+        &root.0,
+        request(),
+        &binding,
+        &stop,
+        Instant::now() + Duration::from_millis(70),
+        |_, _| Ok(()),
+    )
+    .unwrap_err();
+    assert!(failed.publication_uncertain);
+    assert_eq!(
+        physical::load(&root.0, &stop).unwrap()[0].phase,
+        physical::Phase::Reserved
+    );
+    assert_eq!(
+        resources::occupancy(&root.0, &stop)
+            .unwrap()
+            .unwrap()
+            .invocations,
+        1
+    );
+    assert!(usage::load(&root.0).unwrap().calls.is_empty());
+    drop(held);
+    let partial = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    assert!(matches!(
+        physical::begin_bound_checked(
+            &root.0,
+            request(),
+            &binding,
+            &stop,
+            deadline(),
+            |_, _| panic!("partial replay cannot resend")
+        ),
+        Ok(Registration::Existing {
+            phase: physical::Phase::Reserved,
+            receipt: None
+        })
+    ));
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        partial
+    );
+    assert!(
+        physical::begin_bound_checked(
+            &root.0,
+            physical_request(identity("call_after_partial"), false),
+            &binding,
+            &stop,
+            deadline(),
+            |_, _| Ok(())
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        partial
+    );
+
+    let reviews = Temp::private();
+    let policy = Policy {
+        max_invocations: 2,
+        max_open_processes: 2,
+        reviewer_headroom: 1,
+        ..policy.clone()
+    };
+    let binding = resource_binding(&policy);
+    resources::activate(&reviews.0, &policy, None, &stop, deadline()).unwrap();
+    let Registration::New(receipt) = physical::begin_bound_checked(
+        &reviews.0,
+        physical_request(identity("call_worker"), false),
+        &binding,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap() else {
+        panic!("worker admission");
+    };
+    let mut final_ = observe(receipt, 1, 0, Cost::Unknown);
+    final_.cleanup_complete = Some(true);
+    usage::record(&reviews.0, &final_, &stop).unwrap();
+    assert_eq!(
+        resources::occupancy(&reviews.0, &stop)
+            .unwrap()
+            .unwrap()
+            .invocations,
+        1,
+        "a usage boolean cannot release a resource claim"
+    );
+    let exhausted = physical::begin_bound_checked(
+        &reviews.0,
+        physical_request(identity("call_worker_overflow"), false),
+        &binding,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(exhausted.exit_code(), 3);
+    let reviewer = resources::Binding {
+        reviewer: true,
+        ..binding.clone()
+    };
+    physical::begin_bound_checked(
+        &reviews.0,
+        physical_request(identity("call_reviewer"), false),
+        &reviewer,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        resources::occupancy(&reviews.0, &stop)
+            .unwrap()
+            .unwrap()
+            .invocations,
+        2
+    );
+    assert!(
+        physical::begin_bound_checked(
+            &reviews.0,
+            physical_request(identity("call_reviewer_overflow"), false),
+            &reviewer,
+            &stop,
+            deadline(),
+            |_, _| Ok(())
+        )
+        .is_err()
+    );
+
+    let racing = Temp::private();
+    let barrier = Arc::new(Barrier::new(3));
+    let (activation, receipt) = std::thread::scope(|scope| {
+        let repo = &racing.0;
+        let policy = &policy;
+        let stop = &stop;
+        let start = barrier.clone();
+        let activate = scope.spawn(move || {
+            start.wait();
+            resources::activate(repo, policy, None, stop, deadline())
+        });
+        let start = barrier.clone();
+        let receipt = scope.spawn(move || {
+            start.wait();
+            usage::begin(repo, identity("call_racing_receipt"), None, stop)
+        });
+        barrier.wait();
+        (activate.join().unwrap(), receipt.join().unwrap())
+    });
+    assert_ne!(
+        activation.is_ok(),
+        receipt.is_ok(),
+        "activation and direct receipt must serialize"
+    );
+    if activation.is_ok() {
+        assert!(usage::load(&racing.0).unwrap().calls.is_empty());
+        assert_eq!(
+            resources::occupancy(&racing.0, &stop)
+                .unwrap()
+                .unwrap()
+                .invocations,
+            0
+        );
+    } else {
+        assert!(resources::snapshot(&racing.0, &stop).unwrap().is_none());
+        assert_eq!(usage::load(&racing.0).unwrap().calls.len(), 1);
+    }
+}
+
 #[test]
 fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let root = Temp::new();
