@@ -75,3 +75,14 @@ The view projects at most 64 Teams, 32 members per Team, 512 physical intents an
 Plain output and the existing Reader sanitize terminal text and redact content.
 The default panel layout, refresh, keys and actions remain unchanged. TM-06B
 controls and TM-06C live-refresh/I/O calibration are separate work.
+
+`oms panel --routes` preserves its existing JSON output, including with `--json`.
+With `OMS_PANEL_READER_BOARD` and a foreground TTY, the non-JSON request opens the
+existing Reader as a proposed-route inspector. `--json` always bypasses the
+Reader. It displays the existing chosen snapshot: configured/requested/resolved
+and unreported served identity, requested/selected/applied effort, account pin,
+and catalog/capability source and reported ages. Missing evidence remains unknown;
+reported age alone proves neither freshness nor account entitlement. Billing,
+entitlement and quota remain unknown without a source. The view performs no
+launch, approval, fallback, catalog refresh or model call. Default calls and
+non-TTY output retain their existing behavior.

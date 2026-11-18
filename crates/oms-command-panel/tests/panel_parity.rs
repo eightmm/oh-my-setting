@@ -911,9 +911,57 @@ fn routing_accepts_present_provider_catalog() {
             &services,
         )
     };
-    let (code, out, err) = run(&["--routes"]);
+    let proof = std::env::var("OMS_ROUTE_READER_PROOF").ok();
+    let (code, out, err) = run(if proof.as_deref() == Some("json") {
+        &["--routes", "--json"]
+    } else {
+        &["--routes"]
+    });
     assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&err));
+    if proof.as_deref() == Some("tty") {
+        assert!(out.is_empty() && err.is_empty());
+        assert!(!repo.path().join(".oms").exists());
+        assert!(services.native_seen.borrow().iter().all(|(command, args)| {
+            (*command == NativeCommand::ProviderCatalog && args == &os(&["--json"]))
+                || (*command == NativeCommand::Events && args == &os(&["list", "--json"]))
+        }));
+        println!("route-reader-proof: read-only TTY completed");
+        return;
+    }
     let rt: Value = serde_json::from_slice(&out).unwrap();
+    let mut expected = serde_json::to_vec_pretty(&rt).unwrap();
+    expected.push(b'\n');
+    assert_eq!(out, expected, "legacy JSON byte formatting changed");
+    assert_eq!(
+        rt.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "schema",
+            "main",
+            "tiers",
+            "roles",
+            "tie_band",
+            "auto_review",
+            "council",
+            "writers",
+            "kinds",
+            "owner",
+            "chosen"
+        ]
+        .into()
+    );
+    assert!(
+        !repo.path().join(".oms").exists(),
+        "route preview wrote state"
+    );
+    if proof.as_deref() == Some("json") {
+        assert!(err.is_empty());
+        println!("route-reader-proof: JSON bypassed TTY reader");
+        return;
+    }
     assert!(rt["chosen"]["builder"]["provider"].is_string());
     let snapshot = &rt["chosen"]["builder"]["snapshot"];
     assert_eq!(snapshot["schema"], 1);
@@ -938,6 +986,122 @@ fn routing_accepts_present_provider_catalog() {
             .count(),
         1
     );
+    let rendered = render::routes(&rt, 120);
+    assert!(rendered.contains("Proposed routes (read only)"));
+    assert!(rendered.contains("served unknown") && rendered.contains("applied/served unknown"));
+    assert!(rendered.contains("reported age 86401 seconds"));
+    assert!(rendered.contains("reported probe age 172801 seconds"));
+    assert!(rendered.contains("Exact effort support: unknown"));
+    assert!(rendered.contains("Entitlement: unknown · billing: unknown · quota: unknown"));
+    assert!(rendered.contains("endpoint unknown"));
+    let envelope = json!({"kind":"oms-panel-routes","routes":rt});
+    let missing = repo.path().join("absent-reader-repository");
+    for width in 19..=200 {
+        let rendered = render::routes(&rt, width);
+        assert!(rendered.lines().all(|line| render::width(line) <= width));
+    }
+    for view in [
+        reader::View::Summary,
+        reader::View::Info,
+        reader::View::Raw,
+        reader::View::Events,
+        reader::View::Diff,
+        reader::View::Files,
+        reader::View::Transcript,
+    ] {
+        let mut reader = reader::Reader::default();
+        reader.view = view;
+        let lines = reader.render(&missing, &envelope, 40).unwrap();
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|line| render::width(line) <= 40));
+    }
+    let mut page = Vec::new();
+    let mut keys = [Key::Char('i'), Key::Char('r'), Key::Char('q')].into_iter();
+    reader::page_with(
+        &missing,
+        &envelope,
+        &mut |_| Ok(vec![keys.next().unwrap()]),
+        &mut page,
+        &|| (80, 20),
+        false,
+        &STOP,
+    )
+    .unwrap();
+    let page = String::from_utf8(page).unwrap();
+    assert!(page.contains("OMS Reader") && page.contains("Proposed routes"));
+    assert!(
+        !page.contains(char::from(27)),
+        "plain reader emitted terminal escapes"
+    );
+    assert!(!missing.exists() && !repo.path().join(".oms").exists());
+
+    let mut evidence = rt.clone();
+    evidence["chosen"] = json!({"builder": rt["chosen"]["builder"]});
+    let snapshot = &mut evidence["chosen"]["builder"]["snapshot"];
+    snapshot["configured"]["model"] = "configured-model".into();
+    snapshot["requested_model"] = "requested-model".into();
+    snapshot["resolved"]["model"] = "resolved-model".into();
+    snapshot["requested_effort"] = "low".into();
+    snapshot["resolved"]["effort"] = "medium".into();
+    snapshot["requested_account"] = "requested-seat".into();
+    snapshot["selected_account"] = "selected-seat".into();
+    snapshot["account_pinned"] = true.into();
+    snapshot["capabilities"]["effort_support"] = "reported_supported".into();
+    snapshot["capabilities"]["exact_model_efforts"] = json!(["low", "medium"]);
+    let rendered = render::routes(&evidence, 200);
+    for expected in [
+        "configured configured-model",
+        "requested requested-model",
+        "resolved resolved-model",
+        "requested low",
+        "selected medium",
+        "applied/served unknown",
+        "requested requested-seat",
+        "selected selected-seat",
+        "pinned true",
+        "Exact effort support: reported_supported",
+        "exact model values: low, medium",
+    ] {
+        assert!(rendered.contains(expected), "{expected}: {rendered}");
+    }
+    evidence["chosen"]["builder"]["snapshot"]["capabilities"]["effort_support"] =
+        "reported_unsupported".into();
+    assert!(render::routes(&evidence, 200).contains("Exact effort support: reported_unsupported"));
+    evidence["chosen"]["builder"]["snapshot"] = Value::Null;
+    assert!(
+        render::routes(&evidence, 200)
+            .contains("Catalog models: unknown · resolved present unknown")
+    );
+    let untrusted = format!(
+        "검증{}[2J{}결합 {}",
+        char::from(27),
+        char::from_u32(0x202e).unwrap(),
+        concat!("ghp", "_1234567890abcdef1234567890abcdef1234")
+    );
+    evidence["chosen"]["builder"] = json!({"error":untrusted});
+    let envelope = json!({"kind":"oms-panel-routes","routes":evidence});
+    for view in [reader::View::Summary, reader::View::Raw, reader::View::Info] {
+        let mut reader = reader::Reader::default();
+        reader.view = view;
+        let rendered = reader.render(&missing, &envelope, 40).unwrap().join("\n");
+        assert!(
+            !rendered.contains(char::from(27))
+                && !rendered.contains(char::from_u32(0x202e).unwrap())
+        );
+        assert!(!rendered.contains(concat!("ghp", "_")));
+    }
+    assert_eq!(
+        services
+            .native_seen
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == NativeCommand::ProviderCatalog)
+            .count(),
+        1,
+        "rendering queried the provider"
+    );
+    assert!(!repo.path().join(".oms").exists());
+
     let (code, out, err) = run(&[
         "--dispatch",
         "worker",

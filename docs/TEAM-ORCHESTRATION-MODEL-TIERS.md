@@ -22,6 +22,14 @@ Family 문자열은 identifier-derived/unverified이며 composite/fanout은 unkn
 이는 MR-A의 로컬 fixture 구현 범위다. MR-B의 공유 예산·과금 승인 전체, MR-C UI 전체,
 MR-D 평가·기본값 승격, 실제 provider capability 검증의 완료를 뜻하지 않는다.
 
+MR-C의 제한된 읽기 구현: `OMS_PANEL_READER_BOARD`와 foreground TTY에서
+`panel --routes`는 기존 Reader의 proposed-route inspector를 연다. 기존 JSON과
+`--json` 우선 동작은 보존한다. MR-A chosen snapshot의 identity/effort/account와
+catalog 출처·보고된 나이·exact effort evidence만 표시하며, 실제 실행·승인·served·
+과금/entitlement/quota를 추정하지 않는다. 화면 열람은 refresh나 model call을 만들지
+않는다. 이는 [Panel adapter](../crates/oms-command-panel/README.md)의 읽기 범위이며,
+MR-C의 전체 controls/attribution이나 MR-B 자격·과금 검증 완료를 뜻하지 않는다.
+
 ## 1. 현재 구현과 제안의 경계
 
 정적 확인한 소스:

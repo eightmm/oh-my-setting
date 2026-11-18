@@ -800,6 +800,14 @@ fn routes_output(
         obj.insert("owner".into(), json!(owner));
         obj.insert("chosen".into(), Value::Object(chosen));
     }
+    if !options.has("json")
+        && std::env::var_os("OMS_PANEL_READER_BOARD").is_some()
+        && let Some(mut tty) = crate::input::TerminalInput::open()?
+    {
+        let report = json!({"kind":"oms-panel-routes","routes":base});
+        crate::reader::page(repo.unwrap_or(cwd), &report, &mut tty, stop)?;
+        return Ok((0, vec![], vec![]));
+    }
     output(base)
 }
 

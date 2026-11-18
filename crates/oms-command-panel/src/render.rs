@@ -1472,6 +1472,126 @@ pub fn value_lines(value: &Value, columns: usize) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Proposed route evidence from the existing selection snapshot, without live
+/// capability or billing inference. Unknown fields remain visibly unknown.
+pub fn routes(report: &Value, columns: usize) -> String {
+    let value = |v: &Value| {
+        v.as_str()
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .or_else(|| v.as_u64().map(|n| n.to_string()))
+            .or_else(|| v.as_bool().map(|v| v.to_string()))
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let values = |v: &Value| {
+        let items: Vec<_> = rows(v).iter().filter_map(Value::as_str).collect();
+        if items.is_empty() {
+            "unknown".into()
+        } else {
+            items.join(", ")
+        }
+    };
+    let mut lines = vec![
+        "OMS · Proposed routes (read only)".to_owned(),
+        "Selection preview; launch and approval require their existing checks.".into(),
+        "Reported source ages are not freshness or account entitlement proofs.".into(),
+        format!(
+            "Owner: {} · policy schema {}",
+            value(&report["owner"]),
+            value(&report["schema"])
+        ),
+    ];
+    if let Some(chosen) = report["chosen"].as_object() {
+        for (role, choice) in chosen {
+            lines.push(format!(
+                "# {role} · tier {}",
+                value(&report["roles"][role]["tier"])
+            ));
+            if let Some(error) = choice["error"].as_str() {
+                lines.push(format!("Unavailable: {error}"));
+                continue;
+            }
+            let snapshot = &choice["snapshot"];
+            lines.push(format!(
+                "Harness/provider: {} · family {} ({}) · execution profile {}",
+                value(&snapshot["resolved"]["provider"]),
+                value(&snapshot["model_family"]),
+                value(&snapshot["family_evidence"]),
+                value(&snapshot["execution_profile"])
+            ));
+            lines.push(format!(
+                "Model: configured {} · requested {} · resolved {} · served {}",
+                value(&snapshot["configured"]["model"]),
+                value(&snapshot["requested_model"]),
+                value(&snapshot["resolved"]["model"]),
+                value(&snapshot["served_model"])
+            ));
+            lines.push(format!(
+                "Effort: configured {} · requested {} · selected {} · applied/served {}",
+                value(&snapshot["configured"]["effort"]),
+                value(&snapshot["requested_effort"]),
+                value(&snapshot["resolved"]["effort"]),
+                value(&snapshot["served_effort"])
+            ));
+            lines.push(format!(
+                "Account: requested {} · selected {} · pinned {} · served {}",
+                value(&snapshot["requested_account"]),
+                value(&snapshot["selected_account"]),
+                value(&snapshot["account_pinned"]),
+                value(&snapshot["served_account"])
+            ));
+            let catalog = &snapshot["catalog"];
+            lines.push(format!(
+                "Catalog: source {} · probe {} · reported age {} seconds · read at {}",
+                value(&catalog["source"]),
+                value(&catalog["reported_probe"]),
+                value(&catalog["catalog_age_seconds"]),
+                value(&catalog["read_at"])
+            ));
+            lines.push(format!(
+                "Catalog models: {} · resolved present {} · account {} · endpoint {}",
+                value(&catalog["count"]),
+                value(&catalog["resolved_present"]),
+                value(&catalog["account_alias"]),
+                value(&catalog["endpoint"])
+            ));
+            let capabilities = &snapshot["capabilities"];
+            lines.push(format!(
+                "Capability source: {} · harness version {} · reported probe age {} seconds",
+                value(&capabilities["source"]),
+                value(&capabilities["harness_version"]),
+                value(&capabilities["probe_age_seconds"])
+            ));
+            lines.push(format!(
+                "Exact effort support: {} · exact model values: {}",
+                value(&capabilities["effort_support"]),
+                values(&capabilities["exact_model_efforts"])
+            ));
+            lines.push(format!(
+                "Effort mechanism: {} · provider-reported values: {}",
+                value(&capabilities["effort_mechanism"]),
+                values(&capabilities["provider_reported_efforts"])
+            ));
+            lines.push(format!(
+                "Capability account: {} · endpoint {}",
+                value(&capabilities["account_alias"]),
+                value(&capabilities["endpoint"])
+            ));
+            lines.push("Entitlement: unknown · billing: unknown · quota: unknown".into());
+            lines.push(format!(
+                "Policy digest: {} · snapshot schema {}",
+                value(&snapshot["policy_sha256"]),
+                value(&snapshot["schema"])
+            ));
+        }
+    } else {
+        lines.push("Proposed routes: unknown".into());
+    }
+    let safe = oms_panel_core::redact(lines.join("\n").as_bytes())
+        .unwrap_or_else(|_| "Route text withheld: redaction unavailable".into());
+    wrap(&safe, columns).join("\n") + "\n"
+}
+
 /// Optional Team inspector. The report contains observations, never actions.
 pub fn teams(report: &Value, columns: usize) -> String {
     let value = |v: &Value| {
