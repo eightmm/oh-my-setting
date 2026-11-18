@@ -173,24 +173,34 @@ fn attention(paths: &Paths, flag: &AtomicBool) -> Result<&'static str> {
     }
     Ok("ok")
 }
-fn fetch(paths: &Paths, reference: &str, fallback: bool, flag: &AtomicBool) -> Result<String> {
+fn fetch<'a>(
+    paths: &Paths,
+    reference: &'a str,
+    fallback: bool,
+    flag: &AtomicBool,
+) -> Result<(String, &'a str)> {
     r::git(
         &paths.source,
         &["fetch", "--quiet", "--prune", "--tags", "--", "origin"],
         flag,
     )?;
     if reference != "edge" {
-        for candidate in [
-            format!("refs/tags/{reference}^{{commit}}"),
-            format!("refs/remotes/origin/{reference}^{{commit}}"),
-            format!("{reference}^{{commit}}"),
-        ] {
+        let candidates = if reference.starts_with("refs/") {
+            vec![format!("{reference}^{{commit}}")]
+        } else {
+            vec![
+                format!("refs/tags/{reference}^{{commit}}"),
+                format!("refs/remotes/origin/{reference}^{{commit}}"),
+                format!("{reference}^{{commit}}"),
+            ]
+        };
+        for candidate in candidates {
             if let Ok(commit) = r::git(
                 &paths.source,
                 &["rev-parse", "--verify", "--quiet", &candidate],
                 flag,
             ) {
-                return Ok(commit);
+                return Ok((commit, reference));
             }
             r::check(flag)?;
         }
@@ -201,17 +211,97 @@ fn fetch(paths: &Paths, reference: &str, fallback: bool, flag: &AtomicBool) -> R
         }
     }
     r::git(&paths.source, &["remote", "set-head", "origin", "-a"], flag)?;
-    r::git(
+    let target = r::git(
         &paths.source,
         &["rev-parse", "--verify", "refs/remotes/origin/HEAD^{commit}"],
         flag,
-    )
+    )?;
+    Ok((target, "edge"))
 }
 pub(crate) fn run(
     paths: &Paths,
     options: &Options,
     flag: &AtomicBool,
     services: &dyn crate::Services,
+) -> Result<crate::Output> {
+    run_selected(paths, options, flag, services, None)
+}
+
+#[derive(Clone, Copy)]
+struct ReviewedRelease<'a> {
+    channel: crate::ReleaseChannel,
+    reference: &'a str,
+    target: &'a str,
+}
+
+pub(crate) fn release(
+    paths: &Paths,
+    channel: crate::ReleaseChannel,
+    target: &str,
+    selected_ref: &str,
+    no_tools: bool,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<crate::Output> {
+    if target.len() != 40 || !target.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return r::fail("release target must be a full lowercase commit id");
+    }
+    let reference = match channel {
+        crate::ReleaseChannel::Stable => target.to_owned(),
+        crate::ReleaseChannel::Edge => match selected_ref {
+            "origin/HEAD" | "refs/remotes/origin/HEAD" => "edge".into(),
+            // Preserve the selected branch namespace even if a same-name tag
+            // exists now or is added before a later scheduled update.
+            reference if reference.starts_with("origin/") => {
+                format!("refs/remotes/{reference}")
+            }
+            reference if reference.starts_with("refs/") => reference.to_owned(),
+            reference => {
+                let symbolic = r::git(
+                    &paths.source,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--symbolic-full-name",
+                        "--end-of-options",
+                        reference,
+                    ],
+                    flag,
+                )?;
+                // Local branches and tags retain their namespace. A detached
+                // revision expression is an explicit selection of this SHA.
+                if symbolic.is_empty() {
+                    target.to_owned()
+                } else {
+                    symbolic
+                }
+            }
+        },
+    };
+    let mut args = vec!["--ref".into(), reference.as_str().into()];
+    if no_tools {
+        args.push("--no-tools".into());
+    }
+    let options = crate::cli::parse("update", &args)?;
+    run_selected(
+        paths,
+        &options,
+        flag,
+        services,
+        Some(ReviewedRelease {
+            channel,
+            reference: &reference,
+            target,
+        }),
+    )
+}
+
+fn run_selected(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+    reviewed: Option<ReviewedRelease<'_>>,
 ) -> Result<crate::Output> {
     if options.tool == "auto-update" {
         match options.action.as_str() {
@@ -278,8 +368,9 @@ pub(crate) fn run(
         return crate::agy_surface::probe(paths, flag);
     }
     let old = paths.require_owner()?;
-    let reference = options
-        .get("--ref")
+    let reference = reviewed
+        .map(|r| r.reference)
+        .or_else(|| options.get("--ref"))
         .map(str::to_owned)
         .or_else(|| {
             old.as_ref()
@@ -309,7 +400,7 @@ pub(crate) fn run(
     let check = options.has("--check")
         || options.tool == "auto-update" && options.action != "apply" && !options.has("--apply");
     if !check {
-        let result = apply_update(paths, options, flag, services, &reference);
+        let result = apply_update(paths, options, flag, services, &reference, reviewed);
         if options.tool == "auto-update"
             && let Err(error) = &result
         {
@@ -338,15 +429,16 @@ pub(crate) fn run(
     let file = file.join("FETCH_HEAD");
     let _fetch_guard = r::lock(&file, &paths.cwd)?;
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
-    let target = match fetch(paths, &reference, options.has("--fallback-to-edge"), flag) {
-        Ok(target) => target,
-        Err(error) => {
-            if options.tool == "auto-update" {
-                publish(paths, "failed", &current, "", &reference)?;
+    let (target, reference) =
+        match fetch(paths, &reference, options.has("--fallback-to-edge"), flag) {
+            Ok(target) => target,
+            Err(error) => {
+                if options.tool == "auto-update" {
+                    publish(paths, "failed", &current, "", &reference)?;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
     if target.len() != 40 || !target.bytes().all(|b| b.is_ascii_hexdigit()) {
         return r::fail("invalid fetched update commit");
     }
@@ -361,7 +453,7 @@ pub(crate) fn run(
             },
             &current,
             &target,
-            &reference,
+            reference,
         )?;
     }
     if options.has("--json") {
@@ -666,6 +758,7 @@ fn apply_update(
     flag: &AtomicBool,
     services: &dyn crate::Services,
     reference: &str,
+    reviewed: Option<ReviewedRelease<'_>>,
 ) -> Result<crate::Output> {
     use crate::{IncomingPhase as Phase, transaction::Transaction};
     r::child_guard()?;
@@ -706,15 +799,22 @@ fn apply_update(
         paths.source.join(common)
     };
     let _fetch = r::lock(&common.join("FETCH_HEAD"), &paths.cwd)?;
-    let target = if options.has("--rollback") {
-        old["previous_commit"]
+    let (target, reference) = if options.has("--rollback") {
+        let target = old["previous_commit"]
             .as_str()
             .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
             .ok_or_else(|| r::Error(2, "install receipt has no rollback commit".into()))?
-            .to_owned()
+            .to_owned();
+        (target, reference)
     } else {
         fetch(paths, reference, options.has("--fallback-to-edge"), flag)?
     };
+    if reviewed.is_some_and(|r| r.target != target) {
+        return Err(r::Error(
+            75,
+            "update target changed after release resolution; resolve the channel again".into(),
+        ));
+    }
     let resolved = r::git(
         &paths.source,
         &["rev-parse", "--verify", &format!("{target}^{{commit}}")],
@@ -728,6 +828,12 @@ fn apply_update(
     }
     let mut target = target;
     if let Ok(selected) = std::env::var("OH_MY_SETTING_UPDATE_TARGET_COMMIT") {
+        if reviewed.is_some_and(|r| r.target != selected) {
+            return Err(r::Error(
+                75,
+                "selected update target differs from reviewed release".into(),
+            ));
+        }
         if !std::env::var("OH_MY_SETTING_UPDATE_EXPECTED_TARGET").is_ok_and(|s| !s.is_empty())
             || selected.len() != 40
             || !selected.bytes().all(|b| b.is_ascii_hexdigit())
@@ -751,7 +857,10 @@ fn apply_update(
         }
         target = selected;
     }
-    if options.tool == "auto-update" && !options.has("--rollback") {
+    if (options.tool == "auto-update"
+        || reviewed.is_some_and(|r| r.channel == crate::ReleaseChannel::Edge))
+        && !options.has("--rollback")
+    {
         r::git(
             &paths.source,
             &["merge-base", "--is-ancestor", &current, &target],

@@ -6,11 +6,31 @@ use crate::{Result, require, status as failure};
 pub fn manifest(rt: &Runtime<'_>) -> Result<Value> {
     let store = oms_command_plan::storage::Store::open(&rt.install_root)?
         .with_group_resolver(rt.services.group_resolver());
-    let default=parse(br#"{"schema":1,"channels":{"stable":{"version":"0.4.0","ref":"fa1e9e2cf66ee8b9a5adb642a5ef766c1381db9b","auto_apply":false,"policy":"pinned reviewed commit"},"edge":{"version":"edge","ref":"main","auto_apply":false,"policy":"clean fast-forward development channel"}}}"#)?;
-    let raw = match store.optional("config/update-channels.json", crate::storage::MAX_STATE)? {
-        Some(v) => parse(&v)?,
-        None => default,
+    let Some(raw) = store.optional("config/update-channels.json", crate::storage::MAX_STATE)? else {
+        // A missing manifest has no reviewed stable promotion. Only this
+        // synthetic default may be unconfigured; persisted manifests still
+        // require both channel refs before they can authorize an update.
+        return parse(
+            br#"{
+                "schema": 1,
+                "channels": {
+                    "stable": {
+                        "version": null,
+                        "ref": null,
+                        "auto_apply": false,
+                        "policy": "unconfigured; requires explicit stable promotion"
+                    },
+                    "edge": {
+                        "version": "edge",
+                        "ref": "origin/HEAD",
+                        "auto_apply": false,
+                        "policy": "follow the origin default branch"
+                    }
+                }
+            }"#,
+        );
     };
+    let raw = parse(&raw)?;
     require(
         raw.get("schema").is_int(1) && raw.get("channels").object().is_ok(),
         "invalid update channel manifest",
@@ -29,7 +49,7 @@ pub fn resolve(rt: &Runtime<'_>, channel: &str, fetch: bool) -> Result<Value> {
         "channel must be stable or edge",
     )?;
     let m = manifest(rt)?;
-    if fetch {
+    if fetch && !m.get("channels").get(channel).text("ref").is_empty() {
         rt.parent_write()?;
         rt.services.fetch_release(&rt.install_root)?;
     }
@@ -44,9 +64,12 @@ fn resolve_with(
 ) -> Result<Value> {
     let row = m.get("channels").get(channel);
     let reference = row.text("ref");
-    let mut candidates = vec![reference.to_owned()];
-    if channel == "edge" && !reference.starts_with("origin/") {
-        candidates.insert(0, format!("origin/{reference}"));
+    let mut candidates = Vec::new();
+    if !reference.is_empty() {
+        if channel == "edge" && !reference.starts_with("origin/") {
+            candidates.push(format!("origin/{reference}"));
+        }
+        candidates.push(reference.to_owned());
     }
     let (mut resolved, mut selected) = (String::new(), String::new());
     for candidate in candidates {
@@ -63,7 +86,7 @@ fn resolve_with(
     Ok(object([
         ("schema", number(1)),
         ("channel", string(channel)),
-        ("configured_ref", string(reference)),
+        ("configured_ref", optional(reference)),
         ("selected_ref", optional(&selected)),
         ("resolved_commit", optional(&resolved)),
         ("ready", b(!resolved.is_empty())),
@@ -76,6 +99,8 @@ fn resolve_with(
             "apply_command",
             if resolved.is_empty() {
                 Value::Null
+            } else if channel == "edge" {
+                string("oms runtime release apply edge")
             } else {
                 string(format!("oms update --ref {resolved}"))
             },
@@ -114,6 +139,7 @@ pub fn apply(
         &ReleaseRequest {
             channel: channel.into(),
             target: target.text("resolved_commit").into(),
+            selected_ref: target.text("selected_ref").into(),
             no_tools,
         },
     )?;

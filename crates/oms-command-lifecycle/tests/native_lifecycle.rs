@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use oms_command_lifecycle::{
-    IncomingPhase, IncomingSourceLease, Output, Services, UnavailableServices, run_with_services,
+    IncomingPhase, IncomingSourceLease, Output, ReleaseChannel, Services, UnavailableServices,
+    apply_release_with_services, run_with_services,
 };
 use serde_json::{Value, json};
 use std::{
@@ -270,7 +271,19 @@ impl Services for ColdUpdateHost {
 fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
         for case in [
-            "ok", "proof", "verify", "receipt", "cleanup", "crash", "foreign",
+            "ok",
+            "edge",
+            "fallback",
+            "offline",
+            "release-edge",
+            "release-custom",
+            "release-stable",
+            "proof",
+            "verify",
+            "receipt",
+            "cleanup",
+            "crash",
+            "foreign",
         ] {
             let root =
                 std::env::temp_dir().join(format!("oms-cold-update-{}-{case}", std::process::id()));
@@ -307,8 +320,17 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                 .env("OMS_LOCK_DIR", f.0.join("locks"))
                 .env("OMS_LIFECYCLE_UPDATE_FIXTURE", &f.0)
                 .env("OMS_COLD_CASE", case)
+                .env(
+                    "OH_MY_SETTING_AUTO_UPDATE_STATE",
+                    f.0.join("auto-update.status"),
+                )
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            if case == "offline" {
+                command
+                    .env("CARGO_NET_OFFLINE", "true")
+                    .env("OH_MY_SETTING_REF", "reviewed-tag");
+            }
             let out = command.output().unwrap();
             if matches!(case, "crash" | "foreign") {
                 assert_eq!(
@@ -351,6 +373,19 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
+            if case == "release-edge" {
+                let out = command
+                    .env("OMS_COLD_CASE", "release-override")
+                    .env("OH_MY_SETTING_UPDATE_TARGET_COMMIT", "0".repeat(40))
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
         }
         return;
     };
@@ -361,6 +396,30 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         phases: RefCell::new(vec![]),
     };
     let source = host.source();
+    if host.fail == "release-override" {
+        let state = read(&host.root.join("fixture-state.json"));
+        let prior = fs::read(host.receipt()).unwrap();
+        let flow = fs::read(host.root.join("flow")).unwrap();
+        let out = apply_release_with_services(
+            ReleaseChannel::Edge,
+            state["target"].as_str().unwrap(),
+            "origin/HEAD",
+            &source,
+            true,
+            &AtomicBool::new(false),
+            &host,
+        );
+        assert_eq!(out.0, 75);
+        assert!(String::from_utf8_lossy(&out.2).contains("differs from reviewed release"));
+        assert_eq!(
+            host.git(&source, &["rev-parse", "HEAD"]),
+            state["before"].as_str().unwrap()
+        );
+        assert_eq!(fs::read(host.receipt()).unwrap(), prior);
+        assert_eq!(fs::read(host.root.join("flow")).unwrap(), flow);
+        assert!(host.phases.borrow().is_empty());
+        return;
+    }
     if host.fail == "recover" {
         let state = read(&host.root.join("fixture-state.json"));
         host.before = state["before"].as_str().unwrap().into();
@@ -423,13 +482,28 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     host.git(&source, &["config", "user.name", "fixture"]);
     fs::write(source.join(".gitignore"), b"target/\n").unwrap();
     fs::write(source.join("VERSION"), b"old\n").unwrap();
+    fs::write(
+        source.join("rust-toolchain.toml"),
+        b"[toolchain]\nchannel = \"1.99.1\"\n",
+    )
+    .unwrap();
     fs::write(source.join("skills.manifest.json"), b"{\"skills\":[]}\n").unwrap();
     host.git(&source, &["add", "."]);
     host.git(&source, &["commit", "-qm", "old"]);
     host.before = host.git(&source, &["rev-parse", "HEAD"]);
     fs::write(source.join("VERSION"), b"incoming\n").unwrap();
+    fs::write(
+        source.join("rust-toolchain.toml"),
+        b"[toolchain]\nchannel = \"1.100.0\"\n",
+    )
+    .unwrap();
     host.git(&source, &["commit", "-qam", "incoming"]);
     let target = host.git(&source, &["rev-parse", "HEAD"]);
+    if host.fail == "release-custom" {
+        host.git(&source, &["branch", "development"]);
+        host.git(&source, &["tag", "development", &host.before]);
+        host.git(&source, &["commit", "--allow-empty", "-qm", "default ahead"]);
+    }
     let remote = host.root.join("origin.git");
     host.git(
         &source,
@@ -445,13 +519,52 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
     host.git(&source, &["reset", "--hard", &host.before]);
-    let receipt = json!({"schema":2,"source_root":source,"commit":host.before,"channel":"main",
+    if matches!(host.fail.as_str(), "ok" | "offline") {
+        // Fresh native installs follow edge even from a detached checkout;
+        // an explicit install environment still takes precedence.
+        let expected = if host.fail == "offline" {
+            "reviewed-tag"
+        } else {
+            "edge"
+        };
+        for channel in ["main", "detached"] {
+            if channel == "detached" {
+                host.git(&source, &["checkout", "--detach", &host.before]);
+            }
+            let plan: Value = serde_json::from_slice(&success(call(
+                "install",
+                &["--plan"],
+                &source,
+                &host,
+            )))
+            .unwrap();
+            assert_eq!(plan["install"]["ref"], expected);
+            assert_eq!(plan["install"]["channel"], channel);
+        }
+        host.git(&source, &["checkout", "main"]);
+    }
+    let mut receipt = json!({"schema":2,"source_root":source,"commit":host.before,"channel":"main",
         "version":"old","installed_at":"2026-11-18T00:00:00Z","plugin":{"name":"fixture","version":"old","sha256":"fixture"},
         "profile":"minimal","ref":"edge","previous_commit":"","link_mode":"copy","component_modes":{},"managed_targets":[],
         "components":{"tools":false,"claude_hooks":false,"codex_plugin":false,"auto_update":false,"machine_snapshot":false,"slurm_snapshot":false},
         "native":{"revision":host.before,"frontdoor":host.root.join("data/oh-my-setting/libexec").join(&host.before).join("oms-frontdoor")}});
+    if host.fail == "ok" {
+        receipt["ref"] = json!("reviewed-tag");
+    } else if host.fail == "fallback" {
+        receipt["ref"] = json!("removed-upstream-branch");
+    }
     write(&host.receipt(), &receipt);
     let prior = fs::read(host.receipt()).unwrap();
+    if host.fail == "ok" {
+        let plan: Value = serde_json::from_slice(&success(call(
+            "install",
+            &["--plan"],
+            &source,
+            &host,
+        )))
+        .unwrap();
+        assert_eq!(plan["install"]["ref"], "reviewed-tag");
+    }
     fs::create_dir_all(host.frontdoor().parent().unwrap()).unwrap();
     fs::write(host.frontdoor(), b"prior frontdoor").unwrap();
     let old_cache = source.join("target/oms-native").join(&host.before);
@@ -482,10 +595,20 @@ echo proof >> "$root/flow"
     let cargo = br##"#!/bin/sh
 set -eu
 root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
-[ "$1" = +1.99.1 ] && [ "$2" = build ] && [ "$3" = --manifest-path ]
-[ "$4" = "$root/incoming/Cargo.toml" ]
-expected="+1.99.1 build --manifest-path $4 --locked --offline --release --bin oms --bin oms-mcp-peer-owner --bin oms-run-bounded-helper --bin oms-state-queue-worker --bin oms-graph-python-helper --target-dir $root/incoming/target/lifecycle-build"
+[ "$1" = build ] && [ "$2" = --manifest-path ]
+[ "$3" = "$root/incoming/Cargo.toml" ]
+expected="build --manifest-path $3 --locked --release --bin oms --bin oms-mcp-peer-owner --bin oms-run-bounded-helper --bin oms-state-queue-worker --bin oms-graph-python-helper --target-dir $root/incoming/target/lifecycle-build"
 [ "$*" = "$expected" ]
+# The incoming checkout selects its own toolchain, including a version newer
+# than the updater's checkout. No command-line override can mask that file.
+[ "$(pwd -P)" = "$root/incoming" ]
+{ IFS= read -r section; IFS= read -r channel; } < rust-toolchain.toml
+[ "$section" = '[toolchain]' ] && [ "$channel" = 'channel = "1.100.0"' ]
+if [ "$OMS_COLD_CASE" = offline ]; then
+  [ "${CARGO_NET_OFFLINE:-}" = true ]
+else
+  [ "${CARGO_NET_OFFLINE+x}" != x ]
+fi
 mkdir -p "$root/incoming/target/lifecycle-build/release"
 for name in oms oms-mcp-peer-owner oms-run-bounded-helper oms-state-queue-worker oms-graph-python-helper; do
   cp "$root/bin/incoming" "$root/incoming/target/lifecycle-build/release/$name"
@@ -499,26 +622,142 @@ echo build >> "$root/flow"
         fs::Permissions::from_mode(0o700),
     )
     .unwrap();
-    let preview = call(
-        "update",
-        &["--ref", &target, "--plan", "--no-tools"],
-        &source,
-        &host,
-    );
+    let release_channel = match host.fail.as_str() {
+        "release-edge" | "release-custom" => Some(ReleaseChannel::Edge),
+        "release-stable" => Some(ReleaseChannel::Stable),
+        _ => None,
+    };
+    let follows_edge = matches!(host.fail.as_str(), "edge" | "fallback" | "release-edge");
+    let mut args = vec!["--no-tools"];
+    if host.fail == "fallback" {
+        // Missing explicit refs remain errors unless fallback was requested.
+        assert_ne!(call("update", &["--check", "--json"], &source, &host).0, 0);
+        args.push("--fallback-to-edge");
+    } else if !follows_edge {
+        args.extend(["--ref", target.as_str()]);
+    }
+    let mut preview_args = args.clone();
+    preview_args.push("--plan");
+    let preview = call("update", &preview_args, &source, &host);
     success(preview);
     assert!(!host.root.join("flow").exists());
-    let out = call("update", &["--ref", &target, "--no-tools"], &source, &host);
+    if follows_edge {
+        let mut check_args = args.clone();
+        check_args.extend(["--check", "--json"]);
+        let checked: Value = serde_json::from_slice(&success(call(
+            "update",
+            &check_args,
+            &source,
+            &host,
+        )))
+        .unwrap();
+        assert_eq!(checked["ref"], "edge");
+        assert_eq!(checked["target_commit"], target);
+        assert_eq!(checked["update_available"], true);
+        assert_eq!(fs::read(host.receipt()).unwrap(), prior);
+    }
+    if host.fail == "release-edge" {
+        let rejected = apply_release_with_services(
+            ReleaseChannel::Edge,
+            &host.before,
+            "origin/HEAD",
+            &source,
+            true,
+            &AtomicBool::new(false),
+            &host,
+        );
+        assert_eq!(
+            rejected.0, 75,
+            "a moved upstream must not change the reviewed target"
+        );
+        assert!(!host.root.join("flow").exists());
+        assert_eq!(fs::read(host.receipt()).unwrap(), prior);
+        host.git(&source, &["commit", "--allow-empty", "-qm", "local divergence"]);
+        let divergent = host.git(&source, &["rev-parse", "HEAD"]);
+        let rejected = apply_release_with_services(
+            ReleaseChannel::Edge,
+            &target,
+            "origin/HEAD",
+            &source,
+            true,
+            &AtomicBool::new(false),
+            &host,
+        );
+        assert_ne!(
+            rejected.0, 0,
+            "edge cannot replace a divergent local checkout"
+        );
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), divergent);
+        assert!(!host.root.join("flow").exists());
+        assert_eq!(fs::read(host.receipt()).unwrap(), prior);
+        host.git(&source, &["reset", "--hard", &host.before]);
+    }
+    let out = if let Some(channel) = release_channel {
+        apply_release_with_services(
+            channel,
+            &target,
+            if host.fail == "release-custom" {
+                "origin/development"
+            } else {
+                "origin/HEAD"
+            },
+            &source,
+            true,
+            &AtomicBool::new(false),
+            &host,
+        )
+    } else {
+        call("update", &args, &source, &host)
+    };
     assert_eq!(
         fs::read_to_string(host.root.join("flow")).unwrap(),
         "build\nproof\n"
     );
     assert!(host.root.join("lease-closed").is_file());
     let cache = source.join("target/oms-native").join(&target);
-    if host.fail == "ok" {
+    if follows_edge
+        || release_channel.is_some()
+        || matches!(host.fail.as_str(), "ok" | "offline")
+    {
         success(out);
         assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), target);
-        assert_eq!(host.git(&source, &["rev-parse", "main"]), host.before);
-        assert_eq!(read(&host.receipt())["previous_commit"], host.before);
+        assert_eq!(
+            host.git(&source, &["rev-parse", "main"]),
+            if follows_edge { &target } else { &host.before }.as_str()
+        );
+        let installed = read(&host.receipt());
+        assert_eq!(installed["previous_commit"], host.before);
+        let expected_ref = if follows_edge {
+            "edge"
+        } else if host.fail == "release-custom" {
+            "refs/remotes/origin/development"
+        } else {
+            &target
+        };
+        assert_eq!(installed["ref"], expected_ref);
+        assert_eq!(
+            installed["channel"],
+            if follows_edge { "main" } else { "detached" }
+        );
+        if follows_edge {
+            assert_eq!(
+                host.git(&source, &["symbolic-ref", "--short", "HEAD"]),
+                "main"
+            );
+        }
+        if follows_edge || host.fail == "release-custom" {
+            // The next scheduled check follows the persisted edge ref without
+            // another --fallback-to-edge flag or an explicit --ref override.
+            let checked: Value = serde_json::from_slice(&success(call(
+                "auto-update",
+                &["check", "--json"],
+                &source,
+                &host,
+            )))
+            .unwrap();
+            assert_eq!(checked["ref"], expected_ref);
+            assert_eq!(checked["update_available"], false);
+        }
         assert_eq!(
             *host.phases.borrow(),
             [
@@ -900,6 +1139,75 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
         }
     }
     fs::remove_dir(agy_plugin.parent().unwrap()).unwrap();
+
+    let releases = root.join("data/oh-my-setting/tool-releases.json");
+    assert!(!releases.exists());
+    let inspect_releases = || -> Value {
+        serde_json::from_slice(&success(call(
+            "doctor",
+            &["--tool-lock", "--json"],
+            source,
+            host,
+        )))
+        .unwrap()
+    };
+    let fingerprint = || -> Value {
+        serde_json::from_slice(&success(call("status", &["--fingerprint"], source, host)))
+            .unwrap()
+    };
+    let report = inspect_releases();
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["findings"][0]["level"], "info");
+    let missing = fingerprint();
+    assert_eq!(missing["digests"]["tools_lock"], "not configured");
+    assert_eq!(missing["digests"]["tool_releases"], "missing");
+    assert!(
+        !releases.exists(),
+        "diagnostics must not create release observations"
+    );
+
+    let observed = json!({
+        "schema":2,"resolved_at":"2026-11-18T00:00:00Z",
+        "node":{"version":"22.1.0","resolved_at":"2026-11-18T00:00:00Z",
+            "url":"https://example.invalid/node.tar.gz","sha256":"a".repeat(64)},
+        "npm":{"codex":{"version":"1.0.0","sha512":"b".repeat(128),
+            "integrity":format!("sha512-{}==", "A".repeat(86))}}
+    });
+    write(&releases, &observed);
+    assert_eq!(inspect_releases()["findings"][0]["level"], "ok");
+    let before = fingerprint();
+    let mut refreshed = observed.clone();
+    refreshed["resolved_at"] = json!("2026-11-19T00:00:00Z");
+    refreshed["node"]["resolved_at"] = json!("2026-11-19T00:00:00Z");
+    write(&releases, &refreshed);
+    assert_eq!(
+        fingerprint(), before,
+        "observation timestamps do not change installation identity"
+    );
+    refreshed["node"]["version"] = json!("22.2.0");
+    write(&releases, &refreshed);
+    let changed = fingerprint();
+    assert_ne!(changed["fingerprint"], before["fingerprint"]);
+    assert_ne!(
+        changed["digests"]["tool_releases"],
+        before["digests"]["tool_releases"]
+    );
+
+    for (field, malformed) in [
+        ("sha512", "b".repeat(127)),
+        ("sha512", "z".repeat(128)),
+        ("integrity", format!("sha512-{}==", "A".repeat(85))),
+        ("integrity", format!("sha512-{}==", "!".repeat(86))),
+    ] {
+        let mut invalid = observed.clone();
+        invalid["npm"]["codex"][field] = json!(malformed);
+        write(&releases, &invalid);
+        let out = call("doctor", &["--tool-lock", "--json"], source, host);
+        assert_ne!(out.0, 0, "malformed {field} must fail diagnostics");
+        assert!(String::from_utf8_lossy(&out.2).contains("invalid recorded"));
+    }
+    fs::remove_file(releases).unwrap();
+    assert_eq!(fingerprint(), missing);
 }
 
 #[test]

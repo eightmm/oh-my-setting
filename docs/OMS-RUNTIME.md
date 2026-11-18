@@ -483,7 +483,7 @@ Profiles:
 | `remote` | explicit `OMS_REMOTE_ADAPTER`; does not establish backend execution readiness |
 | `full` | compatibility profile for the former all-tools install |
 
-The agent-side installer reuses the existing locked tool installer:
+The agent-side installer reuses the existing verified tool installer:
 
 ```bash
 scripts/install-profile.sh --apply \
@@ -844,6 +844,8 @@ budget_exhausted        -> preserve partial state
 
 ```bash
 oms runtime release status
+oms runtime release resolve edge
+oms runtime release apply edge
 oms runtime release resolve stable
 oms runtime release apply stable
 oms runtime release promote \
@@ -852,12 +854,28 @@ oms runtime release promote \
   --expected-manifest-digest <reviewed-digest>
 ```
 
-`config/update-channels.json` distinguishes a pinned reviewed `stable` commit
-from a clean-fast-forward `edge` channel. The stable pin stays on the last
-reviewed commit until a maintainer promotes a later full CI-green commit with
-an exact manifest digest. Applying a channel delegates to the
-existing transactional `scripts/update.sh`. Promotion uses an exact manifest
-CAS and never silently auto-applies stable changes.
+`config/update-channels.json` distinguishes a reviewed `stable` commit from an
+`edge` channel that follows updates. The default edge ref is `origin/HEAD`, so
+it follows the remote's actual default branch without assuming its name is
+`main`. An explicitly configured custom edge ref remains the chosen update
+source. Applying edge uses the native update transaction, checks that the
+fetched target still matches the resolved commit and is a fast-forward, and
+preserves tracking for subsequent updates. Its suggested command is
+`oms runtime release apply edge`.
+
+Stable stays on the last explicitly promoted commit until a maintainer
+promotes another full commit with the exact reviewed manifest digest.
+Promotion uses a compare-and-swap check on that manifest and does not apply the
+release automatically. Applying stable retains the exact commit pin.
+
+When the manifest is absent, no stable release is invented: stable reports
+`configured_ref: null`, `version: null`, `ready: false`, and
+`apply_command: null`. Applying this unconfigured stable channel refuses
+without fetching or publishing an update. Runtime doctor reports its state
+inside the release view without treating the absence of an optional stable
+promotion as a failure. An explicitly configured stable ref that cannot be
+resolved locally still produces a doctor issue. Existing promotion history
+is preserved when a manifest is present.
 
 ## ExperimentContract v2
 

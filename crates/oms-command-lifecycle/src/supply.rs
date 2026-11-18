@@ -14,11 +14,63 @@ use std::{
     time::Duration,
 };
 const MAX: usize = 1024 * 1024 * 1024;
+pub(crate) const RELEASE_RECEIPT: &str = "tool-releases.json";
+
+fn catalog() -> Value {
+    json!({
+        "schema": 2,
+        "node": {"channel": "lts"},
+        "uv": {},
+        "gh": {},
+        "antigravity": {},
+        "npm": {
+            "claude": {"package": "@anthropic-ai/claude-code", "binary": "claude"},
+            "codex": {"package": "@openai/codex", "binary": "codex"},
+            "ntn": {"package": "ntn", "binary": "ntn"}
+        }
+    })
+}
+
+fn release_policy(cwd: &Path, custom: Option<&Path>) -> Result<Value> {
+    let table = match custom {
+        Some(path) => r::value(&cwd.join(path))?,
+        None => catalog(),
+    };
+    if table["schema"] != 2 {
+        return r::fail("unsupported tool lock schema");
+    }
+    Ok(table)
+}
+
+fn installed(paths: &Paths, name: &str) -> Option<PathBuf> {
+    r::find(name, &paths.cwd).or_else(|| {
+        let path = paths.home.join(".local/bin").join(name);
+        fs::metadata(&path)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .then_some(path)
+    })
+}
+
+fn tool_row<'a>(table: &'a Value, name: &str) -> &'a Value {
+    match name {
+        "claude" | "codex" | "ntn" => &table["npm"][name],
+        "agy" => &table["antigravity"],
+        _ => &table[name],
+    }
+}
+
+fn set_tool(table: &mut Value, name: &str, row: Value) {
+    match name {
+        "claude" | "codex" | "ntn" => table["npm"][name] = row,
+        "agy" => table["antigravity"] = row,
+        _ => table[name] = row,
+    }
+}
 fn scalar<'a>(v: &'a Value, name: &str) -> Result<&'a str> {
     v[name]
         .as_str()
         .filter(|s| !s.is_empty() && !s.contains(['\0', '\n', '\r']))
-        .ok_or_else(|| r::Error(2, format!("invalid tool lock field: {name}")))
+        .ok_or_else(|| r::Error(2, format!("invalid tool release field: {name}")))
 }
 fn version(value: &str) -> Result<()> {
     if !regex::Regex::new(r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
@@ -32,7 +84,7 @@ fn version(value: &str) -> Result<()> {
 fn https(url: &str) -> Result<()> {
     let rest = url
         .strip_prefix("https://")
-        .ok_or_else(|| r::Error(2, "locked download must use HTTPS".into()))?;
+        .ok_or_else(|| r::Error(2, "tool download must use HTTPS".into()))?;
     let host = rest.split('/').next().unwrap_or("");
     if host.is_empty()
         || host.contains(['@', ':', '?', '#'])
@@ -40,7 +92,7 @@ fn https(url: &str) -> Result<()> {
         || url.contains("${")
         || url.contains("latest")
     {
-        return r::fail("locked download must be an exact HTTPS URL");
+        return r::fail("tool download must be an exact HTTPS URL");
     }
     Ok(())
 }
@@ -101,7 +153,7 @@ fn checksum(path: &Path, algorithm: &str, expected: &str) -> Result<()> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         || actual != expected
     {
-        return r::fail("locked tool checksum mismatch");
+        return r::fail("tool payload checksum mismatch");
     }
     Ok(())
 }
@@ -491,35 +543,28 @@ pub(crate) fn install(
     if selected.is_empty() {
         return Ok(());
     }
-    let lock_file = std::env::var_os("OH_MY_SETTING_TOOL_LOCK")
-        .map(PathBuf::from)
-        .unwrap_or(paths.source.join("tools.lock.json"));
-    let mut lock = r::value(&lock_file)?;
-    if lock["schema"] != 2 {
-        return r::fail("unsupported tool lock schema");
-    }
-    latest(paths, &mut lock, selected, tx, flag)?;
-    let host = platform()?;
-    let scratch = r::Scratch::new()?;
-    let bin = paths.home.join(".local/bin");
+    let explicit_lock = std::env::var_os("OH_MY_SETTING_TOOL_LOCK").map(PathBuf::from);
+    let mut lock = release_policy(&paths.cwd, explicit_lock.as_deref())?;
     for name in selected {
         if !["node", "uv", "gh", "agy", "claude", "codex", "ntn"].contains(&name.as_str()) {
             return r::fail("unknown managed tool");
         }
+    }
+    let selected = selected
+        .iter()
+        .filter(|name| upgrade || explicit_lock.is_some() || installed(paths, name).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    let host = platform()?;
+    if explicit_lock.is_none() {
+        latest(paths, &mut lock, &selected, &host, tx, flag)?;
+    }
+    let scratch = r::Scratch::new()?;
+    let bin = paths.home.join(".local/bin");
+    for name in &selected {
         r::check(flag)?;
-        if let Some(binary) = r::find(name, &paths.cwd).or_else(|| {
-            let p = bin.join(name);
-            p.is_file().then_some(p)
-        }) {
-            if !upgrade && ["claude", "codex", "agy", "ntn"].contains(&name.as_str()) {
-                continue;
-            }
-            let catalog = if name == "agy" {
-                "antigravity"
-            } else {
-                name.as_str()
-            };
-            if !["claude", "codex", "agy", "ntn"].contains(&name.as_str()) {
+        if let Some(binary) = installed(paths, name) {
+            if let Some(expected) = tool_row(&lock, name)["version"].as_str() {
                 let out = r::command(
                     &binary,
                     &["--version".into()],
@@ -528,16 +573,15 @@ pub(crate) fn install(
                     flag,
                     Duration::from_secs(10),
                 )?;
-                if out.0 == 0
-                    && String::from_utf8_lossy(&out.1).split_whitespace().any(|s| {
-                        s.trim_start_matches('v') == lock[catalog]["version"].as_str().unwrap_or("")
-                    })
-                {
+                if explicit_lock.is_none() && (out.0 != 0 || version_number(&out.1).is_none()) {
+                    return r::fail(format!("{name} version unavailable; refresh refused"));
+                }
+                if out.0 == 0 && satisfies_release(&out.1, expected, explicit_lock.is_none()) {
                     continue;
                 }
             }
             if ["claude", "codex", "agy"].contains(&name.as_str())
-                && std::env::var_os("OH_MY_SETTING_TOOL_LOCK").is_none()
+                && explicit_lock.is_none()
                 && vendor(paths, name, &binary)
             {
                 let before = r::command(
@@ -548,6 +592,9 @@ pub(crate) fn install(
                     flag,
                     Duration::from_secs(10),
                 )?;
+                if before.0 != 0 || version_number(&before.1).is_none() {
+                    return r::fail("vendor provider version unavailable; refresh refused");
+                }
                 let out = r::command(
                     &binary,
                     &["update".into()],
@@ -567,8 +614,7 @@ pub(crate) fn install(
                     flag,
                     Duration::from_secs(10),
                 )?;
-                if before.0 != 0
-                    || after.0 != 0
+                if after.0 != 0
                     || version_number(&after.1)
                         .zip(version_number(&before.1))
                         .is_none_or(|(a, b)| a < b)
@@ -865,6 +911,16 @@ pub(crate) fn install(
     Ok(())
 }
 
+fn satisfies_release(raw: &[u8], expected: &str, follow_upstream: bool) -> bool {
+    String::from_utf8_lossy(raw)
+        .split_whitespace()
+        .any(|s| s.trim_start_matches('v') == expected.trim_start_matches('v'))
+        || follow_upstream
+            && version_number(raw)
+                .zip(release_number(expected))
+                .is_some_and(|(actual, desired)| actual > desired)
+}
+
 fn version_number(raw: &[u8]) -> Option<Vec<u64>> {
     String::from_utf8_lossy(raw)
         .split(|c: char| !c.is_ascii_digit() && c != '.')
@@ -902,7 +958,7 @@ fn vendor(paths: &Paths, name: &str, binary: &Path) -> bool {
         _ => false,
     }
 }
-fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
+fn metadata_bytes(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Vec<u8>> {
     let host = url
         .strip_prefix("https://")
         .and_then(|s| s.split('/').next())
@@ -910,14 +966,16 @@ fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
     if ![
         "registry.npmjs.org",
         "antigravity-cli-auto-updater-974169037036.us-central1.run.app",
+        "nodejs.org",
+        "api.github.com",
     ]
     .contains(&host)
         || url.contains(['?', '#', '\r', '\n'])
     {
-        return r::fail("unapproved provider metadata endpoint");
+        return r::fail("unapproved tool metadata endpoint");
     }
     let program = r::find("curl", &paths.cwd)
-        .ok_or_else(|| r::Error(2, "curl required for provider metadata".into()))?;
+        .ok_or_else(|| r::Error(2, "curl required for current tool metadata".into()))?;
     let out = r::command(
         program,
         &[
@@ -940,7 +998,7 @@ fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
         Duration::from_secs(25),
     )?;
     if out.0 != 0 || out.1.len() > 2097152 + 4 {
-        return r::fail("provider metadata unavailable or oversized");
+        return r::fail("current tool metadata unavailable or oversized");
     }
     let split = out
         .1
@@ -948,25 +1006,26 @@ fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
         .rposition(|b| *b == b'\n')
         .ok_or_else(|| r::Error(2, "invalid metadata response".into()))?;
     if &out.1[split + 1..] == b"404" {
-        return Err(r::Error(4, "provider release incomplete".into()));
+        return Err(r::Error(4, "current tool release is incomplete".into()));
     }
     if &out.1[split + 1..] != b"200" {
-        return r::fail("provider metadata redirects and non-success responses are refused");
+        return r::fail("tool metadata redirects and non-success responses are refused");
     }
-    r::parse(&out.1[..split])
+    Ok(out.1[..split].to_vec())
 }
-fn npm_release(
-    paths: &Paths,
-    package: &str,
-    release: &str,
-    flag: &AtomicBool,
-) -> Result<(String, String)> {
+type Fetch<'a> = dyn FnMut(&str) -> Result<Vec<u8>> + 'a;
+
+fn npm_metadata(package: &str, release: &str, fetch: &mut Fetch<'_>) -> Result<Value> {
+    if !regex::Regex::new(r"^(?:@[a-z0-9._-]+/)?[a-z0-9._-]+$")
+        .unwrap()
+        .is_match(package)
+    {
+        return r::fail("unsafe npm package name");
+    }
     let encoded = package.replace('/', "%2F");
-    let row = metadata(
-        paths,
-        &format!("https://registry.npmjs.org/{encoded}/{release}"),
-        flag,
-    )?;
+    let row = r::parse(&fetch(&format!(
+        "https://registry.npmjs.org/{encoded}/{release}"
+    ))?)?;
     let actual = scalar(&row, "version")?.to_owned();
     version(&actual)?;
     if row["name"] != package || release != "latest" && actual != release {
@@ -988,142 +1047,279 @@ fn npm_release(
     {
         return r::fail("invalid npm release SRI");
     }
-    Ok((actual, integrity))
+    Ok(row)
 }
-fn stable(actual: &str, previous: &str) -> Result<()> {
-    let parse = |s: &str| {
-        s.trim_start_matches('v')
-            .split('.')
-            .map(str::parse::<u64>)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .ok()
-            .filter(|v| v.len() == 3)
-    };
-    if parse(actual)
-        .zip(parse(previous))
-        .is_none_or(|(a, b)| a < b)
-    {
-        return r::fail("provider release is not a non-downgraded stable version");
-    }
-    Ok(())
+fn release_number(value: &str) -> Option<Vec<u64>> {
+    value
+        .strip_prefix('v')
+        .unwrap_or(value)
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()
+        .filter(|v| v.len() == 3)
 }
-fn latest(
-    paths: &Paths,
-    lock: &mut Value,
-    selected: &[String],
-    tx: &mut Transaction,
-    flag: &AtomicBool,
-) -> Result<()> {
-    if std::env::var_os("OH_MY_SETTING_TOOL_LOCK").is_some() {
-        return Ok(());
-    }
-    let file = paths.data.join("provider-tools.lock.json");
-    if r::exists(&file) {
-        let old = r::value(&file)?;
-        if old["schema"] != 2 {
-            return r::fail("invalid previous provider snapshot");
-        }
-        for name in ["claude", "codex"] {
-            lock["npm"][name] = old["npm"][name].clone();
-        }
-        lock["antigravity"] = old["antigravity"].clone();
-    }
-    let mut changed = false;
-    for name in selected
-        .iter()
-        .filter(|n| ["claude", "codex", "agy"].contains(&n.as_str()))
-    {
-        if r::find(name, &paths.cwd).is_some_and(|p| vendor(paths, name, &p)) {
-            continue;
-        }
-        let mut candidate = lock.clone();
-        let resolved = (|| -> Result<()> {
-            if name == "agy" {
-                let previous = scalar(&candidate["antigravity"], "version")?.to_owned();
-                let mut releases = std::collections::BTreeSet::new();
-                let platforms = candidate["antigravity"]["platforms"]
-                    .as_object()
-                    .ok_or_else(|| r::Error(2, "invalid provider platforms".into()))?
-                    .keys()
-                    .filter(|s| !s.starts_with("windows-"))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for host in platforms {
-                    let row = metadata(
-                        paths,
-                        &format!(
-                            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{}.json",
-                            host.replace('-', "_")
-                        ),
-                        flag,
-                    )?;
-                    let release = scalar(&row, "version")?;
-                    stable(release, &previous)?;
-                    releases.insert(release.to_owned());
-                    let url = scalar(&row, "url")?;
-                    https(url)?;
-                    if !url.starts_with(&format!("https://storage.googleapis.com/antigravity-public/antigravity-cli/{release}-")) || url.split('/').any(|p|p==".."||p=="."){return r::fail("provider release URL escaped its official bucket");}
-                    let digest = scalar(&row, "sha512")?;
-                    if digest.len() != 128 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        return r::fail("invalid provider release checksum");
-                    }
-                    candidate["antigravity"]["platforms"][&host]["url"] = json!(url);
-                    candidate["antigravity"]["platforms"][&host]["sha512"] = json!(digest);
-                }
-                if releases.len() != 1 {
-                    return Err(r::Error(
-                        4,
-                        "provider release incomplete across supported platforms".into(),
-                    ));
-                }
-                candidate["antigravity"]["version"] = json!(releases.into_iter().next().unwrap());
-            } else {
-                let row = &mut candidate["npm"][name];
-                let (release, integrity) =
-                    npm_release(paths, scalar(row, "package")?, "latest", flag)?;
-                stable(&release, scalar(row, "version")?)?;
-                row["version"] = json!(release);
-                row["integrity"] = json!(integrity);
-                for (host, native) in row["native"]
-                    .as_object_mut()
-                    .ok_or_else(|| r::Error(2, "invalid npm native platforms".into()))?
-                {
-                    if host.starts_with("windows-") {
-                        continue;
-                    }
-                    let suffix = host
-                        .replace("darwin-amd64", "darwin-x64")
-                        .replace("linux-amd64", "linux-x64");
-                    let expected = if name == "codex" {
-                        format!("{release}-{suffix}")
-                    } else {
-                        release.clone()
-                    };
-                    let (actual, integrity) =
-                        npm_release(paths, scalar(native, "package")?, &expected, flag)?;
-                    native["version"] = json!(actual);
-                    native["integrity"] = json!(integrity);
-                }
-            }
-            Ok(())
-        })();
-        match resolved {
-            Ok(()) => {
-                *lock = candidate;
-                changed = true;
-            }
-            Err(error) if error.0 == 4 => {
-                tx.warn("provider release incomplete; retaining the previous verified snapshot")
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if changed {
-        tx.write(&file, &r::bytes(lock)?, 0o600)?;
+fn stable_release(value: &str) -> Result<()> {
+    version(value)?;
+    if release_number(value).is_none() {
+        return r::fail("latest tool release must be a stable semantic version");
     }
     Ok(())
 }
 
+fn optional_upgrade(previous: &str, candidate: &str) -> Result<bool> {
+    version(previous)?;
+    stable_release(candidate)?;
+    let base = previous.split(['-', '+']).next().unwrap_or(previous);
+    let installed = release_number(base)
+        .ok_or_else(|| r::Error(2, "installed optional provider version is uncomparable".into()))?;
+    let desired = release_number(candidate).unwrap();
+    let prerelease = previous.split('+').next().unwrap_or(previous).contains('-');
+    Ok(desired > installed || desired == installed && prerelease)
+}
+fn digest(value: &str, length: usize) -> Result<String> {
+    if value.len() != length || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return r::fail("invalid current tool payload digest");
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn checksum_entry(raw: &[u8], name: &str) -> Result<String> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| r::Error(2, "invalid release checksum manifest".into()))?;
+    let mut found = None;
+    for line in text.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.get(1) != Some(&name) {
+            continue;
+        }
+        if fields.len() != 2 || found.is_some() {
+            return r::fail("ambiguous release checksum entry");
+        }
+        found = Some(digest(fields[0], 64)?);
+    }
+    found.ok_or_else(|| r::Error(4, "current host payload has no published checksum".into()))
+}
+
+fn archive_row(
+    release: &str,
+    host: &str,
+    url: &str,
+    algorithm: &str,
+    checksum: &str,
+    format: &str,
+) -> Value {
+    let mut result = json!({"version": release, "platforms": {}});
+    result["platforms"][host] = json!({"url": url, "archive": format});
+    result["platforms"][host][algorithm] = json!(checksum);
+    result
+}
+
+fn resolve_tool(name: &str, host: &str, fetch: &mut Fetch<'_>) -> Result<Value> {
+    let (node_host, node_file, uv_host) = match host {
+        "darwin-amd64" => ("darwin-x64", "osx-x64-tar", "x86_64-apple-darwin"),
+        "darwin-arm64" => ("darwin-arm64", "osx-arm64-tar", "aarch64-apple-darwin"),
+        "linux-amd64" => ("linux-x64", "linux-x64", "x86_64-unknown-linux-gnu"),
+        "linux-arm64" => ("linux-arm64", "linux-arm64", "aarch64-unknown-linux-gnu"),
+        _ => return r::fail("unsupported release host"),
+    };
+    if name == "node" {
+        let index = r::parse(&fetch("https://nodejs.org/dist/index.json")?)?;
+        let rows = index
+            .as_array()
+            .ok_or_else(|| r::Error(2, "invalid Node release index".into()))?;
+        let current = rows
+            .iter()
+            .filter(|row| row["lts"].as_str().is_some_and(|s| !s.is_empty()))
+            .filter_map(|row| Some((release_number(row["version"].as_str()?)?, row)))
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, row)| row)
+            .ok_or_else(|| r::Error(4, "no stable Node LTS release is published".into()))?;
+        let tag = scalar(current, "version")?;
+        stable_release(tag)?;
+        if !current["files"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|value| value == node_file))
+        {
+            return r::fail("current Node LTS release is unavailable for this host");
+        }
+        let release = tag.strip_prefix('v').unwrap_or(tag);
+        let filename = format!("node-v{release}-{node_host}.tar.gz");
+        let base = format!("https://nodejs.org/dist/v{release}");
+        let checksum = checksum_entry(&fetch(&format!("{base}/SHASUMS256.txt"))?, &filename)?;
+        let mut row = archive_row(
+            release,
+            host,
+            &format!("{base}/{filename}"),
+            "sha256",
+            &checksum,
+            "tar.gz",
+        );
+        row["channel"] = json!("lts");
+        return Ok(row);
+    }
+    if matches!(name, "uv" | "gh") {
+        let repo = if name == "uv" { "astral-sh/uv" } else { "cli/cli" };
+        let response = r::parse(&fetch(&format!(
+            "https://api.github.com/repos/{repo}/releases/latest"
+        ))?)?;
+        if response["draft"] != false || response["prerelease"] != false {
+            return r::fail("tool release must be published and stable");
+        }
+        let tag = scalar(&response, "tag_name")?;
+        stable_release(tag)?;
+        let release = tag.strip_prefix('v').unwrap_or(tag);
+        let (filename, format) = if name == "uv" {
+            (format!("uv-{uv_host}.tar.gz"), "tar.gz")
+        } else {
+            let platform = host
+                .replace("darwin-", "macOS_")
+                .replace("linux-", "linux_");
+            let format = if host.starts_with("darwin-") {
+                "zip"
+            } else {
+                "tar.gz"
+            };
+            (format!("gh_{release}_{platform}.{format}"), format)
+        };
+        let assets = response["assets"]
+            .as_array()
+            .ok_or_else(|| r::Error(2, "invalid release asset list".into()))?
+            .iter()
+            .filter(|asset| asset["name"] == filename)
+            .collect::<Vec<_>>();
+        if assets.len() != 1 {
+            return r::fail("current release must contain exactly one host payload");
+        }
+        let asset = assets[0];
+        if asset["state"] != "uploaded"
+            || asset["size"]
+                .as_u64()
+                .is_none_or(|size| size == 0 || size > MAX as u64)
+        {
+            return r::fail("current host payload is incomplete or oversized");
+        }
+        let url = scalar(asset, "browser_download_url")?;
+        https(url)?;
+        if url != format!("https://github.com/{repo}/releases/download/{tag}/{filename}") {
+            return r::fail("release payload URL is not bound to its repository and version");
+        }
+        let checksum = digest(
+            scalar(asset, "digest")?
+                .strip_prefix("sha256:")
+                .ok_or_else(|| r::Error(2, "release payload requires a SHA256 digest".into()))?,
+            64,
+        )?;
+        return Ok(archive_row(release, host, url, "sha256", &checksum, format));
+    }
+    if name == "agy" {
+        let response = r::parse(&fetch(&format!(
+            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{}.json",
+            host.replace('-', "_")
+        ))?)?;
+        let release = scalar(&response, "version")?;
+        stable_release(release)?;
+        let url = scalar(&response, "url")?;
+        https(url)?;
+        if !url.starts_with(&format!(
+            "https://storage.googleapis.com/antigravity-public/antigravity-cli/{release}-"
+        )) || url.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return r::fail("provider release URL escaped its official versioned bucket");
+        }
+        let checksum = digest(scalar(&response, "sha512")?, 128)?;
+        return Ok(archive_row(release, host, url, "sha512", &checksum, "tar.gz"));
+    }
+    if matches!(name, "claude" | "codex" | "ntn") {
+        let mut row = tool_row(&catalog(), name).clone();
+        let main = npm_metadata(scalar(&row, "package")?, "latest", fetch)?;
+        let release = scalar(&main, "version")?;
+        stable_release(release)?;
+        row["version"] = json!(release);
+        row["integrity"] = main["dist"]["integrity"].clone();
+        if name != "ntn" {
+            let suffix = host
+                .replace("darwin-amd64", "darwin-x64")
+                .replace("linux-amd64", "linux-x64");
+            let alias = if name == "claude" {
+                format!("@anthropic-ai/claude-code-{suffix}")
+            } else {
+                format!("@openai/codex-{suffix}")
+            };
+            let package = if name == "codex" { "@openai/codex" } else { &alias };
+            let expected = if name == "codex" {
+                format!("{release}-{suffix}")
+            } else {
+                release.to_owned()
+            };
+            let native = npm_metadata(package, &expected, fetch)?;
+            row["native"] = json!({});
+            row["native"][host] = json!({
+                "alias": alias, "package": package,
+                "version": native["version"], "integrity": native["dist"]["integrity"]
+            });
+        }
+        return Ok(row);
+    }
+    r::fail("unknown managed tool")
+}
+
+fn latest(
+    paths: &Paths,
+    lock: &mut Value,
+    selected: &[String],
+    host: &str,
+    tx: &mut Transaction,
+    flag: &AtomicBool,
+) -> Result<()> {
+    let file = paths.data.join(RELEASE_RECEIPT);
+    let mut observed = json!({"schema": 2, "npm": {}});
+    let previous = if r::exists(&file) {
+        Some((file.clone(), false))
+    } else {
+        let legacy = paths.data.join("provider-tools.lock.json");
+        r::exists(&legacy).then_some((legacy, true))
+    };
+    if let Some((previous, legacy)) = previous {
+        match r::value(&previous) {
+            Ok(old) if old["schema"] == 2 => {
+                for name in ["node", "uv", "gh", "ntn", "claude", "codex", "agy"] {
+                    if legacy && !matches!(name, "claude" | "codex" | "agy") {
+                        continue;
+                    }
+                    let row = tool_row(&old, name);
+                    if row["version"].is_string() {
+                        set_tool(&mut observed, name, row.clone());
+                    }
+                }
+            }
+            _ => tx.warn("previous release observations unreadable; recording fresh resolutions"),
+        }
+    }
+    let mut changed = false;
+    for name in selected {
+        if installed(paths, name).is_some_and(|p| vendor(paths, name, &p)) {
+            continue;
+        }
+        // Receipts describe observations only. Neither an old observation nor a
+        // checked-in version may choose or restrict the next upstream resolution.
+        let mut row = resolve_tool(name, host, &mut |url| metadata_bytes(paths, url, flag))
+            .map_err(|error| {
+                r::Error(
+                    error.0,
+                    format!("cannot resolve current {name} release: {}", error.1),
+                )
+            })?;
+        row["resolved_at"] = json!(r::now());
+        set_tool(lock, name, row.clone());
+        set_tool(&mut observed, name, row);
+        changed = true;
+    }
+    if changed {
+        tx.write(&file, &r::bytes(&observed)?, 0o600)?;
+    }
+    Ok(())
+}
 pub(crate) fn refresh_optional(
     paths: &Paths,
     tx: &mut Transaction,
@@ -1200,9 +1396,6 @@ pub(crate) fn refresh_optional(
     );
     let root = fs::canonicalize(root)?;
     let bin = prefix.join("bin");
-    let now = chrono::DateTime::parse_from_rfc3339(&r::now())
-        .map_err(|_| r::Error(2, "clock unavailable".into()))?;
-    let cutoff = now - chrono::Duration::days(14);
     let scratch = r::Scratch::new()?;
     for binary in [
         "cursor-agent",
@@ -1272,53 +1465,11 @@ pub(crate) fn refresh_optional(
         if fs::canonicalize(directory.join(declared))? != resolved {
             continue;
         }
-        let history = match metadata(
-            paths,
-            &format!("https://registry.npmjs.org/{}", name.replace('/', "%2F")),
-            flag,
-        ) {
-            Ok(row) => row,
-            Err(_) => {
-                r::check(flag)?;
-                tx.warn("optional provider metadata unavailable; keeping the installed package");
-                continue;
-            }
-        };
-        let mut eligible = Vec::new();
-        let parse = |s: &str| {
-            s.split('+')
-                .next()
-                .unwrap_or(s)
-                .split('.')
-                .map(str::parse::<u64>)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .ok()
-                .filter(|p| p.len() == 3)
-        };
-        let base = previous.split('-').next().unwrap_or(previous);
-        let Some(installed) = parse(base) else {
+        let candidate = npm_metadata(name, "latest", &mut |url| metadata_bytes(paths, url, flag))?;
+        let release = scalar(&candidate, "version")?.to_owned();
+        if !optional_upgrade(previous, &release)? {
             continue;
-        };
-        for (release, data) in history["versions"]
-            .as_object()
-            .ok_or_else(|| r::Error(2, "invalid optional release catalog".into()))?
-        {
-            let Some(number) = parse(release) else {
-                continue;
-            };
-            let published = history["time"][release]
-                .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-            if published.is_some_and(|date| date <= cutoff)
-                && (number > installed || number == installed && previous.contains('-'))
-            {
-                eligible.push((number, release.clone(), data.clone()));
-            }
         }
-        eligible.sort_by(|a, b| a.0.cmp(&b.0));
-        let Some((_, release, candidate)) = eligible.pop() else {
-            continue;
-        };
         let new_bins = if let Some(path) = candidate["bin"].as_str() {
             json!({name.rsplit('/').next().unwrap():path})
         } else {
@@ -1342,10 +1493,9 @@ pub(crate) fn refresh_optional(
         }
         let work = scratch.0.join(binary);
         fs::create_dir(&work)?;
-        let (_, integrity) = npm_release(paths, name, &release, flag)?;
         let archive = pack(
             paths,
-            &json!({"package":name,"version":release,"integrity":integrity}),
+            &json!({"package":name,"version":release,"integrity":candidate["dist"]["integrity"]}),
             &work,
             flag,
         )?;
@@ -1358,7 +1508,6 @@ pub(crate) fn refresh_optional(
                 "-g".into(),
                 "--no-fund".into(),
                 "--no-audit".into(),
-                format!("--before={}", cutoff.format("%Y-%m-%dT%H:%M:%SZ")).into(),
                 "--".into(),
                 archive.into_os_string(),
             ],
@@ -1373,4 +1522,490 @@ pub(crate) fn refresh_optional(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn response(url: &str, value: Value) -> (String, Vec<u8>) {
+        (url.into(), serde_json::to_vec(&value).unwrap())
+    }
+
+    fn resolve_fixture(name: &str, host: &str, responses: Vec<(String, Vec<u8>)>) -> Result<Value> {
+        let mut responses = VecDeque::from(responses);
+        let result = resolve_tool(name, host, &mut |url| {
+            let (expected, raw) = responses.pop_front().expect("unexpected metadata request");
+            assert_eq!(url, expected);
+            Ok(raw)
+        });
+        if result.is_ok() {
+            assert!(responses.is_empty(), "release resolution stopped early");
+        }
+        result
+    }
+
+    fn npm_fixture(package: &str, release: &str) -> Value {
+        json!({
+            "name": package,
+            "version": release,
+            "dist": {
+                "tarball": format!(
+                    "https://registry.npmjs.org/{package}/-/{}-{release}.tgz",
+                    package.rsplit('/').next().unwrap()
+                ),
+                "integrity": format!("sha512-{}==", "A".repeat(86))
+            }
+        })
+    }
+
+    fn github_fixture(repo: &str, tag: &str, filename: &str) -> Value {
+        json!({
+            "tag_name": tag,
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+                "name": filename,
+                "state": "uploaded",
+                "size": 1024,
+                "digest": format!("sha256:{}", "a".repeat(64)),
+                "browser_download_url": format!(
+                    "https://github.com/{repo}/releases/download/{tag}/{filename}"
+                )
+            }]
+        })
+    }
+
+    #[test]
+    fn default_catalog_has_no_pins_and_only_explicit_relative_override_is_loaded() {
+        let scratch = r::Scratch::new().unwrap();
+        let pinned = json!({"schema": 2, "node": {"version": "18.20.8"}});
+        r::new_file(
+            &scratch.0.join("tools.lock.json"),
+            b"not a default policy",
+            0o600,
+        )
+        .unwrap();
+        r::new_file(
+            &scratch.0.join("custom.json"),
+            &r::bytes(&pinned).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let current = release_policy(&scratch.0, None).unwrap();
+        for name in ["node", "uv", "gh", "ntn", "claude", "codex", "agy"] {
+            assert!(tool_row(&current, name).get("version").is_none());
+            assert!(tool_row(&current, name).get("platforms").is_none());
+        }
+        assert_eq!(current["node"]["channel"], "lts");
+        assert_eq!(
+            release_policy(&scratch.0, Some(Path::new("custom.json"))).unwrap(),
+            pinned
+        );
+        assert!(release_policy(&scratch.0, Some(Path::new("absent.json"))).is_err());
+        assert!(release_policy(&scratch.0, Some(Path::new("tools.lock.json"))).is_err());
+    }
+
+    #[test]
+    fn non_executable_local_placeholder_is_not_an_installed_tool() {
+        let scratch = r::Scratch::new().unwrap();
+        let paths = Paths {
+            home: scratch.0.join("home"),
+            source: scratch.0.clone(),
+            receipt: scratch.0.join("receipt.json"),
+            config: scratch.0.join("config"),
+            state: scratch.0.join("state"),
+            data: scratch.0.join("data"),
+            cwd: scratch.0.clone(),
+        };
+        let name = "oms-supply-fixture-command";
+        let executable = paths.home.join(".local/bin").join(name);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        r::new_file(&executable, b"fixture only\n", 0o600).unwrap();
+        assert!(installed(&paths, name).is_none());
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(installed(&paths, name), Some(executable));
+    }
+
+    #[test]
+    fn node_selects_highest_lts_by_version_and_ignores_order_and_major_parity() {
+        let row = resolve_fixture(
+            "node",
+            "linux-amd64",
+            vec![
+                response(
+                    "https://nodejs.org/dist/index.json",
+                    json!([
+                        {"version": "v26.0.0", "lts": false, "files": ["linux-x64"]},
+                        {"version": "v24.10.0", "lts": "Older", "files": ["linux-x64"]},
+                        {"version": "v27.0.0-alpha.1", "lts": "Preview", "files": ["linux-x64"]},
+                        {"version": "v25.3.1", "lts": "Current", "files": ["linux-x64"]},
+                        {"version": "v25.2.9", "lts": "Current", "files": ["linux-x64"]}
+                    ]),
+                ),
+                (
+                    "https://nodejs.org/dist/v25.3.1/SHASUMS256.txt".into(),
+                    format!("{}  node-v25.3.1-linux-x64.tar.gz\n", "b".repeat(64)).into_bytes(),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(row["version"], "25.3.1");
+        assert_eq!(row["channel"], "lts");
+        assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+        assert_eq!(row["platforms"]["linux-amd64"]["sha256"], "b".repeat(64));
+    }
+
+    #[test]
+    fn node_resolves_each_host_without_requiring_other_platforms() {
+        for (host, index_file, filename) in [
+            ("darwin-amd64", "osx-x64-tar", "node-v26.1.0-darwin-x64.tar.gz"),
+            ("darwin-arm64", "osx-arm64-tar", "node-v26.1.0-darwin-arm64.tar.gz"),
+            ("linux-amd64", "linux-x64", "node-v26.1.0-linux-x64.tar.gz"),
+            ("linux-arm64", "linux-arm64", "node-v26.1.0-linux-arm64.tar.gz"),
+        ] {
+            let row = resolve_fixture(
+                "node",
+                host,
+                vec![
+                    response(
+                        "https://nodejs.org/dist/index.json",
+                        json!([{"version": "v26.1.0", "lts": "Fixture", "files": [index_file]}]),
+                    ),
+                    (
+                        "https://nodejs.org/dist/v26.1.0/SHASUMS256.txt".into(),
+                        format!("{}  {filename}\n", "a".repeat(64)).into_bytes(),
+                    ),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                row["platforms"][host]["url"],
+                format!("https://nodejs.org/dist/v26.1.0/{filename}")
+            );
+            assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn node_rejects_incomplete_current_release_and_missing_or_ambiguous_checksum() {
+        let result = resolve_fixture(
+            "node",
+            "linux-amd64",
+            vec![response(
+                "https://nodejs.org/dist/index.json",
+                json!([
+                    {"version": "v26.2.0", "lts": "Fixture", "files": ["linux-arm64"]},
+                    {"version": "v26.1.0", "lts": "Fixture", "files": ["linux-x64"]}
+                ]),
+            )],
+        );
+        assert!(result.is_err());
+        let line = format!("{}  host.tar.gz\n", "a".repeat(64));
+        assert!(checksum_entry(line.as_bytes(), "other.tar.gz").is_err());
+        assert!(checksum_entry(format!("{line}{line}").as_bytes(), "host.tar.gz").is_err());
+        assert!(checksum_entry(b"invalid  host.tar.gz\n", "host.tar.gz").is_err());
+        assert!(
+            checksum_entry(
+                format!("{}  host.tar.gz extra\n", "a".repeat(64)).as_bytes(),
+                "host.tar.gz"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn github_releases_resolve_exact_verified_host_assets() {
+        for (name, host, repo, tag, filename, format) in [
+            (
+                "uv",
+                "darwin-amd64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-x86_64-apple-darwin.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "uv",
+                "darwin-arm64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-aarch64-apple-darwin.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "uv",
+                "linux-amd64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-x86_64-unknown-linux-gnu.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "uv",
+                "linux-arm64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-aarch64-unknown-linux-gnu.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "gh",
+                "darwin-amd64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_macOS_amd64.zip",
+                "zip",
+            ),
+            (
+                "gh",
+                "darwin-arm64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_macOS_arm64.zip",
+                "zip",
+            ),
+            (
+                "gh",
+                "linux-amd64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_linux_amd64.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "gh",
+                "linux-arm64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_linux_arm64.tar.gz",
+                "tar.gz",
+            ),
+        ] {
+            let row = resolve_fixture(
+                name,
+                host,
+                vec![response(
+                    &format!("https://api.github.com/repos/{repo}/releases/latest"),
+                    github_fixture(repo, tag, filename),
+                )],
+            )
+            .unwrap();
+            assert_eq!(row["version"], tag.trim_start_matches('v'));
+            assert_eq!(row["platforms"][host]["archive"], format);
+            assert_eq!(row["platforms"][host]["sha256"], "a".repeat(64));
+            assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn github_rejects_unpublished_misbound_and_unverified_assets() {
+        let base = github_fixture("cli/cli", "v2.105.0", "gh_2.105.0_linux_amd64.tar.gz");
+        for (pointer, bad) in [
+            ("/draft", json!(true)),
+            ("/prerelease", json!(true)),
+            ("/tag_name", json!("v2.106.0-rc.1")),
+            ("/assets/0/digest", Value::Null),
+            (
+                "/assets/0/digest",
+                json!(format!("sha512:{}", "a".repeat(128))),
+            ),
+            ("/assets/0/digest", json!("sha256:invalid")),
+            ("/assets/0/state", json!("new")),
+            ("/assets/0/size", json!(0)),
+            ("/assets/0/size", json!(MAX as u64 + 1)),
+            (
+                "/assets/0/browser_download_url",
+                json!("https://github.com/other/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz"),
+            ),
+        ] {
+            let mut bad_release = base.clone();
+            *bad_release.pointer_mut(pointer).unwrap() = bad;
+            assert!(
+                resolve_fixture(
+                    "gh",
+                    "linux-amd64",
+                    vec![response(
+                        "https://api.github.com/repos/cli/cli/releases/latest",
+                        bad_release,
+                    )],
+                )
+                .is_err(),
+                "accepted {pointer}"
+            );
+        }
+        let mut duplicate = base.clone();
+        duplicate["assets"]
+            .as_array_mut()
+            .unwrap()
+            .push(base["assets"][0].clone());
+        assert!(
+            resolve_fixture(
+                "gh",
+                "linux-amd64",
+                vec![response(
+                    "https://api.github.com/repos/cli/cli/releases/latest",
+                    duplicate,
+                )],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn npm_latest_freezes_native_versions_for_only_the_current_host() {
+        for (host, suffix) in [
+            ("darwin-amd64", "darwin-x64"),
+            ("darwin-arm64", "darwin-arm64"),
+            ("linux-amd64", "linux-x64"),
+            ("linux-arm64", "linux-arm64"),
+        ] {
+            for (name, package, release) in [
+                ("claude", "@anthropic-ai/claude-code", "2.1.20"),
+                ("codex", "@openai/codex", "0.150.0"),
+            ] {
+                let alias = format!("{package}-{suffix}");
+                let native_package = if name == "codex" { package } else { &alias };
+                let native_version = if name == "codex" {
+                    format!("{release}-{suffix}")
+                } else {
+                    release.into()
+                };
+                let row = resolve_fixture(
+                    name,
+                    host,
+                    vec![
+                        response(
+                            &format!(
+                                "https://registry.npmjs.org/{}/latest",
+                                package.replace('/', "%2F")
+                            ),
+                            npm_fixture(package, release),
+                        ),
+                        response(
+                            &format!(
+                                "https://registry.npmjs.org/{}/{native_version}",
+                                native_package.replace('/', "%2F")
+                            ),
+                            npm_fixture(native_package, &native_version),
+                        ),
+                    ],
+                )
+                .unwrap();
+                assert_eq!(row["version"], release);
+                assert_eq!(row["native"].as_object().unwrap().len(), 1);
+                assert_eq!(row["native"][host]["version"], native_version);
+                assert_eq!(row["native"][host]["alias"], alias);
+            }
+        }
+        let ntn = resolve_fixture(
+            "ntn",
+            "linux-amd64",
+            vec![response(
+                "https://registry.npmjs.org/ntn/latest",
+                npm_fixture("ntn", "0.9.1"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(ntn["version"], "0.9.1");
+        assert!(ntn.get("native").is_none());
+    }
+
+    #[test]
+    fn npm_rejects_identity_tarball_and_integrity_mismatches() {
+        for (pointer, bad) in [
+            ("/name", json!("other-package")),
+            ("/version", json!("0.9.2")),
+            (
+                "/dist/tarball",
+                json!("https://registry.npmjs.org/ntn/-/ntn-0.9.0.tgz"),
+            ),
+            ("/dist/tarball", json!("https://example.invalid/ntn-0.9.1.tgz")),
+            ("/dist/integrity", json!("sha1-invalid")),
+        ] {
+            let mut bad_release = npm_fixture("ntn", "0.9.1");
+            *bad_release.pointer_mut(pointer).unwrap() = bad;
+            assert!(
+                npm_metadata("ntn", "0.9.1", &mut |_| Ok(r::bytes(&bad_release).unwrap()))
+                    .is_err()
+            );
+        }
+        assert!(
+            resolve_fixture(
+                "ntn",
+                "linux-amd64",
+                vec![response(
+                    "https://registry.npmjs.org/ntn/latest",
+                    npm_fixture("ntn", "1.0.0-beta.1"),
+                )],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn agy_uses_only_current_host_manifest_and_requires_versioned_bucket_and_digest() {
+        for host in ["darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64"] {
+            let url = format!(
+                "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{}.json",
+                host.replace('-', "_")
+            );
+            let manifest = json!({
+                "version": "1.5.0",
+                "url": format!("https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-build/{host}/payload.tar.gz"),
+                "sha512": "a".repeat(128)
+            });
+            let row = resolve_fixture("agy", host, vec![response(&url, manifest.clone())]).unwrap();
+            assert_eq!(row["version"], "1.5.0");
+            assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+            for (key, bad) in [
+                ("sha512", json!("invalid")),
+                (
+                    "url",
+                    json!("https://storage.googleapis.com/another-bucket/1.5.0/payload.tar.gz"),
+                ),
+                (
+                    "url",
+                    json!("https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.0-build/payload.tar.gz"),
+                ),
+                (
+                    "url",
+                    json!("https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-build/../payload.tar.gz"),
+                ),
+            ] {
+                let mut bad_manifest = manifest.clone();
+                bad_manifest[key] = bad;
+                assert!(resolve_fixture("agy", host, vec![response(&url, bad_manifest)]).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_upstream_never_resolves_to_an_observed_or_built_in_version() {
+        for name in ["node", "uv", "gh", "ntn", "claude", "codex", "agy"] {
+            let error = resolve_tool(name, "linux-amd64", &mut |_| {
+                Err(r::Error(4, "fixture upstream unavailable".into()))
+            })
+            .unwrap_err();
+            assert_eq!(error.0, 4);
+        }
+    }
+
+    #[test]
+    fn newer_installed_versions_are_retained_unless_the_user_explicitly_pins() {
+        assert!(satisfies_release(b"uv 0.14.0\n", "0.13.9", true));
+        assert!(!satisfies_release(b"uv 0.14.0\n", "0.13.9", false));
+        assert!(satisfies_release(b"v26.1.0\n", "26.1.0", false));
+        assert!(!satisfies_release(b"gh version 2.100.0\n", "2.105.0", true));
+        assert!(!satisfies_release(b"unrecognized version\n", "1.0.0", true));
+        assert!(optional_upgrade("1.9.9", "2.0.0").unwrap());
+        assert!(optional_upgrade("2.0.0-beta.1", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.0.0", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.1.0", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.0.0+build.1", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.0.0+build-1", "2.0.0").unwrap());
+        assert!(optional_upgrade("invalid", "2.0.0").is_err());
+        assert!(optional_upgrade("2.0.0", "2.1.0-beta.1").is_err());
+    }
 }

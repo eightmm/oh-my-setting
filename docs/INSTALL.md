@@ -35,19 +35,16 @@ hard link. Under the default link mode the global rules are such a symlink, so t
 load on that surface; the terminal CLI is unaffected. `OH_MY_SETTING_LINK_MODE=copy` installs
 regular files that `oms doctor` checks for parity instead. OMS has not tested the Cowork surface.
 
-OMS requires Python 3.11+ with no upper version bound and provisions the 3.12
-runtime pinned in `tools.lock.json`. System Python stays unchanged, including
-older versions on Ubuntu 20.04/22.04 and macOS Command Line Tools.
+OMS lifecycle commands run as native Rust binaries; installation and scheduled
+updates do not provision or require a private Python interpreter. A cold install
+or update builds the selected checkout with Cargo and the toolchain declared by
+that checkout's `rust-toolchain.toml`. Install Rust through rustup before using a
+source checkout without a verified staged payload. The build keeps `Cargo.lock`
+with `--locked` and can fetch missing dependencies. Set `CARGO_NET_OFFLINE=true`
+only when the required toolchain and dependencies are already cached.
 
-When system `python3` is missing or older than 3.11, the installer fetches the pinned uv
-(sha256-checked), builds its own Python from `tools.lock.json`, and points a
-managed `python3` shim at it. musl-based Linux such as Alpine is not
-supported: the pinned builds need glibc.
-
-Hook launchers select the managed interpreter even when provider apps inherit
-only `/usr/bin:/bin`. Antigravity's MCP registration stores the resolved
-interpreter's absolute path. Cleanup and lifecycle help remain available with
-an older system Python when no managed runtime exists.
+Managed tool artifacts support glibc Linux and macOS on amd64/arm64. musl-based
+Linux such as Alpine is unsupported by this artifact selection.
 
 On Ubuntu 24.04+ with AppArmor unprivileged user namespaces restricted,
 `oms doctor` warns that Codex sandboxed runs may fail; allow user namespaces
@@ -61,7 +58,7 @@ on the Linux filesystem, along with your WSL home; do not use `/mnt/c`.
 Install and run provider CLIs inside WSL, using the Linux requirements above.
 Native Windows (Git Bash/MSYS2/Cygwin) is unsupported and OMS refuses to run;
 `scripts/install-tools.sh` and `scripts/doctor.sh` also refuse it when run
-directly, and `tools.lock.json` pins no Windows payloads.
+directly; the managed artifact catalog has no native Windows target.
 
 <details>
 <summary>Remove a legacy native Windows installation</summary>
@@ -88,14 +85,14 @@ links; start the WSL2 installation separately.
 ### Profiles and integrations
 
 The default installer selects the `core` capability: the harness, Bash, Git,
-Python, and one coding-agent provider. It does not make GitHub CLI, Notion CLI,
+the native OMS runtime, and one coding-agent provider. It does not make GitHub CLI, Notion CLI,
 all three providers, research tooling, or cluster tools mandatory. Use the
 `full` compatibility profile only on machines that should carry the historical
 all-provider/GitHub/Notion/research footprint.
 
 Capability profiles are `core`, `council`, `github`, `notion`, `research`,
 `hpc`, `container`, `remote`, and `full`. The selective installer reuses the
-existing locked download transactions, records the exact requested profile in a
+existing verified download transactions, records the exact requested profile in a
 private receipt, and reapplies only that tool set during updates. Existing
 installs without a capability receipt retain the legacy full-tool update path
 until an agent explicitly migrates them. See
@@ -114,130 +111,79 @@ updates and scheduled triggers preserve them. An explicit environment override
 on `oms update` changes the recorded choice. Antigravity also accepts `auto`
 (the default: install only when available) or `1` (require it).
 
-### Provider installation and updates
+### Tool installation and updates
 
-Only installing a missing Git, tar, gzip or find needs root. Managed bootstrap
-versions, platform URLs and integrity values are pinned in `tools.lock.json`.
-Fresh provider installs resolve a stable release into the private
-`provider-tools.lock.json` snapshot. Locked payloads cover Linux and macOS on
-amd64/arm64; rows for the retired Windows targets in an older snapshot or
-explicit lock are ignored. Fresh Claude downloads its
-native binary and verifies SHA-256 from the vendor HTTPS manifest before
-running `install VERSION`; OMS does not verify the manifest’s GPG signature.
-Fresh Codex and agy keep their existing verified installation paths. The
-snapshot records resolved versions, not a permanent version policy or proof
-of installation.
+Only installing a missing Git, tar, gzip or find needs root. OMS keeps managed
+tool identities in its native installer and resolves release versions from the
+official upstream source when a tool is missing or an upgrade is requested.
+There is no checked-in default version lock. An ordinary install preserves tools
+already present; `oms update` refreshes the selected tool set unless `--no-tools`
+is requested.
 
-For recognized vendor layouts:
-
-| Provider | Normal refresh | Explicit tool lock |
+| Tool | Default release source | Payload check |
 |---|---|---|
-| Claude | `claude update` | `claude install VERSION`; require equality. |
-| Codex (native) | `codex update` | Refuse a mismatch before updating; matching pins stay unchanged. |
-| agy (native) | `agy update`; vendor-managed on the default channel | Refuse pin mismatch or drift in OMS-marked bytes; matching pins stay unchanged. |
-| Pi | `pi update self` only through `install-tools.sh --providers` | Skip refresh: the lock schema has no Pi row. |
+| Node | Newest LTS in the official Node distribution index | Versioned archive and `SHASUMS256.txt` SHA-256 |
+| uv | Latest non-prerelease GitHub release from `astral-sh/uv` | Exact current-host asset and its SHA-256 release digest |
+| gh | Latest non-prerelease GitHub release from `cli/cli` | Exact current-host asset and its SHA-256 release digest |
+| Claude, Codex, ntn | The package's npm `latest` dist-tag | Package identity, exact version and SHA-512 SRI; Claude/Codex native package identity and SRI too |
+| Antigravity | Its official current-host updater manifest | Versioned artifact URL and SHA-512 |
 
-> Pi is refreshed only when already installed. Full-tool installs and profile
-> reapply leave it unchanged. Manual `--no-tools` skips tool refresh.
+Node follows LTS rather than a prerelease or the highest Current major. Only the
+current host's payload must be available; a delayed release on another platform
+does not block this host. A failed or malformed metadata response is an error,
+not permission to install an old saved release. Default upgrades preserve an
+already installed version newer than the resolved release.
 
-<details>
-<summary>Detailed refresh rules: integrity, interrupted transactions, Claude migration and inventory</summary>
+The private `tool-releases.json` receipt under the OMS data directory records
+resolved versions, URLs or package coordinates, integrity fields and observation
+times. It is an observation record, not a policy for the next update or proof
+that every recorded version is installed. Older `provider-tools.lock.json`
+provider observations can be carried forward without choosing future versions.
+`oms doctor --tool-lock` checks either these records or an explicit pin; it does
+not contact upstream or prove installed-byte integrity. Fingerprints exclude
+observation timestamps.
 
-Recognized Claude, Codex and agy vendor layouts use `claude update`,
-`codex update` and `agy update` through `install-tools.sh --providers`, profile
-reapply and normal updates. Pi refresh runs only through `install-tools.sh --providers`
-using `pi update self`; full-tool installs and profile reapply leave Pi unchanged. OMS checks
-that the command still resolves into its vendor layout, `--version` succeeds,
-and its version has not decreased; it does not require snapshot equality or
-claim to authenticate vendor-updated bytes. Pi is refreshed only when already
-installed; OMS does not run its interactive fresh installer. Scheduled apply
-refreshes installed providers even when OMS itself is unchanged. Optional
-npm-installed providers use stable releases at least 14 days old; their npm
-lifecycle scripts can execute package code, and git/URL dependencies are not
-subject to that age limit. Manual `--no-tools` skips tool refresh.
+To opt into exact versions, set `OH_MY_SETTING_TOOL_LOCK` to a schema-2 JSON
+file containing the selected tools and current-host payload metadata. Relative
+paths are resolved from the command's working directory. An explicit pin is
+validated and may deliberately select an older version. Clearing the override
+restores normal upstream resolution; no repository edit is needed.
 
+Recognized vendor-native Claude, Codex and Antigravity installations retain their
+vendor update commands. OMS checks successful version probes and rejects a
+reported version decrease; these updates do not claim that vendor-managed bytes
+match a previous OMS observation. Fresh managed Claude/Codex payloads are
+verified through npm package metadata before publication. `ntn` may run its
+verified package's installation script. Explicit pins use the verified exact
+payload path instead of the default vendor update command.
 
+Already installed Pi is refreshed with `pi update self` only through
+`oms install-tools --providers`. Other recognized optional npm providers in a
+writable user-owned global prefix use their current `latest` dist-tag; there is
+no 14-day release delay or npm `--before` restriction. npm lifecycle scripts may
+execute package code. An explicit tool lock skips these optional refreshes
+because its schema does not describe them.
 
-#### Explicit pins and integrity
-
-An explicit `OH_MY_SETTING_TOOL_LOCK` pins Claude with `claude install VERSION` and
-requires equality. Native Codex and agy refuse a mismatched pin before updating;
-matching pins leave them unchanged. Pi has no row in the current lock schema, so an
-explicit lock skips Pi refresh with a note and leaves it unchanged. On the default channel agy is vendor-managed after a lock-verified bootstrap,
-like Claude and Codex. A fresh install leaves no ownership digest. Refresh retires
-an existing, well-formed legacy sidecar only while `~/.local` and `~/.local/bin`
-are real directories; changed bytes produce a warning before vendor refresh.
-Malformed or linked markers, digest-read errors and failed sidecar removal still
-refuse the operation.
-
-Under an explicit lock, an existing OMS ownership digest stays binding: doctor
-checks it and refresh refuses changed owned bytes before running the binary.
-Restore the verified binary and marker, or preserve both elsewhere and reapply
-the profile to install a verified payload. An unmarked vendor installation stays
-vendor-owned; a matching pin leaves it unchanged without creating a marker.
-
-An interrupted OMS direct-install transaction with recovery residue
-first recovers from a checksum-verified locked payload before vendor refresh. Under an explicit lock, unexpected bytes in an OMS-marked AGY binary remain
-refused without transaction recovery evidence. Doctor verifies marked commands
-before probes. On the default channel it warns once about a verifiable stale AGY
-sidecar and permits the selected tool's probe; malformed or otherwise invalid
-ownership evidence still skips execution.
-
-Warning-only mode continues local state checks while skipping unsafe
-tool/model/plugin/skill probes; required-tool and integration audits stop.
-
-
-
-#### Claude launcher migration
-
-An absent, empty or invalid native versions directory leaves Claude on its existing
-npm/shim path. Migration requires an executable numeric native release inside the
-resolved vendor versions root. When an OMS-owned Claude npm shim shadows existing native
-versions, OMS invokes the newest native binary's installer to restore the vendor
-launcher. The proven OMS shim moves to `.claude.oh-my-setting-migration` beside the
-launcher while the vendor installs; failure restores it when the launcher is absent, and
-a later lifecycle call verifies the native launcher directly, regardless of PATH order,
-and finishes cleanup without installing again.
-
-The backup stays until npm cleanup succeeds. Only the npm package in the prefix captured
-by that shim is uninstalled, with lifecycle scripts disabled. An npm-owned Claude
-launcher under the active npm root remains valid, including the `~/.local` prefix.
-Unproven ownership refuses migration and names recovery; a vendor launcher is never
-replaced by an OMS shim. A kill after the vendor install but before npm cleanup can
-leave an extra npm copy.
-
-#### Provider inventory and cleanup
-
-`oms doctor` lists provider copies across PATH, vendor roots, and every nvm Node prefix,
-marks the selected copy, channel and version, and gives prefix-specific npm uninstall
-and foreign launcher removal commands. Only the command selected on PATH may execute a
-version probe. All extra copies say "not executed", even with a matching sidecar; npm
-versions come from package metadata. The `digest` status is `matched`, `unmarked`,
-`invalid` or `unknown`. A matching sidecar describes bytes and grants no execution
-authority. Vendor-retained release files count as one installation and never receive
-cleanup guidance, including when a release directory is on PATH.
-
-Aliases do not add version probes. Cleanup guidance excludes the selected copy and its
-aliases. Entries with line or field separators are escaped and reported as unknown
-without execution. When an integrity failure disables probes, tool versions are labeled
-"not probed". Doctor checks direct-tool transaction residue before accepting a
-vendor-channel version. Uninstall and repair leave vendor launchers and vendor roots in
-place.
-
-</details>
-
-Provider dependencies are selected with the provider: Codex and Claude include
-locked Node, while Antigravity does not. New downloads are verified before use.
-Existing external CLIs at the exact version are reused and labeled as
-version-only by doctor. Install, update, repair, and uninstall share one
-user-wide lifecycle lock.
+Provider dependencies are selected with the provider: Claude, Codex and ntn
+include Node; Antigravity does not. Downloads and package identities are checked
+before managed publication, and local install/update/repair/uninstall changes
+share the reversible lifecycle transaction. Vendor update commands manage their
+own recovery; their binaries are not part of the OMS checkout rollback.
 
 ## Updates
 
-Installation and scheduled updates use a private uv-managed Python pinned in
-`tools.lock.json`; system/project Python is only a bootstrap, not the timer's
-interpreter. Automatic updates preserve local checkout edits and report them as
-`skipped`. Keep private policy in user skills outside the tracked install tree.
+Fresh installations track `edge`, which follows the origin repository's default
+branch. An explicit `OH_MY_SETTING_REF`, `--ref`, or saved tracking choice is
+preserved. A successful `--fallback-to-edge` also saves `edge` for the next
+update. Applying the runtime edge channel keeps tracking its configured branch;
+applying a reviewed stable release keeps that exact commit. If no channel
+manifest exists, stable is unconfigured until explicitly promoted.
+
+The native updater prepares and checks the incoming payload before publishing
+it, using the incoming checkout's Rust toolchain. Missing locked dependencies
+can be fetched; offline operation is an explicit caller choice. Automatic
+updates preserve local checkout edits and report a blocked/skipped update.
+Keep private policy in user skills outside the tracked install tree.
 Systemd installs report whether logout persistence is available; explicitly set
 `OH_MY_SETTING_AUTO_UPDATE_LINGER=1` when installing the trigger to enable it
 (host permission may be required), or use cron. Linger applies to all this
@@ -265,7 +211,7 @@ A step is previewed by its own code where that code has a write-free mode
 (links and backups, the capability profile, Claude hook rows, Antigravity
 permission rules, the auto-update trigger). Everything else is named
 `not-previewed` rather than described from a second copy of its logic: the
-clone or fetch, the Python runtime, tool installers and any PATH line they add,
+clone or fetch, the native payload build, tool installers and any PATH line they add,
 service logins, the Codex plugin and its `config.toml` block, MCP and
 Antigravity plugin registration, and the Claude `statusLine`, `modelSettings`
 and `attribution` keys. The plan reads the checkout as it is on disk, so an

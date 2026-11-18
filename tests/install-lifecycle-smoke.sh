@@ -99,11 +99,24 @@ EOF
     # Put a fast cargo shim on PATH only during repair so cargo builds instantly by copying build_dir.
     cat > "$case_dir/bin/cargo" <<EOF
 #!/usr/bin/env bash
+set -euo pipefail
+[ "\$PWD" = "$case_dir/checkout" ] || exit 81
+[ "\${1:-}" = build ] || exit 82
+[ -f rust-toolchain.toml ] || exit 83
+[ "\${CARGO_NET_OFFLINE:-}" = true ] || exit 84
+locked=0
+for arg in "\$@"; do
+  case "\$arg" in
+    --offline|+*) exit 85 ;;
+    --locked) locked=1 ;;
+  esac
+done
+[ "\$locked" = 1 ] || exit 86
 mkdir -p "$case_dir/checkout/target/lifecycle-build/release"
 cp -f "$build_dir"/oms* "$case_dir/checkout/target/lifecycle-build/release/"
 EOF
     chmod +x "$case_dir/bin/cargo"
-    OMS_NATIVE_NO_AUTO_STAGE=0 "$HOME/.local/bin/oms" doctor --repair --no-model-doctor >/dev/null ||
+    CARGO_NET_OFFLINE=true OMS_NATIVE_NO_AUTO_STAGE=0 "$HOME/.local/bin/oms" doctor --repair --no-model-doctor >/dev/null ||
       fail "doctor --repair failed ($mode)"
     "$HOME/.local/bin/oms" list >/dev/null || fail "oms list failed after repair ($mode)"
     broken_found=0

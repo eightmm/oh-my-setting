@@ -273,15 +273,16 @@ fn build(paths: &Paths, revision: &str, flag: &AtomicBool) -> Result<PathBuf> {
     }
     let cargo = r::find("cargo", &paths.cwd)
         .ok_or_else(|| r::Error(2, "native payload missing and cargo unavailable".into()))?;
+    // Cargo/rustup selects the toolchain declared by this checkout. Incoming
+    // revisions may need a newer compiler or dependencies not cached locally;
+    // callers can still opt into Cargo's offline mode through its environment.
     let result = r::command(
         cargo,
         &[
-            "+1.99.1".into(),
             "build".into(),
             "--manifest-path".into(),
             paths.source.join("Cargo.toml").into_os_string(),
             "--locked".into(),
-            "--offline".into(),
             "--release".into(),
             "--bin".into(),
             "oms".into(),

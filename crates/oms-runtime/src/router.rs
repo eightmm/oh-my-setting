@@ -701,8 +701,9 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
             if envelope.get("failures").truth() {
                 issues.push("unresolved failures exist")
             }
-            if !release.get("stable").get("ready").truth() {
-                issues.push("stable channel ref is unavailable locally")
+            let stable = release.get("stable");
+            if !stable.text("configured_ref").is_empty() && !stable.get("ready").truth() {
+                issues.push("configured stable channel ref is unavailable locally")
             }
             if r.has("strict") && !issues.is_empty() {
                 code = 3

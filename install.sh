@@ -336,7 +336,7 @@ if [ "$PLAN_ONLY" = 1 ]; then
   . "$plan_root/scripts/lib/platform.sh"
   oms_bash_enter
   oms_native_route strict "$plan_root" install --plan "${install_original_args[@]}" || exit $?
-  echo "error: native payload unavailable for --plan; install cargo 1.99.1 or verify $plan_root" >&2
+  echo "error: native payload unavailable for --plan; install the Rust toolchain declared in $plan_root/rust-toolchain.toml or verify the staged payload" >&2
   exit 2
 fi
 export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"
@@ -805,13 +805,13 @@ run_as_root() {
 }
 
 # Minimal images (rocky-minimal, opensuse, alpine, arch) lack git or the tar
-# and gzip that locked tool archives need; install only what is missing.
+# and gzip that verified tool archives need; install only what is missing.
 install_system_packages_if_missing() {
   local missing=() package
-  # A musl libc host (Alpine) cannot run the pinned glibc uv or Node;
+  # A musl libc host (Alpine) cannot run the supported glibc uv or Node artifacts;
   # stop before installing anything instead of leaving half an install.
   if [ "$(uname -s)" = Linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
-    echo "error: musl-based Linux (such as Alpine) is not supported: the pinned uv and Node builds need glibc; use a glibc distribution or container" >&2
+    echo "error: musl-based Linux (such as Alpine) is not supported: the managed uv and Node builds need glibc; use a glibc distribution or container" >&2
     exit 1
   fi
   for package in "$@"; do
@@ -936,5 +936,5 @@ if [ -f "$DEST/scripts/lib/platform.sh" ]; then
   oms_native_route strict "$DEST" install "${install_original_args[@]}" || exit $?
 fi
 
-echo "error: native installer unavailable in $DEST (install cargo 1.99.1 and rerun)" >&2
+echo "error: native installer unavailable in $DEST (install the Rust toolchain declared in $DEST/rust-toolchain.toml and rerun)" >&2
 exit 2

@@ -817,29 +817,52 @@ fn providers(paths: &Paths, options: &Options) -> Result<crate::Output> {
     r::json(&table)
 }
 fn tool_lock(paths: &Paths) -> Result<Vec<Value>> {
-    let path = std::env::var_os("OH_MY_SETTING_TOOL_LOCK")
-        .map(PathBuf::from)
-        .unwrap_or(paths.source.join("tools.lock.json"));
+    let explicit = std::env::var_os("OH_MY_SETTING_TOOL_LOCK").map(PathBuf::from);
+    let path = explicit
+        .as_ref()
+        .map(|path| paths.cwd.join(path))
+        .unwrap_or(paths.data.join(crate::supply::RELEASE_RECEIPT));
+    if explicit.is_none() && !r::exists(&path) {
+        return Ok(vec![finding(
+            "tool releases",
+            "info",
+            "no release observations recorded; managed tools resolve current upstream releases when installed or updated",
+        )]);
+    }
     let table = r::value(&path)?;
     if table["schema"] != 2 {
-        return r::fail("unsupported tool lock schema");
+        return r::fail("unsupported tool release record schema");
     }
     fn validate(v: &Value) -> Result<()> {
         match v {
             Value::Object(o) => {
                 for (k, v) in o {
-                    if k == "sha256"
+                    if matches!(k.as_str(), "sha256" | "sha512")
                         && v.as_str().is_none_or(|s| {
-                            s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())
+                            let length = if k == "sha256" { 64 } else { 128 };
+                            s.len() != length || !s.bytes().all(|b| b.is_ascii_hexdigit())
                         })
                     {
-                        return r::fail("invalid locked payload digest");
+                        return r::fail("invalid recorded payload digest");
+                    }
+                    if k == "integrity"
+                        && v.as_str().is_none_or(|s| {
+                            s.strip_prefix("sha512-").is_none_or(|digest| {
+                                digest.len() != 88
+                                    || !digest.ends_with("==")
+                                    || !digest.as_bytes()[..86].iter().all(|b| {
+                                        b.is_ascii_alphanumeric() || matches!(*b, b'+' | b'/')
+                                    })
+                            })
+                        })
+                    {
+                        return r::fail("invalid recorded npm integrity");
                     }
                     if k == "url"
                         && v.as_str()
                             .is_none_or(|s| !s.starts_with("https://") || s.contains(['\r', '\n']))
                     {
-                        return r::fail("locked download URL must use HTTPS");
+                        return r::fail("recorded download URL must use HTTPS");
                     }
                     validate(v)?;
                 }
@@ -855,9 +878,13 @@ fn tool_lock(paths: &Paths) -> Result<Vec<Value>> {
     }
     validate(&table)?;
     Ok(vec![finding(
-        "tool lock",
+        "tool releases",
         "ok",
-        "tool lock schema, HTTPS URLs and payload digests validated",
+        if explicit.is_some() {
+            "explicit tool pin schema, HTTPS URLs and digest fields validated; installed bytes and upstream freshness were not checked"
+        } else {
+            "release observation schema, HTTPS URLs and digest fields validated; observations do not pin future updates or prove installed versions"
+        },
     )])
 }
 /// Read-only report of registered provider accounts: home safety and

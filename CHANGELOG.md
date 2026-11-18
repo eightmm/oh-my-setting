@@ -526,6 +526,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Managed tool upgrades resolve current upstream releases instead of a checked-in
+  `tools.lock.json`: Node follows the newest LTS, uv/gh use their latest stable
+  GitHub release, npm tools follow `latest`, and Antigravity uses its current-host
+  manifest. Other platforms no longer hold up this host. Optional npm provider
+  updates have no 14-day delay. Exact user pins remain opt-in, and private release
+  observations do not control future version selection.
 - Worker orientation builds its graph context pack in a private candidate
   directory, reuses the parent's cache entries by content key and publishes
   with an atomic rename, so a cold pack takes seconds instead of hitting the
@@ -1048,6 +1054,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Native OMS installation/update builds use the incoming checkout's Rust
+  toolchain and can fetch missing locked dependencies. Fresh installs follow
+  `edge`; fallback and runtime edge apply retain branch tracking instead of
+  accidentally pinning a commit. Missing release configuration no longer
+  invents an old stable promotion. Doctor and fingerprints describe observed
+  tool releases without treating them as default pins or installation proof.
 - CI jobs run on `ubuntu-24.04` instead of `ubuntu-latest`: the rollout of
   the Ubuntu 26.04 runner image failed `core/room-protocol`, `draft-pr` and
   `runtime-core` on every branch while the same commits passed on 24.04 and

@@ -26,17 +26,18 @@ privately first. Please allow time for a fix before public disclosure.
   entries without restoring a stale whole-file backup over later user edits.
   Delegate exceptions accept one exact command token and one normalized
   absolute worktree parent; rule metacharacters are rejected.
-- Installs or reuses the required toolchain: Node/nvm, uv, `gh`, Antigravity,
-  and the global npm packages for Codex, Claude Code, and Notion CLI. Exact
-  versions come from `tools.lock.json`; direct platform payloads plus npm
-  wrapper/native packages are verified against repository-pinned digests or
-  integrity before use. npm installs the verified wrapper offline with a fresh
-  cache before adding the verified native payload. A pre-existing external CLI
-  at the exact version is reused as version-only evidence; it is not described
-  as byte-authenticated. Managed direct binaries have digest ownership sidecars,
-  while npm wrapper/native packages and shims use recoverable swaps.
-  Uninstall leaves them and the user-local PATH entry in place. Windows Git
-  Bash requires the exact locked native Node release beforehand.
+- Installs or reuses the tools selected by capability profiles: Node, uv, `gh`,
+  Antigravity, and the Codex, Claude Code, and Notion CLI packages. Default
+  upgrades resolve Node LTS and current stable upstream releases over HTTPS;
+  direct artifacts and npm wrapper/native packages are checked against the
+  published SHA-256/SHA-512 digests or SHA-512 SRI before managed publication.
+  The private `tool-releases.json` records resolved metadata, not a permanent
+  pin or proof of the installed version. `OH_MY_SETTING_TOOL_LOCK` remains an
+  explicit exact-version override. Reused external CLIs provide version-only
+  evidence, not byte authentication. Recognized vendor-native providers use
+  their own updater and recovery; OMS checks its exit and version result.
+  Managed file publication uses recoverable swaps. Native Windows is
+  unsupported; WSL2 follows the Linux artifact contract.
 - Optionally writes a local machine/Slurm snapshot under `local/` and generated
   Slurm references (gitignored). Skip with `OH_MY_SETTING_GENERATE_MACHINE=0`
   and `OH_MY_SETTING_GENERATE_SLURM=0`.
@@ -200,8 +201,10 @@ Treat these outputs as local operational metadata.
 ## Hardening recommendations for users
 
 - Review `install.sh` before piping it to a shell, or clone and run it locally.
-- Review changes to `tools.lock.json`; the lock authenticates the selected
-  upstream bytes, not the upstream publisher's intent.
+- Review installer/resolver changes and recorded release metadata. Published
+  checksums and SRI bind downloaded bytes to the selected upstream metadata;
+  they do not independently authenticate the publisher's intent. Use an explicit
+  `OH_MY_SETTING_TOOL_LOCK` when you need a reviewed exact tool version.
 - Pin a trusted ref instead of `edge` when reproducibility matters.
 - Use check-only updates unless you trust unattended clean fast-forwards.
 - Run `oms doctor` after install to verify managed state.

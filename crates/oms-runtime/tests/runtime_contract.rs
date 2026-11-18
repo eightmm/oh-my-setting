@@ -692,6 +692,250 @@ fn profile_planning_and_install_fail_closed() {
 }
 
 #[test]
+fn release_defaults_follow_remote_head_without_inventing_stable() {
+    if child_test("release_defaults_follow_remote_head_without_inventing_stable") {
+        return;
+    }
+    use oms_runtime::services::{ExternalOutput, ReleaseRequest};
+    use oms_runtime::value::{Value, from_serde, hash};
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Default)]
+    struct Releases {
+        revisions: RefCell<Vec<String>>,
+        fetches: Cell<u64>,
+        applications: RefCell<Vec<ReleaseRequest>>,
+    }
+    impl Services for Releases {
+        fn repository_view(&self, repo: &Path) -> Result<RepositoryView> {
+            Native.repository_view(repo)
+        }
+        fn resolve_revision(&self, root: &Path, revision: &str) -> Result<Option<String>> {
+            assert!(!revision.is_empty());
+            self.revisions.borrow_mut().push(revision.into());
+            let output = std::process::Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{revision}^{{commit}}"),
+                ])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            Ok(output
+                .status
+                .success()
+                .then(|| String::from_utf8(output.stdout).unwrap().trim().to_owned()))
+        }
+        fn fetch_release(&self, _: &Path) -> Result<()> {
+            self.fetches.set(self.fetches.get() + 1);
+            Ok(())
+        }
+        fn apply_release(&self, _: &Path, request: &ReleaseRequest) -> Result<ExternalOutput> {
+            self.applications.borrow_mut().push(request.clone());
+            Ok(ExternalOutput {
+                exit: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let f = Fixture::new();
+    for args in [
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ][..],
+        &["update-ref", "refs/remotes/origin/development", "HEAD"][..],
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/development",
+        ][..],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&f.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    std::fs::write(
+        f.0.join("PROJECT.md"),
+        "# Release fixture\n\n## Acceptance\n- Update channels report their configured state.\n",
+    )
+    .unwrap();
+    let mut profiles: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../../config/capability-profiles.json")).unwrap();
+    profiles["profiles"]["core"] = serde_json::json!({
+        "required": [], "optional": [], "any_of": [], "inherits": []
+    });
+    std::fs::create_dir(f.0.join("config")).unwrap();
+    std::fs::write(
+        f.0.join("config/capability-profiles.json"),
+        serde_json::to_vec(&profiles).unwrap(),
+    )
+    .unwrap();
+    let services = Releases::default();
+    let interrupted = AtomicBool::new(false);
+    let runtime =
+        oms_runtime::storage::Runtime::open(&f.0, &f.0, &f.0, &services, &interrupted).unwrap();
+    let default = oms_runtime::release::manifest(&runtime).unwrap();
+    let reviewed = hash(&default).unwrap();
+    let status = oms_runtime::release::status(&runtime).unwrap();
+    let stable = status.get("stable");
+    assert!(!stable.get("ready").truth());
+    for field in [
+        "configured_ref",
+        "selected_ref",
+        "resolved_commit",
+        "version",
+        "apply_command",
+    ] {
+        assert!(matches!(stable.get(field), Value::Null), "{field}");
+    }
+    let edge = status.get("edge");
+    assert!(edge.get("ready").truth());
+    assert_eq!(edge.text("configured_ref"), "origin/HEAD");
+    assert_eq!(edge.text("selected_ref"), "origin/HEAD");
+    assert_eq!(edge.text("apply_command"), "oms runtime release apply edge");
+    let command: Vec<OsString> = edge
+        .text("apply_command")
+        .split_whitespace()
+        .skip(2)
+        .map(OsString::from)
+        .collect();
+    let request = oms_runtime::parse(&command).unwrap();
+    assert_eq!(request.mode, oms_runtime::parser::Mode::Release);
+    assert_eq!(request.action, "apply");
+    assert_eq!(request.positional(0).unwrap(), "edge");
+    let commit = edge.text("resolved_commit").to_owned();
+    assert!([40, 64].contains(&commit.len()));
+
+    let refused = oms_runtime::release::apply(&runtime, "stable", true, true).unwrap_err();
+    assert_eq!(refused.code, 3);
+    assert_eq!(services.fetches.get(), 0);
+    assert!(services.applications.borrow().is_empty());
+    assert!(!f.0.join("config/update-channels.json").exists());
+    assert!(
+        services
+            .revisions
+            .borrow()
+            .iter()
+            .all(|r| r == "HEAD" || r == "origin/HEAD")
+    );
+    let doctor_request = oms_runtime::parse(&["doctor".into(), "--strict".into()]).unwrap();
+    let doctor = || {
+        let response = oms_runtime::router::dispatch(&runtime, &doctor_request).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
+        (response.code, report)
+    };
+    let (code, report) = doctor();
+    assert_eq!(code, 0);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["issues"], serde_json::json!([]));
+    assert_eq!(report["release"]["stable"]["ready"], false);
+    assert!(report["release"]["stable"]["configured_ref"].is_null());
+
+    let configured = serde_json::json!({
+        "schema": 1,
+        "channels": {
+            "stable": {
+                "ref": commit,
+                "version": "1.2.3",
+                "auto_apply": false,
+                "policy": "pinned reviewed commit",
+                "promoted_at": "2026-08-18T03:58:43Z"
+            },
+            "edge": {"ref": "development", "version": "edge", "auto_apply": false}
+        }
+    });
+    let manifest_path = f.0.join("config/update-channels.json");
+    let configured_bytes = serde_json::to_vec(&configured).unwrap();
+    std::fs::write(&manifest_path, &configured_bytes).unwrap();
+    let actual = oms_runtime::release::manifest(&runtime).unwrap();
+    assert_eq!(
+        hash(&actual).unwrap(),
+        hash(&from_serde(&configured).unwrap()).unwrap()
+    );
+    let stable = oms_runtime::release::resolve(&runtime, "stable", false).unwrap();
+    assert!(stable.get("ready").truth());
+    assert_eq!(stable.text("configured_ref"), commit);
+    assert_eq!(stable.text("resolved_commit"), commit);
+    assert_eq!(stable.text("version"), "1.2.3");
+    assert_eq!(
+        stable.text("apply_command"),
+        format!("oms update --ref {commit}")
+    );
+    let edge = oms_runtime::release::resolve(&runtime, "edge", false).unwrap();
+    assert_eq!(edge.text("configured_ref"), "development");
+    assert_eq!(edge.text("selected_ref"), "origin/development");
+    let stale = oms_runtime::release::promote(&runtime, &commit, "2.0.0", &reviewed).unwrap_err();
+    assert_eq!(stale.code, 75);
+    oms_runtime::release::apply(&runtime, "stable", false, true).unwrap();
+    let applications = services.applications.borrow();
+    assert_eq!(applications.len(), 1);
+    assert_eq!(applications[0].channel, "stable");
+    assert_eq!(applications[0].target, commit);
+    assert_eq!(applications[0].selected_ref, commit);
+    assert!(applications[0].no_tools);
+    drop(applications);
+    oms_runtime::release::apply(&runtime, "edge", false, false).unwrap();
+    let applications = services.applications.borrow();
+    assert_eq!(applications.len(), 2);
+    assert_eq!(applications[1].channel, "edge");
+    assert_eq!(applications[1].target, commit);
+    assert_eq!(applications[1].selected_ref, "origin/development");
+    assert!(!applications[1].no_tools);
+    drop(applications);
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), configured_bytes);
+    assert_eq!(doctor().0, 0);
+
+    let mut unavailable = configured.clone();
+    unavailable["channels"]["stable"]["ref"] = serde_json::json!("f".repeat(commit.len()));
+    std::fs::write(&manifest_path, serde_json::to_vec(&unavailable).unwrap()).unwrap();
+    let (code, report) = doctor();
+    assert_eq!(code, 3);
+    assert_eq!(report["ok"], false);
+    assert_eq!(
+        report["issues"],
+        serde_json::json!(["configured stable channel ref is unavailable locally"])
+    );
+
+    for (channel, reference) in [
+        ("stable", serde_json::Value::Null),
+        ("stable", serde_json::json!("")),
+        ("stable", serde_json::json!(17)),
+        ("edge", serde_json::Value::Null),
+    ] {
+        let mut invalid = configured.clone();
+        invalid["channels"][channel]["ref"] = reference;
+        let bytes = serde_json::to_vec(&invalid).unwrap();
+        std::fs::write(&manifest_path, &bytes).unwrap();
+        assert_eq!(oms_runtime::release::manifest(&runtime).unwrap_err().code, 2);
+        assert_eq!(
+            oms_runtime::release::apply(&runtime, "stable", true, true)
+                .unwrap_err()
+                .code,
+            2
+        );
+        assert_eq!(services.fetches.get(), 0);
+        assert_eq!(services.applications.borrow().len(), 2);
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn release_promotion_rejects_invalid_inputs() {
     if child_test("release_promotion_rejects_invalid_inputs") {
         return;

@@ -485,8 +485,12 @@ plugin-cache freshness or verification.
 `oms status --fingerprint` prints a content-free JSON fingerprint of the
 installation: OMS version, receipt scalars (commit, channel, ref, profile,
 link mode, dirty), component flags and modes, plugin hash, and sha256 digests of
-`rules/global-AGENTS.md`, `skills.manifest.json`, `tools.lock.json` and
-`custom-skills/`. It omits paths, user names, timestamps and file contents,
+`rules/global-AGENTS.md`, `skills.manifest.json`, and `custom-skills/`.
+`digests.tools_lock` describes an explicit `OH_MY_SETTING_TOOL_LOCK` override or
+`not configured`; `digests.tool_releases` describes the local release observations
+with `resolved_at` removed, or `missing` before any resolution. Neither digest
+proves that recorded versions are installed. It omits paths, user names,
+observation timestamps and file contents,
 never runs a provider CLI and never writes. Save it and move it yourself
 (git, scp); OMS runs no sync and moves no credentials. `oms status --compare
 FILE [--json]` diffs the local fingerprint against such a file: exit 0 when

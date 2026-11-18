@@ -207,7 +207,7 @@ fn usage(tool: &str) -> String {
             .join("\n")
     )
 }
-fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
+pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
     let (flags, values) = spec(tool);
     let mut out = Options {
         tool: tool.into(),
