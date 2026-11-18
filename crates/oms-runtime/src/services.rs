@@ -103,7 +103,25 @@ pub struct RelatedSource {
     pub source_sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceAction {
+    Host,
+    Status,
+    Activate { policy: PathBuf },
+    Hold { expected_policy_sha256: String },
+}
+
 pub trait Services {
+    /// Native resource producer owns policy validation, actual host generation,
+    /// exact state-root custody and dispatch CAS. No execution permit is returned.
+    fn resource_action(
+        &self,
+        _repo: &Path,
+        _state_repo: &Path,
+        _action: &ResourceAction,
+    ) -> Result<Value> {
+        Err(unavailable("resource policy"))
+    }
     /// Read-only native account-database lookup for an explicitly named ~user.
     /// This supplies metadata, with no file access or execution authority.
     fn account_home(&self, _username: &std::ffi::OsStr) -> Result<Option<PathBuf>> {

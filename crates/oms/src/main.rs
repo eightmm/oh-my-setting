@@ -17,13 +17,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const ROOT_HELP: &str = r#"usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]
-                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,doctor}
+                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,resources,doctor}
                    ...
 
 Typed semantic core over the existing hardened OMS execution plane.
 
 positional arguments:
-  {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,doctor}
+  {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,resources,doctor}
     envelope            project the effective TaskEnvelope
     evidence            criterion-level evidence coverage
     next                return the smallest currently valid internal actions
@@ -39,6 +39,7 @@ positional arguments:
     backend             trusted-local, isolated, or remote execution
     experiment          ExperimentContract v2 and invariant packs
     benchmark           harness effectiveness telemetry
+    resources           explicit observed host-local resource policy
     doctor              validate the runtime projection without replacing OMS
                         doctor
 
@@ -48,7 +49,7 @@ options:
   --pretty              pretty-print JSON
   --version             show program's version number and exit"#;
 const ROOT_USAGE: &str = r#"usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]
-                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,doctor}
+                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,resources,doctor}
                    ..."#;
 const HINT: &str = "hint: run `oms runtime --help` for usage";
 const USAGE: &str = "usage: oms runtime context-inspect [-h] [--repo REPO] [--pretty]\n                                   [--injections]\n                                   [--session-hash SESSION_HASH]\n                                   [--session TRANSCRIPT] [--timeline]\n                                   [--compare COMPARE] [--verify-current]\n                                   [--limit LIMIT] [--format {json,text}]\n                                   [manifest]";
@@ -174,7 +175,7 @@ fn argument_repr(value: &str) -> String {
 }
 fn invalid_command(arg: &OsStr) -> String {
     format!(
-        "argument command: invalid choice: '{}' (choose from envelope, evidence, next, brief, failure, context, context-inspect, profile, release, capsule, backend, experiment, benchmark, doctor)",
+        "argument command: invalid choice: '{}' (choose from envelope, evidence, next, brief, failure, context, context-inspect, profile, release, capsule, backend, experiment, benchmark, resources, doctor)",
         arg.to_string_lossy()
     )
 }
@@ -420,6 +421,7 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                 b"backend",
                 b"experiment",
                 b"benchmark",
+                b"resources",
                 b"doctor",
                 b"ssh-adapter",
                 b"exec-snapshot",

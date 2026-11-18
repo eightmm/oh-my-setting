@@ -12,7 +12,7 @@ use std::{
 const USAGE: &str = "usage: oms runtime failure [-h] [--repo REPO] [--pretty]\n                           {classify,catalog} ...\n";
 const CLASSIFY_USAGE: &str = "usage: oms runtime failure classify [-h] [--repo REPO] [--pretty]\n                                    [--exit EXIT] [--code CODE]\n                                    text\n";
 const CATALOG_USAGE: &str = "usage: oms runtime failure catalog [-h] [--repo REPO] [--pretty]\n";
-const ROOT_USAGE: &str = "usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,doctor}\n                   ...\n";
+const ROOT_USAGE: &str = "usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,resources,doctor}\n                   ...\n";
 const HELP_COMMON: &str = "options:\n  -h, --help   show this help message and exit\n  --repo REPO  project repository or directory\n  --pretty     pretty-print JSON\n";
 
 #[cfg(unix)]

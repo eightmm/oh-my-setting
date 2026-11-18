@@ -47,6 +47,28 @@ impl Drop for Fixture {
 }
 struct Native;
 impl Services for Native {
+    fn resource_action(
+        &self,
+        repo: &Path,
+        state_repo: &Path,
+        action: &oms_runtime::services::ResourceAction,
+    ) -> Result<oms_runtime::value::Value> {
+        use oms_runtime::services::ResourceAction;
+        use oms_runtime::value::*;
+        assert_eq!(repo, state_repo);
+        let (name, policy) = match action {
+            ResourceAction::Host => ("host", Value::Null),
+            ResourceAction::Status => ("status", Value::Null),
+            ResourceAction::Activate { policy } => ("activate", os(policy.as_os_str())),
+            ResourceAction::Hold {
+                expected_policy_sha256,
+            } => {
+                assert_eq!(expected_policy_sha256, &"a".repeat(64));
+                ("hold", Value::Null)
+            }
+        };
+        Ok(object([("action", string(name)), ("policy", policy)]))
+    }
     fn resolve_roots(&self, cwd: &Path, _: &OsStr) -> Result<RuntimeRoots> {
         Ok(RuntimeRoots {
             execution_repo: cwd.into(),
@@ -251,6 +273,72 @@ fn help_parse_interruption_and_unavailable_fail_closed() {
     let response = run(&args, &f.0, &f.0, &Unavailable, &AtomicBool::new(false));
     assert_eq!(response.code, 2);
     assert!(String::from_utf8_lossy(&response.stderr).contains("unavailable"));
+    assert!(
+        Unavailable
+            .resource_action(&f.0, &f.0, &oms_runtime::services::ResourceAction::Status)
+            .is_err()
+    );
+    for action in ["host", "status", "activate", "hold"] {
+        let help = f.run(&["resources", action, "--help"], false);
+        assert_eq!(help.code, 0);
+        assert!(
+            String::from_utf8_lossy(&help.stdout)
+                .contains(&format!("oms runtime resources {action}"))
+        );
+    }
+    for invalid in [
+        vec!["resources"],
+        vec!["resources", "activate"],
+        vec!["resources", "activate", "--policy", ""],
+        vec!["resources", "hold", "--expected-policy-sha256", "bad"],
+        vec!["resources", "retire", "--done", "true"],
+    ] {
+        assert_eq!(f.run(&invalid, false).code, 2);
+    }
+    for action in ["host", "status"] {
+        let report = f.run(&["resources", action], false);
+        assert_eq!(report.code, 0);
+        assert_eq!(
+            oms_runtime::value::parse(&report.stdout)
+                .unwrap()
+                .text("action"),
+            action
+        );
+        let parsed = oms_runtime::parse(&["resources".into(), action.into()]).unwrap();
+        assert!(parsed.child_read_only());
+    }
+    let activated = f.run(
+        &[
+            "resources",
+            "activate",
+            "--policy",
+            f.0.join("policy.json").to_str().unwrap(),
+        ],
+        false,
+    );
+    assert_eq!(activated.code, 0);
+    assert_eq!(
+        oms_runtime::value::parse(&activated.stdout)
+            .unwrap()
+            .text("policy"),
+        "policy.json"
+    );
+    let held = f.run(
+        &[
+            "resources",
+            "hold",
+            "--expected-policy-sha256",
+            &"a".repeat(64),
+        ],
+        false,
+    );
+    assert_eq!(held.code, 0);
+    assert_eq!(
+        oms_runtime::value::parse(&held.stdout)
+            .unwrap()
+            .text("action"),
+        "hold"
+    );
     let described = f.run(&["backend", "describe", "apptainer"], false);
     assert_eq!(described.code, 0);
     assert!(String::from_utf8_lossy(&described.stdout).contains("cgroup enforcement"));

@@ -304,7 +304,7 @@ fn dispatch_owns_runtime_subcommands_and_leaves_unowned_tools_to_legacy() {
     assert_eq!(owned.status.code(), Some(0));
     assert!(!owned.stdout.is_empty());
 
-    for sub in ["ssh-adapter", "exec-snapshot"] {
+    for sub in ["ssh-adapter", "exec-snapshot", "resources"] {
         let out = Command::new(f.binary())
             .arg("--oms-dispatch")
             .arg(&f.0)
@@ -1561,7 +1561,8 @@ fn public_owned_status_75_and_stream_failures_never_retry() {
     assert!(!f.0.join("preflight").exists());
 }
 
-// Expected bytes captured through scripts/oms in the immutable reference checkout.
+// Leaf bytes come from the immutable reference checkout; root choices also
+// include explicitly added native commands.
 #[test]
 fn public_experiment_modes_preserve_root_forwarding_and_precedence() {
     let f = Fixture::new();
@@ -1627,7 +1628,7 @@ fn public_experiment_modes_preserve_root_forwarding_and_precedence() {
             &["runtime", "--first", "experiment", "template", "--last"],
             2,
             "",
-            "usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,doctor}\n                   ...\noms runtime: error: unrecognized arguments: --first --last\nhint: run `oms runtime --help` for usage\n",
+            "usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,resources,doctor}\n                   ...\noms runtime: error: unrecognized arguments: --first --last\nhint: run `oms runtime --help` for usage\n",
         ),
         (
             &["runtime", "--first", "experiment", "validate"],
@@ -1652,7 +1653,7 @@ fn public_experiment_modes_preserve_root_forwarding_and_precedence() {
             &["runtime", "--repo", "--pretty", "experiment", "template"],
             2,
             "",
-            "usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,doctor}\n                   ...\noms runtime: error: argument --repo: expected one argument\nhint: run `oms runtime --help` for usage\n",
+            "usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,resources,doctor}\n                   ...\noms runtime: error: argument --repo: expected one argument\nhint: run `oms runtime --help` for usage\n",
         ),
         (
             &["runtime", "experiment", "compare", "{}"],

@@ -193,11 +193,9 @@ fn parser_diagnostics() {
             .ends_with("argument --pretty: ignored explicit argument 'x'\n")
     );
     let (_, _, err) = call(&["template", "--unknown", "x"], &t.0);
-    assert!(
-        String::from_utf8(err)
-            .unwrap()
-            .ends_with("oms runtime: error: unrecognized arguments: --unknown x\n")
-    );
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.ends_with("oms runtime: error: unrecognized arguments: --unknown x\n"));
+    assert!(err.contains("benchmark,resources,doctor"));
     let (_, _, err) = call(&["validate", "--unknown"], &t.0);
     assert!(
         String::from_utf8(err)

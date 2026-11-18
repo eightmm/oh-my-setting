@@ -217,6 +217,7 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                 value
             }
         }
+        Mode::Resources => crate::resources::action(rt, r)?,
         Mode::Evidence => match r.action.as_str() {
             "show" => {
                 let base = crate::projection::base(rt)?;

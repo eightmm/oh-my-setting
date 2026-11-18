@@ -254,12 +254,51 @@ for the expected call and an explicitly pinned cleanup scope, with revision CAS
 and idempotent replay. Usage/spend, persistent sessions, Team slots and candidate
 WIP remain separate; a usage cleanup Boolean cannot release a resource claim.
 
-These are internal producer primitives. Native factory/CLI and full Team launch
-integration, session/WIP/Team retirement and epoch recovery remain to be wired.
+`retire_team_checked` and `retire_write_checked` require exact owner/generation
+and custody revision, and preserve a canonical decision reference and digest.
+They refuse while the target retains independent execution/session custody;
+Team retirement also waits for its candidate WIP. Member completion never
+retires the Team. Legacy rows without a revision remain readable as revision 1.
+Repeated exact retirement is idempotent and a changed decision refuses.
+
+`DecisionEvidence` is correlation, not a public authorization payload. The parent
+adapter must validate the actual canonical owner/result/acceptance decision for
+the supplied `DecisionTarget` under retained producer guards before calling a
+checked API. Its callback checks only pinned evidence and owned lock generations
+while the dispatch writer is held; it must not acquire producer locks or run
+native/Git proof subprocesses there. The store safely rereads the exact owned,
+regular canonical source (at most 16 MiB), verifies its SHA-256 and checks the
+callback again after CAS. The adapter revalidates its full outer authority after
+inner locks drop. Failure after CAS remains publication-uncertain. A matching
+file hash alone and free-form done/cleanup flags cannot supply the producer's
+decision semantics.
+
+`idle_session_checked` requires the transport producer's exact scoped
+turn-terminal decision and releases only invocation custody. The process/session
+remains counted. `close_session` requires the owning reactor's sealed cleanup
+for the expected physical call and pinned scope, with revision CAS. It releases
+that OS scope and makes no claim about an unobserved remote/native session.
+Neither path changes candidate WIP, Team custody or usage liability.
+
+`reconcile_checked` takes an exact registry snapshot and a producer-validated
+epoch decision. It permits a new epoch only from held state with all four
+custody counts drained. Resource schema 2 retains all prior policies and epoch
+decision references alongside the unchanged physical intents, claims and usage.
+The domain stays fixed; old epoch names and policy digests cannot be reused.
+Inactive historical claims retain their original policy and host bindings.
+Unknown usage remains a liability and is never reset or refunded by an epoch
+transition. Unsupported versions refuse; resource schema 1 remains readable.
+
+The native runtime exposes policy `host`, `status`, explicit `activate --policy`
+and exact-policy `hold` through `oms runtime resources`; see the
+[resource CLI contract](../oms-runtime/README.md). Full Team launch integration
+and producer-validated retirement/epoch consumers remain separate work.
 Unknown native descendants, provider-account capacity and cross-host global hard
 bounds are unsupported. Current unbound/legacy panel paths refuse in an active
 domain. The existing usage fixture covers mixed-call concurrency, partial writes,
-headroom, direct-receipt activation races, tampering and independent custody.
+headroom, direct-receipt activation races, tampering, independent custody,
+decision/revision conflicts, retained history and epoch reuse, scoped session
+idle/close, and post-CAS producer-guard failure.
 
 Each new registration or observation reads and validates the complete history,
 then atomically replaces the ledger with that history plus the new receipt.

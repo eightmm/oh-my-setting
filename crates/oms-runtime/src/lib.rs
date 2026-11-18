@@ -114,6 +114,7 @@ pub mod parser;
 pub mod profiles;
 pub mod projection;
 pub mod release;
+pub mod resources;
 pub mod router;
 pub mod services;
 pub mod ssh_adapter;

@@ -21,6 +21,69 @@ fn plan_error(message: impl Into<String>) -> oms_command_plan::Error {
         message: message.into(),
     }
 }
+/// Kernel boot identity for the explicitly observed host-local resource domain.
+/// Neither a hostname nor an inherited locator can stand in for this generation.
+pub(crate) fn observed_host_generation_before(
+    deadline: Instant,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> oms_command_plan::Result<String> {
+    use sha2::Digest;
+    let check = || {
+        if interrupted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(oms_command_plan::Error {
+                code: 130,
+                message: "host generation proof interrupted".into(),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(oms_command_plan::Error {
+                code: 75,
+                message: "host generation proof deadline expired".into(),
+            });
+        }
+        Ok(())
+    };
+    check()?;
+    #[cfg(target_os = "linux")]
+    let raw = read_bounded_system_file(Path::new("/proc/sys/kernel/random/boot_id"), 128)?
+        .ok_or_else(|| plan_error("native host generation unavailable"))?;
+    #[cfg(target_os = "macos")]
+    let raw = run_clean_probe_budget(
+        "/usr/sbin/sysctl",
+        &["-n", "kern.bootsessionuuid"],
+        &[0],
+        Some(deadline),
+        interrupted,
+    )?
+    .1;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let raw: Vec<u8> = Vec::new();
+    check()?;
+    let boot = std::str::from_utf8(&raw)
+        .map_err(|_| plan_error("invalid native host generation"))?
+        .trim();
+    if boot.len() != 36
+        || !boot.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err(plan_error(
+            "native host generation unavailable or malformed",
+        ));
+    }
+    Ok(format!(
+        "{:x}",
+        sha2::Sha256::digest(format!(
+            "oms-host-boot-v1\0{}\0{}",
+            std::env::consts::OS,
+            boot.to_ascii_lowercase()
+        ))
+    ))
+}
 
 /// Resolves group membership for private-group permission checks in
 /// `oms_command_plan` and `oms_runtime`, matching Python `_private_group`.
@@ -706,6 +769,8 @@ fn parse_dscacheutil_account_entries(
 // with a wall deadline and bounded output; argv is never shell-parsed and no
 // interpreter or legacy script is invoked.
 // ---------------------------------------------------------------------------
+#[path = "services_resources.rs"]
+mod resources;
 use crate::services_control::ControlServices;
 use oms_runtime::services::{
     BackendRequest, BackendResult, ExternalOutput, InstallerRequest, LedgerRequest, LedgerResult,
@@ -1139,6 +1204,14 @@ impl<'a> RuntimeServices<'a> {
 }
 
 impl oms_runtime::Services for RuntimeServices<'_> {
+    fn resource_action(
+        &self,
+        repo: &Path,
+        state_repo: &Path,
+        action: &oms_runtime::services::ResourceAction,
+    ) -> oms_command_plan::Result<Value> {
+        resources::action(repo, state_repo, action, self.cancel())
+    }
     /// Read-only passwd lookup of a named user's home; no file or exec authority.
     fn account_home(&self, username: &OsStr) -> oms_command_plan::Result<Option<PathBuf>> {
         let name = username.as_bytes();

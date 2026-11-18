@@ -652,9 +652,10 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
     use oms_command_telemetry::store::{
         dispatch,
         physical::{self, Registration},
-        resources::{self, Binding, Policy, Team},
+        resources::{self, Binding, DecisionEvidence, DecisionTarget, Policy, Team},
     };
     use oms_supervisor::process::{OwnedCleanup, PhysicalCall, Progress, Reactor, Request, Scope};
+    use sha2::{Digest, Sha256};
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
     fn cleanup(call: &str, scope: Scope) -> OwnedCleanup {
@@ -676,6 +677,12 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
     let stop = AtomicBool::new(false);
     let deadline = || Instant::now() + Duration::from_secs(3);
     let policy = resource_policy();
+    let decision_body = br#"{"schema":1,"fixture":"canonical-owner-decision"}"#;
+    let decision = DecisionEvidence {
+        record: ".oms/plan/tasks.json".into(),
+        sha256: format!("{:x}", Sha256::digest(decision_body)),
+        revision: "decision-one".into(),
+    };
     let legacy = resource_binding(&policy);
     let team = Binding {
         team: Some(Team {
@@ -780,11 +787,43 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
     );
     assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
     let admitted = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    let mut old_registry = oms_json::parse_strict(&admitted).unwrap();
+    let old_resource = old_registry
+        .as_object_mut()
+        .unwrap()
+        .get_mut(&oms_json::PyString::from("resources"))
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    for collection in ["teams", "write_wip"] {
+        for entry in old_resource
+            .get_mut(&oms_json::PyString::from(collection))
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            entry
+                .as_object_mut()
+                .unwrap()
+                .remove(&oms_json::PyString::from("revision"));
+        }
+    }
+    root.write(
+        dispatch::REGISTRY,
+        oms_json::session_call_key_json_bytes(&old_registry).unwrap(),
+    );
+    assert_eq!(
+        resources::occupancy(&root.0, &stop).unwrap().unwrap(),
+        total
+    );
+    root.write(dispatch::REGISTRY, &admitted);
     for damage in [
         "downgrade",
         "missing-claims",
         "missing-intents",
         "legacy-dispatch",
+        "resource-version",
     ] {
         let mut value = oms_json::parse_strict(&admitted).unwrap();
         let fields = value.as_object_mut().unwrap();
@@ -809,6 +848,14 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
                     "calls".into(),
                     oms_json::parse_strict(br#"{"legacy":{"state":"unknown"}}"#).unwrap(),
                 );
+            }
+            "resource-version" => {
+                fields
+                    .get_mut(&oms_json::PyString::from("resources"))
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("schema".into(), oms_json::Value::integer("99").unwrap());
             }
             _ => unreachable!(),
         }
@@ -931,6 +978,18 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         |_, _| Ok(()),
     )
     .unwrap();
+    assert!(
+        resources::retire_write_checked(
+            &root.0,
+            &binding,
+            &winning.operation_id,
+            1,
+            &stop,
+            deadline(),
+            |_, _| panic!("running custody cannot reach a decision callback")
+        )
+        .is_err()
+    );
     assert_eq!(
         resources::occupancy(&root.0, &stop)
             .unwrap()
@@ -939,6 +998,21 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         1
     );
     resources::hold(&root.0, &policy.sha256().unwrap(), &stop, deadline()).unwrap();
+    let held_busy = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    assert!(
+        resources::reconcile_checked(
+            &root.0,
+            &held_busy,
+            &Policy {
+                epoch: "busy-epoch".into(),
+                ..policy.clone()
+            },
+            &stop,
+            deadline(),
+            |_, _| panic!("held unknown work cannot reach epoch decision checks")
+        )
+        .is_err()
+    );
     assert_eq!(
         resources::fence(
             &root.0,
@@ -980,6 +1054,254 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
             .unwrap()
             .invocations,
         0
+    );
+
+    root.write(&decision.record, decision_body);
+    let linked_decision = root.0.join(".oms/plan/linked-decision.json");
+    std::fs::hard_link(root.0.join(&decision.record), &linked_decision).unwrap();
+    assert!(
+        resources::retire_write_checked(
+            &root.0,
+            &binding,
+            &winning.operation_id,
+            1,
+            &stop,
+            deadline(),
+            |_, _| Ok(decision.clone())
+        )
+        .is_err(),
+        "a matching hash cannot bypass canonical source ownership and single-link checks"
+    );
+    std::fs::remove_file(linked_decision).unwrap();
+    let before_retirement = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    let mut foreign_owner = binding.clone();
+    foreign_owner.root_generation = "old-owner-generation".into();
+    assert!(
+        resources::retire_write_checked(
+            &root.0,
+            &foreign_owner,
+            &winning.operation_id,
+            1,
+            &stop,
+            deadline(),
+            |_, _| panic!("stale owner must refuse before checking evidence")
+        )
+        .is_err()
+    );
+    let mut forged = decision.clone();
+    forged.sha256 = "0".repeat(64);
+    assert!(
+        resources::retire_write_checked(
+            &root.0,
+            &binding,
+            &winning.operation_id,
+            1,
+            &stop,
+            deadline(),
+            |_, _| Ok(forged.clone())
+        )
+        .is_err()
+    );
+    assert!(
+        resources::retire_write_checked(
+            &root.0,
+            &binding,
+            &winning.operation_id,
+            2,
+            &stop,
+            deadline(),
+            |_, _| panic!("stale revision must refuse before checking evidence")
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        before_retirement
+    );
+    resources::retire_write_checked(
+        &root.0,
+        &binding,
+        &winning.operation_id,
+        1,
+        &stop,
+        deadline(),
+        |_, target| {
+            assert!(
+                matches!(target, DecisionTarget::Write { operation_id, revision: 1, .. }
+                if *operation_id == winning.operation_id)
+            );
+            Ok(decision.clone())
+        },
+    )
+    .unwrap();
+    let retired_write = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    resources::retire_write_checked(
+        &root.0,
+        &binding,
+        &winning.operation_id,
+        1,
+        &stop,
+        deadline(),
+        |_, _| Ok(decision.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        retired_write
+    );
+    let total = resources::occupancy(&root.0, &stop).unwrap().unwrap();
+    assert_eq!(
+        (total.teams, total.write_wip),
+        (1, 0),
+        "member decisions do not retire the Team"
+    );
+    let mut checks = 0;
+    let lost_guard =
+        resources::retire_team_checked(&root.0, &team, 1, &stop, deadline(), |_, _| {
+            checks += 1;
+            if checks == 2 {
+                Err(oms_command_telemetry::store::StoreError::Changed)
+            } else {
+                Ok(decision.clone())
+            }
+        })
+        .unwrap_err();
+    assert!(
+        lost_guard.publication_uncertain,
+        "post-CAS producer failure remains uncertain"
+    );
+    resources::retire_team_checked(&root.0, &team, 1, &stop, deadline(), |_, _| {
+        Ok(decision.clone())
+    })
+    .unwrap();
+    assert_eq!(
+        resources::occupancy(&root.0, &stop).unwrap().unwrap(),
+        resources::Occupancy::default()
+    );
+    let retained_usage = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let next_policy = Policy {
+        epoch: "epoch-two".into(),
+        host_generation_sha256: "d".repeat(64),
+        ..policy.clone()
+    };
+    let drained = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    assert!(
+        resources::reconcile_checked(
+            &root.0,
+            &retired_write,
+            &next_policy,
+            &stop,
+            deadline(),
+            |_, _| Ok(decision.clone())
+        )
+        .is_err(),
+        "epoch reconciliation requires exact source bytes"
+    );
+    resources::reconcile_checked(
+        &root.0,
+        &drained,
+        &next_policy,
+        &stop,
+        deadline(),
+        |_, target| {
+            assert!(
+                matches!(target, DecisionTarget::PolicyEpoch { current, next }
+                if current.epoch == "epoch-one" && next.epoch == "epoch-two")
+            );
+            Ok(decision.clone())
+        },
+    )
+    .unwrap();
+    let evolved = resources::snapshot(&root.0, &stop).unwrap().unwrap();
+    assert!(evolved.active);
+    assert_eq!(evolved.policy, next_policy);
+    assert_eq!(
+        physical::load(&root.0, &stop).unwrap().len(),
+        2,
+        "old physical claims stay readable"
+    );
+    assert_eq!(
+        std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(),
+        retained_usage,
+        "unknown spend is never refunded"
+    );
+    resources::hold(&root.0, &next_policy.sha256().unwrap(), &stop, deadline()).unwrap();
+    let held_epoch = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
+    for reused in [
+        &policy,
+        &Policy {
+            epoch: policy.epoch.clone(),
+            ..next_policy.clone()
+        },
+    ] {
+        assert!(
+            resources::reconcile_checked(
+                &root.0,
+                &held_epoch,
+                reused,
+                &stop,
+                deadline(),
+                |_, _| panic!("old epoch identifiers cannot reach producer checks")
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap(),
+        held_epoch
+    );
+    let third_policy = Policy {
+        epoch: "epoch-three".into(),
+        ..next_policy.clone()
+    };
+    resources::reconcile_checked(
+        &root.0,
+        &held_epoch,
+        &third_policy,
+        &stop,
+        deadline(),
+        |_, _| Ok(decision.clone()),
+    )
+    .unwrap();
+    let history =
+        oms_json::parse_strict(&std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap()).unwrap();
+    let history = history.get("resources").unwrap();
+    assert_eq!(
+        history
+            .get("previous_policies")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        history
+            .get("epoch_decisions")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(usage::load(&root.0).unwrap().calls.len(), 2);
+
+    let fresh_binding = resource_binding(&third_policy);
+    physical::begin_bound_checked(
+        &root.0,
+        physical_request(identity("call_fresh_epoch"), false),
+        &fresh_binding,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        resources::occupancy(&root.0, &stop)
+            .unwrap()
+            .unwrap()
+            .invocations,
+        1
     );
 
     let sessions = Temp::private();
@@ -1027,6 +1349,136 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         )
         .is_err()
     );
+    let session_call = PhysicalCall::new(&session_id.call_id).unwrap();
+    let narrow_proof = cleanup(&session_id.call_id, Scope::Leader);
+    assert!(
+        resources::close_session(
+            &sessions.0,
+            &session_binding,
+            &session_call,
+            &narrow_proof,
+            2,
+            &stop,
+            deadline()
+        )
+        .is_err(),
+        "leader cleanup cannot close a process-group session"
+    );
+    assert!(
+        resources::close_session(
+            &sessions.0,
+            &session_binding,
+            &session_call,
+            &proof,
+            1,
+            &stop,
+            deadline()
+        )
+        .is_err(),
+        "session close uses its current independent revision"
+    );
+    assert!(
+        resources::close_session(
+            &sessions.0,
+            &session_binding,
+            &session_call,
+            &foreign,
+            2,
+            &stop,
+            deadline()
+        )
+        .is_err()
+    );
+    resources::close_session(
+        &sessions.0,
+        &session_binding,
+        &session_call,
+        &proof,
+        2,
+        &stop,
+        deadline(),
+    )
+    .unwrap();
+    let closed = std::fs::read(sessions.0.join(dispatch::REGISTRY)).unwrap();
+    resources::close_session(
+        &sessions.0,
+        &session_binding,
+        &session_call,
+        &proof,
+        2,
+        &stop,
+        deadline(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(sessions.0.join(dispatch::REGISTRY)).unwrap(),
+        closed
+    );
+    assert_eq!(
+        resources::occupancy(&sessions.0, &stop)
+            .unwrap()
+            .unwrap()
+            .open_processes,
+        0
+    );
+    let idle_id = identity("call_idle_session");
+    physical::begin_bound_checked(
+        &sessions.0,
+        physical_request(idle_id.clone(), false),
+        &session_binding,
+        &stop,
+        deadline(),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    sessions.write(&decision.record, decision_body);
+    let idle_call = PhysicalCall::new(&idle_id.call_id).unwrap();
+    let before_idle = std::fs::read(sessions.0.join(dispatch::REGISTRY)).unwrap();
+    assert!(
+        resources::idle_session_checked(
+            &sessions.0,
+            &session_binding,
+            &idle_call,
+            1,
+            &stop,
+            deadline(),
+            |_, _| Err(oms_command_telemetry::store::StoreError::Changed)
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(sessions.0.join(dispatch::REGISTRY)).unwrap(),
+        before_idle
+    );
+    resources::idle_session_checked(
+        &sessions.0, &session_binding, &idle_call, 1, &stop, deadline(), |_, target| {
+            assert!(matches!(target, DecisionTarget::SessionIdle { call, revision: 1, .. } if *call == &idle_call));
+            Ok(decision.clone())
+        }
+    ).unwrap();
+    resources::idle_session_checked(
+        &sessions.0,
+        &session_binding,
+        &idle_call,
+        1,
+        &stop,
+        deadline(),
+        |_, _| Ok(decision.clone()),
+    )
+    .unwrap();
+    let total = resources::occupancy(&sessions.0, &stop).unwrap().unwrap();
+    assert_eq!((total.invocations, total.open_processes), (0, 1));
+    let idle_proof = cleanup(&idle_id.call_id, Scope::ProcessGroup);
+    resources::close_session(
+        &sessions.0,
+        &session_binding,
+        &idle_call,
+        &idle_proof,
+        2,
+        &stop,
+        deadline(),
+    )
+    .unwrap();
 
     let strict = Temp::private();
     resources::activate(&strict.0, &policy, None, &stop, deadline()).unwrap();

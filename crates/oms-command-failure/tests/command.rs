@@ -91,11 +91,9 @@ fn parser_error_text_and_number_edges() {
             .unwrap()
             .contains("exit-124")
     );
-    assert!(
-        String::from_utf8(call(&["catalog", "--"]).2)
-            .unwrap()
-            .ends_with("unrecognized arguments: --\n")
-    );
+    let err = String::from_utf8(call(&["catalog", "--"]).2).unwrap();
+    assert!(err.ends_with("unrecognized arguments: --\n"));
+    assert!(err.contains("benchmark,resources,doctor"));
     let err = call(&["classify", "x", "--pretty=yes"]).2;
     assert!(
         String::from_utf8(err)
