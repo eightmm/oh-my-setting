@@ -743,6 +743,7 @@ impl PeerProcessExecutor for CollabServices<'_> {
                 remove_environment: input.remove_environment,
                 merged: input.merge,
                 physical_call: input.physical_call,
+                launch_fence: input.launch_fence.as_ref(),
                 ..Job::new(argv, &input.cwd, input.timeout, input.max_bytes)
             },
             interrupted,
