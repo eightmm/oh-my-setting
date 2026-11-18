@@ -7,6 +7,18 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
+/// Incremental byte-prefix digests; observing a prefix does not consume it.
+#[derive(Clone, Default)]
+pub struct PrefixSha256(Sha256);
+impl PrefixSha256 {
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+    pub fn digest(&self) -> String {
+        format!("{:x}", self.0.clone().finalize())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Null,

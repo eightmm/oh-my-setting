@@ -353,6 +353,9 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
     let mut selected = vec![];
     let mut omitted = vec![];
     let mut bundle = vec![];
+    let mut attribution = Vec::new();
+    let mut prefix = PrefixSha256::default();
+    let mut prefix_end = 0;
     let mut included = BTreeSet::new();
     let mut truncated = BTreeSet::new();
     for candidate in ordered {
@@ -398,9 +401,66 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             omitted.push(row);
             continue;
         }
+        let start = bundle.len();
         bundle.extend(header.as_bytes());
         bundle.extend(&part);
         bundle.extend(footer.as_bytes());
+        let layer = if candidate.label == "PROJECT.md"
+            || candidate.path.file_name().is_some_and(|s| s == "AGENTS.md")
+        {
+            "contract"
+        } else if candidate.label == ".oms/task/current.md" {
+            "task"
+        } else {
+            "retrieved"
+        };
+        let payload = start + header.len();
+        let usable = data.len() - omitted_bytes;
+        let marker = part.len().saturating_sub(usable);
+        let source_sha256 = sha(data);
+        let mut add = |a: usize, b: usize, original: Option<(usize, usize)>| {
+            if b <= a || attribution.len() >= 4096 {
+                return;
+            }
+            prefix.update(&bundle[prefix_end..b]);
+            prefix_end = b;
+            attribution.push(oms_context::attribution::Span {
+                layer: if original.is_some() { layer } else { "framing" },
+                start: a,
+                end: b,
+                sha256: sha(&bundle[a..b]),
+                prefix_sha256: prefix.digest(),
+                source_sha256: original.map(|_| source_sha256.clone()),
+                source_bytes: original.map(|_| data.len()),
+                source_range: original,
+            });
+        };
+        add(start, payload, None);
+        match policy.as_str() {
+            "full" | "head" => {
+                add(payload, payload + usable, Some((0, usable)));
+                add(payload + usable, payload + part.len(), None);
+            }
+            "tail" => {
+                add(payload, payload + marker, None);
+                add(
+                    payload + marker,
+                    payload + part.len(),
+                    Some((data.len() - usable, data.len())),
+                );
+            }
+            _ => {
+                let left = usable / 2;
+                add(payload, payload + left, Some((0, left)));
+                add(payload + left, payload + left + marker, None);
+                add(
+                    payload + left + marker,
+                    payload + part.len(),
+                    Some((data.len() - (usable - left), data.len())),
+                );
+            }
+        }
+        add(payload + part.len(), bundle.len(), None);
         included.insert(candidate.label.clone());
         if omitted_bytes > 0 && required.contains(&candidate.label) {
             truncated.insert(candidate.label.clone());
@@ -413,7 +473,7 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             ("bytes_selected", number(part.len())),
             ("omitted_bytes", number(omitted_bytes)),
             ("selection", string(policy)),
-            ("sha256", string(sha(data))),
+            ("sha256", string(source_sha256)),
         ]));
     }
     let missing = unresolved
@@ -429,7 +489,21 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
         ("schema", number(1)),
         ("generated_at", string(&rt.now)),
         ("phase", string(&request.phase)),
-        ("phase_rules_sha256", string(table_hash)),
+        ("phase_rules_sha256", string(&table_hash)),
+        (
+            "request_attribution",
+            from_serde(
+                &oms_context::attribution::describe(
+                    &bundle,
+                    "oms-context-v1",
+                    &attribution,
+                    |b| sha(b),
+                    Some(&table_hash),
+                    None,
+                )
+                .map_err(error)?,
+            )?,
+        ),
         ("budget_bytes", number(request.max_bytes)),
         ("targets", list(targets.iter().map(String::as_str))),
         ("selected_bytes", number(bundle.len())),
@@ -552,6 +626,10 @@ pub fn inspect(rt: &Runtime<'_>, request: &Request) -> Result<Value> {
     }
     .map_err(error)?;
     if request.has("verify-current") {
+        require(
+            result["kind"] != "oms-context-request-inspection",
+            "--verify-current needs a compiled context manifest",
+        )?;
         let v = parse(&left)?;
         let mut sources = rows(v.get("selected")).to_vec();
         sources.sort_by(|a, b| a.text("path").cmp(b.text("path")));

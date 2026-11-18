@@ -1922,9 +1922,9 @@ fn is_clean_retry(snapshot: &Option<Option<[u8; 32]>>, context: &Context<'_>, cw
     }
 }
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_env(
+pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     route: &mut Route,
-    prompt: &[u8],
+    prompt: &P,
     cwd: &Path,
     write: bool,
     timeout: u64,
@@ -1932,7 +1932,7 @@ pub(crate) fn execute_env(
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
-    crate::safety::outbound(prompt)?;
+    crate::safety::outbound(prompt.bytes())?;
     if !discovered(&route.provider) {
         return Err(Error::new(127, "provider command not found"));
     }
@@ -1973,7 +1973,7 @@ pub(crate) fn execute_env(
     {
         return fail("provider does not support read access through this transport");
     }
-    let transport = transport(route, prompt, cwd, write, timeout)?;
+    let transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
     let team_protocol = if extra_env
         .iter()
         .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")
@@ -2140,6 +2140,14 @@ pub(crate) fn execute_env(
         pending_usage.fence(context.interrupted)?;
         pending_usage.qualify(&attempt, context.executor, context.interrupted)?;
         let usage_receipt = pending_usage.receipt.clone();
+        let request_context = crate::request_context::Prepared::new(
+            &usage_repo,
+            prompt,
+            &usage_receipt.identity,
+            &pending_usage.launch_fence(),
+            context.interrupted,
+        );
+        pending_usage.fence(context.interrupted)?;
         let started = std::time::Instant::now();
         let invocation = Invocation {
             argv: exec_argv,
@@ -2174,6 +2182,9 @@ pub(crate) fn execute_env(
             Ok(result) => result,
             Err(error) => {
                 let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false, None);
+                if let Ok(mut request_context) = request_context {
+                    let _ = request_context.returned(&usage_repo, false, context.interrupted);
+                }
                 return Err(error);
             }
         };
@@ -2202,6 +2213,10 @@ pub(crate) fn execute_env(
         let settlement = pending_usage.settle_execution(result.owned_cleanup.as_ref());
         accounting?;
         settlement?;
+        // Optional context evidence cannot delay canonical settlement or turn a
+        // completed invocation into a retry-eligible failure.
+        let context_record = request_context
+            .and_then(|mut prepared| prepared.returned(&usage_repo, true, context.interrupted));
         result.stdout = decoded.into_bytes();
         if !result.stdout.is_empty()
             && let Some(model) = configured
@@ -2237,16 +2252,21 @@ pub(crate) fn execute_env(
                 _ => {}
             }
         }
+        if context_record.is_err() {
+            result.stderr.extend_from_slice(
+                b"\nwarning: context request evidence unavailable; delivery remains unknown\n",
+            );
+        }
         return Ok(result);
     }
     fail("account capacity overflow exhausted")
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_with_fallback_env(
+pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Sized>(
     route: &mut Route,
     fallback: &str,
-    prompt: &[u8],
+    prompt: &P,
     cwd: &Path,
     write: bool,
     timeout: u64,
@@ -2601,6 +2621,8 @@ mod bridge_route_tests {
                     starts: AtomicUsize,
                     hooks: AtomicUsize,
                     mode: &'static str,
+                    state: PathBuf,
+                    context_guard: Mutex<Option<oms_lock::Guard>>,
                 }
                 impl Executor for Qualified {
                     fn with_physical_contract(
@@ -2628,6 +2650,22 @@ mod bridge_route_tests {
                             resource: Some(&self.binding),
                             expires_at,
                         })?;
+                        if self.mode == "context-prepare" && count == 1 {
+                            let parent = self.state.join(".oms/runtime/context");
+                            fs::create_dir_all(&parent).unwrap();
+                            fs::write(parent.join("calls"), b"fixture blocks evidence directory")
+                                .unwrap();
+                        }
+                        if self.mode == "context-busy" && count == 1 {
+                            let path = PathBuf::from(format!(
+                                ".oms/runtime/context/calls/{}.json",
+                                call.id()
+                            ));
+                            *self.context_guard.lock().unwrap() = Some(
+                                storage::lock(attempt.state_root, &path, &AtomicBool::new(false))
+                                    .unwrap(),
+                            );
+                        }
                         assert!(
                             usage::load(attempt.state_root)
                                 .unwrap()
@@ -2663,18 +2701,37 @@ mod bridge_route_tests {
                         let count = self.starts.fetch_add(1, Ordering::Relaxed);
                         assert_eq!(self.hooks.load(Ordering::Relaxed), (count + 1) * 2);
                         let retry = self.mode == "retry" && count == 0;
+                        let physical_call = request.physical_call.as_ref().unwrap().id().to_owned();
                         request.argv = vec!["/bin/sh".into(), "-c".into(), format!(
                             "printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"local fixture\"}}'; {}",
                             if retry { "printf 'rate limit' >&2; exit 1" } else { "exit 0" }).into()];
                         let result = crate::process::Native.execute(request, stop)?;
                         assert!(result.owned_cleanup.is_some());
+                        if self.mode == "context-returned" {
+                            fs::write(
+                                self.state.join(format!(
+                                    ".oms/runtime/context/calls/{physical_call}.json"
+                                )),
+                                b"changed fixture evidence",
+                            )
+                            .unwrap();
+                        }
                         if self.mode == "cancel" {
                             stop.store(true, Ordering::Release);
                         }
                         Ok(result)
                     }
                 }
-                for mode in ["retry", "cancel", "expires", "missing", "missing-final"] {
+                for mode in [
+                    "retry",
+                    "cancel",
+                    "expires",
+                    "missing",
+                    "missing-final",
+                    "context-prepare",
+                    "context-returned",
+                    "context-busy",
+                ] {
                     let state = repo.join(format!("contract-{mode}"));
                     fs::create_dir(&state).unwrap();
                     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
@@ -2698,6 +2755,8 @@ mod bridge_route_tests {
                     )
                     .unwrap();
                     let executor = Qualified {
+                        state: state.clone(),
+                        context_guard: Mutex::new(None),
                         binding: resources::Binding {
                             policy_sha256: policy.sha256().unwrap(),
                             host_generation_sha256: policy.host_generation_sha256.clone(),
@@ -2733,8 +2792,19 @@ mod bridge_route_tests {
                         ("OMS_STATE_REPO".into(), state.as_os_str().into()),
                         ("OMS_OPERATION_ID".into(), "op_scoped".into()),
                     ];
+                    let mut prompt = crate::request_context::Prompt::framing("Question:\n");
+                    prompt.push_layer("task", "검증 🙂");
+                    prompt
+                        .untrusted(
+                            "retrieved",
+                            "fixture",
+                            "selected context",
+                            b"selected source",
+                        )
+                        .unwrap();
+                    let request_started = std::time::Instant::now();
                     let result = execute_with_fallback_env(
-                        &mut route, "second", b"fixture", cwd, true, 10, repo, &extra, &context,
+                        &mut route, "second", &prompt, cwd, true, 10, repo, &extra, &context,
                     );
                     let occupancy = resources::occupancy(&state, &AtomicBool::new(false))
                         .unwrap()
@@ -2746,6 +2816,55 @@ mod bridge_route_tests {
                             assert_eq!(executor.starts.load(Ordering::Relaxed), 2);
                             assert_eq!(executor.hooks.load(Ordering::Relaxed), 4);
                             assert_eq!(calls.len(), 2);
+                            let mut manifests = Vec::new();
+                            for call in &calls {
+                                let path = state.join(format!(
+                                    ".oms/runtime/context/calls/{}.json",
+                                    call.receipt.identity.call_id
+                                ));
+                                let raw = fs::read(&path).unwrap();
+                                let recorded = V::parse(&raw).unwrap();
+                                assert_eq!(recorded.get("operation_id").text(), Some("op_scoped"));
+                                assert_eq!(
+                                    recorded.get("call_id").text(),
+                                    Some(call.receipt.identity.call_id.as_str())
+                                );
+                                let projection = oms_context::inspect_manifest(&raw, 100).unwrap();
+                                assert_eq!(projection["dispatch"], "executor-returned");
+                                assert!(projection["provider_delivery"].is_null());
+                                let a = &projection["attribution"];
+                                assert_eq!(a["request_bytes"], prompt.len());
+                                assert_eq!(a["request_sha256"], storage::hash(prompt.as_bytes()));
+                                assert_eq!(a["measured_bytes"], prompt.len());
+                                assert_eq!(a["layers"]["task"]["bytes"], "검증 🙂".len());
+                                assert!(a["layers"]["task"]["tokens"].is_null());
+                                assert!(a["provider_added_unknown"]["bytes"].is_null());
+                                manifests.push(raw);
+                            }
+                            let mut correction = calls[0].receipt.clone();
+                            correction.revision += 1;
+                            correction.phase = usage::Phase::Final;
+                            correction.usage.input_tokens = Some(17);
+                            correction.source_sha256 =
+                                Some(storage::hash(b"late fixture usage correction"));
+                            usage::record(&state, &correction, &AtomicBool::new(false)).unwrap();
+                            assert_eq!(
+                                usage::load(&state).unwrap().calls[0]
+                                    .receipt
+                                    .usage
+                                    .input_tokens,
+                                Some(17)
+                            );
+                            for (call, raw) in calls.iter().zip(manifests) {
+                                assert_eq!(
+                                    fs::read(state.join(format!(
+                                        ".oms/runtime/context/calls/{}.json",
+                                        call.receipt.identity.call_id
+                                    )))
+                                    .unwrap(),
+                                    raw
+                                );
+                            }
                             assert_eq!(
                                 (
                                     occupancy.invocations,
@@ -2759,6 +2878,29 @@ mod bridge_route_tests {
                             assert_eq!(result.unwrap().code, 0);
                             assert!(stop.load(Ordering::Acquire));
                             assert_eq!(calls.len(), 1);
+                            assert_eq!(
+                                (
+                                    occupancy.invocations,
+                                    occupancy.open_processes,
+                                    occupancy.write_wip
+                                ),
+                                (0, 0, 1)
+                            );
+                        }
+                        "context-prepare" | "context-returned" | "context-busy" => {
+                            let result = result.unwrap();
+                            assert_eq!(result.code, 0);
+                            assert!(result.complete);
+                            assert!(!capacity(&result));
+                            assert!(
+                                String::from_utf8_lossy(&result.stderr)
+                                    .contains("context request evidence unavailable")
+                            );
+                            assert_eq!(route.model, "first");
+                            assert_eq!(executor.starts.load(Ordering::Relaxed), 1);
+                            assert_eq!(executor.hooks.load(Ordering::Relaxed), 2);
+                            assert_eq!(calls.len(), 1);
+                            assert!(request_started.elapsed() < Duration::from_secs(3));
                             assert_eq!(
                                 (
                                     occupancy.invocations,

@@ -1471,6 +1471,7 @@ fn confirm(
         options.remove(key);
     }
     options.set_value("role", "reviewer");
+    let body = crate::request_context::Prompt::unknown(body);
     let mut warnings = Vec::new();
     let seat = peer::call(
         "agent-call",

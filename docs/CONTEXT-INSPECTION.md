@@ -101,6 +101,53 @@ matching recorded digests are not current freshness or authority evidence.
 
 ## Bounds, authority and compatibility
 
+### Physical-call context attribution
+
+Native provider calls prepare a metadata-only manifest at
+`.oms/runtime/context/calls/CALL_ID.json`, after the canonical physical New
+registration. Inspect that exact path with the existing `context-inspect`
+command; JSON and `--format text` support `oms-context-request-inspection`.
+The record connects the canonical `operation_id` and `call_id` to the prepared
+primary prompt's UTF-8 byte count, request digest and renderer version. These
+identifiers are correlation data, never launch or controller credentials.
+
+Known ranges are assigned to `contract`, `task`, `retrieved`, `history`,
+`tool_schema`, `tool_result` or `framing`, with a selected-byte digest, an exact
+serialized-prefix digest and source size/range when observed. No range is counted
+twice. Up to 4096 spans are retained; remaining bytes stay `unattributed_bytes`.
+The shared compiler also adds `request_attribution` to new schema-1 manifests,
+including head/tail/middle source ranges and phase-policy identity. In this new
+attribution, truncation markers are framing; the existing `bytes_selected` and
+budget fields retain their prior definition, which includes markers in payload.
+The inspector bounds span lists with the existing `--limit`.
+
+`dispatch: prepared` proves preparation only; `executor-returned` records the
+executor boundary, and `executor-error` its error return. None proves that the
+provider or model consumed the prompt. An interrupted or failed metadata update
+can leave the prepared record even after execution. `provider_delivery`, layer
+tokens, tokenizer, cache hit and provider-added context bytes remain null.
+Compiled-manifest and phase-policy links are null when the actual producer has
+no checked link; inspection does not infer them by matching text or searching
+for a recent manifest. The existing unsupported native
+`peer-delegate --context-manifest` selection remains unsupported.
+
+Fallback attempts retain separate call manifests under the same operation.
+Usage, cumulative scope and late corrections remain exclusively in the canonical
+`.oms/usage/receipts.jsonl` projection; the inspector reports that reference but
+does not open or price it. No layer bytes are converted into tokens or added to
+provider usage. Source text, prompts and raw tool output are absent from the new
+metadata. Prefix hashes use incremental state, not repeated full-prefix scans.
+
+Context recording uses one nonblocking canonical lock attempt and finite
+metadata, with the launch fence checked around preparation. Optional evidence
+failure does not change an execution's exit, completeness, fallback decision or
+usage/owned-cleanup settlement. The returned update follows that settlement;
+on failure the caller receives a static warning and missing evidence stays
+unknown. Filesystem I/O itself is subject to the host's kernel. Per-call manifests
+cannot be compared or source-verified as compiled packs; `--compare` and
+`--verify-current` refuse those combinations. Legacy manifests retain their
+existing inspection and comparison output.
+
 Manifest reads require an own-UID, single-link regular file inside the selected
 repository. Descriptor-relative opens refuse symlinks in path
 components, parent traversal, special files, files over 4 MiB and detected

@@ -337,6 +337,7 @@ fn parse_mode_depth(
     })
 }
 
+pub mod attribution;
 mod manifest;
 mod session_json;
 pub use manifest::{compare_manifests, inspect_manifest, inspection_limit_value};
