@@ -502,7 +502,10 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     if host.fail == "release-custom" {
         host.git(&source, &["branch", "development"]);
         host.git(&source, &["tag", "development", &host.before]);
-        host.git(&source, &["commit", "--allow-empty", "-qm", "default ahead"]);
+        host.git(
+            &source,
+            &["commit", "--allow-empty", "-qm", "default ahead"],
+        );
     }
     let remote = host.root.join("origin.git");
     host.git(
@@ -531,13 +534,9 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
             if channel == "detached" {
                 host.git(&source, &["checkout", "--detach", &host.before]);
             }
-            let plan: Value = serde_json::from_slice(&success(call(
-                "install",
-                &["--plan"],
-                &source,
-                &host,
-            )))
-            .unwrap();
+            let plan: Value =
+                serde_json::from_slice(&success(call("install", &["--plan"], &source, &host)))
+                    .unwrap();
             assert_eq!(plan["install"]["ref"], expected);
             assert_eq!(plan["install"]["channel"], channel);
         }
@@ -556,13 +555,8 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     write(&host.receipt(), &receipt);
     let prior = fs::read(host.receipt()).unwrap();
     if host.fail == "ok" {
-        let plan: Value = serde_json::from_slice(&success(call(
-            "install",
-            &["--plan"],
-            &source,
-            &host,
-        )))
-        .unwrap();
+        let plan: Value =
+            serde_json::from_slice(&success(call("install", &["--plan"], &source, &host))).unwrap();
         assert_eq!(plan["install"]["ref"], "reviewed-tag");
     }
     fs::create_dir_all(host.frontdoor().parent().unwrap()).unwrap();
@@ -644,13 +638,8 @@ echo build >> "$root/flow"
     if follows_edge {
         let mut check_args = args.clone();
         check_args.extend(["--check", "--json"]);
-        let checked: Value = serde_json::from_slice(&success(call(
-            "update",
-            &check_args,
-            &source,
-            &host,
-        )))
-        .unwrap();
+        let checked: Value =
+            serde_json::from_slice(&success(call("update", &check_args, &source, &host))).unwrap();
         assert_eq!(checked["ref"], "edge");
         assert_eq!(checked["target_commit"], target);
         assert_eq!(checked["update_available"], true);
@@ -672,7 +661,10 @@ echo build >> "$root/flow"
         );
         assert!(!host.root.join("flow").exists());
         assert_eq!(fs::read(host.receipt()).unwrap(), prior);
-        host.git(&source, &["commit", "--allow-empty", "-qm", "local divergence"]);
+        host.git(
+            &source,
+            &["commit", "--allow-empty", "-qm", "local divergence"],
+        );
         let divergent = host.git(&source, &["rev-parse", "HEAD"]);
         let rejected = apply_release_with_services(
             ReleaseChannel::Edge,
@@ -715,10 +707,7 @@ echo build >> "$root/flow"
     );
     assert!(host.root.join("lease-closed").is_file());
     let cache = source.join("target/oms-native").join(&target);
-    if follows_edge
-        || release_channel.is_some()
-        || matches!(host.fail.as_str(), "ok" | "offline")
-    {
+    if follows_edge || release_channel.is_some() || matches!(host.fail.as_str(), "ok" | "offline") {
         success(out);
         assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), target);
         assert_eq!(
@@ -1152,8 +1141,7 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
         .unwrap()
     };
     let fingerprint = || -> Value {
-        serde_json::from_slice(&success(call("status", &["--fingerprint"], source, host)))
-            .unwrap()
+        serde_json::from_slice(&success(call("status", &["--fingerprint"], source, host))).unwrap()
     };
     let report = inspect_releases();
     assert_eq!(report["status"], "ok");
@@ -1181,7 +1169,8 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     refreshed["node"]["resolved_at"] = json!("2026-11-19T00:00:00Z");
     write(&releases, &refreshed);
     assert_eq!(
-        fingerprint(), before,
+        fingerprint(),
+        before,
         "observation timestamps do not change installation identity"
     );
     refreshed["node"]["version"] = json!("22.2.0");

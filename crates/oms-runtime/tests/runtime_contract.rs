@@ -922,7 +922,10 @@ fn release_defaults_follow_remote_head_without_inventing_stable() {
         invalid["channels"][channel]["ref"] = reference;
         let bytes = serde_json::to_vec(&invalid).unwrap();
         std::fs::write(&manifest_path, &bytes).unwrap();
-        assert_eq!(oms_runtime::release::manifest(&runtime).unwrap_err().code, 2);
+        assert_eq!(
+            oms_runtime::release::manifest(&runtime).unwrap_err().code,
+            2
+        );
         assert_eq!(
             oms_runtime::release::apply(&runtime, "stable", true, true)
                 .unwrap_err()

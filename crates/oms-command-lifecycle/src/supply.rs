@@ -1071,8 +1071,12 @@ fn optional_upgrade(previous: &str, candidate: &str) -> Result<bool> {
     version(previous)?;
     stable_release(candidate)?;
     let base = previous.split(['-', '+']).next().unwrap_or(previous);
-    let installed = release_number(base)
-        .ok_or_else(|| r::Error(2, "installed optional provider version is uncomparable".into()))?;
+    let installed = release_number(base).ok_or_else(|| {
+        r::Error(
+            2,
+            "installed optional provider version is uncomparable".into(),
+        )
+    })?;
     let desired = release_number(candidate).unwrap();
     let prerelease = previous.split('+').next().unwrap_or(previous).contains('-');
     Ok(desired > installed || desired == installed && prerelease)
@@ -1159,7 +1163,11 @@ fn resolve_tool(name: &str, host: &str, fetch: &mut Fetch<'_>) -> Result<Value> 
         return Ok(row);
     }
     if matches!(name, "uv" | "gh") {
-        let repo = if name == "uv" { "astral-sh/uv" } else { "cli/cli" };
+        let repo = if name == "uv" {
+            "astral-sh/uv"
+        } else {
+            "cli/cli"
+        };
         let response = r::parse(&fetch(&format!(
             "https://api.github.com/repos/{repo}/releases/latest"
         ))?)?;
@@ -1228,7 +1236,9 @@ fn resolve_tool(name: &str, host: &str, fetch: &mut Fetch<'_>) -> Result<Value> 
             return r::fail("provider release URL escaped its official versioned bucket");
         }
         let checksum = digest(scalar(&response, "sha512")?, 128)?;
-        return Ok(archive_row(release, host, url, "sha512", &checksum, "tar.gz"));
+        return Ok(archive_row(
+            release, host, url, "sha512", &checksum, "tar.gz",
+        ));
     }
     if matches!(name, "claude" | "codex" | "ntn") {
         let mut row = tool_row(&catalog(), name).clone();
@@ -1246,7 +1256,11 @@ fn resolve_tool(name: &str, host: &str, fetch: &mut Fetch<'_>) -> Result<Value> 
             } else {
                 format!("@openai/codex-{suffix}")
             };
-            let package = if name == "codex" { "@openai/codex" } else { &alias };
+            let package = if name == "codex" {
+                "@openai/codex"
+            } else {
+                &alias
+            };
             let expected = if name == "codex" {
                 format!("{release}-{suffix}")
             } else {
@@ -1660,10 +1674,22 @@ mod tests {
     #[test]
     fn node_resolves_each_host_without_requiring_other_platforms() {
         for (host, index_file, filename) in [
-            ("darwin-amd64", "osx-x64-tar", "node-v26.1.0-darwin-x64.tar.gz"),
-            ("darwin-arm64", "osx-arm64-tar", "node-v26.1.0-darwin-arm64.tar.gz"),
+            (
+                "darwin-amd64",
+                "osx-x64-tar",
+                "node-v26.1.0-darwin-x64.tar.gz",
+            ),
+            (
+                "darwin-arm64",
+                "osx-arm64-tar",
+                "node-v26.1.0-darwin-arm64.tar.gz",
+            ),
             ("linux-amd64", "linux-x64", "node-v26.1.0-linux-x64.tar.gz"),
-            ("linux-arm64", "linux-arm64", "node-v26.1.0-linux-arm64.tar.gz"),
+            (
+                "linux-arm64",
+                "linux-arm64",
+                "node-v26.1.0-linux-arm64.tar.gz",
+            ),
         ] {
             let row = resolve_fixture(
                 "node",
@@ -1817,7 +1843,9 @@ mod tests {
             ("/assets/0/size", json!(MAX as u64 + 1)),
             (
                 "/assets/0/browser_download_url",
-                json!("https://github.com/other/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz"),
+                json!(
+                    "https://github.com/other/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz"
+                ),
             ),
         ] {
             let mut bad_release = base.clone();
@@ -1921,14 +1949,16 @@ mod tests {
                 "/dist/tarball",
                 json!("https://registry.npmjs.org/ntn/-/ntn-0.9.0.tgz"),
             ),
-            ("/dist/tarball", json!("https://example.invalid/ntn-0.9.1.tgz")),
+            (
+                "/dist/tarball",
+                json!("https://example.invalid/ntn-0.9.1.tgz"),
+            ),
             ("/dist/integrity", json!("sha1-invalid")),
         ] {
             let mut bad_release = npm_fixture("ntn", "0.9.1");
             *bad_release.pointer_mut(pointer).unwrap() = bad;
             assert!(
-                npm_metadata("ntn", "0.9.1", &mut |_| Ok(r::bytes(&bad_release).unwrap()))
-                    .is_err()
+                npm_metadata("ntn", "0.9.1", &mut |_| Ok(r::bytes(&bad_release).unwrap())).is_err()
             );
         }
         assert!(
@@ -1967,11 +1997,15 @@ mod tests {
                 ),
                 (
                     "url",
-                    json!("https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.0-build/payload.tar.gz"),
+                    json!(
+                        "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.0-build/payload.tar.gz"
+                    ),
                 ),
                 (
                     "url",
-                    json!("https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-build/../payload.tar.gz"),
+                    json!(
+                        "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-build/../payload.tar.gz"
+                    ),
                 ),
             ] {
                 let mut bad_manifest = manifest.clone();

@@ -4622,7 +4622,10 @@ exit 92
         );
         remote.git(&["symbolic-ref", "HEAD", "refs/heads/unavailable"]);
         rt.fetch_release(repo.path()).unwrap();
-        assert_eq!(rt.resolve_revision(repo.path(), "origin/HEAD").unwrap(), None);
+        assert_eq!(
+            rt.resolve_revision(repo.path(), "origin/HEAD").unwrap(),
+            None
+        );
         assert_eq!(
             rt.resolve_revision(repo.path(), "origin/main").unwrap(),
             Some(view.head)
@@ -4735,7 +4738,12 @@ exit 92
         let release = |channel: &str, target: &str| ReleaseRequest {
             channel: channel.into(),
             target: target.into(),
-            selected_ref: if channel == "edge" { "origin/HEAD" } else { target }.into(),
+            selected_ref: if channel == "edge" {
+                "origin/HEAD"
+            } else {
+                target
+            }
+            .into(),
             no_tools: true,
         };
         assert!(

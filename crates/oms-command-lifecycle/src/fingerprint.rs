@@ -170,7 +170,9 @@ pub(crate) fn build(paths: &Paths) -> Result<Value> {
     );
     digests.insert(
         "tool_releases".into(),
-        json!(release_digest(&paths.data.join(crate::supply::RELEASE_RECEIPT))?),
+        json!(release_digest(
+            &paths.data.join(crate::supply::RELEASE_RECEIPT)
+        )?),
     );
     digests.insert(
         "custom_skills".into(),

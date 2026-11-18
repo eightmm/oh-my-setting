@@ -206,11 +206,10 @@ pub(crate) fn build(paths: &Paths, old: Option<&Value>, flag: &AtomicBool) -> Re
             .unwrap_or("custom")
             .into()
     }));
-    row["ref"] = json!(env::var("OH_MY_SETTING_REF").unwrap_or_else(|_| {
-        old.and_then(|v| v["ref"].as_str())
-            .unwrap_or("edge")
-            .into()
-    }));
+    row["ref"] = json!(
+        env::var("OH_MY_SETTING_REF")
+            .unwrap_or_else(|_| { old.and_then(|v| v["ref"].as_str()).unwrap_or("edge").into() })
+    );
     row["previous_commit"] = json!(
         old.and_then(|v| v["previous_commit"].as_str())
             .unwrap_or("")

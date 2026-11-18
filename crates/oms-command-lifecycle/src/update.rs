@@ -243,7 +243,11 @@ pub(crate) fn release(
     flag: &AtomicBool,
     services: &dyn crate::Services,
 ) -> Result<crate::Output> {
-    if target.len() != 40 || !target.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+    if target.len() != 40
+        || !target
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return r::fail("release target must be a full lowercase commit id");
     }
     let reference = match channel {

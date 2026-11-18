@@ -6,7 +6,8 @@ use crate::{Result, require, status as failure};
 pub fn manifest(rt: &Runtime<'_>) -> Result<Value> {
     let store = oms_command_plan::storage::Store::open(&rt.install_root)?
         .with_group_resolver(rt.services.group_resolver());
-    let Some(raw) = store.optional("config/update-channels.json", crate::storage::MAX_STATE)? else {
+    let Some(raw) = store.optional("config/update-channels.json", crate::storage::MAX_STATE)?
+    else {
         // A missing manifest has no reviewed stable promotion. Only this
         // synthetic default may be unconfigured; persisted manifests still
         // require both channel refs before they can authorize an update.

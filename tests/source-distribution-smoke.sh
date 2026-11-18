@@ -59,6 +59,7 @@ EOF
       bash "$repo/scripts/check.sh" "$@"
   }
   print_plan() { invoke_check --affected --print-affected-mode "$@"; }
+  expected_ci_record() { printf 'mode=%s\nnative=%s\npython=false\noperator=\n' "$1" "$2"; }
   oms_smoke_make_repo "$repo"
   printf 'base\n' > "$repo/README.md"
   git -C "$repo" add .
@@ -70,7 +71,7 @@ EOF
   selected="$(print_plan --changed-from "$base" --changed-to "$docs")"
   [ "$selected" = affected ] || fail "documentation planning selected: $selected"
   print_plan --changed-from "$base" --changed-to "$docs" --ci-output "$check_probe/docs.out"
-  printf 'mode=affected\nnative=false\npython=false\noperator=\n' > "$check_probe/expected.out"
+  expected_ci_record affected false > "$check_probe/expected.out"
   cmp -s "$check_probe/docs.out" "$check_probe/expected.out" || fail "documentation CI selection changed"
 
   mkdir -p "$repo/crates/oms/src"
@@ -81,7 +82,7 @@ EOF
   selected="$(print_plan --changed-from "$docs" --changed-to "$native")"
   [ "$selected" = full ] || fail "native planning selected: $selected"
   print_plan --changed-from "$docs" --changed-to "$native" --ci-output "$check_probe/native.out"
-  printf 'mode=full\nnative=true\npython=false\noperator=\n' > "$check_probe/expected.out"
+  expected_ci_record full true > "$check_probe/expected.out"
   cmp -s "$check_probe/native.out" "$check_probe/expected.out" || fail "native CI selection changed"
 
   # The first critical path selects the reason, but later paths still contribute
