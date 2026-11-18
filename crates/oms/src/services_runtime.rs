@@ -1,4 +1,6 @@
 //! Native runtime host adapters and shared bounded Unix account-ownership proofs.
+#[path = "services_apptainer.rs"]
+mod apptainer;
 use oms_command_plan::services::GroupMembership;
 use oms_supervisor::capture::{CaptureOptions, LimitAction};
 use oms_supervisor::process::{Progress, Reactor, Request, Scope, Streams};
@@ -909,6 +911,7 @@ pub(crate) struct RuntimeServices<'a> {
     helper: Option<PathBuf>,
     /// `OMS_SSH_BIN` as seen at construction, else `ssh`.
     ssh: OsString,
+    apptainer: Option<PathBuf>,
     #[cfg(test)]
     lock_timeout: Option<Duration>,
 }
@@ -939,6 +942,7 @@ impl<'a> RuntimeServices<'a> {
             ssh: std::env::var_os("OMS_SSH_BIN")
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "ssh".into()),
+            apptainer: std::env::var_os("PATH").and_then(|p| apptainer::locate(&p)),
             source,
             scope,
             #[cfg(test)]
@@ -1357,15 +1361,20 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         }
         Ok(stdout)
     }
-    /// `trusted-local` is always ready (the caller never asks); there is no
-    /// compiled container or remote-adapter producer, so those report an
-    /// honest not-ready with the missing capability.
+    /// Apptainer probes local inputs only; host namespaces remain an execution
+    /// requirement. Existing isolated/remote producers remain unavailable.
     fn backend_check(
         &self,
         profile: &str,
-        _image: &OsStr,
-        _adapter: &OsStr,
+        image: &OsStr,
+        adapter: &OsStr,
     ) -> oms_command_plan::Result<Value> {
+        if profile == "apptainer" {
+            if !adapter.is_empty() {
+                return Err(plan_error("--adapter does not apply to Apptainer"));
+            }
+            return apptainer::readiness(self, image);
+        }
         let missing: &[&str] = match profile {
             "trusted-local" => &[],
             "isolated" => &["native container supervisor"],
@@ -1382,7 +1391,7 @@ impl oms_runtime::Services for RuntimeServices<'_> {
             ("details", rvalue::empty()),
         ]))
     }
-    /// `trusted-local` only: process supervision, not a sandbox. The leader is
+    /// Trusted-local and explicit Apptainer use the same process owner. The leader is
     /// reaped and its whole tree cleaned by the supervisor; the log keeps head
     /// and tail within `log_limit`; log then receipt are created exclusively.
     fn supervise(
@@ -1390,7 +1399,7 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         repo: &Path,
         request: &BackendRequest,
     ) -> oms_command_plan::Result<BackendResult> {
-        if request.profile != "trusted-local" {
+        if !["trusted-local", "apptainer"].contains(&request.profile.as_str()) {
             return Err(unavailable(&format!(
                 "{} execution isolation backend",
                 request.profile
@@ -1417,6 +1426,11 @@ impl oms_runtime::Services for RuntimeServices<'_> {
             .filter(|m| m.is_dir() && !m.file_type().is_symlink())
             .and_then(|_| std::fs::canonicalize(&request.cwd).ok())
             .ok_or_else(|| plan_error("execution directory must be a real directory"))?;
+        let mut container = if request.profile == "apptainer" {
+            Some(apptainer::prepare(self, repo, request)?)
+        } else {
+            None
+        };
         let operation = format!("exec-{}", oms_command_plan::storage::random_hex(16)?);
         let log_target = request
             .log
@@ -1438,6 +1452,9 @@ impl oms_runtime::Services for RuntimeServices<'_> {
             .collect();
         let mut seen = std::collections::BTreeSet::new();
         names.retain(|n| seen.insert(n.clone()));
+        if container.is_some() {
+            names.clear();
+        }
         for name in names {
             if let Some(value) = std::env::var_os(&name) {
                 let pair = format!("{}={}", name.to_string_lossy(), value.to_string_lossy());
@@ -1452,7 +1469,14 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         }
         environment.push(("OMS_RUNTIME_BACKEND".into(), "1".into()));
         let started_at = utc_stamp(now_secs());
-        let mut spec = ChildSpec::new(request.argv.clone(), request.wall, request.log_limit);
+        let argv = container
+            .as_ref()
+            .map_or_else(|| request.argv.clone(), |launch| launch.argv.clone());
+        if let Some(launch) = &container {
+            launch.image.check()?;
+            environment = launch.environment.clone();
+        }
+        let mut spec = ChildSpec::new(argv, request.wall, request.log_limit);
         spec.cwd = Some(&cwd);
         spec.merged = true;
         spec.drain = true;
@@ -1480,8 +1504,19 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         if code < 0 {
             code = 125;
         }
+        let launcher_exit = code;
+        if let Some(launch) = &mut container {
+            match launch.image.verify_after() {
+                Ok(()) => launch.details.set("image_stability", rvalue::string("same observed bytes before and after execution; concurrent open is not pinned"))?,
+                Err(error) => {
+                    code = 125;
+                    launch.details.set("image_stability", rvalue::string("changed-or-unverified; execution is not accepted"))?;
+                    launch.details.set("image_error", rvalue::string(error.message))?;
+                }
+            }
+        }
         log_output.publish(&raw)?;
-        let description = oms_runtime::backend::describe("trusted-local")?;
+        let description = oms_runtime::backend::describe(&request.profile)?;
         let relative = |target: &Path| -> String {
             let absolute = if target.is_absolute() {
                 target.to_owned()
@@ -1507,7 +1542,7 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         let mut receipt = rvalue::object([
             ("schema", rvalue::number(1)),
             ("operation_id", rvalue::string(&operation)),
-            ("profile", rvalue::string("trusted-local")),
+            ("profile", rvalue::string(&request.profile)),
             ("started_at", rvalue::string(started_at)),
             ("finished_at", rvalue::string(utc_stamp(now_secs()))),
             (
@@ -1551,6 +1586,18 @@ impl oms_runtime::Services for RuntimeServices<'_> {
                 )),
             ),
         ]);
+        if let Some(launch) = container {
+            receipt.set("launcher_exit", rvalue::number(launcher_exit))?;
+            let mut limits = receipt.get("resource_limits").clone();
+            limits.set("enforced", Value::Null)?;
+            limits.set(
+                "requested_via_apptainer",
+                rvalue::list(["memory_mb", "cpus", "pids"]),
+            )?;
+            limits.set("tmpfs", rvalue::string("unsupported; not enforced"))?;
+            receipt.set("resource_limits", limits)?;
+            receipt.set("apptainer", launch.details)?;
+        }
         let mut bytes = rvalue::sorted_pretty(&receipt)?;
         bytes.push(b'\n');
         receipt_output.publish(&bytes)?;
@@ -3479,6 +3526,100 @@ mod runtime_tests {
         std::fs::read(path).unwrap()
     }
 
+    fn apptainer_test_process(name: &str, needs_session: bool) -> bool {
+        if std::env::var_os("OMS_APPTAINER_TEST_CHILD").as_deref() == Some(OsStr::new(name)) {
+            return false;
+        }
+        let session = Dir::new();
+        let bus = if needs_session {
+            match std::os::unix::net::UnixListener::bind(session.path().join("bus")) {
+                Ok(bus) => Some(bus),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+                    ) =>
+                {
+                    assert!(
+                        !std::env::var("CI").is_ok_and(|v| v == "true" || v == "1"),
+                        "Linux CI must exercise the native Apptainer fixture: {error}"
+                    );
+                    eprintln!(
+                        "CAPABILITY-SKIP {name}: local Unix session socket unavailable: {error}; fake-host execution requires capable Linux CI"
+                    );
+                    return true;
+                }
+                Err(error) => panic!("session socket fixture: {error}"),
+            }
+        } else {
+            None
+        };
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", name, "--nocapture"])
+            .env("OMS_APPTAINER_TEST_CHILD", name)
+            .env_remove("OMS_HARNESS_CHILD")
+            .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+            .env_remove("OMS_STATE_REPO")
+            .env("OMS_LOCK_DIR", session.path().join("locks"))
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env("OMS_TEST_LITERAL", "$(touch oms-apptainer-evaluated)")
+            .env("APPTAINER_BIND", "/unexpected:/unexpected")
+            .env("APPTAINERENV_OMS_AMBIENT", "unexpected")
+            .env("SINGULARITY_BINDPATH", "/unexpected:/unexpected");
+        if bus.is_some() {
+            child.env("XDG_RUNTIME_DIR", session.path()).env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/bus", session.path().display()),
+            );
+        }
+        let status = child.status().unwrap();
+        assert!(status.success(), "{name}");
+        true
+    }
+
+    fn fake_apptainer(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let binary = dir.join("apptainer");
+        std::fs::write(&binary, r#"#!/bin/sh
+case "$1 ${2-}" in
+  '--version ') printf 'apptainer version 1.5.5-fixture\n'; exit 0 ;;
+  'exec --help') printf '%s\n' '--containall --cleanenv --no-home --no-eval --userns --no-mount --drop-caps --no-privs --net --network --bind --cwd --memory --cpus --pids-limit'; exit 0 ;;
+  'sif header') [ "$(head -c 11 "$3")" = fixture-sif ]; exit $? ;;
+esac
+[ "$1" = exec ] || exit 90
+printf 'arg=%s\n' "$@"
+env
+while [ "$#" -gt 0 ] && [ "$1" != --cwd ]; do shift; done
+[ "$#" -ge 4 ] || exit 91
+shift 2
+image=$1
+shift
+printf 'run\n' >> "$image.calls"
+case "$1" in
+  exit-seven) exit 7 ;;
+  mutate-image) printf 'changed\n' >> "$image"; exit 0 ;;
+  namespace-refuse) printf 'namespace denied\n' >&2; exit 255 ;;
+  wait) printf 'waiting\n' > "$image.waiting"; exec sleep 30 ;;
+esac
+exit 92
+"#).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let image = dir.join("local.sif");
+        std::fs::write(&image, b"fixture-sif\n").unwrap();
+        (binary, image)
+    }
+
+    fn apptainer_request(repo: &Path, image: &Path, command: &str, name: &str) -> BackendRequest {
+        let mut request = backend(&[command], repo, 10, 65536);
+        request.profile = "apptainer".into();
+        request.image = image.as_os_str().to_owned();
+        request.log = Some(format!("{name}.log").into());
+        request.receipt = Some(format!("{name}.json").into());
+        request
+    }
+
     #[test]
     fn utc_stamp_formats_known_instants() {
         assert_eq!(utc_stamp(0), "1970-01-01T00:00:00Z");
@@ -3634,13 +3775,16 @@ mod runtime_tests {
 
     #[test]
     fn backend_check_reports_honest_readiness() {
+        use std::os::unix::fs::PermissionsExt;
         let (flag, source) = (Arc::new(AtomicBool::new(false)), Dir::new());
-        let rt = services(&flag, source.path());
+        let mut rt = services(&flag, source.path());
         let ready = rt
             .backend_check("trusted-local", OsStr::new(""), OsStr::new(""))
             .unwrap();
         assert!(ready.get("ready").truth() && ready.get("missing").strings().unwrap().is_empty());
         for profile in ["isolated", "remote"] {
+            let description = oms_runtime::backend::describe(profile).unwrap();
+            assert!(description.get("enforced").object().unwrap().is_empty());
             let row = rt
                 .backend_check(profile, OsStr::new("img"), OsStr::new("adp"))
                 .unwrap();
@@ -3651,6 +3795,428 @@ mod runtime_tests {
             rt.backend_check("bogus", OsStr::new(""), OsStr::new(""))
                 .is_err()
         );
+        rt.apptainer = None;
+        assert!(
+            !rt.backend_check("apptainer", OsStr::new("missing.sif"), OsStr::new(""))
+                .unwrap()
+                .get("ready")
+                .truth()
+        );
+        if cfg!(target_os = "linux")
+            && apptainer_test_process(
+                "services_runtime::runtime_tests::backend_check_reports_honest_readiness",
+                true,
+            )
+        {
+            return;
+        }
+        let (binary, image) = fake_apptainer(source.path());
+        rt.apptainer = Some(binary.clone());
+        let check = |image: &OsStr| {
+            rt.backend_check("apptainer", image, OsStr::new(""))
+                .unwrap()
+        };
+        let ready = check(image.as_os_str());
+        if !cfg!(target_os = "linux") {
+            assert!(!ready.get("ready").truth());
+            assert!(ready.get("missing").strings().unwrap()[0].contains("requires Linux"));
+            return;
+        }
+        assert!(ready.get("ready").truth(), "{ready:?}");
+        assert!(ready.get("details").get("preflight_only").truth());
+        assert_eq!(
+            ready.get("details").get("image").get("sha256"),
+            &Value::Null
+        );
+        // An owned pathname alone is insufficient evidence of a private session.
+        let session = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+        std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let public_session = check(image.as_os_str());
+        std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!public_session.get("ready").truth());
+        let bus = session.join("bus");
+        let saved = session.join("saved-bus");
+        std::fs::rename(&bus, &saved).unwrap();
+        std::fs::write(&bus, b"not a socket").unwrap();
+        let fake_session = check(image.as_os_str());
+        std::fs::remove_file(&bus).unwrap();
+        std::fs::rename(&saved, &bus).unwrap();
+        assert!(!fake_session.get("ready").truth());
+        for bad in [
+            OsStr::new(""),
+            OsStr::new("missing.sif"),
+            source.path().as_os_str(),
+            OsStr::new("/dev/null"),
+        ] {
+            assert!(!check(bad).get("ready").truth());
+        }
+        let link = source.path().join("linked.sif");
+        std::os::unix::fs::symlink(&image, &link).unwrap();
+        assert!(!check(link.as_os_str()).get("ready").truth());
+        let large = source.path().join("large.sif");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(!check(large.as_os_str()).get("ready").truth());
+        std::fs::write(&image, b"not a SIF").unwrap();
+        assert!(!check(image.as_os_str()).get("ready").truth());
+        std::fs::write(&image, b"fixture-sif\n").unwrap();
+        let script = String::from_utf8(read(&binary))
+            .unwrap()
+            .replace("--userns", "--unsupported");
+        std::fs::write(&binary, script).unwrap();
+        assert!(!check(image.as_os_str()).get("ready").truth());
+        assert!(
+            !source.path().join("local.sif.calls").exists(),
+            "preflight must not execute a payload"
+        );
+    }
+
+    #[test]
+    fn apptainer_policy_and_image_observations_are_literal_and_bounded() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::apptainer_policy_and_image_observations_are_literal_and_bounded",
+            false,
+        ) {
+            return;
+        }
+        let repo = Dir::new();
+        let (binary, image) = fake_apptainer(repo.path());
+        let mut request = apptainer_request(repo.path(), &image, "exit-seven", "policy");
+        request
+            .argv
+            .extend(argv(&["two words", "$(touch oms-apptainer-evaluated)"]));
+        let words = apptainer::command(&binary, repo.path(), None, repo.path(), &image, &request);
+        for required in [
+            "--containall",
+            "--cleanenv",
+            "--no-home",
+            "--no-eval",
+            "--userns",
+            "--no-privs",
+            "--net",
+        ] {
+            assert!(words.contains(&required.into()));
+        }
+        for pair in [
+            ["--no-mount", "hostfs,bind-paths,cwd"],
+            ["--drop-caps", "ALL"],
+            ["--network", "none"],
+            ["--memory", "4294967296"],
+            ["--cpus", "2"],
+            ["--pids-limit", "512"],
+        ] {
+            assert!(words.windows(2).any(|w| w == argv(&pair)), "{pair:?}");
+        }
+        let read_only = format!("{}:{}:ro", repo.path().display(), repo.path().display());
+        assert!(words.contains(&read_only.into()));
+        assert_eq!(&words[words.len() - 3..], request.argv.as_slice());
+        request.allow_network = true;
+        let host = apptainer::command(
+            &binary,
+            repo.path(),
+            Some(repo.path()),
+            repo.path(),
+            &image,
+            &request,
+        );
+        assert!(!host.contains(&"--net".into()) && !host.contains(&"--network".into()));
+        let writable = format!("{}:{}:rw", repo.path().display(), repo.path().display());
+        assert!(host.contains(&writable.into()));
+        let explicit = apptainer::container_environment(&argv(&["OMS_TEST_LITERAL"])).unwrap();
+        assert_eq!(
+            explicit,
+            vec![(
+                "APPTAINERENV_OMS_TEST_LITERAL".into(),
+                "$(touch oms-apptainer-evaluated)".into()
+            )]
+        );
+        assert!(apptainer::container_environment(&[]).unwrap().is_empty());
+        for key in [
+            "APPTAINER_BIND",
+            "SINGULARITYENV_PATH",
+            "HOME",
+            "BAD=NAME",
+            "1BAD",
+        ] {
+            assert!(apptainer::container_environment(&argv(&[key])).is_err());
+        }
+
+        let mut observed = apptainer::Image::open(image.as_os_str()).unwrap();
+        assert_eq!(
+            observed.hash(&AtomicBool::new(false)).unwrap(),
+            sha_hex(b"fixture-sif\n")
+        );
+        assert_eq!(observed.hash(&AtomicBool::new(true)).unwrap_err().code, 130);
+        std::fs::write(&image, b"changed\n").unwrap();
+        assert!(observed.check().is_err());
+        for bad in [
+            OsStr::new(""),
+            OsStr::new("docker://example/image"),
+            OsStr::new("/dev/null"),
+            repo.path().as_os_str(),
+        ] {
+            assert!(apptainer::Image::open(bad).is_err());
+        }
+        let link = repo.path().join("linked.sif");
+        std::os::unix::fs::symlink(&image, &link).unwrap();
+        assert!(apptainer::Image::open(link.as_os_str()).is_err());
+        let large = repo.path().join("large.sif");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(apptainer::Image::open(large.as_os_str()).is_err());
+        if cfg!(target_os = "linux") && users::get_current_uid() != 0 {
+            let flag = Arc::new(AtomicBool::new(false));
+            let mut rt = services(&flag, repo.path());
+            rt.apptainer = Some(binary);
+            let missing = rt
+                .backend_check("apptainer", image.as_os_str(), OsStr::new(""))
+                .unwrap();
+            assert!(!missing.get("ready").truth());
+            assert!(missing.get("missing").strings().unwrap()[0].contains("XDG_RUNTIME_DIR"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apptainer_public_run_preserves_policy_argv_and_receipt() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::apptainer_public_run_preserves_policy_argv_and_receipt",
+            true,
+        ) {
+            return;
+        }
+        let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
+        let (binary, image) = fake_apptainer(repo.path());
+        let mut rt = services(&flag, repo.path());
+        rt.apptainer = Some(binary);
+        let args = argv(&[
+            "backend",
+            "run",
+            "apptainer",
+            "--image",
+            "local.sif",
+            "--log",
+            "run.log",
+            "--receipt",
+            "run.json",
+            "--inherit-env",
+            "OMS_TEST_LITERAL",
+            "--",
+            "exit-seven",
+            "two words",
+            "$(touch oms-apptainer-evaluated)",
+        ]);
+        let response = oms_runtime::run(&args, repo.path(), repo.path(), &rt, &flag);
+        assert_eq!(
+            response.code,
+            7,
+            "{}",
+            String::from_utf8_lossy(&response.stderr)
+        );
+        let receipt = rvalue::parse(&read(&repo.path().join("run.json"))).unwrap();
+        assert_eq!(receipt.text("profile"), "apptainer");
+        assert!(receipt.get("launcher_exit").is_int(7) && receipt.get("exit").is_int(7));
+        assert_eq!(receipt.get("resource_limits").get("enforced"), &Value::Null);
+        assert_eq!(
+            receipt.get("apptainer").get("image").text("sha256"),
+            sha_hex(b"fixture-sif\n")
+        );
+        assert_eq!(receipt.get("apptainer").text("network"), "none-requested");
+        let log = String::from_utf8(read(&repo.path().join("run.log"))).unwrap();
+        let actual: Vec<_> = log.lines().filter_map(|s| s.strip_prefix("arg=")).collect();
+        for flag in [
+            "--containall",
+            "--cleanenv",
+            "--no-home",
+            "--no-eval",
+            "--userns",
+            "--no-privs",
+        ] {
+            assert!(actual.contains(&flag), "{actual:?}");
+        }
+        for pair in [
+            ["--no-mount", "hostfs,bind-paths,cwd"],
+            ["--drop-caps", "ALL"],
+            ["--network", "none"],
+            ["--memory", "4294967296"],
+            ["--cpus", "2"],
+            ["--pids-limit", "512"],
+        ] {
+            assert!(actual.windows(2).any(|p| p == pair), "{pair:?}: {actual:?}");
+        }
+        let bind = format!("{}:{}:ro", repo.path().display(), repo.path().display());
+        assert!(actual.windows(2).any(|p| p == ["--bind", bind.as_str()]));
+        assert_eq!(
+            &actual[actual.len() - 4..],
+            [
+                image.to_str().unwrap(),
+                "exit-seven",
+                "two words",
+                "$(touch oms-apptainer-evaluated)"
+            ]
+        );
+        assert!(
+            log.lines()
+                .any(|s| s == "APPTAINERENV_OMS_TEST_LITERAL=$(touch oms-apptainer-evaluated)")
+        );
+        for prefix in [
+            "APPTAINER_BIND=",
+            "SINGULARITY_BINDPATH=",
+            "APPTAINERENV_OMS_AMBIENT=",
+            "OMS_TEST_LITERAL=",
+        ] {
+            assert!(!log.lines().any(|s| s.starts_with(prefix)));
+        }
+        assert!(!repo.path().join("oms-apptainer-evaluated").exists());
+        assert_eq!(read(&repo.path().join("local.sif.calls")), b"run\n");
+        // Publishing to existing outputs refuses before a second container exec.
+        assert_eq!(
+            oms_runtime::run(&args, repo.path(), repo.path(), &rt, &flag).code,
+            2
+        );
+        assert_eq!(read(&repo.path().join("local.sif.calls")), b"run\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apptainer_explicit_mount_network_and_refusal_contracts() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::apptainer_explicit_mount_network_and_refusal_contracts",
+            true,
+        ) {
+            return;
+        }
+        let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
+        let (binary, image) = fake_apptainer(repo.path());
+        let mut rt = services(&flag, repo.path());
+        rt.apptainer = Some(binary);
+        let work = repo.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let mut request = apptainer_request(repo.path(), &image, "exit-seven", "work");
+        request.worktree = Some("work".into());
+        request.cwd = work.clone();
+        let result = rt.supervise(repo.path(), &request).unwrap();
+        assert_eq!(result.exit, 7);
+        let log = String::from_utf8(read(&repo.path().join("work.log"))).unwrap();
+        assert!(log.contains(&format!("arg={}:{}:rw\n", work.display(), work.display())));
+        assert!(log.contains(&format!(
+            "arg={}:{}:ro\n",
+            repo.path().display(),
+            repo.path().display()
+        )));
+        let mut host = apptainer_request(repo.path(), &image, "exit-seven", "host");
+        host.worktree = Some(".".into());
+        host.allow_network = true;
+        let result = rt.supervise(repo.path(), &host).unwrap();
+        assert_eq!(
+            result.receipt.get("apptainer").text("network"),
+            "host-requested"
+        );
+        let log = String::from_utf8(read(&repo.path().join("host.log"))).unwrap();
+        assert!(
+            !log.lines()
+                .any(|s| s == "arg=--net" || s == "arg=--network")
+        );
+        assert!(log.contains(&format!(
+            "arg={}:{}:rw\n",
+            repo.path().display(),
+            repo.path().display()
+        )));
+        let mut bad = apptainer_request(repo.path(), &image, "exit-seven", "bad");
+        bad.image.clear();
+        assert!(
+            rt.supervise(repo.path(), &bad)
+                .unwrap_err()
+                .message
+                .contains("explicit local")
+        );
+        bad.image = image.as_os_str().into();
+        for key in [
+            "APPTAINER_BIND",
+            "SINGULARITYENV_PATH",
+            "HOME",
+            "BAD=NAME",
+            "1BAD",
+        ] {
+            bad.inherit_env = vec![key.into()];
+            assert!(rt.supervise(repo.path(), &bad).is_err(), "{key}");
+        }
+        bad.inherit_env.clear();
+        let ambiguous = repo.path().join("ambiguous,bind");
+        std::fs::create_dir(&ambiguous).unwrap();
+        bad.worktree = Some(ambiguous.clone());
+        bad.cwd = ambiguous;
+        assert!(rt.supervise(repo.path(), &bad).is_err());
+        assert_eq!(read(&repo.path().join("local.sif.calls")), b"run\nrun\n");
+        let refused = apptainer_request(repo.path(), &image, "namespace-refuse", "refused");
+        let result = rt.supervise(repo.path(), &refused).unwrap();
+        assert_eq!(result.exit, 255);
+        assert_eq!(
+            result.receipt.get("apptainer").text("network"),
+            "none-requested"
+        );
+        assert_eq!(
+            read(&repo.path().join("local.sif.calls")),
+            b"run\nrun\nrun\n",
+            "no fallback invocation"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apptainer_supervision_preserves_drift_timeout_and_cancellation_evidence() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::apptainer_supervision_preserves_drift_timeout_and_cancellation_evidence",
+            true,
+        ) {
+            return;
+        }
+        let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
+        let (binary, image) = fake_apptainer(repo.path());
+        let mut rt = services(&flag, repo.path());
+        rt.apptainer = Some(binary);
+        let changed = apptainer_request(repo.path(), &image, "mutate-image", "changed");
+        let result = rt.supervise(repo.path(), &changed).unwrap();
+        assert_eq!(result.exit, 125);
+        assert!(result.receipt.get("launcher_exit").is_int(0));
+        assert!(
+            result
+                .receipt
+                .get("apptainer")
+                .text("image_stability")
+                .starts_with("changed-or-unverified")
+        );
+        assert!(!read(&repo.path().join("changed.log")).is_empty());
+        let mut slow = apptainer_request(repo.path(), &image, "wait", "slow");
+        slow.wall = Duration::from_secs(1);
+        let result = rt.supervise(repo.path(), &slow).unwrap();
+        assert_eq!(result.exit, 124);
+        assert!(result.receipt.get("timed_out").truth());
+        std::fs::remove_file(repo.path().join("local.sif.waiting")).unwrap();
+        let waiting = repo.path().join("local.sif.waiting");
+        let stop = Arc::clone(&flag);
+        let canceller = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !waiting.exists() && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let observed = waiting.exists();
+            stop.store(true, Ordering::Release);
+            observed
+        });
+        let cancel = apptainer_request(repo.path(), &image, "wait", "cancel");
+        let result = rt.supervise(repo.path(), &cancel).unwrap();
+        assert!(
+            canceller.join().unwrap(),
+            "fixture must start before cancellation"
+        );
+        assert_eq!(result.exit, 130);
+        assert!(result.receipt.get("launcher_exit").is_int(130));
+        assert!(!result.receipt.get("timed_out").truth());
     }
 
     #[test]

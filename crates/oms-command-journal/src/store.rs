@@ -1298,9 +1298,10 @@ impl JournalStore {
             return Ok(None);
         }
         let mut lines = vec![format!("[work-journal] {} — {today}", self.project.name)];
+        lines.push("Historical observations; check oms inbox for current task state.".into());
         for (heading, rows) in [
-            ("Open blockers", &annotations.blockers),
-            ("Next priorities", &annotations.next_actions),
+            ("Recently observed blockers", &annotations.blockers),
+            ("Recorded next actions", &annotations.next_actions),
         ] {
             if !rows.is_empty() {
                 lines.push(format!("{heading} (last 7d):"));

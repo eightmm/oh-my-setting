@@ -253,10 +253,11 @@ fn keys(v: &V, expected: &[&str]) -> Result<(), StoreError> {
     }
 }
 fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
+    // Check framing and the row bound before the strict JSON parser.
+    let v = row(line)?;
     // Accounting refuses duplicate keys instead of the legacy index's last-key policy.
     oms_context::parse_json(line)
         .map_err(|_| invalid("invalid or duplicate usage receipt JSON"))?;
-    let v = row(line)?;
     keys(
         &v,
         &[
@@ -360,7 +361,12 @@ fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
     Ok(receipt)
 }
 fn receipts(bytes: &[u8]) -> Result<Vec<Receipt>, StoreError> {
-    lines(bytes)?.into_iter().map(decode).collect()
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(invalid("partial final JSONL row"));
+    }
+    // Each decoder validates its own JSONL row; the generic index pass would
+    // parse every historical row again without adding a validation guarantee.
+    bytes.split_inclusive(|b| *b == b'\n').map(decode).collect()
 }
 fn current(rows: &[Receipt]) -> Result<Vec<Receipt>, StoreError> {
     let mut revisions = BTreeMap::new();
@@ -537,7 +543,6 @@ pub fn record(
     let mut added = false;
     mutate(&root, &target, false, None, interrupted, |old| {
         let mut rows = receipts(old)?;
-        current(&rows)?;
         if !rows
             .iter()
             .any(|r| r.identity.call_id == receipt.identity.call_id)
@@ -545,6 +550,7 @@ pub fn record(
             return Err(invalid("usage receipt has no registered call"));
         }
         if rows.iter().any(|r| r == receipt) {
+            current(&rows)?;
             return Ok(old.to_vec());
         }
         rows.push(receipt.clone());

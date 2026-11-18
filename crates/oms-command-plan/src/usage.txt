@@ -1,5 +1,8 @@
 Usage: agent-plan.sh [--repo PATH] [--file PATH] <command> [options]
 
+Own execution tasks, dependencies, claims and review state. Use agent-task
+for the current resume note; its handoff packet does not claim or run plan work.
+
 Commands:
   contract-propose --id ID --summary TEXT [--scope-paths CSV] [--decision-artifact REPO_REL] [--json]
   contract-accept --id ID --version N [--json]  Parent-only acceptance.

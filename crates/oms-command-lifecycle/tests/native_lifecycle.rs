@@ -142,6 +142,104 @@ fn native_only(value: &Value) {
     }
 }
 
+fn doctor_provider_capability_evidence(source: &Path, root: &Path, host: &NativeServices) {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let check = |table: &Path, evidence: &Path| {
+        let out = call(
+            "doctor",
+            &[
+                "--providers",
+                "--check",
+                "--table",
+                table.to_str().unwrap(),
+                "--root",
+                evidence.to_str().unwrap(),
+            ],
+            source,
+            host,
+        );
+        assert!(out.2.is_empty(), "{}", String::from_utf8_lossy(&out.2));
+        let report: Value = serde_json::from_slice(&out.1).unwrap();
+        (out.0, report)
+    };
+    let (code, report) = check(&shipped.join("config/provider-capabilities.json"), shipped);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["checked"], 23);
+    assert_eq!(report["ok"], true);
+
+    fs::write(
+        root.join("provider-evidence.rs"),
+        r###"pub(crate) async fn worker() {}
+pub(super) const fn configured() -> bool { true }
+pub unsafe extern "C" fn foreign_worker() {}
+pub struct Native;
+pub enum Outcome { Complete }
+pub type Alias = Native;
+pub const LIMIT: usize = 1;
+pub static mut STATE: usize = 0;
+fn fixture_test() {}
+// fn comment_only() {}
+/* outer /* nested */
+fn block_only() {}
+*/
+const TEXT: &str = "
+fn string_only() {}
+";
+const RAW: &str = r##"
+fn raw_only() {}
+"##;
+const QUOTE: char = '"';
+fn borrowed<'a>(value: &'a str) -> &'a str { value }
+use elsewhere::import_only;
+fn caller() { call_only(); }
+fn worker_suffix() {}
+"###,
+    )
+    .unwrap();
+    let table_path = root.join("provider-evidence.json");
+    let mut table = json!({"schema":1,"functions":[{"id":"worker_call"}],
+        "providers":{"fixture":{"worker_call":{"status":"supported","verified":"fixture",
+            "impl":["provider-evidence.rs::worker"],"test":["provider-evidence.rs::fixture_test"]}}}});
+    for (symbol, expected) in [
+        ("worker", true),
+        ("configured", true),
+        ("foreign_worker", true),
+        ("Native", true),
+        ("Outcome", true),
+        ("Alias", true),
+        ("LIMIT", true),
+        ("STATE", true),
+        ("borrowed", true),
+        ("comment_only", false),
+        ("block_only", false),
+        ("string_only", false),
+        ("raw_only", false),
+        ("import_only", false),
+        ("call_only", false),
+        ("work", false),
+    ] {
+        table["providers"]["fixture"]["worker_call"]["impl"] =
+            json!([format!("provider-evidence.rs::{symbol}")]);
+        write(&table_path, &table);
+        let (code, report) = check(&table_path, root);
+        assert_eq!(code == 0, expected, "{symbol}: {report}");
+        assert_eq!(report["ok"], expected, "{symbol}: {report}");
+    }
+    table["providers"]["fixture"]["worker_call"]["impl"] = json!(["provider-evidence.rs::worker"]);
+    table["providers"]["fixture"]["worker_call"]["test"] =
+        json!(["provider-evidence.rs::call_only"]);
+    write(&table_path, &table);
+    assert_eq!(check(&table_path, root).0, 1);
+    table["providers"]["fixture"]["worker_call"]["test"] =
+        json!(["retired-provider-test.rs::fixture_test"]);
+    write(&table_path, &table);
+    assert_eq!(check(&table_path, root).0, 1);
+}
+
 // Keep diagnostics in the canonical isolated lifecycle fixture: the same read-only
 // contract applies to both inventory and pin comparison, without --pin or probes.
 fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeServices) {
@@ -533,6 +631,7 @@ esac
     let source = root.join("source");
     let home = root.join("home");
     let host = NativeServices::default();
+    doctor_provider_capability_evidence(&source, &root, &host);
     doctor_configuration_diagnostics(&source, &root, &host);
     assert!(
         Command::new("git")

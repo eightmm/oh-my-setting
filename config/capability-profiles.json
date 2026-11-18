@@ -51,7 +51,7 @@
       "managed_tools": []
     },
     "container": {
-      "description": "Container-isolated runtime backend.",
+      "description": "Docker/Podman tooling; native isolated backend execution remains unavailable.",
       "required": [],
       "any_of": [["docker", "podman"]],
       "min_present": {},
@@ -59,7 +59,7 @@
       "managed_tools": []
     },
     "remote": {
-      "description": "External remote execution adapter.",
+      "description": "External adapter configuration; native generic remote execution remains unavailable.",
       "required": [],
       "any_of": [],
       "min_present": {},
