@@ -10,6 +10,7 @@ pub mod checkpoint;
 pub mod ci;
 mod cli;
 pub mod delivery;
+pub mod feedback;
 mod git;
 pub mod guard;
 pub mod helpers;
