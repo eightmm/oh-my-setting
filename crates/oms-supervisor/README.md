@@ -19,6 +19,9 @@ Request::new(argv: Vec<OsString>) -> Request
 Reactor::new() -> Reactor
 Reactor::dedicated() -> Result<Reactor, String>
 Reactor::start(&mut self, request: Request) -> Result<JobId, StartError>
+Reactor::send(&mut self, id: JobId, frame: &[u8]) -> Result<(), SendError>
+Reactor::close_input(&mut self, id: JobId) -> Result<(), SendError>
+Reactor::receive(&mut self, id: JobId) -> Result<Option<OutputEvent>, String>
 Reactor::stop(&mut self, id: JobId, reason: StopReason) -> Result<(), String>
 Reactor::poll(&mut self, id: JobId, budget: Duration) -> Result<Progress, String>
 Reactor::snapshot(&self, id: JobId) -> Result<Snapshot, String>
@@ -104,6 +107,75 @@ and drive the reactor. CLI shutdown with failed
 identity persistence drives cleanup in the foreground; persisted pending cleanup
 retains canonical `cleanup_failed` identity for recovery rather than terminal
 success. A durable detached runner is handed to the OS reaper at CLI exit.
+
+## Bounded raw duplex
+
+`Request::duplex = Some(DuplexOptions { ... })` opts into incremental input and
+output on the same owning reactor. All seven byte/frame/event/work bounds must
+be positive, `max_frame_bytes <= max_input_bytes`, streams must be `Separate`,
+and fixed `stdin` must be absent. There are no implicit defaults or new CLI flags.
+Legacy requests retain their fixed-input/close-after-write behavior.
+
+`send(id, frame)` atomically accepts or rejects a complete consumer frame. Its
+success means queue acceptance; it is no child-processing or outbound-send
+acknowledgement. `FrameTooLarge`, `QueueFull`, closed input, non-duplex and unknown
+jobs are distinct errors. Partial writes retain their frame allocation within
+the input byte bound, including the written prefix. Each turn attempts at most
+four input syscalls and four reads per stream, additionally limited by the
+requested byte budgets; a nonzero poll can run two turns. EAGAIN preserves the
+queue. EPIPE closes input and records abandoned bytes without inventing a
+protocol error or dropping already observed output. `close_input` is idempotent
+and half-closes after accepted bytes drain; deadline or cancellation can still
+abandon queued input with explicit status.
+
+`receive` takes raw byte chunks with a process-local unique generation and
+contiguous sequence shared across stdout and stderr. Read preference alternates
+after a received chunk so a full single-event queue cannot always favor stdout.
+Output byte and event bounds apply together. A full queue pauses pipe reads,
+while exit observation, deadlines, cancellation and reaping continue. Capture
+limits remain independent; a capture cutoff or bounded cleanup can close a pipe
+without EOF, reflected by capture EOF and `output_closed_early`. No accepted
+output event is silently discarded. `Snapshot::duplex` contains queue and input
+state only; captures must never be replayed as new incremental events. When poll
+removes a finished job, `Completion::duplex.output` retains its bounded undelivered
+queue. Consumers must process that queue as well as events taken before poll.
+
+This transport neither frames nor decodes stdout. Consumers must bound incomplete
+frames, frame length and pending protocol requests, validate UTF-8/envelopes when
+the selected protocol requires them, and distinguish protocol completion from
+process exit and cleanup. A consumer may enqueue a cooperative cancellation
+frame and drive a bounded grace before calling the existing `stop` method; the
+reactor grants no automatic retry or replacement-call authority.
+
+```rust,ignore
+request.streams = Streams::Separate;
+request.duplex = Some(DuplexOptions {
+    max_frame_bytes: 16 * 1024,
+    max_input_bytes: 64 * 1024,
+    max_input_frames: 8,
+    max_output_bytes: 64 * 1024,
+    max_output_events: 32,
+    max_read_bytes_per_turn: 16 * 1024,
+    max_write_bytes_per_turn: 16 * 1024,
+});
+let id = reactor.start(request)?;
+reactor.send(id, b"request\n")?;
+reactor.close_input(id)?; // Only when this protocol needs no later replies.
+loop {
+    while let Some(event) = reactor.receive(id)? {
+        consume_bounded(&event)?;
+    }
+    match reactor.poll(id, Duration::from_millis(10))? {
+        Progress::Pending(_) => {}
+        Progress::Complete(done) => {
+            for event in done.duplex.as_ref().unwrap().output.iter() {
+                consume_bounded(event)?;
+            }
+            return assess_protocol_exit_output_and_cleanup(done);
+        }
+    }
+}
+```
 
 ## Command integration and canonical mode checklist
 
@@ -237,5 +309,10 @@ The existing process fixtures exercise owned leader/group cleanup, cancellation,
 call/scope correlation and resistance to diagnostic-field changes. Recovery
 fixtures exercise durable settlement replay, mismatched identity and legacy
 terminal records. Root/Peer fixtures cover their service handoff separately.
+Duplex fixtures cover a live reply before child exit, raw fragmented bytes,
+partial writes, queue/capture bounds, half-close, EPIPE, deadline/cancellation
+under backpressure and retained terminal events. The harness-free
+`duplex_whole_tree` target exercises real exclusive Linux leader/descendant
+cleanup; unsupported platforms explicitly check refusal.
 These checks do not establish live provider, macOS/WSL2, kernel-stuck teardown,
 whole-tree fanout bounds or final CI/install/publication correctness.
