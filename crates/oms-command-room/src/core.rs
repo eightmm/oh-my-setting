@@ -15,6 +15,7 @@ pub struct Room<'a> {
     pub(crate) session: Session,
     pub(crate) services: &'a dyn Services,
     pub(crate) stop: &'a AtomicBool,
+    pub(crate) deadline: Option<std::time::Instant>,
     snapshots: crate::Shared<HashMap<String, Arc<Snapshot>>>,
     pub(crate) notices: crate::Shared<Vec<String>>,
 }
@@ -26,6 +27,8 @@ pub struct Join {
     pub model: Option<String>,
     pub label: Option<String>,
     pub native_session: Option<String>,
+    /// Exact terminal Main whose native binding is transferred atomically.
+    pub replaces: Option<String>,
     pub owns: Vec<String>,
     pub parent: Option<String>,
     pub dispatch_role: Option<String>,
@@ -43,6 +46,7 @@ impl Join {
             model: None,
             label: None,
             native_session: None,
+            replaces: None,
             owns: vec![],
             parent: None,
             dispatch_role: None,
@@ -101,6 +105,29 @@ impl Carry<'_> {
     }
 }
 impl<'a> Room<'a> {
+    /// Applies one absolute budget to append locks and native producer proofs.
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+    fn checkpoint(&self) -> Result<()> {
+        checkpoint(self.stop)?;
+        if self
+            .deadline
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            return Err(Error::new("room deadline expired"));
+        }
+        Ok(())
+    }
+    pub(crate) fn operations(&self) -> Result<Box<dyn crate::OperationsRead + '_>> {
+        self.checkpoint()?;
+        match self.deadline {
+            Some(deadline) => self.services.operations_before(&self.repo, deadline),
+            None => self.services.operations(&self.repo),
+        }
+    }
+
     pub fn open(
         repo: &Path,
         session: Session,
@@ -143,6 +170,7 @@ impl<'a> Room<'a> {
             session,
             services,
             stop,
+            deadline: None,
             snapshots: crate::Shared::new(HashMap::new()),
             notices: crate::Shared::new(Vec::new()),
         })
@@ -160,7 +188,7 @@ impl<'a> Room<'a> {
     }
     pub(crate) fn snapshot(&self, id: &str) -> Result<Arc<Snapshot>> {
         identifier(id, "room")?;
-        checkpoint(self.stop)?;
+        self.checkpoint()?;
         let store = self.storage()?;
         store.check()?;
         let cached = self.snapshots.borrow().get(id).cloned();
@@ -287,7 +315,7 @@ impl<'a> Room<'a> {
         let mut current = id.to_owned();
         let mut seen = BTreeSet::from([current.clone()]);
         for _ in 0..MAX_HOPS {
-            checkpoint(self.stop)?;
+            self.checkpoint()?;
             let next = match self.tail_successor(&current) {
                 Ok(Some(n)) => n,
                 _ => return Ok(current),
@@ -422,13 +450,24 @@ impl<'a> Room<'a> {
         id: &str,
         writes: &[(&Value, &str, Carry<'_>)],
     ) -> Result<Vec<bool>> {
+        self.append_batch_at_enrolled(id, writes, None)
+    }
+    fn append_batch_at_enrolled(
+        &self,
+        id: &str,
+        writes: &[(&Value, &str, Carry<'_>)],
+        expected: Option<(&str, u64, &str)>,
+    ) -> Result<Vec<bool>> {
         identifier(id, "room")?;
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        checkpoint(self.stop)?;
+        self.checkpoint()?;
         let store = self.storage()?;
-        let guard = store.lock(id, self.stop)?;
+        let guard = match self.deadline {
+            Some(deadline) => store.lock_before(id, self.stop, deadline)?,
+            None => store.lock(id, self.stop)?,
+        };
         guard.check().map_err(|e| Error::new(e.to_string()))?;
         let snapshot = self.snapshot(id)?;
         let mut rows = snapshot.rows.clone();
@@ -436,13 +475,33 @@ impl<'a> Room<'a> {
         let mut bytes = Vec::new();
         let mut applied = Vec::with_capacity(writes.len());
         let mut proofs = Vec::new();
+        if let Some((participant, sequence, parent)) = expected {
+            let state = project(&rows)?;
+            let member = state
+                .list("participants")
+                .iter()
+                .find(|p| p.text("participant") == participant)
+                .ok_or_else(|| Error::new("checked leave participant unavailable"))?;
+            if member.number("seq") != sequence
+                || member.text("parent") != parent
+                || member.text("role") != "advisor"
+            {
+                return Err(Error::new("checked leave enrollment changed"));
+            }
+            if !member.flag("joined") {
+                return Ok(vec![false]);
+            }
+            let read = self.checked_leave_parent(&state, id, parent)?;
+            read.check()?;
+            proofs.push(read);
+        }
         let mut seq = rows
             .iter()
             .filter_map(|r| r["seq"].as_i64())
             .max()
             .unwrap_or(0);
         for &(event, original, carry) in writes {
-            checkpoint(self.stop)?;
+            self.checkpoint()?;
             if original.is_empty() {
                 return Err(Error::new("--text or --text-file is required"));
             }
@@ -508,15 +567,22 @@ impl<'a> Room<'a> {
         if bytes.is_empty() {
             return Ok(applied);
         }
-        checkpoint(self.stop)?;
+        self.checkpoint()?;
         guard.check().map_err(|e| Error::new(e.to_string()))?;
         store.check()?;
         for proof in &proofs {
             proof.check()?;
         }
+        self.checkpoint()?;
         let stat = store
             .threads
             .append(&Store::name(id), &snapshot.stat, &bytes)?;
+        self.checkpoint().map_err(|e| {
+            Error::new(format!(
+                "Room append may already be published; reconcile: {}",
+                e.message
+            ))
+        })?;
         for proof in &proofs {
             proof.check().map_err(|e| {
                 Error::new(format!(
@@ -605,13 +671,16 @@ impl<'a> Room<'a> {
         bytes.extend(encode(&row, false, false)?);
         bytes.push(b'\n');
         let store = self.storage()?;
-        let guard = store.lock(id, self.stop)?;
+        let guard = match self.deadline {
+            Some(deadline) => store.lock_before(id, self.stop, deadline)?,
+            None => store.lock(id, self.stop)?,
+        };
         guard.check().map_err(|e| Error::new(e.to_string()))?;
         store.check()?;
         if store.threads.exists(&Store::name(id))? {
             return Err(Error::new("room id already exists; join it explicitly"));
         }
-        checkpoint(self.stop)?;
+        self.checkpoint()?;
         store.threads.create(&Store::name(id), &bytes)?;
         guard.release().map_err(|e| Error::new(e.to_string()))?;
         self.invalidate(id);
@@ -666,7 +735,7 @@ impl<'a> Room<'a> {
         )
         .map_err(|e| Error::new(e.to_string()))?;
         let guard = Store::acquire(&lock, self.stop)?;
-        checkpoint(self.stop)?;
+        self.checkpoint()?;
         root.atomic_mutate(
             Path::new(".oms/threads/CURRENT"),
             oms_safe_fs::MutationOptions {
@@ -698,7 +767,15 @@ impl<'a> Room<'a> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| join.participant.clone());
         let mut e = obj([
-            ("kind", "join".into()),
+            (
+                "kind",
+                if join.replaces.is_some() {
+                    "main-resume"
+                } else {
+                    "join"
+                }
+                .into(),
+            ),
             ("participant", join.participant.into()),
             ("provider", provider.into()),
             ("role", join.role.into()),
@@ -713,6 +790,7 @@ impl<'a> Room<'a> {
             ("state", join.state),
             ("alias", join.alias),
             ("task_id", join.task_id),
+            ("replaces", join.replaces),
         ] {
             if let Some(v) = v {
                 e.set(k, v);
@@ -783,6 +861,29 @@ impl<'a> Room<'a> {
         ]);
         self.append(id, &e, "Work description updated")?;
         Ok(e)
+    }
+    /// Exact enrollment CAS under the Room writer. This supplies no cleanup
+    /// authority: the native caller must retain its actual sealed owner proof.
+    /// The current parent Operations guard remains pinned through publication.
+    pub fn leave_if_enrolled(
+        &self,
+        id: &str,
+        who: &str,
+        sequence: u64,
+        parent: &str,
+    ) -> Result<Value> {
+        if self.resolve(id)? != id {
+            return Err(Error::new(
+                "checked leave room generation changed; reconcile",
+            ));
+        }
+        let event = obj([("kind", "leave".into()), ("participant", who.into())]);
+        self.append_batch_at_enrolled(
+            id,
+            &[(&event, "Owned participant cleanup confirmed", Carry::No)],
+            Some((who, sequence, parent)),
+        )?;
+        Ok(obj([("status", "left".into())]))
     }
     pub fn leave(&self, id: &str, who: &str) -> Result<Value> {
         self.append(
@@ -1413,7 +1514,7 @@ impl<'a> Room<'a> {
         ]);
         // Intent validation under the append lock serializes concurrent publishers.
         self.append(id, &e, "App delivery intent")?;
-        checkpoint(self.stop)?;
+        self.checkpoint()?;
         let receipt = self.services.deliver(DeliveryRequest {
             repository: &self.repo,
             app,
@@ -1511,7 +1612,7 @@ impl<'a> Room<'a> {
         let mut bytes = 0;
         let mut active = 0;
         for name in names {
-            checkpoint(self.stop)?;
+            self.checkpoint()?;
             let Some(name) = name.to_str() else {
                 incomplete = true;
                 continue;

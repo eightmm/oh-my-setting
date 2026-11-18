@@ -3885,6 +3885,43 @@ exec sh -c "$last"
             assert_eq!(pending.join().unwrap().code, 0);
         });
         assert_eq!(std::fs::read(&exclusive).unwrap(), payload);
+        // Losing a lock during an external fetch must precede any checkpoint write.
+        std::fs::remove_file(root.join("resume_ready")).unwrap();
+        let lost = dest_dir.join("lost-lock.bin");
+        std::fs::write(&lost, b"original").unwrap();
+        let lost_args = args(&lost, &digest, payload.len());
+        std::fs::write(root.join("resume_hold"), "2").unwrap();
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| request(&lost_args));
+            let started = std::time::Instant::now();
+            while !root.join("resume_ready").exists() && started.elapsed() < Duration::from_secs(3)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(root.join("resume_ready").exists());
+            let physical_dest = lost.canonicalize().unwrap();
+            let cache = std::fs::read_dir(&cache_parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    std::fs::read(path.join("manifest.json"))
+                        .ok()
+                        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+                        .is_some_and(|row| {
+                            row["identity"]["dest"] == physical_dest.to_str().unwrap()
+                        })
+                })
+                .unwrap();
+            let manifest = cache.join("manifest.json");
+            let before = std::fs::read(&manifest).unwrap();
+            std::fs::rename(cache.join("transfer.lock"), cache.join("detached.lock")).unwrap();
+            std::fs::create_dir(cache.join("transfer.lock")).unwrap();
+            std::fs::remove_file(root.join("resume_hold")).unwrap();
+            assert_ne!(pending.join().unwrap().code, 0);
+            assert_eq!(std::fs::read(&manifest).unwrap(), before);
+            assert!(!cache.join("00002.chunk").exists());
+            assert_eq!(std::fs::read(&lost).unwrap(), b"original");
+        });
         std::fs::write(&source, []).unwrap();
         let empty = dest_dir.join("empty.bin");
         assert_eq!(request(&args(&empty, &sha256(b""), 0)).code, 0);
@@ -4160,6 +4197,29 @@ exec sh -c "$last"
 
     #[test]
     fn cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart() {
+        fn pid_live(pid: impl ToString) -> bool {
+            let pid = pid.to_string();
+            if !Command::new("kill")
+                .args(["-0", &pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+            {
+                return false;
+            }
+            // Orphans can await a different subreaper. Match the remote
+            // liveness contract: zombies have exited, regardless of kill -0.
+            let process = Command::new("ps")
+                .args(["-p", &pid, "-o", "stat="])
+                .output()
+                .unwrap();
+            !process.status.success()
+                || !String::from_utf8_lossy(&process.stdout)
+                    .trim()
+                    .starts_with('Z')
+        }
         if std::env::var_os("OMS_TEST_CANCEL_HARDENING").is_none() {
             let temp = TempDir::new().unwrap();
             let state_dir = temp.0.join("remote_state");
@@ -4276,18 +4336,15 @@ exec sh -c "$last"
         let vc: serde_json::Value = serde_json::from_slice(&canceled.stdout).unwrap();
         assert_eq!(vc["state"], "cancelled");
         assert_eq!(vc["signal"], "SIGKILL");
-        let alive = Command::new("kill")
-            .args(["-0", &child_pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
-        assert!(!alive, "workload ignoring SIGTERM survived cancel");
+        assert!(
+            !pid_live(child_pid),
+            "workload ignoring SIGTERM survived cancel"
+        );
 
         // 2. Empty lstart on a live process causes cancel to hold unknown (75), not lost.
         let mut sleeper = ChildKillGuard(Some(Command::new("sleep").arg("20").spawn().unwrap()));
         let sleeper_pid = sleeper.0.as_ref().unwrap().id();
+        assert!(pid_live(sleeper_pid));
         let meta_src: serde_json::Value = serde_json::from_slice::<serde_json::Value>(
             &rec_running.stdout,
         )
@@ -4473,22 +4530,27 @@ exec sh -c "$last"
         assert_eq!(vg["signal"], "SIGKILL");
         let mut grand_alive = true;
         for _ in 0..50 {
-            grand_alive = Command::new("kill")
-                .args(["-0", &grand_pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success();
+            grand_alive = pid_live(grand_pid);
             if !grand_alive {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert!(
-            !grand_alive,
-            "orphaned grandchild {grand_pid} survived cancel"
-        );
+        if grand_alive {
+            let process = Command::new("ps")
+                .args([
+                    "-p",
+                    &grand_pid.to_string(),
+                    "-o",
+                    "pid=,ppid=,pgid=,stat=,lstart=,comm=",
+                ])
+                .output()
+                .unwrap();
+            panic!(
+                "orphaned grandchild {grand_pid} survived cancel: {}",
+                String::from_utf8_lossy(&process.stdout)
+            );
+        }
 
         // 6a. When runner.sh exits early while child leader lives (no result.json),
         //     reconcile keeps state=running via child.lstart and cancel reaps the group.
@@ -4537,13 +4599,7 @@ exec sh -c "$last"
             .args(["-KILL", &dead_runner_pid.to_string()])
             .status();
         for _ in 0..50 {
-            let r_alive = Command::new("kill")
-                .args(["-0", &dead_runner_pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success();
+            let r_alive = pid_live(dead_runner_pid);
             if !r_alive {
                 break;
             }
@@ -4598,13 +4654,7 @@ exec sh -c "$last"
         for pid in [dead_cpid, dead_grand_pid] {
             let mut alive = true;
             for _ in 0..50 {
-                alive = Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .unwrap()
-                    .success();
+                alive = pid_live(pid);
                 if !alive {
                     break;
                 }
@@ -4659,13 +4709,7 @@ exec sh -c "$last"
             .args(["-KILL", &unk_runner_pid.to_string()])
             .status();
         for _ in 0..50 {
-            let r_alive = Command::new("kill")
-                .args(["-0", &unk_runner_pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success();
+            let r_alive = pid_live(unk_runner_pid);
             if !r_alive {
                 break;
             }
@@ -4746,20 +4790,8 @@ exec sh -c "$last"
                 ])
                 .status();
             for _ in 0..50 {
-                let r_alive = Command::new("kill")
-                    .args(["-0", &dead2_runner_pid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .unwrap()
-                    .success();
-                let c_alive = Command::new("kill")
-                    .args(["-0", &dead2_cpid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .unwrap()
-                    .success();
+                let r_alive = pid_live(dead2_runner_pid);
+                let c_alive = pid_live(dead2_cpid);
                 if !r_alive && !c_alive {
                     break;
                 }
@@ -4802,13 +4834,7 @@ exec sh -c "$last"
             assert_eq!(vd2["signal"], "SIGKILL");
             let mut dead2_grand_alive = true;
             for _ in 0..50 {
-                dead2_grand_alive = Command::new("kill")
-                    .args(["-0", &dead2_grand_pid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .unwrap()
-                    .success();
+                dead2_grand_alive = pid_live(dead2_grand_pid);
                 if !dead2_grand_alive {
                     break;
                 }

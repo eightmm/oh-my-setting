@@ -15,6 +15,12 @@
 //! `install --star` has no native producer and is refused; and
 //! `incoming_lifecycle` needs the incoming revision already staged under
 //! `target/oms-native/<rev>/` (this adapter never builds it).
+#[path = "services_incoming.rs"]
+mod incoming;
+#[path = "services_physical.rs"]
+mod physical;
+#[path = "services_team_requests.rs"]
+mod team_requests;
 use crate::services_control::ControlServices;
 use oms_command_autonomy::receipt;
 use oms_command_hooks::HostServices as HookHostServices;
@@ -181,6 +187,45 @@ impl<'a> CollabServices<'a> {
     }
 }
 
+pub(crate) fn prelaunch_error(
+    error: oms_command_peer::Error,
+    stop: &AtomicBool,
+    deadline: Instant,
+    expires_at: Option<i128>,
+) -> oms_command_peer::Error {
+    let expired = || {
+        expires_at.is_some_and(|expiry| {
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(i128::MAX, |time| time.as_secs() as i128)
+                >= expiry
+        })
+    };
+    let code = if stop.load(Ordering::Acquire) {
+        130
+    } else if Instant::now() >= deadline || expired() {
+        124
+    } else {
+        error.code
+    };
+    oms_command_peer::Error::new(code, error.message)
+}
+
+trait OwnedDuplexConsumer {
+    fn check(&self) -> oms_command_peer::Result<()>;
+    fn started(
+        &mut self,
+        reactor: &mut Reactor,
+        job: oms_supervisor::process::JobId,
+    ) -> oms_command_peer::Result<()>;
+    fn event(
+        &mut self,
+        reactor: &mut Reactor,
+        job: oms_supervisor::process::JobId,
+        event: oms_supervisor::process::OutputEvent,
+    ) -> oms_command_peer::Result<()>;
+}
+
 /// One supervised child. `cancel` names the stop recorded on interruption.
 struct Job<'a> {
     argv: Vec<OsString>,
@@ -193,6 +238,9 @@ struct Job<'a> {
     limit: usize,
     heartbeat: Option<&'a ActivityHeartbeat>,
     cancel: StopReason,
+    physical_call: Option<oms_supervisor::process::PhysicalCall>,
+    channel: Option<&'a mut dyn OwnedDuplexConsumer>,
+    launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
 }
 
 impl<'a> Job<'a> {
@@ -208,6 +256,9 @@ impl<'a> Job<'a> {
             limit,
             heartbeat: None,
             cancel: StopReason::Cancelled,
+            physical_call: None,
+            channel: None,
+            launch_fence: None,
         }
     }
 }
@@ -234,6 +285,12 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     let mut request = Request::new(job.argv);
     request.cwd = Some(std::fs::canonicalize(job.cwd).map_err(|e| e.to_string())?);
     request.stdin = job.stdin;
+    let mut channel = job.channel;
+    if channel.is_some() {
+        request.stdin = None;
+        request.duplex = Some(team_requests::options());
+    }
+    request.physical_call = job.physical_call;
     let mut remove_environment = job.remove_environment;
     for key in ["OMS_NATIVE_OUTCOME", "OMS_NATIVE_DISPATCHED"] {
         if !remove_environment.iter().any(|v| v == key) {
@@ -278,8 +335,20 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if !job.merged {
         request.stderr_capture = Some(request.capture.clone());
     }
+    if let Some(fence) = job.launch_fence {
+        fence.check(interrupted).map_err(|e| e.message)?;
+    }
+    if let Some(channel) = &channel {
+        channel.check().map_err(|e| e.message)?;
+    }
     let id = reactor.start(request).map_err(|e| e.to_string())?;
+    if let Some(channel) = &mut channel {
+        channel
+            .started(&mut reactor, id)
+            .map_err(|_| "Team channel issuance failed; pending intent retained".to_owned())?;
+    }
     let mut cancelling = false;
+    let mut channel_failed = false;
     let mut beat = Instant::now();
     let mut heartbeat_failed = false;
     loop {
@@ -306,11 +375,41 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
             reactor.stop(id, job.cancel).map_err(|e| e.to_string())?;
             cancelling = true;
         }
-        if let Progress::Complete(done) = reactor
+        if let Some(channel) = &channel
+            && !channel_failed
+            && channel.check().is_err()
+        {
+            channel_failed = true;
+            reactor
+                .stop(id, StopReason::Deadline)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(channel) = &mut channel {
+            while let Some(event) = reactor.receive(id).map_err(|e| e.to_string())? {
+                if !channel_failed && channel.event(&mut reactor, id, event).is_err() {
+                    channel_failed = true;
+                    reactor
+                        .stop(id, StopReason::SupervisorError)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        if let Progress::Complete(mut done) = reactor
             .poll(id, Duration::from_millis(50))
             .map_err(|e| e.to_string())?
         {
-            return Ok((done, heartbeat_failed));
+            if let Some(channel) = &mut channel
+                && let Some(terminal) = &mut done.duplex
+            {
+                while let Some(event) = terminal.output.pop_front() {
+                    // A terminal child cannot receive new responses. Unconsumed
+                    // requests remain incomplete instead of gaining an ACK.
+                    if !channel_failed && channel.event(&mut reactor, id, event).is_err() {
+                        channel_failed = true;
+                    }
+                }
+            }
+            return Ok((done, heartbeat_failed || channel_failed));
         }
     }
 }
@@ -609,6 +708,24 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn execute_team_requests(
+        &self,
+        input: Invocation,
+        binding: oms_command_peer::process::TeamLaunchBinding<'_>,
+        interrupted: &AtomicBool,
+    ) -> oms_command_peer::Result<Completed> {
+        self.team_requests(input, binding, interrupted)
+    }
+
+    fn with_physical_contract(
+        &self,
+        attempt: &oms_command_peer::process::PhysicalAttempt<'_>,
+        deadline: Instant,
+        interrupted: &AtomicBool,
+        register: oms_command_peer::process::RegisterPhysical<'_>,
+    ) -> oms_command_peer::Result<()> {
+        self.physical_contract(attempt, deadline, interrupted, register)
+    }
     fn execute(
         &self,
         input: Invocation,
@@ -616,12 +733,17 @@ impl PeerProcessExecutor for CollabServices<'_> {
     ) -> oms_command_peer::Result<Completed> {
         let fail = |code, e: String| oms_command_peer::Error::new(code, e);
         let argv = self.resolve_argv(input.argv).map_err(|e| fail(2, e))?;
+        if let Some(fence) = &input.launch_fence {
+            fence.check(interrupted)?;
+        }
         let (done, _) = supervise(
             Job {
                 stdin: input.input,
                 environment: input.environment,
                 remove_environment: input.remove_environment,
                 merged: input.merge,
+                physical_call: input.physical_call,
+                launch_fence: input.launch_fence.as_ref(),
                 ..Job::new(argv, &input.cwd, input.timeout, input.max_bytes)
             },
             interrupted,
@@ -631,11 +753,15 @@ impl PeerProcessExecutor for CollabServices<'_> {
             && done.output_complete()
             && done.cleanup_complete()
             && done.supervision_error.is_none();
+        let cleanup_complete = Some(done.cleanup_complete());
+        let owned_cleanup = done.owned_cleanup().cloned();
         Ok(Completed {
             code: stop_code(&done),
             stdout: done.stdout.bytes,
             stderr: done.stderr.map_or_else(Vec::new, |s| s.bytes),
             complete,
+            cleanup_complete,
+            owned_cleanup,
             elapsed: done.duration,
         })
     }
@@ -682,6 +808,7 @@ struct RoomOperations<'a> {
     repo: PathBuf,
     attempts: Vec<oms_command_room::Attempt>,
     fingerprint: String,
+    deadline: Option<Instant>,
     stop: &'a AtomicBool,
     _guard: Box<dyn oms_command_plan::services::LifecycleGuard + 'a>,
 }
@@ -711,8 +838,11 @@ impl oms_command_room::OperationsRead for RoomOperations<'_> {
         &self.attempts
     }
     fn check(&self) -> oms_command_room::Result<()> {
-        if self.stop.load(Ordering::Acquire) {
-            return Err(oms_command_room::Error::new("room operation interrupted"));
+        if self.stop.load(Ordering::Acquire) || self.deadline.is_some_and(|at| Instant::now() >= at)
+        {
+            return Err(oms_command_room::Error::new(
+                "room operation interrupted or deadline expired",
+            ));
         }
         if room_operations_projection(&self.repo)?.0 != self.fingerprint {
             return Err(oms_command_room::Error::new(
@@ -776,6 +906,29 @@ impl oms_command_room::Services for CollabServices<'_> {
             repo: repo.to_owned(),
             attempts,
             fingerprint,
+            deadline: None,
+            stop: self.interrupted,
+            _guard: guard,
+        }))
+    }
+    fn operations_before<'a>(
+        &'a self,
+        repo: &Path,
+        deadline: Instant,
+    ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
+        self.check(self.interrupted).map_err(room_error)?;
+        let guard =
+            oms_command_plan::Services::lifecycle_writer_before(&self.control, repo, deadline)
+                .map_err(room_error)?;
+        let (fingerprint, attempts) = room_operations_projection(repo)?;
+        if Instant::now() >= deadline {
+            return Err(room_error("native Room operation deadline expired"));
+        }
+        Ok(Box::new(RoomOperations {
+            repo: repo.to_owned(),
+            attempts,
+            fingerprint,
+            deadline: Some(deadline),
             stop: self.interrupted,
             _guard: guard,
         }))
@@ -812,6 +965,43 @@ impl oms_command_room::Services for CollabServices<'_> {
 }
 
 impl PanelServices for CollabServices<'_> {
+    fn team_contracts(
+        &self,
+        execution: &Path,
+        state: &Path,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<CommandOutput> {
+        let request =
+            oms_command_plan::Request::new(oms_command_plan::Action::TeamList).flag("json");
+        let context = oms_command_plan::Context::from_selected_state_before(
+            &request,
+            execution,
+            execution,
+            state,
+            stop,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .map_err(|error| oms_panel_core::Error {
+            code: error.code,
+            ..panel_error(error)
+        })?;
+        let plan = oms_command_plan::Plan::open(context, &self.control, stop).map_err(|error| {
+            oms_panel_core::Error {
+                code: error.code,
+                ..panel_error(error)
+            }
+        })?;
+        let response = plan
+            .execute(&request)
+            .map_err(|error| oms_panel_core::Error {
+                code: error.code,
+                ..panel_error(error)
+            })?;
+        Ok(output((response.code, response.stdout, response.stderr)))
+    }
+    fn physical_executor(&self) -> Option<&dyn PeerProcessExecutor> {
+        Some(self)
+    }
     fn publication_receipt(
         &self,
         repo: &Path,
@@ -1561,8 +1751,17 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
         oms_command_hooks::run_with_services(name, &[], input, cwd, source, interrupted, &host)
     }
 
+    fn prepare_incoming_source(
+        &self,
+        source: &Path,
+        revision: &str,
+        interrupted: &AtomicBool,
+    ) -> Result<Box<dyn oms_command_lifecycle::IncomingSourceLease + '_>, Output> {
+        incoming::prepare(self, source, revision, interrupted)
+    }
+
     /// Preflight proves the incoming revision is already staged and dispatchable
-    /// before any Git mutation. Reconcile, Verify and RefreshTools run that
+    /// before live checkout mutation. Reconcile, Verify and RefreshTools run that
     /// checkout's own staged `--oms-dispatch` frontdoor to completion with
     /// `OMS_NATIVE_UPDATE_PARENT` in the child's environment only.
     fn incoming_lifecycle(
@@ -2464,6 +2663,45 @@ mod tests {
         let err =
             PeerExecutor::execute(&host, &request(&["true"], dir.path()), &cancelled).unwrap_err();
         assert_eq!(err.code, 130);
+
+        struct ExpiredChannel;
+        impl OwnedDuplexConsumer for ExpiredChannel {
+            fn check(&self) -> oms_command_peer::Result<()> {
+                Err(oms_command_peer::Error::new(124, "expired channel"))
+            }
+            fn started(
+                &mut self,
+                _: &mut Reactor,
+                _: oms_supervisor::process::JobId,
+            ) -> oms_command_peer::Result<()> {
+                panic!("expired channel started a child")
+            }
+            fn event(
+                &mut self,
+                _: &mut Reactor,
+                _: oms_supervisor::process::JobId,
+                _: oms_supervisor::process::OutputEvent,
+            ) -> oms_command_peer::Result<()> {
+                unreachable!()
+            }
+        }
+        let marker = dir.path().join("expired-channel-started");
+        let mut argv = sh("printf started > \"$1\"");
+        argv.push(marker.as_os_str().to_owned());
+        assert!(
+            supervise(
+                Job {
+                    channel: Some(&mut ExpiredChannel),
+                    ..Job::new(argv, dir.path(), Duration::from_secs(1), 1024)
+                },
+                &stop,
+            )
+            .is_err()
+        );
+        assert!(
+            !marker.exists(),
+            "prestart expiry must have no child effect"
+        );
     }
 
     #[test]
@@ -2527,6 +2765,96 @@ mod tests {
     }
 
     #[test]
+    fn team_view_uses_selected_state_instead_of_ambient_repository() {
+        const CHILD: &str = "OMS_TEST_TEAM_VIEW_SELECTED_ROOTS";
+        if std::env::var_os(CHILD).is_none() {
+            let execution = Fixture::new();
+            let other = Fixture::new();
+            for repo in [execution.path(), other.path()] {
+                let out = std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .arg(repo)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{:?}", out.stderr);
+            }
+            std::fs::create_dir_all(other.path().join(".oms/plan")).unwrap();
+            std::fs::write(other.path().join(".oms/plan/tasks.json"), b"invalid").unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "services_collab::tests::team_view_uses_selected_state_instead_of_ambient_repository",
+                    "--nocapture",
+                ])
+                .current_dir(execution.path())
+                .env(CHILD, "1")
+                .env("OMS_STATE_REPO", other.path())
+                .env("OMS_HARNESS_CHILD", "1")
+                .env("OMS_HARNESS_DELEGATE_DEPTH", "7")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let execution = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let other = PathBuf::from(std::env::var_os("OMS_STATE_REPO").unwrap())
+            .canonicalize()
+            .unwrap();
+        assert_ne!(execution, other);
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = CollabServices::new(&stop, source()).unwrap();
+        // The real ambient Plan resolver sees the invalid other repository.
+        let ambient = PanelServices::command(
+            &host,
+            NativeCommand::Plan,
+            &execution,
+            &[
+                "team-list".into(),
+                "--json".into(),
+                "--repo".into(),
+                execution.as_os_str().into(),
+            ],
+            &stop,
+        )
+        .unwrap();
+        assert_ne!(ambient.code, 0);
+        let before = std::fs::read(other.join(".oms/plan/tasks.json")).unwrap();
+        let report = oms_panel_core::teams::read_at(&execution, &execution, &host, &stop).unwrap();
+        assert_eq!(report["sources"]["teams"]["status"], "available");
+        assert_eq!(report["roots"], json!([]));
+        assert!(
+            !execution.join(".oms").exists(),
+            "view must not create state"
+        );
+        assert_eq!(
+            std::fs::read(other.join(".oms/plan/tasks.json")).unwrap(),
+            before
+        );
+
+        // A selected shared-state root also stays distinct from execution.
+        std::fs::write(other.join(".oms/plan/tasks.json"), b"{\"tasks\":{}}").unwrap();
+        std::fs::create_dir_all(execution.join(".oms/plan")).unwrap();
+        std::fs::write(execution.join(".oms/plan/tasks.json"), b"invalid").unwrap();
+        let report = oms_panel_core::teams::read_at(&execution, &other, &host, &stop).unwrap();
+        assert_eq!(report["sources"]["teams"]["status"], "available");
+        assert_eq!(report["roots"], json!([]));
+        assert_eq!(std::env::var("OMS_HARNESS_CHILD").unwrap(), "1");
+        assert_eq!(std::env::var("OMS_HARNESS_DELEGATE_DEPTH").unwrap(), "7");
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            PanelServices::team_contracts(&host, &execution, &other, &cancelled)
+                .unwrap_err()
+                .code,
+            130
+        );
+    }
+
+    #[test]
     fn peer_process_executor_maps_stops_like_the_native_executor() {
         let stop = Arc::new(AtomicBool::new(false));
         let host = CollabServices::new(&stop, source()).expect("source is available");
@@ -2543,6 +2871,14 @@ mod tests {
                     timeout,
                     max_bytes: 1024,
                     merge: false,
+                    launch_fence: None,
+                    physical_call: Some(
+                        oms_supervisor::process::PhysicalCall::new(&format!(
+                            "call_fixture_{}",
+                            script.len()
+                        ))
+                        .unwrap(),
+                    ),
                 },
                 &stop,
             )
@@ -2552,8 +2888,16 @@ mod tests {
             (done.code, done.stdout.as_slice(), done.complete),
             (4, &b"in"[..], true)
         );
+        let cleanup = done.owned_cleanup.as_ref().unwrap();
+        assert_eq!(cleanup.call().id(), "call_fixture_11");
+        assert_eq!(cleanup.scope(), Scope::ProcessGroup);
         let done = invoke("sleep 30", Duration::from_millis(200)).expect("deadline");
         assert_eq!((done.code, done.complete), (124, false));
+        assert_eq!(done.cleanup_complete, Some(true));
+        assert_eq!(
+            done.owned_cleanup.as_ref().unwrap().call().id(),
+            "call_fixture_8"
+        );
         assert!(invoke("true", Duration::ZERO).is_err());
     }
 
@@ -3471,7 +3815,9 @@ esac"#,
         };
 
         stage(&root, rev, "exit 0");
-        assert_eq!(run(), 0);
+        let preflight =
+            host.incoming_lifecycle(IncomingPhase::Preflight, &root, rev, b"{}", &[], &stop);
+        assert_eq!(preflight.0, 0, "{}", String::from_utf8_lossy(&preflight.2));
 
         // Corrupt manifest is refused before spawning.
         std::fs::write(dir.join("manifest.json"), b"not json").unwrap();

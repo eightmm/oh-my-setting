@@ -5,13 +5,20 @@ use crate::storage::{Context, MAX_FILE};
 use crate::{Error, Output, Result, checkpoint, require, value, verify};
 use oms_command_plan::services::SupervisedCommand;
 use oms_command_plan::storage::Store;
+use oms_command_telemetry::store::campaign as shared_campaign;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-pub const KINDS: &[&str] = &["seat", "consolidator", "verifier", "repair", "final"];
+pub use oms_command_telemetry::store::campaign::KINDS;
+fn shared_error(error: oms_command_telemetry::store::StoreError) -> Error {
+    Error::new(error.exit_code(), error.to_string())
+}
+fn row_text(row: &oms_json::Value, key: &str) -> String {
+    shared_campaign::text(shared_campaign::field(row, key))
+}
 pub fn parse_candidates(text: &str) -> Vec<(String, String)> {
     let fence = regex::Regex::new(r"^```([A-Za-z]+)[ \t]*$").unwrap();
     let mut current: Option<(String, String)> = None;
@@ -71,6 +78,8 @@ pub fn validate_manifest(
         value::text(&manifest["problem"], "sha256"),
     )?;
     let git = oms_command_plan::repository::Git {
+        group_snapshot: None,
+        deadline: None,
         repo,
         interrupted,
         group_resolver: None,
@@ -277,118 +286,54 @@ impl<'a> Ledger<'a> {
     fn lock(&self) -> Result<oms_lock::Guard> {
         checkpoint(self.interrupted)?;
         let settings = oms_lock::Settings::from_env().map_err(|e| Error::new(2, e.to_string()))?;
-        oms_lock::Lock::for_file(&self.store.repo().join(self.path("events.jsonl")), settings)
-            .and_then(|lock| lock.acquire(None))
-            .map_err(|e| Error::new(2, e.to_string()))
+        let deadline = std::time::Instant::now()
+            .checked_add(settings.timeout)
+            .ok_or_else(|| Error::new(2, "campaign lock deadline overflow"))?;
+        oms_command_telemetry::store::lock_file_before(
+            &self.store.repo().join(self.path("events.jsonl")),
+            self.interrupted,
+            deadline,
+        )
+        .map_err(shared_error)
+    }
+    fn saved_manifest(&self) -> Result<shared_campaign::Manifest> {
+        let raw = self.store.read(self.path("manifest.json"), MAX_FILE)?;
+        shared_campaign::saved_manifest(&raw, self.directory.rsplit('/').next().unwrap())
+            .map_err(shared_error)
     }
     pub fn manifest(&self) -> Result<Value> {
-        let raw = self.store.read(self.path("manifest.json"), MAX_FILE)?;
-        let manifest = value::parse(&raw)?;
-        require(
-            raw == value::canonical(&manifest)?
-                && self.directory.ends_with(&value::hash(&raw)[..16]),
-            "campaign manifest digest mismatch",
-        )?;
-        value::keys(
-            &manifest,
-            &[
-                "problem",
-                "base",
-                "verify",
-                "candidate_formats",
-                "groups",
-                "budget",
-            ],
-            &["public_data", "consolidator"],
-        )?;
-        let budget = &manifest["budget"];
-        crate::campaign_usage::policy(budget)?;
-        for (key, high) in [
-            ("total_calls", 200),
-            ("max_concurrent", 16),
-            ("max_waves", 20),
-            ("deadline_s", 86400),
-            ("stall_waves", 20),
-        ] {
-            value::integer(&budget[key], 1, high, key)?;
-        }
-        for (key, high) in [
-            ("concurrency", 4),
-            ("timeout_s", 3600),
-            ("max_artifact_bytes", 1073741824),
-        ] {
-            value::integer(&budget["verifier"][key], 1, high, key)?;
-        }
-        let groups = manifest["groups"]
-            .as_array()
-            .ok_or_else(|| Error::new(2, "saved campaign groups are malformed"))?;
-        require(
-            !groups.is_empty()
-                && groups.iter().all(|g| {
-                    g["routes"].as_array().is_some_and(|r| {
-                        !r.is_empty()
-                            && r.iter()
-                                .all(|r| r["provider"].is_string() && r["model"].is_string())
-                    })
-                }),
-            "saved campaign routes are malformed",
-        )?;
-        Ok(manifest)
+        value::from_shared(&self.saved_manifest()?.value)
     }
-    #[allow(clippy::type_complexity)]
-    fn view(&self) -> Result<(Vec<Value>, BTreeMap<String, Value>, BTreeSet<String>)> {
-        let manifest = self.manifest()?;
+    fn view(&self) -> Result<shared_campaign::View> {
+        let manifest = self.saved_manifest()?;
         let raw = self.store.read(self.path("events.jsonl"), 16 * MAX_FILE)?;
-        require(
-            raw.ends_with(b"\n"),
-            "campaign events contain incomplete row",
-        )?;
-        let rows = raw
-            .split(|b| *b == b'\n')
-            .filter(|s| !s.is_empty())
-            .map(value::parse)
-            .collect::<Result<Vec<_>>>()?;
-        require(
-            rows.first().is_some_and(|r| {
-                r["type"] == "campaign_started" && r["budget"] == manifest["budget"]
-            }),
-            "campaign start budget differs from manifest",
-        )?;
-        let providers = providers(&manifest);
-        let mut reservations = BTreeMap::new();
-        let mut settled = BTreeSet::new();
-        for row in &rows {
-            require(
-                row.is_object() && row["type"].is_string(),
-                "invalid campaign event",
-            )?;
-            let id = value::text(row, "id");
-            if row["type"] == "reservation" {
-                require(
-                    id.strip_prefix("res_").is_some_and(|s| {
-                        s.len() == 32
-                            && s.bytes()
-                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                    }) && providers.contains(&value::text(row, "provider").to_owned())
-                        && KINDS.contains(&value::text(row, "kind"))
-                        && !reservations.contains_key(id),
-                    "invalid reservation event",
-                )?;
-                reservations.insert(id.to_owned(), row.clone());
-                if let Some(policy) = crate::campaign_usage::policy(&manifest["budget"])? {
-                    require(
-                        row["reserved_usage"] == policy.reservation(),
-                        "campaign usage reservation differs from manifest",
-                    )?;
-                }
-            } else if row["type"] == "settled" {
-                require(
-                    reservations.contains_key(id) && settled.insert(id.to_owned()),
-                    "invalid settlement event",
-                )?;
-            }
-        }
-        Ok((rows, reservations, settled))
+        shared_campaign::saved_events(&manifest, &raw).map_err(shared_error)
+    }
+    /// Exact observed policy locators, without controller or owner authority.
+    pub fn provider_environment(
+        &self,
+        reservation: &str,
+    ) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>> {
+        let _lock = self.lock()?;
+        let manifest = self.saved_manifest()?;
+        let view = self.view()?;
+        let row = view
+            .reservations
+            .get(reservation)
+            .ok_or_else(|| Error::new(2, "campaign reservation unavailable"))?;
+        let now = chrono::DateTime::parse_from_rfc3339(&value::now())
+            .map_err(|_| Error::new(2, "campaign clock unavailable"))?
+            .timestamp();
+        view.active(&manifest, reservation, &row_text(row, "provider"), now)
+            .map_err(shared_error)?;
+        Ok(vec![
+            ("OMS_OPERATION_ID".into(), reservation.into()),
+            ("OMS_GOAL_ID".into(), manifest.sha256[..16].into()),
+            (
+                "OMS_CAMPAIGN_MANIFEST_SHA256".into(),
+                manifest.sha256.into(),
+            ),
+        ])
     }
     fn append(&self, row: &Value) -> Result<()> {
         self.store
@@ -397,26 +342,26 @@ impl<'a> Ledger<'a> {
     }
     pub fn events(&self) -> Result<Vec<Value>> {
         let _lock = self.lock()?;
-        Ok(self.view()?.0)
+        self.view()?.rows.iter().map(value::from_shared).collect()
     }
     pub fn reserve(&self, provider: &str, kind: &str, limit: Option<u64>) -> Result<String> {
         let _lock = self.lock()?;
-        let manifest = self.manifest()?;
-        let (rows, reserved, settled) = self.view()?;
+        let saved = self.saved_manifest()?;
+        let manifest = value::from_shared(&saved.value)?;
+        let view = self.view()?;
+        let reserved = &view.reservations;
+        let settled = &view.settled;
         require(
-            providers(&manifest).contains(&provider.to_owned()) && KINDS.contains(&kind),
+            saved.providers.contains(provider) && KINDS.contains(&kind),
             "invalid provider or reservation kind",
         )?;
         let budget = &manifest["budget"];
-        let usage_policy = crate::campaign_usage::policy(budget)?;
+        let usage_policy = saved
+            .policy
+            .map(|inner| crate::campaign_usage::Policy { inner });
         if let Some(policy) = &usage_policy {
-            let spent = crate::campaign_usage::summary(
-                self.store.repo(),
-                policy,
-                &rows,
-                &reserved,
-                &settled,
-            )?;
+            let spent =
+                crate::campaign_usage::summary(self.store.repo(), policy, &view, self.interrupted)?;
             policy.admit(&spent)?;
         }
         let total = budget["total_calls"].as_u64().unwrap();
@@ -425,7 +370,7 @@ impl<'a> Ledger<'a> {
             || limit.is_some_and(|n| {
                 reserved
                     .values()
-                    .filter(|r| value::text(r, "kind") == kind)
+                    .filter(|r| row_text(r, "kind") == kind)
                     .count() as u64
                     >= n
             })
@@ -435,7 +380,7 @@ impl<'a> Ledger<'a> {
         let cap = &budget["per_provider"][provider];
         let provider_calls = reserved
             .values()
-            .filter(|r| value::text(r, "provider") == provider)
+            .filter(|r| row_text(r, "provider") == provider)
             .count() as u64;
         if provider_calls >= cap["calls"].as_u64().unwrap_or(total) {
             return Err(fail("provider calls exhausted"));
@@ -450,7 +395,7 @@ impl<'a> Ledger<'a> {
         }
         if active
             .iter()
-            .filter(|r| value::text(r, "provider") == provider)
+            .filter(|r| row_text(r, "provider") == provider)
             .count() as u64
             >= cap["concurrency"]
                 .as_u64()
@@ -459,7 +404,10 @@ impl<'a> Ledger<'a> {
             return Err(fail("provider concurrency exhausted"));
         }
         if kind == "verifier"
-            && active.iter().filter(|r| r["kind"] == "verifier").count() as u64
+            && active
+                .iter()
+                .filter(|r| row_text(r, "kind") == "verifier")
+                .count() as u64
                 >= budget["verifier"]["concurrency"].as_u64().unwrap()
         {
             return Err(fail("verifier concurrency exhausted"));
@@ -477,8 +425,8 @@ impl<'a> Ledger<'a> {
         verify::reason(outcome)?;
         require(outcome.len() <= 256, "settlement outcome exceeds 256 bytes")?;
         let _lock = self.lock()?;
-        let (_, reserved, settled) = self.view()?;
-        if !reserved.contains_key(id) || settled.contains(id) {
+        let view = self.view()?;
+        if !view.reservations.contains_key(id) || view.settled.contains(id) {
             return Ok(false);
         }
         self.append(&json!({"type": "settled", "id": id, "outcome": outcome}))?;
@@ -499,49 +447,35 @@ impl<'a> Ledger<'a> {
     }
     pub fn spent(&self) -> Result<Value> {
         let _lock = self.lock()?;
-        let (rows, reserved, settled) = self.view()?;
+        let view = self.view()?;
+        let reserved = &view.reservations;
         let mut counts = BTreeMap::new();
         for row in reserved.values() {
-            *counts
-                .entry(value::text(row, "provider").to_owned())
-                .or_insert(0u64) += 1;
+            *counts.entry(row_text(row, "provider")).or_insert(0u64) += 1;
         }
         let mut spent = json!({"total_calls": reserved.len(), "per_provider": counts});
         if let Some(policy) = crate::campaign_usage::policy(&self.manifest()?["budget"])? {
             spent["usage"] = crate::campaign_usage::summary(
                 self.store.repo(),
                 &policy,
-                &rows,
-                &reserved,
-                &settled,
+                &view,
+                self.interrupted,
             )?;
         }
         Ok(spent)
     }
     pub fn abandon_unsettled(&self) -> Result<()> {
         let _lock = self.lock()?;
-        let (_, reserved, settled) = self.view()?;
-        for id in reserved.keys().filter(|id| !settled.contains(*id)) {
+        let view = self.view()?;
+        for id in view
+            .reservations
+            .keys()
+            .filter(|id| !view.settled.contains(*id))
+        {
             self.append(&json!({"type": "settled", "id": id, "outcome": "abandoned"}))?;
         }
         Ok(())
     }
-}
-fn providers(manifest: &Value) -> Vec<String> {
-    let mut providers = BTreeSet::new();
-    if let Some(groups) = manifest["groups"].as_array() {
-        for group in groups {
-            if let Some(routes) = group["routes"].as_array() {
-                for route in routes {
-                    providers.insert(value::text(route, "provider").to_owned());
-                }
-            }
-        }
-    }
-    if let Some(route) = manifest.get("consolidator") {
-        providers.insert(value::text(route, "provider").to_owned());
-    }
-    providers.into_iter().collect()
 }
 fn extension(kind: &str) -> &str {
     match kind {
@@ -634,13 +568,7 @@ fn consolidate(
                 "agent-call",
                 call,
                 Duration::from_secs(remaining.min(1200)),
-                vec![
-                    ("OMS_OPERATION_ID".into(), reservation.clone().into()),
-                    (
-                        "OMS_GOAL_ID".into(),
-                        ledger.directory.rsplit('/').next().unwrap().into(),
-                    ),
-                ],
+                ledger.provider_environment(&reservation)?,
             )?,
             4 * MAX_FILE,
         )?;
@@ -769,6 +697,8 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
     )?;
     let result = (|| {
         let git = oms_command_plan::repository::Git {
+            group_snapshot: None,
+            deadline: None,
             repo: &scratch_path,
             interrupted: ctx.interrupted,
             group_resolver: ctx.services.group_membership_resolver(),
@@ -1030,10 +960,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                     "agent-call",
                     call,
                     Duration::from_secs((deadline - current_time()).clamp(1, 1200) as u64),
-                    vec![
-                        ("OMS_OPERATION_ID".into(), reservation.clone().into()),
-                        ("OMS_GOAL_ID".into(), cid.into()),
-                    ],
+                    ledger.provider_environment(&reservation)?,
                 )
                 .and_then(|out| artifact(ctx, &out, 4 * MAX_FILE));
                 let answer = match answer {

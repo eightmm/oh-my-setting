@@ -356,7 +356,7 @@ fn swaps(logs: &[&[Value]], who: &str) -> Result<(SwapMap, String)> {
             if e.text("participant") != who {
                 continue;
             }
-            if e.text("kind") == "join" && e.text("role") == "main" {
+            if matches!(e.text("kind"), "join" | "main-resume") && e.text("role") == "main" {
                 provider = Some(e.get("provider").str()?.to_owned());
             } else if e.text("kind") == "main-swap" {
                 let old = provider
@@ -506,7 +506,7 @@ fn membership(
         .iter()
         .filter(|r| {
             r.get("room_event").text("participant") == who
-                && r.get("room_event").text("kind") == "join"
+                && matches!(r.get("room_event").text("kind"), "join" | "main-resume")
         })
         .collect::<Vec<_>>();
     require(
@@ -519,6 +519,8 @@ fn membership(
     let closing = |r: &Value| {
         r.text("role") == "closed"
             || r.get("room_event").text("kind") == "closed"
+            || r.get("room_event").text("kind") == "main-resume"
+                && r.get("room_event").text("replaces") == who
             || r.get("room_event").text("participant") == who
                 && r.get("room_event").text("kind") == "leave"
     };
@@ -545,7 +547,10 @@ fn membership(
                     r.text("ts") <= ended
                         && (closing(r)
                             || r.get("room_event").text("participant") == who
-                                && r.get("room_event").text("kind") == "join")
+                                && matches!(
+                                    r.get("room_event").text("kind"),
+                                    "join" | "main-resume"
+                                ))
                 }),
                 "historical READ crosses successor membership boundary",
             )?;
@@ -575,7 +580,7 @@ fn membership(
             .iter()
             .filter(|r| {
                 r.get("room_event").text("participant") == who
-                    && r.get("room_event").text("kind") == "join"
+                    && matches!(r.get("room_event").text("kind"), "join" | "main-resume")
             })
             .count();
         require(

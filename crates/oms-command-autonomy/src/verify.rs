@@ -63,6 +63,8 @@ pub fn missing_base(
         return Ok(None);
     }
     let git = oms_command_plan::repository::Git {
+        group_snapshot: None,
+        deadline: None,
         repo,
         interrupted,
         group_resolver: None,
@@ -165,6 +167,8 @@ pub fn reuse_context(
         return Ok(None);
     }
     let git = oms_command_plan::repository::Git {
+        group_snapshot: None,
+        deadline: None,
         repo,
         interrupted,
         group_resolver: None,

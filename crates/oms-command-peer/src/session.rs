@@ -791,7 +791,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
         ),
         ("cwd", repo.to_string_lossy().into_owned().into()),
         ("provider", source.provider.clone().into()),
-        ("source_session", source.ident.into()),
+        ("source_session", source.ident.clone().into()),
         ("action", if fork { "fork" } else { "resume" }.into()),
         ("capability", "installed CLI --help".into()),
         ("dry_run", (!args.has("apply")).into()),
@@ -803,9 +803,9 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                 *provider == source.provider && source.path.starts_with(root)
             })
             .and_then(|(_, _, _, home)| home));
-        let (environment, account_remove) = match owner {
+        let (mut environment, account_remove, account) = match owner {
             Some(home) => providers::session_environment(&source.provider, &home)?,
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), None),
         };
         let mut remove_environment: Vec<OsString> = std::env::vars_os()
             .filter_map(|(k, _)| {
@@ -815,6 +815,30 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
             })
             .collect();
         remove_environment.extend(account_remove);
+        let usage_repo = crate::usage::state_repository(&repo, &[])?;
+        let pending = crate::admission::begin_interactive_with_executor(
+            crate::admission::InteractiveRequest {
+                state_root: &usage_repo,
+                provider: &source.provider,
+                selected_model: None,
+                account: account.as_deref(),
+                attempt: None,
+                resume_session: Some(&source.ident),
+            },
+            crate::admission::InteractiveContext {
+                contract_repo: &repo,
+                execution_repo: &repo,
+                root: None,
+                team: None,
+                task_id: None,
+            },
+            context.executor,
+            context.interrupted,
+        )?;
+        let call_id = pending.call_id().to_owned();
+        environment.push(("OMS_PROVIDER_CALL_ID".into(), call_id.clone().into()));
+        remove_environment.retain(|key| key != "OMS_PROVIDER_CALL_ID");
+        pending.fence_with_executor(context.executor, context.interrupted)?;
         let result = context.executor.execute(
             process::Invocation {
                 argv: native,
@@ -825,9 +849,36 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                 timeout: Duration::from_secs(86400),
                 max_bytes: 1024 * 1024,
                 merge: false,
+                launch_fence: Some(pending.launch_fence()),
+                physical_call: Some(
+                    oms_supervisor::process::PhysicalCall::new(&call_id)
+                        .map_err(|e| Error::new(2, e))?,
+                ),
             },
             context.interrupted,
-        )?;
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = pending.finish(None, None);
+                return Err(error);
+            }
+        };
+        pending
+            .finish_with_cleanup(
+                Some(&result.stdout),
+                result.cleanup_complete,
+                result.owned_cleanup.as_ref(),
+            )
+            .map_err(|error| {
+                Error::new(
+                    error.code,
+                    format!(
+                        "native resume usage accounting failed; reconcile before retrying: {error}"
+                    ),
+                )
+            })?;
+        report.set("provider_call_id", call_id);
         report.set("native_returncode", V::Num(result.code.to_string()));
         return Ok((result.code, json(&report)?, Vec::new()));
     }

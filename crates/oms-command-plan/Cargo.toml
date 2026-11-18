@@ -12,6 +12,7 @@ oms-lock = { path = "../oms-lock" }
 oms-scrub = { path = "../oms-scrub" }
 oms-contract-markdown = { path = "../oms-contract-markdown" }
 oms-work-inspect = { path = "../oms-work-inspect" }
+oms-supervisor = { path = "../oms-supervisor" }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 regex = "=1.13.1"
 rustix = { version = "=1.1.6", features = ["fs", "process"] }

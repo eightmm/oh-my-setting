@@ -16,6 +16,7 @@ fn path(r: &Request) -> Vec<&str> {
         Mode::Backend => "backend",
         Mode::Experiment => "experiment",
         Mode::Benchmark => "benchmark",
+        Mode::Resources => "resources",
         Mode::Doctor => "doctor",
         _ => return vec![],
     };

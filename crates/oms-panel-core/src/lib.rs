@@ -26,6 +26,7 @@ pub mod services;
 pub mod since;
 pub mod state;
 mod storage;
+pub mod teams;
 pub mod terminals;
 pub mod tick;
 mod value;

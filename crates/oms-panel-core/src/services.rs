@@ -117,6 +117,47 @@ pub trait PeerExecutor {
 }
 /// Only these domain services may produce authority. Display snapshots confer none.
 pub trait Services: PeerExecutor {
+    /// Team/source readers share the caller's selected roots. Contextual hosts
+    /// can bind them directly; subprocess hosts pass an explicit state locator.
+    fn team_contracts(
+        &self,
+        execution: &Path,
+        state: &Path,
+        stop: &AtomicBool,
+    ) -> Result<CommandOutput> {
+        let execution = std::fs::canonicalize(execution).map_err(Error::new)?;
+        let state = std::fs::canonicalize(state).map_err(Error::new)?;
+        let ambient = std::env::var_os("OMS_STATE_REPO").filter(|value| !value.is_empty());
+        let same_state = ambient.as_ref().is_none_or(|value| {
+            std::fs::canonicalize(execution.join(value)).ok().as_ref() == Some(&state)
+        });
+        if execution == state && same_state {
+            return self.command(
+                NativeCommand::Plan,
+                &execution,
+                &args(&["team-list", "--json"]),
+                stop,
+            );
+        }
+        let mut request = ExecutionRequest::new(
+            vec![
+                "team-list".into(),
+                "--json".into(),
+                "--repo".into(),
+                execution.as_os_str().into(),
+            ],
+            &execution,
+        );
+        request
+            .environment
+            .push(("OMS_STATE_REPO".into(), state.as_os_str().into()));
+        self.command_context(NativeCommand::Plan, &request, stop)
+    }
+    /// Native interactive calls reuse the parent's canonical physical factory.
+    /// Unavailable hosts retain legacy admission, which refuses active domains.
+    fn physical_executor(&self) -> Option<&dyn oms_command_peer::process::Executor> {
+        None
+    }
     /// Native host handshake: fence the pane generation, obtain a bounded
     /// handoff, confirm old-native exit, append Room::swap_main under its native
     /// operations read guard, and start the replacement in that same pane.

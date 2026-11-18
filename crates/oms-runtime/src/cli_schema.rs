@@ -1,5 +1,6 @@
 //! Reference cli_parser.py SHA-256: 4a0023aee10a12265dbf92d2dac091f53612936535d250e8902f8d9e77621ae0
-//! Argument/help metadata transcribed from cli_parser.py; no parser is executed.
+//! Legacy argument/help metadata transcribed from cli_parser.py, with native
+//! resource-policy actions declared here. No legacy parser is executed.
 pub(super) const SCOPES: &str = r###"[
   {"path":[],"description":"Typed semantic core over the existing hardened OMS execution plane.",
    "arguments":[
@@ -7,7 +8,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--repo"],"default":".","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","help":"pretty-print JSON"},
     {"names":["--version"],"action":"version","version":"0.7.0"}
-   ],"children":[{"name":"envelope","help":"project the effective TaskEnvelope"},{"name":"evidence","help":"criterion-level evidence coverage"},{"name":"next","help":"return the smallest currently valid internal actions"},{"name":"brief","help":"read a return brief, optionally comparing a saved envelope"},{"name":"failure","help":"classify failures and inspect recovery metadata"},{"name":"context","help":"compile a bounded context manifest and bundle"},{"name":"context-inspect","help":"inspect saved context metadata and optionally verify source files"},{"name":"profile","help":"optional capability contracts"},{"name":"release","help":"stable/edge update channel handling"},{"name":"capsule","help":"sanitized cross-machine continuity state"},{"name":"backend","help":"trusted-local, isolated, apptainer, or remote execution"},{"name":"experiment","help":"ExperimentContract v2 and invariant packs"},{"name":"benchmark","help":"harness effectiveness telemetry"},{"name":"doctor","help":"validate the runtime projection without replacing OMS doctor"}],"groups":[]},
+   ],"children":[{"name":"envelope","help":"project the effective TaskEnvelope"},{"name":"evidence","help":"criterion-level evidence coverage"},{"name":"next","help":"return the smallest currently valid internal actions"},{"name":"brief","help":"read a return brief, optionally comparing a saved envelope"},{"name":"failure","help":"classify failures and inspect recovery metadata"},{"name":"context","help":"compile a bounded context manifest and bundle"},{"name":"context-inspect","help":"inspect saved context metadata and optionally verify source files"},{"name":"profile","help":"optional capability contracts"},{"name":"release","help":"stable/edge update channel handling"},{"name":"capsule","help":"sanitized cross-machine continuity state"},{"name":"backend","help":"trusted-local, isolated, apptainer, or remote execution"},{"name":"experiment","help":"ExperimentContract v2 and invariant packs"},{"name":"benchmark","help":"harness effectiveness telemetry"},{"name":"resources","help":"explicit observed host-local resource policy"},{"name":"doctor","help":"validate the runtime projection without replacing OMS doctor"}],"groups":[]},
   {"path":["envelope"],"description":"",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
@@ -524,6 +525,38 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
     {"names":["left"]},
     {"names":["right"]}
+   ],"children":[],"groups":[]},
+  {"path":["resources"],"description":"Explicit observed repository/host-local capacity. No resource policy activates by default.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"}
+   ],"children":[{"name":"host","help":"read the actual kernel boot generation hash"},{"name":"status","help":"read the selected state repository's policy and independent custody"},{"name":"activate","help":"activate an explicit policy before Main starts; preserve prior history"},{"name":"hold","help":"block new admission while preserving custody and settlement"}],"groups":[]},
+  {"path":["resources", "host"],"description":"Read-only boot generation identity; no policy or provider starts.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"}
+   ],"children":[],"groups":[]},
+  {"path":["resources", "status"],"description":"Read-only custody observation; it grants no launch permit.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"}
+   ],"children":[],"groups":[]},
+  {"path":["resources", "activate"],"description":"Parent-only explicit activation. Existing legacy custody refuses; no history is reset.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
+    {"names":["--policy"],"required":true,"help":"owned regular policy file inside the execution repository, relative to the caller directory; at most 64 KiB"}
+   ],"children":[],"groups":[]},
+  {"path":["resources", "hold"],"description":"Parent-only hold blocks admission and preserves all independent custody and usage.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
+    {"names":["--expected-policy-sha256"],"required":true,"help":"exact policy digest from status; stale or changed policies refuse"}
    ],"children":[],"groups":[]},
   {"path":["doctor"],"description":"",
    "arguments":[

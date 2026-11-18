@@ -1320,6 +1320,13 @@ fn multi_provider_accounts() {
     );
     inputs.requested_account = Some("work".into());
     let route = routing::allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+    let snapshot = route.snapshot.as_ref().unwrap();
+    assert_eq!(snapshot.selected_account.as_deref(), Some("work"));
+    assert_eq!(snapshot.requested_account.as_deref(), Some("work"));
+    assert!(snapshot.account_pinned);
+    assert_eq!(snapshot.served_account, None);
+    assert_eq!(snapshot.capabilities.account_alias, None);
+    assert_eq!(snapshot.catalog.account_alias, None);
     assert_eq!(
         (route.account.as_deref(), route.account_pinned),
         (Some("work"), true)

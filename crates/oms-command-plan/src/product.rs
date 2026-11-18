@@ -94,6 +94,7 @@ fn entries(
     sibling: bool,
     wanted: Option<&str>,
     groups: Option<crate::services::GroupResolver>,
+    snapshot: Option<std::sync::Arc<crate::storage::GroupProofSnapshot>>,
 ) -> Result<Vec<(String, Vec<u8>, Value)>> {
     let metadata = match std::fs::symlink_metadata(directory) {
         Ok(m) => m,
@@ -104,7 +105,9 @@ fn entries(
         metadata.is_dir() && !metadata.file_type().is_symlink(),
         "land receipts require a real directory",
     )?;
-    let store = Store::open(directory)?.with_group_resolver(groups);
+    let store = Store::open(directory)?
+        .with_group_resolver(groups)
+        .with_group_snapshot(snapshot);
     let mut out = Vec::new();
     for name in store.names(".", 65536, false)? {
         let Some(name) = name.to_str() else {
@@ -197,6 +200,7 @@ pub(crate) fn commit_landing(
             sibling,
             Some(commit),
             plan.services.group_membership_resolver(),
+            plan.group_snapshot.clone(),
         )? {
             if !name.starts_with(&format!("{commit}-"))
                 || expected.is_some_and(|d| d != json::sha(&raw))
@@ -289,6 +293,7 @@ pub(crate) fn landed_paths(plan: &Plan<'_>, proof: &CommitLanding) -> Result<Vec
             *sibling,
             None,
             plan.services.group_membership_resolver(),
+            plan.group_snapshot.clone(),
         )? {
             all.push((dir.clone(), *sibling, entry));
         }
@@ -720,4 +725,84 @@ fn commit_product(plan: &Plan<'_>, bundle: &Value, task: &Value) -> Result<Value
         product.set("artifact", artifact)?;
     }
     Ok(product)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::GroupMembership;
+    use crate::storage::GroupProofSnapshot;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn receipt_entries_keep_the_bounded_group_readset() {
+        static ORDINARY_QUERIES: AtomicUsize = AtomicUsize::new(0);
+        fn ordinary(_: u32) -> Result<GroupMembership> {
+            ORDINARY_QUERIES.fetch_add(1, Ordering::Relaxed);
+            Err(error(
+                "ordinary group query must not run in bounded admission",
+            ))
+        }
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "oms-plan-group-receipts-{}",
+            crate::storage::random_hex(16).unwrap()
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+        std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let name = format!("{}-fixture.json", "a".repeat(40));
+        std::fs::write(directory.0.join(&name), b"{}").unwrap();
+        std::fs::set_permissions(
+            directory.0.join(&name),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let gid = std::fs::metadata(&directory.0).unwrap().gid();
+        let snapshot = Arc::new(GroupProofSnapshot::new());
+        assert!(
+            entries(
+                &directory.0,
+                false,
+                None,
+                Some(ordinary),
+                Some(snapshot.clone())
+            )
+            .is_err()
+        );
+        assert_eq!(snapshot.missing().unwrap(), Some(gid));
+        assert_eq!(ORDINARY_QUERIES.load(Ordering::Relaxed), 0);
+        snapshot
+            .insert(
+                gid,
+                GroupMembership {
+                    gid,
+                    explicit_member_uids: vec![],
+                    primary_member_uids: vec![rustix::process::getuid().as_raw()],
+                },
+            )
+            .unwrap();
+        let rows = entries(
+            &directory.0,
+            false,
+            None,
+            Some(ordinary),
+            Some(snapshot.clone()),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, name);
+        assert_eq!(snapshot.proofs().unwrap().len(), 1);
+        assert_eq!(ORDINARY_QUERIES.load(Ordering::Relaxed), 0);
+        assert!(entries(&directory.0, false, None, Some(ordinary), None).is_err());
+        assert_eq!(ORDINARY_QUERIES.load(Ordering::Relaxed), 1);
+    }
 }

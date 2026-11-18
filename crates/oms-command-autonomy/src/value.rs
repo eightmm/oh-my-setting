@@ -69,6 +69,9 @@ pub fn plan(v: &Value) -> Result<oms_command_plan::json::Value> {
 pub fn from_plan(v: &oms_command_plan::json::Value) -> Result<Value> {
     parse(&oms_command_plan::json::canonical(v)?)
 }
+pub(crate) fn from_shared(v: &oms_json::Value) -> Result<Value> {
+    parse(&oms_json::canonical_json(v).map_err(|_| Error::new(2, "cannot encode shared JSON"))?)
+}
 pub fn keys(v: &Value, required: &[&str], optional: &[&str]) -> Result<()> {
     let map = v
         .as_object()

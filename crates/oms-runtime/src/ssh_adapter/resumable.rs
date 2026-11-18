@@ -382,6 +382,11 @@ pub(super) fn run(
         destination_lock.check().map_err(error)?;
         transfer_lock.check().map_err(error)?;
         let bytes = fetch(&req, options, index)?;
+        // The external read may outlast this lock's custody. Revalidate before
+        // changing the checkpoint, even when final delivery will later refuse.
+        destination_lock.check().map_err(error)?;
+        transfer_lock.check().map_err(error)?;
+        check_cancelled(req.interrupted)?;
         let row = serde_json::json!({"bytes": bytes.len(), "sha256": sha256(&bytes)});
         cache.write(
             &chunk_name(index),
@@ -389,6 +394,8 @@ pub(super) fn run(
             options.chunk_len(index) as usize,
         )?;
         manifest["chunks"][index.to_string()] = row;
+        destination_lock.check().map_err(error)?;
+        transfer_lock.check().map_err(error)?;
         cache.write(
             "manifest.json",
             &serde_json::to_vec(&manifest).map_err(error)?,

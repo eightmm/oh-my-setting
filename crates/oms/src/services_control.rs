@@ -378,6 +378,13 @@ impl<'a> ControlServices<'a> {
 }
 
 impl oms_command_plan::Services for ControlServices<'_> {
+    fn lifecycle_writer_before(
+        &self,
+        repo: &Path,
+        deadline: Instant,
+    ) -> oms_command_plan::Result<Box<dyn LifecycleGuard + '_>> {
+        oms_command_plan::Services::lifecycle_writer_before(&self.local, repo, deadline)
+    }
     fn state_root(&self, repo: &Path) -> oms_command_plan::Result<Option<PathBuf>> {
         let state = state_repository_for(repo).map_err(plan_error)?;
         let own = std::fs::canonicalize(repo)
@@ -470,6 +477,14 @@ impl oms_command_plan::Services for ControlServices<'_> {
     }
     fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
         Some(crate::services_runtime::resolve_group_membership)
+    }
+    fn group_membership_before(
+        &self,
+        gid: u32,
+        deadline: Instant,
+        interrupted: &AtomicBool,
+    ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+        crate::services_runtime::resolve_group_membership_before(gid, deadline, interrupted)
     }
     fn read_managed_patch(
         &self,
@@ -3055,7 +3070,7 @@ mod tests {
         let projected = control.project_lifecycle(b"").unwrap();
         assert_eq!(
             oms_command_plan::json::canonical(&projected.attempts).unwrap(),
-            b"[]"
+            b"{}"
         );
         assert!(control.project_lifecycle(b"not json\n").is_err());
         assert!(control.group_membership_resolver().is_some());
@@ -3093,6 +3108,16 @@ mod tests {
         std::fs::write(events_dir.join("events.jsonl"), review_events).unwrap();
         let (_, projected_rows) = oms_command_operations::load_projection(&canonical).unwrap();
         assert_eq!(projected_rows.len(), 2);
+        let lifecycle = control.project_lifecycle(review_events.as_bytes()).unwrap();
+        assert_eq!(lifecycle.attempts.object().unwrap().len(), 2);
+        assert_eq!(
+            lifecycle.attempts.get("att_review1").text("state"),
+            "review"
+        );
+        assert_eq!(
+            lifecycle.attempts.get("att_stale1").text("state"),
+            "working"
+        );
         assert!(
             oms_command_landing::Services::wait_siblings(
                 &control,
@@ -3107,6 +3132,1247 @@ mod tests {
     fn osv(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
     }
+    #[test]
+    fn team_contract_enrollment_uses_native_lifecycle_and_room_proofs() {
+        use oms_command_operations::value::obj;
+        use oms_command_operations::{StartRequest, append_lifecycle, create_attempt, new_event};
+        use oms_command_peer::admission::{
+            InteractiveContext, InteractiveRequest, begin_interactive_with_executor,
+        };
+        use oms_command_peer::process::{
+            Executor, Invocation, Native, PhysicalAttempt, PhysicalContract, RootLocator,
+            TeamLocator,
+        };
+        use oms_command_plan::{Context, Plan, Request, json};
+        use oms_command_telemetry::store::{physical, resources, usage};
+        if std::env::var_os("OMS_TEAM_REQUEST_REGISTER").is_some() {
+            let repo = PathBuf::from(std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").unwrap());
+            let stop = Arc::new(AtomicBool::new(false));
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap();
+            let control = services(&stop, source, Vec::new());
+            let previous = std::env::var("OMS_TEAM_REQUEST_PREVIOUS").unwrap();
+            let request = Request::parse(&osv(&[
+                "team-register",
+                "--team-spec",
+                "team.json",
+                "--expected-team-sha256",
+                &previous,
+            ]))
+            .unwrap();
+            let context = Context::from_environment(&request, &repo).unwrap();
+            Plan::open(context, &control, &stop)
+                .unwrap()
+                .execute(&request)
+                .unwrap();
+            return;
+        }
+        if let Some(mode) = std::env::var_os("OMS_TEAM_REQUEST_RUN") {
+            let repo = PathBuf::from(std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").unwrap());
+            let stop = Arc::new(AtomicBool::new(false));
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap();
+            let collab = crate::services_collab::CollabServices::new(&stop, source).unwrap();
+            let digest = std::env::var("OMS_TEAM_REQUEST_SPEC").unwrap();
+            let args = osv(&[
+                "--providers",
+                "fixture",
+                "--prompt",
+                mode.to_str().unwrap(),
+                "--model",
+                "fixture",
+                "--reasoning-effort",
+                "high",
+                "--task-id",
+                "task-a",
+                "--team-id",
+                "team-a",
+                "--team-spec-sha256",
+                &digest,
+                "--team-member",
+                "lead-a",
+                "--team-member-generation",
+                "1",
+                "--team-requests",
+                "--print-timeout",
+                if mode == "protocol-timeout" {
+                    "8s"
+                } else {
+                    "15s"
+                },
+            ]);
+            let handler = if mode == "protocol-cancel" {
+                Some(
+                    signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&stop))
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let output = oms_command_peer::run_with_executor(
+                "peer-ask", &args, &repo, source, &stop, &collab,
+            );
+            if let Some(handler) = handler {
+                signal_hook::low_level::unregister(handler);
+            }
+            if mode == "protocol-timeout" || mode == "protocol-cancel" {
+                let calls = usage::load(&repo).unwrap();
+                let attempt = calls
+                    .calls
+                    .last()
+                    .unwrap()
+                    .receipt
+                    .identity
+                    .attempt_id
+                    .as_ref()
+                    .unwrap();
+                let (_, projected) = oms_command_operations::load_projection(&repo).unwrap();
+                assert_eq!(
+                    projected
+                        .iter()
+                        .find(|a| a.get("attempt_id").text() == Some(attempt))
+                        .unwrap()
+                        .get("state")
+                        .text(),
+                    Some(if mode == "protocol-timeout" {
+                        "timed_out"
+                    } else {
+                        "cancelled"
+                    })
+                );
+            }
+            if (mode == "protocol-positive" || mode == "protocol-fragment") && output.0 != 0 {
+                for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
+                    .unwrap()
+                    .flatten()
+                {
+                    if let Ok(bytes) = std::fs::read(entry.path()) {
+                        let text = String::from_utf8_lossy(&bytes);
+                        if let Some((_, diagnostic)) = text.split_once("## Diagnostics") {
+                            eprintln!("fixture diagnostics: {diagnostic}");
+                        }
+                    }
+                }
+            }
+            if mode == "protocol-positive" || mode == "protocol-fragment" {
+                assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+            } else {
+                assert_ne!(output.0, 0, "invalid protocol succeeded");
+            }
+            assert!(!String::from_utf8_lossy(&output.1).contains("nonce"));
+            assert!(!String::from_utf8_lossy(&output.2).contains("nonce"));
+            return;
+        }
+        if std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").is_none() {
+            let policy = resources::Policy {
+                domain: "native-fixture".into(),
+                epoch: "epoch-a".into(),
+                host_generation_sha256: crate::services_runtime::observed_host_generation_before(
+                    Instant::now() + Duration::from_secs(5),
+                    &AtomicBool::new(false),
+                )
+                .unwrap(),
+                max_teams: 8,
+                max_invocations: 8,
+                max_open_processes: 8,
+                max_write_wip: 8,
+                reviewer_headroom: 1,
+            };
+            let policy = String::from_utf8(policy.to_json().unwrap()).unwrap();
+            let fixture = Tmp::repo(&[
+                ("team-policy.json", policy.as_str()),
+                ("src/lib.rs", "pub fn fixture() {}\n"),
+            ]);
+            std::fs::create_dir(fixture.path().join("caller")).unwrap();
+            let private_state = Tmp::new();
+            std::fs::set_permissions(private_state.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+                .current_dir(fixture.path().join("caller"))
+                .env("OMS_NATIVE_PHYSICAL_FIXTURE",fixture.path()).env("OMS_STATE_REPO","..")
+                .env("XDG_STATE_HOME",private_state.path()).env("HOME",private_state.path());
+            for key in [
+                "OMS_HARNESS_CHILD",
+                "OMS_HARNESS_DELEGATE_DEPTH",
+                "OMS_ROOM_ID",
+                "OMS_ROOM_PARTICIPANT",
+                "OMS_PANEL_MAIN_ATTEMPT",
+                "OMS_ATTEMPT_ID",
+                "OMS_HARNESS_CALL_ID",
+                "OMS_CAMPAIGN_MANIFEST_SHA256",
+                "OMS_OPERATION_ID",
+                "OMS_AUTOPILOT_OWNER_ID",
+            ] {
+                child.env_remove(key);
+            }
+            assert!(
+                child.status().unwrap().success(),
+                "native physical fixture child failed"
+            );
+            return;
+        }
+        let repo = PathBuf::from(std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let control = services(&stop, repo.as_path(), Vec::new());
+        let collab = crate::services_collab::CollabServices::new(&stop, repo.as_path()).unwrap();
+        if let Some(selected) = std::env::var_os("OMS_NATIVE_PHYSICAL_GUARD_OWNER") {
+            let selected = selected.to_str().unwrap();
+            let attempt = PhysicalAttempt {
+                state_root: repo.as_path(),
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                team: None,
+                root: Some(RootLocator {
+                    owner: selected,
+                    room_id: "room-team",
+                }),
+                provider: "codex",
+                account: Some("work"),
+                selected_model: Some("fixture"),
+                selected_effort: None,
+                task_id: None,
+                write: true,
+                persistent_session: false,
+            };
+            let before = physical::load(repo.as_path(), &stop).unwrap().len();
+            let error = collab
+                .with_physical_contract(
+                    &attempt,
+                    Instant::now() + Duration::from_secs(5),
+                    &stop,
+                    Box::new(|_| panic!("child/depth must refuse before registration")),
+                )
+                .unwrap_err();
+            assert!(error.message.contains("parent-only"), "{error:?}");
+            assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), before);
+            return;
+        }
+        let room = oms_command_room::Room::open(
+            repo.as_path(),
+            oms_command_room::Session {
+                agent: "codex".into(),
+                ..Default::default()
+            },
+            &collab,
+            &stop,
+            true,
+            false,
+        )
+        .unwrap();
+        room.create(
+            Some("room-team"),
+            "Native team fixture",
+            Some("task-a"),
+            None,
+            None,
+        )
+        .unwrap();
+        let owner = create_attempt(
+            repo.as_path(),
+            &StartRequest {
+                provider: "codex".into(),
+                tool: "panel-main".into(),
+                refs: obj([
+                    ("panel_room_id", "room-team".into()),
+                    ("panel_role", "main".into()),
+                ]),
+                ..Default::default()
+            },
+            &stop,
+        )
+        .unwrap();
+        for state in ["starting", "working"] {
+            let event = new_event(
+                &owner,
+                0usize.into(),
+                "attempt.state_changed",
+                obj([("to_state", state.into())]),
+            )
+            .unwrap();
+            append_lifecycle(repo.as_path(), event, &stop).unwrap();
+        }
+        room.join("room-team", oms_command_room::Join::new(&owner, "codex"))
+            .unwrap();
+        let policy_bytes = std::fs::read(repo.join("team-policy.json")).unwrap();
+        let resource_policy = resources::Policy::parse(&policy_bytes).unwrap();
+        resources::activate(
+            repo.as_path(),
+            &resource_policy,
+            None,
+            &stop,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let root = RootLocator {
+            owner: &owner,
+            room_id: "room-team",
+        };
+        let run_local = |call: oms_command_peer::admission::InteractiveCall| {
+            let count = physical::load(repo.as_path(), &stop).unwrap().len();
+            call.fence_with_executor(&collab, &stop).unwrap();
+            assert_eq!(
+                physical::load(repo.as_path(), &stop).unwrap().len(),
+                count,
+                "qualification cannot register or resend"
+            );
+            oms_command_operations::lock::FileLock::acquire_before(
+                &oms_command_operations::event_path(repo.as_path()),
+                &stop,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            for relative in [
+                ".oms/landings.jsonl",
+                ".oms/threads/room-team.jsonl",
+                ".oms/delegations/.marker-set-lock-target",
+                ".oms/plan/tasks.json",
+            ] {
+                let lock = oms_lock::Lock::for_file(
+                    &repo.join(relative),
+                    oms_lock::Settings::from_env().unwrap(),
+                )
+                .unwrap();
+                lock.try_acquire().unwrap().check().unwrap();
+            }
+            let tag = oms_supervisor::process::PhysicalCall::new(call.call_id()).unwrap();
+            let done = Native
+                .execute(
+                    Invocation {
+                        argv: sh("printf native-physical"),
+                        cwd: repo.clone(),
+                        input: None,
+                        environment: vec![],
+                        remove_environment: vec![],
+                        timeout: Duration::from_secs(5),
+                        max_bytes: 1024,
+                        merge: false,
+                        physical_call: Some(tag.clone()),
+                        launch_fence: Some(call.launch_fence()),
+                    },
+                    &stop,
+                )
+                .unwrap();
+            assert_eq!(done.code, 0);
+            assert_eq!(done.stdout, b"native-physical");
+            assert_eq!(done.cleanup_complete, Some(true));
+            assert!(
+                done.owned_cleanup
+                    .as_ref()
+                    .is_some_and(|proof| proof.call() == &tag)
+            );
+            call.finish_with_cleanup(None, done.cleanup_complete, done.owned_cleanup.as_ref())
+                .unwrap();
+            let occupancy = resources::snapshot(repo.as_path(), &stop)
+                .unwrap()
+                .unwrap()
+                .occupancy;
+            assert_eq!(occupancy.invocations, 0);
+            assert_eq!(occupancy.open_processes, 0);
+        };
+        assert!(!repo.join(".oms/plan/tasks.json").exists());
+        let main_call = begin_interactive_with_executor(
+            InteractiveRequest {
+                state_root: repo.as_path(),
+                provider: "codex",
+                selected_model: Some("fixture"),
+                account: Some("work"),
+                attempt: Some(&owner),
+                resume_session: None,
+            },
+            InteractiveContext {
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                root: Some(root),
+                team: None,
+                task_id: None,
+            },
+            &collab,
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), 1);
+        run_local(main_call);
+        assert!(
+            !repo.join(".oms/plan/tasks.json").exists(),
+            "Root admission must not require or initialize a Plan"
+        );
+        for (child_flag, depth) in [("1", "0"), ("0", "1")] {
+            let status = Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+                .current_dir(repo.join("caller")).env("OMS_NATIVE_PHYSICAL_GUARD_OWNER",&owner)
+                .env("OMS_HARNESS_CHILD",child_flag).env("OMS_HARNESS_DELEGATE_DEPTH",depth).status().unwrap();
+            assert!(
+                status.success(),
+                "Root locator cannot override child/depth guards"
+            );
+        }
+        let call = |values: &[&str]| {
+            let request = Request::parse(&osv(values)).unwrap();
+            let mut context = Context::from_environment(&request, repo.as_path()).unwrap();
+            context.execution_repo = repo.as_path().into();
+            context.state_repo = repo.as_path().into();
+            context.plan_file = repo.as_path().join(".oms/plan/tasks.json");
+            context.panel_main_attempt = owner.clone();
+            context.room_id = "room-team".into();
+            context.participant = owner.clone();
+            Plan::open(context, &control, &stop)
+                .unwrap()
+                .execute(&request)
+        };
+        call(&["init", "--goal", "bounded fixture"]).unwrap();
+        call(&[
+            "add",
+            "--id",
+            "task-a",
+            "--title",
+            "native team fixture",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ])
+        .unwrap();
+        let plan =
+            json::parse(&std::fs::read(repo.as_path().join(".oms/plan/tasks.json")).unwrap())
+                .unwrap();
+        let task = plan.get("tasks").get("task-a");
+        let (events, _) = oms_command_operations::load_projection(repo.as_path()).unwrap();
+        let created = events
+            .iter()
+            .find(|e| {
+                e.get("attempt_id").text() == Some(&owner)
+                    && e.get("event_type").text() == Some("attempt.created")
+            })
+            .unwrap();
+        let mut spec: Value = serde_json::from_slice(include_bytes!(
+            "../../oms-command-plan/tests/fixtures/team-spec.json"
+        ))
+        .unwrap();
+        spec["root_owner"] = owner.clone().into();
+        spec["root_owner_generation"] = created.get("event_id").text().unwrap().into();
+        spec["plan_id"] = plan.text("plan_id").into();
+        spec["task_sha256"] = json::hash(task).unwrap().into();
+        spec["objective_sha256"] = json::sha(b"bounded fixture").into();
+        spec["criterion_sha256"] = oms_command_plan::team::criterion_digest(&plan, task)
+            .unwrap()
+            .into();
+        spec["base_sha"] = git(repo.as_path(), &["rev-parse", "HEAD"]).into();
+        let policy = json::sha(&policy_bytes);
+        spec["policy_sha256"] = policy.clone().into();
+        for member in spec["members"].as_array_mut().unwrap() {
+            member["root_owner"] = owner.clone().into();
+            if member["role"] == "lead" {
+                member["logical_parent"] = owner.clone().into();
+            }
+            member["route"]["policy_sha256"] = policy.clone().into();
+            if member["role"] == "worker" {
+                member["access"] = "write".into();
+                // The interactive launcher supplies no per-call effort override.
+                member["route"]["requested_effort"] = Value::Null;
+            }
+        }
+        std::fs::write(
+            repo.as_path().join("team.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        let before = std::fs::read(oms_command_operations::event_path(repo.as_path())).unwrap();
+        call(&["team-register", "--team-spec", "team.json"]).unwrap();
+        let view: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        assert_eq!(view["phase"], "planned");
+        assert_eq!(view["spec"]["root_owner"], owner);
+        assert_eq!(view["verified"], Value::Null);
+        let request = Request::new(oms_command_plan::Action::TeamShow);
+        let mut context = Context::from_environment(&request, repo.as_path()).unwrap();
+        context.execution_repo = repo.as_path().into();
+        context.state_repo = repo.as_path().into();
+        context.plan_file = repo.as_path().join(".oms/plan/tasks.json");
+        context.panel_main_attempt = owner.clone();
+        context.room_id = "room-team".into();
+        context.participant = owner.clone();
+        let admission_plan = Plan::open(context, &control, &stop).unwrap();
+        let request = oms_command_plan::team::AdmissionRequest {
+            team_id: "team-a".into(),
+            spec_sha256: view["history"][0]["sha256"].as_str().unwrap().into(),
+            member_id: "lead-a".into(),
+            member_generation: 1,
+            provider: "codex".into(),
+            harness: "codex".into(),
+            host: "local".into(),
+            transport: "direct".into(),
+            account: Some("work".into()),
+            selected_model: Some("fixture".into()),
+            selected_effort: Some("high".into()),
+            write: false,
+        };
+        let guard = admission_plan
+            .team_admission_before(request, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        guard.check().unwrap();
+        assert_eq!(guard.binding().text("root_owner"), owner);
+        assert!(
+            oms_command_operations::lock::FileLock::acquire_before(
+                &oms_command_operations::event_path(repo.as_path()),
+                &stop,
+                Instant::now() + Duration::from_millis(20)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(oms_command_operations::event_path(repo.as_path())).unwrap(),
+            before
+        );
+        assert_eq!(
+            usage::load(repo.as_path()).unwrap().calls.len(),
+            1,
+            "contract-only checks create no physical receipt"
+        );
+        drop(guard);
+        oms_command_operations::lock::FileLock::acquire_before(
+            &oms_command_operations::event_path(repo.as_path()),
+            &stop,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        assert_eq!(
+            std::fs::read(oms_command_operations::event_path(repo.as_path())).unwrap(),
+            before
+        );
+        let team = TeamLocator {
+            team_id: "team-a".into(),
+            spec_sha256: view["history"][0]["sha256"].as_str().unwrap().into(),
+            member_id: "worker-a".into(),
+            member_generation: 1,
+        };
+        let member_call = begin_interactive_with_executor(
+            InteractiveRequest {
+                state_root: repo.as_path(),
+                provider: "codex",
+                selected_model: Some("fixture"),
+                account: Some("other-account"),
+                attempt: None,
+                resume_session: None,
+            },
+            InteractiveContext {
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                root: Some(root),
+                team: Some(&team),
+                task_id: Some("task-a"),
+            },
+            &collab,
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), 2);
+        let claim = resources::snapshot(repo.as_path(), &stop).unwrap().unwrap();
+        assert_eq!(claim.occupancy.teams, 1);
+        assert_eq!(claim.occupancy.invocations, 1);
+        assert_eq!(claim.occupancy.open_processes, 1);
+        run_local(member_call);
+        let receipts = usage::load(repo.as_path()).unwrap();
+        assert_eq!(receipts.calls.len(), 2);
+        assert!(
+            receipts
+                .calls
+                .iter()
+                .all(|call| call.receipt.cleanup_complete == Some(true)
+                    && call.receipt.cost == usage::Cost::Unknown)
+        );
+        let lead = TeamLocator {
+            member_id: "lead-a".into(),
+            ..team.clone()
+        };
+        for selected_effort in [None, Some("medium")] {
+            let attempt = PhysicalAttempt {
+                state_root: repo.as_path(),
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                team: Some(&lead),
+                root: Some(root),
+                provider: "codex",
+                account: Some("work"),
+                selected_model: Some("fixture"),
+                selected_effort,
+                task_id: Some("task-a"),
+                write: false,
+                persistent_session: false,
+            };
+            let before_calls = physical::load(repo.as_path(), &stop).unwrap().len();
+            let error = collab
+                .with_physical_contract(
+                    &attempt,
+                    Instant::now() + Duration::from_secs(5),
+                    &stop,
+                    Box::new(|_| panic!("effort mismatch reached registration")),
+                )
+                .unwrap_err();
+            assert!(error.message.contains("physical route"), "{error:?}");
+            assert_eq!(
+                physical::load(repo.as_path(), &stop).unwrap().len(),
+                before_calls
+            );
+        }
+        let reject = |member: &TeamLocator,
+                      selected: RootLocator<'_>,
+                      account: &str,
+                      model: &str,
+                      task: &str,
+                      execution: &Path,
+                      cancelled: bool,
+                      elapsed: bool| {
+            let attempt = PhysicalAttempt {
+                state_root: repo.as_path(),
+                contract_repo: repo.as_path(),
+                execution_repo: execution,
+                team: Some(member),
+                root: Some(selected),
+                provider: "codex",
+                account: Some(account),
+                selected_model: Some(model),
+                selected_effort: None,
+                task_id: Some(task),
+                write: true,
+                persistent_session: false,
+            };
+            let count = physical::load(repo.as_path(), &stop).unwrap().len();
+            let interruption = AtomicBool::new(cancelled);
+            let deadline = if elapsed {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(5)
+            };
+            let error = collab
+                .with_physical_contract(
+                    &attempt,
+                    deadline,
+                    &interruption,
+                    Box::new(|_| panic!("invalid contract reached registration")),
+                )
+                .unwrap_err();
+            assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), count);
+            error
+        };
+        let mut invalid_member = team.clone();
+        invalid_member.member_generation = 2;
+        reject(
+            &invalid_member,
+            root,
+            "other-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            RootLocator {
+                owner: "foreign-main",
+                room_id: "room-team",
+            },
+            "other-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            root,
+            "wrong-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            root,
+            "other-account",
+            "wrong-model",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            root,
+            "other-account",
+            "fixture",
+            "wrong-task",
+            repo.as_path(),
+            false,
+            false,
+        );
+        let wrong_base = Tmp::repo(&[("different", "different base\n")]);
+        reject(
+            &team,
+            root,
+            "other-account",
+            "fixture",
+            "task-a",
+            wrong_base.path(),
+            false,
+            false,
+        );
+        assert_eq!(
+            reject(
+                &team,
+                root,
+                "other-account",
+                "fixture",
+                "task-a",
+                repo.as_path(),
+                true,
+                false
+            )
+            .code,
+            130
+        );
+        assert_eq!(
+            reject(
+                &team,
+                root,
+                "other-account",
+                "fixture",
+                "task-a",
+                repo.as_path(),
+                false,
+                true
+            )
+            .code,
+            75
+        );
+        let retain_pending = |id: &str, contract: PhysicalContract<'_>| {
+            let registered = physical::begin_bound_checked(
+                repo.as_path(),
+                physical::Request {
+                    identity: usage::Identity {
+                        call_id: id.into(),
+                        operation_id: format!("operation-{id}"),
+                        provider: "codex".into(),
+                        selected_model: Some("fixture".into()),
+                        account: Some("other-account".into()),
+                        task_id: Some("task-a".into()),
+                        ..Default::default()
+                    },
+                    cumulative: None,
+                    write: true,
+                    campaign_manifest_sha256: None,
+                },
+                contract.resource.expect("native contract resource binding"),
+                &stop,
+                Instant::now() + Duration::from_secs(5),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            assert!(matches!(registered, physical::Registration::New(_)));
+            oms_supervisor::process::PhysicalCall::new(id).unwrap()
+        };
+        let attempt = PhysicalAttempt {
+            state_root: repo.as_path(),
+            contract_repo: repo.as_path(),
+            execution_repo: repo.as_path(),
+            team: Some(&team),
+            root: Some(root),
+            provider: "codex",
+            account: Some("other-account"),
+            selected_model: Some("fixture"),
+            selected_effort: None,
+            task_id: Some("task-a"),
+            write: true,
+            persistent_session: false,
+        };
+        let policy_error = collab
+            .with_physical_contract(
+                &attempt,
+                Instant::now() + Duration::from_secs(10),
+                &stop,
+                Box::new(|contract| {
+                    let call = retain_pending("policy-held", contract);
+                    std::fs::write(repo.join("team-policy.json"), b"{}\n").unwrap();
+                    Ok(call)
+                }),
+            )
+            .unwrap_err();
+        assert!(policy_error.message.contains("policy"), "{policy_error:?}");
+        std::fs::write(repo.join("team-policy.json"), &policy_bytes).unwrap();
+        let assert_retained = |expected: usize, open: u64| {
+            assert_eq!(
+                physical::load(repo.as_path(), &stop).unwrap().len(),
+                expected
+            );
+            let receipts = usage::load(repo.as_path()).unwrap();
+            assert_eq!(receipts.calls.len(), expected);
+            for id in ["policy-held", "expiry-held"]
+                .into_iter()
+                .take(expected - 2)
+            {
+                let receipt = &receipts
+                    .calls
+                    .iter()
+                    .find(|call| call.receipt.identity.call_id == id)
+                    .unwrap()
+                    .receipt;
+                assert_eq!(receipt.phase, usage::Phase::Pending);
+                assert_eq!(receipt.cost, usage::Cost::Unknown);
+                assert_eq!(receipt.cleanup_complete, None);
+            }
+            let occupancy = resources::snapshot(repo.as_path(), &stop)
+                .unwrap()
+                .unwrap()
+                .occupancy;
+            assert_eq!(occupancy.invocations, open);
+            assert_eq!(occupancy.open_processes, open);
+        };
+        assert_retained(3, 1);
+        // Use a real native contract expiry. Wait at most twelve seconds for a
+        // minute boundary so the existing UTC producer supplies the calendar.
+        let expiry = loop {
+            let now = oms_command_autonomy::value::now();
+            let second = now[17..19].parse::<u64>().unwrap();
+            if second <= 47 {
+                break format!("{}{:02}Z", &now[..17], second + 12);
+            }
+            std::thread::sleep(Duration::from_secs(60 - second));
+        };
+        spec["generation"] = 2.into();
+        spec["previous_sha256"] = team.spec_sha256.clone().into();
+        spec["expires_at"] = expiry.into();
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        call(&[
+            "team-register",
+            "--team-spec",
+            "team.json",
+            "--expected-team-sha256",
+            &team.spec_sha256,
+        ])
+        .unwrap();
+        let next: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        let next_team = TeamLocator {
+            spec_sha256: next["history"][1]["sha256"].as_str().unwrap().into(),
+            ..team.clone()
+        };
+        let attempt = PhysicalAttempt {
+            team: Some(&next_team),
+            ..attempt
+        };
+        let expiry_error = collab
+            .with_physical_contract(
+                &attempt,
+                Instant::now() + Duration::from_secs(20),
+                &stop,
+                Box::new(|contract| {
+                    let expires_at = contract.expires_at.unwrap();
+                    let call = retain_pending("expiry-held", contract);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap();
+                    let expires_at = Duration::from_secs(expires_at.try_into().unwrap());
+                    if let Some(remaining) = expires_at.checked_sub(now) {
+                        std::thread::sleep(remaining);
+                    }
+                    Ok(call)
+                }),
+            )
+            .unwrap_err();
+        assert!(expiry_error.message.contains("expired"), "{expiry_error:?}");
+        assert_retained(4, 2);
+        spec["generation"] = 3.into();
+        spec["previous_sha256"] = next_team.spec_sha256.clone().into();
+        spec["expires_at"] = "2200-01-01T00:00:00Z".into();
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        call(&[
+            "team-register",
+            "--team-spec",
+            "team.json",
+            "--expected-team-sha256",
+            &next_team.spec_sha256,
+        ])
+        .unwrap();
+        let active: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        let active_team = TeamLocator {
+            spec_sha256: active["history"][2]["sha256"].as_str().unwrap().into(),
+            ..team.clone()
+        };
+        {
+            let lock = oms_lock::Lock::for_file(
+                &repo.join(".oms/threads/room-team.jsonl"),
+                oms_lock::Settings::from_env().unwrap(),
+            )
+            .unwrap();
+            let held = lock.try_acquire().unwrap();
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(deadline);
+            let mut join = oms_command_room::Join::new("bounded-probe", "codex");
+            join.role = "advisor".into();
+            join.parent = Some(owner.clone());
+            let start = Instant::now();
+            let error = bounded.join("room-team", join.clone()).unwrap_err();
+            assert_eq!(
+                crate::services_collab::prelaunch_error(
+                    oms_command_peer::Error::new(75, error.message),
+                    &stop,
+                    deadline,
+                    None,
+                )
+                .code,
+                124,
+                "actual late Room deadline must retain timeout classification"
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+            let cancelled = AtomicBool::new(false);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &cancelled,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(deadline);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(Duration::from_millis(30));
+                    cancelled.store(true, Ordering::Release);
+                });
+                let start = Instant::now();
+                let error = bounded.join("room-team", join).unwrap_err();
+                assert_eq!(
+                    crate::services_collab::prelaunch_error(
+                        oms_command_peer::Error::new(75, error.message),
+                        &cancelled,
+                        deadline,
+                        None,
+                    )
+                    .code,
+                    130,
+                    "actual late Room cancellation must retain cancellation classification"
+                );
+                assert!(start.elapsed() < Duration::from_secs(1));
+            });
+            drop(held);
+        }
+        {
+            let probe = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            let mut join = oms_command_room::Join::new("bounded-native-probe", "codex");
+            join.role = "advisor".into();
+            join.parent = Some(owner.clone());
+            probe.join("room-team", join).unwrap();
+            let generation = probe
+                .status("room-team", false)
+                .unwrap()
+                .list("participants")
+                .iter()
+                .find(|p| p.text("participant") == "bounded-native-probe")
+                .unwrap()
+                .number("seq");
+            let held = oms_command_operations::lock::FileLock::acquire_before(
+                &oms_command_operations::event_path(repo.as_path()),
+                &stop,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(Instant::now() + Duration::from_millis(100));
+            let start = Instant::now();
+            assert!(
+                bounded
+                    .leave_if_enrolled("room-team", "bounded-native-probe", generation, &owner)
+                    .is_err()
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel_services =
+                crate::services_collab::CollabServices::new(&cancel, repo.as_path()).unwrap();
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &cancel_services,
+                &cancel,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(Instant::now() + Duration::from_secs(2));
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(Duration::from_millis(30));
+                    cancel.store(true, Ordering::Release);
+                });
+                let start = Instant::now();
+                assert!(
+                    bounded
+                        .leave_if_enrolled("room-team", "bounded-native-probe", generation, &owner)
+                        .is_err()
+                );
+                assert!(start.elapsed() < Duration::from_secs(1));
+            });
+            drop(held);
+            probe.leave("room-team", "bounded-native-probe").unwrap();
+        }
+        let adapters = repo.join("adapters");
+        std::fs::create_dir(&adapters).unwrap();
+        let adapter = adapters.join("oms-agent-adapter-fixture");
+        let script = r#"#!/bin/sh
+set -eu
+prompt_file=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --prompt-file ]; then shift; prompt_file=$1; fi
+  shift
+done
+prompt=$(cat "$prompt_file")
+IFS= read -r hello
+field() { printf '%s' "${2-$hello}" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"; }
+num() { printf '%s' "$hello" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p"; }
+session=$(field session)
+nonce=$(field nonce)
+generation=$(num connection_generation)
+binding=$(field binding_sha256)
+expiry=${OMS_TEAM_REQUEST_EXPIRY:-$(num expires_at)}
+case "$prompt" in *protocol-wrong*) nonce=wrong;; esac
+printf '{"schema":1,"kind":"hello","session":"%s","nonce":"%s","connection_generation":%s}\n' "$session" "$nonce" "$generation"
+case "$prompt" in *protocol-cancel*) kill -USR1 "$PPID"; while :; do sleep 1; done;; *protocol-timeout*) while :; do sleep 1; done;; esac
+case "$prompt" in *protocol-oversize*) printf '%8193s' x; while :; do sleep 1; done;; *protocol-partial*) printf '{'; exit 0;; esac
+for sequence in 1 2; do
+  action=report_blocker
+  case "$prompt" in *protocol-unsupported*) action=request_dispatch;; esac
+  text=bounded-blocker
+  case "$prompt:$sequence" in *protocol-conflict*:2) text=changed;; esac
+  request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":1,"request_id":"report-one","action":"%s","text":"%s","expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$action" "$text" "$expiry")
+  case "$prompt" in *protocol-fragment*) printf '%s' "$request" | cut -c 1-20 | tr -d '\n'; sleep 0.02; printf '%s\n' "$request" | cut -c 21-;; *) printf '%s\n' "$request";; esac
+  case "$prompt" in *protocol-early*) printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"predicted"}\n' "$session" "$nonce" "$generation" "$sequence";; esac
+  IFS= read -r response || exit 3
+  case "$response" in *'"response"'*) :;; *) exit 4;; esac
+  case "$prompt" in *protocol-lost*) exit 0;; esac
+  challenge=$(field receipt_challenge "$response")
+  printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"%s"}\n' "$session" "$nonce" "$generation" "$sequence" "$challenge"
+done
+"#;
+        std::fs::write(&adapter, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(adapter.with_file_name("oms-agent-adapter-fixture.oms-team-request-v1.json"),serde_json::to_vec(&serde_json::json!({"schema":1,"protocol":"oms-team-request-v1","binary_sha256":json::sha(script.as_bytes())})).unwrap()).unwrap();
+        std::fs::set_permissions(
+            adapters.join("oms-agent-adapter-fixture.oms-team-request-v1.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        spec["generation"] = 4.into();
+        spec["previous_sha256"] = active_team.spec_sha256.clone().into();
+        for member in spec["members"].as_array_mut().unwrap() {
+            if member["id"] == "lead-a" {
+                member["route"]["provider"] = "fixture".into();
+                member["route"]["harness"] = "fixture".into();
+                member["route"]["account"] = Value::Null;
+            }
+        }
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        // Custom provider registration is scoped to each real child invocation;
+        // no process-global environment mutation grants the fixture authority.
+        let register=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_REGISTER","1").env("OMS_TEAM_REQUEST_PREVIOUS",&active_team.spec_sha256).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+        assert!(register.success());
+        let updated =
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+        let head = updated
+            .get("teams")
+            .get("team-a")
+            .get("versions")
+            .array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .text("sha256")
+            .to_owned();
+        let task_before = json::hash(updated.get("tasks")).unwrap();
+        let physical_before = physical::load(repo.as_path(), &stop).unwrap().len();
+        let report_expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 12;
+        for mode in [
+            "protocol-positive",
+            "protocol-lost",
+            "protocol-conflict",
+            "protocol-wrong",
+            "protocol-early",
+            "protocol-timeout",
+            "protocol-cancel",
+            "protocol-fragment",
+            "protocol-oversize",
+            "protocol-partial",
+            "protocol-unsupported",
+        ] {
+            let status=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+                .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN",mode).env("OMS_TEAM_REQUEST_EXPIRY",report_expiry.to_string()).env("OMS_TEAM_REQUEST_SPEC",&head).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+            assert!(status.success(), "native Team protocol case {mode} failed");
+            let current_room = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            let projection =
+                oms_command_room::project(&current_room.records("room-team").unwrap()).unwrap();
+            assert!(
+                projection
+                    .list("participants")
+                    .iter()
+                    .filter(|p| p.text("participant").starts_with("team-call_"))
+                    .all(|p| !p.flag("joined")),
+                "sealed cleanup must settle the exact enrollment"
+            );
+            let ledger =
+                json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+            assert_eq!(json::hash(ledger.get("tasks")).unwrap(), task_before);
+            let record = ledger.get("teams").get("team-a");
+            assert!(record.get("request_schema").is_int(2));
+            assert_eq!(
+                record.get("requests").array().unwrap().len(),
+                1,
+                "replay cannot create another report"
+            );
+        }
+        assert_eq!(
+            physical::load(repo.as_path(), &stop).unwrap().len(),
+            physical_before + 11,
+            "no hidden provider resend"
+        );
+        let native_occupancy = resources::snapshot(repo.as_path(), &stop)
+            .unwrap()
+            .unwrap()
+            .occupancy;
+        assert_eq!(
+            (
+                native_occupancy.invocations,
+                native_occupancy.open_processes
+            ),
+            (2, 2),
+            "only earlier unknown liabilities remain"
+        );
+        let retained = updated.get("teams").get("team-a").opt("requests").cloned();
+        assert!(
+            retained.is_none(),
+            "feature off contracts have no request ledger"
+        );
+        let before_generation =
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests")
+                .clone();
+        spec["generation"] = 5.into();
+        spec["previous_sha256"] = head.clone().into();
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        let status=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_REGISTER","1").env("OMS_TEAM_REQUEST_PREVIOUS",&head).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+        assert!(status.success());
+        assert_eq!(
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests"),
+            &before_generation,
+            "generation changes preserve dedup history"
+        );
+        let cancel = new_event(
+            &owner,
+            0usize.into(),
+            "attempt.state_changed",
+            obj([("to_state", "cancelled".into())]),
+        )
+        .unwrap();
+        append_lifecycle(repo.as_path(), cancel, &stop).unwrap();
+        assert_eq!(
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests"),
+            &before_generation,
+            "owner cancellation preserves dedup history"
+        );
+        let held: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        assert_eq!(held["phase"], "held");
+        assert!(held["reason"].as_str().unwrap().contains("owner"));
+        reject(
+            &active_team,
+            root,
+            "other-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        let reference = view["history"][0]["path"].as_str().unwrap();
+        let mut corrupt = std::fs::read(repo.as_path().join(reference)).unwrap();
+        corrupt.push(b' ');
+        std::fs::write(repo.as_path().join(reference), corrupt).unwrap();
+        assert!(
+            call(&["team-show", "--id", "team-a"])
+                .unwrap_err()
+                .message
+                .contains("digest")
+        );
+    }
+
     /// An initialised active packet written directly: `init` itself is refused
     /// inside a harness child, which would make the tests environment-dependent.
     fn packet(repo: &Path, id: &str) -> PathBuf {

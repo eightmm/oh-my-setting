@@ -18,6 +18,7 @@ pub enum Mode {
     Backend,
     Experiment,
     Benchmark,
+    Resources,
     Doctor,
     Help,
     Version,
@@ -141,6 +142,7 @@ impl Request {
                     )
             }
             Mode::Benchmark => matches!(self.action.as_str(), "show" | "compare"),
+            Mode::Resources => matches!(self.action.as_str(), "host" | "status"),
             Mode::Help | Mode::Version => true,
         }
     }
@@ -159,6 +161,17 @@ fn spec(r: &Request) -> Spec {
         r.subaction.as_str(),
     ) {
         (Mode::Envelope, _, _) => ("", "output", "", "", 0, 0, false),
+        (Mode::Resources, "activate", _) => ("", "policy", "", "policy", 0, 0, false),
+        (Mode::Resources, "hold", _) => (
+            "",
+            "expected-policy-sha256",
+            "",
+            "expected-policy-sha256",
+            0,
+            0,
+            false,
+        ),
+        (Mode::Resources, _, _) => ("", "", "", "", 0, 0, false),
         (Mode::Evidence, "matrix", _) => ("", "task limit format", "", "", 0, 0, false),
         (Mode::Evidence, "bind", _) => (
             "",
@@ -317,7 +330,7 @@ fn choose<'a>(value: &'a OsStr, choices: &[&str]) -> Result<&'a str> {
     )?;
     Ok(v)
 }
-pub const COMMANDS: &str = "envelope evidence next brief failure context context-inspect profile release capsule backend experiment benchmark doctor";
+pub const COMMANDS: &str = "envelope evidence next brief failure context context-inspect profile release capsule backend experiment benchmark resources doctor";
 pub fn parse(argv: &[OsString]) -> Result<Request> {
     let mut r = Request {
         mode: Mode::Help,
@@ -544,6 +557,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 "backend" => Mode::Backend,
                 "experiment" => Mode::Experiment,
                 "benchmark" => Mode::Benchmark,
+                "resources" => Mode::Resources,
                 _ => Mode::Doctor,
             };
             selected = true;
@@ -557,6 +571,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                     | Mode::Backend
                     | Mode::Experiment
                     | Mode::Benchmark
+                    | Mode::Resources
             );
             if r.mode == Mode::Envelope {
                 r.action = "show".into()
@@ -573,6 +588,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                     "template validate compare register show run launch sweep summarize evaluate invariants"
                 }
                 Mode::Benchmark => "show snapshot record compare",
+                Mode::Resources => "host status activate hold",
                 _ => "",
             };
             r.action = choose(arg, &choices.split_whitespace().collect::<Vec<_>>())
@@ -827,6 +843,7 @@ fn action_destination(mode: Mode) -> &'static str {
         Mode::Backend => "backend_action",
         Mode::Experiment => "experiment_action",
         Mode::Benchmark => "benchmark_action",
+        Mode::Resources => "resource_action",
         _ => "action",
     }
 }

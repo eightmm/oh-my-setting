@@ -73,7 +73,10 @@ the quarantine already exists. A mismatch at an existing quarantine refuses.
 
 `delete_orphans` returns `OrphanReport` and owns only `.oms/artifacts` regular,
 owned, single-link bodies. It preserves indexed/completion paths, output-digest,
-lock names and standard index/ignore names. It validates the kept snapshot
+the canonical panel-dispatch namespace, lock names and standard index/ignore
+names. Dispatch reservations and receipts belong to their native writers; age
+and an absent artifact-index row cannot settle their execution custody.
+It validates the kept snapshot
 under the lock and refuses uncertain receipts. Scans exceeding 65536 entries
 or depth 64 refuse before unlinking. Nonnegative grace is measured in seconds;
 zero allows immediate deletion. Dry runs report candidates without unlinking.
@@ -160,6 +163,145 @@ write rather than forgetting lifetime spend. A pending receipt is durable
 before each physical provider invocation; a crash can therefore leave an
 unresolved liability without needing a completed artifact.
 
+`store::budget` projects those receipts with canonical logical operations and
+outstanding physical intents. A matching call/operation identity is counted
+once, including an intent whose pending receipt was never published. The first
+physical claim replaces its logical escrow; a retry adds its own liability.
+Unknown dimensions retain the per-call floor after operation settlement, while
+later measured corrections replace earlier amounts. Proven pre-invocation
+refusal releases a no-call escrow only when no physical intent or receipt exists.
+The candidate check compares the complete after-projection with explicit caps.
+Campaign admission reuses this calculation and preserves its existing logical
+call limits and output fields. This API performs no writes and grants no launch
+or cleanup authority; callers must bind snapshots and serialize admission through
+their canonical reservation writer. Native descendant coverage and resource
+reservations require separate execution evidence.
+
+`store::dispatch::Transaction` shares the existing physical repository's
+`.oms/artifacts/panel-dispatch.lock` using direct Flock, independently of the
+legacy lock selector. It provides strict legacy/schema-2 resource snapshots and byte
+compare-and-swap at the existing 4 MiB registry path, plus immutable schema-2
+launch and schema-1 process artifacts bounded to 64 KiB. Callers retain unknown
+fields when patching their own records. Present empty or malformed state refuses
+instead of becoming an empty registry. Reads and mutations recheck the guard and
+anchored namespace, and waiting is bounded and cancellable. A prior artifact
+publication remains an uncertain effect if the subsequent registry update fails.
+The panel dispatch producer uses this shared writer and releases its guard before
+calling external execution or room producers. This storage API supplies no
+resource policy or launch permit by itself.
+
+`store::physical` registers repository-local observed calls through that same
+writer. Its versioned `physical.calls` extension preserves existing dispatch
+records. A reserved intent precedes the pending usage receipt; an exact CAS then
+links the receipt ordinal as `ready`. A ready record proves registration only.
+The shared deadline bounds nested lock waits, and every lock is released before
+returning to execution. The caller rechecks its launch fence after registration.
+An identical call ID returns existing status without resending or rewriting; a
+changed request refuses. Partial publication retains its intent and liability.
+Read-only loading creates no state. These legacy observations prove neither
+owner generations nor hard resource limits or native descendant containment.
+
+`store::campaign` validates the original canonical saved manifest, its full digest
+and the bounded complete events ledger. Logical admission and physical admission
+share its usage-policy parser and operation-state projection. It preserves the
+existing logical call/concurrency units; its active-reservation/deadline check is
+an observed budget binding, without controller or owner-generation authority.
+The canonical campaign producer remains the only manifest/event writer.
+
+`physical::begin_checked` runs the caller's policy check under the shared dispatch
+writer before any new intent. The caller retains its canonical campaign lock
+across this registration and rechecks that outer guard after nested writes. New
+campaign-bound call records use schema 2 and retain the full manifest digest in
+their immutable request; schema-1 legacy calls remain readable. Replays with
+changed binding bytes refuse. Partial records and receipts retain their liability,
+and resource/usage failure never authorizes resend. `lock_file_before` reuses the
+existing LegacyAuto lock for a target already validated by its owning store;
+the lock itself supplies no file-access or launch policy.
+
+`store::usage::begin_before` accepts the admission request's monotonic deadline.
+Receipt and ignore-file lock acquisition share that deadline and retain their
+existing LegacyAuto lock namespaces. A refused lock wait or failed preparation
+check appends no receipt and consumes no ordinal. Filesystem persistence may finish
+after the deadline; the caller must recheck its launch fence before executing.
+Ordinary `begin` keeps the existing configured timeout contract.
+Direct usage registration keeps its existing receipt writer and checks the domain
+while holding it. Activation holds dispatch then that same receipt writer across
+its history check and CAS, so a racing direct receipt is either retained before
+activation refuses or refused after activation. An active resource domain requires the
+physical producer's private registered-receipt path; a receipt-only registration
+cannot bypass capacity. Normal receipt revisions remain independent.
+
+`store::resources` adds an explicit `repository-host-local-observed` policy to
+that same registry. Activation compares exact expected bytes and refuses all
+legacy dispatch, physical or receipt history whose custody has not been
+reconciled. It never deletes history or starts a new empty epoch over unknown
+work. Schema 2 blocks schema-1-only writers; bound physical records use schema 3.
+Missing domains/claims, changed immutable bindings and unsupported outer legacy
+dispatch custody refuse while preserving bytes. No policy activates by default.
+
+Team slots, running invocations, open processes and write WIP are independent
+counts derived from retained claims. Reviewer headroom bounds ordinary admission;
+WIP is shared by exact owner/operation retries and outlives process exit. A new
+physical intent and its claims publish in one CAS before the separate pending
+receipt/ready acknowledgement. A later failure retains the reservation and
+liability. Exact replay grants no resend. Holding a domain blocks new work while
+allowing observations and settlement. Capacity refusal returns 3; held returns 75.
+
+`begin_bound_checked` requires the native parent to validate the actual host,
+root creation, Team/member generation, role and selected route. `Binding` itself
+is correlation data. Execution settlement accepts only the sealed reactor proof
+for the expected call and an explicitly pinned cleanup scope, with revision CAS
+and idempotent replay. Usage/spend, persistent sessions, Team slots and candidate
+WIP remain separate; a usage cleanup Boolean cannot release a resource claim.
+
+`retire_team_checked` and `retire_write_checked` require exact owner/generation
+and custody revision, and preserve a canonical decision reference and digest.
+They refuse while the target retains independent execution/session custody;
+Team retirement also waits for its candidate WIP. Member completion never
+retires the Team. Legacy rows without a revision remain readable as revision 1.
+Repeated exact retirement is idempotent and a changed decision refuses.
+
+`DecisionEvidence` is correlation, not a public authorization payload. The parent
+adapter must validate the actual canonical owner/result/acceptance decision for
+the supplied `DecisionTarget` under retained producer guards before calling a
+checked API. Its callback checks only pinned evidence and owned lock generations
+while the dispatch writer is held; it must not acquire producer locks or run
+native/Git proof subprocesses there. The store safely rereads the exact owned,
+regular canonical source (at most 16 MiB), verifies its SHA-256 and checks the
+callback again after CAS. The adapter revalidates its full outer authority after
+inner locks drop. Failure after CAS remains publication-uncertain. A matching
+file hash alone and free-form done/cleanup flags cannot supply the producer's
+decision semantics.
+
+`idle_session_checked` requires the transport producer's exact scoped
+turn-terminal decision and releases only invocation custody. The process/session
+remains counted. `close_session` requires the owning reactor's sealed cleanup
+for the expected physical call and pinned scope, with revision CAS. It releases
+that OS scope and makes no claim about an unobserved remote/native session.
+Neither path changes candidate WIP, Team custody or usage liability.
+
+`reconcile_checked` takes an exact registry snapshot and a producer-validated
+epoch decision. It permits a new epoch only from held state with all four
+custody counts drained. Resource schema 2 retains all prior policies and epoch
+decision references alongside the unchanged physical intents, claims and usage.
+The domain stays fixed; old epoch names and policy digests cannot be reused.
+Inactive historical claims retain their original policy and host bindings.
+Unknown usage remains a liability and is never reset or refunded by an epoch
+transition. Unsupported versions refuse; resource schema 1 remains readable.
+
+The native runtime exposes policy `host`, `status`, explicit `activate --policy`
+and exact-policy `hold` through `oms runtime resources`; see the
+[resource CLI contract](../oms-runtime/README.md). The native Peer/Main factory
+qualifies canonical Root/Team bindings around physical registration; unsupported
+Team capability/resource/budget requests refuse. Producer-validated retirement
+and epoch consumers remain separate work.
+Unknown native descendants, provider-account capacity and cross-host global hard
+bounds are unsupported. Calls without a qualifying native owner refuse in an
+active domain. The existing usage fixture covers mixed-call concurrency, partial writes,
+headroom, direct-receipt activation races, tampering, independent custody,
+decision/revision conflicts, retained history and epoch reuse, scoped session
+idle/close, and post-CAS producer-guard failure.
+
 Each new registration or observation reads and validates the complete history,
 then atomically replaces the ledger with that history plus the new receipt.
 Work and replacement bytes therefore grow with ledger size. This bound includes
@@ -168,7 +310,7 @@ Reaching the ceiling or finding malformed history refuses further accounting
 and provider continuation. Deleting history would erase spend and unresolved
 liabilities, so storage failure must be reconciled before another call.
 
-Schema 1 records immutable `call_id`, `operation_id`, provider and any known
+Schema 2 records immutable `call_id`, `operation_id`, provider and any known
 selected-model/account/goal/task/attempt/run identities. `selected_model` names
 the selected route and makes no claim about an unreported served model.
 The store allocates `ordinal`
@@ -180,6 +322,15 @@ has integer `microusd`. Reported amounts identify `provider-reported` or
 `provider-estimate` provenance. Zero is accepted only as an explicitly reported
 amount. Decimal conversion uses integer arithmetic, rounding a sub-microUSD
 remainder upward. OMS never computes a rate-card price from tokens.
+
+The nullable `cleanup_complete` field carries separate native process-owner
+evidence. A timeout may have confirmed cleanup while usage remains unknown;
+final usage does not prove cleanup. Cleanup is limited to the executor's
+supervision scope and does not prove bounded native fanout. Pending registrations
+and schema-1 history retain null. Both schemas remain readable without rewriting
+historical rows.
+Once cleanup is confirmed, later usage corrections must preserve that fact.
+This field alone grants no budget, dispatch or publication authority.
 
 Repeated identical receipts are idempotent; changed data at the same revision
 refuses publication. A higher revision is an explicit correction, including a

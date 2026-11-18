@@ -3,10 +3,66 @@ use crate::json::{self, Value, number, object};
 use crate::{Result, error, require};
 use oms_safe_fs::{ByteReadOptions, MutationError, MutationOptions, Root};
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// One admission validation pass. Only the parent producer can fill the proof
+/// set; all used groups are freshly revalidated before returning a binding.
+pub struct GroupProofSnapshot {
+    state: Mutex<(BTreeMap<u32, crate::services::GroupMembership>, Option<u32>)>,
+}
+impl GroupProofSnapshot {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new((BTreeMap::new(), None)),
+        }
+    }
+    fn get(&self, gid: u32) -> Result<crate::services::GroupMembership> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| error("group proof snapshot unavailable"))?;
+        if let Some(proof) = state.0.get(&gid) {
+            return Ok(proof.clone());
+        }
+        state.1 = Some(gid);
+        Err(error("bounded native group ownership proof required"))
+    }
+    pub(crate) fn missing(&self) -> Result<Option<u32>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| error("group proof snapshot unavailable"))?
+            .1
+            .take())
+    }
+    pub(crate) fn insert(&self, gid: u32, proof: crate::services::GroupMembership) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| error("group proof snapshot unavailable"))?;
+        require(
+            proof.gid == gid && !state.0.contains_key(&gid) && state.0.len() < 128,
+            "invalid or excessive group ownership proofs",
+        )?;
+        state.0.insert(gid, proof);
+        Ok(())
+    }
+    pub(crate) fn proofs(&self) -> Result<Vec<crate::services::GroupMembership>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| error("group proof snapshot unavailable"))?
+            .0
+            .values()
+            .cloned()
+            .collect())
+    }
+}
 
 pub const MAX_JSON: usize = 4 * 1024 * 1024;
 pub const MAX_STREAM: usize = 16 * 1024 * 1024;
@@ -17,6 +73,7 @@ pub const ACTIVE: &str = ".oms/plan/tasks.json";
 pub struct Store {
     root: Root,
     groups: Option<crate::services::GroupResolver>,
+    group_snapshot: Option<Arc<GroupProofSnapshot>>,
 }
 pub struct FileSnapshot {
     pub raw: Vec<u8>,
@@ -49,6 +106,7 @@ fn trusted(
     directory: bool,
     private: bool,
     groups: Option<crate::services::GroupResolver>,
+    snapshot: Option<&GroupProofSnapshot>,
 ) -> Result<()> {
     let mode = info.st_mode & 0o7777;
     // Group-writable records need an account-database proof. This crate never
@@ -56,9 +114,13 @@ fn trusted(
     let private_group = if mode & 0o020 == 0 {
         true
     } else {
-        let resolve = groups
-            .ok_or_else(|| error("native private-group account proof service unavailable"))?;
-        let membership = resolve(info.st_gid)?;
+        let membership = match snapshot {
+            Some(snapshot) => snapshot.get(info.st_gid)?,
+            None => groups
+                .ok_or_else(|| error("native private-group account proof service unavailable"))?(
+                info.st_gid,
+            )?,
+        };
         let uid = rustix::process::getuid().as_raw();
         membership.gid == info.st_gid
             && membership
@@ -111,10 +173,17 @@ struct Anchor {
     root: PathBuf,
     leaf: OsString,
     groups: Option<crate::services::GroupResolver>,
+    group_snapshot: Option<Arc<GroupProofSnapshot>>,
 }
 impl Anchor {
     fn trusted(&self, info: &Stat, directory: bool, private: bool) -> Result<()> {
-        trusted(info, directory, private, self.groups)
+        trusted(
+            info,
+            directory,
+            private,
+            self.groups,
+            self.group_snapshot.as_deref(),
+        )
     }
     fn check(&self) -> Result<()> {
         for (index, (fd, initial, name)) in self.dirs.iter().enumerate() {
@@ -148,10 +217,21 @@ impl Anchor {
 }
 impl Store {
     fn trusted(&self, info: &Stat, directory: bool, private: bool) -> Result<()> {
-        trusted(info, directory, private, self.groups)
+        trusted(
+            info,
+            directory,
+            private,
+            self.groups,
+            self.group_snapshot.as_deref(),
+        )
     }
     pub fn with_group_resolver(mut self, groups: Option<crate::services::GroupResolver>) -> Self {
         self.groups = groups;
+        self.group_snapshot = None;
+        self
+    }
+    pub(crate) fn with_group_snapshot(mut self, snapshot: Option<Arc<GroupProofSnapshot>>) -> Self {
+        self.group_snapshot = snapshot;
         self
     }
     pub fn open(repo: &Path) -> Result<Self> {
@@ -159,6 +239,7 @@ impl Store {
             root: Root::open(repo)
                 .map_err(|e| error(format!("cannot open plan repository: {e:?}")))?,
             groups: None,
+            group_snapshot: None,
         })
     }
     pub fn repo(&self) -> &Path {
@@ -191,6 +272,7 @@ impl Store {
             root: self.repo().to_path_buf(),
             leaf: rel.file_name().unwrap().to_owned(),
             groups: self.groups,
+            group_snapshot: self.group_snapshot.clone(),
         };
         for part in rel.parent().unwrap_or(Path::new("")).components() {
             if let Component::Normal(name) = part {

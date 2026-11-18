@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "kind": "oms-team-spec",
+  "id": "team-a",
+  "generation": 1,
+  "previous_sha256": "",
+  "root_owner": "main-a",
+  "root_owner_generation": "evt-owner",
+  "room_id": "room-team",
+  "plan_id": "unset",
+  "task_id": "task-a",
+  "task_sha256": "unset",
+  "objective_sha256": "unset",
+  "criterion_sha256": "unset",
+  "base_sha": "unset",
+  "mode": "oms-team",
+  "allowed_paths": ["src"],
+  "forbidden_paths": [],
+  "resources": [],
+  "policy_ref": "team-policy.json",
+  "policy_sha256": "unset",
+  "budget_ref": null,
+  "expires_at": "2200-01-01T00:00:00Z",
+  "max_members": 2,
+  "required_capabilities": [],
+  "members": [
+    {
+      "id": "lead-a", "generation": 1, "display_name": "same label",
+      "logical_parent": "main-a", "root_owner": "main-a", "role": "lead", "access": "read",
+      "attempt_id": null, "worktree_ref": null, "native_identity": null,
+      "route": {
+        "schema": 1, "harness": "codex", "provider": "codex", "transport": "direct", "account": "work", "host": "local",
+        "configured_model": "fixture", "requested_model": "fixture", "resolved_model": null, "served_model": null,
+        "requested_effort": "high", "applied_effort": null, "model_family": null,
+        "policy_sha256": "unset", "catalog_sha256": null, "capability_sha256": null
+      }
+    },
+    {
+      "id": "worker-a", "generation": 1, "display_name": "same label",
+      "logical_parent": "lead-a", "root_owner": "main-a", "role": "worker", "access": "read",
+      "attempt_id": null, "worktree_ref": null, "native_identity": null,
+      "route": {
+        "schema": 1, "harness": "codex", "provider": "codex", "transport": "direct", "account": "other-account", "host": "local",
+        "configured_model": "fixture", "requested_model": "fixture", "resolved_model": null, "served_model": null,
+        "requested_effort": "high", "applied_effort": null, "model_family": null,
+        "policy_sha256": "unset", "catalog_sha256": null, "capability_sha256": null
+      }
+    }
+  ]
+}

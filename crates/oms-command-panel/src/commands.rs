@@ -436,6 +436,19 @@ pub fn run(
     }
     let repo = repo_req()?;
     let execution = execution_req()?;
+    if options.has("teams") {
+        let report = oms_panel_core::teams::read_at(&execution, &repo, services, stop)?;
+        if options.has("json") {
+            return output(report);
+        }
+        if std::env::var_os("OMS_PANEL_READER_BOARD").is_some()
+            && let Some(mut tty) = crate::input::TerminalInput::open()?
+        {
+            crate::reader::page(&repo, &report, &mut tty, stop)?;
+            return Ok((0, vec![], vec![]));
+        }
+        return plain(crate::render::teams(&report, crate::layout::dimensions().0));
+    }
     if options.has("release-main") {
         return output(release::release(
             &repo,
@@ -772,6 +785,7 @@ fn routes_output(
                         "provider": alloc.candidate.provider,
                         "model": alloc.candidate.model,
                         "effort": alloc.candidate.effort,
+                        "snapshot": alloc.snapshot,
                     }),
                 );
             }
@@ -785,6 +799,14 @@ fn routes_output(
         obj.insert("kinds".into(), json!(kinds));
         obj.insert("owner".into(), json!(owner));
         obj.insert("chosen".into(), Value::Object(chosen));
+    }
+    if !options.has("json")
+        && std::env::var_os("OMS_PANEL_READER_BOARD").is_some()
+        && let Some(mut tty) = crate::input::TerminalInput::open()?
+    {
+        let report = json!({"kind":"oms-panel-routes","routes":base});
+        crate::reader::page(repo.unwrap_or(cwd), &report, &mut tty, stop)?;
+        return Ok((0, vec![], vec![]));
     }
     output(base)
 }
@@ -866,6 +888,10 @@ fn routing_inputs(
         if models.is_empty() {
             models = strings("catalog_models");
         }
+        inputs.provider_evidence.insert(
+            name.into(),
+            routing::ProviderEvidence::from_catalog_row(provider)?,
+        );
         inputs.catalogs.insert(name.into(), models);
     }
 
@@ -1204,7 +1230,8 @@ fn dispatch_command(
     }
     inputs.requested_account = flag_account.or(continued);
     inputs.requested_model = options.get("model").map(str::to_owned);
-    let mut route = routing::allocate(
+    inputs.requested_effort = options.get("reasoning-effort").map(str::to_owned);
+    let route = routing::allocate(
         &policy,
         &owner,
         &role,
@@ -1225,12 +1252,6 @@ fn dispatch_command(
                 route.candidate.provider
             ),
         )?;
-    }
-    if let Some(model) = options.get("model") {
-        route.candidate.model = model.into();
-    }
-    if let Some(effort) = options.get("reasoning-effort") {
-        route.candidate.effort = effort.into();
     }
     routing::valid_route(&route.candidate)?;
     let mut request = dispatch::DispatchRequest {

@@ -9,7 +9,7 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::Errno;
 use rustix::process::{self as os, Pid, Signal, WaitId, WaitIdOptions, WaitOptions};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::marker::PhantomData;
 use std::os::fd::OwnedFd;
@@ -17,6 +17,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) const MAX_DROP_WAIT: Duration = Duration::from_secs(5);
@@ -31,16 +32,235 @@ pub enum Scope {
     /// Requires the exclusive, pre-spawn Linux subreaper reactor.
     WholeTree,
 }
+
+/// A parent's physical-call correlation, not admission or permission to spawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhysicalCall(String);
+impl PhysicalCall {
+    pub fn new(id: &str) -> Result<Self, String> {
+        if id.is_empty()
+            || id.len() > 160
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+        {
+            return Err("invalid physical call correlation".into());
+        }
+        Ok(Self(id.into()))
+    }
+    pub fn id(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Sealed by the owning reactor after cleanup. Scope stays explicit: leader or
+/// POSIX-group cleanup cannot establish whole-tree or native-fanout bounds.
+#[derive(Clone, Debug)]
+pub struct OwnedCleanup {
+    call: PhysicalCall,
+    pid: u32,
+    scope: Scope,
+}
+impl OwnedCleanup {
+    pub fn call(&self) -> &PhysicalCall {
+        &self.call
+    }
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+    pub fn matches(&self, call: &PhysicalCall, scope: Scope) -> bool {
+        self.call == *call && self.scope == scope
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Streams {
     Merged,
     Separate,
+}
+/// Explicit queue and work bounds for an incremental raw-byte transport.
+/// Protocol framing, UTF-8 validation and outstanding RPC limits belong to its
+/// consumer; no hidden protocol or observer queue exists in the reactor.
+#[derive(Clone, Debug)]
+pub struct DuplexOptions {
+    pub max_frame_bytes: usize,
+    pub max_input_bytes: usize,
+    pub max_input_frames: usize,
+    pub max_output_bytes: usize,
+    pub max_output_events: usize,
+    pub max_read_bytes_per_turn: usize,
+    pub max_write_bytes_per_turn: usize,
+}
+impl DuplexOptions {
+    fn validate(&self) -> crate::Result<()> {
+        if [
+            self.max_frame_bytes,
+            self.max_input_bytes,
+            self.max_input_frames,
+            self.max_output_bytes,
+            self.max_output_events,
+            self.max_read_bytes_per_turn,
+            self.max_write_bytes_per_turn,
+        ]
+        .contains(&0)
+            || self.max_frame_bytes > self.max_input_bytes
+        {
+            return Err(
+                "duplex requires positive bounds and frame bytes within input bytes".into(),
+            );
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+/// Sequence is contiguous across both streams within this process-local
+/// generation. Separate pipes provide no global child-write ordering guarantee.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputEvent {
+    pub generation: u64,
+    pub sequence: u64,
+    pub stream: OutputStream,
+    pub bytes: Vec<u8>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendError {
+    UnknownJob,
+    NotDuplex,
+    InputClosed,
+    FrameTooLarge,
+    QueueFull,
+}
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::UnknownJob => "unknown owned process",
+            Self::NotDuplex => "owned process is not duplex",
+            Self::InputClosed => "owned duplex input is closed",
+            Self::FrameTooLarge => "duplex input frame exceeds byte bound",
+            Self::QueueFull => "duplex input queue is full",
+        })
+    }
+}
+impl std::error::Error for SendError {}
+#[derive(Clone, Debug)]
+pub struct DuplexStatus {
+    pub generation: u64,
+    /// Retained frame bytes, including the written prefix of a partial frame.
+    pub input_queued_bytes: usize,
+    pub input_queued_frames: usize,
+    pub input_accepted_bytes: u64,
+    pub input_written_bytes: u64,
+    pub input_abandoned_bytes: u64,
+    pub input_close_requested: bool,
+    pub input_closed: bool,
+    pub input_broken_pipe: bool,
+    /// True only when every accepted input byte was written to the pipe.
+    /// This is not an acknowledgement that the child processed those bytes.
+    pub input_drained: bool,
+    pub output_queued_bytes: usize,
+    pub output_queued_events: usize,
+    pub next_sequence: u64,
+    /// Cleanup/capture cutoff closed a reader without observing real EOF.
+    pub output_closed_early: bool,
+}
+#[derive(Clone, Debug)]
+pub struct DuplexCompletion {
+    pub status: DuplexStatus,
+    /// Events not yet taken with receive, in sequence order. Captures are
+    /// independent snapshots and must never be replayed as incremental events.
+    pub output: VecDeque<OutputEvent>,
+}
+struct Duplex {
+    options: DuplexOptions,
+    generation: u64,
+    input: VecDeque<Vec<u8>>,
+    input_offset: usize,
+    input_bytes: usize,
+    accepted: u64,
+    written: u64,
+    abandoned: u64,
+    close_requested: bool,
+    closed: bool,
+    broken_pipe: bool,
+    output: VecDeque<OutputEvent>,
+    output_bytes: usize,
+    sequence: u64,
+    output_closed_early: bool,
+    next_stream: OutputStream,
+}
+static NEXT_DUPLEX_GENERATION: AtomicU64 = AtomicU64::new(1);
+impl Duplex {
+    fn new(options: DuplexOptions) -> crate::Result<Self> {
+        let generation = NEXT_DUPLEX_GENERATION
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| "duplex generation exhausted")?;
+        Ok(Self {
+            options,
+            generation,
+            input: VecDeque::new(),
+            input_offset: 0,
+            input_bytes: 0,
+            accepted: 0,
+            written: 0,
+            abandoned: 0,
+            close_requested: false,
+            closed: false,
+            broken_pipe: false,
+            output: VecDeque::new(),
+            output_bytes: 0,
+            sequence: 1,
+            output_closed_early: false,
+            next_stream: OutputStream::Stdout,
+        })
+    }
+    fn status(&self) -> DuplexStatus {
+        DuplexStatus {
+            generation: self.generation,
+            input_queued_bytes: self.input_bytes,
+            input_queued_frames: self.input.len(),
+            input_accepted_bytes: self.accepted,
+            input_written_bytes: self.written,
+            input_abandoned_bytes: self.abandoned,
+            input_close_requested: self.close_requested,
+            input_closed: self.closed,
+            input_broken_pipe: self.broken_pipe,
+            input_drained: self.input.is_empty() && self.abandoned == 0,
+            output_queued_bytes: self.output_bytes,
+            output_queued_events: self.output.len(),
+            next_sequence: self.sequence,
+            output_closed_early: self.output_closed_early,
+        }
+    }
+    fn output_capacity(&self) -> usize {
+        if self.output.len() >= self.options.max_output_events {
+            0
+        } else {
+            self.options.max_output_bytes - self.output_bytes
+        }
+    }
+    fn abandon_input(&mut self) {
+        self.closed = true;
+        self.abandoned = self
+            .abandoned
+            .saturating_add(self.input_bytes.saturating_sub(self.input_offset) as u64);
+        self.input_bytes = 0;
+        self.input_offset = 0;
+        self.input.clear();
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Request {
     pub argv: Vec<OsString>,
     pub cwd: Option<PathBuf>,
     pub stdin: Option<Vec<u8>>,
+    /// Opt-in raw duplex; mutually exclusive with fixed stdin and merged streams.
+    pub duplex: Option<DuplexOptions>,
     pub clear_environment: bool,
     pub environment: Vec<(OsString, OsString)>,
     pub remove_environment: Vec<OsString>,
@@ -51,6 +271,7 @@ pub struct Request {
     pub deadline: Option<Instant>,
     pub scope: Scope,
     pub terminate_grace: Duration,
+    pub physical_call: Option<PhysicalCall>,
 }
 impl Request {
     pub fn new(argv: Vec<OsString>) -> Self {
@@ -58,6 +279,7 @@ impl Request {
             argv,
             cwd: None,
             stdin: None,
+            duplex: None,
             clear_environment: false,
             environment: vec![],
             remove_environment: vec![],
@@ -67,6 +289,7 @@ impl Request {
             deadline: None,
             scope: Scope::ProcessGroup,
             terminate_grace: Duration::from_secs(2),
+            physical_call: None,
         }
     }
 }
@@ -150,8 +373,14 @@ pub struct Completion {
     pub scope: Scope,
     pub signals: Vec<SignalRecord>,
     pub supervision_error: Option<String>,
+    pub duplex: Option<DuplexCompletion>,
+    owned_cleanup: Option<OwnedCleanup>,
 }
 impl Completion {
+    /// Uses sealed observations, unaffected by edits to public diagnostic fields.
+    pub fn owned_cleanup(&self) -> Option<&OwnedCleanup> {
+        self.owned_cleanup.as_ref()
+    }
     pub fn cleanup_complete(&self) -> bool {
         self.leader_reaped
             && self.supervision_error.is_none()
@@ -174,6 +403,7 @@ pub struct Snapshot {
     pub stderr: Option<Captured>,
     pub elapsed: Duration,
     pub supervision_error: Option<String>,
+    pub duplex: Option<DuplexStatus>,
 }
 #[derive(Debug)]
 pub enum Progress {
@@ -188,6 +418,7 @@ struct Job {
     err: Option<OwnedFd>,
     input: Option<OwnedFd>,
     input_offset: usize,
+    duplex: Option<Duplex>,
     stdout: Capture,
     stderr: Option<Capture>,
     started: Instant,
@@ -307,6 +538,17 @@ impl Reactor {
         if self.dedicated && !self.jobs.is_empty() {
             return Err("dedicated reactor already owns a tree".into());
         }
+        if let Some(options) = &request.duplex {
+            options.validate().map_err(StartError::InvalidRequest)?;
+            if request.stdin.is_some() || request.streams != Streams::Separate || detached {
+                return Err(
+                    "duplex requires separate streams, no fixed stdin and an attached child".into(),
+                );
+            }
+        }
+        // Allocate the generation before spawn, preserving ownership on every
+        // fallible setup path.
+        let duplex = request.duplex.clone().map(Duplex::new).transpose()?;
         let next = self
             .next
             .checked_add(1)
@@ -332,7 +574,7 @@ impl Reactor {
         };
         // Prepare every fallible descriptor operation before spawning. A later
         // error must never lose an already-created child's ownership handle.
-        let (input, child_input) = if request.stdin.is_some() {
+        let (input, child_input) = if request.stdin.is_some() || request.duplex.is_some() {
             let (r, w) = pipe_cloexec()?;
             nonblocking(&w)?;
             (Some(w), Stdio::from(r))
@@ -388,6 +630,7 @@ impl Reactor {
             err: if detached { None } else { err_read },
             input: if detached { None } else { input },
             input_offset: 0,
+            duplex,
             request,
             started,
             exit: None,
@@ -415,6 +658,55 @@ impl Reactor {
         self.next = next;
         self.jobs.insert(id, job);
         Ok(id)
+    }
+    /// Accept one complete consumer frame without blocking. Success means
+    /// queue admission only; rejection does not copy or partially enqueue it.
+    pub fn send(&mut self, id: JobId, frame: &[u8]) -> Result<(), SendError> {
+        let job = self.jobs.get_mut(&id).ok_or(SendError::UnknownJob)?;
+        let duplex = job.duplex.as_mut().ok_or(SendError::NotDuplex)?;
+        if duplex.close_requested || duplex.closed || job.stopping.is_some() {
+            return Err(SendError::InputClosed);
+        }
+        if frame.len() > duplex.options.max_frame_bytes {
+            return Err(SendError::FrameTooLarge);
+        }
+        if duplex.input.len() >= duplex.options.max_input_frames
+            || frame.len() > duplex.options.max_input_bytes - duplex.input_bytes
+        {
+            return Err(SendError::QueueFull);
+        }
+        duplex.input.push_back(frame.to_vec());
+        duplex.input_bytes += frame.len();
+        duplex.accepted = duplex.accepted.saturating_add(frame.len() as u64);
+        Ok(())
+    }
+    /// Idempotent half-close. Previously accepted frames drain before EOF;
+    /// deadline/cancellation may still abandon them with explicit status.
+    pub fn close_input(&mut self, id: JobId) -> Result<(), SendError> {
+        let job = self.jobs.get_mut(&id).ok_or(SendError::UnknownJob)?;
+        let duplex = job.duplex.as_mut().ok_or(SendError::NotDuplex)?;
+        duplex.close_requested = true;
+        if duplex.input.is_empty() {
+            job.input.take();
+            duplex.closed = true;
+        }
+        Ok(())
+    }
+    /// Takes one incremental output chunk. Call before poll and consume the
+    /// terminal queue from Completion after poll removes the finished job.
+    pub fn receive(&mut self, id: JobId) -> crate::Result<Option<OutputEvent>> {
+        let duplex = self
+            .jobs
+            .get_mut(&id)
+            .ok_or("unknown owned process")?
+            .duplex
+            .as_mut()
+            .ok_or("owned process is not duplex")?;
+        let event = duplex.output.pop_front();
+        if let Some(event) = &event {
+            duplex.output_bytes -= event.bytes.len();
+        }
+        Ok(event)
     }
     /// Numeric provenance is retained; callers supply the real received signal.
     pub fn stop(&mut self, id: JobId, reason: StopReason) -> crate::Result<()> {
@@ -461,13 +753,16 @@ impl Reactor {
                 wait = wait.min(Duration::from_millis(10));
             }
             let mut fds = Vec::new();
-            if let Some(fd) = &job.out {
+            let output_ready = job.duplex.as_ref().is_none_or(|d| d.output_capacity() > 0);
+            if output_ready && let Some(fd) = &job.out {
                 fds.push(PollFd::new(fd, PollFlags::IN));
             }
-            if let Some(fd) = &job.err {
+            if output_ready && let Some(fd) = &job.err {
                 fds.push(PollFd::new(fd, PollFlags::IN));
             }
-            if let Some(fd) = &job.input {
+            if job.duplex.as_ref().is_none_or(|d| !d.input.is_empty())
+                && let Some(fd) = &job.input
+            {
                 fds.push(PollFd::new(fd, PollFlags::OUT));
             }
             let timeout = Timespec {
@@ -596,10 +891,12 @@ impl Job {
             stderr: self.stderr.as_ref().map(Capture::snapshot),
             elapsed: self.started.elapsed(),
             supervision_error: self.error.clone(),
+            duplex: self.duplex.as_ref().map(Duplex::status),
         }
     }
     fn completion(self) -> Completion {
-        Completion {
+        let physical_call = self.request.physical_call;
+        let mut completion = Completion {
             pid: self.pid.as_raw_nonzero().get() as u32,
             exit: self.exit,
             stop: self.stop,
@@ -612,7 +909,22 @@ impl Job {
             scope: self.request.scope,
             signals: self.signals,
             supervision_error: self.error,
+            duplex: self.duplex.map(|d| DuplexCompletion {
+                status: d.status(),
+                output: d.output,
+            }),
+            owned_cleanup: None,
+        };
+        if completion.cleanup_complete()
+            && let Some(call) = physical_call
+        {
+            completion.owned_cleanup = Some(OwnedCleanup {
+                call,
+                pid: completion.pid,
+                scope: completion.scope,
+            });
         }
+        completion
     }
     fn fail(&mut self, error: String) {
         if self.error.is_none() {
@@ -642,6 +954,9 @@ impl Job {
         }
         self.stopping = Some(Instant::now());
         self.input.take();
+        if let Some(duplex) = &mut self.duplex {
+            duplex.abandon_input();
+        }
         if self.request.scope == Scope::Leader && self.stop.is_none() && self.exit.is_some() {
             return;
         }
@@ -715,15 +1030,16 @@ impl Job {
             return;
         }
         self.observe_exit();
-        if let Err(e) = drain(&mut self.out, &mut self.stdout) {
-            self.out.take();
-            self.fail(e);
-        }
-        if let Some(capture) = &mut self.stderr
-            && let Err(e) = drain(&mut self.err, capture)
-        {
-            self.err.take();
-            self.fail(e);
+        let stderr_first = self
+            .duplex
+            .as_ref()
+            .is_some_and(|d| d.next_stream == OutputStream::Stderr);
+        if stderr_first {
+            self.drain_output(OutputStream::Stderr);
+            self.drain_output(OutputStream::Stdout);
+        } else {
+            self.drain_output(OutputStream::Stdout);
+            self.drain_output(OutputStream::Stderr);
         }
         self.write_input();
         // Preserve an already-observed child outcome and actual EOF even when
@@ -801,6 +1117,9 @@ impl Job {
         if (self.stop.is_some() || drain_expired)
             && (self.kill_sent || self.group_quiescent == Some(true))
         {
+            if let Some(duplex) = &mut self.duplex {
+                duplex.output_closed_early |= self.out.is_some() || self.err.is_some();
+            }
             self.out.take();
             self.err.take();
         }
@@ -828,7 +1147,29 @@ impl Job {
             self.finished = true;
         }
     }
+    fn drain_output(&mut self, stream: OutputStream) {
+        let (fd, capture) = match stream {
+            OutputStream::Stdout => (&mut self.out, &mut self.stdout),
+            OutputStream::Stderr => {
+                let Some(capture) = self.stderr.as_mut() else {
+                    return;
+                };
+                (&mut self.err, capture)
+            }
+        };
+        if let Err(error) = drain(fd, capture, self.duplex.as_mut(), stream) {
+            if let Some(duplex) = &mut self.duplex {
+                duplex.output_closed_early |= fd.is_some();
+            }
+            fd.take();
+            self.fail(error);
+        }
+    }
     fn write_input(&mut self) {
+        if self.duplex.is_some() {
+            self.write_duplex_input();
+            return;
+        }
         let Some(fd) = &self.input else {
             return;
         };
@@ -858,6 +1199,67 @@ impl Job {
                 self.input.take();
                 self.fail(format!("owned stdin failed: {e}"));
             }
+        }
+    }
+    fn write_duplex_input(&mut self) {
+        let Some(fd) = &self.input else {
+            return;
+        };
+        let duplex = self.duplex.as_mut().expect("duplex writer");
+        let mut remaining = duplex.options.max_write_bytes_per_turn;
+        // Bound zero-byte frames, EINTR and syscall work as well as byte work.
+        for _ in 0..4 {
+            let Some(frame) = duplex.input.front() else {
+                break;
+            };
+            if duplex.input_offset == frame.len() {
+                duplex.input_bytes -= frame.len();
+                duplex.input.pop_front();
+                duplex.input_offset = 0;
+                continue;
+            }
+            if remaining == 0 {
+                break;
+            }
+            let end = frame
+                .len()
+                .min(duplex.input_offset.saturating_add(remaining));
+            match rustix::io::write(fd, &frame[duplex.input_offset..end]) {
+                Ok(0) => {
+                    self.input.take();
+                    duplex.abandon_input();
+                    self.fail("owned duplex stdin made no progress".into());
+                    return;
+                }
+                Ok(n) => {
+                    duplex.input_offset += n;
+                    duplex.written = duplex.written.saturating_add(n as u64);
+                    remaining -= n;
+                    if duplex.input_offset == frame.len() {
+                        duplex.input_bytes -= frame.len();
+                        duplex.input.pop_front();
+                        duplex.input_offset = 0;
+                    }
+                }
+                Err(Errno::AGAIN) => break,
+                Err(Errno::INTR) => continue,
+                Err(Errno::PIPE) => {
+                    self.input.take();
+                    duplex.broken_pipe = true;
+                    duplex.abandon_input();
+                    return;
+                }
+                Err(e) => {
+                    self.input.take();
+                    duplex.abandon_input();
+                    self.fail(format!("owned duplex stdin failed: {e}"));
+                    return;
+                }
+            }
+        }
+        if duplex.input.is_empty() && duplex.close_requested {
+            self.input.take();
+            duplex.closed = true;
         }
     }
     fn reap_adopted(&mut self) {
@@ -969,8 +1371,16 @@ impl Job {
         }
     }
 }
-fn drain(fd: &mut Option<OwnedFd>, capture: &mut Capture) -> crate::Result<()> {
+fn drain(
+    fd: &mut Option<OwnedFd>,
+    capture: &mut Capture,
+    mut duplex: Option<&mut Duplex>,
+    stream: OutputStream,
+) -> crate::Result<()> {
     if capture.should_stop() {
+        if let Some(d) = &mut duplex {
+            d.output_closed_early |= fd.is_some();
+        }
         fd.take();
         return Ok(());
     }
@@ -979,16 +1389,45 @@ fn drain(fd: &mut Option<OwnedFd>, capture: &mut Capture) -> crate::Result<()> {
     };
     let mut buf = [0u8; 65536];
     // Bound per-turn work so an unbounded writer cannot starve cancellation.
+    let mut remaining = duplex
+        .as_ref()
+        .map_or(4 * 65536, |d| d.options.max_read_bytes_per_turn);
     for _ in 0..4 {
-        match rustix::io::read(opened, &mut buf) {
+        let capacity = duplex.as_ref().map_or(buf.len(), |d| d.output_capacity());
+        let size = buf.len().min(remaining).min(capacity);
+        if size == 0 {
+            break;
+        }
+        if duplex.as_ref().is_some_and(|d| d.sequence == u64::MAX) {
+            return Err("duplex output sequence exhausted".into());
+        }
+        match rustix::io::read(opened, &mut buf[..size]) {
             Ok(0) => {
                 capture.eof = true;
                 fd.take();
                 return Ok(());
             }
             Ok(n) => {
+                remaining -= n;
+                if let Some(d) = &mut duplex {
+                    d.output.push_back(OutputEvent {
+                        generation: d.generation,
+                        sequence: d.sequence,
+                        stream,
+                        bytes: buf[..n].to_vec(),
+                    });
+                    d.sequence += 1;
+                    d.output_bytes += n;
+                    d.next_stream = match stream {
+                        OutputStream::Stdout => OutputStream::Stderr,
+                        OutputStream::Stderr => OutputStream::Stdout,
+                    };
+                }
                 capture.push(&buf[..n]);
                 if capture.should_stop() {
+                    if let Some(d) = &mut duplex {
+                        d.output_closed_early = true;
+                    }
                     fd.take();
                     return Ok(());
                 }
@@ -1172,6 +1611,8 @@ mod tests {
             scope: Scope::Leader,
             signals: vec![],
             supervision_error: None,
+            duplex: None,
+            owned_cleanup: None,
         }
     }
 
@@ -1240,10 +1681,12 @@ mod tests {
         let mut reactor = Reactor::new();
         let mut request = Request::new(vec!["/bin/sh".into(), "-c".into(), "printf ok".into()]);
         request.scope = Scope::Leader;
+        let call = PhysicalCall::new("call_leader_fixture").unwrap();
+        request.physical_call = Some(call.clone());
         request.deadline = Some(Instant::now() + Duration::from_secs(5));
         let id = reactor.start(request).unwrap();
         let until = Instant::now() + Duration::from_secs(5);
-        let completion = loop {
+        let mut completion = loop {
             match reactor.poll(id, Duration::from_millis(50)).unwrap() {
                 Progress::Complete(done) => break done,
                 Progress::Pending(_) => {
@@ -1257,6 +1700,22 @@ mod tests {
         assert_eq!(completion.exit.map(|e| e.shell_code()), Some(0));
         assert_eq!(completion.stdout.bytes, b"ok");
         assert!(completion.signals.is_empty(), "{:?}", completion.signals);
+        let proof = completion.owned_cleanup().unwrap();
+        assert!(proof.matches(&call, Scope::Leader));
+        assert_eq!(proof.pid(), completion.pid);
+        assert!(!proof.matches(&call, Scope::WholeTree));
+        assert!(!proof.matches(&PhysicalCall::new("call_other").unwrap(), Scope::Leader));
+        completion.scope = Scope::WholeTree;
+        completion.all_reaped = true;
+        assert_eq!(completion.owned_cleanup().unwrap().scope(), Scope::Leader);
+        let mut synthetic = fake_ps_completion(b"", Some(0));
+        synthetic.scope = Scope::WholeTree;
+        synthetic.all_reaped = true;
+        assert!(synthetic.cleanup_complete());
+        assert!(synthetic.owned_cleanup().is_none());
+        for invalid in ["", "call with space", "call/new", &"a".repeat(161)] {
+            assert!(PhysicalCall::new(invalid).is_err());
+        }
     }
 
     #[test]
@@ -1270,6 +1729,8 @@ mod tests {
             "printf out; exit 3".into(),
         ]);
         natural.scope = Scope::ProcessGroup;
+        let natural_call = PhysicalCall::new("call_group_fixture").unwrap();
+        natural.physical_call = Some(natural_call.clone());
         natural.deadline = Some(Instant::now() + Duration::from_secs(5));
         let id = reactor.start(natural).unwrap();
         let until = Instant::now() + Duration::from_secs(5);
@@ -1284,10 +1745,23 @@ mod tests {
         assert_eq!(done.group_quiescent, Some(true), "{done:?}");
         assert!(done.leader_reaped, "{done:?}");
         assert_eq!(done.exit.map(|e| e.shell_code()), Some(3), "{done:?}");
+        assert!(
+            done.owned_cleanup()
+                .unwrap()
+                .matches(&natural_call, Scope::ProcessGroup)
+        );
+        assert!(
+            !done
+                .owned_cleanup()
+                .unwrap()
+                .matches(&natural_call, Scope::WholeTree)
+        );
 
         // 2) Cancelled running child under Scope::ProcessGroup.
         let mut slow = Request::new(vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()]);
         slow.scope = Scope::ProcessGroup;
+        let stopped_call = PhysicalCall::new("call_group_cancel_fixture").unwrap();
+        slow.physical_call = Some(stopped_call.clone());
         slow.deadline = Some(Instant::now() + Duration::from_secs(30));
         let id = reactor.start(slow).unwrap();
         std::thread::sleep(Duration::from_millis(100));
@@ -1303,5 +1777,354 @@ mod tests {
         assert!(done.supervision_error.is_none(), "{done:?}");
         assert_eq!(done.group_quiescent, Some(true), "{done:?}");
         assert!(done.leader_reaped, "{done:?}");
+        assert!(
+            done.owned_cleanup()
+                .unwrap()
+                .matches(&stopped_call, Scope::ProcessGroup)
+        );
+        assert!(
+            !done
+                .owned_cleanup()
+                .unwrap()
+                .matches(&natural_call, Scope::ProcessGroup)
+        );
+    }
+    fn duplex_request(script: &str) -> Request {
+        let mut request = Request::new(vec!["/bin/sh".into(), "-c".into(), script.into()]);
+        request.streams = Streams::Separate;
+        request.scope = Scope::Leader;
+        request.deadline = Some(Instant::now() + Duration::from_secs(5));
+        request.terminate_grace = Duration::ZERO;
+        request.duplex = Some(DuplexOptions {
+            max_frame_bytes: 32768,
+            max_input_bytes: 65536,
+            max_input_frames: 4,
+            max_output_bytes: 1024,
+            max_output_events: 8,
+            max_read_bytes_per_turn: 7,
+            max_write_bytes_per_turn: 11,
+        });
+        request
+    }
+    fn finish(reactor: &mut Reactor, id: JobId) -> Completion {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            match reactor.poll(id, Duration::from_millis(10)).unwrap() {
+                Progress::Complete(done) => return done,
+                Progress::Pending(_) => {
+                    assert!(Instant::now() < until, "fixture cleanup timed out")
+                }
+            }
+        }
+    }
+    fn collect_event(event: OutputEvent, events: &mut Vec<OutputEvent>) {
+        if let Some(previous) = events.last() {
+            assert_eq!(event.generation, previous.generation);
+            assert_eq!(event.sequence, previous.sequence + 1);
+        } else {
+            assert_eq!(event.sequence, 1);
+        }
+        events.push(event);
+    }
+    fn stream_bytes(events: &[OutputEvent], stream: OutputStream) -> Vec<u8> {
+        events
+            .iter()
+            .filter(|e| e.stream == stream)
+            .flat_map(|e| e.bytes.iter().copied())
+            .collect()
+    }
+    #[test]
+    fn duplex_refuses_invalid_bounds_and_preserves_fixed_stdin() {
+        let mut reactor = Reactor::new();
+        for index in 0..8 {
+            let mut request = duplex_request("exit 0");
+            let options = request.duplex.as_mut().unwrap();
+            match index {
+                0 => options.max_frame_bytes = 0,
+                1 => options.max_input_bytes = 0,
+                2 => options.max_input_frames = 0,
+                3 => options.max_output_bytes = 0,
+                4 => options.max_output_events = 0,
+                5 => options.max_read_bytes_per_turn = 0,
+                6 => options.max_write_bytes_per_turn = 0,
+                _ => options.max_frame_bytes = options.max_input_bytes + 1,
+            }
+            assert!(matches!(
+                reactor.start(request),
+                Err(StartError::InvalidRequest(_))
+            ));
+        }
+        let mut merged = duplex_request("exit 0");
+        merged.streams = Streams::Merged;
+        assert!(matches!(
+            reactor.start(merged),
+            Err(StartError::InvalidRequest(_))
+        ));
+        let mut mixed = duplex_request("exit 0");
+        mixed.stdin = Some(vec![]);
+        assert!(matches!(
+            reactor.start(mixed),
+            Err(StartError::InvalidRequest(_))
+        ));
+        assert_eq!(reactor.pending(), 0);
+        let mut fixed = Request::new(vec!["/bin/cat".into()]);
+        fixed.stdin = Some(b"fixed\xff\n".to_vec());
+        fixed.scope = Scope::Leader;
+        let id = reactor.start(fixed).unwrap();
+        assert_eq!(reactor.send(id, b"no"), Err(SendError::NotDuplex));
+        let done = finish(&mut reactor, id);
+        assert!(done.cleanup_complete() && done.output_complete());
+        assert_eq!(done.stdout.bytes, b"fixed\xff\n");
+        assert!(done.duplex.is_none());
+    }
+    #[test]
+    fn duplex_live_reply_partial_writes_raw_fragments_and_half_close() {
+        let mut reactor = Reactor::new();
+        let mut request = duplex_request(
+            "printf 'ready\n'; IFS= read -r request; printf 'reply:%s\n' \"$request\"; cat; printf '\\377final\\n'; printf 'diagnostic\\n' >&2",
+        );
+        request.capture.max_bytes = 128;
+        let id = reactor.start(request).unwrap();
+        let generation = reactor.snapshot(id).unwrap().duplex.unwrap().generation;
+        let payload = [b"raw-".as_slice(), &[0xe2, 0x82], &vec![b'x'; 8192]].concat();
+        let mut events = Vec::new();
+        let mut sent = false;
+        let mut done = loop {
+            while let Some(event) = reactor.receive(id).unwrap() {
+                collect_event(event, &mut events);
+            }
+            if !sent && stream_bytes(&events, OutputStream::Stdout) == b"ready\n" {
+                assert!(
+                    reactor.snapshot(id).unwrap().exit.is_none(),
+                    "live event must precede child completion"
+                );
+                reactor.send(id, b"answer\n").unwrap();
+                reactor.send(id, &payload).unwrap();
+                reactor.close_input(id).unwrap();
+                reactor.close_input(id).unwrap();
+                assert_eq!(reactor.send(id, b"late"), Err(SendError::InputClosed));
+                sent = true;
+            }
+            match reactor.poll(id, Duration::from_millis(1)).unwrap() {
+                Progress::Complete(done) => break done,
+                Progress::Pending(snapshot) => {
+                    let state = snapshot.duplex.unwrap();
+                    assert!(state.input_queued_bytes <= 65536);
+                    assert!(state.output_queued_bytes <= 1024);
+                    assert!(state.output_queued_events <= 8);
+                    assert_eq!(state.generation, generation);
+                    assert!(snapshot.elapsed < Duration::from_secs(5));
+                }
+            }
+        };
+        assert!(sent);
+        assert!(
+            done.cleanup_complete() && done.output_complete(),
+            "{done:?}"
+        );
+        assert_eq!(done.stop, None);
+        let terminal = done.duplex.take().unwrap();
+        for event in terminal.output {
+            collect_event(event, &mut events);
+        }
+        assert_eq!(events[0].generation, generation);
+        let expected = [
+            b"ready\nreply:answer\n".as_slice(),
+            &payload,
+            b"\xfffinal\n",
+        ]
+        .concat();
+        assert_eq!(stream_bytes(&events, OutputStream::Stdout), expected);
+        assert_eq!(stream_bytes(&events, OutputStream::Stderr), b"diagnostic\n");
+        assert!(done.stdout.limited && done.stdout.bytes.len() <= 128);
+        assert!(
+            terminal.status.input_close_requested
+                && terminal.status.input_closed
+                && terminal.status.input_drained
+        );
+        assert_eq!(
+            terminal.status.input_written_bytes,
+            (payload.len() + 7) as u64
+        );
+        assert_eq!(terminal.status.input_abandoned_bytes, 0);
+        assert!(!terminal.status.output_closed_early);
+        assert_eq!(reactor.send(id, b"removed"), Err(SendError::UnknownJob));
+    }
+    #[test]
+    fn duplex_terminal_queue_and_input_bounds_are_explicit() {
+        let mut reactor = Reactor::new();
+        let mut request = duplex_request("cat; printf final; printf err >&2");
+        let options = request.duplex.as_mut().unwrap();
+        options.max_frame_bytes = 4;
+        options.max_input_bytes = 4;
+        options.max_input_frames = 2;
+        options.max_write_bytes_per_turn = 1;
+        let id = reactor.start(request).unwrap();
+        assert_eq!(reactor.send(id, b"large"), Err(SendError::FrameTooLarge));
+        reactor.send(id, b"abcd").unwrap();
+        assert_eq!(reactor.send(id, b"e"), Err(SendError::QueueFull));
+        reactor.poll(id, Duration::ZERO).unwrap();
+        let state = reactor.snapshot(id).unwrap().duplex.unwrap();
+        assert_eq!(state.input_written_bytes, 1);
+        assert_eq!(
+            state.input_queued_bytes, 4,
+            "partial frame retains its bounded allocation"
+        );
+        assert_eq!(reactor.send(id, b"e"), Err(SendError::QueueFull));
+        reactor.close_input(id).unwrap();
+        let mut done = finish(&mut reactor, id);
+        assert!(done.output_complete() && done.cleanup_complete());
+        let terminal = done.duplex.take().unwrap();
+        let events: Vec<_> = terminal.output.into_iter().collect();
+        assert_eq!(stream_bytes(&events, OutputStream::Stdout), b"abcdfinal");
+        assert_eq!(stream_bytes(&events, OutputStream::Stderr), b"err");
+        assert!(terminal.status.input_drained);
+        assert!(reactor.receive(id).is_err());
+        let id = reactor.start(duplex_request("cat")).unwrap();
+        for _ in 0..4 {
+            reactor.send(id, b"").unwrap();
+        }
+        assert_eq!(reactor.send(id, b""), Err(SendError::QueueFull));
+        reactor.close_input(id).unwrap();
+        let done = finish(&mut reactor, id);
+        assert!(done.duplex.unwrap().status.input_drained);
+    }
+    #[test]
+    fn duplex_full_queues_do_not_block_deadline_cancel_or_cleanup() {
+        for cancel in [false, true] {
+            let mut reactor = Reactor::new();
+            let mut request = duplex_request(
+                "while :; do printf 'stdout flood'; printf 'stderr flood' >&2; done",
+            );
+            request.scope = Scope::ProcessGroup;
+            let call = PhysicalCall::new(if cancel {
+                "duplex_cancel"
+            } else {
+                "duplex_deadline"
+            })
+            .unwrap();
+            request.physical_call = Some(call.clone());
+            let options = request.duplex.as_mut().unwrap();
+            options.max_frame_bytes = 262144;
+            options.max_input_bytes = 262144;
+            options.max_write_bytes_per_turn = 262144;
+            options.max_output_bytes = 32;
+            options.max_output_events = 1;
+            options.max_read_bytes_per_turn = 32;
+            let id = reactor.start(request).unwrap();
+            reactor.send(id, &vec![b'x'; 262144]).unwrap();
+            loop {
+                match reactor.poll(id, Duration::from_millis(1)).unwrap() {
+                    Progress::Pending(snapshot)
+                        if snapshot.duplex.as_ref().unwrap().output_queued_events == 1 =>
+                    {
+                        break;
+                    }
+                    Progress::Pending(snapshot) => {
+                        assert!(snapshot.elapsed < Duration::from_secs(5))
+                    }
+                    Progress::Complete(done) => panic!("flood ended before control: {done:?}"),
+                }
+            }
+            if cancel {
+                reactor.stop(id, StopReason::Cancelled).unwrap();
+            } else {
+                reactor.jobs.get_mut(&id).unwrap().request.deadline = Some(Instant::now());
+            }
+            let done = finish(&mut reactor, id);
+            assert_eq!(
+                done.stop,
+                Some(if cancel {
+                    StopReason::Cancelled
+                } else {
+                    StopReason::Deadline
+                })
+            );
+            assert!(done.cleanup_complete(), "{done:?}");
+            assert!(
+                done.owned_cleanup()
+                    .unwrap()
+                    .matches(&call, Scope::ProcessGroup)
+            );
+            assert!(!done.output_complete());
+            let terminal = done.duplex.unwrap();
+            assert_eq!(
+                terminal.output.len(),
+                1,
+                "accepted protocol bytes must remain available"
+            );
+            assert!(terminal.status.output_queued_bytes <= 32);
+            assert!(terminal.status.output_closed_early);
+            assert!(terminal.status.input_abandoned_bytes > 0);
+            assert!(!terminal.status.input_drained);
+        }
+    }
+    #[test]
+    fn duplex_stdout_eof_and_broken_input_do_not_hide_stderr() {
+        let mut reactor = Reactor::new();
+        let id = reactor
+            .start(duplex_request(
+                "exec 0<&-; exec 1>&-; printf closed >&2; while :; do :; done",
+            ))
+            .unwrap();
+        let mut events = Vec::new();
+        loop {
+            match reactor.poll(id, Duration::from_millis(1)).unwrap() {
+                Progress::Pending(snapshot) => assert!(snapshot.elapsed < Duration::from_secs(5)),
+                Progress::Complete(done) => {
+                    panic!("fixture completed before EPIPE probe: {done:?}")
+                }
+            }
+            while let Some(event) = reactor.receive(id).unwrap() {
+                collect_event(event, &mut events);
+            }
+            if stream_bytes(&events, OutputStream::Stderr) == b"closed"
+                && reactor.snapshot(id).unwrap().stdout.eof
+            {
+                break;
+            }
+        }
+        reactor.send(id, b"unread").unwrap();
+        reactor.poll(id, Duration::ZERO).unwrap();
+        let status = reactor.snapshot(id).unwrap().duplex.unwrap();
+        assert!(status.input_broken_pipe && status.input_closed);
+        assert_eq!(status.input_abandoned_bytes, 6);
+        assert!(!status.input_drained);
+        assert_eq!(reactor.send(id, b"late"), Err(SendError::InputClosed));
+        reactor.stop(id, StopReason::Cancelled).unwrap();
+        let done = finish(&mut reactor, id);
+        assert!(done.stdout.eof && done.cleanup_complete());
+        assert_eq!(stream_bytes(&events, OutputStream::Stderr), b"closed");
+    }
+    #[test]
+    fn duplex_capture_limit_and_unobserved_cleanup_remain_failures() {
+        let mut reactor = Reactor::new();
+        let mut request = duplex_request("while :; do printf flood; done");
+        request.capture.max_bytes = 8;
+        request.capture.on_limit = crate::capture::LimitAction::Terminate;
+        let call = PhysicalCall::new("duplex_output_limit").unwrap();
+        request.physical_call = Some(call);
+        let id = reactor.start(request).unwrap();
+        let done = finish(&mut reactor, id);
+        assert_eq!(done.stop, Some(StopReason::OutputLimit));
+        assert!(done.cleanup_complete());
+        assert!(!done.output_complete());
+        assert!(done.duplex.as_ref().unwrap().status.output_closed_early);
+        assert!(
+            done.duplex
+                .as_ref()
+                .unwrap()
+                .output
+                .iter()
+                .map(|e| e.bytes.len())
+                .sum::<usize>()
+                > 8
+        );
+        let id = reactor.start(duplex_request("exit 0")).unwrap();
+        reactor.jobs.get_mut(&id).unwrap().error =
+            Some("fixture: cleanup observation unknown".into());
+        let done = finish(&mut reactor, id);
+        assert!(!done.cleanup_complete());
+        assert!(done.owned_cleanup().is_none());
     }
 }

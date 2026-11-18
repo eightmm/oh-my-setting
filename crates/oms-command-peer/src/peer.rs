@@ -54,6 +54,10 @@ pub(crate) const VALUES: &[&str] = &[
     "context-pack",
     "max-turns",
     "idle-timeout",
+    "team-id",
+    "team-spec-sha256",
+    "team-member",
+    "team-member-generation",
 ];
 pub(crate) const FLAGS: &[&str] = &[
     "dry-run",
@@ -97,6 +101,7 @@ pub(crate) const FLAGS: &[&str] = &[
     "strict-brief",
     "json",
     "terminalize-resumed-repair",
+    "team-requests",
 ];
 pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
     let mut expanded = Vec::new();
@@ -110,10 +115,26 @@ pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
             expanded.push("claude".into());
         }
     }
-    Args::parse(&expanded, VALUES, FLAGS)
+    let args = Args::parse(&expanded, VALUES, FLAGS)?;
+    let team = process::TeamLocator::from_args(&args)?;
+    if args.has("team-requests")
+        && (team.is_none()
+            || args.has("fallback-model")
+            || args.has("interactive")
+            || args.has("export-only")
+            || args.has("dry-run"))
+    {
+        return fail(
+            "--team-requests requires an explicit Team and one report-only read transport",
+        );
+    }
+    Ok(args)
 }
 pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     let args = parse(argv)?;
+    if args.has("team-requests") && tool != "peer-ask" {
+        return fail("Team requests are supported only by read-only peer-ask");
+    }
     if args.has("help") {
         return Ok(out(help(tool).to_vec()));
     }
@@ -728,7 +749,17 @@ pub(crate) fn call(
     } else {
         None
     };
+    if args.has("team-requests") && live_attempt.is_none() {
+        return fail("Team request lead lifecycle enrollment unavailable");
+    }
     let mut usage_env = crate::usage::operation_env(&[])?;
+    if args.has("team-requests") {
+        usage_env.push((
+            "OMS_TEAM_REQUEST_PROTOCOL".into(),
+            "oms-team-request-v1".into(),
+        ));
+    }
+    process::TeamLocator::append_args(args, &mut usage_env)?;
     if let Some(id) = &live_attempt {
         usage_env.push(("OMS_ATTEMPT_ID".into(), id.into()));
     }
@@ -761,6 +792,8 @@ pub(crate) fn call(
             stdout: Vec::new(),
             stderr: error.message.into_bytes(),
             complete: false,
+            cleanup_complete: None,
+            owned_cleanup: None,
             elapsed: std::time::Duration::ZERO,
         },
     };
@@ -775,7 +808,33 @@ pub(crate) fn call(
                 } else {
                     obj([("panel_account", account.clone().into())])
                 };
-                match crate::delegate::transition(repo, &id, state, refs, context) {
+                let transitioned = if args.has("team-requests") {
+                    // Cleanup/terminal bookkeeping has an independent finite
+                    // budget; cancellation never authorizes a new provider call.
+                    let settling = std::sync::atomic::AtomicBool::new(false);
+                    let finished = std::sync::atomic::AtomicBool::new(false);
+                    std::thread::scope(|scope| {
+                        let watchdog = scope.spawn(|| {
+                            std::thread::park_timeout(std::time::Duration::from_secs(2));
+                            if !finished.load(Ordering::Acquire) {
+                                settling.store(true, Ordering::Release);
+                            }
+                        });
+                        let bounded = Context {
+                            cwd: context.cwd,
+                            source: context.source,
+                            interrupted: &settling,
+                            executor: context.executor,
+                        };
+                        let result = crate::delegate::transition(repo, &id, state, refs, &bounded);
+                        finished.store(true, Ordering::Release);
+                        watchdog.thread().unpark();
+                        result
+                    })
+                } else {
+                    crate::delegate::transition(repo, &id, state, refs, context)
+                };
+                match transitioned {
                     Ok(()) => return Ok(()),
                     Err(err) => {
                         last_err = Some(err);
@@ -855,6 +914,7 @@ pub(crate) fn call(
         repo,
         &obj([
             ("schema", 1usize.into()),
+            ("event_id", crate::id("evt_")?.into()),
             ("ts", now().into()),
             ("artifact_id", crate::id("art_")?.into()),
             ("kind", tool.trim_start_matches("peer-").into()),
@@ -1016,6 +1076,20 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         if correlated {
             warnings.extend_from_slice(b"warning: explicit reviewer council includes the writer's model family; correlated judgment is not independent\n");
         }
+    }
+    if args.has("team-requests")
+        && (targets.len() != 1
+            || !args.has("providers")
+            || args.has("debate")
+            || args.has("until-agreement")
+            || args.has("synthesize")
+            || args.has("deliberation")
+            || args.has("max-rounds")
+            || args.has("all"))
+    {
+        return fail(
+            "Team request channel requires exactly one explicit --providers target and one round",
+        );
     }
     apply_account(args, &mut targets)?;
     if targets.is_empty() {

@@ -110,6 +110,14 @@ pub(crate) fn human(r: &V) -> String {
 fn lifetime(r: &V, out: &mut String) {
     if let Some(u) = r.get("lifetime_provider_usage") {
         writeln!(out,"lifetime provider receipts (independent of artifact window): calls={} tokens={} unknown-token-calls={} reported-microUSD={} unknown-cost-calls={} unsettled={} conflicts={} provider-estimate-calls={}",display(&u["calls"]),display(&u["tokens"]),display(&u["unknown_token_calls"]),display(&u["cost_microusd"]),display(&u["unknown_cost_calls"]),display(&u["unsettled_calls"]),display(&u["conflicts"]),display(&u["provider_estimate_calls"])).unwrap();
+        writeln!(
+            out,
+            "native cleanup evidence: confirmed={} incomplete={} unknown={}",
+            display(&u["cleanup_confirmed_calls"]),
+            display(&u["cleanup_incomplete_calls"]),
+            display(&u["cleanup_unknown_calls"])
+        )
+        .unwrap();
     }
 }
 fn reported(total: &V, reports: &V, calls: &V) -> String {

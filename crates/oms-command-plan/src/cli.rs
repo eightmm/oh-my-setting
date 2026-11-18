@@ -167,9 +167,18 @@ pub(crate) fn physical_leaf(cwd: &Path, path: &OsStr) -> PathBuf {
 /// git. Uses the shared sanitized Git runner, so ambient `GIT_*` cannot
 /// redirect it and interruption/timeouts fail the call.
 pub(crate) fn worktree_root(repo: &Path, interrupted: &AtomicBool) -> crate::Result<PathBuf> {
+    worktree_root_before(repo, interrupted, None)
+}
+pub(crate) fn worktree_root_before(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    deadline: Option<std::time::Instant>,
+) -> crate::Result<PathBuf> {
     let physical =
         canonicalize_dir(repo).map_err(|_| error("cannot resolve the physical repository"))?;
     let git = Git {
+        group_snapshot: None,
+        deadline,
         repo: &physical,
         interrupted,
         group_resolver: None,

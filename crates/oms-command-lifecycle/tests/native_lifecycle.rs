@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use oms_command_lifecycle::{
-    IncomingPhase, Output, Services, UnavailableServices, run_with_services,
+    IncomingPhase, IncomingSourceLease, Output, Services, UnavailableServices, run_with_services,
 };
 use serde_json::{Value, json};
 use std::{
@@ -140,6 +140,452 @@ fn native_only(value: &Value) {
             "retired runtime in configuration: {raw}"
         );
     }
+}
+
+struct ColdUpdateHost {
+    root: PathBuf,
+    before: String,
+    fail: String,
+    phases: RefCell<Vec<IncomingPhase>>,
+}
+impl ColdUpdateHost {
+    fn git(&self, source: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(source)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().into()
+    }
+    fn source(&self) -> PathBuf {
+        self.root.join("source")
+    }
+    fn receipt(&self) -> PathBuf {
+        self.root.join("config/oh-my-setting/install.json")
+    }
+    fn frontdoor(&self) -> PathBuf {
+        self.root.join("home/.local/bin/oms")
+    }
+}
+struct ColdLease<'a>(&'a ColdUpdateHost, PathBuf);
+impl IncomingSourceLease for ColdLease<'_> {
+    fn source_root(&self) -> &Path {
+        &self.1
+    }
+    fn recheck(&self, _: &AtomicBool) -> Result<(), Output> {
+        assert!(self.1.is_dir());
+        Ok(())
+    }
+    fn close(self: Box<Self>, _: &AtomicBool) -> Output {
+        fs::write(self.0.root.join("lease-closed"), b"closed").unwrap();
+        if self.0.fail == "cleanup" {
+            return (75, vec![], vec![]);
+        }
+        self.0.git(
+            &self.0.source(),
+            &["worktree", "remove", "--force", self.1.to_str().unwrap()],
+        );
+        (0, vec![], vec![])
+    }
+}
+impl Services for ColdUpdateHost {
+    fn prepare_incoming_source(
+        &self,
+        source: &Path,
+        revision: &str,
+        _: &AtomicBool,
+    ) -> Result<Box<dyn IncomingSourceLease + '_>, Output> {
+        assert_eq!(self.git(source, &["rev-parse", "HEAD"]), self.before);
+        assert_eq!(fs::read(self.frontdoor()).unwrap(), b"prior frontdoor");
+        let incoming = self.root.join("incoming");
+        self.git(
+            source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                incoming.to_str().unwrap(),
+                revision,
+            ],
+        );
+        Ok(Box::new(ColdLease(self, incoming)))
+    }
+    fn incoming_lifecycle(
+        &self,
+        phase: IncomingPhase,
+        source: &Path,
+        revision: &str,
+        old: &[u8],
+        _: &[OsString],
+        _: &AtomicBool,
+    ) -> Output {
+        self.phases.borrow_mut().push(phase);
+        if phase == IncomingPhase::Preflight {
+            let cache = source.join("target/oms-native").join(revision);
+            assert!(
+                cache
+                    .join(if revision == self.before {
+                        "sentinel"
+                    } else {
+                        "manifest.json"
+                    })
+                    .is_file()
+            );
+            assert!(
+                !self.root.join("incoming").exists(),
+                "lease closes before live handoff"
+            );
+            if matches!(self.fail.as_str(), "crash" | "foreign") {
+                std::process::exit(91);
+            }
+            return (0, vec![], vec![]);
+        }
+        if phase == IncomingPhase::Verify {
+            return (if self.fail == "verify" { 7 } else { 0 }, vec![], vec![]);
+        }
+        assert_eq!(phase, IncomingPhase::Reconcile);
+        assert_eq!(self.git(source, &["rev-parse", "HEAD"]), revision);
+        fs::write(self.frontdoor(), b"incoming frontdoor").unwrap();
+        let lib = self.root.join("data/oh-my-setting/libexec").join(revision);
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(lib.join("oms-frontdoor"), b"incoming native frontdoor").unwrap();
+        let mut row: Value = serde_json::from_slice(old).unwrap();
+        row["commit"] = json!(revision);
+        row["native"] = json!({"revision":revision,"frontdoor":lib.join("oms-frontdoor")});
+        if self.fail == "receipt" {
+            row["native"]["revision"] = json!(self.before);
+        }
+        write(&self.receipt(), &row);
+        (0, serde_json::to_vec(&row).unwrap(), vec![])
+    }
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
+    let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
+        for case in [
+            "ok", "proof", "verify", "receipt", "cleanup", "crash", "foreign",
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("oms-cold-update-{}-{case}", std::process::id()));
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let f = Fixture(fs::canonicalize(root).unwrap());
+            for name in ["bin", "home", "config", "data", "state", "cache", "locks"] {
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(f.0.join(name))
+                    .unwrap();
+            }
+            for name in ["git", "mkdir", "cp", "chmod", "ps"] {
+                let path = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                    .map(|p| p.join(name))
+                    .find(|p| p.is_file())
+                    .unwrap();
+                symlink(fs::canonicalize(path).unwrap(), f.0.join("bin").join(name)).unwrap();
+            }
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "cold_update_prepares_incoming_and_rolls_back_owned_state",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("PATH", f.0.join("bin"))
+                .env("HOME", f.0.join("home"))
+                .env("XDG_CONFIG_HOME", f.0.join("config"))
+                .env("XDG_DATA_HOME", f.0.join("data"))
+                .env("XDG_STATE_HOME", f.0.join("state"))
+                .env("XDG_CACHE_HOME", f.0.join("cache"))
+                .env("TMPDIR", &f.0)
+                .env("OMS_LOCK_DIR", f.0.join("locks"))
+                .env("OMS_LIFECYCLE_UPDATE_FIXTURE", &f.0)
+                .env("OMS_COLD_CASE", case)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            let out = command.output().unwrap();
+            if matches!(case, "crash" | "foreign") {
+                assert_eq!(
+                    out.status.code(),
+                    Some(91),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                let state = read(&f.0.join("fixture-state.json"));
+                let target = state["target"].as_str().unwrap();
+                let receipt = f.0.join("config/oh-my-setting/install.json");
+                assert_eq!(read(&receipt)["commit"], state["before"]);
+                assert_eq!(
+                    fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
+                    b"prior frontdoor"
+                );
+                assert!(!f.0.join("incoming").exists());
+                let journal = fs::read_to_string(
+                    f.0.join("config/oh-my-setting/native-update/transaction.json"),
+                )
+                .unwrap();
+                assert!(!journal.contains(&format!("{}/incoming", f.0.display())));
+                let cache = f.0.join("source/target/oms-native").join(target);
+                assert!(cache.join("oms").is_file());
+                if case == "foreign" {
+                    fs::write(cache.join("oms"), b"foreign bytes").unwrap();
+                }
+                let out = command.env("OMS_COLD_CASE", "recover").output().unwrap();
+                assert!(
+                    out.status.success(),
+                    "{case}: {}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                continue;
+            }
+            assert!(
+                out.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        return;
+    };
+    let mut host = ColdUpdateHost {
+        root: fs::canonicalize(root).unwrap(),
+        before: String::new(),
+        fail: std::env::var("OMS_COLD_CASE").unwrap(),
+        phases: RefCell::new(vec![]),
+    };
+    let source = host.source();
+    if host.fail == "recover" {
+        let state = read(&host.root.join("fixture-state.json"));
+        host.before = state["before"].as_str().unwrap().into();
+        let target = state["target"].as_str().unwrap();
+        let foreign = state["case"] == "foreign";
+        let out = call("update", &["--ref", target, "--no-tools"], &source, &host);
+        if foreign {
+            assert_ne!(out.0, 0);
+            assert!(host.phases.borrow().is_empty());
+            assert_eq!(
+                fs::read(source.join("target/oms-native").join(target).join("oms")).unwrap(),
+                b"foreign bytes"
+            );
+            assert!(
+                host.root
+                    .join("config/oh-my-setting/native-update/transaction.json")
+                    .is_file()
+            );
+            assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+            assert_eq!(read(&host.receipt())["commit"], host.before);
+            assert_eq!(fs::read(host.frontdoor()).unwrap(), b"prior frontdoor");
+            assert_eq!(
+                fs::read_to_string(host.root.join("flow")).unwrap(),
+                "build\nproof\n"
+            );
+        } else {
+            success(out);
+            assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), target);
+            assert_eq!(read(&host.receipt())["commit"], target);
+            assert!(
+                !host
+                    .root
+                    .join("config/oh-my-setting/native-update/transaction.json")
+                    .exists()
+            );
+            assert_eq!(
+                fs::read_to_string(host.root.join("flow")).unwrap(),
+                "build\nproof\nbuild\nproof\n",
+                "recovery rolls back the prior cache then prepares anew"
+            );
+        }
+        assert_eq!(
+            fs::read(
+                source
+                    .join("target/oms-native")
+                    .join(&host.before)
+                    .join("sentinel")
+            )
+            .unwrap(),
+            b"prior cache"
+        );
+        return;
+    }
+    fs::create_dir(&source).unwrap();
+    host.git(&source, &["init", "-q", "--initial-branch=main"]);
+    host.git(
+        &source,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    host.git(&source, &["config", "user.name", "fixture"]);
+    fs::write(source.join(".gitignore"), b"target/\n").unwrap();
+    fs::write(source.join("VERSION"), b"old\n").unwrap();
+    fs::write(source.join("skills.manifest.json"), b"{\"skills\":[]}\n").unwrap();
+    host.git(&source, &["add", "."]);
+    host.git(&source, &["commit", "-qm", "old"]);
+    host.before = host.git(&source, &["rev-parse", "HEAD"]);
+    fs::write(source.join("VERSION"), b"incoming\n").unwrap();
+    host.git(&source, &["commit", "-qam", "incoming"]);
+    let target = host.git(&source, &["rev-parse", "HEAD"]);
+    let remote = host.root.join("origin.git");
+    host.git(
+        &source,
+        &[
+            "clone",
+            "--bare",
+            source.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+    host.git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    host.git(&source, &["reset", "--hard", &host.before]);
+    let receipt = json!({"schema":2,"source_root":source,"commit":host.before,"channel":"main",
+        "version":"old","installed_at":"2026-11-18T00:00:00Z","plugin":{"name":"fixture","version":"old","sha256":"fixture"},
+        "profile":"minimal","ref":"edge","previous_commit":"","link_mode":"copy","component_modes":{},"managed_targets":[],
+        "components":{"tools":false,"claude_hooks":false,"codex_plugin":false,"auto_update":false,"machine_snapshot":false,"slurm_snapshot":false},
+        "native":{"revision":host.before,"frontdoor":host.root.join("data/oh-my-setting/libexec").join(&host.before).join("oms-frontdoor")}});
+    write(&host.receipt(), &receipt);
+    let prior = fs::read(host.receipt()).unwrap();
+    fs::create_dir_all(host.frontdoor().parent().unwrap()).unwrap();
+    fs::write(host.frontdoor(), b"prior frontdoor").unwrap();
+    let old_cache = source.join("target/oms-native").join(&host.before);
+    fs::create_dir_all(&old_cache).unwrap();
+    fs::write(old_cache.join("sentinel"), b"prior cache").unwrap();
+    fs::write(host.root.join("before"), &host.before).unwrap();
+    write(
+        &host.root.join("fixture-state.json"),
+        &json!({"before":host.before,"target":target,"case":host.fail}),
+    );
+    let incoming = br##"#!/bin/sh
+set -eu
+root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
+[ "$#" = 6 ] && [ "$1" = --oms-dispatch ] && [ "$4" = -- ] && [ "$5" = link ] && [ "$6" = --plan ]
+[ "$2" = "$root/incoming" ]
+[ "$(git -C "$2" rev-parse HEAD)" = "$3" ]
+read before < "$root/before" || :
+[ "$(git -C "$root/source" rev-parse HEAD)" = "$before" ]
+echo proof >> "$root/flow"
+[ "$OMS_COLD_CASE" != proof ] || exit 2
+"##;
+    fs::write(host.root.join("bin/incoming"), incoming).unwrap();
+    fs::set_permissions(
+        host.root.join("bin/incoming"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let cargo = br##"#!/bin/sh
+set -eu
+root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
+[ "$1" = +1.99.1 ] && [ "$2" = build ] && [ "$3" = --manifest-path ]
+[ "$4" = "$root/incoming/Cargo.toml" ]
+expected="+1.99.1 build --manifest-path $4 --locked --offline --release --bin oms --bin oms-mcp-peer-owner --bin oms-run-bounded-helper --bin oms-state-queue-worker --bin oms-graph-python-helper --target-dir $root/incoming/target/lifecycle-build"
+[ "$*" = "$expected" ]
+mkdir -p "$root/incoming/target/lifecycle-build/release"
+for name in oms oms-mcp-peer-owner oms-run-bounded-helper oms-state-queue-worker oms-graph-python-helper; do
+  cp "$root/bin/incoming" "$root/incoming/target/lifecycle-build/release/$name"
+  chmod 700 "$root/incoming/target/lifecycle-build/release/$name"
+done
+echo build >> "$root/flow"
+"##;
+    fs::write(host.root.join("bin/cargo"), cargo).unwrap();
+    fs::set_permissions(
+        host.root.join("bin/cargo"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let preview = call(
+        "update",
+        &["--ref", &target, "--plan", "--no-tools"],
+        &source,
+        &host,
+    );
+    success(preview);
+    assert!(!host.root.join("flow").exists());
+    let out = call("update", &["--ref", &target, "--no-tools"], &source, &host);
+    assert_eq!(
+        fs::read_to_string(host.root.join("flow")).unwrap(),
+        "build\nproof\n"
+    );
+    assert!(host.root.join("lease-closed").is_file());
+    let cache = source.join("target/oms-native").join(&target);
+    if host.fail == "ok" {
+        success(out);
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), target);
+        assert_eq!(host.git(&source, &["rev-parse", "main"]), host.before);
+        assert_eq!(read(&host.receipt())["previous_commit"], host.before);
+        assert_eq!(
+            *host.phases.borrow(),
+            [
+                IncomingPhase::Preflight,
+                IncomingPhase::Reconcile,
+                IncomingPhase::Verify
+            ]
+        );
+        assert!(cache.join("oms").is_file());
+        let manifest = read(&cache.join("manifest.json"));
+        assert_eq!(manifest["source_commit"], target);
+        success(call(
+            "update",
+            &["--rollback", "--no-tools"],
+            &source,
+            &host,
+        ));
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+        assert_eq!(read(&host.receipt())["previous_commit"], target);
+        assert_eq!(
+            fs::read_to_string(host.root.join("flow")).unwrap(),
+            "build\nproof\n",
+            "warm rollback does not rebuild"
+        );
+    } else {
+        assert_eq!(
+            out.0,
+            match host.fail.as_str() {
+                "verify" => 7,
+                "cleanup" => 75,
+                _ => 2,
+            },
+            "{}",
+            String::from_utf8_lossy(&out.2)
+        );
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+        assert_eq!(
+            host.git(&source, &["symbolic-ref", "--short", "HEAD"]),
+            "main"
+        );
+        assert_eq!(fs::read(host.receipt()).unwrap(), prior);
+        assert_eq!(fs::read(host.frontdoor()).unwrap(), b"prior frontdoor");
+        assert!(!cache.exists());
+        assert!(
+            !host
+                .root
+                .join("data/oh-my-setting/libexec")
+                .join(&target)
+                .exists()
+        );
+        if matches!(host.fail.as_str(), "proof" | "cleanup") {
+            assert!(host.phases.borrow().is_empty());
+        }
+        if host.fail == "receipt" {
+            assert!(!host.phases.borrow().contains(&IncomingPhase::Verify));
+        }
+    }
+    assert_eq!(
+        fs::read(old_cache.join("sentinel")).unwrap(),
+        b"prior cache"
+    );
+    assert!(
+        !host
+            .root
+            .join("config/oh-my-setting/native-update/transaction.json")
+            .exists()
+    );
 }
 
 fn doctor_provider_capability_evidence(source: &Path, root: &Path, host: &NativeServices) {

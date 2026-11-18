@@ -737,6 +737,8 @@ pub(crate) fn finish(
                 ("schema", 1usize.into()),
                 ("kind", "review-verify".into()),
                 ("event_id", crate::id("evt_")?.into()),
+                ("operation_id", run.into()),
+                ("provider", "local".into()),
                 ("verified_head", current.get("head").clone()),
                 (
                     "active_task_id",
@@ -1572,6 +1574,9 @@ fn outcome(
         &obj([
             ("schema", 1usize.into()),
             ("kind", "review-outcome".into()),
+            ("event_id", crate::id("evt_")?.into()),
+            ("operation_id", run.into()),
+            ("provider", "local".into()),
             ("ts", now().into()),
             ("artifact_id", crate::id("art_")?.into()),
             ("exit", V::Num(code.to_string())),

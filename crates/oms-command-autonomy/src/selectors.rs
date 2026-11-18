@@ -288,6 +288,8 @@ pub fn candidate_only_targets(
         return Ok(vec![]);
     }
     let git = oms_command_plan::repository::Git {
+        group_snapshot: None,
+        deadline: None,
         repo,
         interrupted,
         group_resolver: None,

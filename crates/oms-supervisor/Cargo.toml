@@ -15,3 +15,7 @@ users = { version = "=0.11.0", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[[test]]
+name = "duplex_whole_tree"
+harness = false

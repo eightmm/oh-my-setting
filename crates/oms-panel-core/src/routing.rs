@@ -33,7 +33,7 @@ pub const ROLES: &[&str] = &[
     "advisor",
 ];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub provider: String,
@@ -162,6 +162,149 @@ impl Policy {
         Ok(policy)
     }
 }
+/// Bounded metadata returned by the existing catalog reader. A cached probe
+/// or identifier never establishes live model capability, entitlement or price.
+#[derive(Clone, Debug, Default)]
+pub struct ProviderEvidence {
+    pub source: String,
+    pub read_at: Option<u64>,
+    pub reported_probe: Option<String>,
+    pub catalog_age_seconds: Option<u64>,
+    pub probe_age_seconds: Option<u64>,
+    pub harness_version: Option<String>,
+    pub effort_mechanism: Option<String>,
+    pub provider_reported_efforts: Vec<String>,
+    pub model_effort_scales: BTreeMap<String, Vec<String>>,
+}
+impl ProviderEvidence {
+    pub fn from_catalog_row(row: &Value) -> Result<Self> {
+        let bounded_text = |value: Option<&Value>| -> Result<Option<String>> {
+            let Some(value) = value.filter(|v| !v.is_null()) else {
+                return Ok(None);
+            };
+            let value = value
+                .as_str()
+                .ok_or_else(|| Error::new("invalid catalog evidence text"))?;
+            require(
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control),
+                "catalog evidence text exceeds bounds",
+            )?;
+            Ok(Some(value.into()))
+        };
+        let efforts = |value: Option<&Value>| -> Result<Vec<String>> {
+            let Some(value) = value.filter(|v| !v.is_null()) else {
+                return Ok(vec![]);
+            };
+            let values = value
+                .as_array()
+                .ok_or_else(|| Error::new("invalid catalog effort evidence"))?;
+            require(values.len() <= 16, "catalog effort evidence exceeds bounds")?;
+            values
+                .iter()
+                .map(|v| bounded_text(Some(v))?.ok_or_else(|| Error::new("invalid catalog effort")))
+                .collect()
+        };
+        let age = |key| -> Result<Option<u64>> {
+            row.get(key)
+                .filter(|v| !v.is_null())
+                .map(|v| {
+                    v.as_u64()
+                        .ok_or_else(|| Error::new("invalid catalog evidence age"))
+                })
+                .transpose()
+        };
+        let mut scales = BTreeMap::new();
+        if let Some(value) = row.get("model_effort_scales").filter(|v| !v.is_null()) {
+            let values = value
+                .as_object()
+                .ok_or_else(|| Error::new("invalid model effort scales"))?;
+            require(values.len() <= 2048, "model effort scales exceed bounds")?;
+            for (model, scale) in values {
+                require(
+                    !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control),
+                    "invalid model effort identity",
+                )?;
+                scales.insert(model.clone(), efforts(Some(scale))?);
+            }
+        }
+        Ok(Self {
+            source: "oms-models".into(),
+            read_at: Some(crate::timestamp()),
+            reported_probe: bounded_text(row.get("catalog_probe"))?,
+            catalog_age_seconds: age("catalog_age_seconds")?,
+            probe_age_seconds: age("snapshot_age_seconds")?,
+            harness_version: bounded_text(row.get("version"))?,
+            effort_mechanism: bounded_text(row.get("effort_mechanism"))?,
+            provider_reported_efforts: efforts(row.get("effort_values"))?,
+            model_effort_scales: scales,
+        })
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogSnapshot {
+    pub models_sha256: Option<String>,
+    pub count: usize,
+    pub resolved_present: Option<bool>,
+    pub source: Option<String>,
+    /// The current catalog producer supplies no account/endpoint binding.
+    pub account_alias: Option<String>,
+    pub endpoint: Option<String>,
+    pub reported_probe: Option<String>,
+    /// Reported file age at read time, not a refresh time or freshness verdict.
+    pub catalog_age_seconds: Option<u64>,
+    pub read_at: Option<u64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EffortSupport {
+    ReportedSupported,
+    ReportedUnsupported,
+    Unknown,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitySnapshot {
+    pub source: Option<String>,
+    pub account_alias: Option<String>,
+    pub endpoint: Option<String>,
+    pub exact_model_efforts: Option<Vec<String>>,
+    pub provider_reported_efforts: Vec<String>,
+    pub effort_mechanism: Option<String>,
+    pub probe_age_seconds: Option<u64>,
+    pub harness_version: Option<String>,
+    pub effort_support: EffortSupport,
+}
+/// Immutable selection evidence, independent of permission and admission. The
+/// launch writer retains this snapshot; later policy/catalog changes do not
+/// rewrite an in-flight call. Unreported served identity remains null.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSnapshot {
+    pub schema: u64,
+    pub policy_schema: Option<u64>,
+    pub policy_sha256: Option<String>,
+    pub configured: Option<Candidate>,
+    pub requested_model: Option<String>,
+    pub requested_effort: Option<String>,
+    pub requested_account: Option<String>,
+    pub selected_account: Option<String>,
+    pub account_pinned: bool,
+    pub served_account: Option<String>,
+    pub resolved: Candidate,
+    pub served_model: Option<String>,
+    pub served_effort: Option<String>,
+    pub served_source: Option<String>,
+    pub binding_sha256: String,
+    pub catalog: CatalogSnapshot,
+    pub capabilities: CapabilitySnapshot,
+    pub model_family: Option<String>,
+    /// Identifier-derived family is diagnostic, never verified served-family
+    /// or composite membership evidence.
+    pub family_evidence: String,
+    /// No existing catalog row proves single/composite execution or fanout.
+    pub execution_profile: Option<String>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Route {
     #[serde(flatten)]
@@ -184,11 +327,14 @@ pub struct Route {
     pub account_pinned: bool,
     #[serde(default, skip_serializing)]
     pub explicit_target: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<RouteSnapshot>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct RoutingInputs {
     pub installed: Option<BTreeSet<String>>,
     pub catalogs: BTreeMap<String, Vec<String>>,
+    pub provider_evidence: BTreeMap<String, ProviderEvidence>,
     pub status: Value,
     pub recent: BTreeMap<String, usize>,
     pub writer: Option<(String, String)>,
@@ -201,6 +347,140 @@ pub struct RoutingInputs {
     pub running_accounts: BTreeMap<String, usize>,
     pub requested_account: Option<String>,
     pub requested_model: Option<String>,
+    pub requested_effort: Option<String>,
+}
+impl Route {
+    fn binding_sha256(&self) -> Result<String> {
+        let value = serde_json::json!({"candidate":self.candidate,"role":self.role,"kind":self.kind,"owner":self.owner,"workload":self.workload,"access":self.access,"purpose":self.purpose,"judged_family":self.judged_family,"judge_note":self.judge_note,"account":self.account,"account_pinned":self.account_pinned});
+        Ok(crate::digest(&crate::value::encoded(&value)?))
+    }
+    /// Legacy/manual routes retain explicit unknown provenance. A supplied
+    /// snapshot must bind the final route; it cannot survive a model/account/
+    /// access change or turn a rank into authority.
+    pub fn freeze_snapshot(&mut self) -> Result<()> {
+        valid_route(&self.candidate)?;
+        if self.snapshot.is_none() {
+            self.snapshot = Some(self.selection_snapshot(None, None, None)?);
+        }
+        let snapshot = self.snapshot.as_ref().expect("snapshot initialized");
+        require(
+            snapshot.schema == 1
+                && snapshot.resolved == self.candidate
+                && snapshot.selected_account == self.account
+                && snapshot.account_pinned == self.account_pinned
+                && snapshot.binding_sha256 == self.binding_sha256()?,
+            "route snapshot differs from final route",
+        )?;
+        require(
+            snapshot.capabilities.effort_support != EffortSupport::ReportedUnsupported,
+            "resolved model does not support requested effort",
+        )?;
+        require(
+            snapshot.served_model.is_none()
+                && snapshot.served_account.is_none()
+                && snapshot.served_effort.is_none()
+                && snapshot.served_source.is_none(),
+            "launch snapshot cannot reuse served observations",
+        )?;
+        require(
+            serde_json::to_vec(snapshot).map_err(Error::new)?.len() <= 32768,
+            "route snapshot exceeds bounds",
+        )?;
+        Ok(())
+    }
+    pub fn snapshot_sha256(&self) -> Result<Option<String>> {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                let value = serde_json::to_value(snapshot).map_err(Error::new)?;
+                Ok(crate::digest(&crate::value::encoded(&value)?))
+            })
+            .transpose()
+    }
+    fn selection_snapshot(
+        &self,
+        policy: Option<&Policy>,
+        configured: Option<Candidate>,
+        inputs: Option<&RoutingInputs>,
+    ) -> Result<RouteSnapshot> {
+        let evidence = inputs.and_then(|v| v.provider_evidence.get(&self.candidate.provider));
+        let catalog = inputs.and_then(|v| v.catalogs.get(&self.candidate.provider));
+        let exact_efforts = evidence
+            .and_then(|e| e.model_effort_scales.get(&self.candidate.model))
+            .filter(|v| !v.is_empty())
+            .cloned();
+        let effort_support = match &exact_efforts {
+            Some(efforts) if efforts.contains(&self.candidate.effort) => {
+                EffortSupport::ReportedSupported
+            }
+            Some(_) => EffortSupport::ReportedUnsupported,
+            None => EffortSupport::Unknown,
+        };
+        let model_family = route_family(&self.candidate.provider, &self.candidate.model)
+            .and_then(|_| model_family(&self.candidate.provider, &self.candidate.model).ok())
+            .map(str::to_owned);
+        Ok(RouteSnapshot {
+            schema: 1,
+            policy_schema: policy.map(|p| p.schema),
+            policy_sha256: policy
+                .map(|p| -> Result<String> {
+                    Ok(crate::digest(&crate::value::encoded(
+                        &serde_json::to_value(p).map_err(Error::new)?,
+                    )?))
+                })
+                .transpose()?,
+            configured,
+            requested_model: inputs.and_then(|v| v.requested_model.clone()),
+            requested_effort: inputs.and_then(|v| v.requested_effort.clone()),
+            requested_account: inputs.and_then(|v| v.requested_account.clone()),
+            selected_account: self.account.clone(),
+            account_pinned: self.account_pinned,
+            served_account: None,
+            resolved: self.candidate.clone(),
+            served_model: None,
+            served_effort: None,
+            served_source: None,
+            binding_sha256: self.binding_sha256()?,
+            catalog: CatalogSnapshot {
+                models_sha256: catalog
+                    .map(|v| -> Result<String> {
+                        Ok(crate::digest(&crate::value::encoded(
+                            &serde_json::to_value(v).map_err(Error::new)?,
+                        )?))
+                    })
+                    .transpose()?,
+                count: catalog.map_or(0, Vec::len),
+                resolved_present: catalog.map(|v| v.contains(&self.candidate.model)),
+                source: evidence.map(|v| v.source.clone()),
+                account_alias: None,
+                endpoint: None,
+                reported_probe: evidence.and_then(|v| v.reported_probe.clone()),
+                catalog_age_seconds: evidence.and_then(|v| v.catalog_age_seconds),
+                read_at: evidence.and_then(|v| v.read_at),
+            },
+            capabilities: CapabilitySnapshot {
+                source: evidence.map(|v| v.source.clone()),
+                account_alias: None,
+                endpoint: None,
+                exact_model_efforts: exact_efforts,
+                provider_reported_efforts: evidence
+                    .map(|v| v.provider_reported_efforts.clone())
+                    .unwrap_or_default(),
+                effort_mechanism: evidence.and_then(|v| v.effort_mechanism.clone()),
+                probe_age_seconds: evidence.and_then(|v| v.probe_age_seconds),
+                harness_version: evidence.and_then(|v| v.harness_version.clone()),
+                effort_support,
+            },
+            family_evidence: if model_family.is_some() {
+                "identifier_derived_unverified"
+            } else {
+                "unknown"
+            }
+            .into(),
+            model_family,
+            execution_profile: None,
+        })
+    }
 }
 pub fn kind(role: &str) -> Result<&'static str> {
     match role {
@@ -419,6 +699,16 @@ pub fn allocate(
         role != "researcher" || workload == "light",
         "researchers use the light tier",
     )?;
+    if let Some(effort) = &inputs.requested_effort {
+        require(
+            ["low", "medium", "high"].contains(&effort.as_str()),
+            "invalid requested route effort",
+        )?;
+        require(
+            role != "researcher" || effort == "low",
+            "researcher effort must remain low",
+        )?;
+    }
     let independent = INDEPENDENT.contains(&role);
     let judged_family = if independent {
         let (provider, model) = inputs
@@ -442,6 +732,12 @@ pub fn allocate(
                 .filter(|v| v.provider == "antigravity")
                 .cloned(),
         );
+    }
+    let configured = candidates.clone();
+    if let Some(effort) = &inputs.requested_effort {
+        for candidate in &mut candidates {
+            candidate.effort.clone_from(effort);
+        }
     }
     if let Some(req) = &inputs.requested_model {
         for c in &mut candidates {
@@ -487,6 +783,26 @@ pub fn allocate(
                 continue;
             };
             c.model = model;
+        }
+        if valid_route(&c).is_err() || daily_capped(&inputs.status, &c) {
+            continue;
+        }
+        // Apply eligibility to the resolved identity as well. A new catalog
+        // revision of Fable cannot escape the existing explicit-use restriction.
+        if !(inputs.explicit_target || role == "security-auditor")
+            && route_family(&c.provider, &c.model)
+                .is_some_and(|f| c.provider == "claude" && f.0 == "fable")
+        {
+            continue;
+        }
+        if inputs
+            .provider_evidence
+            .get(&c.provider)
+            .and_then(|e| e.model_effort_scales.get(&c.model))
+            .filter(|efforts| !efforts.is_empty())
+            .is_some_and(|efforts| !efforts.contains(&c.effort))
+        {
+            continue;
         }
         let mut account = None;
         let mut account_reason = None;
@@ -632,7 +948,10 @@ pub fn allocate(
         None
     };
     let account_pinned = inputs.requested_account.is_some() && account.is_some();
-    Ok(Route {
+    let configured = configured
+        .into_iter()
+        .find(|v| v.provider == candidate.provider);
+    let mut route = Route {
         candidate,
         role: role.into(),
         kind: board_kind.into(),
@@ -646,7 +965,11 @@ pub fn allocate(
         account_reason,
         account_pinned,
         explicit_target: inputs.explicit_target,
-    })
+        snapshot: None,
+    };
+    route.snapshot = Some(route.selection_snapshot(Some(policy), configured, Some(inputs))?);
+    route.freeze_snapshot()?;
+    Ok(route)
 }
 pub fn weekly_used(status: &Value, provider: &str) -> Option<u8> {
     crate::metrics::percent(&status[provider]["weekly_used"])
@@ -1007,4 +1330,268 @@ pub fn account_weekly_used(row: &Value, now: u64) -> Option<u8> {
         }
     }
     crate::metrics::percent(&row["weekly_used"])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn claude_inputs() -> RoutingInputs {
+        RoutingInputs {
+            installed: Some(["claude".into()].into()),
+            catalogs: BTreeMap::from([("claude".into(), vec!["claude-sonnet-5-6".into()])]),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn schema_two_remains_strict_and_snapshots_separate_model_identities() {
+        let policy = Policy::bundled().unwrap();
+        let original = serde_json::to_value(&policy).unwrap();
+        for path in ["policy", "candidate", "role", "schema", "effort"] {
+            let mut changed = original.clone();
+            match path {
+                "policy" => changed["execution_profile"] = "composite".into(),
+                "candidate" => changed["tiers"]["routine"][0]["served_model"] = "other".into(),
+                "role" => changed["roles"]["worker"]["risk"] = "low".into(),
+                "schema" => changed["schema"] = 3.into(),
+                _ => changed["tiers"]["routine"][0]["effort"] = "native-fixed".into(),
+            }
+            assert!(
+                Policy::parse(&serde_json::to_vec(&changed).unwrap()).is_err(),
+                "{path}"
+            );
+        }
+        let mut inputs = claude_inputs();
+        inputs.provider_evidence.insert(
+            "claude".into(),
+            ProviderEvidence::from_catalog_row(&json!({
+                "catalog_probe":"failed", "catalog_age_seconds":86401,
+                "snapshot_age_seconds":172801, "effort_values":["low","medium","high"]
+            }))
+            .unwrap(),
+        );
+        let route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+        let snapshot = route.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.policy_schema, Some(2));
+        assert_eq!(
+            snapshot.configured.as_ref().unwrap().model,
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(snapshot.resolved.model, "claude-sonnet-5-6");
+        assert_eq!(snapshot.requested_model, None);
+        assert_eq!(snapshot.served_model, None);
+        assert_eq!(snapshot.served_effort, None);
+        assert_eq!(snapshot.capabilities.effort_support, EffortSupport::Unknown);
+        assert_eq!(snapshot.catalog.reported_probe.as_deref(), Some("failed"));
+        assert_eq!(snapshot.catalog.catalog_age_seconds, Some(86401));
+        assert_eq!(snapshot.capabilities.probe_age_seconds, Some(172801));
+        assert_eq!(snapshot.catalog.resolved_present, Some(true));
+        assert_eq!(snapshot.family_evidence, "identifier_derived_unverified");
+        assert_eq!(snapshot.execution_profile, None);
+        assert_eq!(snapshot.selected_account, None);
+        assert_eq!(snapshot.served_account, None);
+        assert_eq!(snapshot.catalog.account_alias, None);
+        assert_eq!(snapshot.capabilities.endpoint, None);
+        let saved = serde_json::to_value(snapshot).unwrap();
+        let old_digest = route.snapshot_sha256().unwrap();
+        inputs.requested_model = Some("claude-sonnet-5-5".into());
+        inputs.requested_effort = Some("low".into());
+        let pinned = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+        let pin = pinned.snapshot.unwrap();
+        assert_eq!(pin.configured.unwrap().effort, "medium");
+        assert_eq!(pin.requested_effort.as_deref(), Some("low"));
+        assert_eq!(pin.requested_model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(pin.resolved.model, "claude-sonnet-5-5");
+        assert_eq!(pin.catalog.resolved_present, Some(false));
+        assert_eq!(pin.served_model, None);
+        let mut rolled_back = policy.clone();
+        rolled_back.tiers.get_mut("routine").unwrap()[0].model = "gpt-6.2-terra".into();
+        inputs.catalogs.clear();
+        inputs.provider_evidence.clear();
+        assert_eq!(
+            serde_json::to_value(route.snapshot.as_ref().unwrap()).unwrap(),
+            saved
+        );
+        assert_eq!(route.snapshot_sha256().unwrap(), old_digest);
+        assert_ne!(
+            route.snapshot.as_ref().unwrap().policy_sha256,
+            allocate(&rolled_back, "codex", "worker", None, "read", None, &inputs)
+                .unwrap()
+                .snapshot
+                .unwrap()
+                .policy_sha256
+        );
+        let mut loaded: Route =
+            serde_json::from_value(serde_json::to_value(&route).unwrap()).unwrap();
+        loaded.freeze_snapshot().unwrap();
+        assert_eq!(loaded.snapshot, route.snapshot);
+    }
+    #[test]
+    fn exact_effort_evidence_and_final_fable_eligibility_are_checked() {
+        let policy = Policy::bundled().unwrap();
+        let mut inputs = claude_inputs();
+        inputs.requested_effort = Some("high".into());
+        inputs.provider_evidence.insert(
+            "claude".into(),
+            ProviderEvidence::from_catalog_row(&json!({
+                "model_effort_scales":{"claude-sonnet-5-6":["low","medium"]},
+                "effort_values":["low","medium","high"], "catalog_probe":"ok"
+            }))
+            .unwrap(),
+        );
+        assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.requested_effort = Some("medium".into());
+        let route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+        assert_eq!(
+            route.snapshot.unwrap().capabilities.effort_support,
+            EffortSupport::ReportedSupported
+        );
+        inputs.status =
+            json!({"claude":{"daily_cap":{"claude-sonnet-5-6":crate::now()[..10].to_owned()}}});
+        assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.status = Value::Null;
+        inputs
+            .provider_evidence
+            .get_mut("claude")
+            .unwrap()
+            .model_effort_scales
+            .insert("claude-sonnet-5-6".into(), vec!["native-fixed".into()]);
+        assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.requested_effort = Some("max".into());
+        assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.requested_effort = None;
+        inputs.requested_model = Some("claude-fable-5-2".into());
+        inputs.provider_evidence.clear();
+        assert!(
+            allocate(
+                &policy,
+                "codex",
+                "worker",
+                Some("frontier"),
+                "read",
+                None,
+                &inputs
+            )
+            .is_err()
+        );
+        inputs.explicit_target = true;
+        let explicit = allocate(
+            &policy,
+            "codex",
+            "worker",
+            Some("frontier"),
+            "read",
+            None,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(explicit.candidate.model, "claude-fable-5-2");
+        inputs.requested_model = None;
+        inputs.explicit_target = false;
+        inputs
+            .catalogs
+            .insert("claude".into(), vec!["claude-fable-5-2".into()]);
+        let auditor = allocate(
+            &policy,
+            "codex",
+            "security-auditor",
+            None,
+            "read",
+            None,
+            &inputs,
+        )
+        .unwrap();
+        let snapshot = auditor.snapshot.unwrap();
+        assert_eq!(snapshot.configured.unwrap().model, "claude-fable-5-1");
+        assert_eq!(snapshot.resolved.model, "claude-fable-5-2");
+        assert_eq!(snapshot.served_model, None);
+    }
+    #[test]
+    fn legacy_composite_and_family_evidence_stay_unknown_without_a_producer() {
+        let mut policy = Policy::bundled().unwrap();
+        policy.tiers.insert(
+            "routine".into(),
+            vec![Candidate {
+                provider: "pi".into(),
+                model: "vendor/Orchestrator".into(),
+                effort: "medium".into(),
+                public_only: true,
+                access: None,
+            }],
+        );
+        let mut inputs = RoutingInputs {
+            installed: Some(["pi".into()].into()),
+            explicit_target: true,
+            ..Default::default()
+        };
+        assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.public_repository = true;
+        let mut route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+        let snapshot = route.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.model_family, None);
+        assert_eq!(snapshot.family_evidence, "unknown");
+        assert_eq!(snapshot.execution_profile, None);
+        assert_eq!(snapshot.capabilities.effort_support, EffortSupport::Unknown);
+        assert_eq!(snapshot.catalog.models_sha256, None);
+        route.snapshot = None;
+        route.freeze_snapshot().unwrap();
+        let legacy = route.snapshot.as_ref().unwrap();
+        assert_eq!(legacy.policy_sha256, None);
+        assert_eq!(legacy.policy_schema, None);
+        assert_eq!(legacy.configured, None);
+        assert_eq!(legacy.served_model, None);
+        assert!(allocate(&policy, "codex", "reviewer", None, "write", None, &inputs).is_err());
+    }
+    #[test]
+    fn snapshots_reject_rebinding_served_replay_and_malformed_evidence() {
+        let policy = Policy::bundled().unwrap();
+        let route = allocate(
+            &policy,
+            "codex",
+            "worker",
+            None,
+            "read",
+            None,
+            &claude_inputs(),
+        )
+        .unwrap();
+        for change in ["account", "model", "effort", "access", "schema", "served"] {
+            let mut altered = route.clone();
+            match change {
+                "account" => altered.account = Some("other".into()),
+                "model" => altered.candidate.model = "claude-sonnet-5-7".into(),
+                "effort" => altered.candidate.effort = "low".into(),
+                "access" => altered.access = "write".into(),
+                "schema" => altered.snapshot.as_mut().unwrap().schema = 2,
+                _ => {
+                    altered.snapshot.as_mut().unwrap().served_model =
+                        Some("reported elsewhere".into())
+                }
+            }
+            assert!(altered.freeze_snapshot().is_err(), "{change}");
+        }
+        let mut legacy = route.clone();
+        legacy.snapshot = None;
+        legacy.candidate.provider = "pi".into();
+        legacy.candidate.model = format!("vendor/{}", "x".repeat(32768));
+        assert!(
+            legacy
+                .freeze_snapshot()
+                .unwrap_err()
+                .message
+                .contains("exceeds bounds")
+        );
+        let mut snapshot = serde_json::to_value(route.snapshot.unwrap()).unwrap();
+        snapshot["new_authority"] = true.into();
+        assert!(serde_json::from_value::<RouteSnapshot>(snapshot).is_err());
+        for row in [
+            json!({"catalog_age_seconds":-1}),
+            json!({"effort_values":vec!["high";17]}),
+            json!({"model_effort_scales":{"model":true}}),
+            json!({"version":"bad\nversion"}),
+        ] {
+            assert!(ProviderEvidence::from_catalog_row(&row).is_err());
+        }
+    }
 }

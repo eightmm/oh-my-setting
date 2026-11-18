@@ -116,11 +116,25 @@ impl Resolver {
                 return Err("foreign scratch common directory".into());
             }
             let git_dir = git_path(&local, "--git-dir", interrupted)?;
-            let suffix = git_dir
-                .strip_prefix(common.join("worktrees"))
-                .map_err(|_| "scratch is not a linked worktree")?;
-            if suffix.as_os_str().is_empty() {
-                return Err("scratch registration is unavailable".into());
+            if git_dir.parent() != Some(common.join("worktrees").as_path()) {
+                return Err("scratch is not a linked worktree".into());
+            }
+            let forward_path = local.join(".git");
+            let back_path = git_dir.join("gitdir");
+            let (forward, forward_info) = storage::regular(&forward_path, MARKER_LIMIT, 1)?;
+            let pointer = query_path(
+                forward
+                    .strip_prefix(b"gitdir: ")
+                    .ok_or("invalid scratch Git pointer")?,
+            )?;
+            if physical_directory(&local.join(pointer))? != git_dir {
+                return Err("scratch Git pointer changed".into());
+            }
+            let (back, back_info) = storage::regular(&back_path, MARKER_LIMIT, 1)?;
+            // Membership alone also accepts another registered checkout's
+            // metadata. Both pointers must describe this exact worktree.
+            if query_path(&back)? != forward_path {
+                return Err("scratch Git registration points to another checkout".into());
             }
             let listing = git(&origin, &["worktree", "list", "--porcelain"], interrupted)?;
             let worktrees = listing
@@ -141,6 +155,16 @@ impl Resolver {
                 || git_path(&main, "--git-dir", interrupted)? != common
             {
                 return Err("shared repository does not own the common directory".into());
+            }
+            let (forward_after, forward_generation) =
+                storage::regular(&forward_path, MARKER_LIMIT, 1)?;
+            let (back_after, back_generation) = storage::regular(&back_path, MARKER_LIMIT, 1)?;
+            if forward != forward_after
+                || back != back_after
+                || !storage::generation(&forward_info, &forward_generation)
+                || !storage::generation(&back_info, &back_generation)
+            {
+                return Err("scratch Git registration changed".into());
             }
             Ok(main)
         })();

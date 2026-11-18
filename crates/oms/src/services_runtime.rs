@@ -21,6 +21,69 @@ fn plan_error(message: impl Into<String>) -> oms_command_plan::Error {
         message: message.into(),
     }
 }
+/// Kernel boot identity for the explicitly observed host-local resource domain.
+/// Neither a hostname nor an inherited locator can stand in for this generation.
+pub(crate) fn observed_host_generation_before(
+    deadline: Instant,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> oms_command_plan::Result<String> {
+    use sha2::Digest;
+    let check = || {
+        if interrupted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(oms_command_plan::Error {
+                code: 130,
+                message: "host generation proof interrupted".into(),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(oms_command_plan::Error {
+                code: 75,
+                message: "host generation proof deadline expired".into(),
+            });
+        }
+        Ok(())
+    };
+    check()?;
+    #[cfg(target_os = "linux")]
+    let raw = read_bounded_system_file(Path::new("/proc/sys/kernel/random/boot_id"), 128)?
+        .ok_or_else(|| plan_error("native host generation unavailable"))?;
+    #[cfg(target_os = "macos")]
+    let raw = run_clean_probe_budget(
+        "/usr/sbin/sysctl",
+        &["-n", "kern.bootsessionuuid"],
+        &[0],
+        Some(deadline),
+        interrupted,
+    )?
+    .1;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let raw: Vec<u8> = Vec::new();
+    check()?;
+    let boot = std::str::from_utf8(&raw)
+        .map_err(|_| plan_error("invalid native host generation"))?
+        .trim();
+    if boot.len() != 36
+        || !boot.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err(plan_error(
+            "native host generation unavailable or malformed",
+        ));
+    }
+    Ok(format!(
+        "{:x}",
+        sha2::Sha256::digest(format!(
+            "oms-host-boot-v1\0{}\0{}",
+            std::env::consts::OS,
+            boot.to_ascii_lowercase()
+        ))
+    ))
+}
 
 /// Resolves group membership for private-group permission checks in
 /// `oms_command_plan` and `oms_runtime`, matching Python `_private_group`.
@@ -29,30 +92,46 @@ fn plan_error(message: impl Into<String>) -> oms_command_plan::Error {
 /// process with an explicit wall deadline and output bound so an unresponsive
 /// host directory service can never hang in-process permission checks.
 pub(crate) fn resolve_group_membership(gid: u32) -> oms_command_plan::Result<GroupMembership> {
+    resolve_group_membership_with(gid, &run_clean_probe)
+}
+pub(crate) fn resolve_group_membership_before(
+    gid: u32,
+    deadline: Instant,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> oms_command_plan::Result<GroupMembership> {
+    resolve_group_membership_with(gid, &|program, args, exits| {
+        run_clean_probe_budget(program, args, exits, Some(deadline), interrupted)
+    })
+}
+type AccountProbe<'a> =
+    dyn Fn(&str, &[&str], &[i32]) -> oms_command_plan::Result<(i32, Vec<u8>)> + 'a;
+fn resolve_group_membership_with(
+    gid: u32,
+    probe: &AccountProbe<'_>,
+) -> oms_command_plan::Result<GroupMembership> {
     #[cfg(target_os = "linux")]
     {
-        verify_linux_nss_completeness()?;
+        verify_linux_nss_completeness(probe)?;
         let gid_arg = gid.to_string();
-        let (group_code, group_raw) =
-            run_clean_probe("/usr/bin/getent", &["group", &gid_arg], &[0, 2])?;
+        let (group_code, group_raw) = probe("/usr/bin/getent", &["group", &gid_arg], &[0, 2])?;
         if group_code == 2 || group_raw.iter().all(|b| b.is_ascii_whitespace()) {
             return Err(plan_error("unknown group id"));
         }
         let member_names = parse_colon_group_members(&group_raw, gid)?;
-        let (_, accounts_raw) = run_clean_probe("/usr/bin/getent", &["passwd"], &[0])?;
+        let (_, accounts_raw) = probe("/usr/bin/getent", &["passwd"], &[0])?;
         let (uid_by_name, primary_member_uids) = parse_colon_account_entries(&accounts_raw, gid)?;
         resolve_membership_uids(gid, &member_names, &uid_by_name, primary_member_uids)
     }
     #[cfg(target_os = "macos")]
     {
         let gid_arg = gid.to_string();
-        let (_, group_raw) = run_clean_probe(
+        let (_, group_raw) = probe(
             "/usr/bin/dscacheutil",
             &["-q", "group", "-a", "gid", &gid_arg],
             &[0],
         )?;
         let member_names = parse_dscacheutil_group_members(&group_raw, gid)?;
-        let (_, accounts_raw) = run_clean_probe("/usr/bin/dscacheutil", &["-q", "user"], &[0])?;
+        let (_, accounts_raw) = probe("/usr/bin/dscacheutil", &["-q", "user"], &[0])?;
         let (uid_by_name, primary_member_uids) =
             parse_dscacheutil_account_entries(&accounts_raw, gid)?;
         resolve_membership_uids(gid, &member_names, &uid_by_name, primary_member_uids)
@@ -276,7 +355,7 @@ fn verify_linux_nss_sources(
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn verify_linux_nss_completeness() -> oms_command_plan::Result<()> {
+fn verify_linux_nss_completeness(probe: &AccountProbe<'_>) -> oms_command_plan::Result<()> {
     let (passwd_sources, group_sources) =
         match read_bounded_system_file(Path::new("/etc/nsswitch.conf"), NSSWITCH_LIMIT)? {
             Some(raw) => parse_nsswitch_databases(&raw)?,
@@ -288,7 +367,7 @@ fn verify_linux_nss_completeness() -> oms_command_plan::Result<()> {
         || compat_files_are_local_only(Path::new("/etc/passwd"), Path::new("/etc/group")),
         |db| match std::fs::symlink_metadata("/var/lib/sss/pipes/nss") {
             Ok(_) => {
-                let (_, out) = run_clean_probe("/usr/bin/getent", &["-s", "sss", db], &[0])?;
+                let (_, out) = probe("/usr/bin/getent", &["-s", "sss", db], &[0])?;
                 if out.iter().all(|b| b.is_ascii_whitespace()) {
                     return Err(plan_error(format!(
                         "NSS provider sss for {db} returned no enumerated entries; complete account proof unavailable"
@@ -328,6 +407,37 @@ fn run_clean_probe(
     args: &[&str],
     ok_exits: &[i32],
 ) -> oms_command_plan::Result<(i32, Vec<u8>)> {
+    run_clean_probe_budget(
+        program,
+        args,
+        ok_exits,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+fn run_clean_probe_budget(
+    program: &str,
+    args: &[&str],
+    ok_exits: &[i32],
+    deadline: Option<Instant>,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> oms_command_plan::Result<(i32, Vec<u8>)> {
+    let check = || -> oms_command_plan::Result<()> {
+        if interrupted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(oms_command_plan::Error {
+                code: 130,
+                message: "account proof interrupted".into(),
+            });
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(oms_command_plan::Error {
+                code: 75,
+                message: "account proof deadline expired".into(),
+            });
+        }
+        Ok(())
+    };
+    check()?;
     let mut argv = Vec::with_capacity(1 + args.len());
     argv.push(OsString::from(program));
     argv.extend(args.iter().map(OsString::from));
@@ -339,11 +449,15 @@ fn run_clean_probe(
     request.environment = vec![("LC_ALL".into(), "C".into())];
     request.streams = Streams::Separate;
     request.scope = Scope::ProcessGroup;
-    request.deadline = Some(
-        Instant::now()
-            .checked_add(ACCOUNT_ENUM_WALL)
-            .ok_or_else(|| plan_error("account probe deadline overflow"))?,
-    );
+    let ordinary_deadline = Instant::now()
+        .checked_add(ACCOUNT_ENUM_WALL)
+        .ok_or_else(|| plan_error("account probe deadline overflow"))?;
+    request.deadline = Some(deadline.map_or(ordinary_deadline, |deadline| {
+        deadline.min(ordinary_deadline)
+    }));
+    if deadline.is_some() {
+        request.terminate_grace = Duration::ZERO;
+    }
     request.capture = CaptureOptions {
         max_bytes: ACCOUNT_ENUM_LIMIT,
         on_limit: LimitAction::Terminate,
@@ -359,13 +473,21 @@ fn run_clean_probe(
     let id = reactor
         .start(request)
         .map_err(|e| plan_error(format!("account enumeration failed to start: {e}")))?;
+    let mut cancelled = false;
     loop {
+        if interrupted.load(std::sync::atomic::Ordering::Acquire) && !cancelled {
+            reactor
+                .stop(id, oms_supervisor::process::StopReason::Cancelled)
+                .map_err(plan_error)?;
+            cancelled = true;
+        }
         match reactor
             .poll(id, Duration::from_millis(50))
             .map_err(|e| plan_error(format!("account enumeration poll failed: {e}")))?
         {
             Progress::Pending(_) => {}
             Progress::Complete(done) => {
+                check()?;
                 if !done.cleanup_complete()
                     || !done.output_complete()
                     || done.stop.is_some()
@@ -647,6 +769,8 @@ fn parse_dscacheutil_account_entries(
 // with a wall deadline and bounded output; argv is never shell-parsed and no
 // interpreter or legacy script is invoked.
 // ---------------------------------------------------------------------------
+#[path = "services_resources.rs"]
+mod resources;
 use crate::services_control::ControlServices;
 use oms_runtime::services::{
     BackendRequest, BackendResult, ExternalOutput, InstallerRequest, LedgerRequest, LedgerResult,
@@ -1080,6 +1204,14 @@ impl<'a> RuntimeServices<'a> {
 }
 
 impl oms_runtime::Services for RuntimeServices<'_> {
+    fn resource_action(
+        &self,
+        repo: &Path,
+        state_repo: &Path,
+        action: &oms_runtime::services::ResourceAction,
+    ) -> oms_command_plan::Result<Value> {
+        resources::action(repo, state_repo, action, self.cancel())
+    }
     /// Read-only passwd lookup of a named user's home; no file or exec authority.
     fn account_home(&self, username: &OsStr) -> oms_command_plan::Result<Option<PathBuf>> {
         let name = username.as_bytes();
@@ -4624,6 +4756,77 @@ exit 92
             malformed.is_err(),
             "a short sha is refused before any fetch"
         );
+    }
+
+    #[test]
+    fn account_probes_share_deadline_cancel_and_bounded_cleanup() {
+        let dir = Dir::new();
+        let stopped = AtomicBool::new(false);
+        assert_eq!(
+            run_clean_probe_budget(
+                "/bin/sh",
+                &["-c", "printf complete"],
+                &[0],
+                Some(Instant::now() + Duration::from_secs(2)),
+                &stopped
+            )
+            .unwrap(),
+            (0, b"complete".to_vec())
+        );
+        let entered = dir.path().join("entered");
+        let args = [
+            "-c",
+            "printf entered > \"$1\"; exec /bin/sleep 10",
+            "account-probe",
+            entered.to_str().unwrap(),
+        ];
+        assert_eq!(
+            run_clean_probe_budget("/bin/sh", &args, &[0], Some(Instant::now()), &stopped)
+                .unwrap_err()
+                .code,
+            75
+        );
+        assert!(!entered.exists());
+        let started = Instant::now();
+        assert_eq!(
+            run_clean_probe_budget(
+                "/bin/sh",
+                &args,
+                &[0],
+                Some(started + Duration::from_millis(300)),
+                &stopped
+            )
+            .unwrap_err()
+            .code,
+            75
+        );
+        assert!(entered.is_file());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::fs::remove_file(&entered).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while !entered.is_file() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                stopped.store(true, Ordering::Release);
+            });
+            let started = Instant::now();
+            assert_eq!(
+                run_clean_probe_budget(
+                    "/bin/sh",
+                    &args,
+                    &[0],
+                    Some(started + Duration::from_secs(2)),
+                    &stopped
+                )
+                .unwrap_err()
+                .code,
+                130
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+        assert!(entered.is_file());
     }
 
     #[test]

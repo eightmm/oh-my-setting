@@ -102,7 +102,18 @@ impl Transaction {
         self.replace(target, |p| copy(source, p))
     }
     pub fn files(&mut self, target: &Path, files: &[(&str, &[u8], u32)]) -> Result<()> {
-        self.replace(target, |p| {
+        self.files_mode(target, files, false)
+    }
+    pub fn create_files(&mut self, target: &Path, files: &[(&str, &[u8], u32)]) -> Result<()> {
+        self.files_mode(target, files, true)
+    }
+    fn files_mode(
+        &mut self,
+        target: &Path,
+        files: &[(&str, &[u8], u32)],
+        create_only: bool,
+    ) -> Result<()> {
+        self.replace_mode(target, false, create_only, |p| {
             fs::create_dir(p)?;
             fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
             for (name, raw, mode) in files {
@@ -115,12 +126,13 @@ impl Transaction {
         })
     }
     fn replace(&mut self, target: &Path, prepare: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
-        self.replace_mode(target, false, prepare)
+        self.replace_mode(target, false, false, prepare)
     }
     fn replace_mode(
         &mut self,
         target: &Path,
         external: bool,
+        create_only: bool,
         prepare: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
         let identify = |p: &Path| {
@@ -142,6 +154,9 @@ impl Transaction {
             return r::fail("transaction staging name already exists");
         }
         let old = identify(&target)?;
+        if create_only && old.is_some() {
+            return r::fail("refusing to replace an existing lifecycle target");
+        }
         prepare(&staged)?;
         let new = identify(&staged)?;
         self.journal.changes.push(Change {
@@ -409,7 +424,7 @@ impl Transaction {
     /// Snapshot provider-owned files before letting its CLI rewrite them. A kill
     /// before sealing retains the undo copy and refuses uncertain recovery.
     pub fn publish_external(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace_mode(target, true, |p| external_copy(source, p))
+        self.replace_mode(target, true, false, |p| external_copy(source, p))
     }
     pub fn prepare_external(&mut self, targets: &[PathBuf]) -> Result<usize> {
         let start = self.journal.changes.len();

@@ -2,6 +2,7 @@ use crate::{Error, Result, Value, decode, identifier, require};
 use oms_lock::{Guard, Lock, Mode, Settings};
 use oms_safe_fs::{ByteReadOptions, MutationError, MutationOptions, MutationPhase, Root};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub const MAX_STATE: usize = 8 * 1024 * 1024;
@@ -63,6 +64,13 @@ pub struct Transaction<'a> {
     store: &'a Store,
     guard: Guard,
 }
+pub(crate) fn reservation_error(error: oms_command_telemetry::store::dispatch::Error) -> Error {
+    Error {
+        code: error.exit_code(),
+        publication_uncertain: error.publication_uncertain,
+        ..Error::new(error)
+    }
+}
 impl Store {
     pub fn open(repo: &Path) -> Result<Self> {
         Self::with_settings(repo, Settings::from_env().map_err(Error::new)?)
@@ -75,6 +83,18 @@ impl Store {
     }
     pub fn repo(&self) -> &Path {
         self.root.physical_root()
+    }
+    pub(crate) fn dispatch_transaction<'a>(
+        &self,
+        interrupted: &'a AtomicBool,
+    ) -> Result<oms_command_telemetry::store::dispatch::Transaction<'a>> {
+        oms_command_telemetry::store::dispatch::Transaction::with_settings(
+            self.repo(),
+            self.settings.clone(),
+            Duration::from_secs(10),
+            interrupted,
+        )
+        .map_err(reservation_error)
     }
     pub fn read(&self, relative: &Path, maximum: usize, missing: bool) -> Result<Vec<u8>> {
         path(relative)?;

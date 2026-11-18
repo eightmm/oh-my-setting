@@ -104,6 +104,23 @@ A timeout, crash, abandoned controller or unpriced/subscription cost never
 refunds a liability. Only a pre-invocation refusal with no calls proves no
 provider spend. Later canonical receipt revisions are reconciled on the next
 admission or status read; conflicting cumulative observations block admission.
+The same projection includes physical intents whose usage receipt was never
+acknowledged. They retain their per-call liability after settlement or refusal
+and appear separately as `intent_only_calls`; matching receipts are counted once.
+Status/file observations confer no launch authority or canonical owner-generation
+proof.
+
+Canonical campaign invocations also carry the full saved manifest digest as
+`OMS_CAMPAIGN_MANIFEST_SHA256`. Each physical account retry and model fallback
+revalidates that exact manifest, active reservation, provider and deadline under
+the existing campaign events lock. The shared dispatch writer checks the complete
+usage after-projection before publishing its next intent. Logical reservation,
+policy parsing and operation-state projection reuse the same saved-ledger
+validator. A present binding with missing or invalid referenced state refuses
+continuation. Historical
+calls without this binding remain included in accounting. The digest is an
+observed soft-budget locator; strict team owner generations, account/domain
+capacity and native descendant bounds require separate evidence.
 
 `goal-drive --campaign FILE --status` includes `spent.usage`, with measured
 amounts and report coverage, historical settled amounts, active and unresolved

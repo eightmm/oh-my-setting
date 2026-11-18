@@ -97,6 +97,8 @@ pub fn pending(
     let repo =
         std::fs::canonicalize(repo).map_err(|_| Error::new(2, "cannot resolve repository"))?;
     let git = Git {
+        group_snapshot: None,
+        deadline: None,
         repo: &repo,
         interrupted,
         group_resolver: None,

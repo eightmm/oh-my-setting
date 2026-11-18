@@ -4,6 +4,13 @@ Own execution tasks, dependencies, claims and review state. Use agent-task
 for the current resume note; its handoff packet does not claim or run plan work.
 
 Commands:
+  team-register --team-spec REPO_REL [--expected-team-sha256 SHA] [--json]
+                                     Enrolled parent only. Capture an immutable
+                                     planned team; never launches a provider.
+  team-show --id ID [--json] | team-list [--json]
+                                     Read current contracts and stale bindings.
+  team-cancel --id ID --expected-team-sha256 SHA --reason TEXT [--json]
+                                     Withdraw an unlaunched planned team.
   contract-propose --id ID --summary TEXT [--scope-paths CSV] [--decision-artifact REPO_REL] [--json]
   contract-accept --id ID --version N [--json]  Parent-only acceptance.
   contract-list [--json] | contract-show --id ID [--json]

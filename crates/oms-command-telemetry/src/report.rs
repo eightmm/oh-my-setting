@@ -616,8 +616,14 @@ pub(crate) fn report(
             "tokens":V::Null,"cost_microusd":V::Null,"token_reports":0,"cost_reports":0,
             "unknown_token_calls":0,"unknown_cost_calls":0,"unsettled_calls":0,"conflicts":0,
             "provider_estimate_calls":0,
+            "cleanup_confirmed_calls":0,"cleanup_incomplete_calls":0,"cleanup_unknown_calls":0,
             "basis":"absolute receipt revisions; cumulative session differences with known baselines; independent of artifact window; costs are reported values, not authoritative billing");
         for call in calls {
+            lifetime.inc(match call.receipt.cleanup_complete {
+                Some(true) => "cleanup_confirmed_calls",
+                Some(false) => "cleanup_incomplete_calls",
+                None => "cleanup_unknown_calls",
+            });
             for (value, total, reports, unknown) in [
                 (
                     call.tokens,

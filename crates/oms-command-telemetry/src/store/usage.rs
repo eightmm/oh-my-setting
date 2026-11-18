@@ -102,6 +102,9 @@ pub struct Receipt {
     pub cost: Cost,
     pub cumulative: Option<Cumulative>,
     pub source_sha256: Option<String>,
+    /// Native process-owner evidence, independent of usage completeness. Legacy
+    /// receipts and missing executor acknowledgements retain unknown custody.
+    pub cleanup_complete: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -163,7 +166,8 @@ fn validate(receipt: &Receipt) -> Result<(), StoreError> {
     if receipt.phase == Phase::Pending
         && (receipt.usage != Usage::default()
             || receipt.cost != Cost::Unknown
-            || receipt.source_sha256.is_some())
+            || receipt.source_sha256.is_some()
+            || receipt.cleanup_complete.is_some())
     {
         return Err(invalid("pending usage receipt contains measurements"));
     }
@@ -193,6 +197,22 @@ fn number(n: u64) -> V {
 fn optional(n: Option<u64>) -> V {
     n.map(number).unwrap_or(V::Null)
 }
+pub(super) fn identity_value(i: &Identity) -> V {
+    obj!("call_id":i.call_id.clone(),"operation_id":i.operation_id.clone(),"provider":i.provider.clone(),
+        "selected_model":i.selected_model.clone(),"account":i.account.clone(),"goal_id":i.goal_id.clone(),
+        "task_id":i.task_id.clone(),"attempt_id":i.attempt_id.clone(),"run_id":i.run_id.clone())
+}
+pub(super) fn validate_pending(
+    identity: &Identity,
+    cumulative: &Option<Cumulative>,
+) -> Result<(), StoreError> {
+    validate(&Receipt {
+        identity: identity.clone(),
+        cumulative: cumulative.clone(),
+        ordinal: 1,
+        ..Receipt::default()
+    })
+}
 fn encode_receipt(r: &Receipt) -> Result<Vec<u8>, StoreError> {
     let i = &r.identity;
     let u = &r.usage;
@@ -203,22 +223,26 @@ fn encode_receipt(r: &Receipt) -> Result<Vec<u8>, StoreError> {
         Cost::Subscription => ("subscription", "unknown"),
         Cost::Unknown => ("unknown", "unknown"),
     };
-    encode(&obj!(
-        "schema":1, "kind":"provider-usage", "call_id":i.call_id.clone(),
-        "operation_id":i.operation_id.clone(), "provider":i.provider.clone(),
-        "selected_model":i.selected_model.clone(), "account":i.account.clone(), "goal_id":i.goal_id.clone(),
-        "task_id":i.task_id.clone(), "attempt_id":i.attempt_id.clone(), "run_id":i.run_id.clone(),
-        "ordinal":number(r.ordinal), "revision":number(r.revision),
-        "phase":match r.phase { Phase::Pending=>"pending", Phase::Partial=>"partial", Phase::Final=>"final", Phase::Unknown=>"unknown" },
-        "provider_usage":obj!("input_tokens":optional(u.input_tokens),"output_tokens":optional(u.output_tokens),
-            "cache_read_tokens":optional(u.cache_read_tokens),"cache_write_tokens":optional(u.cache_write_tokens),
-            "cache_in_input":u.cache_in_input,"total_tokens":optional(u.total_tokens)),
-        "cost":obj!("status":status,"basis":basis,"microusd":optional(r.cost.microusd())),
-        "cumulative":r.cumulative.as_ref().map(|s| obj!("session_id":s.session_id.clone(),"baseline_unknown":s.baseline_unknown)),
-        "source_sha256":r.source_sha256.clone()
-    )).map_err(|_| invalid("cannot encode usage receipt"))
+    let (V::Object(mut fields), V::Object(payload)) = (
+        identity_value(i),
+        obj!(
+            "schema":2, "kind":"provider-usage",
+            "ordinal":number(r.ordinal), "revision":number(r.revision),
+            "phase":match r.phase { Phase::Pending=>"pending", Phase::Partial=>"partial", Phase::Final=>"final", Phase::Unknown=>"unknown" },
+            "provider_usage":obj!("input_tokens":optional(u.input_tokens),"output_tokens":optional(u.output_tokens),
+                "cache_read_tokens":optional(u.cache_read_tokens),"cache_write_tokens":optional(u.cache_write_tokens),
+                "cache_in_input":u.cache_in_input,"total_tokens":optional(u.total_tokens)),
+            "cost":obj!("status":status,"basis":basis,"microusd":optional(r.cost.microusd())),
+            "cumulative":r.cumulative.as_ref().map(|s| obj!("session_id":s.session_id.clone(),"baseline_unknown":s.baseline_unknown)),
+            "source_sha256":r.source_sha256.clone(), "cleanup_complete":r.cleanup_complete
+        ),
+    ) else {
+        return Err(invalid("cannot encode usage receipt"));
+    };
+    fields.extend(payload);
+    encode(&V::Object(fields)).map_err(|_| invalid("cannot encode usage receipt"))
 }
-fn uint(v: &V) -> Result<u64, StoreError> {
+pub(super) fn uint(v: &V) -> Result<u64, StoreError> {
     v.int()
         .and_then(|s| s.parse().ok())
         .ok_or(invalid("usage count must be a nonnegative u64"))
@@ -242,7 +266,7 @@ fn opt_string(v: &V) -> Result<Option<String>, StoreError> {
         string(v).map(Some)
     }
 }
-fn keys(v: &V, expected: &[&str]) -> Result<(), StoreError> {
+pub(super) fn keys(v: &V, expected: &[&str]) -> Result<(), StoreError> {
     if let V::Object(fields) = v
         && fields.len() == expected.len()
         && expected.iter().all(|key| v.get(key).is_some())
@@ -252,36 +276,52 @@ fn keys(v: &V, expected: &[&str]) -> Result<(), StoreError> {
         Err(invalid("unknown or missing usage receipt fields"))
     }
 }
+pub(super) fn identity_from_value(v: &V) -> Result<Identity, StoreError> {
+    Ok(Identity {
+        call_id: string(&v["call_id"])?,
+        operation_id: string(&v["operation_id"])?,
+        provider: string(&v["provider"])?,
+        selected_model: opt_string(&v["selected_model"])?,
+        account: opt_string(&v["account"])?,
+        goal_id: opt_string(&v["goal_id"])?,
+        task_id: opt_string(&v["task_id"])?,
+        attempt_id: opt_string(&v["attempt_id"])?,
+        run_id: opt_string(&v["run_id"])?,
+    })
+}
 fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
     // Check framing and the row bound before the strict JSON parser.
     let v = row(line)?;
     // Accounting refuses duplicate keys instead of the legacy index's last-key policy.
     oms_context::parse_json(line)
         .map_err(|_| invalid("invalid or duplicate usage receipt JSON"))?;
-    keys(
-        &v,
-        &[
-            "schema",
-            "kind",
-            "call_id",
-            "operation_id",
-            "provider",
-            "selected_model",
-            "account",
-            "goal_id",
-            "task_id",
-            "attempt_id",
-            "run_id",
-            "ordinal",
-            "revision",
-            "phase",
-            "provider_usage",
-            "cost",
-            "cumulative",
-            "source_sha256",
-        ],
-    )?;
-    if v["schema"] != V::from(1) || v["kind"].text() != Some("provider-usage") {
+    let mut fields = vec![
+        "schema",
+        "kind",
+        "call_id",
+        "operation_id",
+        "provider",
+        "selected_model",
+        "account",
+        "goal_id",
+        "task_id",
+        "attempt_id",
+        "run_id",
+        "ordinal",
+        "revision",
+        "phase",
+        "provider_usage",
+        "cost",
+        "cumulative",
+        "source_sha256",
+    ];
+    match v["schema"] {
+        ref schema if *schema == V::from(1) => {}
+        ref schema if *schema == V::from(2) => fields.push("cleanup_complete"),
+        _ => return Err(invalid("unsupported usage receipt schema")),
+    }
+    keys(&v, &fields)?;
+    if v["kind"].text() != Some("provider-usage") {
         return Err(invalid("unsupported usage receipt schema"));
     }
     let u = &v["provider_usage"];
@@ -321,17 +361,7 @@ fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
         })
     };
     let receipt = Receipt {
-        identity: Identity {
-            call_id: string(&v["call_id"])?,
-            operation_id: string(&v["operation_id"])?,
-            provider: string(&v["provider"])?,
-            selected_model: opt_string(&v["selected_model"])?,
-            account: opt_string(&v["account"])?,
-            goal_id: opt_string(&v["goal_id"])?,
-            task_id: opt_string(&v["task_id"])?,
-            attempt_id: opt_string(&v["attempt_id"])?,
-            run_id: opt_string(&v["run_id"])?,
-        },
+        identity: identity_from_value(&v)?,
         ordinal: uint(&v["ordinal"])?,
         revision: uint(&v["revision"])?,
         phase: match v["phase"].text() {
@@ -356,6 +386,11 @@ fn decode(line: &[u8]) -> Result<Receipt, StoreError> {
         cost,
         cumulative,
         source_sha256: opt_string(&v["source_sha256"])?,
+        cleanup_complete: match v["cleanup_complete"] {
+            V::Null => None,
+            V::Bool(value) => Some(value),
+            _ => return Err(invalid("invalid native cleanup evidence")),
+        },
     };
     validate(&receipt)?;
     Ok(receipt)
@@ -415,6 +450,14 @@ fn current(rows: &[Receipt]) -> Result<Vec<Receipt>, StoreError> {
     // must never switch between per-call and cumulative scope or session identity.
     let mut previous: Option<&Receipt> = None;
     for row in revisions.values() {
+        if let Some(old) = previous.filter(|old| old.identity.call_id == row.identity.call_id)
+            && old.cleanup_complete == Some(true)
+            && row.cleanup_complete != Some(true)
+        {
+            return Err(invalid(
+                "confirmed cleanup cannot be discarded by a usage revision",
+            ));
+        }
         if let Some(old) = previous.filter(|old| old.identity.call_id == row.identity.call_id)
             && old.cumulative != row.cumulative
             && !(old.phase == Phase::Pending && old.cumulative.is_none())
@@ -485,12 +528,80 @@ pub fn begin(
     cumulative: Option<Cumulative>,
     interrupted: &AtomicBool,
 ) -> Result<Receipt, StoreError> {
+    begin_inner(repo, identity, cumulative, interrupted, None, false)
+}
+/// Shared admission bounds nested receipt/ignore lock waits by one monotonic
+/// deadline. Persistence may finish later; the caller must fence external launch.
+pub fn begin_before(
+    repo: &Path,
+    identity: Identity,
+    cumulative: Option<Cumulative>,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<Receipt, StoreError> {
+    begin_inner(
+        repo,
+        identity,
+        cumulative,
+        interrupted,
+        Some(deadline),
+        false,
+    )
+}
+pub(super) fn writer_before(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<oms_lock::Guard, StoreError> {
+    let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
+    acquire_before(&target, interrupted, Some(deadline))
+}
+pub(super) fn begin_registered_before(
+    tx: &super::dispatch::Transaction<'_>,
+    identity: Identity,
+    cumulative: Option<Cumulative>,
+    interrupted: &AtomicBool,
+    deadline: Instant,
+) -> Result<Receipt, StoreError> {
+    begin_inner(
+        tx.repo(),
+        identity,
+        cumulative,
+        interrupted,
+        Some(deadline),
+        true,
+    )
+}
+fn begin_inner(
+    repo: &Path,
+    identity: Identity,
+    cumulative: Option<Cumulative>,
+    interrupted: &AtomicBool,
+    deadline: Option<Instant>,
+    registered: bool,
+) -> Result<Receipt, StoreError> {
+    before(interrupted, deadline)?;
     let root = Root::open(repo)?;
     let target = canonical_index(repo, Some(Path::new(RECEIPTS)), false, false)?;
-    let _guard = acquire(&target, interrupted)?;
-    ensure_ignore(root.physical_root(), interrupted)?;
+    let _guard = acquire_before(&target, interrupted, deadline)?;
+    // Activation holds dispatch then this same receipt writer across its CAS.
+    // A direct writer only observes dispatch, preserving the legacy lock contract.
+    if !registered
+        && let Some(raw) = super::dispatch::read_snapshot(root.physical_root(), interrupted)?
+    {
+        let registry =
+            crate::value::parse(&raw, true).map_err(|_| invalid("invalid dispatch registry"))?;
+        if registry["schema"] == V::from(2) {
+            return Err(invalid(
+                "resource domain requires physical intent admission",
+            ));
+        }
+    }
+    before(interrupted, deadline)?;
+    ensure_ignore_before(root.physical_root(), interrupted, deadline)?;
     let mut result = None;
     mutate(&root, &target, true, None, interrupted, |old| {
+        before(interrupted, deadline)?;
         let rows = current(&receipts(old)?)?;
         if rows.iter().any(|r| r.identity.call_id == identity.call_id) {
             return Err(invalid("usage call already exists"));
@@ -522,6 +633,7 @@ pub fn begin(
         validate(&receipt)?;
         let mut new = old.to_vec();
         new.extend(encode_receipt(&receipt)?);
+        before(interrupted, deadline)?;
         result = Some(receipt);
         Ok(new)
     })?;

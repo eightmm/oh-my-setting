@@ -1,12 +1,21 @@
 # Team-aware panel: layout and interaction contract
 
-작성: 2026-11-17. **DESIGN ONLY / runtime UI 미구현**.
+작성: 2026-11-17. **설계와 TM-06A 선택형 읽기 화면 / 운영 승격 없음**.
 Source baseline: `de2f547c6a40ddf67c62068bce309050c6d4fa48`.
 이 문서는 [#245](https://github.com/eightmm/oh-my-setting/pull/245)의 TM-06과
 [#248](https://github.com/eightmm/oh-my-setting/pull/248)의 관측·검증 명세를 구체화한다.
 새 Main, scheduler, 상태 DB, web frontend, 모델 호출 또는 기본값 변경을 추가하지 않는다.
 Main 선택은 [별도 정책](TEAM-ORCHESTRATION-MAIN-POLICY.md)을 따른다.
 목업의 팀·숫자·상태는 설명용이며 실제 실행 결과가 아니다.
+
+2026-11-18 구현 범위: `oms panel --teams [--json]`은 기존 Plan의 `team-list`,
+resource snapshot, physical intent reader를 사용하는 선택형 읽기 화면이다.
+Root owner/generation → Team ID/generation → logical lead/member를 보여 주며
+같은 label도 ID로 구분한다. Held 이유와 source 오류·미검증·omitted 범위를 남긴다.
+Spec은 실행 증거가 아니며 retained intent도 running count가 아니다. Served/cleanup/
+usage/native children의 미보고 값을 0이나 성공으로 채우지 않는다. 기존 Reader에
+연결하며 default panel·키·action은 유지한다. 이는 TM-06A의 로컬 fixture 범위다.
+TM-06B 조작, TM-06C live refresh/I/O 비교, 실제 native terminal smoke는 별도다.
 
 ## 1. 무엇을 유지하고 바꾸는가
 
@@ -215,5 +224,6 @@ resource ownership이 해제되거나 worker가 종료된 것으로 처리되어
 
 Pinned source의 layout constants, 현재 panel 설명, orchestration skill, #245/#248의
 관련 계약 및 기존 UX 명세의 해당 부분을 정적으로 대조했다. 전체 runtime 감사를
-수행한 것은 아니다. 실제 TUI 렌더링, Rust compile, provider session, 모델 비교 평가와
-성능 측정은 아직 수행하지 않았다. 게시 PR에서 실제 실행한 문서/CI 검증을 별도 기록한다.
+수행한 것은 아니다. 이후 TM-06A 선택형 reader/CLI는 로컬 Rust fixture로 별도 검증한다.
+Provider session, 실제 native terminal smoke, 모델 비교 평가와 성능 측정은 이 구현의
+검증 범위가 아니다. 게시 PR에서 실제 실행한 검사와 exact-head CI를 별도 기록한다.

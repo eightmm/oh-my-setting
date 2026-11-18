@@ -37,7 +37,7 @@ fn unrecognized(args: &[OsString]) -> (i32, Vec<u8>, Vec<u8>) {
         .map(|x| x.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ");
-    (2, vec![], format!("usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {{envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,doctor}}\n                   ...\noms runtime: error: unrecognized arguments: {joined}\n").into_bytes())
+    (2, vec![], format!("usage: oms runtime [-h] [--repo REPO] [--pretty] [--version]\n                   {{envelope,evidence,next,brief,failure,context,context-inspect,profile,release,capsule,backend,experiment,benchmark,resources,doctor}}\n                   ...\noms runtime: error: unrecognized arguments: {joined}\n").into_bytes())
 }
 fn help(action: &str) -> Vec<u8> {
     let body = match action {

@@ -173,8 +173,10 @@ impl Room<'_> {
             .position(|r| r["seq"] == p["seq"])
             .ok_or_else(|| Error::new("room enrollment turn is unavailable"))?;
         let enrollment = &snapshot.rows[at];
-        if enrollment["room_event"].text("kind") != "join"
-            || enrollment["room_event"].text("participant") != who
+        if !matches!(
+            enrollment["room_event"].text("kind"),
+            "join" | "main-resume"
+        ) || enrollment["room_event"].text("participant") != who
         {
             return Err(Error::new("room enrollment turn changed"));
         }

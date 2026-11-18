@@ -833,6 +833,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         })
         .unwrap_or_default();
     extra_env = crate::usage::operation_env(&extra_env)?;
+    process::TeamLocator::append_args(args, &mut extra_env)?;
     extra_env.push(("OMS_ATTEMPT_ID".into(), attempt.clone().into()));
     if !task_id.is_empty() {
         extra_env.push(("OMS_TASK_ID".into(), task_id.clone().into()));

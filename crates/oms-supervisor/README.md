@@ -1,6 +1,6 @@
 # Native agent supervisor and owned-process engine
 
-This standalone crate supplies native process execution and implementations of
+This workspace crate supplies native process execution and implementations of
 all `agent-supervisor` modes. `capture.rs` and `process.rs` are reusable engine
 modules; `command.rs`, `cli.rs`, `lifecycle.rs`, and `storage.rs` implement the
 command domain. The binary is a native runner entry point. No implementation
@@ -8,11 +8,9 @@ invokes Python, Bash, provider CLIs, a scheduler, or a container engine. An
 explicit payload may itself be a user-selected shell. Fixed Git and `ps`
 queries are native external producers, driven by the same process engine.
 
-This is an intermediate migration patch. Compilation does not establish
-behavioral/security parity. The gaps below block a claim of full migration
-completion. Root workspace/lock registration, CLI routing, service adapters,
-global signal installation, integration tests, release, and global documentation
-remain with the parent.
+The root CLI and native service adapters use this engine. Compilation alone does
+not establish behavioral or security parity; the scope and recovery limits below
+remain part of the contract. Release/install and platform evidence stay separate.
 
 ## Reusable API
 
@@ -21,6 +19,9 @@ Request::new(argv: Vec<OsString>) -> Request
 Reactor::new() -> Reactor
 Reactor::dedicated() -> Result<Reactor, String>
 Reactor::start(&mut self, request: Request) -> Result<JobId, StartError>
+Reactor::send(&mut self, id: JobId, frame: &[u8]) -> Result<(), SendError>
+Reactor::close_input(&mut self, id: JobId) -> Result<(), SendError>
+Reactor::receive(&mut self, id: JobId) -> Result<Option<OutputEvent>, String>
 Reactor::stop(&mut self, id: JobId, reason: StopReason) -> Result<(), String>
 Reactor::poll(&mut self, id: JobId, budget: Duration) -> Result<Progress, String>
 Reactor::snapshot(&self, id: JobId) -> Result<Snapshot, String>
@@ -56,6 +57,15 @@ duration, signal records, reaping evidence and explicit supervision error.
 `Complete` alone is not successful cleanup: callers must inspect
 `cleanup_complete()`, output completeness/cutoff, requested scope and stop reason.
 Process-group completion never claims whole-tree containment.
+
+A parent can tag `Request::physical_call` with a validated `PhysicalCall` ID.
+Only the owning reactor can mint `Completion::owned_cleanup()` after confirming
+cleanup. Its opaque `OwnedCleanup` retains the exact call, PID and actual scope;
+editing public completion diagnostics cannot change that proof. Consumers compare
+`matches(expected_call, expected_scope)` against their admitted binding. Missing
+tags, unknown cleanup and synthetic results provide no proof. The tag grants no
+admission, and the proof supplies no native fanout limit, session closure, WIP
+settlement or durable restart evidence.
 
 The state machine is spawn -> observe/drain/feed -> freeze completion or stop
 reason -> TERM/grace/KILL as needed -> observe quiescence -> nonblocking reap ->
@@ -98,6 +108,75 @@ identity persistence drives cleanup in the foreground; persisted pending cleanup
 retains canonical `cleanup_failed` identity for recovery rather than terminal
 success. A durable detached runner is handed to the OS reaper at CLI exit.
 
+## Bounded raw duplex
+
+`Request::duplex = Some(DuplexOptions { ... })` opts into incremental input and
+output on the same owning reactor. All seven byte/frame/event/work bounds must
+be positive, `max_frame_bytes <= max_input_bytes`, streams must be `Separate`,
+and fixed `stdin` must be absent. There are no implicit defaults or new CLI flags.
+Legacy requests retain their fixed-input/close-after-write behavior.
+
+`send(id, frame)` atomically accepts or rejects a complete consumer frame. Its
+success means queue acceptance; it is no child-processing or outbound-send
+acknowledgement. `FrameTooLarge`, `QueueFull`, closed input, non-duplex and unknown
+jobs are distinct errors. Partial writes retain their frame allocation within
+the input byte bound, including the written prefix. Each turn attempts at most
+four input syscalls and four reads per stream, additionally limited by the
+requested byte budgets; a nonzero poll can run two turns. EAGAIN preserves the
+queue. EPIPE closes input and records abandoned bytes without inventing a
+protocol error or dropping already observed output. `close_input` is idempotent
+and half-closes after accepted bytes drain; deadline or cancellation can still
+abandon queued input with explicit status.
+
+`receive` takes raw byte chunks with a process-local unique generation and
+contiguous sequence shared across stdout and stderr. Read preference alternates
+after a received chunk so a full single-event queue cannot always favor stdout.
+Output byte and event bounds apply together. A full queue pauses pipe reads,
+while exit observation, deadlines, cancellation and reaping continue. Capture
+limits remain independent; a capture cutoff or bounded cleanup can close a pipe
+without EOF, reflected by capture EOF and `output_closed_early`. No accepted
+output event is silently discarded. `Snapshot::duplex` contains queue and input
+state only; captures must never be replayed as new incremental events. When poll
+removes a finished job, `Completion::duplex.output` retains its bounded undelivered
+queue. Consumers must process that queue as well as events taken before poll.
+
+This transport neither frames nor decodes stdout. Consumers must bound incomplete
+frames, frame length and pending protocol requests, validate UTF-8/envelopes when
+the selected protocol requires them, and distinguish protocol completion from
+process exit and cleanup. A consumer may enqueue a cooperative cancellation
+frame and drive a bounded grace before calling the existing `stop` method; the
+reactor grants no automatic retry or replacement-call authority.
+
+```rust,ignore
+request.streams = Streams::Separate;
+request.duplex = Some(DuplexOptions {
+    max_frame_bytes: 16 * 1024,
+    max_input_bytes: 64 * 1024,
+    max_input_frames: 8,
+    max_output_bytes: 64 * 1024,
+    max_output_events: 32,
+    max_read_bytes_per_turn: 16 * 1024,
+    max_write_bytes_per_turn: 16 * 1024,
+});
+let id = reactor.start(request)?;
+reactor.send(id, b"request\n")?;
+reactor.close_input(id)?; // Only when this protocol needs no later replies.
+loop {
+    while let Some(event) = reactor.receive(id)? {
+        consume_bounded(&event)?;
+    }
+    match reactor.poll(id, Duration::from_millis(10))? {
+        Progress::Pending(_) => {}
+        Progress::Complete(done) => {
+            for event in done.duplex.as_ref().unwrap().output.iter() {
+                consume_bounded(event)?;
+            }
+            return assess_protocol_exit_output_and_cleanup(done);
+        }
+    }
+}
+```
+
 ## Command integration and canonical mode checklist
 
 `CommandHost::new(runner_argv)` supplies the native runner executable and any
@@ -116,9 +195,8 @@ entry point. Neither installs process-global signal handlers. Dispatch launches
 detached runners with stdin, stdout and stderr connected to `/dev/null`, and
 closed warning stderr pipes cannot turn a completed job into a supervisor error.
 
-Canonical anchors below refer to
-`attempt-runner.py`, read through EOF.
-The implementation exists for every row; behavioral verification is deferred.
+Canonical anchors below refer to the historical `attempt-runner.py` migration
+source. Current implementations and fixtures live in this crate and the root.
 
 | Mode | Source lines | Implemented behavior / limitation |
 | --- | --- | --- |
@@ -225,16 +303,16 @@ their existing process identity checks.
 
 ## Verification boundary
 
-Rust 1.99.1 offline `cargo check --all-targets` and rustfmt are the implementation-phase
-checks; exact session results are in the worker report.
-All resolved dependency versions already occur in the root lockfile.
-
-No tests were added, edited, deleted or executed in the R179 repair pass.
-Reference inspection was scoped to the repaired paths and canonical process
-shutdown helpers. Existing tests remain unchanged. Tests, integration scenarios,
-behavioral probes, cross-platform
-execution, baseline-reversal tests, CI/install/publication and paid/provider/
-scheduler/container/remote launches were explicitly deferred by the brief.
-Consequently empty/zero/equal/malformed boundaries and failure exits are source
-implementations, not runtime evidence. Independent security review and parent
-admission are still required.
+Use pinned Rust 1.99.1 with the workspace lockfile:
+`cargo +1.99.1 test -p oms-supervisor --all-targets --locked --offline`.
+The existing process fixtures exercise owned leader/group cleanup, cancellation,
+call/scope correlation and resistance to diagnostic-field changes. Recovery
+fixtures exercise durable settlement replay, mismatched identity and legacy
+terminal records. Root/Peer fixtures cover their service handoff separately.
+Duplex fixtures cover a live reply before child exit, raw fragmented bytes,
+partial writes, queue/capture bounds, half-close, EPIPE, deadline/cancellation
+under backpressure and retained terminal events. The harness-free
+`duplex_whole_tree` target exercises real exclusive Linux leader/descendant
+cleanup; unsupported platforms explicitly check refusal.
+These checks do not establish live provider, macOS/WSL2, kernel-stuck teardown,
+whole-tree fanout bounds or final CI/install/publication correctness.

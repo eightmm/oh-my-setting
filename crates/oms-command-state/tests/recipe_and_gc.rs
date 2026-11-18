@@ -511,6 +511,28 @@ fn gc_completion_captures_host_hooks_telemetry_prune_and_orphans() {
     let orphan_payload = repo.join(".oms/artifacts/loose-orphan.bin");
     fs::write(&kept_payload, b"kept").unwrap();
     fs::write(&orphan_payload, b"orphan").unwrap();
+    let dispatch = repo.join(".oms/artifacts/panel-dispatch");
+    fs::create_dir_all(&dispatch).unwrap();
+    let dispatch_records = [
+        (
+            "reservations.json",
+            br#"{"schema":1,"calls":{"call-unknown":{"state":"unknown"}}}"#.as_slice(),
+        ),
+        (
+            "call-unknown-launch.json",
+            br#"{"schema":2,"member":"call-unknown","state":"reserved"}"#.as_slice(),
+        ),
+        (
+            "call-unknown-process.json",
+            br#"{"schema":1,"member":"call-unknown","cleanup_complete":false}"#.as_slice(),
+        ),
+    ];
+    for (name, body) in dispatch_records {
+        fs::write(dispatch.join(name), body).unwrap();
+    }
+    let lookalike = repo.join(".oms/artifacts/panel-dispatch-copy/loose.json");
+    fs::create_dir_all(lookalike.parent().unwrap()).unwrap();
+    fs::write(&lookalike, b"orphan").unwrap();
 
     // 1005 valid artifact rows so keep=1000 prunes 5 rows while preserving kept_payload ref on the last row.
     let mut index_bytes = Vec::new();
@@ -532,6 +554,10 @@ fn gc_completion_captures_host_hooks_telemetry_prune_and_orphans() {
     age_file(&repo.join(&cap_rel), 1000);
     age_file(&kept_payload, 1000);
     age_file(&orphan_payload, 1000);
+    for (name, _) in dispatch_records {
+        age_file(&dispatch.join(name), 1000);
+    }
+    age_file(&lookalike, 1000);
 
     // Aged small-file residue: panel-activity, state-hint, orphan peer wrapper
     // (no tree), a peer wrapper whose tree still exists, and a fresh hint.
@@ -633,6 +659,14 @@ fn gc_completion_captures_host_hooks_telemetry_prune_and_orphans() {
     assert_eq!(apply_report.get("deferred").array().unwrap().len(), 0);
     assert!(!repo.join(&cap_rel).exists());
     assert!(!orphan_payload.exists());
+    assert!(!lookalike.exists());
+    for (name, body) in dispatch_records {
+        assert_eq!(
+            fs::read(dispatch.join(name)).unwrap(),
+            body,
+            "dispatch custody: {name}"
+        );
+    }
     assert!(kept_payload.exists());
     assert!(!activity.exists() && !hint.exists() && !orphan_peer.exists());
     assert!(fresh_hint.exists() && live_peer.join("owner.json").exists());

@@ -331,5 +331,29 @@ mod tests {
         );
         let allowed = resolve_state_with(&foreign, &scratch, true).unwrap();
         assert_eq!(allowed, main_repo);
+        let second = parent.join("second");
+        git_ok(
+            &main_repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                second.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let pointer = std::fs::read(scratch.join(".git")).unwrap();
+        std::fs::copy(second.join(".git"), scratch.join(".git")).unwrap();
+        assert_eq!(
+            resolve_state_with(&resolver, &scratch, true).unwrap(),
+            scratch,
+            "another registered worktree's metadata cannot prove this checkout"
+        );
+        assert!(resolve_state_with(&resolver, &scratch, false).is_err());
+        std::fs::write(scratch.join(".git"), pointer).unwrap();
+        assert_eq!(
+            resolve_state_with(&resolver, &scratch, false).unwrap(),
+            main_repo
+        );
     }
 }

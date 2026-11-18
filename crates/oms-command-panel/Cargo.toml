@@ -9,6 +9,7 @@ rust-version = "1.99.1"
 oms-panel-core = { path = "../oms-panel-core" }
 oms-work-inspect = { path = "../oms-work-inspect" }
 oms-command-plan = { path = "../oms-command-plan" }
+oms-command-peer = { path = "../oms-command-peer" }
 oms-command-task = { path = "../oms-command-task" }
 oms-command-operations = { path = "../oms-command-operations" }
 oms-command-room = { path = "../oms-command-room" }

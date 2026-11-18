@@ -1,17 +1,16 @@
 # oms-command-peer
 
-Native peer command migration with the W5b integrations described below.
-This crate compiles independently but is **not yet a complete compatibility replacement**.
-Do not wire it into production routing until the remaining contracts below
-have been implemented and the canonical behavior suites have run.
+Native peer commands and the root CLI's execution adapters use this crate.
+The boundaries below distinguish implemented paths from remaining capabilities;
+compilation alone does not establish complete compatibility.
 
-The standalone workspace uses Rust 1.99.1, edition 2024, resolver 3 and forbids
+The workspace uses Rust 1.99.1, edition 2024, resolver 3 and forbids
 unsafe code. Dependencies resolve through the root workspace lockfile; no crate-local
 lockfile or new dependency is needed for the embedded view assets.
 
 ## Entrypoints
 
-- `owns(tool, args)` classifies the fifteen command names without IO, including
+- `owns(tool, args)` classifies the native command names without IO, including
   malformed invocations. Unknown names are unowned and return status 75.
 - `run(tool, args, cwd, interrupted)` uses the checkout as development source.
 - `run_with_source(tool, args, cwd, source_root, interrupted)` accepts the
@@ -71,10 +70,76 @@ state root, otherwise the owner repository is used. No credential or raw
 provider output is copied into the receipt: only counts, known identities and
 the output digest are stored. A receipt publication failure stops continuation
 and leaves the registered liability for reconciliation.
+Schema-2 receipts separately retain the executor's native cleanup evidence;
+timeout or incomplete provider usage never manufactures zero spend. Missing
+execution acknowledgements retain unknown cleanup. Schema-1 history stays readable.
+`Invocation::physical_call` additionally carries the exact physical-call tag to
+the native reactor. `Completed::owned_cleanup` retains its opaque, actual-scope
+proof separately from the legacy Boolean observation. Synthetic executors leave
+that proof absent. Resource-bound calls settle invocation and process custody
+only with that exact call's allowed-scope proof. Usage, persistent sessions,
+Team slots and candidate WIP remain separate; native fanout bounds are unknown.
 Registration failure prevents that physical invocation. Completion-persistence
 failure stops automatic account overflow and model fallback, even when provider
 output is already available. Ordinary and budget-enforced calls share this
 strict contract so an untracked retry cannot disappear from budget admission.
+
+Registration first publishes a repository-local observed physical intent in the
+shared dispatch registry, then its pending usage receipt, then a CAS linking the
+receipt ordinal. All admission locks are released before the executor runs, and
+cancellation or expiry at the final launch fence retains the pending liability.
+A repeated physical ID returns status without resending. Partial publication
+stops continuation until reconciliation. This observed registration does not
+establish team authority, canonical owner generations or hard native limits.
+
+An explicit `OMS_CAMPAIGN_MANIFEST_SHA256` binds a physical call to the original
+canonical manifest and an active matching provider reservation. Empty, changed,
+expired or settled bindings refuse before execution. Admission holds the existing
+campaign events lock before the shared dispatch, usage and ignore-file locks,
+using one monotonic deadline. The shared budget projection includes the candidate
+physical call, previous receipts and outstanding intents; every fallback repeats
+this check. The outer ledger guard and campaign deadline are checked again after
+nested registration. All locks are released before execution. This observed soft
+usage policy does not grant controller/root authority or a provider hard cap.
+
+`session resume --apply` uses the same intent, pending receipt and final launch
+fence before its native executor call; previews create no call liability.
+Registered account homes supply an account ID only on an exact registry match.
+Interactive terminal output remains unmeasured usage even after a successful
+exit. Its digest and the executor's separate cleanup acknowledgement are retained;
+an execution error without acknowledgement keeps cleanup unknown. The result
+includes `provider_call_id`. Registration or completion-persistence failures stop
+continuation and never authorize automatic resend.
+
+The typed `admission` facade lets interactive Main use that same producer without
+capturing or altering its TTY streams. It verifies the selected canonical state
+root, carries the actual attempt and explicit resume identity, and returns an
+opaque handle for the final fence and unknown settlement. Dropping a handle
+does not refund or resend. Uncaptured output has no source digest; missing cleanup
+acknowledgement stays unknown.
+
+Explicit Team calls pass all four locators exactly once: `--team-id`,
+`--team-spec-sha256`, `--team-member` and `--team-member-generation`. Ambient
+Team metadata supplies no admission authority. The root native executor pins the
+canonical Main creation/Room and Team/spec/member generation, task dependencies,
+actual selected account/model/access, execution base and active observed host
+policy around physical registration. A Main can qualify before a Plan exists.
+Explicit Team effort constraints match only the literal the transport adds to
+its argv. Missing or different effort refuses before registration. An unspecified
+contract or interactive effort remains unknown, without applied/support evidence.
+Actual child/depth guards still apply. Unsupported native-team, required native
+capabilities, resource requests and Team budget references refuse.
+
+After the resource writer wait, native qualification checks the original call
+again without registering another call. Both acknowledgements are required;
+missing acknowledgement, expiry or changed policy retains Pending liabilities
+and prevents execution. Outer producer guards end before the provider runs.
+Every account/model retry repeats this path with a distinct physical call.
+Accounting or cleanup-settlement failure prevents retry. Owned cleanup can be
+persisted after cancellation through an independent bounded settlement writer.
+Interactive Main retains its TTY and therefore keeps unobserved cleanup and
+usage unknown. These paths establish neither authenticated TeamRequest control
+nor provider-account capacity, hidden-child coverage or a global hard cap.
 
 The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
 thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed
@@ -206,20 +271,11 @@ not established by compilation:
 
 ## Remaining compatibility work and integration blockers
 
-W5b is incomplete. The owner must resolve these concrete dependency boundaries:
-
-1. Existing `oms-output/Cargo.toml` still enables the JSON precision feature
-   prohibited by this brief. Runtime itself no longer enables it. No such feature
-   was added here, but a zero-feature dependency closure requires an upstream
-   repair outside this crate; preserving native digest reuse cannot fix that
-   manifest from the allowed directory.
-2. Canonical admission/checkpoint APIs live in `oms-command-landing`, whose
-   `oms-reference` dependency requires `proc_pidinfo` 0.1.4. That package is absent
-   from the permitted root lockfile. Importing that dependency would violate the
-   external-package constraint. No alternate admission implementation is invented.
-3. The public peer executor returns buffered process results and has no terminal
-   control-input or streamed durable sink interface. Interactive delegation and
-   complete streamed command capture need the owner's interface decision.
+The historical W5b dependency blockers no longer describe this workspace:
+`oms-output` does not enable `arbitrary_precision`, and `proc_pidinfo` is in the
+root lockfile. The remaining public peer executor returns buffered process
+results and has no terminal control-input or streamed durable sink interface.
+Interactive delegation and complete streamed command capture need that interface.
 
 The remaining behavior is still refused or incomplete:
 
@@ -232,9 +288,9 @@ The remaining behavior is still refused or incomplete:
   `oms-command-graph`. Only the supplied typed pack path above is implemented.
 - Session checkpoint/fork/launch/compare/file restore, managed panel relocation,
   full status projection and complete handoff-prompt synthesis need the native
-  checkpoint/panel interfaces. Resume launch serialization/receipts are not yet
-  complete. Prompts-only Antigravity capture is bounded by the general 64 MiB
-  reader and is not a streaming history implementation.
+  checkpoint/panel interfaces. Native resume uses physical registration and its
+  final fence as described above. Prompts-only Antigravity capture is bounded by
+  the general 64 MiB reader and is not a streaming history implementation.
 - Remote artifact views still refuse. Legacy `artifact_view.py::ssh_read` uses
   SSH plus a remote no-follow reader; the requested private curl-config transport
   is a different interface. Neither transport may silently lose remote no-follow
@@ -248,9 +304,9 @@ The remaining behavior is still refused or incomplete:
   semantic deliberation enforcement, until-agreement stop reports, advice
   triggers, task observation and persistent failure recovery remain incomplete.
 
-The canonical behavioral suites, failure/edge cases, adversarial namespace
-cases and cross-provider fixtures were not run under the implementation-first
-brief. No production selector, commit, push or install was performed.
+The original implementation-first brief deferred behavioral verification.
+Current native fixtures cover the implemented paths listed below; they do not
+establish every compatibility item above or live provider/platform behavior.
 
 ## Concurrent calls and interrupted publication
 
@@ -276,7 +332,8 @@ authority over concurrent owner work or prove whole-tree containment.
 ## Validation for this phase
 
 ```sh
-cargo +1.99.1 check --manifest-path Cargo.toml -p oms-command-peer --all-targets --offline
+cargo +1.99.1 check --manifest-path Cargo.toml -p oms-command-peer --all-targets --locked --offline
+cargo +1.99.1 test -p oms-command-peer --all-targets --locked --offline
 cargo +1.99.1 fmt --manifest-path Cargo.toml -p oms-command-peer -- --check
 ```
 
@@ -287,15 +344,15 @@ services. It uses isolated subprocess environments and unique initialized Git
 repositories; no provider executable or online service is needed.
 The owner must still run canonical behavioral suites for full migration parity.
 
-Behavior sources inspected: `scripts/thread.sh`,
+Historical migration sources: `scripts/thread.sh`,
 `scripts/lib/review_confirm.py`, `scripts/lib/review_since.py`,
 `scripts/lib/red_check.py`, `scripts/lib/answer-quality.py`,
 `scripts/lib/oms_runtime/context_pack.py`, `scripts/lib/oms_sessions/`,
 `scripts/session-handoff.sh`, `scripts/agent-ml-context.sh`,
 `scripts/detect-project-style.sh`, and `scripts/lib/peer-common.sh`.
-Existing `tests/test_sessions.py`, `tests/test_oms_runtime_context_pack.py`,
-`tests/test_artifact_view.py`, operator suites and shell smoke coverage remain
-for the owner's behavioral validation phase.
+The retired Python tests are historical references. Current native fixtures and
+the affected root integration checks supply behavioral evidence; platform, live
+provider and release/install verification remain separate.
 
 ## Asset and dependency audit (W2)
 

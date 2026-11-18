@@ -791,15 +791,27 @@ fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bou
         id: Some(id.into()),
     })
 }
-pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>);
+pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>, Option<String>);
 
 pub(crate) fn session_environment(provider: &str, location: &Path) -> Result<SessionEnv> {
     let spec = isolated(provider).ok_or_else(|| Error::new(2, UNPROVED))?;
     if !owned_private(location) {
         return fail("requested provider account is unavailable");
     }
-    let bound = bind(spec, &home_dir()?, "", location.to_path_buf())?;
-    Ok((bound.environment, bound.remove))
+    let home = home_dir()?;
+    let registry = load_registry(&home)?;
+    let location = canonical(location);
+    let account = registry
+        .get(provider)
+        .and_then(|accounts| {
+            accounts
+                .entries
+                .iter()
+                .find(|entry| canonical(&entry.home) == location)
+        })
+        .map(|entry| entry.id.clone());
+    let bound = bind(spec, &home, account.as_deref().unwrap_or(""), location)?;
+    Ok((bound.environment, bound.remove, account))
 }
 fn owned_private(path: &Path) -> bool {
     std::fs::symlink_metadata(path).ok().is_some_and(|m| {
@@ -1265,6 +1277,7 @@ impl Drop for ProviderScratch {
 }
 struct Transport {
     argv: Vec<OsString>,
+    selected_effort: Option<String>,
     input: Option<Vec<u8>>,
     environment: Vec<(OsString, OsString)>,
     scratch: Option<ProviderScratch>,
@@ -1284,6 +1297,7 @@ impl Transport {
     fn effort(&mut self, route: &Route, flag: &str) {
         if !route.effort.is_empty() {
             self.option(flag, &route.effort);
+            self.selected_effort = Some(route.effort.clone());
         }
     }
     fn prompt_file(&mut self, provider: &str, prompt: &[u8]) -> Result<PathBuf> {
@@ -1303,6 +1317,7 @@ fn transport(
     let provider = route.provider.as_str();
     let mut cmd = Transport {
         argv: vec![binary_path(provider).into_os_string()],
+        selected_effort: None,
         input: Some(prompt.to_vec()),
         environment: Vec::new(),
         scratch: None,
@@ -1364,6 +1379,7 @@ fn transport(
             cmd.model(route);
             if !route.effort.is_empty() {
                 cmd.option("-c", format!("model_reasoning_effort=\"{}\"", route.effort));
+                cmd.selected_effort = Some(route.effort.clone());
             }
             cmd.args(&["--json"]);
             if !write {
@@ -1715,6 +1731,92 @@ fn transport(
     }
     Ok(cmd)
 }
+/// Capability declarations are selection evidence, never session credentials.
+pub(crate) fn team_protocol_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(2, "adapter parent unavailable"))?;
+    let info = std::fs::symlink_metadata(path)?;
+    if !info.is_file()
+        || info.file_type().is_symlink()
+        || info.nlink() != 1
+        || info.uid() != rustix::process::geteuid().as_raw()
+        || info.mode() & 0o022 != 0
+        || info.len() > maximum as u64
+    {
+        return fail("unsafe Team request adapter declaration");
+    }
+    let root =
+        oms_safe_fs::Root::open(parent).map_err(|_| Error::new(2, "adapter root unavailable"))?;
+    let bytes = root
+        .read_no_follow(
+            Path::new(
+                path.file_name()
+                    .ok_or_else(|| Error::new(2, "adapter file unavailable"))?,
+            ),
+            oms_safe_fs::ByteReadOptions {
+                missing_ok: false,
+                max_bytes: maximum,
+            },
+        )
+        .map_err(|_| Error::new(2, "adapter declaration read refused"))?;
+    let after = std::fs::symlink_metadata(path)?;
+    if (
+        info.dev(),
+        info.ino(),
+        info.size(),
+        info.mtime(),
+        info.mtime_nsec(),
+        info.ctime(),
+        info.ctime_nsec(),
+    ) != (
+        after.dev(),
+        after.ino(),
+        after.size(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    ) {
+        return fail("Team request adapter declaration changed");
+    }
+    Ok(bytes)
+}
+fn team_protocol(route: &Route, argv: &[OsString]) -> Result<crate::process::TeamProtocol> {
+    if builtin_binary(&route.provider).is_some() {
+        return fail("built-in transport does not support OMS Team request protocol");
+    }
+    let binary = PathBuf::from(
+        argv.first()
+            .ok_or_else(|| Error::new(2, "adapter binary missing"))?,
+    );
+    if !binary.is_absolute() {
+        return fail("Team request adapter requires an explicit registered absolute binary");
+    }
+    let raw = team_protocol_file(&binary, 16 * 1024 * 1024)?;
+    let manifest = PathBuf::from(format!("{}.oms-team-request-v1.json", binary.display()));
+    let declaration = team_protocol_file(&manifest, 8192)?;
+    if declaration.len() > 8192 {
+        return fail("Team request manifest exceeds bound");
+    }
+    let parsed =
+        oms_command_plan::json::parse(&declaration).map_err(|e| Error::new(e.code, e.message))?;
+    oms_command_plan::json::keys(&parsed, &["schema", "protocol", "binary_sha256"], &[])
+        .map_err(|e| Error::new(e.code, e.message))?;
+    if !parsed.get("schema").is_int(1)
+        || parsed.text("protocol") != "oms-team-request-v1"
+        || parsed.text("binary_sha256") != storage::hash(&raw)
+    {
+        return fail("Team request adapter manifest mismatch");
+    }
+    Ok(crate::process::TeamProtocol {
+        binary,
+        binary_sha256: storage::hash(&raw),
+        manifest,
+        manifest_sha256: storage::hash(&declaration),
+    })
+}
 /// Writable dirs named by the child environment: the cargo target and every
 /// isolated provider's account home.
 fn env_rw_dirs(environment: &[(OsString, OsString)]) -> Vec<PathBuf> {
@@ -1872,6 +1974,17 @@ pub(crate) fn execute_env(
         return fail("provider does not support read access through this transport");
     }
     let transport = transport(route, prompt, cwd, write, timeout)?;
+    let team_protocol = if extra_env
+        .iter()
+        .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")
+    {
+        if write {
+            return fail("Team request channels are read-only");
+        }
+        Some(team_protocol(route, &transport.argv)?)
+    } else {
+        None
+    };
     let extra_env = crate::usage::operation_env(extra_env)?;
     let usage_repo = crate::usage::state_repository(account_repo, &extra_env)?;
     let remove_environment: Vec<OsString> = std::env::vars_os()
@@ -1969,52 +2082,118 @@ pub(crate) fn execute_env(
                     .map_err(|e| Error::new(2, e))?;
             exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
         }
-        let usage_receipt = crate::usage::begin(
-            &usage_repo,
-            route,
-            account.as_deref(),
-            &extra_env,
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let team = crate::process::TeamLocator::from_extra(&extra_env)?;
+        let physical_task = crate::usage::env(&extra_env, "OMS_TASK_ID");
+        let attempt = crate::process::PhysicalAttempt {
+            state_root: &usage_repo,
+            contract_repo: account_repo,
+            execution_repo: cwd,
+            team: team.as_ref(),
+            root: None,
+            provider: &route.provider,
+            account: account.as_deref().filter(|id| *id != "default"),
+            selected_model: (route.model != "provider-default").then_some(route.model.as_str()),
+            selected_effort: transport.selected_effort.as_deref(),
+            task_id: physical_task.as_deref(),
+            write,
+            persistent_session: false,
+        };
+        let mut registered = None;
+        context.executor.with_physical_contract(
+            &attempt,
+            deadline,
             context.interrupted,
+            Box::new(|binding| {
+                let pending = crate::usage::begin_before(
+                    &usage_repo,
+                    route,
+                    account.as_deref(),
+                    write,
+                    &extra_env,
+                    context.interrupted,
+                    deadline,
+                    binding,
+                )?;
+                let call = pending.physical_call()?;
+                registered = Some(pending);
+                Ok(call)
+            }),
         )?;
+        let pending_usage = registered.ok_or_else(|| {
+            Error::new(
+                75,
+                "native admission returned without a physical acknowledgement",
+            )
+        })?;
         environment.push((
             "OMS_PROVIDER_CALL_ID".into(),
-            usage_receipt.identity.call_id.clone().into(),
+            pending_usage.receipt.identity.call_id.clone().into(),
         ));
+        pending_usage.fence(context.interrupted)?;
+        pending_usage.qualify(&attempt, context.executor, context.interrupted)?;
+        let usage_receipt = pending_usage.receipt.clone();
         let started = std::time::Instant::now();
-        let result = context.executor.execute(
-            Invocation {
-                argv: exec_argv,
-                cwd: cwd.to_owned(),
-                input: transport.input.clone(),
-                environment,
-                remove_environment,
-                timeout: Duration::from_secs(timeout),
-                max_bytes: 64 * 1024 * 1024,
-                merge: false,
-            },
-            context.interrupted,
-        );
+        let invocation = Invocation {
+            argv: exec_argv,
+            cwd: cwd.to_owned(),
+            input: transport.input.clone(),
+            environment,
+            remove_environment,
+            timeout: Duration::from_secs(timeout),
+            max_bytes: 64 * 1024 * 1024,
+            merge: false,
+            launch_fence: Some(pending_usage.launch_fence()),
+            physical_call: Some(
+                oms_supervisor::process::PhysicalCall::new(&usage_receipt.identity.call_id)
+                    .map_err(|e| Error::new(2, e))?,
+            ),
+        };
+        let result = if let Some(protocol) = &team_protocol {
+            context.executor.execute_team_requests(
+                invocation,
+                crate::process::TeamLaunchBinding {
+                    pending: &pending_usage,
+                    attempt: &attempt,
+                    protocol,
+                },
+                context.interrupted,
+            )
+        } else {
+            context.executor.execute(invocation, context.interrupted)
+        };
         let mut result = match result {
             Ok(result) => result,
             Err(error) => {
-                let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false);
+                let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false, None);
                 return Err(error);
             }
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        let (decoded, terminal) = decode_output(&route.provider, &result.stdout);
-        crate::usage::finish(
+        let (decoded, terminal) = if team_protocol.is_some() {
+            (
+                String::from_utf8_lossy(&result.stdout).into_owned(),
+                result.complete,
+            )
+        } else {
+            decode_output(&route.provider, &result.stdout)
+        };
+        let accounting = crate::usage::finish(
             &usage_repo,
             usage_receipt,
             &result.stdout,
             result.complete && terminal,
+            result.cleanup_complete,
         )
         .map_err(|error| {
             Error::new(
                 error.code,
                 format!("provider usage accounting failed; reconcile before retrying: {error}"),
             )
-        })?;
+        });
+        let settlement = pending_usage.settle_execution(result.owned_cleanup.as_ref());
+        accounting?;
+        settlement?;
         result.stdout = decoded.into_bytes();
         if !result.stdout.is_empty()
             && let Some(model) = configured
@@ -2336,8 +2515,23 @@ mod bridge_route_tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
     }
     #[derive(Default)]
-    struct Capture(Mutex<Vec<Invocation>>);
+    struct Capture(Mutex<Vec<Invocation>>, Mutex<Vec<Option<String>>>);
     impl Executor for Capture {
+        fn with_physical_contract(
+            &self,
+            attempt: &crate::process::PhysicalAttempt<'_>,
+            _: std::time::Instant,
+            stop: &AtomicBool,
+            register: crate::process::RegisterPhysical<'_>,
+        ) -> Result<()> {
+            crate::check(stop)?;
+            assert!(attempt.team.is_none());
+            self.1
+                .lock()
+                .unwrap()
+                .push(attempt.selected_effort.map(str::to_owned));
+            register(crate::process::PhysicalContract::default()).map(|_| ())
+        }
         fn execute(&self, request: Invocation, _: &AtomicBool) -> Result<Completed> {
             let git = request.argv[0] == "git";
             if !git {
@@ -2361,6 +2555,8 @@ mod bridge_route_tests {
                 stdout: b"fixture answer\n".to_vec(),
                 stderr: Vec::new(),
                 complete: true,
+                cleanup_complete: Some(true),
+                owned_cleanup: None,
                 elapsed: Duration::ZERO,
             })
         }
@@ -2384,6 +2580,218 @@ mod bridge_route_tests {
         execute_env(&mut route, prompt, cwd, write, 12, repo, &[], &context)
     }
     #[test]
+    fn physical_contracts_fence_each_retry_and_settle_owned_execution() {
+        isolated_transport(
+            "physical_contracts_fence_each_retry_and_settle_owned_execution",
+            "normal",
+            |repo, cwd| {
+                use crate::process::{PhysicalAttempt, PhysicalContract, RegisterPhysical};
+                use oms_command_telemetry::store::{resources, usage};
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                struct Qualified {
+                    binding: resources::Binding,
+                    starts: AtomicUsize,
+                    hooks: AtomicUsize,
+                    mode: &'static str,
+                }
+                impl Executor for Qualified {
+                    fn with_physical_contract(
+                        &self,
+                        attempt: &PhysicalAttempt<'_>,
+                        _: std::time::Instant,
+                        _: &AtomicBool,
+                        register: RegisterPhysical<'_>,
+                    ) -> Result<()> {
+                        let count = self.hooks.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(attempt.provider, "claude");
+                        assert_eq!(
+                            attempt.selected_model,
+                            Some(if count < 2 { "first" } else { "second" })
+                        );
+                        assert!(attempt.team.is_none() && attempt.root.is_none());
+                        assert_eq!(attempt.selected_effort, Some("high"));
+                        assert_eq!(attempt.owned().borrow().selected_effort, Some("high"));
+                        if self.mode == "missing" || (self.mode == "missing-final" && count == 1) {
+                            return Ok(());
+                        }
+                        let expires_at =
+                            (self.mode == "expires").then(|| crate::seconds() as i64 + 1);
+                        let call = register(PhysicalContract {
+                            resource: Some(&self.binding),
+                            expires_at,
+                        })?;
+                        assert!(
+                            usage::load(attempt.state_root)
+                                .unwrap()
+                                .calls
+                                .iter()
+                                .any(|entry| entry.receipt.identity.call_id == call.id())
+                        );
+                        if let Some(expiry) = expires_at {
+                            let start = std::time::Instant::now();
+                            while (crate::seconds() as i64) < expiry {
+                                assert!(start.elapsed() < Duration::from_secs(3));
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                        Ok(())
+                    }
+                    fn execute(
+                        &self,
+                        mut request: Invocation,
+                        stop: &AtomicBool,
+                    ) -> Result<Completed> {
+                        if request.argv[0] == "git" {
+                            return Ok(Completed {
+                                code: 0,
+                                stdout: Vec::new(),
+                                stderr: Vec::new(),
+                                complete: true,
+                                cleanup_complete: Some(true),
+                                owned_cleanup: None,
+                                elapsed: Duration::ZERO,
+                            });
+                        }
+                        let count = self.starts.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(self.hooks.load(Ordering::Relaxed), (count + 1) * 2);
+                        let retry = self.mode == "retry" && count == 0;
+                        request.argv = vec!["/bin/sh".into(), "-c".into(), format!(
+                            "printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"local fixture\"}}'; {}",
+                            if retry { "printf 'rate limit' >&2; exit 1" } else { "exit 0" }).into()];
+                        let result = crate::process::Native.execute(request, stop)?;
+                        assert!(result.owned_cleanup.is_some());
+                        if self.mode == "cancel" {
+                            stop.store(true, Ordering::Release);
+                        }
+                        Ok(result)
+                    }
+                }
+                for mode in ["retry", "cancel", "expires", "missing", "missing-final"] {
+                    let state = repo.join(format!("contract-{mode}"));
+                    fs::create_dir(&state).unwrap();
+                    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+                    let stop = AtomicBool::new(false);
+                    let policy = resources::Policy {
+                        domain: "fixture-domain".into(),
+                        epoch: "one".into(),
+                        host_generation_sha256: "a".repeat(64),
+                        max_teams: 1,
+                        max_invocations: 1,
+                        max_open_processes: 1,
+                        max_write_wip: 1,
+                        reviewer_headroom: 0,
+                    };
+                    resources::activate(
+                        &state,
+                        &policy,
+                        None,
+                        &stop,
+                        std::time::Instant::now() + Duration::from_secs(2),
+                    )
+                    .unwrap();
+                    let executor = Qualified {
+                        binding: resources::Binding {
+                            policy_sha256: policy.sha256().unwrap(),
+                            host_generation_sha256: policy.host_generation_sha256.clone(),
+                            root_owner: "fixture-main".into(),
+                            root_generation: "fixture-creation".into(),
+                            team: None,
+                            reviewer: false,
+                            persistent_session: false,
+                            cleanup_scopes: vec![
+                                oms_supervisor::process::Scope::ProcessGroup,
+                                oms_supervisor::process::Scope::WholeTree,
+                            ],
+                        },
+                        starts: AtomicUsize::new(0),
+                        hooks: AtomicUsize::new(0),
+                        mode,
+                    };
+                    let context = Context {
+                        cwd,
+                        source: repo,
+                        interrupted: &stop,
+                        executor: &executor,
+                    };
+                    let mut route = Route {
+                        provider: "claude".into(),
+                        model: "first".into(),
+                        effort: "high".into(),
+                        explicit: true,
+                        account: String::new(),
+                        account_pinned: false,
+                    };
+                    let extra = vec![
+                        ("OMS_STATE_REPO".into(), state.as_os_str().into()),
+                        ("OMS_OPERATION_ID".into(), "op_scoped".into()),
+                    ];
+                    let result = execute_with_fallback_env(
+                        &mut route, "second", b"fixture", cwd, true, 10, repo, &extra, &context,
+                    );
+                    let occupancy = resources::occupancy(&state, &AtomicBool::new(false))
+                        .unwrap()
+                        .unwrap();
+                    let calls = usage::load(&state).unwrap().calls;
+                    match mode {
+                        "retry" => {
+                            assert_eq!(result.unwrap().code, 0);
+                            assert_eq!(executor.starts.load(Ordering::Relaxed), 2);
+                            assert_eq!(executor.hooks.load(Ordering::Relaxed), 4);
+                            assert_eq!(calls.len(), 2);
+                            assert_eq!(
+                                (
+                                    occupancy.invocations,
+                                    occupancy.open_processes,
+                                    occupancy.write_wip
+                                ),
+                                (0, 0, 1)
+                            );
+                        }
+                        "cancel" => {
+                            assert_eq!(result.unwrap().code, 0);
+                            assert!(stop.load(Ordering::Acquire));
+                            assert_eq!(calls.len(), 1);
+                            assert_eq!(
+                                (
+                                    occupancy.invocations,
+                                    occupancy.open_processes,
+                                    occupancy.write_wip
+                                ),
+                                (0, 0, 1)
+                            );
+                        }
+                        "expires" | "missing-final" => {
+                            assert_eq!(result.unwrap_err().code, 75);
+                            assert_eq!(executor.starts.load(Ordering::Relaxed), 0);
+                            assert_eq!(calls.len(), 1);
+                            assert_eq!(calls[0].receipt.phase, usage::Phase::Pending);
+                            assert_eq!(
+                                (
+                                    occupancy.invocations,
+                                    occupancy.open_processes,
+                                    occupancy.write_wip
+                                ),
+                                (1, 1, 1)
+                            );
+                        }
+                        "missing" => {
+                            assert_eq!(result.unwrap_err().code, 75);
+                            assert_eq!(executor.starts.load(Ordering::Relaxed), 0);
+                            assert!(calls.is_empty());
+                            assert_eq!(occupancy, resources::Occupancy::default());
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        calls
+                            .iter()
+                            .all(|entry| entry.tokens.is_none() && entry.cost_microusd.is_none())
+                    );
+                }
+            },
+        );
+    }
+    #[test]
     fn physical_provider_calls_record_fallback_and_timeout_usage() {
         isolated_transport(
             "physical_provider_calls_record_fallback_and_timeout_usage",
@@ -2392,30 +2800,81 @@ mod bridge_route_tests {
                 use oms_command_telemetry::store::usage::{self, Phase};
                 struct Reports(std::sync::atomic::AtomicUsize, PathBuf);
                 impl Executor for Reports {
-                    fn execute(&self, request: Invocation, _: &AtomicBool) -> Result<Completed> {
+                    fn execute(
+                        &self,
+                        request: Invocation,
+                        interrupted: &AtomicBool,
+                    ) -> Result<Completed> {
                         if request.argv[0] == "git" {
                             return Ok(Completed {
                                 code: 0,
                                 stdout: vec![],
                                 stderr: vec![],
                                 complete: true,
+                                cleanup_complete: Some(true),
+                                owned_cleanup: None,
                                 elapsed: Duration::ZERO,
                             });
                         }
                         let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let calls = usage::load(&self.1).unwrap().calls;
                         assert_eq!(calls.last().unwrap().receipt.phase, Phase::Pending);
+                        let intents =
+                            oms_command_telemetry::store::physical::load(&self.1, interrupted)
+                                .unwrap();
+                        assert_eq!(intents.len(), n + 1);
+                        let current = &calls.last().unwrap().receipt;
+                        let intent = intents
+                            .iter()
+                            .find(|intent| intent.identity.call_id == current.identity.call_id)
+                            .unwrap();
+                        assert_eq!(intent.identity, current.identity);
+                        assert_eq!(intent.usage_ordinal, Some(current.ordinal));
+                        assert_eq!(
+                            intent.phase,
+                            oms_command_telemetry::store::physical::Phase::Ready
+                        );
+                        assert!(intent.write);
+                        if let Some((_, digest)) = request
+                            .environment
+                            .iter()
+                            .find(|(key, _)| key == "OMS_CAMPAIGN_MANIFEST_SHA256")
+                        {
+                            let digest = digest.to_str().unwrap();
+                            assert_eq!(intent.campaign_manifest_sha256.as_deref(), Some(digest));
+                            let directory =
+                                oms_command_telemetry::store::campaign::directory(digest).unwrap();
+                            let campaign_guard = oms_command_telemetry::store::lock_file_before(
+                                &self.1.join(directory).join("events.jsonl"),
+                                interrupted,
+                                std::time::Instant::now() + Duration::from_millis(100),
+                            )
+                            .unwrap();
+                            drop(campaign_guard);
+                        } else {
+                            assert_eq!(intent.campaign_manifest_sha256, None);
+                        }
+                        let _guard = oms_command_telemetry::store::dispatch::Transaction::acquire(
+                            &self.1,
+                            Duration::from_millis(100),
+                            interrupted,
+                        )
+                        .unwrap();
                         assert!(
                             request
                                 .environment
                                 .iter()
                                 .any(|(k, _)| k == "OMS_PROVIDER_CALL_ID")
                         );
+                        assert_eq!(
+                            request.physical_call.as_ref().map(|call| call.id()),
+                            Some(intent.identity.call_id.as_str())
+                        );
                         Ok(Completed {
                         code:if n == 0 {1} else if n == 2 {124} else {0},
                         stdout:format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fixture answer\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":2,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":0}},\"total_cost_usd\":0.0000{}}}\n",n+1).into_bytes(),
                         stderr:if n == 0 {b"rate limit".to_vec()} else {vec![]},
-                        complete:n != 2,elapsed:Duration::ZERO,
+                        complete:n != 2,cleanup_complete:Some(true),owned_cleanup:None,elapsed:Duration::ZERO,
                     })
                     }
                 }
@@ -2475,9 +2934,298 @@ mod bridge_route_tests {
                 let calls = usage::load(&state).unwrap().calls;
                 assert_eq!(calls[2].receipt.phase, Phase::Unknown);
                 assert_eq!(calls[2].cost_microusd, Some(30));
+                assert_eq!(calls[2].receipt.cleanup_complete, Some(true));
+
+                let bounded = repo.join("bounded-state");
+                std::fs::create_dir(&bounded).unwrap();
+                std::fs::set_permissions(&bounded, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let raw = format!(
+                    r#"{{"problem":{{"file":"problem.txt","sha256":"{}"}},"base":"{}",
+                    "verify":{{"command":"true","timeout_s":30,"inputs":[]}},"candidate_formats":["text"],
+                    "groups":[{{"id":"group","formulation":"fixture","k":1,"routes":[{{"provider":"claude","model":"first"}}]}}],
+                    "budget":{{"max_concurrent":4,"total_calls":10,"deadline_s":60,"max_waves":2,"stall_waves":2,
+                    "verifier":{{"concurrency":1,"timeout_s":30,"max_artifact_bytes":1024}},
+                    "usage":{{"max_tokens":60,"per_call":{{"tokens":60}}}}}}}}"#,
+                    "a".repeat(64),
+                    "b".repeat(40),
+                );
+                let manifest = oms_json::parse_strict(raw.as_bytes()).unwrap();
+                let raw = oms_json::canonical_json(&manifest).unwrap();
+                let digest = crate::storage::hash(&raw);
+                let directory = format!(".oms/plan/campaigns/{}", &digest[..16]);
+                let store = oms_command_plan::storage::Store::open(&bounded).unwrap();
+                store
+                    .publish_once(format!("{directory}/manifest.json"), &raw, 1024 * 1024)
+                    .unwrap();
+                let budget = String::from_utf8(
+                    oms_json::canonical_json(manifest.get("budget").unwrap()).unwrap(),
+                )
+                .unwrap();
+                let started = format!(
+                    r#"{{"type":"campaign_started","budget":{budget},"started_at":{:?}}}"#,
+                    crate::now()
+                );
+                store
+                    .append(
+                        format!("{directory}/events.jsonl"),
+                        &oms_command_plan::json::parse(started.as_bytes()).unwrap(),
+                    )
+                    .unwrap();
+                let operation = crate::id("res_").unwrap();
+                let reservation = format!(
+                    r#"{{"type":"reservation","id":"{operation}","provider":"claude","kind":"seat","reserved_usage":{{"tokens":60,"cost_microusd":null}}}}"#
+                );
+                store
+                    .append(
+                        format!("{directory}/events.jsonl"),
+                        &oms_command_plan::json::parse(reservation.as_bytes()).unwrap(),
+                    )
+                    .unwrap();
+                let bounded_reports =
+                    Reports(std::sync::atomic::AtomicUsize::new(0), bounded.clone());
+                let bounded_context = Context {
+                    executor: &bounded_reports,
+                    ..context
+                };
+                let extra = vec![
+                    ("OMS_STATE_REPO".into(), bounded.as_os_str().to_owned()),
+                    ("OMS_OPERATION_ID".into(), operation.clone().into()),
+                    ("OMS_GOAL_ID".into(), digest[..16].into()),
+                    ("OMS_CAMPAIGN_MANIFEST_SHA256".into(), digest.clone().into()),
+                ];
+                route.model = "first".into();
+                let error = execute_with_fallback_env(
+                    &mut route,
+                    "second",
+                    b"fixture",
+                    cwd,
+                    true,
+                    12,
+                    repo,
+                    &extra,
+                    &bounded_context,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.code, 3,
+                    "each physical fallback must pass campaign admission"
+                );
+                assert_eq!(
+                    bounded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                    1
+                );
+                assert_eq!(usage::load(&bounded).unwrap().calls.len(), 1);
+                assert_eq!(
+                    oms_command_telemetry::store::physical::load(&bounded, &stop)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                let registry = bounded.join(oms_command_telemetry::store::dispatch::REGISTRY);
+                let before = std::fs::read(&registry).unwrap();
+                for (key, value) in [
+                    ("OMS_CAMPAIGN_MANIFEST_SHA256", String::new()),
+                    (
+                        "OMS_CAMPAIGN_MANIFEST_SHA256",
+                        format!("{}{}", &digest[..16], "e".repeat(48)),
+                    ),
+                    ("OMS_GOAL_ID", "other_goal".into()),
+                    ("OMS_OPERATION_ID", format!("res_{}", "0".repeat(32))),
+                ] {
+                    let mut invalid = extra.clone();
+                    invalid.push((key.into(), value.into()));
+                    let error = execute_env(
+                        &mut route,
+                        b"fixture",
+                        cwd,
+                        true,
+                        12,
+                        repo,
+                        &invalid,
+                        &bounded_context,
+                    )
+                    .unwrap_err();
+                    assert_eq!(
+                        error.code, 2,
+                        "invalid explicit campaign binding must not become unbudgeted: {error}"
+                    );
+                    assert_eq!(
+                        bounded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                        1
+                    );
+                    assert_eq!(std::fs::read(&registry).unwrap(), before);
+                    assert_eq!(usage::load(&bounded).unwrap().calls.len(), 1);
+                }
+                store
+                    .append(
+                        format!("{directory}/events.jsonl"),
+                        &oms_command_plan::json::parse(
+                            format!(
+                                r#"{{"type":"settled","id":"{operation}","outcome":"refused"}}"#
+                            )
+                            .as_bytes(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                let error = execute_env(
+                    &mut route,
+                    b"fixture",
+                    cwd,
+                    true,
+                    12,
+                    repo,
+                    &extra,
+                    &bounded_context,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.code, 2,
+                    "settled reservation cannot authorize another physical call"
+                );
+                assert_eq!(
+                    bounded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                    1
+                );
+
+                let guarded = repo.join("guarded-state");
+                fs::create_dir(&guarded).unwrap();
+                fs::set_permissions(&guarded, fs::Permissions::from_mode(0o700)).unwrap();
+                let guarded_store = oms_command_plan::storage::Store::open(&guarded).unwrap();
+                guarded_store
+                    .publish_once(format!("{directory}/manifest.json"), &raw, 1024 * 1024)
+                    .unwrap();
+                for row in [&started, &reservation] {
+                    guarded_store
+                        .append(
+                            format!("{directory}/events.jsonl"),
+                            &oms_command_plan::json::parse(row.as_bytes()).unwrap(),
+                        )
+                        .unwrap();
+                }
+                let receipt_target = oms_command_telemetry::store::canonical_index(
+                    &guarded,
+                    Some(Path::new(usage::RECEIPTS)),
+                    true,
+                    false,
+                )
+                .unwrap();
+                let settings = oms_lock::Settings::from_env().unwrap();
+                let held = oms_lock::Lock::for_file(&receipt_target, settings.clone())
+                    .unwrap()
+                    .try_acquire()
+                    .unwrap();
+                let events_lock = oms_lock::Lock::for_file(
+                    &guarded_store.repo().join(&directory).join("events.jsonl"),
+                    settings,
+                )
+                .unwrap();
+                let guarded_reports =
+                    Reports(std::sync::atomic::AtomicUsize::new(0), guarded.clone());
+                let guarded_context = Context {
+                    executor: &guarded_reports,
+                    ..bounded_context
+                };
+                let mut guarded_env = extra.clone();
+                guarded_env.push(("OMS_STATE_REPO".into(), guarded.as_os_str().to_owned()));
+                let mut guarded_route = route.clone();
+                std::thread::scope(|scope| {
+                    let worker = scope.spawn(|| {
+                        execute_env(
+                            &mut guarded_route,
+                            b"fixture",
+                            cwd,
+                            true,
+                            12,
+                            repo,
+                            &guarded_env,
+                            &guarded_context,
+                        )
+                    });
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    let mut reserved = false;
+                    while std::time::Instant::now() < deadline {
+                        if oms_command_telemetry::store::physical::load(&guarded, &stop)
+                            .is_ok_and(|intents| !intents.is_empty())
+                        {
+                            reserved = true;
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    assert!(
+                        reserved,
+                        "physical registration reached the nested receipt wait"
+                    );
+                    let moved = events_lock.path().with_extension("fixture-moved");
+                    assert!(!moved.exists());
+                    fs::rename(events_lock.path(), &moved).unwrap();
+                    drop(held);
+                    let outcome = worker.join().unwrap();
+                    if moved.is_dir() {
+                        fs::remove_dir_all(moved).unwrap();
+                    } else {
+                        fs::remove_file(moved).unwrap();
+                    }
+                    let error = outcome.unwrap_err();
+                    assert_eq!(error.code, 75, "{error}");
+                    assert!(error.message.contains("campaign guard changed"), "{error}");
+                    assert_eq!(
+                        guarded_reports.0.load(std::sync::atomic::Ordering::Relaxed),
+                        0
+                    );
+                    let pending = usage::load(&guarded).unwrap().calls;
+                    assert_eq!(pending.len(), 1);
+                    assert_eq!(pending[0].receipt.phase, Phase::Pending);
+                    let intents =
+                        oms_command_telemetry::store::physical::load(&guarded, &stop).unwrap();
+                    assert_eq!(intents.len(), 1);
+                    assert_eq!(intents[0].usage_ordinal, Some(pending[0].receipt.ordinal));
+                });
             },
         );
     }
+    #[test]
+    fn team_protocol_capability_is_strict_owned_and_rechecked() {
+        let scratch = ProviderScratch::new("team-protocol", None).unwrap();
+        let binary = scratch
+            .file("oms-agent-adapter-fixture", b"fixture adapter bytes")
+            .unwrap();
+        let manifest = PathBuf::from(format!("{}.oms-team-request-v1.json", binary.display()));
+        let route = Route {
+            provider: "fixture".into(),
+            model: "fixture".into(),
+            effort: "high".into(),
+            explicit: true,
+            account: String::new(),
+            account_pinned: false,
+        };
+        let declare = |schema: u8| {
+            std::fs::write(&manifest,format!("{{\"schema\":{schema},\"protocol\":\"oms-team-request-v1\",\"binary_sha256\":\"{}\"}}",storage::hash(b"fixture adapter bytes"))).unwrap();
+            std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        declare(1);
+        let selected = team_protocol(&route, &[binary.clone().into_os_string()]).unwrap();
+        selected.check().unwrap();
+        std::fs::write(&binary, b"changed adapter bytes").unwrap();
+        assert!(selected.check().is_err());
+        std::fs::write(&binary, b"fixture adapter bytes").unwrap();
+        declare(2);
+        assert!(team_protocol(&route, &[binary.clone().into_os_string()]).is_err());
+        declare(1);
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert!(team_protocol(&route, &[binary.clone().into_os_string()]).is_err());
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let linked = binary.with_file_name("linked");
+        std::fs::hard_link(&binary, &linked).unwrap();
+        assert!(team_protocol(&route, &[binary.clone().into_os_string()]).is_err());
+        let builtin = Route {
+            provider: "codex".into(),
+            ..route
+        };
+        assert!(team_protocol(&builtin, &[binary.into_os_string()]).is_err());
+    }
+
     #[test]
     fn native_write_transports() {
         for mode in ["normal", "resume"] {
@@ -2654,6 +3402,12 @@ mod bridge_route_tests {
                             })
                             .collect();
                         assert_eq!(request.argv[1..], expected, "{provider} exact={exact}");
+                        let selected_effort = (exact && !flag.is_empty()).then(|| "high".into());
+                        assert_eq!(
+                            *capture.1.lock().unwrap(),
+                            vec![selected_effort.clone(), selected_effort],
+                            "{provider} exact={exact}"
+                        );
                         if file.is_some() {
                             assert!(!scratch.exists());
                         }

@@ -54,6 +54,27 @@ impl Reader {
         Ok(lines)
     }
     pub fn render(&self, repo: &Path, report: &Value, width: usize) -> Result<Vec<String>> {
+        if report["kind"] == "oms-panel-routes" {
+            let routes = &report["routes"];
+            if matches!(self.view, View::Summary | View::Info) {
+                return Ok(render::routes(routes, width)
+                    .lines()
+                    .map(str::to_owned)
+                    .collect());
+            }
+            let bytes = serde_json::to_vec(routes).map_err(Error::new)?;
+            return Ok(render::wrap(&oms_panel_core::redact(&bytes)?, width));
+        }
+        if report["kind"] == "oms-panel-teams" {
+            if matches!(self.view, View::Summary | View::Info) {
+                return Ok(render::teams(report, width)
+                    .lines()
+                    .map(str::to_owned)
+                    .collect());
+            }
+            let bytes = serde_json::to_vec(report).map_err(Error::new)?;
+            return Ok(render::wrap(&oms_panel_core::redact(&bytes)?, width));
+        }
         let mut out = Vec::new();
         let store = Store::open(repo)?;
         if self.view == View::Summary {

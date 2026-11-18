@@ -291,6 +291,30 @@ fn migration_and_retention_are_consistent() {
     assert!(oms_context::parse_json(&migrated).is_ok());
     check_code(&root, &["migrate"], 0);
     check_code(&root, &["validate"], 0);
+    let local_reviews = concat!(
+        "{\"schema\":1,\"kind\":\"review-outcome\",\"exit\":2,\"ts\":\"2026-07-01\"}\n",
+        "{\"schema\":1,\"kind\":\"review-verify\",\"exit\":1,\"ts\":\"2026-07-01\"}\n"
+    );
+    root.index(local_reviews);
+    assert_ok(&native(&root, &["migrate"]));
+    check_code(&root, &["validate"], 0);
+    let migrated = std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
+    for (line, exit) in migrated.lines().zip([2, 1]) {
+        let row = oms_context::parse_json(line.as_bytes()).unwrap();
+        assert_eq!(support::text(support::field(&row, "provider")), "local");
+        assert_eq!(
+            support::field(&row, "exit"),
+            &Json::Number(exit.to_string())
+        );
+    }
+    assert_ok(&native(&root, &["migrate"]));
+    assert_eq!(
+        std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap(),
+        migrated
+    );
+    root.index("{\"kind\":\"call\",\"exit\":0,\"ts\":\"2026-07-01\"}\n");
+    assert_ok(&native(&root, &["migrate"]));
+    check_code(&root, &["validate"], 1);
     let source = event("evt_old", "call", 0, ",\"artifact\":\"missing.md\"")
         + &event("evt_new", "call", 0, "");
     for args in [
