@@ -6,7 +6,16 @@ The Project Graph describes code relationships; the Execution Graph describes
 legal next actions. Both sit above the control plane and do not own authority;
 neither replaces `agent-plan`, `plan-run`, `patch-admit`, `patch-land`,
 `goal-drive` or `autopilot`. The schemas, module boundaries and function
-signatures below are the implementation contract.
+signatures below retain the original design and migration context.
+
+For the current native implementation, use the
+[graph crate map](../crates/oms-command-graph/README.md) and
+[retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md). The Python module layout
+and retired Python test names below are historical references; they are not
+evidence that those paths remain runnable or that native parity was measured.
+The native retrieval benchmark entrypoint is `oms graph project benchmark`.
+Language-specific extraction and resolution limits must be checked before
+treating a sparse graph as complete.
 
 ## In this guide
 
