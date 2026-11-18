@@ -3116,7 +3116,7 @@ mod bridge_route_tests {
                     .try_acquire()
                     .unwrap();
                 let events_lock = oms_lock::Lock::for_file(
-                    &guarded.join(&directory).join("events.jsonl"),
+                    &guarded_store.repo().join(&directory).join("events.jsonl"),
                     settings,
                 )
                 .unwrap();
