@@ -54,6 +54,10 @@ pub(crate) const VALUES: &[&str] = &[
     "context-pack",
     "max-turns",
     "idle-timeout",
+    "team-id",
+    "team-spec-sha256",
+    "team-member",
+    "team-member-generation",
 ];
 pub(crate) const FLAGS: &[&str] = &[
     "dry-run",
@@ -110,7 +114,9 @@ pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
             expanded.push("claude".into());
         }
     }
-    Args::parse(&expanded, VALUES, FLAGS)
+    let args = Args::parse(&expanded, VALUES, FLAGS)?;
+    process::TeamLocator::from_args(&args)?;
+    Ok(args)
 }
 pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     let args = parse(argv)?;
@@ -729,6 +735,7 @@ pub(crate) fn call(
         None
     };
     let mut usage_env = crate::usage::operation_env(&[])?;
+    process::TeamLocator::append_args(args, &mut usage_env)?;
     if let Some(id) = &live_attempt {
         usage_env.push(("OMS_ATTEMPT_ID".into(), id.into()));
     }

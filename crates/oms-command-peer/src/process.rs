@@ -3,7 +3,7 @@ use crate::{Error, Result};
 use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
 use std::{
     ffi::OsString,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -19,6 +19,7 @@ pub struct Invocation {
     pub max_bytes: usize,
     pub merge: bool,
     pub physical_call: Option<oms_supervisor::process::PhysicalCall>,
+    pub launch_fence: Option<LaunchFence>,
 }
 #[derive(Clone, Debug)]
 pub struct Completed {
@@ -32,13 +33,262 @@ pub struct Completed {
     pub owned_cleanup: Option<oms_supervisor::process::OwnedCleanup>,
     pub elapsed: Duration,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamLocator {
+    pub team_id: String,
+    pub spec_sha256: String,
+    pub member_id: String,
+    pub member_generation: i128,
+}
+const TEAM_LOCATORS: [(&str, &str); 4] = [
+    ("team-id", "OMS_TEAM_ID"),
+    ("team-spec-sha256", "OMS_TEAM_SPEC_SHA256"),
+    ("team-member", "OMS_TEAM_MEMBER"),
+    ("team-member-generation", "OMS_TEAM_MEMBER_GENERATION"),
+];
+impl TeamLocator {
+    fn decode(values: &[String]) -> Result<Self> {
+        let identifier = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 160
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+        };
+        let generation = values[3].parse::<i128>().ok().filter(|n| *n > 0);
+        if !identifier(&values[0])
+            || !identifier(&values[2])
+            || values[1].len() != 64
+            || !values[1]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !values[3].bytes().all(|b| b.is_ascii_digit())
+            || generation.is_none()
+        {
+            return Err(Error::new(2, "invalid explicit Team locator bundle"));
+        }
+        Ok(Self {
+            team_id: values[0].clone(),
+            spec_sha256: values[1].clone(),
+            member_id: values[2].clone(),
+            member_generation: generation.unwrap(),
+        })
+    }
+    pub(crate) fn from_args(args: &crate::cli::Args) -> Result<Option<Self>> {
+        if TEAM_LOCATORS.iter().all(|(flag, _)| !args.has(flag)) {
+            return Ok(None);
+        }
+        let values = TEAM_LOCATORS
+            .iter()
+            .map(|(flag, _)| {
+                if args.all(flag).len() != 1 {
+                    return Err(Error::new(
+                        2,
+                        "Team locators require all four options exactly once",
+                    ));
+                }
+                args.os(flag)
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+                    .ok_or_else(|| Error::new(2, "Team locator requires UTF-8 text"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::decode(&values).map(Some)
+    }
+    pub(crate) fn append_args(
+        args: &crate::cli::Args,
+        extra: &mut Vec<(OsString, OsString)>,
+    ) -> Result<()> {
+        if Self::from_args(args)?.is_some() {
+            for (flag, env) in TEAM_LOCATORS {
+                extra.push((env.into(), args.os(flag).unwrap().into()));
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn from_extra(extra: &[(OsString, OsString)]) -> Result<Option<Self>> {
+        if TEAM_LOCATORS
+            .iter()
+            .all(|(_, key)| !extra.iter().any(|(name, _)| name == key))
+        {
+            return Ok(None);
+        }
+        let values = TEAM_LOCATORS
+            .iter()
+            .map(|(_, key)| {
+                let found = extra
+                    .iter()
+                    .filter(|(name, _)| name == key)
+                    .collect::<Vec<_>>();
+                if found.len() != 1 {
+                    return Err(Error::new(2, "incomplete or duplicate Team metadata"));
+                }
+                found[0]
+                    .1
+                    .to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| Error::new(2, "Team metadata requires UTF-8 text"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::decode(&values).map(Some)
+    }
+}
+pub struct PhysicalAttempt<'a> {
+    pub state_root: &'a Path,
+    pub contract_repo: &'a Path,
+    pub execution_repo: &'a Path,
+    pub team: Option<&'a TeamLocator>,
+    pub root: Option<RootLocator<'a>>,
+    pub provider: &'a str,
+    pub account: Option<&'a str>,
+    pub selected_model: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub write: bool,
+    pub persistent_session: bool,
+}
+#[derive(Clone, Copy)]
+pub struct RootLocator<'a> {
+    pub owner: &'a str,
+    pub room_id: &'a str,
+}
+pub(crate) struct OwnedPhysicalAttempt {
+    state: PathBuf,
+    contract: PathBuf,
+    execution: PathBuf,
+    root: Option<(String, String)>,
+    team: Option<TeamLocator>,
+    provider: String,
+    account: Option<String>,
+    selected_model: Option<String>,
+    task_id: Option<String>,
+    write: bool,
+    persistent_session: bool,
+}
+impl PhysicalAttempt<'_> {
+    pub(crate) fn owned(&self) -> OwnedPhysicalAttempt {
+        OwnedPhysicalAttempt {
+            state: self.state_root.into(),
+            contract: self.contract_repo.into(),
+            execution: self.execution_repo.into(),
+            root: self
+                .root
+                .map(|root| (root.owner.into(), root.room_id.into())),
+            team: self.team.cloned(),
+            provider: self.provider.into(),
+            account: self.account.map(str::to_owned),
+            selected_model: self.selected_model.map(str::to_owned),
+            task_id: self.task_id.map(str::to_owned),
+            write: self.write,
+            persistent_session: self.persistent_session,
+        }
+    }
+}
+impl OwnedPhysicalAttempt {
+    pub(crate) fn borrow(&self) -> PhysicalAttempt<'_> {
+        PhysicalAttempt {
+            state_root: &self.state,
+            contract_repo: &self.contract,
+            execution_repo: &self.execution,
+            root: self
+                .root
+                .as_ref()
+                .map(|(owner, room_id)| RootLocator { owner, room_id }),
+            team: self.team.as_ref(),
+            provider: &self.provider,
+            account: self.account.as_deref(),
+            selected_model: self.selected_model.as_deref(),
+            task_id: self.task_id.as_deref(),
+            write: self.write,
+            persistent_session: self.persistent_session,
+        }
+    }
+}
+#[derive(Clone, Copy, Default)]
+pub struct PhysicalContract<'a> {
+    pub resource: Option<&'a oms_command_telemetry::store::resources::Binding>,
+    pub expires_at: Option<i64>,
+}
+#[derive(Clone, Debug)]
+pub struct LaunchFence {
+    deadline: Instant,
+    expires_at: Option<i64>,
+    campaign_deadline: Option<i64>,
+}
+impl LaunchFence {
+    pub(crate) fn new(deadline: Instant, expires_at: Option<i64>) -> Self {
+        Self {
+            deadline,
+            expires_at,
+            campaign_deadline: None,
+        }
+    }
+    pub(crate) fn with_campaign_deadline(mut self, deadline: Option<i64>) -> Self {
+        self.campaign_deadline = deadline;
+        self
+    }
+    pub fn check(&self, interrupted: &AtomicBool) -> Result<()> {
+        crate::check(interrupted)?;
+        if Instant::now() >= self.deadline {
+            return Err(Error::new(
+                75,
+                "provider admission deadline expired; pending intent retained",
+            ));
+        }
+        if self.expires_at.is_some() || self.campaign_deadline.is_some() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|time| i64::try_from(time.as_secs()).ok())
+                .ok_or_else(|| Error::new(75, "provider launch clock unavailable"))?;
+            if self
+                .campaign_deadline
+                .is_some_and(|deadline| now >= deadline)
+            {
+                return Err(Error::new(
+                    3,
+                    "campaign deadline expired; pending intent retained",
+                ));
+            }
+            if self.expires_at.is_some_and(|expires_at| now >= expires_at) {
+                return Err(Error::new(
+                    75,
+                    "Team contract expired; pending intent retained",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+/// Called at most once under the native parent's contract guards. A successful
+/// callback acknowledges one physical registration; guards end before execution.
+pub type RegisterPhysical<'a> =
+    Box<dyn FnOnce(PhysicalContract<'_>) -> Result<oms_supervisor::process::PhysicalCall> + 'a>;
 pub trait Executor: Sync {
+    fn with_physical_contract(
+        &self,
+        attempt: &PhysicalAttempt<'_>,
+        _deadline: Instant,
+        interrupted: &AtomicBool,
+        register: RegisterPhysical<'_>,
+    ) -> Result<()> {
+        crate::check(interrupted)?;
+        if attempt.team.is_some() {
+            return Err(Error::new(
+                75,
+                "canonical team admission service unavailable",
+            ));
+        }
+        register(PhysicalContract::default()).map(|_| ())
+    }
     fn execute(&self, request: Invocation, interrupted: &AtomicBool) -> Result<Completed>;
 }
 pub struct Native;
 impl Executor for Native {
     fn execute(&self, input: Invocation, interrupted: &AtomicBool) -> Result<Completed> {
         crate::check(interrupted)?;
+        if let Some(fence) = &input.launch_fence {
+            fence.check(interrupted)?;
+        }
         let allow_whole_tree = !matches!(
             input
                 .argv
@@ -79,6 +329,9 @@ impl Executor for Native {
                 .ok_or_else(|| Error::new(2, "execution deadline overflow"))?,
         );
         request.capture.max_bytes = input.max_bytes;
+        if let Some(fence) = &input.launch_fence {
+            fence.check(interrupted)?;
+        }
         let job = reactor
             .start(request)
             .map_err(|e| Error::new(125, format!("process could not start: {e}")))?;
@@ -148,6 +401,7 @@ pub(crate) fn invoke_env(
             max_bytes: 64 * 1024 * 1024,
             merge,
             physical_call: None,
+            launch_fence: None,
         },
         context.interrupted,
     )
@@ -203,6 +457,7 @@ pub(crate) fn git_input(
             max_bytes: 64 * 1024 * 1024,
             merge: false,
             physical_call: None,
+            launch_fence: None,
         },
         context.interrupted,
     )?;
@@ -210,4 +465,75 @@ pub(crate) fn git_input(
         return crate::fail("git operation failed or output was incomplete");
     }
     Ok(result.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn explicit_team_locators_preserve_large_generations_and_reject_ambiguous_metadata() {
+        let valid = vec![
+            "--team-id".into(),
+            "team-a".into(),
+            "--team-spec-sha256".into(),
+            "a".repeat(64).into(),
+            "--team-member".into(),
+            "member-a".into(),
+            "--team-member-generation".into(),
+            "18446744073709551617".into(),
+        ];
+        let args = crate::peer::parse(&valid).unwrap();
+        let locator = TeamLocator::from_args(&args).unwrap().unwrap();
+        assert_eq!(locator.member_generation, i128::from(u64::MAX) + 2);
+        let mut extra = Vec::new();
+        TeamLocator::append_args(&args, &mut extra).unwrap();
+        assert_eq!(TeamLocator::from_extra(&extra).unwrap(), Some(locator));
+        assert_eq!(TeamLocator::from_extra(&[]).unwrap(), None);
+        for count in 1..4 {
+            assert!(TeamLocator::from_extra(&extra[..count]).is_err());
+        }
+        let mut duplicate = extra.clone();
+        duplicate.push(extra[0].clone());
+        assert!(TeamLocator::from_extra(&duplicate).is_err());
+        let mut duplicate = valid.clone();
+        duplicate.extend(["--team-id".into(), "team-b".into()]);
+        assert!(crate::peer::parse(&duplicate).is_err());
+        for invalid in ["0", "-1", "170141183460469231731687303715884105728", ""] {
+            let mut args = valid.clone();
+            *args.last_mut().unwrap() = invalid.into();
+            assert!(crate::peer::parse(&args).is_err());
+        }
+        let mut nontext = valid;
+        nontext[1] = OsString::from_vec(vec![0xff]);
+        assert!(crate::peer::parse(&nontext).is_err());
+        let mut nontext = extra;
+        nontext[1].1 = OsString::from_vec(vec![0xff]);
+        assert!(TeamLocator::from_extra(&nontext).is_err());
+    }
+
+    #[test]
+    fn expired_launch_fences_refuse_before_native_spawn() {
+        let stop = AtomicBool::new(false);
+        let request = Invocation {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            cwd: std::env::current_dir().unwrap(),
+            input: None,
+            environment: Vec::new(),
+            remove_environment: Vec::new(),
+            timeout: Duration::from_secs(1),
+            max_bytes: 1024,
+            merge: false,
+            physical_call: None,
+            launch_fence: Some(LaunchFence::new(
+                Instant::now() + Duration::from_secs(1),
+                Some(1),
+            )),
+        };
+        assert_eq!(Native.execute(request.clone(), &stop).unwrap_err().code, 75);
+        let mut deadline = request;
+        deadline.launch_fence = Some(LaunchFence::new(Instant::now(), None));
+        assert_eq!(Native.execute(deadline, &stop).unwrap_err().code, 75);
+    }
 }

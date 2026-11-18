@@ -436,6 +436,19 @@ pub fn run(
     }
     let repo = repo_req()?;
     let execution = execution_req()?;
+    if options.has("teams") {
+        let report = oms_panel_core::teams::read_at(&execution, &repo, services, stop)?;
+        if options.has("json") {
+            return output(report);
+        }
+        if std::env::var_os("OMS_PANEL_READER_BOARD").is_some()
+            && let Some(mut tty) = crate::input::TerminalInput::open()?
+        {
+            crate::reader::page(&repo, &report, &mut tty, stop)?;
+            return Ok((0, vec![], vec![]));
+        }
+        return plain(crate::render::teams(&report, crate::layout::dimensions().0));
+    }
     if options.has("release-main") {
         return output(release::release(
             &repo,

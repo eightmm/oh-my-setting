@@ -1004,6 +1004,137 @@ fn routing_accepts_present_provider_catalog() {
     }
 }
 
+fn teams_are_read_only_and_keep_unknown_evidence_and_stable_ids() {
+    if std::env::var_os("OMS_TEAM_VIEW_CHILD").is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("teams_are_read_only_and_keep_unknown_evidence_and_stable_ids")
+            .env("OMS_TEAM_VIEW_CHILD", "1")
+            .env("OMS_HARNESS_CHILD", "1")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "1")
+            .env_remove("OMS_PANEL_READER_BOARD")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "Team read must remain available to a guarded child"
+        );
+        return;
+    }
+
+    let repo = TempDir::new("panel-team-view");
+    init_git_repo(repo.path());
+    let services = Fake::default();
+    let mut list = Vec::new();
+    for id in ["team-b", "team-a"] {
+        let mut spec: Value = serde_json::from_str(include_str!(
+            "../../oms-command-plan/tests/fixtures/team-spec.json"
+        ))
+        .unwrap();
+        spec["id"] = id.into();
+        for key in [
+            "task_sha256",
+            "objective_sha256",
+            "criterion_sha256",
+            "policy_sha256",
+        ] {
+            spec[key] = "a".repeat(64).into();
+        }
+        spec["base_sha"] = "b".repeat(40).into();
+        for member in spec["members"].as_array_mut().unwrap() {
+            member["route"]["policy_sha256"] = "a".repeat(64).into();
+        }
+        list.push(json!({"id":id,"spec":spec,"history":[{"sha256":"d".repeat(64)}],"phase":"held","reason":"base changed"}));
+    }
+    *services.plan.borrow_mut() = json!(list);
+    let args = ["--repo", repo.path().to_str().unwrap(), "--teams", "--json"];
+    let (code, out, err) = run_with_services(
+        "panel",
+        &os(&args),
+        repo.path(),
+        repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let report: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(report["kind"], "oms-panel-teams");
+    assert_eq!(report["roots"][0]["teams"][0]["id"], "team-a");
+    assert_eq!(report["roots"][0]["teams"][1]["id"], "team-b");
+    assert_eq!(report["roots"][0]["teams"][0]["contract_phase"], "held");
+    assert_eq!(report["resources"], Value::Null);
+    assert_eq!(report["physical_intents"]["running_count"], Value::Null);
+    assert_eq!(report["executes"], false);
+    assert!(
+        !repo.path().join(".oms").exists(),
+        "read view must create no state"
+    );
+    let seen = services.native_seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0], (NativeCommand::Plan, os(&["team-list", "--json"])));
+    drop(seen);
+    let (plain_code, plain_out, plain_err) = run_with_services(
+        "panel",
+        &os(&["--repo", repo.path().to_str().unwrap(), "--teams"]),
+        repo.path(),
+        repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(plain_code, 0, "{}", String::from_utf8_lossy(&plain_err));
+    let plain_out = String::from_utf8(plain_out).unwrap();
+    assert!(plain_out.contains("OMS · Teams") && plain_out.contains("team-a"));
+    assert!(!repo.path().join(".oms").exists());
+
+    for width in [19, 40, 80, 120, 200] {
+        let rendered = render::teams(&report, width);
+        assert!(rendered.lines().all(|line| render::width(line) <= width));
+        assert!(rendered.contains("unknown"));
+    }
+    let rendered = render::teams(&report, 120);
+    assert!(rendered.contains("team-a") && rendered.contains("team-b"));
+    assert!(rendered.contains("lead-a") && rendered.contains("worker-a"));
+    assert!(rendered.contains("base changed"));
+    let mut unsafe_display = report.clone();
+    unsafe_display["roots"][0]["teams"][0]["members"][0]["display_name"] = format!(
+        "검증{}[2J{}결합",
+        char::from(27),
+        char::from_u32(0x202e).unwrap()
+    )
+    .into();
+    let rendered = render::teams(&unsafe_display, 40);
+    assert!(
+        !rendered.contains(char::from(27)) && !rendered.contains(char::from_u32(0x202e).unwrap())
+    );
+    let reader = reader::Reader::default();
+    assert!(
+        !reader
+            .render(Path::new("missing-team-reader-repo"), &report, 80)
+            .unwrap()
+            .is_empty()
+    );
+    *services.plan.borrow_mut() = Value::Null;
+    let (code, out, _) = run_with_services(
+        "panel",
+        &os(&args),
+        repo.path(),
+        repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(code, 0);
+    let unavailable: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(unavailable["roots"], Value::Null);
+    assert_eq!(unavailable["sources"]["teams"]["status"], "unavailable");
+    assert_eq!(
+        unavailable["physical_intents"]["running_count"],
+        Value::Null
+    );
+    assert!(!repo.path().join(".oms").exists());
+    assert!(Options::parse(&os(&["--teams", "--dispatch", "worker"])).is_err());
+    assert!(Options::parse(&os(&["--teams", "--apply"])).is_err());
+    assert!(Options::parse(&os(&["--teams", "--dry-run"])).is_err());
+}
+
 fn account_options_and_target_conflicts() {
     if std::env::var_os("OMS_ACCOUNT_MODEL_CHILD").is_some() {
         let repo = TempDir::new("panel-account-model");
@@ -2019,7 +2150,7 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 9] = [
+    let cases: [(&str, fn()); 10] = [
         (
             "missing_entry_refuses_before_mutation",
             missing_entry_refuses_before_mutation,
@@ -2039,6 +2170,10 @@ fn main() {
         (
             "routing_accepts_present_provider_catalog",
             routing_accepts_present_provider_catalog,
+        ),
+        (
+            "teams_are_read_only_and_keep_unknown_evidence_and_stable_ids",
+            teams_are_read_only_and_keep_unknown_evidence_and_stable_ids,
         ),
         (
             "account_options_and_target_conflicts",

@@ -58,6 +58,51 @@ impl Context {
             Ok(state_hint.map(Path::to_path_buf))
         })
     }
+    /// Resolves the same parent environment and physical roots while sharing
+    /// the caller's cancellation and absolute admission deadline, including Git.
+    pub fn from_environment_before(
+        req: &Request,
+        default_repo: &Path,
+        cwd: &Path,
+        state_hint: Option<&Path>,
+        interrupted: &AtomicBool,
+        deadline: std::time::Instant,
+    ) -> Result<Self> {
+        let result = Self::resolve_inner(
+            req,
+            default_repo,
+            cwd,
+            interrupted,
+            Some(deadline),
+            &|_| Ok(state_hint.map(Path::to_path_buf)),
+            None,
+        );
+        Self::before(interrupted, Some(deadline))?;
+        result
+    }
+    /// A native caller has already selected execution and shared-state roots.
+    /// Ambient locators cannot redirect this read; child and owner flags remain
+    /// the actual process environment and grant no additional authority.
+    pub fn from_selected_state_before(
+        req: &Request,
+        execution_repo: &Path,
+        cwd: &Path,
+        state_repo: &Path,
+        interrupted: &AtomicBool,
+        deadline: std::time::Instant,
+    ) -> Result<Self> {
+        let result = Self::resolve_inner(
+            req,
+            execution_repo,
+            cwd,
+            interrupted,
+            Some(deadline),
+            &|_| Ok(None),
+            Some(state_repo),
+        );
+        Self::before(interrupted, Some(deadline))?;
+        result
+    }
     pub(crate) fn resolve(
         req: &Request,
         default_repo: &Path,
@@ -65,18 +110,51 @@ impl Context {
         interrupted: &AtomicBool,
         hint: &dyn Fn(&Path) -> Result<Option<PathBuf>>,
     ) -> Result<Self> {
-        use crate::cli::{physical_dir, physical_leaf, worktree_root};
+        Self::resolve_inner(req, default_repo, cwd, interrupted, None, hint, None)
+    }
+    fn before(interrupted: &AtomicBool, deadline: Option<std::time::Instant>) -> Result<()> {
+        if interrupted.load(Ordering::Acquire) {
+            return Err(crate::Error {
+                code: 130,
+                message: "plan context resolution interrupted".into(),
+            });
+        }
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            return Err(crate::Error {
+                code: 75,
+                message: "plan context resolution deadline expired".into(),
+            });
+        }
+        Ok(())
+    }
+    fn resolve_inner(
+        req: &Request,
+        default_repo: &Path,
+        cwd: &Path,
+        interrupted: &AtomicBool,
+        deadline: Option<std::time::Instant>,
+        hint: &dyn Fn(&Path) -> Result<Option<PathBuf>>,
+        selected_state: Option<&Path>,
+    ) -> Result<Self> {
+        use crate::cli::{physical_dir, physical_leaf, worktree_root_before};
+        Self::before(interrupted, deadline)?;
         let get = |n: &str| std::env::var(n).unwrap_or_default();
         let repo = req.repo.as_deref().unwrap_or(default_repo);
-        let execution_repo = worktree_root(&physical_dir(cwd, repo.as_os_str()), interrupted)?;
-        let state = match std::env::var_os("OMS_STATE_REPO").filter(|s| !s.is_empty()) {
-            Some(s) => worktree_root(&physical_dir(cwd, &s), interrupted)
-                .map_err(|_| error("cannot resolve plan repository"))?,
-            None => match hint(&execution_repo)? {
-                Some(h) => crate::cli::canonicalize_dir(&h)
+        let execution_repo =
+            worktree_root_before(&physical_dir(cwd, repo.as_os_str()), interrupted, deadline)?;
+        let state = if let Some(selected) = selected_state {
+            crate::cli::canonicalize_dir(&physical_dir(cwd, selected.as_os_str()))
+                .map_err(|_| error("cannot resolve selected plan repository"))?
+        } else {
+            match std::env::var_os("OMS_STATE_REPO").filter(|s| !s.is_empty()) {
+                Some(s) => worktree_root_before(&physical_dir(cwd, &s), interrupted, deadline)
                     .map_err(|_| error("cannot resolve plan repository"))?,
-                None => execution_repo.clone(),
-            },
+                None => match hint(&execution_repo)? {
+                    Some(h) => crate::cli::canonicalize_dir(&h)
+                        .map_err(|_| error("cannot resolve plan repository"))?,
+                    None => execution_repo.clone(),
+                },
+            }
         };
         let state_repo = state;
         // The default plan path keeps its own spelling so the storage layer's

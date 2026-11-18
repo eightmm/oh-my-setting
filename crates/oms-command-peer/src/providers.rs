@@ -1981,20 +1981,56 @@ pub(crate) fn execute_env(
                     .map_err(|e| Error::new(2, e))?;
             exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
         }
-        let pending_usage = crate::usage::begin(
-            &usage_repo,
-            route,
-            account.as_deref(),
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let team = crate::process::TeamLocator::from_extra(&extra_env)?;
+        let physical_task = crate::usage::env(&extra_env, "OMS_TASK_ID");
+        let attempt = crate::process::PhysicalAttempt {
+            state_root: &usage_repo,
+            contract_repo: account_repo,
+            execution_repo: cwd,
+            team: team.as_ref(),
+            root: None,
+            provider: &route.provider,
+            account: account.as_deref().filter(|id| *id != "default"),
+            selected_model: (route.model != "provider-default").then_some(route.model.as_str()),
+            task_id: physical_task.as_deref(),
             write,
-            &extra_env,
+            persistent_session: false,
+        };
+        let mut registered = None;
+        context.executor.with_physical_contract(
+            &attempt,
+            deadline,
             context.interrupted,
+            Box::new(|binding| {
+                let pending = crate::usage::begin_before(
+                    &usage_repo,
+                    route,
+                    account.as_deref(),
+                    write,
+                    &extra_env,
+                    context.interrupted,
+                    deadline,
+                    binding,
+                )?;
+                let call = pending.physical_call()?;
+                registered = Some(pending);
+                Ok(call)
+            }),
         )?;
+        let pending_usage = registered.ok_or_else(|| {
+            Error::new(
+                75,
+                "native admission returned without a physical acknowledgement",
+            )
+        })?;
         environment.push((
             "OMS_PROVIDER_CALL_ID".into(),
             pending_usage.receipt.identity.call_id.clone().into(),
         ));
         pending_usage.fence(context.interrupted)?;
-        let usage_receipt = pending_usage.receipt;
+        pending_usage.qualify(&attempt, context.executor, context.interrupted)?;
+        let usage_receipt = pending_usage.receipt.clone();
         let started = std::time::Instant::now();
         let result = context.executor.execute(
             Invocation {
@@ -2006,6 +2042,7 @@ pub(crate) fn execute_env(
                 timeout: Duration::from_secs(timeout),
                 max_bytes: 64 * 1024 * 1024,
                 merge: false,
+                launch_fence: Some(pending_usage.launch_fence()),
                 physical_call: Some(
                     oms_supervisor::process::PhysicalCall::new(&usage_receipt.identity.call_id)
                         .map_err(|e| Error::new(2, e))?,
@@ -2022,7 +2059,7 @@ pub(crate) fn execute_env(
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let (decoded, terminal) = decode_output(&route.provider, &result.stdout);
-        crate::usage::finish(
+        let accounting = crate::usage::finish(
             &usage_repo,
             usage_receipt,
             &result.stdout,
@@ -2034,7 +2071,10 @@ pub(crate) fn execute_env(
                 error.code,
                 format!("provider usage accounting failed; reconcile before retrying: {error}"),
             )
-        })?;
+        });
+        let settlement = pending_usage.settle_execution(result.owned_cleanup.as_ref());
+        accounting?;
+        settlement?;
         result.stdout = decoded.into_bytes();
         if !result.stdout.is_empty()
             && let Some(model) = configured
@@ -2404,6 +2444,216 @@ mod bridge_route_tests {
         };
         let mut route = route.clone();
         execute_env(&mut route, prompt, cwd, write, 12, repo, &[], &context)
+    }
+    #[test]
+    fn physical_contracts_fence_each_retry_and_settle_owned_execution() {
+        isolated_transport(
+            "physical_contracts_fence_each_retry_and_settle_owned_execution",
+            "normal",
+            |repo, cwd| {
+                use crate::process::{PhysicalAttempt, PhysicalContract, RegisterPhysical};
+                use oms_command_telemetry::store::{resources, usage};
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                struct Qualified {
+                    binding: resources::Binding,
+                    starts: AtomicUsize,
+                    hooks: AtomicUsize,
+                    mode: &'static str,
+                }
+                impl Executor for Qualified {
+                    fn with_physical_contract(
+                        &self,
+                        attempt: &PhysicalAttempt<'_>,
+                        _: std::time::Instant,
+                        _: &AtomicBool,
+                        register: RegisterPhysical<'_>,
+                    ) -> Result<()> {
+                        let count = self.hooks.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(attempt.provider, "claude");
+                        assert_eq!(
+                            attempt.selected_model,
+                            Some(if count < 2 { "first" } else { "second" })
+                        );
+                        assert!(attempt.team.is_none() && attempt.root.is_none());
+                        if self.mode == "missing" || (self.mode == "missing-final" && count == 1) {
+                            return Ok(());
+                        }
+                        let expires_at =
+                            (self.mode == "expires").then(|| crate::seconds() as i64 + 1);
+                        let call = register(PhysicalContract {
+                            resource: Some(&self.binding),
+                            expires_at,
+                        })?;
+                        assert!(
+                            usage::load(attempt.state_root)
+                                .unwrap()
+                                .calls
+                                .iter()
+                                .any(|entry| entry.receipt.identity.call_id == call.id())
+                        );
+                        if let Some(expiry) = expires_at {
+                            let start = std::time::Instant::now();
+                            while (crate::seconds() as i64) < expiry {
+                                assert!(start.elapsed() < Duration::from_secs(3));
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                        Ok(())
+                    }
+                    fn execute(
+                        &self,
+                        mut request: Invocation,
+                        stop: &AtomicBool,
+                    ) -> Result<Completed> {
+                        if request.argv[0] == "git" {
+                            return Ok(Completed {
+                                code: 0,
+                                stdout: Vec::new(),
+                                stderr: Vec::new(),
+                                complete: true,
+                                cleanup_complete: Some(true),
+                                owned_cleanup: None,
+                                elapsed: Duration::ZERO,
+                            });
+                        }
+                        let count = self.starts.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(self.hooks.load(Ordering::Relaxed), (count + 1) * 2);
+                        let retry = self.mode == "retry" && count == 0;
+                        request.argv = vec!["/bin/sh".into(), "-c".into(), format!(
+                            "printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"local fixture\"}}'; {}",
+                            if retry { "printf 'rate limit' >&2; exit 1" } else { "exit 0" }).into()];
+                        let result = crate::process::Native.execute(request, stop)?;
+                        assert!(result.owned_cleanup.is_some());
+                        if self.mode == "cancel" {
+                            stop.store(true, Ordering::Release);
+                        }
+                        Ok(result)
+                    }
+                }
+                for mode in ["retry", "cancel", "expires", "missing", "missing-final"] {
+                    let state = repo.join(format!("contract-{mode}"));
+                    fs::create_dir(&state).unwrap();
+                    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+                    let stop = AtomicBool::new(false);
+                    let policy = resources::Policy {
+                        domain: "fixture-domain".into(),
+                        epoch: "one".into(),
+                        host_generation_sha256: "a".repeat(64),
+                        max_teams: 1,
+                        max_invocations: 1,
+                        max_open_processes: 1,
+                        max_write_wip: 1,
+                        reviewer_headroom: 0,
+                    };
+                    resources::activate(
+                        &state,
+                        &policy,
+                        None,
+                        &stop,
+                        std::time::Instant::now() + Duration::from_secs(2),
+                    )
+                    .unwrap();
+                    let executor = Qualified {
+                        binding: resources::Binding {
+                            policy_sha256: policy.sha256().unwrap(),
+                            host_generation_sha256: policy.host_generation_sha256.clone(),
+                            root_owner: "fixture-main".into(),
+                            root_generation: "fixture-creation".into(),
+                            team: None,
+                            reviewer: false,
+                            persistent_session: false,
+                            cleanup_scopes: vec![
+                                oms_supervisor::process::Scope::ProcessGroup,
+                                oms_supervisor::process::Scope::WholeTree,
+                            ],
+                        },
+                        starts: AtomicUsize::new(0),
+                        hooks: AtomicUsize::new(0),
+                        mode,
+                    };
+                    let context = Context {
+                        cwd,
+                        source: repo,
+                        interrupted: &stop,
+                        executor: &executor,
+                    };
+                    let mut route = Route {
+                        provider: "claude".into(),
+                        model: "first".into(),
+                        effort: String::new(),
+                        explicit: true,
+                        account: String::new(),
+                        account_pinned: false,
+                    };
+                    let extra = vec![
+                        ("OMS_STATE_REPO".into(), state.as_os_str().into()),
+                        ("OMS_OPERATION_ID".into(), "op_scoped".into()),
+                    ];
+                    let result = execute_with_fallback_env(
+                        &mut route, "second", b"fixture", cwd, true, 10, repo, &extra, &context,
+                    );
+                    let occupancy = resources::occupancy(&state, &AtomicBool::new(false))
+                        .unwrap()
+                        .unwrap();
+                    let calls = usage::load(&state).unwrap().calls;
+                    match mode {
+                        "retry" => {
+                            assert_eq!(result.unwrap().code, 0);
+                            assert_eq!(executor.starts.load(Ordering::Relaxed), 2);
+                            assert_eq!(executor.hooks.load(Ordering::Relaxed), 4);
+                            assert_eq!(calls.len(), 2);
+                            assert_eq!(
+                                (
+                                    occupancy.invocations,
+                                    occupancy.open_processes,
+                                    occupancy.write_wip
+                                ),
+                                (0, 0, 1)
+                            );
+                        }
+                        "cancel" => {
+                            assert_eq!(result.unwrap().code, 0);
+                            assert!(stop.load(Ordering::Acquire));
+                            assert_eq!(calls.len(), 1);
+                            assert_eq!(
+                                (
+                                    occupancy.invocations,
+                                    occupancy.open_processes,
+                                    occupancy.write_wip
+                                ),
+                                (0, 0, 1)
+                            );
+                        }
+                        "expires" | "missing-final" => {
+                            assert_eq!(result.unwrap_err().code, 75);
+                            assert_eq!(executor.starts.load(Ordering::Relaxed), 0);
+                            assert_eq!(calls.len(), 1);
+                            assert_eq!(calls[0].receipt.phase, usage::Phase::Pending);
+                            assert_eq!(
+                                (
+                                    occupancy.invocations,
+                                    occupancy.open_processes,
+                                    occupancy.write_wip
+                                ),
+                                (1, 1, 1)
+                            );
+                        }
+                        "missing" => {
+                            assert_eq!(result.unwrap_err().code, 75);
+                            assert_eq!(executor.starts.load(Ordering::Relaxed), 0);
+                            assert!(calls.is_empty());
+                            assert_eq!(occupancy, resources::Occupancy::default());
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        calls
+                            .iter()
+                            .all(|entry| entry.tokens.is_none() && entry.cost_microusd.is_none())
+                    );
+                }
+            },
+        );
     }
     #[test]
     fn physical_provider_calls_record_fallback_and_timeout_usage() {

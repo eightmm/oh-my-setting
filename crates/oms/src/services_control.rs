@@ -3136,16 +3136,97 @@ mod tests {
     fn team_contract_enrollment_uses_native_lifecycle_and_room_proofs() {
         use oms_command_operations::value::obj;
         use oms_command_operations::{StartRequest, append_lifecycle, create_attempt, new_event};
+        use oms_command_peer::admission::{
+            InteractiveContext, InteractiveRequest, begin_interactive_with_executor,
+        };
+        use oms_command_peer::process::{
+            Executor, Invocation, Native, PhysicalAttempt, PhysicalContract, RootLocator,
+            TeamLocator,
+        };
         use oms_command_plan::{Context, Plan, Request, json};
-        let repo = Tmp::repo(&[
-            ("team-policy.json", "{}\n"),
-            ("src/lib.rs", "pub fn fixture() {}\n"),
-        ]);
+        use oms_command_telemetry::store::{physical, resources, usage};
+        if std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").is_none() {
+            let policy = resources::Policy {
+                domain: "native-fixture".into(),
+                epoch: "epoch-a".into(),
+                host_generation_sha256: crate::services_runtime::observed_host_generation_before(
+                    Instant::now() + Duration::from_secs(5),
+                    &AtomicBool::new(false),
+                )
+                .unwrap(),
+                max_teams: 8,
+                max_invocations: 8,
+                max_open_processes: 8,
+                max_write_wip: 8,
+                reviewer_headroom: 1,
+            };
+            let policy = String::from_utf8(policy.to_json().unwrap()).unwrap();
+            let fixture = Tmp::repo(&[
+                ("team-policy.json", policy.as_str()),
+                ("src/lib.rs", "pub fn fixture() {}\n"),
+            ]);
+            std::fs::create_dir(fixture.path().join("caller")).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+                .current_dir(fixture.path().join("caller"))
+                .env("OMS_NATIVE_PHYSICAL_FIXTURE",fixture.path()).env("OMS_STATE_REPO","..");
+            for key in [
+                "OMS_HARNESS_CHILD",
+                "OMS_HARNESS_DELEGATE_DEPTH",
+                "OMS_ROOM_ID",
+                "OMS_ROOM_PARTICIPANT",
+                "OMS_PANEL_MAIN_ATTEMPT",
+                "OMS_ATTEMPT_ID",
+                "OMS_HARNESS_CALL_ID",
+                "OMS_CAMPAIGN_MANIFEST_SHA256",
+                "OMS_OPERATION_ID",
+                "OMS_AUTOPILOT_OWNER_ID",
+            ] {
+                child.env_remove(key);
+            }
+            assert!(
+                child.status().unwrap().success(),
+                "native physical fixture child failed"
+            );
+            return;
+        }
+        let repo = PathBuf::from(std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").unwrap());
         let stop = Arc::new(AtomicBool::new(false));
-        let control = services(&stop, repo.path(), Vec::new());
-        let collab = crate::services_collab::CollabServices::new(&stop, repo.path()).unwrap();
+        let control = services(&stop, repo.as_path(), Vec::new());
+        let collab = crate::services_collab::CollabServices::new(&stop, repo.as_path()).unwrap();
+        if let Some(selected) = std::env::var_os("OMS_NATIVE_PHYSICAL_GUARD_OWNER") {
+            let selected = selected.to_str().unwrap();
+            let attempt = PhysicalAttempt {
+                state_root: repo.as_path(),
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                team: None,
+                root: Some(RootLocator {
+                    owner: selected,
+                    room_id: "room-team",
+                }),
+                provider: "codex",
+                account: Some("work"),
+                selected_model: Some("fixture"),
+                task_id: None,
+                write: true,
+                persistent_session: false,
+            };
+            let before = physical::load(repo.as_path(), &stop).unwrap().len();
+            let error = collab
+                .with_physical_contract(
+                    &attempt,
+                    Instant::now() + Duration::from_secs(5),
+                    &stop,
+                    Box::new(|_| panic!("child/depth must refuse before registration")),
+                )
+                .unwrap_err();
+            assert!(error.message.contains("parent-only"), "{error:?}");
+            assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), before);
+            return;
+        }
         let room = oms_command_room::Room::open(
-            repo.path(),
+            repo.as_path(),
             oms_command_room::Session {
                 agent: "codex".into(),
                 ..Default::default()
@@ -3165,7 +3246,7 @@ mod tests {
         )
         .unwrap();
         let owner = create_attempt(
-            repo.path(),
+            repo.as_path(),
             &StartRequest {
                 provider: "codex".into(),
                 tool: "panel-main".into(),
@@ -3186,21 +3267,133 @@ mod tests {
                 obj([("to_state", state.into())]),
             )
             .unwrap();
-            append_lifecycle(repo.path(), event, &stop).unwrap();
+            append_lifecycle(repo.as_path(), event, &stop).unwrap();
         }
         room.join("room-team", oms_command_room::Join::new(&owner, "codex"))
             .unwrap();
+        let policy_bytes = std::fs::read(repo.join("team-policy.json")).unwrap();
+        let resource_policy = resources::Policy::parse(&policy_bytes).unwrap();
+        resources::activate(
+            repo.as_path(),
+            &resource_policy,
+            None,
+            &stop,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let root = RootLocator {
+            owner: &owner,
+            room_id: "room-team",
+        };
+        let run_local = |call: oms_command_peer::admission::InteractiveCall| {
+            let count = physical::load(repo.as_path(), &stop).unwrap().len();
+            call.fence_with_executor(&collab, &stop).unwrap();
+            assert_eq!(
+                physical::load(repo.as_path(), &stop).unwrap().len(),
+                count,
+                "qualification cannot register or resend"
+            );
+            oms_command_operations::lock::FileLock::acquire_before(
+                &oms_command_operations::event_path(repo.as_path()),
+                &stop,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            for relative in [
+                ".oms/landings.jsonl",
+                ".oms/threads/room-team.jsonl",
+                ".oms/delegations/.marker-set-lock-target",
+                ".oms/plan/tasks.json",
+            ] {
+                let lock = oms_lock::Lock::for_file(
+                    &repo.join(relative),
+                    oms_lock::Settings::from_env().unwrap(),
+                )
+                .unwrap();
+                lock.try_acquire().unwrap().check().unwrap();
+            }
+            let tag = oms_supervisor::process::PhysicalCall::new(call.call_id()).unwrap();
+            let done = Native
+                .execute(
+                    Invocation {
+                        argv: sh("printf native-physical"),
+                        cwd: repo.clone(),
+                        input: None,
+                        environment: vec![],
+                        remove_environment: vec![],
+                        timeout: Duration::from_secs(5),
+                        max_bytes: 1024,
+                        merge: false,
+                        physical_call: Some(tag.clone()),
+                        launch_fence: Some(call.launch_fence()),
+                    },
+                    &stop,
+                )
+                .unwrap();
+            assert_eq!(done.code, 0);
+            assert_eq!(done.stdout, b"native-physical");
+            assert_eq!(done.cleanup_complete, Some(true));
+            assert!(
+                done.owned_cleanup
+                    .as_ref()
+                    .is_some_and(|proof| proof.call() == &tag)
+            );
+            call.finish_with_cleanup(None, done.cleanup_complete, done.owned_cleanup.as_ref())
+                .unwrap();
+            let occupancy = resources::snapshot(repo.as_path(), &stop)
+                .unwrap()
+                .unwrap()
+                .occupancy;
+            assert_eq!(occupancy.invocations, 0);
+            assert_eq!(occupancy.open_processes, 0);
+        };
+        assert!(!repo.join(".oms/plan/tasks.json").exists());
+        let main_call = begin_interactive_with_executor(
+            InteractiveRequest {
+                state_root: repo.as_path(),
+                provider: "codex",
+                selected_model: Some("fixture"),
+                account: Some("work"),
+                attempt: Some(&owner),
+                resume_session: None,
+            },
+            InteractiveContext {
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                root: Some(root),
+                team: None,
+                task_id: None,
+            },
+            &collab,
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), 1);
+        run_local(main_call);
+        assert!(
+            !repo.join(".oms/plan/tasks.json").exists(),
+            "Root admission must not require or initialize a Plan"
+        );
+        for (child_flag, depth) in [("1", "0"), ("0", "1")] {
+            let status = Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+                .current_dir(repo.join("caller")).env("OMS_NATIVE_PHYSICAL_GUARD_OWNER",&owner)
+                .env("OMS_HARNESS_CHILD",child_flag).env("OMS_HARNESS_DELEGATE_DEPTH",depth).status().unwrap();
+            assert!(
+                status.success(),
+                "Root locator cannot override child/depth guards"
+            );
+        }
         let call = |values: &[&str]| {
             let request = Request::parse(&osv(values)).unwrap();
-            let mut context = Context::from_environment(&request, repo.path()).unwrap();
-            context.execution_repo = repo.path().into();
-            context.state_repo = repo.path().into();
-            context.plan_file = repo.path().join(".oms/plan/tasks.json");
+            let mut context = Context::from_environment(&request, repo.as_path()).unwrap();
+            context.execution_repo = repo.as_path().into();
+            context.state_repo = repo.as_path().into();
+            context.plan_file = repo.as_path().join(".oms/plan/tasks.json");
             context.panel_main_attempt = owner.clone();
             context.room_id = "room-team".into();
             context.participant = owner.clone();
-            context.child = false;
-            context.delegate_depth = "0".into();
             Plan::open(context, &control, &stop)
                 .unwrap()
                 .execute(&request)
@@ -3219,9 +3412,10 @@ mod tests {
         ])
         .unwrap();
         let plan =
-            json::parse(&std::fs::read(repo.path().join(".oms/plan/tasks.json")).unwrap()).unwrap();
+            json::parse(&std::fs::read(repo.as_path().join(".oms/plan/tasks.json")).unwrap())
+                .unwrap();
         let task = plan.get("tasks").get("task-a");
-        let (events, _) = oms_command_operations::load_projection(repo.path()).unwrap();
+        let (events, _) = oms_command_operations::load_projection(repo.as_path()).unwrap();
         let created = events
             .iter()
             .find(|e| {
@@ -3241,8 +3435,8 @@ mod tests {
         spec["criterion_sha256"] = oms_command_plan::team::criterion_digest(&plan, task)
             .unwrap()
             .into();
-        spec["base_sha"] = git(repo.path(), &["rev-parse", "HEAD"]).into();
-        let policy = json::sha(b"{}\n");
+        spec["base_sha"] = git(repo.as_path(), &["rev-parse", "HEAD"]).into();
+        let policy = json::sha(&policy_bytes);
         spec["policy_sha256"] = policy.clone().into();
         for member in spec["members"].as_array_mut().unwrap() {
             member["root_owner"] = owner.clone().into();
@@ -3250,13 +3444,16 @@ mod tests {
                 member["logical_parent"] = owner.clone().into();
             }
             member["route"]["policy_sha256"] = policy.clone().into();
+            if member["role"] == "worker" {
+                member["access"] = "write".into();
+            }
         }
         std::fs::write(
-            repo.path().join("team.json"),
+            repo.as_path().join("team.json"),
             serde_json::to_vec(&spec).unwrap(),
         )
         .unwrap();
-        let before = std::fs::read(oms_command_operations::event_path(repo.path())).unwrap();
+        let before = std::fs::read(oms_command_operations::event_path(repo.as_path())).unwrap();
         call(&["team-register", "--team-spec", "team.json"]).unwrap();
         let view: Value =
             serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
@@ -3265,15 +3462,13 @@ mod tests {
         assert_eq!(view["spec"]["root_owner"], owner);
         assert_eq!(view["verified"], Value::Null);
         let request = Request::new(oms_command_plan::Action::TeamShow);
-        let mut context = Context::from_environment(&request, repo.path()).unwrap();
-        context.execution_repo = repo.path().into();
-        context.state_repo = repo.path().into();
-        context.plan_file = repo.path().join(".oms/plan/tasks.json");
+        let mut context = Context::from_environment(&request, repo.as_path()).unwrap();
+        context.execution_repo = repo.as_path().into();
+        context.state_repo = repo.as_path().into();
+        context.plan_file = repo.as_path().join(".oms/plan/tasks.json");
         context.panel_main_attempt = owner.clone();
         context.room_id = "room-team".into();
         context.participant = owner.clone();
-        context.child = false;
-        context.delegate_depth = "0".into();
         let admission_plan = Plan::open(context, &control, &stop).unwrap();
         let request = oms_command_plan::team::AdmissionRequest {
             team_id: "team-a".into(),
@@ -3295,20 +3490,24 @@ mod tests {
         assert_eq!(guard.binding().text("root_owner"), owner);
         assert!(
             oms_command_operations::lock::FileLock::acquire_before(
-                &oms_command_operations::event_path(repo.path()),
+                &oms_command_operations::event_path(repo.as_path()),
                 &stop,
                 Instant::now() + Duration::from_millis(20)
             )
             .is_err()
         );
         assert_eq!(
-            std::fs::read(oms_command_operations::event_path(repo.path())).unwrap(),
+            std::fs::read(oms_command_operations::event_path(repo.as_path())).unwrap(),
             before
         );
-        assert!(!repo.path().join(".oms/usage/receipts.jsonl").exists());
+        assert_eq!(
+            usage::load(repo.as_path()).unwrap().calls.len(),
+            1,
+            "contract-only checks create no physical receipt"
+        );
         drop(guard);
         oms_command_operations::lock::FileLock::acquire_before(
-            &oms_command_operations::event_path(repo.path()),
+            &oms_command_operations::event_path(repo.as_path()),
             &stop,
             Instant::now() + Duration::from_secs(1),
         )
@@ -3316,9 +3515,338 @@ mod tests {
         .check()
         .unwrap();
         assert_eq!(
-            std::fs::read(oms_command_operations::event_path(repo.path())).unwrap(),
+            std::fs::read(oms_command_operations::event_path(repo.as_path())).unwrap(),
             before
         );
+        let team = TeamLocator {
+            team_id: "team-a".into(),
+            spec_sha256: view["history"][0]["sha256"].as_str().unwrap().into(),
+            member_id: "worker-a".into(),
+            member_generation: 1,
+        };
+        let member_call = begin_interactive_with_executor(
+            InteractiveRequest {
+                state_root: repo.as_path(),
+                provider: "codex",
+                selected_model: Some("fixture"),
+                account: Some("other-account"),
+                attempt: None,
+                resume_session: None,
+            },
+            InteractiveContext {
+                contract_repo: repo.as_path(),
+                execution_repo: repo.as_path(),
+                root: Some(root),
+                team: Some(&team),
+                task_id: Some("task-a"),
+            },
+            &collab,
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), 2);
+        let claim = resources::snapshot(repo.as_path(), &stop).unwrap().unwrap();
+        assert_eq!(claim.occupancy.teams, 1);
+        assert_eq!(claim.occupancy.invocations, 1);
+        assert_eq!(claim.occupancy.open_processes, 1);
+        run_local(member_call);
+        let receipts = usage::load(repo.as_path()).unwrap();
+        assert_eq!(receipts.calls.len(), 2);
+        assert!(
+            receipts
+                .calls
+                .iter()
+                .all(|call| call.receipt.cleanup_complete == Some(true)
+                    && call.receipt.cost == usage::Cost::Unknown)
+        );
+        let reject = |member: &TeamLocator,
+                      selected: RootLocator<'_>,
+                      account: &str,
+                      model: &str,
+                      task: &str,
+                      execution: &Path,
+                      cancelled: bool,
+                      elapsed: bool| {
+            let attempt = PhysicalAttempt {
+                state_root: repo.as_path(),
+                contract_repo: repo.as_path(),
+                execution_repo: execution,
+                team: Some(member),
+                root: Some(selected),
+                provider: "codex",
+                account: Some(account),
+                selected_model: Some(model),
+                task_id: Some(task),
+                write: true,
+                persistent_session: false,
+            };
+            let count = physical::load(repo.as_path(), &stop).unwrap().len();
+            let interruption = AtomicBool::new(cancelled);
+            let deadline = if elapsed {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(5)
+            };
+            let error = collab
+                .with_physical_contract(
+                    &attempt,
+                    deadline,
+                    &interruption,
+                    Box::new(|_| panic!("invalid contract reached registration")),
+                )
+                .unwrap_err();
+            assert_eq!(physical::load(repo.as_path(), &stop).unwrap().len(), count);
+            error
+        };
+        let mut invalid_member = team.clone();
+        invalid_member.member_generation = 2;
+        reject(
+            &invalid_member,
+            root,
+            "other-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            RootLocator {
+                owner: "foreign-main",
+                room_id: "room-team",
+            },
+            "other-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            root,
+            "wrong-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            root,
+            "other-account",
+            "wrong-model",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
+        reject(
+            &team,
+            root,
+            "other-account",
+            "fixture",
+            "wrong-task",
+            repo.as_path(),
+            false,
+            false,
+        );
+        let wrong_base = Tmp::repo(&[("different", "different base\n")]);
+        reject(
+            &team,
+            root,
+            "other-account",
+            "fixture",
+            "task-a",
+            wrong_base.path(),
+            false,
+            false,
+        );
+        assert_eq!(
+            reject(
+                &team,
+                root,
+                "other-account",
+                "fixture",
+                "task-a",
+                repo.as_path(),
+                true,
+                false
+            )
+            .code,
+            130
+        );
+        assert_eq!(
+            reject(
+                &team,
+                root,
+                "other-account",
+                "fixture",
+                "task-a",
+                repo.as_path(),
+                false,
+                true
+            )
+            .code,
+            75
+        );
+        let retain_pending = |id: &str, contract: PhysicalContract<'_>| {
+            let registered = physical::begin_bound_checked(
+                repo.as_path(),
+                physical::Request {
+                    identity: usage::Identity {
+                        call_id: id.into(),
+                        operation_id: format!("operation-{id}"),
+                        provider: "codex".into(),
+                        selected_model: Some("fixture".into()),
+                        account: Some("other-account".into()),
+                        task_id: Some("task-a".into()),
+                        ..Default::default()
+                    },
+                    cumulative: None,
+                    write: true,
+                    campaign_manifest_sha256: None,
+                },
+                contract.resource.expect("native contract resource binding"),
+                &stop,
+                Instant::now() + Duration::from_secs(5),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            assert!(matches!(registered, physical::Registration::New(_)));
+            oms_supervisor::process::PhysicalCall::new(id).unwrap()
+        };
+        let attempt = PhysicalAttempt {
+            state_root: repo.as_path(),
+            contract_repo: repo.as_path(),
+            execution_repo: repo.as_path(),
+            team: Some(&team),
+            root: Some(root),
+            provider: "codex",
+            account: Some("other-account"),
+            selected_model: Some("fixture"),
+            task_id: Some("task-a"),
+            write: true,
+            persistent_session: false,
+        };
+        let policy_error = collab
+            .with_physical_contract(
+                &attempt,
+                Instant::now() + Duration::from_secs(10),
+                &stop,
+                Box::new(|contract| {
+                    let call = retain_pending("policy-held", contract);
+                    std::fs::write(repo.join("team-policy.json"), b"{}\n").unwrap();
+                    Ok(call)
+                }),
+            )
+            .unwrap_err();
+        assert!(policy_error.message.contains("policy"), "{policy_error:?}");
+        std::fs::write(repo.join("team-policy.json"), &policy_bytes).unwrap();
+        let assert_retained = |expected: usize, open: u64| {
+            assert_eq!(
+                physical::load(repo.as_path(), &stop).unwrap().len(),
+                expected
+            );
+            let receipts = usage::load(repo.as_path()).unwrap();
+            assert_eq!(receipts.calls.len(), expected);
+            for id in ["policy-held", "expiry-held"]
+                .into_iter()
+                .take(expected - 2)
+            {
+                let receipt = &receipts
+                    .calls
+                    .iter()
+                    .find(|call| call.receipt.identity.call_id == id)
+                    .unwrap()
+                    .receipt;
+                assert_eq!(receipt.phase, usage::Phase::Pending);
+                assert_eq!(receipt.cost, usage::Cost::Unknown);
+                assert_eq!(receipt.cleanup_complete, None);
+            }
+            let occupancy = resources::snapshot(repo.as_path(), &stop)
+                .unwrap()
+                .unwrap()
+                .occupancy;
+            assert_eq!(occupancy.invocations, open);
+            assert_eq!(occupancy.open_processes, open);
+        };
+        assert_retained(3, 1);
+        // Use a real native contract expiry. Wait at most twelve seconds for a
+        // minute boundary so the existing UTC producer supplies the calendar.
+        let expiry = loop {
+            let now = oms_command_autonomy::value::now();
+            let second = now[17..19].parse::<u64>().unwrap();
+            if second <= 47 {
+                break format!("{}{:02}Z", &now[..17], second + 12);
+            }
+            std::thread::sleep(Duration::from_secs(60 - second));
+        };
+        spec["generation"] = 2.into();
+        spec["previous_sha256"] = team.spec_sha256.clone().into();
+        spec["expires_at"] = expiry.into();
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        call(&[
+            "team-register",
+            "--team-spec",
+            "team.json",
+            "--expected-team-sha256",
+            &team.spec_sha256,
+        ])
+        .unwrap();
+        let next: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        let next_team = TeamLocator {
+            spec_sha256: next["history"][1]["sha256"].as_str().unwrap().into(),
+            ..team.clone()
+        };
+        let attempt = PhysicalAttempt {
+            team: Some(&next_team),
+            ..attempt
+        };
+        let expiry_error = collab
+            .with_physical_contract(
+                &attempt,
+                Instant::now() + Duration::from_secs(20),
+                &stop,
+                Box::new(|contract| {
+                    let expires_at = contract.expires_at.unwrap();
+                    let call = retain_pending("expiry-held", contract);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap();
+                    let expires_at = Duration::from_secs(expires_at.try_into().unwrap());
+                    if let Some(remaining) = expires_at.checked_sub(now) {
+                        std::thread::sleep(remaining);
+                    }
+                    Ok(call)
+                }),
+            )
+            .unwrap_err();
+        assert!(expiry_error.message.contains("expired"), "{expiry_error:?}");
+        assert_retained(4, 2);
+        spec["generation"] = 3.into();
+        spec["previous_sha256"] = next_team.spec_sha256.clone().into();
+        spec["expires_at"] = "2200-01-01T00:00:00Z".into();
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        call(&[
+            "team-register",
+            "--team-spec",
+            "team.json",
+            "--expected-team-sha256",
+            &next_team.spec_sha256,
+        ])
+        .unwrap();
+        let active: Value =
+            serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
+                .unwrap();
+        let active_team = TeamLocator {
+            spec_sha256: active["history"][2]["sha256"].as_str().unwrap().into(),
+            ..team.clone()
+        };
         let cancel = new_event(
             &owner,
             0usize.into(),
@@ -3326,16 +3854,26 @@ mod tests {
             obj([("to_state", "cancelled".into())]),
         )
         .unwrap();
-        append_lifecycle(repo.path(), cancel, &stop).unwrap();
+        append_lifecycle(repo.as_path(), cancel, &stop).unwrap();
         let held: Value =
             serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
                 .unwrap();
         assert_eq!(held["phase"], "held");
         assert!(held["reason"].as_str().unwrap().contains("owner"));
+        reject(
+            &active_team,
+            root,
+            "other-account",
+            "fixture",
+            "task-a",
+            repo.as_path(),
+            false,
+            false,
+        );
         let reference = view["history"][0]["path"].as_str().unwrap();
-        let mut corrupt = std::fs::read(repo.path().join(reference)).unwrap();
+        let mut corrupt = std::fs::read(repo.as_path().join(reference)).unwrap();
         corrupt.push(b' ');
-        std::fs::write(repo.path().join(reference), corrupt).unwrap();
+        std::fs::write(repo.as_path().join(reference), corrupt).unwrap();
         assert!(
             call(&["team-show", "--id", "team-a"])
                 .unwrap_err()

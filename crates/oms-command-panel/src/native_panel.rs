@@ -830,7 +830,7 @@ fn run_native(
     }
 
     let admission = (|| -> Result<oms_command_peer::admission::InteractiveCall> {
-        let call = oms_command_peer::admission::begin_interactive(
+        let call = oms_command_peer::admission::begin_interactive_with_executor(
             oms_command_peer::admission::InteractiveRequest {
                 state_root: repo,
                 provider: &resolution.owner,
@@ -839,11 +839,30 @@ fn run_native(
                 attempt: Some(&attempt),
                 resume_session: resume,
             },
+            oms_command_peer::admission::InteractiveContext {
+                contract_repo: &execution,
+                execution_repo: &execution,
+                root: Some(oms_command_peer::process::RootLocator {
+                    owner: &attempt,
+                    room_id: &room_id,
+                }),
+                team: None,
+                task_id: None,
+            },
+            services
+                .physical_executor()
+                .unwrap_or(&oms_command_peer::process::Native),
             stop,
         )
         .map_err(admission_error)?;
         session_lock.check()?;
-        call.fence(stop).map_err(admission_error)?;
+        call.fence_with_executor(
+            services
+                .physical_executor()
+                .unwrap_or(&oms_command_peer::process::Native),
+            stop,
+        )
+        .map_err(admission_error)?;
         Ok(call)
     })();
     let call = match admission {

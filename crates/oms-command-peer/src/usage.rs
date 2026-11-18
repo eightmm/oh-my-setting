@@ -4,7 +4,7 @@ use oms_command_telemetry::store::physical::{self, Registration};
 use oms_command_telemetry::store::usage::{
     self, Cost, Cumulative, Identity, Phase, Receipt, Usage,
 };
-use oms_command_telemetry::store::{StoreError, budget, campaign};
+use oms_command_telemetry::store::{StoreError, budget, campaign, resources};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::Path;
@@ -16,6 +16,9 @@ pub(crate) struct Pending {
     pub receipt: Receipt,
     deadline: Instant,
     campaign_deadline: Option<i64>,
+    resource: Option<(std::path::PathBuf, resources::Binding)>,
+    expires_at: Option<i64>,
+    campaign_binding: Option<Vec<(OsString, OsString)>>,
 }
 pub struct InteractiveRequest<'a> {
     pub state_root: &'a Path,
@@ -25,12 +28,20 @@ pub struct InteractiveRequest<'a> {
     pub attempt: Option<&'a str>,
     pub resume_session: Option<&'a str>,
 }
+pub struct InteractiveContext<'a> {
+    pub contract_repo: &'a Path,
+    pub execution_repo: &'a Path,
+    pub root: Option<crate::process::RootLocator<'a>>,
+    pub team: Option<&'a crate::process::TeamLocator>,
+    pub task_id: Option<&'a str>,
+}
 /// Dropping a handle retains its durable pending liability. It never refunds or
 /// resends an invocation, and registration alone supplies no owner authority.
 #[must_use]
 pub struct InteractiveCall {
     state: std::path::PathBuf,
     pending: Pending,
+    physical: crate::process::OwnedPhysicalAttempt,
 }
 /// The caller's selected shared state remains authoritative over an ambient
 /// locator. Physical aliases are accepted; a different repository is refused.
@@ -51,6 +62,26 @@ pub fn begin_interactive(
     request: InteractiveRequest<'_>,
     interrupted: &AtomicBool,
 ) -> Result<InteractiveCall> {
+    let selected = request.state_root;
+    begin_interactive_with_executor(
+        request,
+        InteractiveContext {
+            contract_repo: selected,
+            execution_repo: selected,
+            root: None,
+            team: None,
+            task_id: None,
+        },
+        &crate::process::Native,
+        interrupted,
+    )
+}
+pub fn begin_interactive_with_executor(
+    request: InteractiveRequest<'_>,
+    context: InteractiveContext<'_>,
+    executor: &dyn crate::process::Executor,
+    interrupted: &AtomicBool,
+) -> Result<InteractiveCall> {
     let state = interactive_state(request.state_root)?;
     let mut extra = vec![(
         "OMS_RESUME_SESSION".into(),
@@ -58,6 +89,9 @@ pub fn begin_interactive(
     )];
     if let Some(attempt) = request.attempt {
         extra.push(("OMS_ATTEMPT_ID".into(), attempt.into()));
+    }
+    if let Some(task) = context.task_id {
+        extra.push(("OMS_TASK_ID".into(), task.into()));
     }
     let extra = operation_env(&extra)?;
     let route = crate::providers::Route {
@@ -68,8 +102,53 @@ pub fn begin_interactive(
         account: request.account.unwrap_or("").into(),
         account_pinned: false,
     };
-    let pending = begin(&state, &route, request.account, true, &extra, interrupted)?;
-    Ok(InteractiveCall { state, pending })
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let physical = crate::process::PhysicalAttempt {
+        state_root: &state,
+        contract_repo: context.contract_repo,
+        execution_repo: context.execution_repo,
+        root: context.root,
+        team: context.team,
+        provider: &route.provider,
+        account: request.account.filter(|account| *account != "default"),
+        selected_model: request.selected_model,
+        task_id: context.task_id,
+        write: true,
+        persistent_session: false,
+    };
+    let mut registered = None;
+    executor.with_physical_contract(
+        &physical,
+        deadline,
+        interrupted,
+        Box::new(|contract| {
+            let pending = begin_before(
+                &state,
+                &route,
+                request.account,
+                true,
+                &extra,
+                interrupted,
+                deadline,
+                contract,
+            )?;
+            let call = pending.physical_call()?;
+            registered = Some(pending);
+            Ok(call)
+        }),
+    )?;
+    let pending = registered.ok_or_else(|| {
+        Error::new(
+            75,
+            "native admission returned without an interactive acknowledgement",
+        )
+    })?;
+    let physical = physical.owned();
+    Ok(InteractiveCall {
+        state,
+        pending,
+        physical,
+    })
 }
 impl InteractiveCall {
     pub fn call_id(&self) -> &str {
@@ -81,13 +160,104 @@ impl InteractiveCall {
     pub fn fence(&self, interrupted: &AtomicBool) -> Result<()> {
         self.pending.fence(interrupted)
     }
+    pub fn launch_fence(&self) -> crate::process::LaunchFence {
+        self.pending.launch_fence()
+    }
+    /// Requalifies the original acknowledgement after the resource writer wait.
+    /// The callback observes that call and cannot register or resend another one.
+    pub fn fence_with_executor(
+        &self,
+        executor: &dyn crate::process::Executor,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        self.pending.fence(stop)?;
+        self.pending
+            .qualify(&self.physical.borrow(), executor, stop)
+    }
     /// Terminal output is never interpreted as accounting. Missing capture and
     /// missing native cleanup evidence remain absent independently of exit code.
     pub fn finish(self, output: Option<&[u8]>, cleanup_complete: Option<bool>) -> Result<()> {
         finish_unobserved(&self.state, self.pending.receipt, output, cleanup_complete)
     }
+    pub fn finish_with_cleanup(
+        self,
+        output: Option<&[u8]>,
+        cleanup_complete: Option<bool>,
+        proof: Option<&oms_supervisor::process::OwnedCleanup>,
+    ) -> Result<()> {
+        let accounting = finish_unobserved(
+            &self.state,
+            self.pending.receipt.clone(),
+            output,
+            cleanup_complete,
+        );
+        let settlement = self.pending.settle_execution(proof);
+        accounting?;
+        settlement
+    }
 }
 impl Pending {
+    pub fn launch_fence(&self) -> crate::process::LaunchFence {
+        crate::process::LaunchFence::new(self.deadline, self.expires_at)
+            .with_campaign_deadline(self.campaign_deadline)
+    }
+    pub fn qualify(
+        &self,
+        attempt: &crate::process::PhysicalAttempt<'_>,
+        executor: &dyn crate::process::Executor,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        self.launch_fence().check(stop)?;
+        let mut acknowledged = false;
+        executor.with_physical_contract(
+            attempt,
+            self.deadline,
+            stop,
+            Box::new(|contract| {
+                if contract.resource != self.resource.as_ref().map(|(_, binding)| binding)
+                    || contract.expires_at != self.expires_at
+                {
+                    return Err(Error::new(
+                        75,
+                        "physical contract changed after registration; no resend occurred",
+                    ));
+                }
+                if let Some(extra) = &self.campaign_binding {
+                    let campaign = campaign_binding(
+                        attempt.state_root,
+                        extra,
+                        &self.receipt.identity,
+                        stop,
+                        self.deadline,
+                    )?
+                    .ok_or_else(|| Error::new(75, "campaign binding disappeared before launch"))?;
+                    campaign
+                        .view
+                        .active(
+                            &campaign.manifest,
+                            &self.receipt.identity.operation_id,
+                            &self.receipt.identity.provider,
+                            unix_now(),
+                        )
+                        .map_err(accounting)?;
+                    campaign
+                        .guard
+                        .check()
+                        .map_err(|error| Error::new(error.exit_code(), error.to_string()))?;
+                }
+                let call = self.physical_call()?;
+                acknowledged = true;
+                Ok(call)
+            }),
+        )?;
+        if !acknowledged {
+            return Err(Error::new(
+                75,
+                "native requalification returned without an acknowledgement; pending intent retained",
+            ));
+        }
+        self.launch_fence().check(stop)
+    }
     pub fn fence(&self, interrupted: &AtomicBool) -> Result<()> {
         if interrupted.load(Ordering::Acquire) {
             return Err(Error::new(
@@ -109,6 +279,46 @@ impl Pending {
                 3,
                 "campaign deadline expired; pending intent retained",
             ));
+        }
+        if let Some((repo, binding)) = &self.resource {
+            resources::fence(
+                repo,
+                binding,
+                &self.physical_call()?,
+                interrupted,
+                self.deadline,
+            )
+            .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+        }
+        self.launch_fence().check(interrupted)
+    }
+    pub fn physical_call(&self) -> Result<oms_supervisor::process::PhysicalCall> {
+        oms_supervisor::process::PhysicalCall::new(&self.receipt.identity.call_id)
+            .map_err(|e| Error::new(2, e))
+    }
+    pub fn settle_execution(
+        &self,
+        proof: Option<&oms_supervisor::process::OwnedCleanup>,
+    ) -> Result<()> {
+        if let (Some((repo, binding)), Some(proof)) = (&self.resource, proof) {
+            // Persist owned cleanup after cancellation, just like terminal usage.
+            // This independent deadline bounds its receipt writer wait.
+            let settlement = AtomicBool::new(false);
+            resources::settle_execution(
+                repo,
+                binding,
+                &self.physical_call()?,
+                proof,
+                1,
+                &settlement,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .map_err(|e| {
+                Error::new(
+                    e.exit_code(),
+                    format!("physical cleanup settlement failed: {e}"),
+                )
+            })?;
         }
         Ok(())
     }
@@ -253,7 +463,7 @@ impl Campaign {
     }
 }
 
-fn env(extra: &[(OsString, OsString)], key: &str) -> Option<String> {
+pub(crate) fn env(extra: &[(OsString, OsString)], key: &str) -> Option<String> {
     extra
         .iter()
         .rev()
@@ -285,14 +495,19 @@ pub(crate) fn operation_env(extra: &[(OsString, OsString)]) -> Result<Vec<(OsStr
     extra.push(("OMS_OPERATION_ID".into(), operation.into()));
     Ok(extra)
 }
-pub(crate) fn begin(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn begin_before(
     repo: &Path,
     route: &crate::providers::Route,
     account: Option<&str>,
     write: bool,
     extra: &[(OsString, OsString)],
     interrupted: &AtomicBool,
+    deadline: Instant,
+    contract: crate::process::PhysicalContract<'_>,
 ) -> Result<Pending> {
+    let resource = contract.resource;
+    crate::process::LaunchFence::new(deadline, contract.expires_at).check(interrupted)?;
     let identity = Identity {
         call_id: crate::id("call_")?,
         operation_id: env(extra, "OMS_OPERATION_ID")
@@ -313,9 +528,24 @@ pub(crate) fn begin(
     } else {
         None
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
     let campaign = campaign_binding(repo, extra, &identity, interrupted, deadline)?;
     let campaign_deadline = campaign.as_ref().map(|campaign| campaign.deadline);
+    let pinned_campaign = campaign.as_ref().map(|campaign| {
+        vec![
+            (
+                "OMS_CAMPAIGN_MANIFEST_SHA256".into(),
+                campaign.manifest.sha256.clone().into(),
+            ),
+            (
+                "OMS_OPERATION_ID".into(),
+                identity.operation_id.clone().into(),
+            ),
+            (
+                "OMS_GOAL_ID".into(),
+                identity.goal_id.clone().unwrap_or_default().into(),
+            ),
+        ]
+    });
     let request = physical::Request {
         identity: identity.clone(),
         cumulative,
@@ -324,17 +554,17 @@ pub(crate) fn begin(
             .as_ref()
             .map(|campaign| campaign.manifest.sha256.clone()),
     };
-    let registered = physical::begin_checked(
-        repo,
-        request,
-        interrupted,
-        deadline,
-        |intents, projection| {
-            campaign.as_ref().map_or(Ok(()), |campaign| {
-                campaign.admit(&identity, intents, projection)
-            })
-        },
-    )
+    let admit = |intents: &[physical::Intent], projection: &usage::Projection| {
+        campaign.as_ref().map_or(Ok(()), |campaign| {
+            campaign.admit(&identity, intents, projection)
+        })
+    };
+    let registered = match resource {
+        Some(binding) => {
+            physical::begin_bound_checked(repo, request, binding, interrupted, deadline, admit)
+        }
+        None => physical::begin_checked(repo, request, interrupted, deadline, admit),
+    }
     .map_err(|e| {
         Error::new(
             e.exit_code(),
@@ -358,6 +588,9 @@ pub(crate) fn begin(
             receipt,
             deadline,
             campaign_deadline,
+            resource: resource.map(|binding| (repo.into(), binding.clone())),
+            expires_at: contract.expires_at,
+            campaign_binding: pinned_campaign,
         }),
         Registration::Existing { .. } => Err(Error::new(
             75,

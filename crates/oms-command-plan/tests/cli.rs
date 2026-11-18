@@ -1077,6 +1077,7 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
                 command.env_remove(key);
             }
         }
+        command.env("XDG_STATE_HOME", fixture.0.join("state"));
         command.env("OMS_TEAM_GIT_FIXTURE_BIN", &bin).env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -1094,6 +1095,7 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     use oms_command_plan::json::{Value, number, object, string};
     use oms_command_plan::services::{LifecycleGuard, ProjectedLifecycle, ProjectedRoom};
     use oms_command_plan::{Action, Context, Plan, Request, json};
+    static REFUSE_ORDINARY_GROUP: AtomicBool = AtomicBool::new(false);
     struct Guard<'a>(&'a AtomicBool);
     impl LifecycleGuard for Guard<'_> {
         fn check(&self) -> oms_command_plan::Result<()> {
@@ -1120,7 +1122,16 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     }
     impl Services for TeamHost {
         fn group_membership_resolver(&self) -> Option<GroupResolver> {
-            Host.group_membership_resolver()
+            fn ordinary(gid: u32) -> oms_command_plan::Result<GroupMembership> {
+                if REFUSE_ORDINARY_GROUP.load(Ordering::Acquire) {
+                    return Err(oms_command_plan::Error {
+                        code: 2,
+                        message: "ordinary group lookup in bounded Team admission".into(),
+                    });
+                }
+                Host.group_membership_resolver().unwrap()(gid)
+            }
+            Some(ordinary)
         }
         fn group_membership_before(
             &self,
@@ -1198,7 +1209,10 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
                             "state",
                             string(if terminal { "cancelled" } else { "working" }),
                         ),
-                        ("refs", object([("panel_room_id", string("room-team"))])),
+                        (
+                            "refs",
+                            object([("panel_room_id", string("room-aaaaaaaaaaaa"))]),
+                        ),
                     ]),
                 )]),
             })
@@ -1223,6 +1237,55 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
                 ]),
             })
         }
+        fn supervise(
+            &self,
+            command: &oms_command_plan::services::SupervisedCommand,
+        ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+            use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason};
+            let mut reactor = Reactor::new();
+            let mut request = Request::new(command.argv.clone());
+            request.cwd = Some(command.cwd.clone());
+            request.scope = Scope::ProcessGroup;
+            request.deadline = Some(std::time::Instant::now() + command.wall);
+            request.environment = command.environment.clone();
+            request.remove_environment = command
+                .remove_environment
+                .iter()
+                .map(OsString::from)
+                .collect();
+            request.capture.max_bytes = command.output_limit;
+            let job = reactor
+                .start(request)
+                .map_err(|e| oms_command_plan::Error {
+                    code: 2,
+                    message: e.to_string(),
+                })?;
+            loop {
+                match reactor
+                    .poll(job, std::time::Duration::from_millis(10))
+                    .map_err(|e| oms_command_plan::Error {
+                        code: 2,
+                        message: e.to_string(),
+                    })? {
+                    Progress::Pending(_) => {}
+                    Progress::Complete(done) => {
+                        return Ok(oms_command_plan::services::Execution {
+                            exit: done
+                                .exit
+                                .map(|exit| exit.shell_code().try_into().unwrap_or(125))
+                                .unwrap_or(125),
+                            runner_exit: 0,
+                            timed_out: done.stop == Some(StopReason::Deadline),
+                            output_limited: done.stdout.limited,
+                            launch_error: false,
+                            supervision_error: !done.cleanup_complete() || !done.output_complete(),
+                            output: done.stdout.bytes,
+                            duration_s: done.duration.as_secs(),
+                        });
+                    }
+                }
+            }
+        }
     }
     let tmp = Tmp::new();
     let r = repo(&tmp);
@@ -1232,7 +1295,8 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
         let req = Request::parse(&args(values)).unwrap();
         let mut ctx = Context::from_environment(&req, &r).unwrap();
         ctx.panel_main_attempt = "main-a".into();
-        ctx.room_id = "room-team".into();
+        ctx.room_id = "room-aaaaaaaaaaaa".into();
+        ctx.participant = "main-a".into();
         ctx.child = child;
         Plan::open(ctx, &host, &stop).unwrap().execute(&req)
     };
@@ -1259,13 +1323,13 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     fs::create_dir_all(r.join(".oms/lifecycle")).unwrap();
     fs::create_dir_all(r.join(".oms/threads")).unwrap();
     let history = concat!(
-        "{\"schema\":1,\"event_id\":\"evt-owner\",\"attempt_id\":\"main-a\",\"seq\":1,\"ts\":\"2026-01-01T00:00:00Z\",\"event_type\":\"attempt.created\"}\n",
-        "{\"schema\":1,\"event_id\":\"evt-start\",\"attempt_id\":\"main-a\",\"seq\":2,\"ts\":\"2026-01-01T00:00:01Z\",\"event_type\":\"attempt.state_changed\"}\n"
+        "{\"schema\":1,\"event_id\":\"evt-owner\",\"attempt_id\":\"main-a\",\"seq\":1,\"ts\":\"2026-01-01T00:00:00Z\",\"event_type\":\"attempt.created\",\"provider\":\"codex\",\"tool\":\"panel-main\",\"refs\":{\"panel_role\":\"main\",\"panel_room_id\":\"room-aaaaaaaaaaaa\",\"panel_room_participant\":\"main-a\",\"panel_owner\":\"codex\"}}\n",
+        "{\"schema\":1,\"event_id\":\"evt-start\",\"attempt_id\":\"main-a\",\"seq\":2,\"ts\":\"2026-01-01T00:00:01Z\",\"event_type\":\"attempt.state_changed\",\"to_state\":\"working\"}\n"
     );
     fs::write(r.join(".oms/lifecycle/events.jsonl"), history).unwrap();
     fs::write(
-        r.join(".oms/threads/room-team.jsonl"),
-        b"{\"schema\":1,\"thread\":\"room-team\",\"seq\":1,\"ts\":\"2026-01-01T00:00:00Z\"}\n",
+        r.join(".oms/threads/room-aaaaaaaaaaaa.jsonl"),
+        b"{\"schema\":1,\"thread\":\"room-aaaaaaaaaaaa\",\"seq\":1,\"ts\":\"2026-01-01T00:00:00Z\",\"room_event\":{\"kind\":\"join\",\"participant\":\"main-a\",\"provider\":\"codex\",\"role\":\"main\"}}\n",
     )
     .unwrap();
     fs::write(r.join("team-policy.json"), b"{}\n").unwrap();
@@ -1291,6 +1355,7 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     let policy = json::sha(b"{}\n");
     let mut spec = json::parse(include_bytes!("fixtures/team-spec.json")).unwrap();
     for (key, value) in [
+        ("room_id", string("room-aaaaaaaaaaaa")),
         ("plan_id", plan.get("plan_id").clone()),
         ("task_sha256", string(json::hash(task).unwrap())),
         ("objective_sha256", string(json::sha(b"bounded fixture"))),
@@ -1462,7 +1527,8 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     let mut admission_context =
         Context::from_environment(&Request::new(Action::TeamShow), &r).unwrap();
     admission_context.panel_main_attempt = "main-a".into();
-    admission_context.room_id = "room-team".into();
+    admission_context.room_id = "room-aaaaaaaaaaaa".into();
+    admission_context.participant = "main-a".into();
     // An old Context timestamp is not the final admission clock.
     admission_context.ts = "2201-01-01T00:00:00Z".into();
     let admission_plan = Plan::open(admission_context.clone(), &host, &stop).unwrap();
@@ -1765,6 +1831,410 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     assert_eq!(
         fs::read_to_string(r.join(".oms/lifecycle/events.jsonl")).unwrap(),
         history
+    );
+
+    // The native publisher and room/lifecycle adapters are fixture inputs here;
+    // Git objects, Plan transitions, verifier execution and typed completion are real.
+    fs::write(r.join("team-policy.json"), b"{}\n").unwrap();
+    fs::write(r.join(".git/info/exclude"), b".oms/\n").unwrap();
+    git(&r, &["add", "."]);
+    git(&r, &["commit", "-qm", "freeze Team fixture source"]);
+    let git_text = |values: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&r)
+            .args(values)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {values:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let base_commit = git_text(&["rev-parse", "HEAD"]);
+    for id in ["commit-obligation", "commit-product"] {
+        call(
+            &[
+                "add",
+                "--id",
+                id,
+                "--title",
+                id,
+                "--allowed",
+                "src/product.txt",
+                "--verify",
+                "bash verify-product.sh",
+            ],
+            false,
+        )
+        .unwrap();
+        call(&["claim", "--id", id, "--provider", "codex"], false).unwrap();
+    }
+    call(
+        &[
+            "add",
+            "--id",
+            "commit-dependent",
+            "--title",
+            "use the verified product",
+            "--depends",
+            "commit-obligation",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+        false,
+    )
+    .unwrap();
+    fs::create_dir_all(r.join("src")).unwrap();
+    fs::write(r.join("src/product.txt"), b"product\n").unwrap();
+    fs::write(
+        r.join("verify-product.sh"),
+        b"#!/bin/sh\nset -eu\ntest \"$(cat src/product.txt)\" = product\n",
+    )
+    .unwrap();
+    git(&r, &["add", "src/product.txt", "verify-product.sh"]);
+    git(&r, &["commit", "-qm", "actual completion product"]);
+    let product_commit = git_text(&["rev-parse", "HEAD"]);
+    let product_tree = git_text(&["rev-parse", "HEAD^{tree}"]);
+    git(
+        &r,
+        &["update-ref", "refs/remotes/fixture/main", &product_commit],
+    );
+    let mut cksum = Command::new("cksum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        cksum.stdin.take().as_mut().unwrap(),
+        std::os::unix::ffi::OsStrExt::as_bytes(r.as_os_str()),
+    )
+    .unwrap();
+    let checksum = cksum.wait_with_output().unwrap();
+    assert!(checksum.status.success());
+    let checksum = String::from_utf8(checksum.stdout).unwrap();
+    let mut checksum = checksum.split_whitespace();
+    let receipt_directory = PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap())
+        .join("oh-my-setting/land")
+        .join(format!(
+            "repo-{}-{}",
+            checksum.next().unwrap(),
+            checksum.next().unwrap()
+        ));
+    fs::create_dir_all(&receipt_directory).unwrap();
+    fs::set_permissions(&receipt_directory, fs::Permissions::from_mode(0o770)).unwrap();
+    let receipt_path = receipt_directory.join(format!("{product_commit}-fixture.json"));
+    let land_receipt = json::canonical(&object([
+        ("schema", number(1)),
+        ("sha", string(&product_commit)),
+        ("state", string("passed")),
+        ("remote", string("fixture")),
+        ("target", string("main")),
+        ("gate", object([("rc", number(0))])),
+        (
+            "push",
+            object([
+                ("rc", number(0)),
+                ("moved", number(1)),
+                ("base", string(&base_commit)),
+            ]),
+        ),
+        ("ci", object([("conclusion", string("success"))])),
+    ]))
+    .unwrap();
+    fs::write(&receipt_path, &land_receipt).unwrap();
+    fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::create_dir_all(r.join(".oms/artifacts")).unwrap();
+    let artifact_path = ".oms/artifacts/commit-product.md";
+    let artifact = b"The fixture product implements commit-obligation.\n";
+    fs::write(r.join(artifact_path), artifact).unwrap();
+    call(
+        &[
+            "review",
+            "--id",
+            "commit-product",
+            "--artifact",
+            artifact_path,
+        ],
+        false,
+    )
+    .unwrap();
+    call(
+        &[
+            "finish",
+            "--id",
+            "commit-product",
+            "--landed-commit",
+            &product_commit,
+        ],
+        false,
+    )
+    .unwrap();
+
+    let parent = json::parse(&fs::read(r.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+    let dependent = parent.get("tasks").get("commit-dependent");
+    let mut dependent_spec = spec.clone();
+    for (key, value) in [
+        ("id", string("team-commit-dependent")),
+        ("generation", number(1)),
+        ("previous_sha256", string("")),
+        ("task_id", string("commit-dependent")),
+        ("task_sha256", string(json::hash(dependent).unwrap())),
+        (
+            "criterion_sha256",
+            string(oms_command_plan::team::criterion_digest(&parent, dependent).unwrap()),
+        ),
+        ("base_sha", string(&product_commit)),
+    ] {
+        dependent_spec.set(key, value).unwrap();
+    }
+    let dependent_spec_path = ".oms/plan/commit-dependent-team.json";
+    fs::write(
+        r.join(dependent_spec_path),
+        json::canonical(&dependent_spec).unwrap(),
+    )
+    .unwrap();
+    call(
+        &["team-register", "--team-spec", dependent_spec_path],
+        false,
+    )
+    .unwrap();
+    let dependent_request = oms_command_plan::team::AdmissionRequest {
+        team_id: "team-commit-dependent".into(),
+        spec_sha256: json::hash(&dependent_spec).unwrap(),
+        member_generation: large_generation,
+        ..admission.clone()
+    };
+    assert!(
+        admission_plan
+            .team_admission_before(dependent_request.clone(), deadline())
+            .err()
+            .unwrap()
+            .message
+            .contains("dependencies")
+    );
+
+    let plan_raw = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let parent = json::parse(&plan_raw).unwrap();
+    let original = parent.get("tasks").get("commit-obligation");
+    let product = parent.get("tasks").get("commit-product");
+    assert_eq!(product.text("state"), "done");
+    assert_eq!(product.get("landing").text("sha"), product_commit);
+    let manifest = Value::Array(
+        ["src/product.txt", "verify-product.sh"]
+            .into_iter()
+            .map(|path| {
+                object([
+                    ("path", string(path)),
+                    ("state", string("file")),
+                    ("mode", string("100644")),
+                    ("sha256", string(json::sha(fs::read(r.join(path)).unwrap()))),
+                ])
+            })
+            .collect(),
+    );
+    let bundle = object([
+        ("schema", number(1)),
+        ("kind", string("satisfied-by")),
+        ("plan_id", parent.get("plan_id").clone()),
+        ("task_id", original.get("id").clone()),
+        (
+            "task_sha256",
+            string(json::receipt_digest(original).unwrap()),
+        ),
+        ("plan_sha256", string(json::sha(&plan_raw))),
+        ("state", original.get("state").clone()),
+        ("lease_id", original.get("lease_id").clone()),
+        (
+            "owner",
+            object([
+                ("provider", string("codex")),
+                ("participant", string("main-a")),
+                ("parent_provider", string("codex")),
+            ]),
+        ),
+        ("original_contract", json::projection(original).unwrap()),
+        (
+            "review_summary",
+            string("The exact committed product fulfills the original obligation."),
+        ),
+        (
+            "reviewed_obligations",
+            Value::Array(vec![string("product")]),
+        ),
+        (
+            "requirements",
+            Value::Array(vec![object([
+                ("id", string("product")),
+                ("obligation", original.get("title").clone()),
+                (
+                    "deliverable",
+                    string("src/product.txt in the exact committed tree"),
+                ),
+                (
+                    "source_paths",
+                    Value::Array(vec![string("src/product.txt")]),
+                ),
+                (
+                    "evidence",
+                    Value::Array(vec![object([
+                        ("path", string(artifact_path)),
+                        ("sha256", string(json::sha(artifact))),
+                    ])]),
+                ),
+            ])]),
+        ),
+        ("base_commit", string(&base_commit)),
+        (
+            "source_envelope",
+            Value::Array(vec![string("src/product.txt"), string("verify-product.sh")]),
+        ),
+        ("source_manifest", manifest.clone()),
+        (
+            "verifier",
+            object([
+                ("command", string("bash verify-product.sh")),
+                ("adopted", Value::Bool(false)),
+                (
+                    "review_summary",
+                    string("Frozen script checks the actual product bytes."),
+                ),
+                (
+                    "files",
+                    Value::Array(vec![manifest.array().unwrap()[1].clone()]),
+                ),
+            ]),
+        ),
+        (
+            "successor",
+            object([
+                ("plan_id", parent.get("plan_id").clone()),
+                ("task_id", product.get("id").clone()),
+                (
+                    "task_sha256",
+                    string(json::receipt_digest(product).unwrap()),
+                ),
+                ("original_contract", json::projection(product).unwrap()),
+                ("product_kind", string("commit")),
+                ("commit_sha", string(&product_commit)),
+                ("land_receipt_sha256", string(json::sha(&land_receipt))),
+            ]),
+        ),
+    ]);
+    let bundle_path = ".oms/plan/commit-product-bundle.json";
+    let bundle_raw = json::canonical(&bundle).unwrap();
+    fs::write(r.join(bundle_path), &bundle_raw).unwrap();
+    let satisfy = [
+        "satisfy",
+        "--id",
+        "commit-obligation",
+        "--completion-bundle",
+        bundle_path,
+        "--expected-completion-bundle-sha256",
+        &json::sha(&bundle_raw),
+        "--expected-plan-sha256",
+        bundle.text("plan_sha256"),
+        "--expected-task-sha256",
+        bundle.text("task_sha256"),
+        "--expected-state",
+        bundle.text("state"),
+        "--lease-id",
+        bundle.text("lease_id"),
+    ];
+    fs::write(r.join("src/product.txt"), b"stale product\n").unwrap();
+    assert!(
+        call(&satisfy, false)
+            .unwrap_err()
+            .message
+            .contains("source content/mode changed")
+    );
+    assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), plan_raw);
+    fs::write(r.join("src/product.txt"), b"product\n").unwrap();
+    call(&satisfy, false).unwrap();
+    let completed_raw = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let completed = json::parse(&completed_raw).unwrap();
+    let completed = completed.get("tasks").get("commit-obligation");
+    assert_eq!(completed.text("completion_kind"), "satisfied-by");
+    assert_eq!(completed.text("state"), "done");
+    let completion_path = r.join(completed.get("completion_receipt").text("path"));
+    let completion_raw = fs::read(&completion_path).unwrap();
+    let completion = json::parse(&completion_raw).unwrap();
+    assert_eq!(
+        completion
+            .get("snapshot")
+            .get("evidence")
+            .text("product_kind"),
+        "commit"
+    );
+    assert_eq!(completion.get("snapshot").text("head"), product_commit);
+    assert_eq!(git_text(&["rev-parse", "HEAD^{tree}"]), product_tree);
+
+    REFUSE_ORDINARY_GROUP.store(true, Ordering::Release);
+    let guard = admission_plan
+        .team_admission_before(dependent_request.clone(), deadline())
+        .unwrap();
+    guard.check().unwrap();
+    fs::write(&receipt_path, b"{}\n").unwrap();
+    assert!(
+        guard
+            .check()
+            .unwrap_err()
+            .message
+            .contains("no passed oms land receipt")
+    );
+    fs::write(&receipt_path, &land_receipt).unwrap();
+    guard.check().unwrap();
+    fs::write(&completion_path, b"{}\n").unwrap();
+    assert!(
+        guard
+            .check()
+            .unwrap_err()
+            .message
+            .contains("evidence digest changed")
+    );
+    fs::write(&completion_path, &completion_raw).unwrap();
+    guard.check().unwrap();
+    git(&r, &["update-ref", "-d", "refs/remotes/fixture/main"]);
+    assert!(guard.check().unwrap_err().message.contains("not reachable"));
+    git(
+        &r,
+        &["update-ref", "refs/remotes/fixture/main", &product_commit],
+    );
+    guard.check().unwrap();
+    drop(guard);
+    fs::write(r.join(artifact_path), b"tampered product report\n").unwrap();
+    assert!(
+        admission_plan
+            .team_admission_before(dependent_request.clone(), deadline())
+            .err()
+            .unwrap()
+            .message
+            .contains("evidence digest changed")
+    );
+    fs::write(r.join(artifact_path), artifact).unwrap();
+    git(&r, &["commit", "--allow-empty", "-qm", "a new Team base"]);
+    assert!(
+        admission_plan
+            .team_admission_before(dependent_request.clone(), deadline())
+            .err()
+            .unwrap()
+            .message
+            .contains("team base changed")
+    );
+    git(&r, &["update-ref", "HEAD", &product_commit]);
+    admission_plan
+        .team_admission_before(dependent_request, deadline())
+        .unwrap()
+        .check()
+        .unwrap();
+    REFUSE_ORDINARY_GROUP.store(false, Ordering::Release);
+    assert_eq!(
+        fs::read(r.join(".oms/plan/tasks.json")).unwrap(),
+        completed_raw
     );
     let req = Request::new(Action::TeamList);
     let mut ctx = Context::from_environment(&req, &r).unwrap();

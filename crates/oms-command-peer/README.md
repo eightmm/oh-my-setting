@@ -76,8 +76,9 @@ execution acknowledgements retain unknown cleanup. Schema-1 history stays readab
 `Invocation::physical_call` additionally carries the exact physical-call tag to
 the native reactor. `Completed::owned_cleanup` retains its opaque, actual-scope
 proof separately from the legacy Boolean observation. Synthetic executors leave
-that proof absent. This in-memory handoff grants no resource release by itself;
-durable resource/session/WIP settlement and native fanout bounds remain separate.
+that proof absent. Resource-bound calls settle invocation and process custody
+only with that exact call's allowed-scope proof. Usage, persistent sessions,
+Team slots and candidate WIP remain separate; native fanout bounds are unknown.
 Registration failure prevents that physical invocation. Completion-persistence
 failure stops automatic account overflow and model fallback, even when provider
 output is already available. Ordinary and budget-enforced calls share this
@@ -116,6 +117,26 @@ root, carries the actual attempt and explicit resume identity, and returns an
 opaque handle for the final fence and unknown settlement. Dropping a handle
 does not refund or resend. Uncaptured output has no source digest; missing cleanup
 acknowledgement stays unknown.
+
+Explicit Team calls pass all four locators exactly once: `--team-id`,
+`--team-spec-sha256`, `--team-member` and `--team-member-generation`. Ambient
+Team metadata supplies no admission authority. The root native executor pins the
+canonical Main creation/Room and Team/spec/member generation, task dependencies,
+actual selected account/model/access, execution base and active observed host
+policy around physical registration. A Main can qualify before a Plan exists;
+actual child/depth guards still apply. Unsupported native-team, required native
+capabilities, resource requests and Team budget references refuse.
+
+After the resource writer wait, native qualification checks the original call
+again without registering another call. Both acknowledgements are required;
+missing acknowledgement, expiry or changed policy retains Pending liabilities
+and prevents execution. Outer producer guards end before the provider runs.
+Every account/model retry repeats this path with a distinct physical call.
+Accounting or cleanup-settlement failure prevents retry. Owned cleanup can be
+persisted after cancellation through an independent bounded settlement writer.
+Interactive Main retains its TTY and therefore keeps unobserved cleanup and
+usage unknown. These paths establish neither authenticated TeamRequest control
+nor provider-account capacity, hidden-child coverage or a global hard cap.
 
 The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
 thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed

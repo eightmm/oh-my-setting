@@ -17,6 +17,8 @@
 //! `target/oms-native/<rev>/` (this adapter never builds it).
 #[path = "services_incoming.rs"]
 mod incoming;
+#[path = "services_physical.rs"]
+mod physical;
 use crate::services_control::ControlServices;
 use oms_command_autonomy::receipt;
 use oms_command_hooks::HostServices as HookHostServices;
@@ -614,6 +616,15 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn with_physical_contract(
+        &self,
+        attempt: &oms_command_peer::process::PhysicalAttempt<'_>,
+        deadline: Instant,
+        interrupted: &AtomicBool,
+        register: oms_command_peer::process::RegisterPhysical<'_>,
+    ) -> oms_command_peer::Result<()> {
+        self.physical_contract(attempt, deadline, interrupted, register)
+    }
     fn execute(
         &self,
         input: Invocation,
@@ -621,6 +632,9 @@ impl PeerProcessExecutor for CollabServices<'_> {
     ) -> oms_command_peer::Result<Completed> {
         let fail = |code, e: String| oms_command_peer::Error::new(code, e);
         let argv = self.resolve_argv(input.argv).map_err(|e| fail(2, e))?;
+        if let Some(fence) = &input.launch_fence {
+            fence.check(interrupted)?;
+        }
         let (done, _) = supervise(
             Job {
                 stdin: input.input,
@@ -822,6 +836,43 @@ impl oms_command_room::Services for CollabServices<'_> {
 }
 
 impl PanelServices for CollabServices<'_> {
+    fn team_contracts(
+        &self,
+        execution: &Path,
+        state: &Path,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<CommandOutput> {
+        let request =
+            oms_command_plan::Request::new(oms_command_plan::Action::TeamList).flag("json");
+        let context = oms_command_plan::Context::from_selected_state_before(
+            &request,
+            execution,
+            execution,
+            state,
+            stop,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .map_err(|error| oms_panel_core::Error {
+            code: error.code,
+            ..panel_error(error)
+        })?;
+        let plan = oms_command_plan::Plan::open(context, &self.control, stop).map_err(|error| {
+            oms_panel_core::Error {
+                code: error.code,
+                ..panel_error(error)
+            }
+        })?;
+        let response = plan
+            .execute(&request)
+            .map_err(|error| oms_panel_core::Error {
+                code: error.code,
+                ..panel_error(error)
+            })?;
+        Ok(output((response.code, response.stdout, response.stderr)))
+    }
+    fn physical_executor(&self) -> Option<&dyn PeerProcessExecutor> {
+        Some(self)
+    }
     fn publication_receipt(
         &self,
         repo: &Path,
@@ -2546,6 +2597,96 @@ mod tests {
     }
 
     #[test]
+    fn team_view_uses_selected_state_instead_of_ambient_repository() {
+        const CHILD: &str = "OMS_TEST_TEAM_VIEW_SELECTED_ROOTS";
+        if std::env::var_os(CHILD).is_none() {
+            let execution = Fixture::new();
+            let other = Fixture::new();
+            for repo in [execution.path(), other.path()] {
+                let out = std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .arg(repo)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{:?}", out.stderr);
+            }
+            std::fs::create_dir_all(other.path().join(".oms/plan")).unwrap();
+            std::fs::write(other.path().join(".oms/plan/tasks.json"), b"invalid").unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "services_collab::tests::team_view_uses_selected_state_instead_of_ambient_repository",
+                    "--nocapture",
+                ])
+                .current_dir(execution.path())
+                .env(CHILD, "1")
+                .env("OMS_STATE_REPO", other.path())
+                .env("OMS_HARNESS_CHILD", "1")
+                .env("OMS_HARNESS_DELEGATE_DEPTH", "7")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let execution = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let other = PathBuf::from(std::env::var_os("OMS_STATE_REPO").unwrap())
+            .canonicalize()
+            .unwrap();
+        assert_ne!(execution, other);
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = CollabServices::new(&stop, source()).unwrap();
+        // The real ambient Plan resolver sees the invalid other repository.
+        let ambient = PanelServices::command(
+            &host,
+            NativeCommand::Plan,
+            &execution,
+            &[
+                "team-list".into(),
+                "--json".into(),
+                "--repo".into(),
+                execution.as_os_str().into(),
+            ],
+            &stop,
+        )
+        .unwrap();
+        assert_ne!(ambient.code, 0);
+        let before = std::fs::read(other.join(".oms/plan/tasks.json")).unwrap();
+        let report = oms_panel_core::teams::read_at(&execution, &execution, &host, &stop).unwrap();
+        assert_eq!(report["sources"]["teams"]["status"], "available");
+        assert_eq!(report["roots"], json!([]));
+        assert!(
+            !execution.join(".oms").exists(),
+            "view must not create state"
+        );
+        assert_eq!(
+            std::fs::read(other.join(".oms/plan/tasks.json")).unwrap(),
+            before
+        );
+
+        // A selected shared-state root also stays distinct from execution.
+        std::fs::write(other.join(".oms/plan/tasks.json"), b"{\"tasks\":{}}").unwrap();
+        std::fs::create_dir_all(execution.join(".oms/plan")).unwrap();
+        std::fs::write(execution.join(".oms/plan/tasks.json"), b"invalid").unwrap();
+        let report = oms_panel_core::teams::read_at(&execution, &other, &host, &stop).unwrap();
+        assert_eq!(report["sources"]["teams"]["status"], "available");
+        assert_eq!(report["roots"], json!([]));
+        assert_eq!(std::env::var("OMS_HARNESS_CHILD").unwrap(), "1");
+        assert_eq!(std::env::var("OMS_HARNESS_DELEGATE_DEPTH").unwrap(), "7");
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            PanelServices::team_contracts(&host, &execution, &other, &cancelled)
+                .unwrap_err()
+                .code,
+            130
+        );
+    }
+
+    #[test]
     fn peer_process_executor_maps_stops_like_the_native_executor() {
         let stop = Arc::new(AtomicBool::new(false));
         let host = CollabServices::new(&stop, source()).expect("source is available");
@@ -2562,6 +2703,7 @@ mod tests {
                     timeout,
                     max_bytes: 1024,
                     merge: false,
+                    launch_fence: None,
                     physical_call: Some(
                         oms_supervisor::process::PhysicalCall::new(&format!(
                             "call_fixture_{}",

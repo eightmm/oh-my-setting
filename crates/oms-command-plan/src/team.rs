@@ -36,12 +36,12 @@ pub struct AdmissionRequest {
     pub write: bool,
 }
 
-/// Pins canonical contract eligibility, not resource capacity, actual member
+/// Pins canonical owner/contract eligibility, not resource capacity, actual member
 /// enrollment or a launch permit. Callers reserve through the existing physical
 /// producer, fence again, and drop all producer guards before external execution.
 pub struct AdmissionGuard<'p, 's> {
     plan: &'p Plan<'s>,
-    request: AdmissionRequest,
+    request: Option<AdmissionRequest>,
     deadline: Instant,
     binding: Value,
     lifecycle: Box<dyn crate::services::LifecycleGuard + 'p>,
@@ -79,12 +79,21 @@ impl<'s> Plan<'s> {
         request: AdmissionRequest,
         deadline: Instant,
     ) -> Result<AdmissionGuard<'p, 's>> {
-        self.team_admission_inner(request, deadline)
+        self.admission_inner(Some(request), deadline)
             .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))
     }
-    fn team_admission_inner<'p>(
+    /// Pins an actual current Main creation and Room for legacy calls sharing
+    /// an active resource domain. No Team or task authority is inferred.
+    pub fn root_admission_before<'p>(
         &'p self,
-        request: AdmissionRequest,
+        deadline: Instant,
+    ) -> Result<AdmissionGuard<'p, 's>> {
+        self.admission_inner(None, deadline)
+            .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))
+    }
+    fn admission_inner<'p>(
+        &'p self,
+        request: Option<AdmissionRequest>,
         deadline: Instant,
     ) -> Result<AdmissionGuard<'p, 's>> {
         self.context.parent()?;
@@ -162,6 +171,15 @@ impl AdmissionGuard<'_, '_> {
     pub fn binding(&self) -> &Value {
         &self.binding
     }
+    pub fn expires_at_unix(&self) -> Result<Option<i64>> {
+        if self.request.is_none() {
+            return Ok(None);
+        }
+        parse_ts(self.binding.text("expires_at"))
+            .and_then(|value| i64::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| error("team contract expiry is unavailable"))
+    }
     pub fn check(&self) -> Result<()> {
         self.check_current().map_err(|error| {
             admission_before(self.plan, self.deadline)
@@ -183,10 +201,12 @@ impl AdmissionGuard<'_, '_> {
         for lock in &self.locks {
             lock.check().map_err(|e| error(e.to_string()))?;
         }
-        require(
-            parse_ts(self.binding.text("expires_at")) > parse_ts(&admission_time()?),
-            "team contract expired",
-        )?;
+        if self.request.is_some() {
+            require(
+                parse_ts(self.binding.text("expires_at")) > parse_ts(&admission_time()?),
+                "team contract expired",
+            )?;
+        }
         admission_before(self.plan, self.deadline)
     }
     fn current(&self) -> Result<Value> {
@@ -227,21 +247,28 @@ impl AdmissionGuard<'_, '_> {
                 plan.git().text(&["rev-parse", "HEAD"])? == binding.text("base_sha"),
                 "team base changed",
             )?;
-            require(
-                json::sha(
-                    plan.source
-                        .read(binding.text("policy_ref"), MAX_SPEC_BYTES)?,
-                ) == binding.text("policy_sha256"),
-                "team policy changed",
-            )?;
+            if self.request.is_some() {
+                require(
+                    json::sha(
+                        plan.source
+                            .read(binding.text("policy_ref"), MAX_SPEC_BYTES)?,
+                    ) == binding.text("policy_sha256"),
+                    "team policy changed",
+                )?;
+            }
             admission_before(self.plan, self.deadline)?;
             return Ok(binding);
         }
     }
     fn current_binding(&self, plan: &Plan<'_>) -> Result<Value> {
+        let Some(request) = &self.request else {
+            let mut binding = Bindings::new(plan).root()?;
+            binding.set("schema", crate::json::number(1))?;
+            binding.set("base_sha", string(plan.git().text(&["rev-parse", "HEAD"])?))?;
+            return Ok(binding);
+        };
         let snapshot = plan.load()?;
         let (teams, heads, _) = registry(plan, &snapshot)?;
-        let request = &self.request;
         let record = teams
             .opt(&request.team_id)
             .ok_or_else(|| error("no such team"))?;
@@ -314,6 +341,7 @@ impl AdmissionGuard<'_, '_> {
         admission_before(self.plan, self.deadline)?;
         Ok(object([
             ("schema", crate::json::number(1)),
+            ("mode", spec.get("mode").clone()),
             ("team_id", string(&request.team_id)),
             ("team_spec_sha256", string(&request.spec_sha256)),
             ("team_generation", spec.get("generation").clone()),
@@ -751,6 +779,42 @@ impl<'a, 'p> Bindings<'a, 'p> {
             "team root owner is not enrolled in the current room",
         )?;
         Ok(())
+    }
+    fn root(&mut self) -> Result<Value> {
+        let plan = self.plan;
+        require(
+            receipt_id(&plan.context.panel_main_attempt, 160),
+            "root admission requires a current Main locator",
+        )?;
+        let (_, events) = self
+            .lifecycle
+            .get_or_insert_with(|| {
+                let raw = plan.store.read(".oms/lifecycle/events.jsonl", MAX_STREAM)?;
+                Ok((
+                    crate::provenance::lifecycle_projection(plan, &raw)?,
+                    rows(&raw)?,
+                ))
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let created = events
+            .iter()
+            .filter(|event| {
+                event.text("attempt_id") == plan.context.panel_main_attempt
+                    && event.text("event_type") == "attempt.created"
+            })
+            .collect::<Vec<_>>();
+        require(
+            created.len() == 1,
+            "root creation generation is ambiguous or missing",
+        )?;
+        let binding = object([
+            ("root_owner", string(&plan.context.panel_main_attempt)),
+            ("root_owner_generation", created[0].get("event_id").clone()),
+            ("room_id", string(&plan.context.room_id)),
+        ]);
+        self.owner(&binding)?;
+        Ok(binding)
     }
 }
 

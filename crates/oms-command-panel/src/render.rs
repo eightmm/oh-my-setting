@@ -1472,6 +1472,145 @@ pub fn value_lines(value: &Value, columns: usize) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Optional Team inspector. The report contains observations, never actions.
+pub fn teams(report: &Value, columns: usize) -> String {
+    let value = |v: &Value| {
+        v.as_str()
+            .map(str::to_owned)
+            .or_else(|| v.as_i64().map(|n| n.to_string()))
+            .or_else(|| v.as_u64().map(|n| n.to_string()))
+            .or_else(|| v.as_bool().map(|value| value.to_string()))
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let mut lines = vec!["OMS · Teams (read only)".to_owned()];
+    for name in ["teams", "resources", "physical_intents"] {
+        let source = &report["sources"][name];
+        lines.push(format!(
+            "{name} source: {}{}",
+            value(&source["status"]),
+            source["reason"]
+                .as_str()
+                .map(|v| format!(" · {v}"))
+                .unwrap_or_default()
+        ));
+    }
+    for root in rows(&report["roots"]) {
+        lines.push(format!(
+            "# Root {} / generation {} (contract owner)",
+            value(&root["id"]),
+            value(&root["generation"])
+        ));
+        for team in rows(&root["teams"]) {
+            lines.push(format!(
+                "## Team {} / generation {} · task {} · {}",
+                value(&team["id"]),
+                value(&team["generation"]),
+                value(&team["task_id"]),
+                value(&team["mode"])
+            ));
+            lines.push(format!(
+                "Contract: {} · {}",
+                value(&team["contract_phase"]),
+                team["reason"]
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("execution/next actor unreported")
+            ));
+            for member in rows(&team["members"]) {
+                let branch = if member["role"] == "lead" {
+                    "  Lead"
+                } else {
+                    "    Member"
+                };
+                lines.push(format!(
+                    "{branch} {} / generation {} · {} · {} · parent {}",
+                    value(&member["id"]),
+                    value(&member["generation"]),
+                    value(&member["display_name"]),
+                    value(&member["role"]),
+                    value(&member["logical_parent"])
+                ));
+                let route = &member["route"];
+                lines.push(format!("      contract {} / {} · requested {} · resolved {} · account {} · served unknown",value(&route["harness"]),value(&route["provider"]),value(&route["requested_model"]),value(&route["resolved_model"]),value(&route["requested_account"])));
+                lines.push("      enrollment/execution/cleanup/usage: unreported".into());
+                for call in rows(&member["physical_intents"]) {
+                    lines.push(format!(
+                        "      intent {} ({}) · selected {} · account {} · running unknown",
+                        value(&call["call_id"]),
+                        value(&call["intent_phase"]),
+                        value(&call["selected_model"]),
+                        value(&call["account"])
+                    ));
+                }
+                if member["omitted_intents"].as_u64().is_some_and(|n| n > 0) {
+                    lines.push(format!(
+                        "      omitted intents: {}",
+                        value(&member["omitted_intents"])
+                    ));
+                }
+            }
+            if team["omitted_members"].as_u64().is_some_and(|n| n > 0) {
+                lines.push(format!(
+                    "    omitted members: {}",
+                    value(&team["omitted_members"])
+                ));
+            }
+            lines.push(format!(
+                "Evidence: verified {} / admitted {} / landed {} / published {}",
+                value(&team["verified"]),
+                value(&team["admitted"]),
+                value(&team["landed"]),
+                value(&team["published"])
+            ));
+        }
+    }
+    for team in rows(&report["unbound_teams"]) {
+        lines.push(format!(
+            "## Team {} · unverified · {}",
+            value(&team["id"]),
+            value(&team["reason"])
+        ));
+    }
+    if report["roots"].as_array().is_some_and(Vec::is_empty)
+        && report["unbound_teams"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    {
+        lines.push("No retained Team contracts; execution remains unknown".into());
+    }
+    if report["omitted_teams"].as_u64().is_some_and(|n| n > 0) {
+        lines.push(format!(
+            "Omitted Teams: {} (display bound)",
+            value(&report["omitted_teams"])
+        ));
+    }
+    let resource = &report["resources"];
+    lines.push(format!(
+        "Resource scope: {} · domain {} · active {}",
+        value(&resource["scope"]),
+        value(&resource["domain"]),
+        value(&resource["active"])
+    ));
+    lines.push(format!(
+        "Claims: invocations {} / open processes {} / write WIP {}",
+        value(&resource["occupancy"]["invocations"]),
+        value(&resource["occupancy"]["open_process_claims"]),
+        value(&resource["occupancy"]["write_wip"])
+    ));
+    lines.push(format!(
+        "Limits: invocations {} / process claims {} / write WIP {} / reviewer headroom {}",
+        value(&resource["limits"]["invocations"]),
+        value(&resource["limits"]["open_process_claims"]),
+        value(&resource["limits"]["write_wip"]),
+        value(&resource["limits"]["reviewer_headroom"])
+    ));
+    lines.push(format!("Retained physical intents: {} · unmatched in display {} · omitted {} (not a running count)",value(&report["physical_intents"]["retained_count"]),value(&report["physical_intents"]["unmatched_in_display"]),value(&report["physical_intents"]["omitted_intents"])));
+    lines.push("Native children/usage: unknown; native global hard cap: unsupported".into());
+    let safe = oms_panel_core::redact(lines.join("\n").as_bytes())
+        .unwrap_or_else(|_| "Team text withheld: redaction unavailable".into());
+    wrap(&safe, columns).join("\n") + "\n"
+}
+
 pub fn results(report: &Value, columns: usize) -> String {
     let mut lines = vec!["OMS · Results".into(), "─".repeat(columns.clamp(12, 60))];
     for row in rows(&report["rows"]) {

@@ -291,11 +291,13 @@ transition. Unsupported versions refuse; resource schema 1 remains readable.
 
 The native runtime exposes policy `host`, `status`, explicit `activate --policy`
 and exact-policy `hold` through `oms runtime resources`; see the
-[resource CLI contract](../oms-runtime/README.md). Full Team launch integration
-and producer-validated retirement/epoch consumers remain separate work.
+[resource CLI contract](../oms-runtime/README.md). The native Peer/Main factory
+qualifies canonical Root/Team bindings around physical registration; unsupported
+Team capability/resource/budget requests refuse. Producer-validated retirement
+and epoch consumers remain separate work.
 Unknown native descendants, provider-account capacity and cross-host global hard
-bounds are unsupported. Current unbound/legacy panel paths refuse in an active
-domain. The existing usage fixture covers mixed-call concurrency, partial writes,
+bounds are unsupported. Calls without a qualifying native owner refuse in an
+active domain. The existing usage fixture covers mixed-call concurrency, partial writes,
 headroom, direct-receipt activation races, tampering, independent custody,
 decision/revision conflicts, retained history and epoch reuse, scoped session
 idle/close, and post-CAS producer-guard failure.

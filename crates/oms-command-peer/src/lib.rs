@@ -33,7 +33,8 @@ mod usage;
 /// Shared registration for interactive callers retaining their native terminal.
 pub mod admission {
     pub use crate::usage::{
-        InteractiveCall, InteractiveRequest, begin_interactive, interactive_state,
+        InteractiveCall, InteractiveContext, InteractiveRequest, begin_interactive,
+        begin_interactive_with_executor, interactive_state,
     };
 }
 mod view;
