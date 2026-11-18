@@ -162,9 +162,11 @@ The trusted source root supplies:
 - `config/review-depth.json`
 - `roles/*.md`, through `oms-command-agent-role` resolution
 
-Optional view overrides are read from `scripts/lib/artifact_view_assets/`:
-`analysis.js`, `view.js`, `view.css` and `view.html`. Each absent file falls back
-independently to its exact bundled copy in `assets/`, embedded with `include_str!`.
+Bundled view defaults live only in `assets/`, embedded with `include_str!`.
+The optional `scripts/lib/artifact_view_assets/` directory under the trusted
+source root can override `analysis.js`, `view.js`, `view.css` and `view.html`;
+the source distribution no longer carries duplicate defaults there. Each absent
+file independently uses the embedded asset.
 Existing empty files remain overrides. Invalid UTF-8, symlinks, unsafe ancestors
 and other read errors refuse rendering instead of silently selecting a fallback.
 The source root itself must still be a valid directory.

@@ -112,17 +112,6 @@ oms_smoke_make_fake_provider_stub() {
   chmod +x "$1"
 }
 
-# Keep transaction fixtures on the working implementation without copying a repo.
-oms_smoke_make_update_source_fixture() {
-  local source="$1"
-  local file
-  mkdir -p "$source/scripts/lib"
-  cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
-  for file in install-contract.sh install-lifecycle-lock.sh canonical-sync.sh file-lock.sh poll.sh; do
-    cp "$ROOT/scripts/lib/$file" "$source/scripts/lib/$file"
-  done
-}
-
 # Native payload artifacts in manifest order; the last name is split so the
 # migration inventory's interpreter-reference count stays unchanged.
 OMS_SMOKE_NATIVE_ARTIFACTS="oms oms-state-queue-worker oms-mcp-peer-owner oms-run-bounded-helper oms-graph-py""thon-helper"

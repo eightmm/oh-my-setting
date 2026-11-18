@@ -26,12 +26,6 @@
       }
     }
   },
-  "nvm": {
-    "version": "v0.40.6",
-    "url": "https://github.com/nvm-sh/nvm/archive/refs/tags/v0.40.6.tar.gz",
-    "sha256": "17302cad7feedb1ad33ba738f93d2176a90970724f22de119603624fcbdec1a2",
-    "script_sha256": "baad94563757afa5147950e3dfa272f06b6307e1a7d92c553f8438959b5165fe"
-  },
   "uv": {
     "version": "0.12.24",
     "platforms": {

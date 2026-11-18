@@ -638,14 +638,15 @@ claude plugin marketplace add eightmm/oh-my-setting
 claude plugin install oms-skills@oh-my-setting
 ```
 
-The manifest is static. No OMS installer, update or doctor registers or reads
-it, and a normal install keeps linking skills as before; using both lists each
-skill twice (once as `oms-skills:NAME`). The plugin carries skills only, no
-hooks, MCP tools or panel, and the skills call `oms`, so they still need an
-oh-my-setting install. The Slurm and GPU skills are offered on every machine,
-where linking installs them only when the tool is present.
-`scripts/validate-skills.py` fails when the manifest and
-`skills.manifest.json` disagree. There is no Gemini extension manifest.
+The manifest is static. OMS installation and update do not automatically register
+this optional marketplace; a normal install keeps linking skills as before.
+Using both lists each skill twice (once as `oms-skills:NAME`). The plugin carries
+skills only, no hooks, MCP tools or panel, and the skills call `oms`, so they still
+need an oh-my-setting install. The Slurm and GPU skills are offered on every
+machine, where linking installs them only when the tool is present.
+The native `oms skill-doctor` reads the marketplace manifest and fails when its
+skill paths disagree with the enabled custom skills in `skills.manifest.json`.
+There is no Gemini extension manifest.
 
 `oms skill-doctor` ends with one `note: always-loaded OMS text is N bytes`
 line: the global rules plus one listing description per catalog skill, which

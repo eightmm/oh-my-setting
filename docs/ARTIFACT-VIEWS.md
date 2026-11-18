@@ -148,32 +148,40 @@ artifact bytes to 12 MiB, and the final HTML to 24 MiB.
 
 ## Remote result snapshots
 
-```bash
-oms artifact-view --repo . remote --host cluster-login \
-  --remote-root /srv/project --input results/comparison.json \
-  --output reports/cluster-snapshot.html
-```
+`oms artifact-view remote` is currently unavailable in the native command.
+It refuses before any SSH call because the bounded remote reader that refuses
+symlinks has not been connected. The former SSH/Python implementation is retired;
+the separate runtime SSH collector does not enable this subcommand. See the
+[native compatibility work](../crates/oms-command-peer/README.md#remaining-compatibility-work-and-integration-blockers).
 
-This reads a results file and its supported artifact paths with SSH batch mode
-and a bounded Python 3 reader on that host. File paths are interpreted relative
-to the explicit remote root; symlink descendants are refused. Remote files are
-limited to 2 MiB each. The SSH identity/configuration must already work; OMS
-does not enroll hosts, upload files, submit jobs, or expose a network port.
+Use `build` with results and artifacts already available locally. A consistent
+snapshot still requires immutable source results and matching artifact hashes;
+collecting files separately does not establish that they came from one generation.
 
-The result is a read-only **snapshot**, not a live remote workspace or tunnel.
-Repeat the explicit command with `--replace` to refresh it. Data hashes identify
-the bytes actually captured. For mutually consistent multi-file snapshots,
-publish an immutable results directory upstream and supply artifact hashes.
+## Bundled viewer assets
+
+The default JavaScript, CSS and HTML have one source under
+`crates/oms-command-peer/assets/` and are embedded in the native binary.
+`scripts/lib/artifact_view_assets/` is an optional override directory under the
+trusted OMS source root; it is no longer populated with identical stock files.
+Each missing asset uses its embedded default. Existing overrides, including
+intentionally empty files, keep their behavior; invalid UTF-8, symlinks and unsafe
+ancestors refuse rendering.
 
 ## Verification
 
-`python3 tests/test_artifact_view.py` exercises the new command family end to end:
-offline payload encoding, artifact digest/path checks, source-bound idempotent
-feedback, child write refusal, capsule adaptation, and SSH command quoting /
-symlink refusal using a local fixture executable. Optional Node checks exercise
-the same pure functions used by the UI for finite scatter axes, saved annotation
-restoration, selected feedback batches and the UTF-8 size bound; a generated
-selected batch is also imported by the real Python command. `node --check
-scripts/lib/artifact_view_assets/view.js` checks browser-script syntax. No
-browser engine, GPU library, paid model or live SSH host is required by these
-tests.
+The existing native `view_embedded_and_installed_assets` test in
+[peer_contract.rs](../crates/oms-command-peer/tests/peer_contract.rs) compares the
+complete HTML from embedded defaults with identical installed overrides. It also
+covers mixed and empty overrides, invalid UTF-8, and leaf/ancestor symlink refusal.
+Run it from the workspace root with the pinned toolchain and cached dependencies:
+
+```bash
+cargo +1.99.1 test -p oms-command-peer --test peer_contract \
+  view_embedded_and_installed_assets --locked --offline
+node --check crates/oms-command-peer/assets/analysis.js
+node --check crates/oms-command-peer/assets/view.js
+```
+
+The Node commands check syntax only. These checks need no browser engine, GPU,
+paid model or live SSH host, and do not establish remote-view support.

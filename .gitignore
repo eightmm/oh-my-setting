@@ -13,4 +13,7 @@ __pycache__/
 .DS_Store
 .oms/
 /target/
-/crates/*/target/
+/crates/*/target
+/crates/oms-command-graph/Cargo.lock
+/crates/oms-command-graph/.handoff.patch
+/crates/oms-command-providers-skills/.review
