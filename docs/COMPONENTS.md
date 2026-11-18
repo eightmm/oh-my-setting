@@ -273,12 +273,12 @@ update process that already started.
 
 ### Profiles and ownership
 
-The default `core` profile installs the harness, Bash, Git, Python and one
+The default `core` profile installs the harness, Bash, Git, the native OMS runtime and one
 coding-agent provider. Selected required CLIs must be present; optional
 capabilities add tools without making them core dependencies. See
 [profiles and integrations](INSTALL.md#profiles-and-integrations) for selection
-and receipts, and [provider installation and updates](INSTALL.md#provider-installation-and-updates)
-for vendor refresh, pins, digest checks, Claude migration and inventory rules.
+and receipts, and [tool installation and updates](INSTALL.md#tool-installation-and-updates)
+for current releases, vendor refresh, explicit pins and payload verification.
 
 > **Pi:** Pi refresh runs only through `install-tools.sh --providers`.
 > Full-tool installs and profile reapply leave Pi unchanged.

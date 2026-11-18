@@ -9,16 +9,96 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 . "$ROOT/tests/lib/smoke-env.sh"
 
 DOCS_ONLY=0
+PLANNING_ONLY=0
 case "${1:-}" in
   "") ;;
   --docs-only) DOCS_ONLY=1 ;;
-  *) echo "usage: source-distribution-smoke.sh [--docs-only]" >&2; exit 2 ;;
+  --planning-only) PLANNING_ONLY=1 ;;
+  *) echo "usage: source-distribution-smoke.sh [--docs-only|--planning-only]" >&2; exit 2 ;;
 esac
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
+
+check_affected_planning() (
+  check_probe="$(mktemp -d "${TMPDIR:-/tmp}/oms-affected-plan.XXXXXX")"
+  trap 'rm -rf "$check_probe"' EXIT HUP INT TERM
+  repo="$check_probe/repo"
+  mkdir -p "$repo/scripts/lib" "$check_probe/bin" "$check_probe/home" "$check_probe/tmp"
+  cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
+  cp "$ROOT/scripts/lib/critical-paths.sh" "$repo/scripts/lib/critical-paths.sh"
+  # The planning contract must not enter maintenance or native setup at all.
+  # Ordinary execution still has to reach that gate; its sentinel stops there.
+  cat > "$repo/scripts/lib/check-maintenance.sh" <<'EOF'
+printf 'maintenance-source\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
+oms_check_maintenance_begin() {
+  printf 'maintenance-begin\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
+  return 97
+}
+EOF
+  cat > "$repo/scripts/lib/platform.sh" <<'EOF'
+printf 'platform-source\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
+oms_native_resolve() { return 1; }
+oms_native_stage() { cargo --version; }
+EOF
+  ln -s "$BASH" "$check_probe/bin/bash"
+  for blocked in cargo rustup curl wget codex claude agy opencode ntn; do
+    cat > "$check_probe/bin/$blocked" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${0##*/}" >> "$OMS_CHECK_FORBIDDEN_LOG"
+exit 99
+EOF
+    chmod +x "$check_probe/bin/$blocked"
+  done
+  invoke_check() {
+    env -i HOME="$check_probe/home" PATH="$check_probe/bin:/usr/bin:/bin" \
+      TMPDIR="$check_probe/tmp" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+      OMS_CHECK_FORBIDDEN_LOG="$check_probe/forbidden.log" OMS_NATIVE_NO_AUTO_STAGE=0 \
+      bash "$repo/scripts/check.sh" "$@"
+  }
+  print_plan() { invoke_check --affected --print-affected-mode "$@"; }
+  oms_smoke_make_repo "$repo"
+  printf 'base\n' > "$repo/README.md"
+  git -C "$repo" add .
+  git -C "$repo" commit -qm base
+  base="$(git -C "$repo" rev-parse HEAD)"
+  printf 'documentation\n' >> "$repo/README.md"
+  git -C "$repo" commit -qam documentation
+  docs="$(git -C "$repo" rev-parse HEAD)"
+  selected="$(print_plan --changed-from "$base" --changed-to "$docs")"
+  [ "$selected" = affected ] || fail "documentation planning selected: $selected"
+  print_plan --changed-from "$base" --changed-to "$docs" --ci-output "$check_probe/docs.out"
+  printf 'mode=affected\nnative=false\npython=false\noperator=\n' > "$check_probe/expected.out"
+  cmp -s "$check_probe/docs.out" "$check_probe/expected.out" || fail "documentation CI selection changed"
+
+  mkdir -p "$repo/crates/oms/src"
+  printf 'fn main() {}\n' > "$repo/crates/oms/src/main.rs"
+  git -C "$repo" add .
+  git -C "$repo" commit -qm native
+  native="$(git -C "$repo" rev-parse HEAD)"
+  selected="$(print_plan --changed-from "$docs" --changed-to "$native")"
+  [ "$selected" = full ] || fail "native planning selected: $selected"
+  print_plan --changed-from "$docs" --changed-to "$native" --ci-output "$check_probe/native.out"
+  printf 'mode=full\nnative=true\npython=false\noperator=\n' > "$check_probe/expected.out"
+  cmp -s "$check_probe/native.out" "$check_probe/expected.out" || fail "native CI selection changed"
+  git -C "$repo" checkout -q --detach "$docs"
+  printf 'untracked\n' > "$repo/dirty"
+  selected="$(print_plan --changed-from "$base" --changed-to "$docs")"
+  [ "$selected" = full ] || fail "dirty-worktree planning no longer selects full verification"
+  rm "$repo/dirty"
+
+  status=0
+  invoke_check --print-affected-mode > "$check_probe/invalid.out" 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail "print mode without --affected must fail before setup"
+  [ ! -s "$check_probe/forbidden.log" ] || fail "planning reached maintenance, build, or external tools"
+  status=0
+  invoke_check --affected --changed-from "$base" --changed-to "$docs" \
+    > "$check_probe/execution.out" 2>&1 || status=$?
+  [ "$status" -eq 97 ] || fail "actual affected verification bypassed the maintenance gate"
+  grep -Fxq maintenance-begin "$check_probe/forbidden.log" || fail "execution omitted maintenance protection"
+)
 
 check_markdown_links() {
   local md dir raw clean resolved broken=0
@@ -71,11 +151,17 @@ check_markdown_links() {
   [ "$broken" -eq 0 ] || fail "found $broken broken relative markdown link(s)"
 }
 
+if [ "$PLANNING_ONLY" = 1 ]; then
+  check_affected_planning
+  echo "source-distribution-smoke (--planning-only): ok"
+  exit 0
+fi
 check_markdown_links
 if [ "$DOCS_ONLY" = 1 ]; then
   echo "source-distribution-smoke (--docs-only): ok"
   exit 0
 fi
+check_affected_planning
 
 # 1. Zero retired .py files in scripts/, tests/, docs/
 leftover_py="$(git -C "$ROOT" ls-files -- 'scripts/*.py' 'scripts/**/*.py' 'tests/*.py' 'tests/**/*.py' 'docs/*.py' 'docs/**/*.py')"

@@ -152,9 +152,14 @@ fi
 if [ "$MODE" = quick ] || [ "$MODE" = affected ]; then
   [ -n "$QUICK_FROM" ] && [ -n "$QUICK_TO" ] || { echo "error: --$MODE requires --changed-from and --changed-to" >&2; exit 2; }
 fi
+if [ "$PRINT_AFFECTED_MODE" = 1 ] && [ "$MODE" != affected ]; then
+  echo "error: --print-affected-mode requires --affected" >&2
+  exit 2
+fi
 
-# Stage native payload once in parent before any parallel/focused checks run.
-if [ "$LIST_STAGES" != 1 ]; then
+# Execution registers maintenance protection and stages its native payload once.
+# Affected-mode printing only selects work; it must not build or acquire a lease.
+if [ "$LIST_STAGES" != 1 ] && [ "$PRINT_AFFECTED_MODE" != 1 ]; then
   # shellcheck source=scripts/lib/check-maintenance.sh
   . "$ROOT/scripts/lib/check-maintenance.sh"
   OMS_LOCK_DIR="$CHECK_ORIGINAL_LOCK_DIR" oms_check_maintenance_begin "$ROOT"
