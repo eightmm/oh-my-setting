@@ -3145,6 +3145,130 @@ mod tests {
         };
         use oms_command_plan::{Context, Plan, Request, json};
         use oms_command_telemetry::store::{physical, resources, usage};
+        if std::env::var_os("OMS_TEAM_REQUEST_REGISTER").is_some() {
+            let repo = PathBuf::from(std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").unwrap());
+            let stop = Arc::new(AtomicBool::new(false));
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap();
+            let control = services(&stop, source, Vec::new());
+            let previous = std::env::var("OMS_TEAM_REQUEST_PREVIOUS").unwrap();
+            let request = Request::parse(&osv(&[
+                "team-register",
+                "--team-spec",
+                "team.json",
+                "--expected-team-sha256",
+                &previous,
+            ]))
+            .unwrap();
+            let context = Context::from_environment(&request, &repo).unwrap();
+            Plan::open(context, &control, &stop)
+                .unwrap()
+                .execute(&request)
+                .unwrap();
+            return;
+        }
+        if let Some(mode) = std::env::var_os("OMS_TEAM_REQUEST_RUN") {
+            let repo = PathBuf::from(std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").unwrap());
+            let stop = Arc::new(AtomicBool::new(false));
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap();
+            let collab = crate::services_collab::CollabServices::new(&stop, source).unwrap();
+            let digest = std::env::var("OMS_TEAM_REQUEST_SPEC").unwrap();
+            let args = osv(&[
+                "--providers",
+                "fixture",
+                "--prompt",
+                mode.to_str().unwrap(),
+                "--model",
+                "fixture",
+                "--reasoning-effort",
+                "high",
+                "--task-id",
+                "task-a",
+                "--team-id",
+                "team-a",
+                "--team-spec-sha256",
+                &digest,
+                "--team-member",
+                "lead-a",
+                "--team-member-generation",
+                "1",
+                "--team-requests",
+                "--print-timeout",
+                if mode == "protocol-timeout" {
+                    "8s"
+                } else {
+                    "15s"
+                },
+            ]);
+            let handler = if mode == "protocol-cancel" {
+                Some(
+                    signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&stop))
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let output = oms_command_peer::run_with_executor(
+                "peer-ask", &args, &repo, source, &stop, &collab,
+            );
+            if let Some(handler) = handler {
+                signal_hook::low_level::unregister(handler);
+            }
+            if mode == "protocol-timeout" || mode == "protocol-cancel" {
+                let calls = usage::load(&repo).unwrap();
+                let attempt = calls
+                    .calls
+                    .last()
+                    .unwrap()
+                    .receipt
+                    .identity
+                    .attempt_id
+                    .as_ref()
+                    .unwrap();
+                let (_, projected) = oms_command_operations::load_projection(&repo).unwrap();
+                assert_eq!(
+                    projected
+                        .iter()
+                        .find(|a| a.get("attempt_id").text() == Some(attempt))
+                        .unwrap()
+                        .get("state")
+                        .text(),
+                    Some(if mode == "protocol-timeout" {
+                        "timed_out"
+                    } else {
+                        "cancelled"
+                    })
+                );
+            }
+            if (mode == "protocol-positive" || mode == "protocol-fragment") && output.0 != 0 {
+                for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
+                    .unwrap()
+                    .flatten()
+                {
+                    if let Ok(bytes) = std::fs::read(entry.path()) {
+                        let text = String::from_utf8_lossy(&bytes);
+                        if let Some((_, diagnostic)) = text.split_once("## Diagnostics") {
+                            eprintln!("fixture diagnostics: {diagnostic}");
+                        }
+                    }
+                }
+            }
+            if mode == "protocol-positive" || mode == "protocol-fragment" {
+                assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+            } else {
+                assert_ne!(output.0, 0, "invalid protocol succeeded");
+            }
+            assert!(!String::from_utf8_lossy(&output.1).contains("nonce"));
+            assert!(!String::from_utf8_lossy(&output.2).contains("nonce"));
+            return;
+        }
         if std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").is_none() {
             let policy = resources::Policy {
                 domain: "native-fixture".into(),
@@ -3166,10 +3290,14 @@ mod tests {
                 ("src/lib.rs", "pub fn fixture() {}\n"),
             ]);
             std::fs::create_dir(fixture.path().join("caller")).unwrap();
+            let private_state = Tmp::new();
+            std::fs::set_permissions(private_state.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
             let mut child = Command::new(std::env::current_exe().unwrap());
             child.args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
                 .current_dir(fixture.path().join("caller"))
-                .env("OMS_NATIVE_PHYSICAL_FIXTURE",fixture.path()).env("OMS_STATE_REPO","..");
+                .env("OMS_NATIVE_PHYSICAL_FIXTURE",fixture.path()).env("OMS_STATE_REPO","..")
+                .env("XDG_STATE_HOME",private_state.path()).env("HOME",private_state.path());
             for key in [
                 "OMS_HARNESS_CHILD",
                 "OMS_HARNESS_DELEGATE_DEPTH",
@@ -3887,6 +4015,320 @@ mod tests {
             spec_sha256: active["history"][2]["sha256"].as_str().unwrap().into(),
             ..team.clone()
         };
+        {
+            let lock = oms_lock::Lock::for_file(
+                &repo.join(".oms/threads/room-team.jsonl"),
+                oms_lock::Settings::from_env().unwrap(),
+            )
+            .unwrap();
+            let held = lock.try_acquire().unwrap();
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(deadline);
+            let mut join = oms_command_room::Join::new("bounded-probe", "codex");
+            join.role = "advisor".into();
+            join.parent = Some(owner.clone());
+            let start = Instant::now();
+            let error = bounded.join("room-team", join.clone()).unwrap_err();
+            assert_eq!(
+                crate::services_collab::prelaunch_error(
+                    oms_command_peer::Error::new(75, error.message),
+                    &stop,
+                    deadline,
+                    None,
+                )
+                .code,
+                124,
+                "actual late Room deadline must retain timeout classification"
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+            let cancelled = AtomicBool::new(false);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &cancelled,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(deadline);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(Duration::from_millis(30));
+                    cancelled.store(true, Ordering::Release);
+                });
+                let start = Instant::now();
+                let error = bounded.join("room-team", join).unwrap_err();
+                assert_eq!(
+                    crate::services_collab::prelaunch_error(
+                        oms_command_peer::Error::new(75, error.message),
+                        &cancelled,
+                        deadline,
+                        None,
+                    )
+                    .code,
+                    130,
+                    "actual late Room cancellation must retain cancellation classification"
+                );
+                assert!(start.elapsed() < Duration::from_secs(1));
+            });
+            drop(held);
+        }
+        {
+            let probe = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            let mut join = oms_command_room::Join::new("bounded-native-probe", "codex");
+            join.role = "advisor".into();
+            join.parent = Some(owner.clone());
+            probe.join("room-team", join).unwrap();
+            let generation = probe
+                .status("room-team", false)
+                .unwrap()
+                .list("participants")
+                .iter()
+                .find(|p| p.text("participant") == "bounded-native-probe")
+                .unwrap()
+                .number("seq");
+            let held = oms_command_operations::lock::FileLock::acquire_before(
+                &oms_command_operations::event_path(repo.as_path()),
+                &stop,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(Instant::now() + Duration::from_millis(100));
+            let start = Instant::now();
+            assert!(
+                bounded
+                    .leave_if_enrolled("room-team", "bounded-native-probe", generation, &owner)
+                    .is_err()
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel_services =
+                crate::services_collab::CollabServices::new(&cancel, repo.as_path()).unwrap();
+            let bounded = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &cancel_services,
+                &cancel,
+                false,
+                false,
+            )
+            .unwrap()
+            .with_deadline(Instant::now() + Duration::from_secs(2));
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(Duration::from_millis(30));
+                    cancel.store(true, Ordering::Release);
+                });
+                let start = Instant::now();
+                assert!(
+                    bounded
+                        .leave_if_enrolled("room-team", "bounded-native-probe", generation, &owner)
+                        .is_err()
+                );
+                assert!(start.elapsed() < Duration::from_secs(1));
+            });
+            drop(held);
+            probe.leave("room-team", "bounded-native-probe").unwrap();
+        }
+        let adapters = repo.join("adapters");
+        std::fs::create_dir(&adapters).unwrap();
+        let adapter = adapters.join("oms-agent-adapter-fixture");
+        let script = r#"#!/bin/sh
+set -eu
+prompt_file=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --prompt-file ]; then shift; prompt_file=$1; fi
+  shift
+done
+prompt=$(cat "$prompt_file")
+IFS= read -r hello
+field() { printf '%s' "${2-$hello}" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"; }
+num() { printf '%s' "$hello" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p"; }
+session=$(field session)
+nonce=$(field nonce)
+generation=$(num connection_generation)
+binding=$(field binding_sha256)
+expiry=${OMS_TEAM_REQUEST_EXPIRY:-$(num expires_at)}
+case "$prompt" in *protocol-wrong*) nonce=wrong;; esac
+printf '{"schema":1,"kind":"hello","session":"%s","nonce":"%s","connection_generation":%s}\n' "$session" "$nonce" "$generation"
+case "$prompt" in *protocol-cancel*) kill -USR1 "$PPID"; while :; do sleep 1; done;; *protocol-timeout*) while :; do sleep 1; done;; esac
+case "$prompt" in *protocol-oversize*) printf '%8193s' x; while :; do sleep 1; done;; *protocol-partial*) printf '{'; exit 0;; esac
+for sequence in 1 2; do
+  action=report_blocker
+  case "$prompt" in *protocol-unsupported*) action=request_dispatch;; esac
+  text=bounded-blocker
+  case "$prompt:$sequence" in *protocol-conflict*:2) text=changed;; esac
+  request=$(printf '{"schema":1,"kind":"request","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"binding_sha256":"%s","body":{"schema":1,"request_id":"report-one","action":"%s","text":"%s","expires_at":%s}}' "$session" "$nonce" "$generation" "$sequence" "$binding" "$action" "$text" "$expiry")
+  case "$prompt" in *protocol-fragment*) printf '%s' "$request" | cut -c 1-20 | tr -d '\n'; sleep 0.02; printf '%s\n' "$request" | cut -c 21-;; *) printf '%s\n' "$request";; esac
+  case "$prompt" in *protocol-early*) printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"predicted"}\n' "$session" "$nonce" "$generation" "$sequence";; esac
+  IFS= read -r response || exit 3
+  case "$response" in *'"response"'*) :;; *) exit 4;; esac
+  case "$prompt" in *protocol-lost*) exit 0;; esac
+  challenge=$(field receipt_challenge "$response")
+  printf '{"schema":1,"kind":"ack","session":"%s","nonce":"%s","connection_generation":%s,"sequence":%s,"request_id":"report-one","receipt_challenge":"%s"}\n' "$session" "$nonce" "$generation" "$sequence" "$challenge"
+done
+"#;
+        std::fs::write(&adapter, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(adapter.with_file_name("oms-agent-adapter-fixture.oms-team-request-v1.json"),serde_json::to_vec(&serde_json::json!({"schema":1,"protocol":"oms-team-request-v1","binary_sha256":json::sha(script.as_bytes())})).unwrap()).unwrap();
+        std::fs::set_permissions(
+            adapters.join("oms-agent-adapter-fixture.oms-team-request-v1.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        spec["generation"] = 4.into();
+        spec["previous_sha256"] = active_team.spec_sha256.clone().into();
+        for member in spec["members"].as_array_mut().unwrap() {
+            if member["id"] == "lead-a" {
+                member["route"]["provider"] = "fixture".into();
+                member["route"]["harness"] = "fixture".into();
+                member["route"]["account"] = Value::Null;
+            }
+        }
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        // Custom provider registration is scoped to each real child invocation;
+        // no process-global environment mutation grants the fixture authority.
+        let register=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_REGISTER","1").env("OMS_TEAM_REQUEST_PREVIOUS",&active_team.spec_sha256).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+        assert!(register.success());
+        let updated =
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+        let head = updated
+            .get("teams")
+            .get("team-a")
+            .get("versions")
+            .array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .text("sha256")
+            .to_owned();
+        let task_before = json::hash(updated.get("tasks")).unwrap();
+        let physical_before = physical::load(repo.as_path(), &stop).unwrap().len();
+        let report_expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 12;
+        for mode in [
+            "protocol-positive",
+            "protocol-lost",
+            "protocol-conflict",
+            "protocol-wrong",
+            "protocol-early",
+            "protocol-timeout",
+            "protocol-cancel",
+            "protocol-fragment",
+            "protocol-oversize",
+            "protocol-partial",
+            "protocol-unsupported",
+        ] {
+            let status=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+                .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN",mode).env("OMS_TEAM_REQUEST_EXPIRY",report_expiry.to_string()).env("OMS_TEAM_REQUEST_SPEC",&head).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+            assert!(status.success(), "native Team protocol case {mode} failed");
+            let current_room = oms_command_room::Room::open(
+                repo.as_path(),
+                oms_command_room::Session::default(),
+                &collab,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            let projection =
+                oms_command_room::project(&current_room.records("room-team").unwrap()).unwrap();
+            assert!(
+                projection
+                    .list("participants")
+                    .iter()
+                    .filter(|p| p.text("participant").starts_with("team-call_"))
+                    .all(|p| !p.flag("joined")),
+                "sealed cleanup must settle the exact enrollment"
+            );
+            let ledger =
+                json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+            assert_eq!(json::hash(ledger.get("tasks")).unwrap(), task_before);
+            let record = ledger.get("teams").get("team-a");
+            assert!(record.get("request_schema").is_int(2));
+            assert_eq!(
+                record.get("requests").array().unwrap().len(),
+                1,
+                "replay cannot create another report"
+            );
+        }
+        assert_eq!(
+            physical::load(repo.as_path(), &stop).unwrap().len(),
+            physical_before + 11,
+            "no hidden provider resend"
+        );
+        let native_occupancy = resources::snapshot(repo.as_path(), &stop)
+            .unwrap()
+            .unwrap()
+            .occupancy;
+        assert_eq!(
+            (
+                native_occupancy.invocations,
+                native_occupancy.open_processes
+            ),
+            (2, 2),
+            "only earlier unknown liabilities remain"
+        );
+        let retained = updated.get("teams").get("team-a").opt("requests").cloned();
+        assert!(
+            retained.is_none(),
+            "feature off contracts have no request ledger"
+        );
+        let before_generation =
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests")
+                .clone();
+        spec["generation"] = 5.into();
+        spec["previous_sha256"] = head.clone().into();
+        std::fs::write(repo.join("team.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        let status=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_REGISTER","1").env("OMS_TEAM_REQUEST_PREVIOUS",&head).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
+        assert!(status.success());
+        assert_eq!(
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests"),
+            &before_generation,
+            "generation changes preserve dedup history"
+        );
         let cancel = new_event(
             &owner,
             0usize.into(),
@@ -3895,6 +4337,15 @@ mod tests {
         )
         .unwrap();
         append_lifecycle(repo.as_path(), cancel, &stop).unwrap();
+        assert_eq!(
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap()
+                .get("teams")
+                .get("team-a")
+                .get("requests"),
+            &before_generation,
+            "owner cancellation preserves dedup history"
+        );
         let held: Value =
             serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
                 .unwrap();

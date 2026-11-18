@@ -268,6 +268,49 @@ impl LaunchFence {
 /// callback acknowledges one physical registration; guards end before execution.
 pub type RegisterPhysical<'a> =
     Box<dyn FnOnce(PhysicalContract<'_>) -> Result<oms_supervisor::process::PhysicalCall> + 'a>;
+/// Only the private New-registration producer can lend this launch binding.
+/// It is not a controller credential; the native owner must still enroll and
+/// start its actual child before issuing a channel session.
+pub struct TeamLaunchBinding<'a> {
+    pub(crate) pending: &'a crate::usage::Pending,
+    pub(crate) attempt: &'a PhysicalAttempt<'a>,
+    pub(crate) protocol: &'a TeamProtocol,
+}
+#[derive(Clone, Debug)]
+pub struct TeamProtocol {
+    pub(crate) binary: PathBuf,
+    pub(crate) binary_sha256: String,
+    pub(crate) manifest: PathBuf,
+    pub(crate) manifest_sha256: String,
+}
+impl TeamProtocol {
+    /// Checks declared selection bytes again; this is not an executing-image pin.
+    pub fn check(&self) -> Result<()> {
+        for (path, expected, maximum) in [
+            (&self.binary, &self.binary_sha256, 16 * 1024 * 1024),
+            (&self.manifest, &self.manifest_sha256, 8192),
+        ] {
+            if crate::storage::hash(&crate::providers::team_protocol_file(path, maximum)?)
+                != *expected
+            {
+                return Err(Error::new(75, "Team request adapter selection changed"));
+            }
+        }
+        Ok(())
+    }
+}
+impl TeamLaunchBinding<'_> {
+    pub fn attempt(&self) -> &PhysicalAttempt<'_> {
+        self.attempt
+    }
+    pub fn identity(&self) -> &oms_command_telemetry::store::usage::Identity {
+        &self.pending.receipt.identity
+    }
+    pub fn check(&self, executor: &dyn Executor, stop: &AtomicBool) -> Result<()> {
+        self.protocol.check()?;
+        self.pending.qualify(self.attempt, executor, stop)
+    }
+}
 pub trait Executor: Sync {
     fn with_physical_contract(
         &self,
@@ -284,6 +327,14 @@ pub trait Executor: Sync {
             ));
         }
         register(PhysicalContract::default()).map(|_| ())
+    }
+    fn execute_team_requests(
+        &self,
+        _request: Invocation,
+        _binding: TeamLaunchBinding<'_>,
+        _interrupted: &AtomicBool,
+    ) -> Result<Completed> {
+        Err(Error::new(75, "native Team request channel unavailable"))
     }
     fn execute(&self, request: Invocation, interrupted: &AtomicBool) -> Result<Completed>;
 }

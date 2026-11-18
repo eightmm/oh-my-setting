@@ -16,6 +16,42 @@ fn same_review(a: &Value, b: &Value) -> bool {
     a["call_id"] == b["call_id"] && a["patch_sha256"] == b["patch_sha256"]
 }
 impl Room<'_> {
+    pub(crate) fn checked_leave_parent<'s>(
+        &'s self,
+        state: &Value,
+        id: &str,
+        parent: &str,
+    ) -> Result<Box<dyn OperationsRead + 's>> {
+        let read = self.operations()?;
+        let owner = read
+            .attempts()
+            .iter()
+            .find(|a| a.attempt_id == parent)
+            .ok_or_else(|| Error::new("checked leave native parent unavailable"))?;
+        if owner.tool != "panel-main"
+            || owner.terminal
+            || !["working", "blocked"].contains(&owner.state.as_str())
+            || !owner.refs.text("panel_room_id").eq(id)
+            || !state.list("participants").iter().any(|p| {
+                p.text("participant") == parent
+                    && p.text("role") == "main"
+                    && p.flag("joined")
+                    && p.text("parent").is_empty()
+            })
+            || read
+                .attempts()
+                .iter()
+                .filter(|a| {
+                    a.tool == "panel-main" && !a.terminal && a.refs.text("panel_room_id") == id
+                })
+                .count()
+                != 1
+        {
+            return Err(Error::new("checked leave native parent changed; reconcile"));
+        }
+        read.check()?;
+        Ok(read)
+    }
     /// Read-only preflight, never an append permit. `append` repeats validation
     /// under its canonical lock and retains producer guards through publication.
     pub fn validate_event(&self, rows: &[Value], event: &Value, text: &str) -> Result<bool> {
@@ -264,7 +300,7 @@ impl Room<'_> {
                         return Err(Error::new("swapped main release is unverified"));
                     }
                 }
-                let read = self.services.operations(&self.repo)?;
+                let read = self.operations()?;
                 let mut related = Vec::new();
                 for attempt in read.attempts() {
                     if attempt.tool == "panel-main"
@@ -905,7 +941,7 @@ impl Room<'_> {
         if others.is_empty() && event["replaces"].is_null() {
             return Ok(());
         }
-        let read = self.services.operations(&self.repo)?;
+        let read = self.operations()?;
         if !event["replaces"].is_null() {
             let previous = member(state, event.text("replaces"))?;
             if state

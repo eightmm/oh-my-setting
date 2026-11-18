@@ -1731,6 +1731,92 @@ fn transport(
     }
     Ok(cmd)
 }
+/// Capability declarations are selection evidence, never session credentials.
+pub(crate) fn team_protocol_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(2, "adapter parent unavailable"))?;
+    let info = std::fs::symlink_metadata(path)?;
+    if !info.is_file()
+        || info.file_type().is_symlink()
+        || info.nlink() != 1
+        || info.uid() != rustix::process::geteuid().as_raw()
+        || info.mode() & 0o022 != 0
+        || info.len() > maximum as u64
+    {
+        return fail("unsafe Team request adapter declaration");
+    }
+    let root =
+        oms_safe_fs::Root::open(parent).map_err(|_| Error::new(2, "adapter root unavailable"))?;
+    let bytes = root
+        .read_no_follow(
+            Path::new(
+                path.file_name()
+                    .ok_or_else(|| Error::new(2, "adapter file unavailable"))?,
+            ),
+            oms_safe_fs::ByteReadOptions {
+                missing_ok: false,
+                max_bytes: maximum,
+            },
+        )
+        .map_err(|_| Error::new(2, "adapter declaration read refused"))?;
+    let after = std::fs::symlink_metadata(path)?;
+    if (
+        info.dev(),
+        info.ino(),
+        info.size(),
+        info.mtime(),
+        info.mtime_nsec(),
+        info.ctime(),
+        info.ctime_nsec(),
+    ) != (
+        after.dev(),
+        after.ino(),
+        after.size(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    ) {
+        return fail("Team request adapter declaration changed");
+    }
+    Ok(bytes)
+}
+fn team_protocol(route: &Route, argv: &[OsString]) -> Result<crate::process::TeamProtocol> {
+    if builtin_binary(&route.provider).is_some() {
+        return fail("built-in transport does not support OMS Team request protocol");
+    }
+    let binary = PathBuf::from(
+        argv.first()
+            .ok_or_else(|| Error::new(2, "adapter binary missing"))?,
+    );
+    if !binary.is_absolute() {
+        return fail("Team request adapter requires an explicit registered absolute binary");
+    }
+    let raw = team_protocol_file(&binary, 16 * 1024 * 1024)?;
+    let manifest = PathBuf::from(format!("{}.oms-team-request-v1.json", binary.display()));
+    let declaration = team_protocol_file(&manifest, 8192)?;
+    if declaration.len() > 8192 {
+        return fail("Team request manifest exceeds bound");
+    }
+    let parsed =
+        oms_command_plan::json::parse(&declaration).map_err(|e| Error::new(e.code, e.message))?;
+    oms_command_plan::json::keys(&parsed, &["schema", "protocol", "binary_sha256"], &[])
+        .map_err(|e| Error::new(e.code, e.message))?;
+    if !parsed.get("schema").is_int(1)
+        || parsed.text("protocol") != "oms-team-request-v1"
+        || parsed.text("binary_sha256") != storage::hash(&raw)
+    {
+        return fail("Team request adapter manifest mismatch");
+    }
+    Ok(crate::process::TeamProtocol {
+        binary,
+        binary_sha256: storage::hash(&raw),
+        manifest,
+        manifest_sha256: storage::hash(&declaration),
+    })
+}
 /// Writable dirs named by the child environment: the cargo target and every
 /// isolated provider's account home.
 fn env_rw_dirs(environment: &[(OsString, OsString)]) -> Vec<PathBuf> {
@@ -1888,6 +1974,17 @@ pub(crate) fn execute_env(
         return fail("provider does not support read access through this transport");
     }
     let transport = transport(route, prompt, cwd, write, timeout)?;
+    let team_protocol = if extra_env
+        .iter()
+        .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")
+    {
+        if write {
+            return fail("Team request channels are read-only");
+        }
+        Some(team_protocol(route, &transport.argv)?)
+    } else {
+        None
+    };
     let extra_env = crate::usage::operation_env(extra_env)?;
     let usage_repo = crate::usage::state_repository(account_repo, &extra_env)?;
     let remove_environment: Vec<OsString> = std::env::vars_os()
@@ -2037,24 +2134,34 @@ pub(crate) fn execute_env(
         pending_usage.qualify(&attempt, context.executor, context.interrupted)?;
         let usage_receipt = pending_usage.receipt.clone();
         let started = std::time::Instant::now();
-        let result = context.executor.execute(
-            Invocation {
-                argv: exec_argv,
-                cwd: cwd.to_owned(),
-                input: transport.input.clone(),
-                environment,
-                remove_environment,
-                timeout: Duration::from_secs(timeout),
-                max_bytes: 64 * 1024 * 1024,
-                merge: false,
-                launch_fence: Some(pending_usage.launch_fence()),
-                physical_call: Some(
-                    oms_supervisor::process::PhysicalCall::new(&usage_receipt.identity.call_id)
-                        .map_err(|e| Error::new(2, e))?,
-                ),
-            },
-            context.interrupted,
-        );
+        let invocation = Invocation {
+            argv: exec_argv,
+            cwd: cwd.to_owned(),
+            input: transport.input.clone(),
+            environment,
+            remove_environment,
+            timeout: Duration::from_secs(timeout),
+            max_bytes: 64 * 1024 * 1024,
+            merge: false,
+            launch_fence: Some(pending_usage.launch_fence()),
+            physical_call: Some(
+                oms_supervisor::process::PhysicalCall::new(&usage_receipt.identity.call_id)
+                    .map_err(|e| Error::new(2, e))?,
+            ),
+        };
+        let result = if let Some(protocol) = &team_protocol {
+            context.executor.execute_team_requests(
+                invocation,
+                crate::process::TeamLaunchBinding {
+                    pending: &pending_usage,
+                    attempt: &attempt,
+                    protocol,
+                },
+                context.interrupted,
+            )
+        } else {
+            context.executor.execute(invocation, context.interrupted)
+        };
         let mut result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -2063,7 +2170,14 @@ pub(crate) fn execute_env(
             }
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        let (decoded, terminal) = decode_output(&route.provider, &result.stdout);
+        let (decoded, terminal) = if team_protocol.is_some() {
+            (
+                String::from_utf8_lossy(&result.stdout).into_owned(),
+                result.complete,
+            )
+        } else {
+            decode_output(&route.provider, &result.stdout)
+        };
         let accounting = crate::usage::finish(
             &usage_repo,
             usage_receipt,
@@ -3071,6 +3185,47 @@ mod bridge_route_tests {
             },
         );
     }
+    #[test]
+    fn team_protocol_capability_is_strict_owned_and_rechecked() {
+        let scratch = ProviderScratch::new("team-protocol", None).unwrap();
+        let binary = scratch
+            .file("oms-agent-adapter-fixture", b"fixture adapter bytes")
+            .unwrap();
+        let manifest = PathBuf::from(format!("{}.oms-team-request-v1.json", binary.display()));
+        let route = Route {
+            provider: "fixture".into(),
+            model: "fixture".into(),
+            effort: "high".into(),
+            explicit: true,
+            account: String::new(),
+            account_pinned: false,
+        };
+        let declare = |schema: u8| {
+            std::fs::write(&manifest,format!("{{\"schema\":{schema},\"protocol\":\"oms-team-request-v1\",\"binary_sha256\":\"{}\"}}",storage::hash(b"fixture adapter bytes"))).unwrap();
+            std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        declare(1);
+        let selected = team_protocol(&route, &[binary.clone().into_os_string()]).unwrap();
+        selected.check().unwrap();
+        std::fs::write(&binary, b"changed adapter bytes").unwrap();
+        assert!(selected.check().is_err());
+        std::fs::write(&binary, b"fixture adapter bytes").unwrap();
+        declare(2);
+        assert!(team_protocol(&route, &[binary.clone().into_os_string()]).is_err());
+        declare(1);
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert!(team_protocol(&route, &[binary.clone().into_os_string()]).is_err());
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let linked = binary.with_file_name("linked");
+        std::fs::hard_link(&binary, &linked).unwrap();
+        assert!(team_protocol(&route, &[binary.clone().into_os_string()]).is_err());
+        let builtin = Route {
+            provider: "codex".into(),
+            ..route
+        };
+        assert!(team_protocol(&builtin, &[binary.into_os_string()]).is_err());
+    }
+
     #[test]
     fn native_write_transports() {
         for mode in ["normal", "resume"] {

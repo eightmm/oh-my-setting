@@ -243,6 +243,49 @@ fn room_lifecycle_and_cursor() {
         assert_eq!(call("updates", &["--after", "malformed"]).0, 2);
         assert_eq!(call("ack", &[]).0, 2);
         success(call("scope", &["--clear"]));
+        let core = oms_command_room::Room::open(
+            &repo.0,
+            oms_command_room::Session::default(),
+            &FixtureServices,
+            &STOP,
+            false,
+            false,
+        )
+        .unwrap();
+        let mut join = oms_command_room::Join::new("checked-reader", "codex");
+        join.role = "advisor".into();
+        join.parent = Some("owner".into());
+        core.join("room-fixture", join).unwrap();
+        let state = core.status("room-fixture", false).unwrap();
+        let generation = state
+            .list("participants")
+            .iter()
+            .find(|p| p.text("participant") == "checked-reader")
+            .unwrap()
+            .number("seq");
+        let before = fs::read(&log).unwrap();
+        assert!(
+            core.leave_if_enrolled("room-fixture", "checked-reader", generation + 1, "owner")
+                .is_err()
+        );
+        assert!(
+            core.leave_if_enrolled("room-fixture", "checked-reader", generation, "owner")
+                .is_err(),
+            "missing native parent producer cannot grant checked leave"
+        );
+        assert_eq!(fs::read(&log).unwrap(), before);
+        core.leave("room-fixture", "checked-reader").unwrap();
+        assert!(
+            !core
+                .status("room-fixture", false)
+                .unwrap()
+                .list("participants")
+                .iter()
+                .find(|p| p.text("participant") == "checked-reader")
+                .unwrap()
+                .flag("joined"),
+            "legacy leave remains available"
+        );
     });
 }
 #[test]

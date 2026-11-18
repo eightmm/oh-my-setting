@@ -214,6 +214,62 @@ ack-before-consume, lost wakeup receipt, message amplification, worker recursive
 시험한다. Parent offline이면 요청이 남거나 안전하게 거절되어야 하며 child가 fallback
 controller가 되면 안 된다. Main 재시작 후 미확정 wakeup을 자동 재전송하지 않는다.
 
+### TM-03A native report channel: bounded implementation
+
+An explicit `peer-ask --team-requests --providers ADAPTER` uses the existing
+four Team locator flags and `--task-id`. It supports only an actual read-only
+lead and `report_blocker`. Registered custom adapters require a strict schema-1
+`ADAPTER.oms-team-request-v1.json` declaration with `protocol` equal to
+`oms-team-request-v1` and the observed `binary_sha256`. The declaration and
+binary are owned, no-follow, single-link regular files, bounded at 8 KiB and
+16 MiB respectively, and checked again before launch. These are selection
+observations, not an immutable executing-image pin or live vendor capability.
+Codex, Claude and Antigravity built-ins refuse this protocol opt-in. The normal
+single-call path keeps its existing behavior.
+
+A borrowed opaque launch binding comes only from the existing physical New
+producer. The actual native lifecycle attempt, Room enrollment, current Team
+contract and owned Supervisor duplex child are required before Root issues a
+private session. Controller image/native process generation, connection and
+private operation file are retained. A public locator, PhysicalCall, environment
+marker or copied JSON cannot create that session. The process is trusted-local;
+this does not isolate hostile processes with the same UID.
+
+The parent sends a hello containing schema/kind, session, random nonce,
+connection_generation, binding_sha256 and expires_at. The actor echoes the
+hello identity, then sends request frames with those identity fields, sequence,
+binding_sha256 and body. Body is exactly schema 1, request_id, action
+`report_blocker`, text and expires_at. The existing private `--prompt-file`
+continues to carry the caller's assignment; a channel handshake is not evidence
+that a model consumed it. Responses contain an unpredictable receipt_challenge;
+ACK echoes it along with exact request_id/sequence and channel identity. Queue
+admission is not consumption. Raw protocol captures and challenge/nonce bytes
+are withheld from outward artifacts; private metadata retains only nonce hash.
+
+Frames/partial frames are capped at 8 KiB, text at 4,000 bytes, input at four
+frames/32 KiB, output queue at eight events/64 KiB, capture per stream at 512 KiB
+and requests at 32 per connection. Deadline/cancel/reap use the same Reactor.
+Session/request expiry cannot exceed the selected session/Team budget. Known
+cleanup is separate from protocol completeness and unknown usage.
+
+The canonical Team record opts into request_schema 2 only when recording its
+first request. Legacy `{versions,phase,reason}` remains readable; older readers
+refuse the extra fields. Request receipts have Plan-wide bounds of 64 and
+512 KiB including final array framing. Same semantic ID/body returns the stored
+outcome; changed body conflicts. Generation changes/cancellation retain dedup
+history. Post-CAS guard failure reports possible publication and retains the
+receipt for reconciliation. Recording a blocker changes no task state, scope,
+route, budget, acceptance or publication authority. Other request actions remain
+unsupported; this is not completion of TM-03/TM-04 or provider-native control.
+
+The canonical native Root fixture exercises public opt-in, actual local adapter,
+private issuance, report CAS, response ACK, replay/conflict, lost ACK, forged
+channel data, early ACK, actual deadline/cancel and exact enrollment cleanup.
+Plan fixtures reject altered receipt keys and an exact 512-KiB comma overflow.
+Only sealed owned cleanup for the exact call/scope allows checked enrollment
+leave; missing or stale authority preserves the enrollment for reconciliation.
+No paid model or live provider capability is claimed by these fixtures.
+
 ## 5. TM-04 — OMS-managed 실행과 복구
 
 첫 E2E는 동일한 fake fixture에서 Codex 역할과 Claude 역할의 read-only workers를

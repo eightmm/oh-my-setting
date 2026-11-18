@@ -507,6 +507,28 @@ impl Store {
         let lock = oms_lock::Lock::for_file(&self.path(id), settings).map_err(io)?;
         Self::acquire(&lock, stop)
     }
+    pub fn lock_before(
+        &self,
+        id: &str,
+        stop: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<oms_lock::Guard> {
+        checkpoint(stop)?;
+        if Instant::now() >= deadline {
+            return Err(Error::new("room lock deadline expired"));
+        }
+        self.check()?;
+        let mut settings = oms_lock::Settings::from_env().map_err(io)?;
+        settings.timeout = settings
+            .timeout
+            .min(deadline.saturating_duration_since(Instant::now()));
+        let lock = oms_lock::Lock::for_file(&self.path(id), settings).map_err(io)?;
+        let guard = Self::acquire(&lock, stop)?;
+        if Instant::now() >= deadline {
+            return Err(Error::new("room lock deadline expired"));
+        }
+        Ok(guard)
+    }
     pub fn acquire(lock: &oms_lock::Lock, stop: &AtomicBool) -> Result<oms_lock::Guard> {
         checkpoint(stop)?;
         let cancellation = oms_lock::Cancellation::default();

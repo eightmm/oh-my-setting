@@ -213,6 +213,15 @@ impl AdmissionGuard<'_, '_> {
         admission_before(self.plan, self.deadline)
     }
     fn current(&self) -> Result<Value> {
+        self.current_plan().map(|(_, binding)| binding)
+    }
+    /// Reuses the same bounded read set for a writer under this guard.
+    pub(crate) fn writer_before(&self) -> Result<Plan<'_>> {
+        let (plan, binding) = self.current_plan()?;
+        require(binding == self.binding, "Team writer binding changed")?;
+        Ok(plan)
+    }
+    fn current_plan(&self) -> Result<(Plan<'_>, Value)> {
         admission_before(self.plan, self.deadline)?;
         let mut context = self.plan.context.clone();
         context.ts = admission_time()?;
@@ -260,7 +269,7 @@ impl AdmissionGuard<'_, '_> {
                 )?;
             }
             admission_before(self.plan, self.deadline)?;
-            return Ok(binding);
+            return Ok((plan, binding));
         }
     }
     fn current_binding(&self, plan: &Plan<'_>) -> Result<Value> {
@@ -894,7 +903,7 @@ fn current(bindings: &mut Bindings<'_, '_>, s: &Snapshot, spec: &Value) -> Resul
 }
 
 fn versions(plan: &Plan<'_>, id: &str, record: &Value) -> Result<Vec<Value>> {
-    json::keys(record, &["versions", "phase", "reason"], &[])?;
+    crate::team_request::validate_record(record)?;
     require(
         ["planned", "held", "settled"].contains(&record.text("phase")),
         "unsupported team lifecycle phase",
@@ -993,6 +1002,7 @@ fn registry(plan: &Plan<'_>, s: &Snapshot) -> Result<(Value, BTreeMap<String, Va
         let specs = versions(plan, id, record)?;
         heads.insert(id.to_owned(), specs.last().unwrap().clone());
     }
+    crate::team_request::validate_aggregate(&teams)?;
     Ok((teams, heads, retained))
 }
 

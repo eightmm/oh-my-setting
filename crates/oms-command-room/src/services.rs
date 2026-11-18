@@ -102,6 +102,13 @@ pub trait Services: Sync {
             "native operations projection service is unavailable",
         ))
     }
+    fn operations_before<'a>(
+        &'a self,
+        _repo: &Path,
+        _deadline: std::time::Instant,
+    ) -> Result<Box<dyn OperationsRead + 'a>> {
+        Err(Error::new("bounded native operations producer unavailable"))
+    }
     fn delivery_available(&self, _app: App) -> bool {
         false
     }

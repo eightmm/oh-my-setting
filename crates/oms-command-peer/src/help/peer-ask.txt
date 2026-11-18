@@ -75,3 +75,13 @@ Environment:
   OMS_PEER_TIMEOUT       Per-provider wall-clock timeout (default: 15m).
   OMS_PEER_PRINT_TIMEOUT Timeout for print mode wait (agy); tracks the verb
                          wall default unless set.
+
+Team report channel (explicit opt-in):
+  --team-requests --providers ADAPTER --team-id ID --team-spec-sha256 SHA
+  --team-member LEAD --team-member-generation N --task-id TASK
+Requires one registered custom read adapter and an owned, single-link manifest
+ADAPTER.oms-team-request-v1.json that is not group/other writable. It contains
+schema 1, protocol oms-team-request-v1, and binary_sha256. Built-in transports
+are unsupported. The native parent authenticates its actual owned stdio
+session; flags and manifest grant no controller credential. Only report_blocker
+is supported; no task-state change, dispatch, wakeup, or automatic resend.

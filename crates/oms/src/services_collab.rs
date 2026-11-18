@@ -19,6 +19,8 @@
 mod incoming;
 #[path = "services_physical.rs"]
 mod physical;
+#[path = "services_team_requests.rs"]
+mod team_requests;
 use crate::services_control::ControlServices;
 use oms_command_autonomy::receipt;
 use oms_command_hooks::HostServices as HookHostServices;
@@ -185,6 +187,45 @@ impl<'a> CollabServices<'a> {
     }
 }
 
+pub(crate) fn prelaunch_error(
+    error: oms_command_peer::Error,
+    stop: &AtomicBool,
+    deadline: Instant,
+    expires_at: Option<i128>,
+) -> oms_command_peer::Error {
+    let expired = || {
+        expires_at.is_some_and(|expiry| {
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(i128::MAX, |time| time.as_secs() as i128)
+                >= expiry
+        })
+    };
+    let code = if stop.load(Ordering::Acquire) {
+        130
+    } else if Instant::now() >= deadline || expired() {
+        124
+    } else {
+        error.code
+    };
+    oms_command_peer::Error::new(code, error.message)
+}
+
+trait OwnedDuplexConsumer {
+    fn check(&self) -> oms_command_peer::Result<()>;
+    fn started(
+        &mut self,
+        reactor: &mut Reactor,
+        job: oms_supervisor::process::JobId,
+    ) -> oms_command_peer::Result<()>;
+    fn event(
+        &mut self,
+        reactor: &mut Reactor,
+        job: oms_supervisor::process::JobId,
+        event: oms_supervisor::process::OutputEvent,
+    ) -> oms_command_peer::Result<()>;
+}
+
 /// One supervised child. `cancel` names the stop recorded on interruption.
 struct Job<'a> {
     argv: Vec<OsString>,
@@ -198,6 +239,8 @@ struct Job<'a> {
     heartbeat: Option<&'a ActivityHeartbeat>,
     cancel: StopReason,
     physical_call: Option<oms_supervisor::process::PhysicalCall>,
+    channel: Option<&'a mut dyn OwnedDuplexConsumer>,
+    launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
 }
 
 impl<'a> Job<'a> {
@@ -214,6 +257,8 @@ impl<'a> Job<'a> {
             heartbeat: None,
             cancel: StopReason::Cancelled,
             physical_call: None,
+            channel: None,
+            launch_fence: None,
         }
     }
 }
@@ -240,6 +285,11 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     let mut request = Request::new(job.argv);
     request.cwd = Some(std::fs::canonicalize(job.cwd).map_err(|e| e.to_string())?);
     request.stdin = job.stdin;
+    let mut channel = job.channel;
+    if channel.is_some() {
+        request.stdin = None;
+        request.duplex = Some(team_requests::options());
+    }
     request.physical_call = job.physical_call;
     let mut remove_environment = job.remove_environment;
     for key in ["OMS_NATIVE_OUTCOME", "OMS_NATIVE_DISPATCHED"] {
@@ -285,8 +335,20 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if !job.merged {
         request.stderr_capture = Some(request.capture.clone());
     }
+    if let Some(fence) = job.launch_fence {
+        fence.check(interrupted).map_err(|e| e.message)?;
+    }
+    if let Some(channel) = &channel {
+        channel.check().map_err(|e| e.message)?;
+    }
     let id = reactor.start(request).map_err(|e| e.to_string())?;
+    if let Some(channel) = &mut channel {
+        channel
+            .started(&mut reactor, id)
+            .map_err(|_| "Team channel issuance failed; pending intent retained".to_owned())?;
+    }
     let mut cancelling = false;
+    let mut channel_failed = false;
     let mut beat = Instant::now();
     let mut heartbeat_failed = false;
     loop {
@@ -313,11 +375,41 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
             reactor.stop(id, job.cancel).map_err(|e| e.to_string())?;
             cancelling = true;
         }
-        if let Progress::Complete(done) = reactor
+        if let Some(channel) = &channel
+            && !channel_failed
+            && channel.check().is_err()
+        {
+            channel_failed = true;
+            reactor
+                .stop(id, StopReason::Deadline)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(channel) = &mut channel {
+            while let Some(event) = reactor.receive(id).map_err(|e| e.to_string())? {
+                if !channel_failed && channel.event(&mut reactor, id, event).is_err() {
+                    channel_failed = true;
+                    reactor
+                        .stop(id, StopReason::SupervisorError)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        if let Progress::Complete(mut done) = reactor
             .poll(id, Duration::from_millis(50))
             .map_err(|e| e.to_string())?
         {
-            return Ok((done, heartbeat_failed));
+            if let Some(channel) = &mut channel
+                && let Some(terminal) = &mut done.duplex
+            {
+                while let Some(event) = terminal.output.pop_front() {
+                    // A terminal child cannot receive new responses. Unconsumed
+                    // requests remain incomplete instead of gaining an ACK.
+                    if !channel_failed && channel.event(&mut reactor, id, event).is_err() {
+                        channel_failed = true;
+                    }
+                }
+            }
+            return Ok((done, heartbeat_failed || channel_failed));
         }
     }
 }
@@ -616,6 +708,15 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn execute_team_requests(
+        &self,
+        input: Invocation,
+        binding: oms_command_peer::process::TeamLaunchBinding<'_>,
+        interrupted: &AtomicBool,
+    ) -> oms_command_peer::Result<Completed> {
+        self.team_requests(input, binding, interrupted)
+    }
+
     fn with_physical_contract(
         &self,
         attempt: &oms_command_peer::process::PhysicalAttempt<'_>,
@@ -706,6 +807,7 @@ struct RoomOperations<'a> {
     repo: PathBuf,
     attempts: Vec<oms_command_room::Attempt>,
     fingerprint: String,
+    deadline: Option<Instant>,
     stop: &'a AtomicBool,
     _guard: Box<dyn oms_command_plan::services::LifecycleGuard + 'a>,
 }
@@ -735,8 +837,11 @@ impl oms_command_room::OperationsRead for RoomOperations<'_> {
         &self.attempts
     }
     fn check(&self) -> oms_command_room::Result<()> {
-        if self.stop.load(Ordering::Acquire) {
-            return Err(oms_command_room::Error::new("room operation interrupted"));
+        if self.stop.load(Ordering::Acquire) || self.deadline.is_some_and(|at| Instant::now() >= at)
+        {
+            return Err(oms_command_room::Error::new(
+                "room operation interrupted or deadline expired",
+            ));
         }
         if room_operations_projection(&self.repo)?.0 != self.fingerprint {
             return Err(oms_command_room::Error::new(
@@ -800,6 +905,29 @@ impl oms_command_room::Services for CollabServices<'_> {
             repo: repo.to_owned(),
             attempts,
             fingerprint,
+            deadline: None,
+            stop: self.interrupted,
+            _guard: guard,
+        }))
+    }
+    fn operations_before<'a>(
+        &'a self,
+        repo: &Path,
+        deadline: Instant,
+    ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
+        self.check(self.interrupted).map_err(room_error)?;
+        let guard =
+            oms_command_plan::Services::lifecycle_writer_before(&self.control, repo, deadline)
+                .map_err(room_error)?;
+        let (fingerprint, attempts) = room_operations_projection(repo)?;
+        if Instant::now() >= deadline {
+            return Err(room_error("native Room operation deadline expired"));
+        }
+        Ok(Box::new(RoomOperations {
+            repo: repo.to_owned(),
+            attempts,
+            fingerprint,
+            deadline: Some(deadline),
             stop: self.interrupted,
             _guard: guard,
         }))
@@ -2534,6 +2662,45 @@ mod tests {
         let err =
             PeerExecutor::execute(&host, &request(&["true"], dir.path()), &cancelled).unwrap_err();
         assert_eq!(err.code, 130);
+
+        struct ExpiredChannel;
+        impl OwnedDuplexConsumer for ExpiredChannel {
+            fn check(&self) -> oms_command_peer::Result<()> {
+                Err(oms_command_peer::Error::new(124, "expired channel"))
+            }
+            fn started(
+                &mut self,
+                _: &mut Reactor,
+                _: oms_supervisor::process::JobId,
+            ) -> oms_command_peer::Result<()> {
+                panic!("expired channel started a child")
+            }
+            fn event(
+                &mut self,
+                _: &mut Reactor,
+                _: oms_supervisor::process::JobId,
+                _: oms_supervisor::process::OutputEvent,
+            ) -> oms_command_peer::Result<()> {
+                unreachable!()
+            }
+        }
+        let marker = dir.path().join("expired-channel-started");
+        let mut argv = sh("printf started > \"$1\"");
+        argv.push(marker.as_os_str().to_owned());
+        assert!(
+            supervise(
+                Job {
+                    channel: Some(&mut ExpiredChannel),
+                    ..Job::new(argv, dir.path(), Duration::from_secs(1), 1024)
+                },
+                &stop,
+            )
+            .is_err()
+        );
+        assert!(
+            !marker.exists(),
+            "prestart expiry must have no child effect"
+        );
     }
 
     #[test]
