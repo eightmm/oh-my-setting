@@ -44,6 +44,8 @@ const VALUES: &[&str] = &[
     "room",
     "launch",
     "spawn-main",
+    "orchestrator",
+    "focus-orchestrator",
     "swap-main",
     "resume",
     "model",
@@ -357,10 +359,15 @@ impl Options {
         }
         self.choice("dispatch", oms_panel_core::routing::ROLES)?;
         self.choice("workload", oms_panel_core::routing::TIERS)?;
+        for key in ["orchestrator", "focus-orchestrator"] {
+            self.choice(key, &crate::orchestrator::PROVIDERS)?;
+        }
         let modes = [
             "watch",
             "launch",
             "spawn-main",
+            "orchestrator",
+            "focus-orchestrator",
             "swap-main",
             "reopen",
             "dispatch",
@@ -439,6 +446,8 @@ impl Options {
                     "finalize",
                     "results",
                     "settle-review",
+                    "orchestrator",
+                    "focus-orchestrator",
                 ]
                 .iter()
                 .any(|key| self.has(key)),
@@ -509,7 +518,7 @@ impl Options {
         )?;
         self.needs(&["export", "page", "participant"], &["results"])?;
         self.needs(&["resume"], &["launch"])?;
-        self.needs(&["task"], &["launch", "spawn-main"])?;
+        self.needs(&["task"], &["launch", "spawn-main", "orchestrator"])?;
         self.needs(
             &["model"],
             &[
@@ -587,7 +596,10 @@ impl Options {
             "--watch cannot combine with JSON or dry-run",
         )?;
         require(
-            !self.has("json") || !self.has("launch"),
+            !self.has("json")
+                || !["launch", "orchestrator", "focus-orchestrator"]
+                    .iter()
+                    .any(|key| self.has(key)),
             "--json is read-only; use --dry-run for a launch plan",
         )?;
         require(
@@ -704,8 +716,9 @@ impl Options {
 
 pub fn usage() -> String {
     let mut text = String::from(
-        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\n",
+        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nBare interactive panel opens or reuses the native Codex Main on tmux. Use --watch for the board alone.\n\n",
     );
+    text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--task TEXT]\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
     for key in FLAGS {
         text.push_str(&format!("  --{key}\n"));
@@ -715,4 +728,20 @@ pub fn usage() -> String {
     }
     text.push_str("  --count [N]\n  -h, --help\n\nTerminal actions: open list focus read controls forget archive restore workspaces workspace-forget workspace-archive workspace-restore\nJob actions: run list logs interrupt stop restart forget archive restore\nJob recipes follow -- as explicit argv. Publication remains an explicit owner action.\n");
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Options;
+
+    #[test]
+    fn orchestrator_actions_cannot_resume_unbound_vendor_sessions() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        let uuid = "00112233-4455-4677-8899-aabbccddeeff";
+        for provider in crate::orchestrator::PROVIDERS {
+            assert!(parse(&["--orchestrator", provider, "--resume", uuid]).is_err());
+            assert!(parse(&["--focus-orchestrator", provider, "--resume", uuid]).is_err());
+        }
+        assert!(parse(&["--launch", "codex", "--resume", "legacy-session"]).is_ok());
+    }
 }

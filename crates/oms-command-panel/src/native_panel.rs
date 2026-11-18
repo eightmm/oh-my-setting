@@ -36,6 +36,17 @@ fn admission_error(error: oms_command_peer::Error) -> Error {
         ..Error::new(error.message)
     }
 }
+const MAIN_STARTUP_PROMPT: &str = "As Overall Main, turn the user's goals into bounded \
+assignments with completion checks. Choose a role for each assignment. Use researcher for \
+read-only investigation, builder for scoped implementation, reviewer for independent review, \
+and verifier for read-only checks. In the Main pane of a managed OMS tmux panel, choose a \
+provider separately from the role. Open or reuse it with oms panel --orchestrator <provider>, \
+then use the same command with --task to send the role, scope, and checks on one line. When \
+provider orchestrators are unavailable, including in standalone inline or Herdr sessions, use \
+oms panel --dispatch <role> --prompt <assignment> where authorized. Coordinate dependencies \
+and avoid overlapping writes. Review the returned evidence, verify the integrated result, and \
+report completion and blockers to the user. Keep your own implementation to necessary integration \
+and unblocking. Preserve project rules and approval requirements. Wait for a user task before assigning work.";
 const ENV_KEYS: &[&str] = &[
     "OMS_AGENT",
     "OMS_PANEL_REPO",
@@ -173,6 +184,41 @@ pub fn run(
     Err(Error::new("unsupported native panel action"))
 }
 
+pub(crate) fn default_main(
+    repo: &Path,
+    cwd: &Path,
+    source: &Path,
+    options: &Options,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Option<Output>> {
+    if !wants_split(options) {
+        return Ok(None);
+    }
+    parent_only()?;
+    let (work_root, is_git) = state::work_repository(cwd)?;
+    if !is_git {
+        return Ok(None);
+    }
+    require(
+        state::repository_for(&work_root, false)? == repo,
+        "current repository conflicts with the inherited OMS_ROOM_REPO",
+    )?;
+    oms_command_peer::admission::interactive_state(repo).map_err(admission_error)?;
+    let prefix = entry_prefix(source)?;
+    let policy = load_policy(source)?;
+    split_panel(
+        repo,
+        &prefix,
+        &policy,
+        SplitRequest::ReuseOrStartCodex,
+        options,
+        services,
+        stop,
+    )?;
+    Ok(Some((0, vec![], vec![])))
+}
+
 fn reopen(
     repo: &Path,
     source: &Path,
@@ -187,21 +233,30 @@ fn reopen(
         .and_then(|p| panes.iter().find(|row| row.pane == p));
     let candidates: Vec<&PanelPane> = panes
         .iter()
-        .filter(|row| !row.watch && current.is_none_or(|c| row.window == c.window))
+        .filter(|row| row.mode != PaneMode::Watch && current.is_none_or(|c| row.window == c.window))
         .collect();
     require(
         candidates.len() == 1,
         "no unique existing OMS input pane; reopen from the intended OMS window",
     )?;
-    let base = candidates[0].clone();
+    reopen_pane(repo, &prefix, candidates[0], services, stop)
+}
+
+fn reopen_pane(
+    repo: &Path,
+    prefix: &[String],
+    base: &PanelPane,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Output> {
     let fresh = discover_panel_panes(repo, services, stop)?;
     require(
-        fresh.contains(&base),
+        fresh.contains(base),
         "OMS input pane changed; retry after refreshing",
     )?;
     let boards: Vec<&PanelPane> = fresh
         .iter()
-        .filter(|row| row.window == base.window && row.watch)
+        .filter(|row| row.window == base.window && row.mode == PaneMode::Watch)
         .collect();
     if boards.is_empty() {
         let selected = tmux_quiet(
@@ -233,18 +288,35 @@ fn reopen(
                 stop,
             )?;
         }
-        let canon = std::fs::canonicalize(repo)
-            .unwrap_or_else(|_| repo.to_path_buf())
-            .to_string_lossy()
-            .into_owned();
-        let owns_main = pane_option(services, repo, "@oms_panel_main_attempt", stop)
-            .is_some_and(|v| !v.is_empty())
-            && pane_option(services, repo, "@oms_panel_room_participant", stop)
-                .is_some_and(|v| !v.is_empty())
-            && pane_option(services, repo, "@oms_panel_repo", stop).as_deref()
-                == Some(canon.as_str());
-        let cmd = watch_shell(repo, &prefix, None, Some(&base.session));
-        board_split(&base.pane, repo, &cmd, owns_main, services, stop)?;
+        let room = if base.mode == PaneMode::Native {
+            let id = tmux_quiet(
+                services,
+                repo,
+                &[
+                    "show-option",
+                    "-w",
+                    "-v",
+                    "-t",
+                    &base.pane,
+                    "@oms_panel_room",
+                ],
+                stop,
+            )
+            .ok_or_else(|| Error::new("native Main room is unavailable"))?;
+            crate::identifier(&id)?;
+            Some(id)
+        } else {
+            None
+        };
+        let cmd = watch_shell(repo, prefix, None, Some(&base.session), room.as_deref());
+        board_split(
+            &base.pane,
+            repo,
+            &cmd,
+            base.mode == PaneMode::Native,
+            services,
+            stop,
+        )?;
     }
     terminals::tmux(
         services,
@@ -377,7 +449,15 @@ fn launch(
             which_exists("tmux"),
             "native chat board requires tmux on PATH",
         )?;
-        split_panel(repo, &prefix, &policy, &harness, options, services, stop)?;
+        split_panel(
+            repo,
+            &prefix,
+            &policy,
+            SplitRequest::StartNew(&harness),
+            options,
+            services,
+            stop,
+        )?;
         return Ok((0, vec![], vec![]));
     }
     let code = run_native(repo, &policy, &harness, options, services, stop)?;
@@ -394,11 +474,16 @@ fn wants_split(options: &Options) -> bool {
             || (layout_opt == "auto" && which_exists("tmux")))
 }
 
+enum SplitRequest<'a> {
+    ReuseOrStartCodex,
+    StartNew(&'a str),
+}
+
 fn split_panel(
     repo: &Path,
     prefix: &[String],
     policy: &routing::Policy,
-    harness: &str,
+    request: SplitRequest<'_>,
     options: &Options,
     services: &dyn Services,
     stop: &AtomicBool,
@@ -416,6 +501,37 @@ fn split_panel(
         )?;
     }
 
+    let harness = match request {
+        SplitRequest::StartNew(harness) => harness,
+        SplitRequest::ReuseOrStartCodex => {
+            if owner.is_some() {
+                let panes = discover_panel_panes(repo, services, stop)?;
+                let candidates: Vec<_> = panes
+                    .iter()
+                    .filter(|pane| pane.session == session && pane.mode == PaneMode::Native)
+                    .collect();
+                require(
+                    candidates.len() <= 1,
+                    "multiple native Main panes found; reopen from the intended OMS window",
+                )?;
+                if let Some(base) = candidates.first() {
+                    start_lock.check()?;
+                    reopen_pane(repo, prefix, base, services, stop)?;
+                    start_lock.check()?;
+                    terminals::tmux(
+                        services,
+                        repo,
+                        &crate::commands::strings(&["select-window", "-t", &base.pane]),
+                        stop,
+                    )?;
+                    drop(start_lock);
+                    return attach_session(&session);
+                }
+            }
+            ensure_main_installed("codex", None, policy)?;
+            "codex"
+        }
+    };
     let chosen_room = crate::commands::room(options);
     if let Some(resume) = options.get("resume") {
         let bound_rooms = native_resume_binding(
@@ -591,7 +707,7 @@ fn split_panel(
             stop,
         )?;
         let owner = resolve_main(policy, harness, options.get("model")).owner;
-        let watch = watch_shell(repo, prefix, Some(&owner), None);
+        let watch = watch_shell(repo, prefix, Some(&owner), None, Some(&ident));
         board_split(&pane, repo, &watch, true, services, stop)?;
         terminals::tmux(
             services,
@@ -601,6 +717,11 @@ fn split_panel(
         )?;
     }
 
+    drop(start_lock);
+    attach_session(&session)
+}
+
+fn attach_session(session: &str) -> Result<()> {
     let attach_verb = if std::env::var_os("TMUX").is_some_and(|v| !v.is_empty()) {
         "switch-client"
     } else {
@@ -703,6 +824,15 @@ fn run_native(
     if let Some(model) = &resolution.model {
         start_args.extend(["--ref".into(), format!("panel_model={model}")]);
     }
+    let native_scheduling = if std::env::var_os("OMS_CAMPAIGN_MANIFEST_SHA256").is_some() {
+        "campaign"
+    } else {
+        "unmanaged"
+    };
+    start_args.extend([
+        "--ref".into(),
+        format!("panel_native_scheduling={native_scheduling}"),
+    ]);
     if let Some(sid) = &native_session {
         let digest = oms_panel_core::digest(sid.as_bytes());
         start_args.extend([
@@ -1041,8 +1171,15 @@ struct PanelPane {
     session: String,
     window: String,
     pane: String,
-    watch: bool,
+    mode: PaneMode,
     signature: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneMode {
+    Control,
+    Native,
+    Watch,
 }
 
 fn discover_panel_panes(
@@ -1083,12 +1220,12 @@ fn discover_panel_panes(
         {
             continue;
         }
-        if let Some(watch) = match_panel_command(command, &canon_repo) {
+        if let Some(mode) = match_panel_entry(command, &canon_repo) {
             found.push(PanelPane {
                 session: session.into(),
                 window: window.into(),
                 pane: pane.into(),
-                watch,
+                mode,
                 signature: oms_panel_core::digest(command.as_bytes()),
             });
         }
@@ -1096,7 +1233,12 @@ fn discover_panel_panes(
     Ok(found)
 }
 
+#[cfg(test)]
 fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
+    match_panel_entry(command, canon_repo).map(|mode| mode == PaneMode::Watch)
+}
+
+fn match_panel_entry(command: &str, canon_repo: &Path) -> Option<PaneMode> {
     let mut words = split_shell_words(command)?;
     if words.len() == 1 {
         words = split_shell_words(&words[0])?;
@@ -1155,7 +1297,7 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
         return None;
     };
 
-    let mut watch = false;
+    let mut mode = PaneMode::Control;
     let mut pane_repo: Option<String> = None;
     let value_flags = [
         "--repo", "--room", "--host", "--layout", "--view", "--owner", "--launch", "--resume",
@@ -1168,7 +1310,7 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
             .map_or((word, None), |(key, value)| (key, Some(value)));
         idx += 1;
         if key == "--watch" && inline.is_none() {
-            watch = true;
+            mode = PaneMode::Watch;
         } else if matches!(key, "--no-animation" | "--attention-only") && inline.is_none() {
             continue;
         } else if value_flags.contains(&key) {
@@ -1184,6 +1326,8 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
             };
             if key == "--repo" {
                 pane_repo = Some(val.to_owned());
+            } else if key == "--launch" && mode == PaneMode::Control {
+                mode = PaneMode::Native;
             }
         } else {
             return None;
@@ -1191,7 +1335,7 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
     }
     let resolved = std::fs::canonicalize(pane_repo?).ok()?;
     if resolved == canon_repo {
-        Some(watch)
+        Some(mode)
     } else {
         None
     }
@@ -1363,7 +1507,7 @@ fn add_main_window(
         stop,
     )?;
     let owner = resolve_main(policy, harness, model).owner;
-    let watch = watch_shell(repo, prefix, Some(&owner), None);
+    let watch = watch_shell(repo, prefix, Some(&owner), None, Some(room_id));
     board_split(&pane, repo, &watch, true, services, stop)?;
     let _ = tmux_quiet(
         services,
@@ -1485,6 +1629,7 @@ fn watch_shell(
     prefix: &[String],
     owner: Option<&str>,
     session: Option<&str>,
+    room: Option<&str>,
 ) -> String {
     let mut parts = panel_env_prefix_for(owner.is_none_or(|o| o == "antigravity" || o == "agy"));
     if let Some(s) = session {
@@ -1499,6 +1644,9 @@ fn watch_shell(
     ]);
     if let Some(owner) = owner {
         parts.extend(["--owner".into(), owner.into()]);
+    }
+    if let Some(room) = room {
+        parts.extend(["--room".into(), room.into()]);
     }
     format!(
         "exec {}",
@@ -1609,12 +1757,12 @@ fn native_command(
     let resolution = resolve_main(policy, provider, model);
     let room_inst = match (room_id, member) {
         (Some(id), Some(m)) => format!(
-            "\nYou are joined to OMS room {id} as {m}. Read oms room show --id {id} first. Include --room {id} in every oms panel --dispatch or --council command."
+            "\nYou are joined to OMS room {id} as {m}. Read oms room show --id {id} first. Include --room {id} in every oms panel --orchestrator, --dispatch, or --council command."
         ),
         _ => String::new(),
     };
     let base_inst = format!(
-        "OMS terminal panel sole main. Repository: {}. Use --owner {} for owner commands.{room_inst}",
+        "OMS terminal panel sole main. Repository: {}. Use --owner {} for owner commands.{room_inst}\n{MAIN_STARTUP_PROMPT}",
         repo.display(),
         resolution.owner
     );
@@ -2147,6 +2295,7 @@ fn live_mains(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<usize> {
+    // Keep both ends nonempty so tmux output trimming preserves unset option columns.
     let raw = terminals::tmux(
         services,
         repo,
@@ -2155,38 +2304,46 @@ fn live_mains(
             "-t",
             &format!("={session}"),
             "-F",
-            "#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}\t#{window_name}\t#{window_id}\t#{@oms_panel_harness}",
+            "#{window_id}\t#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}\t#{window_name}\t#{@oms_panel_harness}\t#{@oms_provider_session}\t.",
         ]),
         stop,
     )?;
     let mut windows = Vec::new();
     for line in raw.replace('\r', "").lines() {
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != 6
-            || fields[3].trim().is_empty()
-            || !crate::commands::valid_target(fields[4], '@')
-        {
+        let [window, owner, room, member, name, harness, provider, "."] = fields.as_slice() else {
             return Err(Error::new(
                 "main window status unavailable; existing sessions preserved",
             ));
+        };
+        require(
+            !name.trim().is_empty() && crate::commands::valid_target(window, '@'),
+            "main window status unavailable; existing sessions preserved",
+        )?;
+        if crate::orchestrator::PROVIDERS.contains(provider)
+            && owner.is_empty()
+            && member.is_empty()
+            && harness.is_empty()
+        {
+            continue;
         }
-        let native = !fields[2].is_empty()
-            || !fields[5].is_empty()
-            || (!fields[0].is_empty() && fields[3] != "control")
-            || LAUNCH_HARNESSES.contains(&fields[3])
-            || fields[3] == "antigravity";
+        let native = !member.is_empty()
+            || !harness.is_empty()
+            || (!owner.is_empty() && *name != "control")
+            || LAUNCH_HARNESSES.contains(name)
+            || *name == "antigravity";
         if !native {
-            if fields[3] != "control" {
+            if *name != "control" {
                 return Err(Error::new(
                     "main window ownership is unverified; existing sessions preserved",
                 ));
             }
             continue;
         }
-        if pending_window.is_some_and(|pw| pw == fields[4] && fields[2].is_empty()) {
+        if pending_window.is_some_and(|pw| pw == *window && member.is_empty()) {
             continue;
         }
-        windows.push((fields[1].to_owned(), fields[2].to_owned()));
+        windows.push((room.to_string(), member.to_string()));
     }
 
     let mut rooms = BTreeSet::new();
@@ -2227,11 +2384,7 @@ fn live_mains(
             if row["tool"] != "panel-main" || row["refs"]["panel_room_id"] != ident.as_str() {
                 continue;
             }
-            let who = row["refs"]["panel_room_participant"]
-                .as_str()
-                .or_else(|| row["attempt_id"].as_str())
-                .unwrap_or("")
-                .to_owned();
+            let who = oms_panel_core::state::main_participant(row).to_owned();
             if row["terminal"] == true {
                 terminal.insert((ident.clone(), who));
             } else if joined.contains(who.as_str()) {
@@ -2313,24 +2466,6 @@ fn native_resume_binding(
         }
     }
     Ok(bound)
-}
-
-fn pane_option(
-    services: &dyn Services,
-    repo: &Path,
-    option: &str,
-    stop: &AtomicBool,
-) -> Option<String> {
-    let pane = std::env::var("TMUX_PANE").ok()?;
-    if pane.is_empty() {
-        return None;
-    }
-    tmux_quiet(
-        services,
-        repo,
-        &["show-option", "-w", "-v", "-t", &pane, option],
-        stop,
-    )
 }
 
 fn tmux_quiet(
@@ -3563,7 +3698,13 @@ mod native_lifecycle_contract {
             assert!(!options.has("help"));
             assert_eq!(super::match_panel_command(&command, &dir.0), Some(false));
         }
-        let watch_cmd = super::watch_shell(&dir.0, &prefix, Some("codex"), Some("oms-test"));
+        let watch_cmd = super::watch_shell(
+            &dir.0,
+            &prefix,
+            Some("codex"),
+            Some("oms-test"),
+            Some("room-fixture"),
+        );
         assert_eq!(super::match_panel_command(&watch_cmd, &dir.0), Some(true));
 
         let hud = super::hud_status_right(&prefix, &dir.0);
@@ -3581,7 +3722,12 @@ mod native_lifecycle_contract {
 
     #[test]
     fn check_legacy_main_excludes_callers_own_pending_tmux_window() {
-        struct PendingWindowMock;
+        struct PendingWindowMock {
+            reference: Option<Value>,
+            terminal: bool,
+            matrix: bool,
+            control_only: bool,
+        }
         impl PeerExecutor for PendingWindowMock {
             fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
                 let args: Vec<String> = request
@@ -3594,7 +3740,13 @@ mod native_lifecycle_contract {
                 } else if args.iter().any(|a| a == "show-options") {
                     b"/repo\n".to_vec()
                 } else if args.iter().any(|a| a == "list-windows") {
-                    b"codex\troom-1\t\tcodex\t@1\tcodex\n".to_vec()
+                    if self.control_only {
+                        b"@1\tcodex\troom-1\tunrelated\tcodex\tcodex\t\t.\n".to_vec()
+                    } else if self.matrix {
+                        b"@1\tcodex\troom-1\tmain-1\tcodex\tcodex\t\t.\n".to_vec()
+                    } else {
+                        b"@2\t\troom-1\t\tAGY Orchestrator\t\tantigravity\t.\n@1\tcodex\troom-1\t\tcodex\tcodex\t\t.\n".to_vec()
+                    }
                 } else {
                     return Err(oms_panel_core::Error::new("unexpected tmux command"));
                 };
@@ -3619,7 +3771,15 @@ mod native_lifecycle_contract {
                 match command {
                     NativeCommand::Events => Ok(CommandOutput {
                         code: 0,
-                        stdout: b"[]".to_vec(),
+                        stdout: if self.matrix {
+                            let mut row = serde_json::json!({"attempt_id":"main-1","tool":"panel-main","terminal":self.terminal,"refs":{"panel_room_id":"room-1"}});
+                            if let Some(reference) = &self.reference {
+                                row["refs"]["panel_room_participant"] = reference.clone();
+                            }
+                            serde_json::to_vec(&vec![row]).unwrap()
+                        } else {
+                            b"[]".to_vec()
+                        },
                         stderr: Vec::new(),
                         cleanup_complete: true,
                         output_complete: true,
@@ -3627,7 +3787,11 @@ mod native_lifecycle_contract {
                     }),
                     NativeCommand::Room => Ok(CommandOutput {
                         code: 0,
-                        stdout: br#"{"closed":false,"participants":[]}"#.to_vec(),
+                        stdout: if self.matrix {
+                            br#"{"closed":false,"participants":[{"participant":"main-1","role":"main","joined":true}]}"#.to_vec()
+                        } else {
+                            br#"{"closed":false,"participants":[]}"#.to_vec()
+                        },
                         stderr: Vec::new(),
                         cleanup_complete: true,
                         output_complete: true,
@@ -3640,10 +3804,43 @@ mod native_lifecycle_contract {
 
         let dir = TempRepo::new();
         let stop = AtomicBool::new(false);
-        assert!(
-            super::check_legacy_main(&dir.0, "oms-test", None, &PendingWindowMock, &stop).is_err()
-        );
-        super::check_legacy_main(&dir.0, "oms-test", Some("@1"), &PendingWindowMock, &stop)
-            .unwrap();
+        let pending = PendingWindowMock {
+            reference: None,
+            terminal: false,
+            matrix: false,
+            control_only: false,
+        };
+        assert!(super::check_legacy_main(&dir.0, "oms-test", None, &pending, &stop).is_err());
+        super::check_legacy_main(&dir.0, "oms-test", Some("@1"), &pending, &stop).unwrap();
+        for terminal in [false, true] {
+            for reference in [None, Some(Value::from("")), Some(Value::from("foreign"))] {
+                let svc = PendingWindowMock {
+                    reference: reference.clone(),
+                    terminal,
+                    matrix: true,
+                    control_only: false,
+                };
+                let expected = usize::from(!terminal || reference == Some(Value::from("foreign")));
+                assert_eq!(
+                    super::live_mains(&dir.0, "oms-test", Some("room-1"), None, &svc, &stop)
+                        .unwrap(),
+                    expected,
+                    "terminal={terminal} reference={reference:?}"
+                );
+                if !terminal {
+                    let svc = PendingWindowMock {
+                        reference: reference.clone(),
+                        terminal,
+                        matrix: true,
+                        control_only: true,
+                    };
+                    assert_eq!(
+                        super::live_mains(&dir.0, "oms-test", Some("room-1"), None, &svc, &stop)
+                            .unwrap(),
+                        1 + usize::from(reference != Some(Value::from("foreign")))
+                    );
+                }
+            }
+        }
     }
 }

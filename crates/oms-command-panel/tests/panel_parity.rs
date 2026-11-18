@@ -334,6 +334,9 @@ impl PeerExecutor for Fake {
                 "list-panes" => self.tmux_panes.borrow().clone().into_bytes(),
                 "list-windows" => self.tmux_windows.borrow().clone().into_bytes(),
                 "show-options" => self.tmux_owner.borrow().clone().into_bytes(),
+                "display-message" if args.last().is_some_and(|v| v == "#{session_id}") => {
+                    b"$1\n".to_vec()
+                }
                 "display-message" => format!("$1\t{}\tsocket\n", std::process::id()).into_bytes(),
                 "has-session" | "select-pane" | "select-window" | "switch-client" => vec![],
                 _ => vec![],
@@ -483,6 +486,125 @@ fn setup_fake_room(services: &Fake, room_id: &str) {
             "panel_main": "att-main"
         }
     }));
+}
+
+fn chats_native_identity_binding() {
+    let repo = TempDir::new("oms-panel-chats");
+    init_git_repo(repo.path());
+    let services = Fake::default();
+    setup_fake_room(&services, "room-chat");
+    services.room.borrow_mut()["participants"][0]["participant"] = json!("att-main");
+    services.room.borrow_mut()["participants"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempt");
+    services.room.borrow_mut()["participants"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"participant":"worker-1","role":"worker","provider":"claude","joined":true}));
+    services.attempts.borrow_mut()[0]["refs"]["panel_native_pane"] = json!("%1");
+    services.attempts.borrow_mut().push(json!({"attempt_id":"worker-attempt","tool":"peer-delegate","refs":{"panel_room_participant":"worker-1","panel_native_pane":"%2"}}));
+    services.room.borrow_mut()["participants"].as_array_mut().unwrap().push(json!({"participant":"worker-missing","role":"worker","provider":"claude","joined":true}));
+    services.attempts.borrow_mut().push(json!({"attempt_id":"worker-missing","tool":"peer-delegate","refs":{"panel_native_pane":"%4"}}));
+    services.attempts.borrow_mut().push(json!({"attempt_id":"worker-latest","tool":"peer-delegate","refs":{"panel_room_participant":"worker-1","panel_native_pane":"%3","panel_native_session":"worker-latest-session"}}));
+    *services.tmux_panes.borrow_mut() = "%1\t@1\t$1\n%2\t@2\t$2\n%3\t@3\t$1\n%4\t@4\t$1\n".into();
+    for reference in [Value::Null, json!(""), json!("foreign")] {
+        if reference.is_null() {
+            services.attempts.borrow_mut()[0]["refs"]
+                .as_object_mut()
+                .unwrap()
+                .remove("panel_room_participant");
+        } else {
+            services.attempts.borrow_mut()[0]["refs"]["panel_room_participant"] = reference.clone();
+        }
+        services.attempts.borrow_mut()[0]["refs"]["panel_native_session"] = json!("main-session");
+        let (code, out, err) = run_with_services(
+            "panel",
+            &os(&[
+                "--repo",
+                repo.path().to_str().unwrap(),
+                "--room",
+                "room-chat",
+                "--chats",
+                "--json",
+            ]),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let result: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["rows"][0]["terminal"], json!(reference != "foreign"));
+        assert_eq!(result["rows"][1]["terminal"], json!(true));
+        assert_eq!(
+            result["rows"][1]["session_id"],
+            json!("worker-latest-session")
+        );
+        assert_eq!(result["rows"][2]["terminal"], json!(false));
+        services.attempts.borrow_mut()[2]["refs"]["panel_room_participant"] =
+            json!("foreign-worker");
+        let (code, out, _) = run_with_services(
+            "panel",
+            &os(&[
+                "--repo",
+                repo.path().to_str().unwrap(),
+                "--room",
+                "room-chat",
+                "--chats",
+                "--json",
+            ]),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        );
+        assert_eq!(code, 0);
+        let foreign: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(foreign["rows"][2]["terminal"], json!(false));
+        services.attempts.borrow_mut()[2]["refs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("panel_room_participant");
+        assert_eq!(
+            result["rows"][0]["session_id"],
+            if reference == "foreign" {
+                Value::Null
+            } else {
+                json!("main-session")
+            }
+        );
+        if reference != "foreign" {
+            let (code, out, err) = run_with_services(
+                "panel",
+                &os(&[
+                    "--repo",
+                    repo.path().to_str().unwrap(),
+                    "--room",
+                    "room-chat",
+                    "--open-chat",
+                    "att-main",
+                    "--chat-surface",
+                    "terminal",
+                ]),
+                repo.path(),
+                repo.path(),
+                &STOP,
+                &services,
+            );
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            let _ = out;
+            let seen = services.commands_seen.borrow();
+            assert!(seen.iter().any(|(_, args)| {
+                args.windows(2).any(|pair| pair == ["select-window", "-t"])
+                    && args.iter().any(|v| v == "@1")
+            }));
+            assert!(seen.iter().any(|(_, args)| {
+                args.windows(2).any(|pair| pair == ["select-pane", "-t"])
+                    && args.iter().any(|v| v == "%1")
+            }));
+        }
+    }
 }
 
 fn cli_validation_and_repo_conflict_parity() {
@@ -736,6 +858,17 @@ fn empty_scope_preserved_on_continue_and_dry_run_launch() {
     let lplan: Value = serde_json::from_slice(&lout).unwrap();
     assert_eq!(lplan["executes"], json!(false));
     assert_eq!(lplan["harness"], json!("codex"));
+    let prompt = lplan["argv"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(prompt.contains(&format!("Repository: {}", repo.path().display())));
+    assert!(prompt.contains("As Overall Main"));
+    assert!(prompt.contains("oms panel --orchestrator"));
+    assert!(prompt.contains("verify the integrated result"));
 }
 
 fn settle_review_and_recommend_parity() {
@@ -2330,6 +2463,7 @@ fn main() {
         let _guard = RootGuard(base.clone());
         let state = base.join("state");
         let worktrees = base.join("wt");
+        ensure_private_dir(&base.join("locks"));
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&state)
@@ -2340,9 +2474,11 @@ fn main() {
             .unwrap();
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args(std::env::args_os().skip(1))
+            .env("TMUX_PANE", "%9")
             .env("OMS_PANEL_PARITY_ROOT", &base)
             .env("TMPDIR", &base)
             .env("XDG_STATE_HOME", &state)
+            .env("OMS_LOCK_DIR", base.join("locks"))
             .env("OMS_DELEGATE_WORKTREE_ROOT", &worktrees);
         for key in [
             "OMS_ROOM_ID",
@@ -2365,7 +2501,11 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 10] = [
+    let cases: [(&str, fn()); 11] = [
+        (
+            "chats_native_identity_binding",
+            chats_native_identity_binding,
+        ),
         (
             "missing_entry_refuses_before_mutation",
             missing_entry_refuses_before_mutation,

@@ -12,6 +12,24 @@ fail() {
   exit 1
 }
 
+mode_is() {
+  local path="$1" expected="$2" mode
+  mode="$(stat -c '%a' "$path" 2>/dev/null)" ||
+    mode="$(stat -f '%Lp' "$path")" || return 1
+  if [ "$mode" != "$expected" ]; then
+    echo "expected mode $expected for $path, got $mode" >&2
+    return 1
+  fi
+}
+
+private_lifecycle_entry() {
+  local path="$1" field
+  mode_is "$path" 700 || return 1
+  for field in pid pid-start started owner; do
+    mode_is "$path/$field" 600 || return 1
+  done
+}
+
 export OMS_INSTALL_LIFECYCLE_LOCK="$TMP/locks/install-lifecycle.lock.d"
 export OMS_INSTALL_LIFECYCLE_LOCK_TIMEOUT=1
 
@@ -23,11 +41,18 @@ exercise_subshell_boundary() {
   local child_status=0
   local child_log="$TMP/child-acquire.log"
   local lock
+  local previous_umask
 
+  previous_umask="$(umask)"
+  umask 0002
   oms_install_lifecycle_lock_acquire "test parent ownership ($identity_mode)" ||
     fail "parent could not acquire the lifecycle lock ($identity_mode)"
+  [ "$(umask)" = 0002 ] || fail "acquisition changed the caller's umask"
+  umask "$previous_umask"
   lock="$OMS_INSTALL_LIFECYCLE_LOCK_PATH"
   [ -d "$lock" ] || fail "acquire did not create the lifecycle lock ($identity_mode)"
+  private_lifecycle_entry "$lock" ||
+    fail "fresh lifecycle lock is not private ($identity_mode)"
 
   # Bash keeps $$ unchanged in a (...) subshell. Process ownership must use the
   # actual executing shell identity, or the child can silently adopt the parent
@@ -160,7 +185,7 @@ exercise_reclaim_gate() {
   local hold="$TMP/$mode-hold"
   local first_ready="$TMP/$mode-first-acquired"
   local second_ready="$TMP/$mode-second-acquired"
-  local first_pid second_pid second_status=0 owner_before owner_after
+  local first_pid second_pid second_status=0 owner_before owner_after claim
 
   mkdir -p "$OMS_INSTALL_LIFECYCLE_LOCK.recovery-claims.d/1.99999999.dead"
   printf '%s\n' 99999999 > \
@@ -177,10 +202,12 @@ exercise_reclaim_gate() {
   printf '%s\n' 1 > "$OMS_INSTALL_LIFECYCLE_LOCK/started"
   printf '%s\n' stale-owner > "$OMS_INSTALL_LIFECYCLE_LOCK/owner"
 
-  OMS_TEST_INSTALL_LIFECYCLE_STALE_BARRIER="$barrier" \
-    OMS_TEST_LOCK_ACQUIRED="$first_ready" OMS_TEST_LOCK_HOLD="$hold" \
-    OMS_INSTALL_LIFECYCLE_LOCK_TIMEOUT=3 bash "$driver" \
-    >"$TMP/$mode-first.log" 2>&1 &
+  (
+    umask 0002
+    OMS_TEST_INSTALL_LIFECYCLE_STALE_BARRIER="$barrier" \
+      OMS_TEST_LOCK_ACQUIRED="$first_ready" OMS_TEST_LOCK_HOLD="$hold" \
+      OMS_INSTALL_LIFECYCLE_LOCK_TIMEOUT=3 exec bash "$driver"
+  ) >"$TMP/$mode-first.log" 2>&1 &
   first_pid=$!
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -e "$barrier.ready" ] && break
@@ -192,6 +219,12 @@ exercise_reclaim_gate() {
   }
   [ ! -e "$OMS_INSTALL_LIFECYCLE_LOCK.recovery-claims.d/1.99999999.dead" ] ||
     fail "$mode did not reclaim a dead unique recovery claim"
+  for claim in "$OMS_INSTALL_LIFECYCLE_LOCK.recovery-claims.d"/*; do
+    private_lifecycle_entry "$claim" || {
+      kill "$first_pid" 2>/dev/null || true
+      fail "$mode recovery claim is not private"
+    }
+  done
 
   OMS_TEST_INSTALL_LIFECYCLE_STALE_BARRIER="$barrier" \
     OMS_TEST_LOCK_ACQUIRED="$second_ready" OMS_TEST_LOCK_HOLD="$hold-second" \
@@ -206,6 +239,10 @@ exercise_reclaim_gate() {
   [ -e "$first_ready" ] || {
     kill "$first_pid" "$second_pid" 2>/dev/null || true
     fail "$mode first contender did not acquire after reclaim"
+  }
+  private_lifecycle_entry "$OMS_INSTALL_LIFECYCLE_LOCK" || {
+    kill "$first_pid" "$second_pid" 2>/dev/null || true
+    fail "$mode replacement lock is not private"
   }
   owner_before="$(sed -n '1p' "$OMS_INSTALL_LIFECYCLE_LOCK/owner")"
   wait "$second_pid" || second_status=$?

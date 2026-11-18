@@ -668,6 +668,101 @@ fn scan_filtered(
     out
 }
 
+/// Locate a Codex rollout by the same native-session digest the Room stores.
+pub fn codex_rollout(consumer: &str) -> Option<std::path::PathBuf> {
+    if !crate::hex(consumer, 32) {
+        return None;
+    }
+    let home = std::env::var_os("CODEX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".codex")))?;
+    let sessions = std::fs::canonicalize(home).ok()?.join("sessions");
+    if !std::fs::symlink_metadata(&sessions).ok()?.is_dir() {
+        return None;
+    }
+    let digits = |name: &str| name.bytes().all(|b| b.is_ascii_digit());
+    let mut remaining = MAX_SCAN_ENTRIES;
+    for (year, _) in scan_filtered(&sessions, 4, true, &mut remaining, digits) {
+        for (month, _) in scan_filtered(&year, 2, true, &mut remaining, digits) {
+            for (day, _) in scan_filtered(&month, 2, true, &mut remaining, digits) {
+                let found = scan_filtered(&day, usize::MAX, false, &mut remaining, |name| {
+                    let Some(stem) = name
+                        .strip_suffix(".jsonl")
+                        .filter(|_| name.starts_with("rollout-"))
+                    else {
+                        return false;
+                    };
+                    stem.len()
+                        .checked_sub(36)
+                        .and_then(|start| stem.get(start..))
+                        .is_some_and(|id| &crate::digest(id.as_bytes())[..32] == consumer)
+                });
+                if let Some((path, _)) = found.into_iter().next() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read only the latest complete turn model from a bound Codex rollout.
+pub fn codex_turn_model(path: &std::path::Path, consumer: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::MetadataExt;
+    const MODEL_TAIL: u64 = 1024 * 1024;
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::CLOEXEC;
+    let fd = rustix::fs::open(path, flags, rustix::fs::Mode::empty()).ok()?;
+    let mut file = std::fs::File::from(fd);
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.nlink() != 1 {
+        return None;
+    }
+    let mut first = Vec::new();
+    use std::io::BufRead;
+    std::io::BufReader::new((&mut file).take(CODEX_TAIL_BYTES as u64))
+        .read_until(b'\n', &mut first)
+        .ok()?;
+    if first.last() != Some(&b'\n') {
+        return None;
+    }
+    let meta_row = crate::decode(&first, CODEX_TAIL_BYTES).ok()?;
+    let id = meta_row["payload"]["id"].as_str()?;
+    if meta_row["type"] != "session_meta" || &crate::digest(id.as_bytes())[..32] != consumer {
+        return None;
+    }
+    let start = meta.len().saturating_sub(MODEL_TAIL);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::new();
+    file.take(MODEL_TAIL).read_to_end(&mut tail).ok()?;
+    let first = if start == 0 {
+        0
+    } else {
+        tail.iter().position(|&b| b == b'\n')? + 1
+    };
+    let last = tail.iter().rposition(|&b| b == b'\n')?;
+    tail.get(first..last)?
+        .rsplit(|&b| b == b'\n')
+        .find_map(|line| {
+            if !line.windows(14).any(|s| s == b"\"turn_context\"") {
+                return None;
+            }
+            let row = crate::decode(line, MODEL_TAIL as usize).ok()?;
+            let model = row["payload"]["model"].as_str()?;
+            (row["type"] == "turn_context"
+                && !model.is_empty()
+                && model.len() <= 120
+                && model
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
+            .then(|| model.to_owned())
+        })
+}
+
 fn read_rate_limits(
     path: &std::path::Path,
     expected_ino: u64,

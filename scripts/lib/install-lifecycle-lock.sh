@@ -116,7 +116,7 @@ oms_install_lifecycle_lock_path() {
     echo "error: invalid install lifecycle lock path: $raw" >&2
     return 75
   fi
-  mkdir -p "$parent" || return
+  (umask 077 && mkdir -p "$parent") || return
   parent="$(CDPATH='' cd -P -- "$parent" && pwd -P)" || return
   printf '%s/%s\n' "$parent" "$name"
 }
@@ -138,6 +138,16 @@ oms_install_lifecycle_lock_read() {
   [ -f "$path" ] && value="$(sed -n '1p' "$path" 2>/dev/null || true)"
   printf '%s\n' "${value//$'\r'/}"
 }
+
+# Match the native lock's permissions without changing the caller's umask.
+oms_install_lifecycle_lock_write_metadata() (
+  local path="$1" owner="$2"
+  umask 077 &&
+    printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" > "$path/pid" &&
+    printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" > "$path/pid-start" &&
+    printf '%s\n' "$(date +%s)" > "$path/started" &&
+    printf '%s\n' "$owner" > "$path/owner"
+)
 
 oms_install_lifecycle_recovery_claim_stale() {  # CLAIM TIMEOUT NOW
   local claim="$1" timeout="$2" now="$3"
@@ -178,15 +188,12 @@ oms_install_lifecycle_recovery_claim_acquire() {  # LOCK_PATH TIMEOUT OWNER STAR
   local -a names=()
 
   if [ -L "$root" ]; then return 75; fi
-  mkdir -p "$root" || return 75
+  (umask 077 && mkdir -p "$root") || return 75
   [ -d "$root" ] && [ ! -L "$root" ] || return 75
   name="$(date +%s).$owner"
   claim="$root/$name"
-  mkdir "$claim" 2>/dev/null || return 75
-  if ! printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" > "$claim/pid" ||
-     ! printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" > "$claim/pid-start" ||
-     ! printf '%s\n' "$(date +%s)" > "$claim/started" ||
-     ! printf '%s\n' "$owner" > "$claim/owner"; then
+  mkdir -m 700 "$claim" 2>/dev/null || return 75
+  if ! oms_install_lifecycle_lock_write_metadata "$claim" "$owner"; then
     rm -f "$claim/pid" "$claim/pid-start" "$claim/started" "$claim/owner"
     rmdir "$claim" 2>/dev/null || true
     return 75
@@ -328,10 +335,7 @@ oms_install_lifecycle_lock_mkdir_acquire() {
   local current_snapshot
 
   oms_install_lifecycle_lock_initialize() {
-    if ! printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID" > "$path/pid" ||
-      ! printf '%s\n' "$OMS_INSTALL_LIFECYCLE_CURRENT_PID_START" > "$path/pid-start" ||
-      ! printf '%s\n' "$(date +%s)" > "$path/started" ||
-      ! printf '%s\n' "$owner" > "$path/owner"; then
+    if ! oms_install_lifecycle_lock_write_metadata "$path" "$owner"; then
       rm -rf "$path"
       return 75
     fi
@@ -343,7 +347,7 @@ oms_install_lifecycle_lock_mkdir_acquire() {
   while :; do
     now="$(date +%s)"
     elapsed=$((now - start))
-    if mkdir "$path" 2>/dev/null; then
+    if mkdir -m 700 "$path" 2>/dev/null; then
       if oms_install_lifecycle_lock_initialize; then
         oms_install_lifecycle_recovery_claim_release || return 75
         return 0
@@ -413,7 +417,7 @@ oms_install_lifecycle_lock_mkdir_acquire() {
       if [ "$current_snapshot" = "$snapshot" ] &&
          mv "$path" "$stale_path" 2>/dev/null; then
         rm -rf "$stale_path"
-        if mkdir "$path" 2>/dev/null && oms_install_lifecycle_lock_initialize; then
+        if mkdir -m 700 "$path" 2>/dev/null && oms_install_lifecycle_lock_initialize; then
           oms_install_lifecycle_recovery_claim_release || return 75
           return 0
         fi

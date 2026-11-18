@@ -76,7 +76,7 @@ fn main_attempt(
         })
         .filter(|v| {
             main.as_ref()
-                .is_none_or(|main| v["refs"]["panel_room_participant"] == *main)
+                .is_none_or(|main| state::main_participant(v) == main)
         })
         .collect();
     require(
@@ -98,6 +98,13 @@ fn policy(source: &Path) -> Result<routing::Policy> {
 pub(crate) struct Session {
     cache: oms_panel_core::cache::Cache,
     metrics: std::sync::Mutex<Option<(std::time::Instant, String, Value)>>,
+    main_model: std::sync::Mutex<Option<MainModel>>,
+}
+struct MainModel {
+    consumer: String,
+    rollout: PathBuf,
+    stamp: String,
+    model: Option<String>,
 }
 const METRICS_TTL: Duration = Duration::from_secs(15);
 impl Session {
@@ -106,6 +113,7 @@ impl Session {
             cache: oms_panel_core::cache::Cache::new(256, Duration::from_secs(3600))
                 .expect("static cache limits"),
             metrics: Default::default(),
+            main_model: Default::default(),
         }
     }
     fn plan(&self, repo: &Path, store: &Store) -> Result<Value> {
@@ -130,6 +138,44 @@ impl Session {
             .cache
             .insert("index".into(), print, Value::Array(rows.clone()));
         Ok(rows)
+    }
+    fn observe_main_model(&self, report: &Value) -> Option<Value> {
+        let room = &report["room"];
+        let mains = state::active_mains(
+            rows(&report["attempts"]["active"]),
+            text(room, "id"),
+            "codex",
+        );
+        let [main] = mains.as_slice() else {
+            return None;
+        };
+        let participant = state::main_participant(main);
+        let member = rows(&room["participants"]).iter().find(|member| {
+            member["participant"] == participant
+                && member["role"] == "main"
+                && member["provider"] == "codex"
+                && member["joined"] == true
+        })?;
+        let consumer = member["consumer"].as_str()?;
+        let mut saved = self.main_model.lock().ok()?;
+        if saved
+            .as_ref()
+            .is_none_or(|v| v.consumer != consumer || !v.rollout.is_file())
+        {
+            *saved = Some(MainModel {
+                consumer: consumer.into(),
+                rollout: metrics::codex_rollout(consumer)?,
+                stamp: String::new(),
+                model: None,
+            });
+        }
+        let entry = saved.as_mut()?;
+        let stamp = oms_panel_core::cache::stamp(&entry.rollout);
+        if entry.stamp != stamp {
+            entry.model = metrics::codex_turn_model(&entry.rollout, consumer);
+            entry.stamp = stamp;
+        }
+        Some(json!({"attempt":main["attempt_id"], "model":entry.model.as_ref()?}))
     }
     fn provider_status(
         &self,
@@ -192,7 +238,8 @@ pub(crate) fn snapshot_with(
     stop: &AtomicBool,
 ) -> Result<state::Snapshot> {
     let mut snapshot = state::snapshot(repo, room(options).as_deref(), services, stop)?;
-    let tasks: Vec<_> = crate::render::calls(&snapshot.report)
+    let calls = crate::render::calls(&snapshot.report);
+    let tasks: Vec<_> = calls
         .iter()
         .filter_map(|v| {
             v["task_id"]
@@ -200,6 +247,12 @@ pub(crate) fn snapshot_with(
                 .filter(|v| !v.is_empty())
                 .map(str::to_owned)
         })
+        .collect();
+    let read_reviews: std::collections::BTreeSet<_> = calls
+        .iter()
+        .filter(|call| call["state"] == "review" && call["refs"]["panel_access"] == "read")
+        .map(|call| text(call, "attempt"))
+        .filter(|attempt| !attempt.is_empty())
         .collect();
     let store = Store::open(repo)?;
     let plan = session.plan(repo, &store)?;
@@ -213,12 +266,33 @@ pub(crate) fn snapshot_with(
         }
     }
     snapshot.report["finalized"] = Value::Object(finalized);
+    snapshot.report["returned_workers"] = Value::Object(
+        index
+            .iter()
+            .filter(|row| {
+                row["kind"] == "delegate"
+                    && row["exit"].as_i64() == Some(0)
+                    && row["artifact"].is_string()
+                    && row["artifact_sha256"].is_string()
+                    && read_reviews.contains(text(row, "attempt_id"))
+            })
+            .filter_map(|row| {
+                Some((
+                    row["attempt_id"].as_str()?.into(),
+                    row["ts"].as_str()?.into(),
+                ))
+            })
+            .collect(),
+    );
     let main_attempt = options
         .get("owner-attempt")
         .map(str::to_owned)
         .or_else(|| snapshot.report["room"]["main"].as_str().map(str::to_owned));
     snapshot.report["provider_status"] =
         session.provider_status(repo, &snapshot.report, main_attempt.as_deref(), &index);
+    if let Some(observation) = session.observe_main_model(&snapshot.report) {
+        snapshot.report["main_model_observation"] = observation;
+    }
     Ok(snapshot)
 }
 
@@ -267,6 +341,8 @@ pub fn resolve_repositories_with(
         || options.has("settle-review")
         || options.has("launch")
         || options.has("spawn-main")
+        || options.has("orchestrator")
+        || options.has("focus-orchestrator")
         || options.has("reopen")
         || options.has("swap-main")
         || options.has("release-main")
@@ -341,8 +417,26 @@ pub fn run(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    run_mode(options, false, cwd, source, services, stop)
+}
+
+pub(crate) fn run_mode(
+    options: &Options,
+    default_main: bool,
+    cwd: &Path,
+    source: &Path,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Output> {
     let env_room = std::env::var_os("OMS_ROOM_REPO").map(PathBuf::from);
     let (repo_opt, exec_opt) = resolve_repositories_with(options, cwd, env_room.as_deref())?;
+    if default_main
+        && let Some(repo) = &repo_opt
+        && let Some(output) =
+            crate::native_panel::default_main(repo, cwd, source, options, services, stop)?
+    {
+        return Ok(output);
+    }
     if let Some(ref _cmd) = options.command {
         let repo = repo_opt.ok_or_else(|| Error {
             code: 3,
@@ -389,6 +483,13 @@ pub fn run(
             ..Error::new("repository required")
         })?;
         return crate::native_panel::run(&repo, source, options, services, stop);
+    }
+    if let Some(provider) = options
+        .get("orchestrator")
+        .or(options.get("focus-orchestrator"))
+    {
+        let repo = repo_opt.ok_or_else(|| Error::new("repository required"))?;
+        return crate::orchestrator::run(&repo, provider, options, services, stop);
     }
     let repo = repo_opt;
     let execution = exec_opt;
@@ -1665,6 +1766,9 @@ fn chats(
         let attempt = rows(&all).iter().rev().find(|v| {
             (!member["attempt"].is_null() && v["attempt_id"] == member["attempt"])
                 || v["refs"]["panel_room_participant"] == participant
+                || (role == "main"
+                    && v["tool"] == "panel-main"
+                    && state::main_participant(v) == participant)
         });
 
         let mut win_target = tmux_windows.get(participant).cloned();

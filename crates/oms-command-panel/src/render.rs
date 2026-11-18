@@ -10,6 +10,7 @@ const SGR_RESET: &str = "\x1b[0m";
 const SGR_BOLD: &str = "\x1b[1m";
 const SGR_DIM: &str = "\x1b[2m";
 const SGR_AMBER_BOLD: &str = "\x1b[1;38;5;215m";
+const SGR_MAIN_TITLE: &str = "\x1b[1;38;5;16;48;5;222m";
 const SGR_VIOLET_BOLD: &str = "\x1b[1;38;5;141m";
 const SGR_SKY_BOLD: &str = "\x1b[1;38;5;111m";
 const SGR_SAGE_BOLD: &str = "\x1b[1;38;5;114m";
@@ -289,22 +290,33 @@ fn render_lr(
 }
 
 fn card_top(title: &str, tag: Option<&str>, columns: usize, colored: bool) -> String {
+    card_top_styled(title, tag, columns, colored, SGR_BOLD)
+}
+
+fn card_top_styled(
+    title: &str,
+    tag: Option<&str>,
+    columns: usize,
+    colored: bool,
+    title_style: &'static str,
+) -> String {
     let inner = columns.saturating_sub(4);
     if columns < 44 {
-        let mut left = vec![Span::raw(title, inner, Some(SGR_BOLD))];
+        let mut left = vec![Span::raw(title, inner, Some(title_style))];
         if let Some(t) = tag.filter(|v| !v.is_empty()) {
             left.push(Span::literal(" · ", Some(SGR_MUTED)));
             left.push(Span::raw(t, inner, Some(SGR_MUTED)));
         }
         return render_lr(left, vec![], columns, false, None, colored);
     }
-    let clean_title = clip(title, columns.saturating_sub(8));
+
     let clean_tag = tag
         .filter(|v| !v.is_empty())
         .map(|v| clip(v, (columns / 3).max(6)))
         .filter(|v| !v.is_empty());
-    let title_w = width(&clean_title);
     let right_len = clean_tag.as_ref().map_or(0, |t| width(t) + 3);
+    let clean_title = clip(title, columns.saturating_sub(5 + right_len));
+    let title_w = width(&clean_title);
     let prefix_len = 3usize; // "╭─ "
     let title_space = 1usize; // " "
     let end_cap = 1usize; // "╮"
@@ -314,7 +326,7 @@ fn card_top(title: &str, tag: Option<&str>, columns: usize, colored: bool) -> St
         Span::literal("╭─ ", Some(SGR_BORDER)),
         Span {
             plain: clean_title,
-            sgr: Some(SGR_BOLD),
+            sgr: Some(title_style),
         },
         Span::literal(" ", None),
         Span {
@@ -382,10 +394,13 @@ fn state_badge(state: &str) -> (String, &'static str) {
         "working" | "running" | "starting" | "queued" => ("[⟳ run]".into(), SGR_CYAN),
         "verifying" => ("[⟳ verify]".into(), SGR_CYAN),
         "review" => ("[⚑ review]".into(), SGR_GOLD_BOLD),
-        "done" | "accepted" | "completed" => ("[✓ done]".into(), SGR_SAGE),
+        "done" => ("[✓ exited]".into(), SGR_SAGE),
+        "completed" => ("[✓ completed]".into(), SGR_SAGE),
+        "accepted" => ("[✓ accepted]".into(), SGR_SAGE),
         "failed" | "guard_stop" | "orphaned" => ("[× failed]".into(), SGR_CORAL_BOLD),
         "timed_out" => ("[◷ timeout]".into(), SGR_CORAL_BOLD),
-        "waiting_input" | "waiting_approval" | "blocked" => ("[! wait]".into(), SGR_AMBER_BOLD),
+        "blocked" => ("[! blocked]".into(), SGR_AMBER_BOLD),
+        "waiting_input" | "waiting_approval" => ("[! wait]".into(), SGR_AMBER_BOLD),
         "" => ("[· -]".into(), SGR_MUTED),
         other => (format!("[· {}]", clean(other, 14)), SGR_MUTED),
     }
@@ -393,7 +408,8 @@ fn state_badge(state: &str) -> (String, &'static str) {
 
 fn view_label(view: View) -> &'static str {
     match view {
-        View::Auto | View::Compact => "Compact",
+        View::Auto => "Teams",
+        View::Compact => "Compact",
         View::Summary => "Summary",
         View::Detail => "Detail",
         View::Graph => "Graph",
@@ -461,6 +477,15 @@ pub fn calls(report: &Value) -> Vec<Value> {
                 call[key] = v.clone();
             }
         }
+        let observed = &report["main_model_observation"];
+        if call["role"] == "main"
+            && call["provider"] == "codex"
+            && !text(&call, "attempt").is_empty()
+            && call["attempt"] == observed["attempt"]
+            && let Some(model) = observed["model"].as_str().filter(|v| !v.is_empty())
+        {
+            call["model"] = json!(model);
+        }
         let override_title = text(member, "label_override");
         if !override_title.is_empty() {
             call["title"] = json!(override_title);
@@ -517,8 +542,20 @@ pub fn calls(report: &Value) -> Vec<Value> {
         }
         output.push(normalize(attempt, &mut cached_agy_model));
     }
-    output.sort_by_key(|v| {
+    output.extend(rows(&report["native_children"]).iter().cloned());
+    for call in &mut output {
+        let finished = &report["returned_workers"][text(call, "attempt")];
+        if call["state"] == "review"
+            && call["refs"]["panel_access"] == "read"
+            && oms_panel_core::metrics::stamp(finished).is_some()
+        {
+            call["returned_at"] = finished.clone();
+        }
+    }
+    output.sort_by_cached_key(|v| {
         (
+            !oms_panel_core::state::LIVE_STATES.contains(&text(v, "state")),
+            text(v, "role") != "main",
             text(v, "created_at").to_owned(),
             text(v, "participant").to_owned(),
         )
@@ -576,12 +613,98 @@ fn normalize(row: &Value, cached_agy_model: &mut Option<Option<String>>) -> Valu
 }
 
 pub fn visible(report: &Value, nav: &navigation::Navigation) -> Vec<Value> {
-    visible_from(calls(report), nav)
+    let filtered = visible_from(calls(report), nav);
+    if matches!(nav.view, View::Tree | View::Graph) {
+        collect_tree(&filtered, nav, nav.view == View::Graph, usize::MAX)
+            .into_iter()
+            .map(|entry| entry.call.clone())
+            .collect()
+    } else {
+        filtered
+    }
+}
+
+fn provider_bucket(call: &Value) -> usize {
+    match text(call, "provider") {
+        "codex" => 0,
+        "claude" => 1,
+        "antigravity" | "agy" => 2,
+        _ => 3,
+    }
+}
+
+fn provider_style(group: usize) -> &'static str {
+    [
+        "\x1b[1;38;5;223m",
+        "\x1b[1;38;5;174m",
+        SGR_SKY_BOLD,
+        SGR_BOLD,
+    ][group]
+}
+
+fn model_label(call: &Value) -> &str {
+    call["model"]
+        .as_str()
+        .filter(|model| !model.is_empty())
+        .unwrap_or("model —")
+}
+
+fn model_and_state(
+    call: &Value,
+    columns: usize,
+    badge: String,
+    badge_style: &'static str,
+) -> Vec<Span> {
+    let mut spans = Vec::new();
+    if columns >= 44 {
+        spans.extend([
+            Span::raw(
+                model_label(call),
+                (columns / 4).max(12),
+                Some(provider_style(provider_bucket(call))),
+            ),
+            Span::literal("  ", None),
+        ]);
+    }
+    spans.push(Span::raw(badge, 20, Some(badge_style)));
+    spans
+}
+
+fn provider_groups(calls: &[Value]) -> Vec<usize> {
+    let preferred = calls
+        .iter()
+        .find(|call| {
+            text(call, "role") == "main"
+                && oms_panel_core::state::LIVE_STATES.contains(&text(call, "state"))
+        })
+        .map(provider_bucket)
+        .unwrap_or(0);
+    let mut groups = vec![0, 1, 2];
+    if calls.iter().any(|call| provider_bucket(call) == 3) {
+        groups.push(3);
+    }
+    groups.sort_by_key(|group| (*group != preferred, *group));
+    groups
+}
+
+fn collapsed_history(nav: &navigation::Navigation, call: &Value) -> bool {
+    nav.view == View::Auto
+        && nav.filter.is_empty()
+        && !nav.attention_only
+        && (oms_panel_core::state::TERMINAL_STATES.contains(&text(call, "state"))
+            || call["returned_at"].is_string())
+        && oms_panel_core::metrics::stamp(&call["returned_at"])
+            .or_else(|| oms_panel_core::metrics::stamp(&call["updated_at"]))
+            .is_none_or(|finished| (oms_panel_core::timestamp() as f64 - finished) >= 300.0)
 }
 
 fn visible_from(all: Vec<Value>, nav: &navigation::Navigation) -> Vec<Value> {
+    let groups = provider_groups(&all);
     let words = navigation::words(&nav.filter);
-    all.into_iter()
+    let mut filtered: Vec<_> = all
+        .into_iter()
+        .filter(|v| nav.view != View::Auto || v["role"] != "main")
+        .filter(|v| !collapsed_history(nav, v))
         .filter(|v| navigation::matches_words(v, &words))
         .filter(|v| {
             !nav.attention_only
@@ -597,7 +720,15 @@ fn visible_from(all: Vec<Value>, nav: &navigation::Navigation) -> Vec<Value> {
                 ]
                 .contains(&text(v, "state"))
         })
-        .collect()
+        .collect();
+    if nav.view == View::Auto {
+        filtered.sort_by_key(|call| {
+            groups
+                .iter()
+                .position(|group| *group == provider_bucket(call))
+        });
+    }
+    filtered
 }
 
 pub fn frame(
@@ -619,32 +750,123 @@ pub fn frame_styled(
     colored: bool,
     fill_height: bool,
 ) -> Vec<String> {
+    board_frame(report, nav, columns, height, read, colored, fill_height).lines
+}
+
+pub(crate) struct BoardFrame {
+    pub lines: Vec<String>,
+    pub provider_rows: [Option<usize>; 3],
+    pub worker_rows: BTreeMap<usize, (String, String)>,
+}
+
+pub(crate) fn board_frame(
+    report: &Value,
+    nav: &navigation::Navigation,
+    columns: usize,
+    height: usize,
+    read: &BTreeMap<String, String>,
+    colored: bool,
+    fill_height: bool,
+) -> BoardFrame {
+    frame_with_capacity(
+        report,
+        nav,
+        columns,
+        height,
+        read,
+        colored,
+        fill_height,
+        &mut 1,
+    )
+}
+
+pub fn page_capacity(
+    report: &Value,
+    nav: &navigation::Navigation,
+    columns: usize,
+    height: usize,
+    read: &BTreeMap<String, String>,
+) -> usize {
+    let mut capacity = 1;
+    frame_with_capacity(
+        report,
+        nav,
+        columns,
+        height,
+        read,
+        false,
+        false,
+        &mut capacity,
+    );
+    capacity
+}
+
+#[allow(clippy::too_many_arguments)]
+fn frame_with_capacity(
+    report: &Value,
+    nav: &navigation::Navigation,
+    columns: usize,
+    height: usize,
+    read: &BTreeMap<String, String>,
+    colored: bool,
+    fill_height: bool,
+    page_capacity: &mut usize,
+) -> BoardFrame {
     let columns = columns.max(1);
     let height = height.max(3);
+    let mut provider_rows = [None; 3];
+    let mut worker_rows = BTreeMap::new();
     let use_cards = columns >= 44;
     let inner_width = if use_cards {
         columns.saturating_sub(4)
     } else {
         columns
     };
-    let all_calls = calls(report);
-    let total = all_calls.len();
-    let calls = visible_from(all_calls, nav);
+    let all = calls(report);
+    let total = all
+        .iter()
+        .filter(|call| nav.view != View::Auto || call["role"] != "main")
+        .count();
+    let history = all
+        .iter()
+        .filter(|call| collapsed_history(nav, call))
+        .count();
+    let filtered = visible_from(all.clone(), nav);
+    let filtered_count = filtered.len();
+    let calls = if matches!(nav.view, View::Tree | View::Graph) {
+        collect_tree(&filtered, nav, nav.view == View::Graph, usize::MAX)
+            .into_iter()
+            .map(|entry| entry.call.clone())
+            .collect()
+    } else {
+        filtered
+    };
     let attention = attention::items(report, read);
     let view = nav.view.resolved(columns, height);
 
     let mut lines = Vec::new();
     lines.push(header_line(
-        report, &calls, &attention, view, columns, colored,
+        report,
+        &calls,
+        &attention,
+        if nav.view == View::Auto && columns >= 44 && height >= 20 {
+            View::Auto
+        } else {
+            view
+        },
+        columns,
+        colored,
     ));
-    if columns >= 56
-        && height >= 14
-        && let Some(meta) = status_subheader(report, columns, colored)
-    {
-        lines.push(meta);
+    let main = render_main_section(report, &all, columns, height, colored);
+    let mut optional = Vec::new();
+    if height >= 14 {
+        optional.push(provider_line(report, columns, colored));
+        if let Some(meta) = status_subheader(report, columns, colored) {
+            optional.push(meta);
+        }
     }
     if columns >= 68 && height >= 18 && !nav.help && !nav.health && !nav.detail {
-        lines.push(legend_line(colored, columns));
+        optional.push(legend_line(colored, columns));
     }
 
     if report["collection"]["ok"] != true || report["capacity_stale"] == true {
@@ -660,12 +882,13 @@ pub fn frame_styled(
             colored,
         ));
     }
+    let mut notices = Vec::new();
     if let Some(notice) = &nav.notice {
         for part in wrap(notice, columns.saturating_sub(2).max(1))
             .into_iter()
             .take(2)
         {
-            lines.push(render_lr(
+            notices.push(render_lr(
                 vec![
                     Span::literal("› ", Some(SGR_CYAN)),
                     Span::raw(part, columns, Some(SGR_CYAN)),
@@ -679,6 +902,11 @@ pub fn frame_styled(
         }
     }
 
+    if nav.help || nav.health || nav.detail {
+        lines.extend(optional.iter().cloned());
+        lines.extend(notices.iter().cloned());
+        lines.extend(main.iter().cloned());
+    }
     if nav.help {
         lines.extend(render_help_card(columns, inner_width, use_cards, colored));
     } else if nav.health {
@@ -698,16 +926,6 @@ pub fn frame_styled(
             colored,
         ));
     } else {
-        if !attention.is_empty() {
-            lines.extend(render_attention_section(
-                &attention,
-                columns,
-                inner_width,
-                height,
-                use_cards,
-                colored,
-            ));
-        }
         if !nav.filter.is_empty() || nav.editing {
             let filter_line = format!(
                 "Filter /{}{} · shown {} of {} · Esc clears",
@@ -726,15 +944,76 @@ pub fn frame_styled(
             ));
         }
 
-        let card_chrome = usize::from(use_cards) * 2 + 1;
-        let capacity = height.saturating_sub(lines.len() + card_chrome).max(1);
-        lines.push(card_top(
-            &format!("Activity · {} calls", calls.len()),
-            Some(view_label(view)),
-            columns,
-            colored,
-        ));
-        if calls.is_empty() {
+        let groups = provider_groups(&all);
+        let provider_chrome = groups.len() + 1;
+        // Reserve the footer, omission count, and at least one selectable row.
+        let provider_view = nav.view == View::Auto
+            && use_cards
+            && height.saturating_sub(lines.len() + main.len()) >= provider_chrome + 3;
+        let content_start = lines.len() + main.len();
+        let activity_chrome = usize::from(!provider_view && content_start + 4 < height);
+        let bottom_chrome =
+            !provider_view && use_cards && content_start + activity_chrome + 4 < height;
+        let chrome = if provider_view {
+            provider_chrome
+        } else {
+            activity_chrome + usize::from(bottom_chrome)
+        };
+        let reserved = 3 + chrome;
+        let available = height
+            .saturating_sub(reserved)
+            .saturating_sub(content_start);
+        if available > 0 && !notices.is_empty() {
+            lines.push(notices.remove(0));
+        }
+        let remaining = height
+            .saturating_sub(reserved)
+            .saturating_sub(lines.len() + main.len());
+        lines.extend(optional.into_iter().chain(notices).take(remaining));
+        lines.extend(main);
+        let row_capacity = height.saturating_sub(lines.len() + chrome + 2).max(1);
+        let detail_rows = !provider_view && view == View::Detail && row_capacity >= 2;
+        let capacity = if detail_rows {
+            row_capacity / 2
+        } else {
+            row_capacity
+        };
+        *page_capacity = capacity;
+        let selected = nav.selected.min(calls.len().saturating_sub(1));
+        let offset = nav
+            .offset
+            .min(selected)
+            .max(selected.saturating_add(1).saturating_sub(capacity))
+            .min(calls.len().saturating_sub(capacity));
+        if activity_chrome > 0 {
+            lines.push(card_top(
+                &format!("Activity · {} calls", calls.len()),
+                Some(view_label(view)),
+                columns,
+                colored,
+            ));
+        }
+        if provider_view {
+            let base = lines.len();
+            lines.extend(render_provider_rows(
+                &groups,
+                &all,
+                &calls,
+                nav,
+                offset,
+                capacity,
+                columns,
+                colored,
+                &report["provider_sessions"],
+                &report["provider_models"],
+                &mut provider_rows,
+                &mut worker_rows,
+                base,
+            ));
+            for row in provider_rows.iter_mut().flatten() {
+                *row += base;
+            }
+        } else if calls.is_empty() {
             lines.push(card_row_lr(
                 vec![Span::literal(
                     "  No recorded calls — press ? for shortcuts or dispatch a worker",
@@ -748,27 +1027,29 @@ pub fn frame_styled(
             ));
         } else {
             match view {
+                View::Summary if nav.view == View::Summary => {
+                    lines.extend(render_summary_rows(
+                        &calls, capacity, columns, use_cards, colored,
+                    ));
+                }
                 View::Graph | View::Tree => lines.extend(render_tree_rows(
                     &calls,
                     nav,
+                    offset,
                     view == View::Graph,
                     capacity,
                     columns,
                     use_cards,
                     colored,
                 )),
-                View::Summary => {
-                    lines.extend(render_summary_rows(
-                        &calls, capacity, columns, use_cards, colored,
-                    ));
-                }
                 _ => {
                     let mut used = 0usize;
-                    for (index, call) in calls.iter().enumerate().skip(nav.offset) {
+                    for (index, call) in calls.iter().enumerate().skip(offset) {
                         if used >= capacity {
                             break;
                         }
                         let selected = index == nav.selected;
+                        register_worker(&mut worker_rows, lines.len(), call);
                         let bg = (colored && selected).then_some(SGR_SEL_BG);
                         let marker = if selected { "▸" } else { " " };
                         let role = text(call, "role");
@@ -776,6 +1057,46 @@ pub fn frame_styled(
                         let alias = call_label(call);
                         let title = text(call, "title");
                         let (badge, badge_sgr) = state_badge(text(call, "state"));
+                        if columns < 44 {
+                            let task = [title, text(call, "purpose"), alias.as_str()]
+                                .into_iter()
+                                .find(|v| !v.is_empty())
+                                .unwrap_or("call");
+                            let state = text(call, "state");
+                            let reason = text(call, "ending");
+                            lines.push(card_row_lr(
+                                vec![Span::raw(
+                                    format!("{marker} {task}"),
+                                    columns,
+                                    Some(SGR_TEXT),
+                                )],
+                                vec![Span::raw(
+                                    format!("{state} {reason}"),
+                                    columns / 2,
+                                    Some(badge_sgr),
+                                )],
+                                columns,
+                                use_cards,
+                                bg,
+                                colored,
+                            ));
+                            used += 1;
+                            if detail_rows {
+                                lines.push(card_row_lr(
+                                    vec![Span::raw(
+                                        call_detail_meta(call),
+                                        inner_width,
+                                        Some(SGR_MUTED),
+                                    )],
+                                    vec![],
+                                    columns,
+                                    use_cards,
+                                    bg,
+                                    colored,
+                                ));
+                            }
+                            continue;
+                        }
                         let left = vec![
                             Span::literal(
                                 marker,
@@ -793,50 +1114,92 @@ pub fn frame_styled(
                             ),
                             Span::raw(title, inner_width, Some(SGR_TEXT)),
                         ];
-                        let right = vec![Span::raw(badge, 20, Some(badge_sgr))];
+                        let right = model_and_state(call, columns, badge, badge_sgr);
                         lines.push(card_row_lr(left, right, columns, use_cards, bg, colored));
                         used += 1;
-
-                        if view == View::Detail && used < capacity {
-                            let meta = call_detail_meta(call);
-                            if !meta.is_empty() {
-                                lines.push(card_row_lr(
-                                    vec![
-                                        Span::literal("    ↳ ", Some(SGR_MUTED)),
-                                        Span::raw(meta, inner_width, Some(SGR_MUTED)),
-                                    ],
-                                    vec![],
-                                    columns,
-                                    use_cards,
-                                    bg,
-                                    colored,
-                                ));
-                                used += 1;
-                            }
+                        if detail_rows {
+                            lines.push(card_row_lr(
+                                vec![
+                                    Span::literal("    ↳ ", Some(SGR_MUTED)),
+                                    Span::raw(call_detail_meta(call), inner_width, Some(SGR_MUTED)),
+                                ],
+                                vec![],
+                                columns,
+                                use_cards,
+                                bg,
+                                colored,
+                            ));
                         }
                     }
                 }
             }
         }
-        if let Some(bottom) = card_bottom(columns, use_cards, colored) {
+        let filtered_out = total.saturating_sub(history).saturating_sub(filtered_count);
+        let folded = filtered_count.saturating_sub(calls.len());
+        let offscreen = calls.len().saturating_sub(capacity.min(calls.len()));
+        if filtered_out > 0 || folded > 0 || offscreen > 0 || history > 0 {
+            lines.push(render_lr(
+                vec![Span::raw(
+                    [
+                        (offscreen, "hidden"),
+                        (filtered_out, "filt"),
+                        (folded, "fold"),
+                        (history, "past (Tab all)"),
+                    ]
+                    .into_iter()
+                    .filter(|(count, _)| *count > 0)
+                    .map(|(count, label)| format!("{count} {label}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                    columns,
+                    Some(SGR_MUTED),
+                )],
+                vec![],
+                columns,
+                false,
+                None,
+                colored,
+            ));
+        }
+        if bottom_chrome && let Some(bottom) = card_bottom(columns, use_cards, colored) {
             lines.push(bottom);
         }
     }
 
     let body_cap = height.saturating_sub(1);
-    lines.truncate(body_cap);
+    if nav.help || nav.health || nav.detail || height < 8 {
+        lines.truncate(body_cap);
+    }
     if fill_height {
         while lines.len() < body_cap {
             lines.push(String::new());
         }
     }
-    let hint = clip(navigation::BOARD_HINT, columns);
+    for row in &mut provider_rows {
+        if row.is_some_and(|row| row >= lines.len()) {
+            *row = None;
+        }
+    }
+    let hint = [
+        navigation::BOARD_HINT,
+        "↑↓ Move  Enter Open  Tab View  / Filter  b Attention  u Refresh  ? Keys  q Quit",
+        "↑↓ Move  Enter Open  Tab View  / Filter  ? Keys  q Quit",
+        "↑↓ Move  Enter Open  ? Keys  q Quit",
+        "↑↓ Enter ? q",
+    ]
+    .into_iter()
+    .find(|hint| width(hint) <= columns)
+    .map_or_else(|| clip("↑↓ Enter ? q", columns), str::to_owned);
     lines.push(if colored {
         format!("{SGR_DIM}{hint}{SGR_RESET}")
     } else {
         hint
     });
-    lines
+    BoardFrame {
+        lines,
+        provider_rows,
+        worker_rows,
+    }
 }
 
 fn call_label(call: &Value) -> String {
@@ -856,21 +1219,14 @@ fn call_label(call: &Value) -> String {
 }
 
 fn call_detail_meta(call: &Value) -> String {
-    let provider = clean(text(call, "provider"), 24);
-    let model = clean(text(call, "model"), 40);
-    let task = clean(text(call, "task_id"), 48);
-    let pm = match (provider.is_empty(), model.is_empty()) {
-        (false, false) => format!("{provider}/{model}"),
-        (false, true) => provider,
-        (true, false) => model,
-        (true, true) => String::new(),
-    };
-    match (pm.is_empty(), task.is_empty()) {
-        (false, false) => format!("{pm} · {task}"),
-        (false, true) => pm,
-        (true, false) => format!("task {task}"),
-        (true, true) => String::new(),
-    }
+    let provider = text(call, "provider");
+    let model = text(call, "model");
+    let task = text(call, "task_id");
+    [provider, model, task]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn header_line(
@@ -886,6 +1242,32 @@ fn header_line(
         .into_iter()
         .find(|v| !v.trim().is_empty())
         .unwrap_or("workspace");
+    if columns < 44 {
+        return render_lr(
+            vec![Span::raw(
+                if title.starts_with("OMS") {
+                    title.to_owned()
+                } else {
+                    format!("OMS {title}")
+                },
+                columns,
+                Some(SGR_AMBER_BOLD),
+            )],
+            if attention.is_empty() {
+                vec![]
+            } else {
+                vec![Span::raw(
+                    format!("!{}", attention.len()),
+                    columns,
+                    Some(SGR_AMBER_BOLD),
+                )]
+            },
+            columns,
+            false,
+            None,
+            colored,
+        );
+    }
     let running = calls
         .iter()
         .filter(|c| {
@@ -907,7 +1289,7 @@ fn header_line(
         parts.push(format!("{review} review"));
     }
     if !attention.is_empty() {
-        parts.push(format!("{} waiting", attention.len()));
+        parts.push(format!("{} attention", attention.len()));
     }
     let summary = if parts.is_empty() {
         format!("{} calls", calls.len())
@@ -927,40 +1309,291 @@ fn header_line(
     render_lr(left, right, columns, false, None, colored)
 }
 
-fn status_subheader(report: &Value, columns: usize, colored: bool) -> Option<String> {
-    let mut segments: Vec<Span> = Vec::new();
-    let push_sep = |segs: &mut Vec<Span>| {
-        if !segs.is_empty() {
-            segs.push(Span::literal(" │ ", Some(SGR_BORDER)));
+#[allow(clippy::too_many_arguments)]
+fn render_provider_rows(
+    groups: &[usize],
+    all: &[Value],
+    calls: &[Value],
+    nav: &navigation::Navigation,
+    offset: usize,
+    capacity: usize,
+    columns: usize,
+    colored: bool,
+    sessions: &Value,
+    models: &Value,
+    provider_rows: &mut [Option<usize>; 3],
+    worker_rows: &mut BTreeMap<usize, (String, String)>,
+    base: usize,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for &group in groups {
+        let label = ["Codex", "Claude", "Antigravity", "Other providers"][group];
+        let members: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| provider_bucket(call) == group)
+            .collect();
+        let lead = all
+            .iter()
+            .filter(|call| provider_bucket(call) == group)
+            .find(|call| {
+                matches!(text(call, "role"), "lead" | "team_lead" | "orchestrator")
+                    && oms_panel_core::state::LIVE_STATES.contains(&text(call, "state"))
+            });
+        let history = all
+            .iter()
+            .filter(|call| provider_bucket(call) == group && collapsed_history(nav, call))
+            .count();
+        let connected = crate::orchestrator::PROVIDERS
+            .get(group)
+            .is_some_and(|provider| {
+                crate::rows(sessions)
+                    .iter()
+                    .any(|item| item.as_str() == Some(provider))
+            });
+        let orchestration = if connected {
+            provider_rows[group] = Some(lines.len());
+            format!("Orchestrator [{}]", group + 1)
+        } else {
+            lead.map(|call| format!("Orchestrator {}", call_label(call)))
+                .unwrap_or_else(|| "Orchestrator: unreported".into())
+        };
+        let working = members
+            .iter()
+            .filter(|(_, call)| {
+                matches!(
+                    text(call, "state"),
+                    "working" | "running" | "starting" | "verifying"
+                )
+            })
+            .count();
+        let mut summary = if working > 0 {
+            format!("{working} working")
+        } else {
+            "idle".to_owned()
+        };
+        let awaiting = members
+            .iter()
+            .filter(|(_, call)| call["state"] == "review" && !call["returned_at"].is_string())
+            .count();
+        if awaiting > 0 {
+            summary.push_str(&format!(" · {awaiting} review"));
         }
-    };
-    for (name, label) in [("claude", "Claude"), ("codex", "Codex")] {
-        let entry = &report["provider_status"][name];
-        if !entry.is_object() {
-            continue;
+        if history > 0 {
+            summary.push_str(&format!(" · {history} past"));
         }
-        let mut metrics = Vec::new();
-        if let Some(used) = entry["weekly_used"].as_u64().filter(|v| *v <= 100) {
-            metrics.push(format!("wk {}% left", 100 - used));
-        }
-        if let Some(used) = entry["five_hour_used"].as_u64().filter(|v| *v <= 100) {
-            metrics.push(format!("5h {}% left", 100 - used));
-        }
-        if !metrics.is_empty() {
-            push_sep(&mut segments);
-            segments.push(Span::raw(
-                format!("{label} {}", metrics.join(" · ")),
-                40,
-                Some(SGR_MUTED),
+        let model = crate::orchestrator::PROVIDERS
+            .get(group)
+            .and_then(|provider| models[*provider].as_str())
+            .or_else(|| lead.map(model_label))
+            .unwrap_or("model —");
+        let full_title = if connected || lead.is_some() {
+            format!("{label} · {orchestration} · {model}")
+        } else {
+            format!("{label} · {orchestration}")
+        };
+        let title = if connected && width(&full_title) + 6 > columns {
+            let label = ["Codex", "Claude", "AGY"][group];
+            format!("[{}] {label} · {model}", group + 1)
+        } else {
+            full_title
+        };
+        let tag = (width(&title) + width(&summary) + 8 <= columns).then_some(summary.as_str());
+        let header = card_top_styled(&title, tag, columns, colored, provider_style(group));
+        lines.push(if !lines.is_empty() {
+            header.replacen('╭', "├", 1).replacen('╮', "┤", 1)
+        } else {
+            header
+        });
+        let on_page: Vec<_> = members
+            .iter()
+            .filter(|(index, _)| *index >= offset && *index < offset + capacity)
+            .collect();
+        for (position, &&(index, call)) in on_page.iter().enumerate() {
+            register_worker(worker_rows, base + lines.len(), call);
+            let selected = index == nav.selected;
+            let (glyph, role_sgr) = role_style(text(call, "role"));
+            let (badge, badge_sgr) = if call["returned_at"].is_string() {
+                ("[✓ returned]".into(), SGR_SAGE)
+            } else {
+                state_badge(text(call, "state"))
+            };
+            let parent = all.iter().find(|parent| {
+                let id = text(call, "parent");
+                !id.is_empty()
+                    && (text(parent, "participant") == id || text(parent, "attempt") == id)
+            });
+            let parent_label = parent
+                .map(|parent| format!(" ← {}", call_label(parent)))
+                .unwrap_or_default();
+            lines.push(card_row_lr(
+                vec![
+                    Span::literal(if selected { "▸ " } else { "  " }, Some(SGR_AMBER_BOLD)),
+                    Span::literal(
+                        if position + 1 == on_page.len() {
+                            "└─ "
+                        } else {
+                            "├─ "
+                        },
+                        Some(SGR_BORDER),
+                    ),
+                    Span::literal(glyph, Some(role_sgr)),
+                    Span::literal(" ", None),
+                    Span::raw(call_label(call), 24, Some(SGR_BOLD)),
+                    Span::literal(" ", None),
+                    Span::raw(text(call, "role"), 24, Some(role_sgr)),
+                    Span::literal(" · ", Some(SGR_MUTED)),
+                    Span::raw(text(call, "title"), columns, Some(SGR_TEXT)),
+                    Span::raw(parent_label, 32, Some(SGR_MUTED)),
+                ],
+                model_and_state(call, columns, badge, badge_sgr),
+                columns,
+                true,
+                (colored && selected).then_some(SGR_SEL_BG),
+                colored,
             ));
         }
     }
+    lines.extend(card_bottom(columns, true, colored));
+    lines
+}
+
+fn register_worker(hits: &mut BTreeMap<usize, (String, String)>, row: usize, call: &Value) {
+    let participant = text(call, "participant");
+    if call["role"] != "main" && !participant.is_empty() {
+        hits.insert(
+            row,
+            (participant.to_owned(), text(call, "attempt").to_owned()),
+        );
+    }
+}
+
+pub(crate) fn dock_top(title: &str, columns: usize, colored: bool) -> String {
+    if columns >= 44 {
+        card_top(title, Some("↕ Drag"), columns, colored)
+    } else {
+        clip(&format!("↕ {title}"), columns)
+    }
+}
+
+pub(crate) fn native_dock_bar(
+    provider: &str,
+    return_label: &'static str,
+    columns: usize,
+    colored: bool,
+) -> String {
+    let group = crate::orchestrator::PROVIDERS
+        .iter()
+        .position(|p| *p == provider)
+        .unwrap_or(3);
+    render_lr(
+        vec![
+            Span::literal(return_label, Some(SGR_TEXT)),
+            Span::literal("  │  ", Some(SGR_MUTED)),
+            Span::raw(
+                format!(
+                    "▼ {} Orchestrator",
+                    crate::orchestrator::provider_name(provider)
+                ),
+                columns,
+                Some(provider_style(group)),
+            ),
+        ],
+        Vec::new(),
+        columns,
+        false,
+        Some(SGR_SEL_BG),
+        colored,
+    )
+}
+
+pub(crate) fn dock_line(line: &str, columns: usize) -> String {
+    let available = columns.saturating_sub(4);
+    let plain = clean(line, 4096);
+    let width_before_clip = width(&plain);
+    let clipped;
+    let (line, used) = if width_before_clip > available {
+        clipped = clip(&plain, available);
+        (clipped.as_str(), width(&clipped))
+    } else {
+        (line, width_before_clip)
+    };
+    let padding = available - used;
+    format!("│ {line}{} │", " ".repeat(padding))
+}
+
+pub(crate) fn dock_bottom(columns: usize, colored: bool) -> String {
+    card_bottom(columns, true, colored).unwrap_or_default()
+}
+
+fn provider_line(report: &Value, columns: usize, colored: bool) -> String {
+    let snapshot = crate::usage::snapshot(report, oms_panel_core::timestamp() as f64);
+    let compact = columns < 56;
+    let tiny = columns < 28;
+    let labels = if tiny {
+        ["C", "L", "A"]
+    } else if compact {
+        ["Cdx", "Cld", "AGY"]
+    } else {
+        ["Codex", "Claude", "AGY"]
+    };
+    let values = ["codex", "claude", "antigravity"]
+        .into_iter()
+        .zip(labels)
+        .map(|(name, label)| {
+            let provider = &snapshot["providers"][name];
+            let label = if name == "antigravity"
+                && !compact
+                && provider["reading"]["source"] == "AGY Gemini quota"
+            {
+                "AGY Gemini"
+            } else {
+                label
+            };
+            let left = if provider["reading"]["stale"] == true {
+                if tiny { "!" } else { "stale" }.into()
+            } else {
+                rows(&provider["windows"])
+                    .iter()
+                    .find(|window| text(window, "name") == "weekly")
+                    .and_then(|window| window["left"].as_u64())
+                    .map(|left| format!("{left}%"))
+                    .unwrap_or_else(|| "—".into())
+            };
+            format!("{label}{}{left}", if compact { "" } else { " " })
+        })
+        .collect::<Vec<_>>();
+    render_lr(
+        vec![Span::raw(
+            format!(
+                "{}{}",
+                if tiny {
+                    "W "
+                } else if compact {
+                    "Wk "
+                } else {
+                    "Weekly left · "
+                },
+                values.join(if compact { " " } else { " │ " })
+            ),
+            1_048_576,
+            Some(SGR_MUTED),
+        )],
+        vec![],
+        columns,
+        false,
+        None,
+        colored,
+    )
+}
+
+fn status_subheader(report: &Value, columns: usize, colored: bool) -> Option<String> {
+    let mut segments: Vec<Span> = Vec::new();
     if let Some(tasks) = report["plan"]["tasks"].as_object()
         && !tasks.is_empty()
     {
         let total = tasks.len();
         let done = tasks.values().filter(|t| t["state"] == "done").count();
-        push_sep(&mut segments);
         segments.push(Span::raw(
             format!("Plan {done}/{total} done"),
             28,
@@ -983,59 +1616,81 @@ fn legend_line(colored: bool, columns: usize) -> String {
     render_lr(spans, vec![], columns, false, None, colored)
 }
 
-fn render_attention_section(
-    attention: &[attention::Item],
+fn render_main_section(
+    report: &Value,
+    calls: &[Value],
     columns: usize,
-    inner_width: usize,
     height: usize,
-    use_cards: bool,
     colored: bool,
 ) -> Vec<String> {
+    let main = calls.iter().find(|call| {
+        text(call, "role") == "main"
+            && oms_panel_core::state::LIVE_STATES.contains(&text(call, "state"))
+    });
+    let goal = text(&report["plan"], "goal");
+    if main.is_none() && goal.is_empty() {
+        return vec![];
+    }
+    let model = main.map(|call| text(call, "model")).unwrap_or("");
+    let provider = main.map(|call| text(call, "provider")).unwrap_or("");
+    let state = main.map(|call| text(call, "state")).unwrap_or("");
+    let use_cards = columns >= 44 && height >= 12;
     let mut out = Vec::new();
-    let max_items = attention::LIMIT
-        .min(height.saturating_sub(8) / 3 + 1)
-        .max(1);
-    out.push(card_top(
-        &format!("! Attention · {}", attention.len()),
-        Some("b filter · r read"),
-        columns,
-        colored,
-    ));
-    for item in attention.iter().take(max_items) {
-        let marker = if item.unread { "●" } else { "·" };
-        let marker_sgr = if item.unread {
-            SGR_AMBER_BOLD
+    if use_cards {
+        out.push(card_top_styled(
+            "Overall Main",
+            Some(state),
+            columns,
+            colored,
+            SGR_MAIN_TITLE,
+        ));
+        let identity = if main.is_some() {
+            [provider, model]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ")
         } else {
-            SGR_MUTED
+            "No active Main".into()
         };
-        let cls_sgr = if matches!(
-            item.cls.as_str(),
-            "failed"
-                | "guard_stop"
-                | "timed_out"
-                | "verify_failed"
-                | "verify_timed_out"
-                | "provider_error"
-        ) {
-            SGR_CORAL_BOLD
-        } else if matches!(item.cls.as_str(), "needs" | "decide" | "stale") {
-            SGR_GOLD_BOLD
+        out.push(card_row_lr(
+            vec![Span::raw(identity, columns, Some(SGR_AMBER_BOLD))],
+            vec![],
+            columns,
+            true,
+            None,
+            colored,
+        ));
+    } else {
+        let identity = if main.is_none() {
+            "Main not active".into()
+        } else if model.is_empty() {
+            format!("Main {provider}")
         } else {
-            SGR_CYAN
+            format!("Main {model}")
         };
-        let mut left = vec![
-            Span::literal(marker, Some(marker_sgr)),
-            Span::literal(" ", None),
-            Span::raw(format!("[{}]", item.cls), 20, Some(cls_sgr)),
-            Span::literal(" ", None),
-        ];
-        let who = item.who.trim();
-        if !who.is_empty() {
-            left.push(Span::raw(who, 28, Some(SGR_BOLD)));
-            left.push(Span::literal(": ", Some(SGR_MUTED)));
-        }
-        left.push(Span::raw(&item.what, inner_width, Some(SGR_TEXT)));
-        out.push(card_row_lr(left, vec![], columns, use_cards, None, colored));
+        out.push(render_lr(
+            vec![Span::raw(identity, columns, Some(SGR_CYAN))],
+            vec![Span::raw(state, columns / 2, Some(SGR_CYAN))],
+            columns,
+            false,
+            None,
+            colored,
+        ));
+    }
+    if !goal.is_empty() {
+        out.push(card_row_lr(
+            vec![Span::raw(
+                format!("Goal: {goal}"),
+                1_048_576,
+                Some(SGR_TEXT),
+            )],
+            vec![],
+            columns,
+            use_cards,
+            None,
+            colored,
+        ));
     }
     if let Some(bottom) = card_bottom(columns, use_cards, colored) {
         out.push(bottom);
@@ -1051,18 +1706,19 @@ fn render_help_card(
 ) -> Vec<String> {
     let rows_data: &[(&str, &str)] = &[
         ("Up/Down · PgUp/Dn", "Select call / scroll list"),
-        ("Enter · f", "Open call results & diff reader"),
+        ("Home · End", "First / last call"),
+        ("Enter", "Open chat or task results"),
+        ("f", "Show selected call details"),
+        ("Click title · 1/2/3", "Read Codex, Claude or AGY chat"),
+        ("Click worker · c", "Read worker details or latest council"),
+        ("U", "Refresh Claude and AGY weekly usage"),
+        ("R · r", "All results / mark attention read"),
         ("Tab · g · t", "Cycle view / Graph view / Tree view"),
         ("/ · Esc", "Filter calls / clear or return to board"),
-        ("b · r", "Toggle attention filter / mark visible read"),
-        ("k · ? · u · q", "Health & capacity / Help / Refresh / Quit"),
-        ("1 · 2 · 0 · s", "Focus Claude / Pi / Codex / Swap main"),
-        ("o · h · j · R", "Rooms / Joined chats / Controls / Results"),
-        (
-            "5 · 6 · e · a",
-            "Dispatch Explain / Implement / Researcher / Advisor",
-        ),
-        ("7 · c · n", "Review gate / Council debate / Retry delivery"),
+        ("b · k", "Toggle attention filter / health"),
+        ("h · j", "Joined chat notice / resource counts"),
+        ("u · 9", "Refresh"),
+        ("? · F12 · q", "Help / Quit"),
     ];
     let mut out = vec![card_top(
         "Keyboard Shortcuts",
@@ -1419,6 +2075,22 @@ fn collect_tree<'a>(
         );
     }
     for call in calls {
+        let mut parent = text(call, "parent");
+        let mut ancestors = BTreeSet::new();
+        let mut hidden = false;
+        while let Some(node) = by_id.get(parent) {
+            if !ancestors.insert(parent) {
+                break;
+            }
+            if nav.folded.contains(parent) {
+                hidden = true;
+                break;
+            }
+            parent = text(node, "parent");
+        }
+        if hidden {
+            continue;
+        }
         let mut stack = Vec::new();
         visit(
             call, &mut stack, true, &children, &mut seen, &mut out, nav, graph, maximum,
@@ -1427,16 +2099,18 @@ fn collect_tree<'a>(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_tree_rows(
     calls: &[Value],
     nav: &navigation::Navigation,
+    offset: usize,
     graph: bool,
     capacity: usize,
     columns: usize,
     use_cards: bool,
     colored: bool,
 ) -> Vec<String> {
-    let entries = collect_tree(calls, nav, graph, capacity);
+    let entries = collect_tree(calls, nav, graph, usize::MAX);
     let inner = if use_cards {
         columns.saturating_sub(4)
     } else {
@@ -1444,13 +2118,20 @@ fn render_tree_rows(
     };
     entries
         .into_iter()
-        .map(|entry| {
+        .enumerate()
+        .skip(offset)
+        .take(capacity)
+        .map(|(index, entry)| {
             let role = text(entry.call, "role");
             let (glyph, role_sgr) = role_style(role);
             let alias = call_label(entry.call);
             let title = text(entry.call, "title");
             let (badge, badge_sgr) = state_badge(text(entry.call, "state"));
             let left = vec![
+                Span::literal(
+                    if index == nav.selected { "▸" } else { " " },
+                    Some(SGR_AMBER_BOLD),
+                ),
                 Span::raw(entry.prefix, 64, Some(SGR_BORDER)),
                 Span::literal(glyph, Some(role_sgr)),
                 Span::literal(" ", None),
@@ -1460,8 +2141,15 @@ fn render_tree_rows(
                 Span::literal(if title.is_empty() { "" } else { " · " }, Some(SGR_MUTED)),
                 Span::raw(title, inner, Some(SGR_TEXT)),
             ];
-            let right = vec![Span::raw(badge, 20, Some(badge_sgr))];
-            card_row_lr(left, right, columns, use_cards, None, colored)
+            let right = model_and_state(entry.call, columns, badge, badge_sgr);
+            card_row_lr(
+                left,
+                right,
+                columns,
+                use_cards,
+                (colored && index == nav.selected).then_some(SGR_SEL_BG),
+                colored,
+            )
         })
         .collect()
 }
@@ -1837,6 +2525,585 @@ mod tests {
     }
 
     #[test]
+    fn finished_workers_wait_five_minutes_before_leaving_overview() {
+        let now = oms_panel_core::timestamp();
+        let nav = navigation::Navigation::default();
+        let recent = json!({"state":"done","updated_at":now.saturating_sub(240)});
+        let old = json!({"state":"done","updated_at":now.saturating_sub(360)});
+        let review = json!({"state":"review","updated_at":now.saturating_sub(360)});
+        let returned = json!({"state":"review","returned_at":"2024-01-01T00:00:00Z"});
+        assert!(!collapsed_history(&nav, &recent));
+        assert!(collapsed_history(&nav, &old));
+        assert!(!collapsed_history(&nav, &review));
+        assert!(collapsed_history(&nav, &returned));
+        let search = navigation::Navigation {
+            filter: "worker".into(),
+            ..Default::default()
+        };
+        assert!(!collapsed_history(&search, &old));
+    }
+
+    #[test]
+    fn board_footer_preserves_essential_keys() {
+        let report = json!({});
+        for columns in [80, 19, 28, 40, 55, 56, 120] {
+            let frame = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                24,
+                &BTreeMap::new(),
+                false,
+                false,
+            );
+            let footer = frame.last().unwrap();
+            for key in ["?", "q", "Enter"] {
+                assert!(footer.contains(key), "{columns}: missing {key}: {footer}");
+            }
+            assert!(
+                footer.contains("↑↓") || footer.contains("Up/Down"),
+                "{columns}: {footer}"
+            );
+            assert!(width(footer) <= columns);
+            if columns == 120 {
+                assert_eq!(footer, navigation::BOARD_HINT);
+            }
+            let colored = frame_styled(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                24,
+                &BTreeMap::new(),
+                true,
+                false,
+            );
+            assert_eq!(strip_sgr(colored.last().unwrap()), *footer);
+        }
+    }
+
+    #[test]
+    fn help_omits_unimplemented_actions() {
+        let help = render_help_card(120, 116, true, false).join("\n");
+        for false_claim in [
+            "Focus Claude",
+            "Swap main",
+            "Rooms /",
+            "Controls /",
+            "Dispatch Explain",
+            "Review gate",
+            "Council debate",
+            "Retry delivery",
+        ] {
+            assert!(!help.contains(false_claim), "{false_claim}: {help}");
+        }
+    }
+
+    #[test]
+    fn viewport_detail_attention_and_geometry() {
+        let report = json!({"collection":{"ok":true}, "room":{"title":"room", "participants":[
+            {"participant":"main", "role":"main", "state":"working", "model":"long-model", "title":"Live"},
+            {"participant":"old", "role":"main", "state":"done", "title":"History"},
+            {"participant":"review", "state":"review", "title":"Review"},
+            {"participant":"blocked", "state":"blocked", "title":"Blocked", "provider":"codex", "model":"m1", "task_id":"task-1"}
+        ]}, "plan":{"goal":"Ship", "tasks":{"one":{"state":"done"}}}, "provider_status":{"codex":{"weekly_used":25}}});
+        let mut observed = report.clone();
+        observed["room"]["participants"][0]["attempt"] = json!("attempt-main");
+        observed["room"]["participants"][0]["provider"] = json!("codex");
+        observed["room_attempts"]["attempt-main"] = json!({
+            "attempt_id":"attempt-main", "provider":"codex", "role":"main", "state":"working"
+        });
+        observed["main_model_observation"] =
+            json!({"attempt":"attempt-main","model":"observed-model"});
+        assert_eq!(calls(&observed)[0]["model"], "observed-model");
+        observed["main_model_observation"]["attempt"] = json!("unrelated");
+        assert_eq!(calls(&observed)[0]["model"], "long-model");
+        let order_report = json!({"room":{"participants":[
+            {"participant":"same", "state":"done", "created_at":"2", "title":"first"},
+            {"participant":"z", "state":"working", "created_at":"1"},
+            {"participant":"same", "state":"done", "created_at":"2", "title":"second"},
+            {"participant":"a", "state":"done", "created_at":"2"},
+            {"participant":"main", "role":"main", "state":"working", "created_at":"3"},
+            {"participant":"early", "state":"done", "created_at":"1"}
+        ]}});
+        let ordered = calls(&order_report);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|row| text(row, "participant"))
+                .collect::<Vec<_>>(),
+            ["main", "z", "early", "a", "same", "same"]
+        );
+        assert_eq!(
+            ordered
+                .iter()
+                .skip(4)
+                .map(|row| text(row, "title"))
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        let read = BTreeMap::new();
+        let overview = frame(&report, &navigation::Navigation::default(), 80, 24, &read);
+        let main_top = overview
+            .iter()
+            .position(|line| line.starts_with("╭─ Overall Main "))
+            .expect("Main must be the first overview card");
+        let status = overview
+            .iter()
+            .position(|line| line.contains("Weekly left"))
+            .unwrap();
+        let legend = overview
+            .iter()
+            .position(|line| line.contains("Gate"))
+            .unwrap();
+        assert!(status < legend && legend < main_top, "{overview:?}");
+        let main_bottom = overview
+            .iter()
+            .enumerate()
+            .skip(main_top + 1)
+            .find(|(_, line)| line.starts_with('╰'))
+            .map(|(index, _)| index)
+            .unwrap();
+        let goal = overview
+            .iter()
+            .position(|line| line.contains("Goal: Ship"))
+            .unwrap();
+        assert!(main_top < goal && goal < main_bottom, "{overview:?}");
+        assert!(overview[main_bottom + 1].starts_with("╭─ "), "{overview:?}");
+        assert!(!overview.iter().any(|line| line.contains("! Attention")));
+        let mut nav = navigation::Navigation {
+            view: View::Detail,
+            ..Default::default()
+        };
+        let calls = visible(&report, &nav);
+        assert_eq!(text(&calls[0], "participant"), "main");
+        assert!(
+            calls
+                .iter()
+                .position(|v| text(v, "participant") == "blocked")
+                .unwrap()
+                < calls
+                    .iter()
+                    .position(|v| text(v, "participant") == "old")
+                    .unwrap()
+        );
+        nav.selected = calls
+            .iter()
+            .position(|v| text(v, "participant") == "blocked")
+            .unwrap();
+        for columns in [19, 28, 40, 80, 120] {
+            let frame = frame_styled(&report, &nav, columns, 24, &read, false, true);
+            println!("FRAME {columns}\n{}", frame.join("\n"));
+            assert!(
+                frame
+                    .iter()
+                    .any(|v| v.contains("▸") && v.contains("Blocked")),
+                "{frame:?}"
+            );
+            assert!(
+                frame
+                    .iter()
+                    .any(|v| v.contains("codex") && v.contains("m1")),
+                "{frame:?}"
+            );
+            assert!(frame.iter().all(|v| width(v) <= columns), "{frame:?}");
+            assert!(page_capacity(&report, &nav, columns, 24, &read) >= 1);
+        }
+        let mut stale_usage = report.clone();
+        stale_usage["provider_status"]["claude"] =
+            json!({"source":"cache stale", "weekly_used":30});
+        let usage = provider_line(&stale_usage, 80, false);
+        assert!(usage.contains("Claude stale"), "{usage}");
+        assert!(!usage.contains("30%"), "{usage}");
+        let mut stale = report.clone();
+        stale["collection"]["ok"] = json!(false);
+        stale["room"]["participants"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"participant":"extra", "state":"blocked", "title":"Extra"}));
+        nav.filter = "".into();
+        nav.editing = true;
+        let frame = frame_styled(&stale, &nav, 56, 12, &read, false, false);
+        assert!(
+            frame
+                .iter()
+                .any(|line| line.contains("▸") && line.contains("Blocked")),
+            "{frame:?}"
+        );
+        assert!(
+            frame.iter().any(|line| line.contains("hidden")),
+            "{frame:?}"
+        );
+        for columns in [19, 28, 40, 55, 56, 80, 120] {
+            for height in [8, 10, 12, 14, 24] {
+                let frame = frame_styled(&stale, &nav, columns, height, &read, false, false);
+                assert!(frame.len() <= height, "{columns}x{height}: {frame:?}");
+                assert!(
+                    frame.iter().all(|line| width(line) <= columns),
+                    "{columns}x{height}: {frame:?}"
+                );
+                for required in ["▸", "!", "Filter", "STALE"] {
+                    assert!(
+                        frame.iter().any(|line| line.contains(required)),
+                        "{columns}x{height} missing {required}: {frame:?}"
+                    );
+                }
+            }
+        }
+        for cols in [44, 80] {
+            let line = card_top(
+                "매우 긴 제목 아주 긴 제목 긴 제목 매우 긴 제목",
+                Some("Escape back"),
+                cols,
+                false,
+            );
+            assert_eq!(width(&line), cols, "{line}");
+            assert_eq!(
+                line,
+                strip_sgr(&card_top(
+                    "매우 긴 제목 아주 긴 제목 긴 제목 매우 긴 제목",
+                    Some("Escape back"),
+                    cols,
+                    true
+                ))
+            );
+        }
+        assert_eq!(state_badge("done").0, "[✓ exited]");
+        assert_eq!(state_badge("completed").0, "[✓ completed]");
+        assert_eq!(state_badge("accepted").0, "[✓ accepted]");
+    }
+
+    #[test]
+    fn narrow_metadata_clipping_and_omission_counts() {
+        let report = json!({"collection":{"ok":true}, "room":{"title":"OMS panel", "participants":[
+            {"participant":"M", "role":"main", "provider":"codex", "state":"working", "title":"Main task"},
+            {"participant":"C", "parent":"M", "state":"blocked", "title":"長い注意長い注意長い注意長い注意長い注意長い注意"},
+            {"participant":"X", "state":"done", "title":"Other"}
+        ]}, "plan":{"goal":"長い目標長い目標長い目標長い目標長い目標長い目標", "tasks":{"a":{"state":"queued"},"b":{"state":"queued"}}},
+        "provider_status":{"codex":{"weekly_used":18,"five_hour_used":11,"five_hour_resets_at":oms_panel_core::timestamp()+3600},"claude":{"weekly_used":30}}});
+        let read = BTreeMap::new();
+        for columns in [19, 28, 40] {
+            let frame = frame(
+                &report,
+                &navigation::Navigation::default(),
+                columns,
+                14,
+                &read,
+            )
+            .join("\n");
+            assert!(
+                frame.contains(if columns < 28 { "L70%" } else { "Cld70%" })
+                    && frame.contains("Main codex")
+                    && frame.contains("!1"),
+                "{frame}"
+            );
+            assert!(frame.contains("Plan 0/2"), "{columns}: {frame}");
+            assert!(
+                frame.contains("82%") && !frame.contains("89%"),
+                "{columns}: {frame}"
+            );
+            assert!(
+                frame
+                    .lines()
+                    .any(|s| s.starts_with("Goal:") && s.contains('…')),
+                "{frame}"
+            );
+            assert!(!frame.contains("OMS OMS"), "{frame}");
+            assert!(
+                frame.contains(if columns < 28 { "A—" } else { "AGY—" }),
+                "{frame}"
+            );
+        }
+        let mut stale = report.clone();
+        stale["collection"]["ok"] = json!(false);
+        let nav = navigation::Navigation {
+            filter: "Main".into(),
+            notice: Some(
+                "A long notice that wraps onto a second line and contains more words".into(),
+            ),
+            ..Default::default()
+        };
+        for columns in [19, 28, 40] {
+            let frame = frame(&stale, &nav, columns, 14, &read).join("\n");
+            assert!(
+                frame.contains("!1") && frame.contains("Filter /Main"),
+                "{columns}: {frame}"
+            );
+            assert!(
+                frame.contains("Plan 0/2")
+                    && frame.contains(if columns < 28 { "C82%" } else { "Cdx82%" }),
+                "{columns}: {frame}"
+            );
+            assert!(frame.contains("STALE"), "{columns}: {frame}");
+        }
+        let mut full_quota = report.clone();
+        full_quota["provider_status"]["codex"]["weekly_used"] = json!(0);
+        full_quota["provider_status"]["codex"]["five_hour_used"] = json!(0);
+        let quota_frame = frame(
+            &full_quota,
+            &navigation::Navigation::default(),
+            19,
+            14,
+            &read,
+        )
+        .join("\n");
+        assert!(quota_frame.contains("C100%"), "{quota_frame}");
+        let mut nav = navigation::Navigation {
+            view: View::Tree,
+            ..Default::default()
+        };
+        nav.folded.insert("M".into());
+        let folded_frame = frame(&report, &nav, 80, 20, &read).join("\n");
+        assert!(
+            folded_frame.contains("1 fold") && !folded_frame.contains("1 filt"),
+            "{folded_frame}"
+        );
+        nav.filter = "Other".into();
+        let frame = frame(&report, &nav, 80, 20, &read).join("\n");
+        assert!(
+            frame.contains("2 filt") && !frame.contains("1 fold"),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn folded_tree_hides_descendants() {
+        let calls = vec![
+            json!({"participant":"M1"}),
+            json!({"participant":"W1", "parent":"M1"}),
+        ];
+        let mut nav = navigation::Navigation::default();
+        nav.folded.insert("M1".into());
+        assert_eq!(tree(&calls, &nav, false, 10).len(), 1);
+    }
+
+    #[test]
+    fn narrow_rows_and_viewport_keep_selected_call_visible() {
+        let mut participants = vec![
+            json!({"participant":"M1", "role":"main", "model":"model-x", "state":"working", "title":"Live task"}),
+        ];
+        for n in 0..20 {
+            participants.push(json!({"participant":format!("W{n}"), "role":"worker", "state":"done", "title":format!("Task{n}")}));
+        }
+        let report = json!({"collection":{"ok":true}, "room":{"id":"room", "participants":participants}, "plan":{"goal":"Ship work"}});
+        let mut nav = navigation::Navigation {
+            view: View::Compact,
+            ..Default::default()
+        };
+        let read = BTreeMap::new();
+        for columns in [19, 28, 40, 80, 120] {
+            let plain = frame_styled(&report, &nav, columns, 14, &read, false, true);
+            let color = frame_styled(&report, &nav, columns, 14, &read, true, true);
+            assert!(
+                plain.iter().any(|row| row.contains("Live ta")),
+                "{columns}: {plain:?}"
+            );
+            assert!(
+                plain.iter().any(|row| row.contains("hidden")),
+                "{columns}: {plain:?}"
+            );
+            for (p, c) in plain.iter().zip(&color) {
+                assert_eq!(*p, strip_sgr(c));
+                assert!(width(p) <= columns);
+            }
+        }
+        nav.selected = visible(&report, &nav)
+            .iter()
+            .position(|v| text(v, "title") == "Task19")
+            .unwrap();
+        let selected_frame = frame(&report, &nav, 28, 14, &read).join("\n");
+        assert!(selected_frame.contains("▸ Task19"), "{selected_frame}");
+        nav.selected = 20;
+        nav.offset = 20;
+        let resized = frame(&report, &nav, 28, 40, &read).join("\n");
+        assert!(resized.contains("▸ Task9"), "{resized}");
+        assert!(resized.contains("Live ta"), "{resized}");
+        assert!(!resized.contains("hidden"), "{resized}");
+        nav.filter = "Task19".into();
+        nav.selected = 0;
+        let frame = frame(&report, &nav, 28, 14, &read).join("\n");
+        assert!(frame.contains("20 filt"), "{frame}");
+    }
+
+    #[test]
+    fn tree_display_order_matches_visible_order_and_selection() {
+        let report = json!({"collection":{"ok":true}, "room":{"participants":[
+            {"participant":"M", "role":"main", "state":"working"},
+            {"participant":"other", "role":"worker", "state":"working"},
+            {"participant":"child", "parent":"M", "role":"worker", "state":"done"}
+        ]}});
+        let nav = navigation::Navigation {
+            view: View::Tree,
+            selected: 1,
+            ..Default::default()
+        };
+        let calls = visible(&report, &nav);
+        assert_eq!(text(&calls[1], "participant"), "child");
+        let rendered = frame(&report, &nav, 80, 20, &BTreeMap::new()).join("\n");
+        assert!(
+            rendered
+                .lines()
+                .any(|row| row.contains("▸└─") && row.contains("child")),
+            "{rendered}"
+        );
+
+        let report = json!({"collection":{"ok":true}, "plan":{"goal":"Ship teams"}, "room":{"participants":[
+            {"participant":"M", "provider":"codex", "role":"main", "state":"working", "title":"Own goal"},
+            {"participant":"CW", "provider":"codex", "role":"worker", "parent":"M", "state":"working", "title":"Codex task"},
+            {"participant":"L", "provider":"claude", "role":"lead", "parent":"M", "state":"working", "title":"Coordinate review"},
+            {"participant":"LW", "provider":"claude", "role":"worker", "parent":"L", "state":"review", "title":"Claude task"},
+            {"participant":"AW", "provider":"antigravity", "role":"worker", "parent":"M", "state":"working", "title":"AGY task"}
+        ]}});
+        let mut nav = navigation::Navigation::default();
+        let visible_calls = visible(&report, &nav);
+        assert_eq!(
+            visible_calls
+                .iter()
+                .map(|call| text(call, "participant"))
+                .collect::<Vec<_>>(),
+            ["CW", "L", "LW", "AW"]
+        );
+        let read = BTreeMap::new();
+        for (columns, height) in [(200, 50), (120, 30), (80, 24), (56, 20), (40, 12), (19, 14)] {
+            for (index, call) in visible_calls.iter().enumerate() {
+                nav.selected = index;
+                let plain = frame_styled(&report, &nav, columns, height, &read, false, true);
+                let color = frame_styled(&report, &nav, columns, height, &read, true, true);
+                assert_eq!(plain.len(), height, "{columns}x{height}: {plain:?}");
+                assert!(plain.iter().all(|line| width(line) <= columns));
+                assert!(
+                    plain
+                        .iter()
+                        .zip(color)
+                        .all(|(plain, color)| *plain == strip_sgr(&color))
+                );
+                let selected_label = if columns < 44 {
+                    text(call, "title").chars().take(4).collect::<String>()
+                } else {
+                    text(call, "participant").to_owned()
+                };
+                assert!(
+                    plain
+                        .iter()
+                        .any(|line| line.contains('▸') && line.contains(&selected_label)),
+                    "{columns}x{height} {index}: {plain:?}"
+                );
+                if columns >= 56 {
+                    let joined = plain.join("\n");
+                    for required in [
+                        "Codex · Orchestrator: unreported",
+                        "Claude · Orchestrator L",
+                        "Antigravity · Orchestrator: unreported",
+                    ] {
+                        assert!(
+                            joined
+                                .lines()
+                                .any(|line| line.starts_with(&format!("├─ {required}"))
+                                    || line.starts_with(&format!("╭─ {required}"))),
+                            "{columns}x{height}: {joined}"
+                        );
+                    }
+                    assert!(
+                        joined
+                            .lines()
+                            .filter(|line| line.contains("Weekly left"))
+                            .count()
+                            == 1
+                    );
+                }
+            }
+        }
+        let mut paged = report.clone();
+        for n in 0..18 {
+            paged["room"]["participants"].as_array_mut().unwrap().push(json!({
+                "participant":format!("P{n:02}"), "provider":(["codex","claude","antigravity"][n%3]),
+                "role":"worker", "parent":"M", "state":"working", "title":format!("Work {n}")
+            }));
+        }
+        let mut page_nav = navigation::Navigation::default();
+        for (columns, height) in [(80, 24), (56, 20)] {
+            for (index, call) in visible(&paged, &page_nav).iter().enumerate() {
+                page_nav.selected = index;
+                let frame = frame_styled(&paged, &page_nav, columns, height, &read, false, true);
+                let identity = format!(" {} ", text(call, "participant"));
+                assert!(
+                    frame
+                        .iter()
+                        .any(|line| line.contains('▸') && line.contains(&identity)),
+                    "{columns}x{height} {index}: {frame:?}"
+                );
+                assert!(frame.len() == height && frame.iter().all(|line| width(line) <= columns));
+                assert!(
+                    frame.iter().any(|line| line.contains("hidden")),
+                    "{frame:?}"
+                );
+                assert!(page_capacity(&paged, &page_nav, columns, height, &read) < 23);
+            }
+        }
+        let mut historical = report.clone();
+        historical["room"]["participants"][4]["state"] = json!("done");
+        nav.selected = 0;
+        assert_eq!(visible(&historical, &nav).len(), 3);
+        let history = frame(&historical, &nav, 80, 24, &read).join("\n");
+        assert!(
+            history.contains("1 past (Tab all)") && !history.contains("AGY task"),
+            "{history}"
+        );
+        let legacy = navigation::Navigation {
+            view: View::Compact,
+            ..Default::default()
+        };
+        assert_eq!(visible(&historical, &legacy).len(), 5);
+        nav.filter = "AGY task".into();
+        assert_eq!(visible(&historical, &nav).len(), 1);
+        let searched = frame(&historical, &nav, 80, 24, &read).join("\n");
+        assert!(
+            searched.contains("AGY task") && searched.contains("[✓ exited]"),
+            "{searched}"
+        );
+        let empty = frame(
+            &json!({"collection":{"ok":true}}),
+            &navigation::Navigation::default(),
+            80,
+            24,
+            &read,
+        )
+        .join("\n");
+        assert_eq!(
+            empty.matches("Orchestrator: unreported").count(),
+            3,
+            "{empty}"
+        );
+        let mut connected = report.clone();
+        connected["provider_sessions"] = json!(["codex", "antigravity"]);
+        let board = board_frame(
+            &connected,
+            &navigation::Navigation::default(),
+            80,
+            24,
+            &read,
+            true,
+            true,
+        );
+        let [Some(codex), None, Some(agy)] = board.provider_rows else {
+            panic!("only connected provider headers should be clickable");
+        };
+        assert!(clean(&board.lines[codex], 80).contains("Codex · Orchestrator [1]"));
+        assert!(clean(&board.lines[agy], 80).contains("Antigravity · Orchestrator [3]"));
+        nav.filter = "Claude task".into();
+        nav.selected = 0;
+        assert_eq!(visible(&report, &nav).len(), 1);
+        let filtered = frame(&report, &nav, 80, 24, &read).join("\n");
+        assert!(
+            filtered
+                .lines()
+                .any(|line| line.contains('▸') && line.contains("LW")),
+            "{filtered}"
+        );
+        assert!(filtered.contains("3 filt"), "{filtered}");
+        assert!(filtered.contains("Claude · Orchestrator L"), "{filtered}");
+    }
+
+    #[test]
     fn color_policy_respects_no_color_env_and_tty() {
         assert!(!resolve_color(false, None, None, None));
         assert!(resolve_color(true, None, None, Some("xterm-256color")));
@@ -1902,7 +3169,7 @@ mod tests {
                 ]
             },
             "provider_status": {
-                "claude": {"weekly_used": 28, "five_hour_used": 23}
+                "claude": {"weekly_used": 28, "five_hour_used": 23, "five_hour_resets_at": oms_panel_core::timestamp()+3600}
             },
             "plan": {
                 "tasks": {
@@ -1911,7 +3178,10 @@ mod tests {
                 }
             }
         });
-        let nav = navigation::Navigation::default();
+        let nav = navigation::Navigation {
+            view: View::Compact,
+            ..Default::default()
+        };
         let read = BTreeMap::new();
         let columns = 84;
         let height = 24;
@@ -1923,12 +3193,12 @@ mod tests {
         assert!(
             plain
                 .iter()
-                .any(|l| l.contains("Claude wk 72% left · 5h 77% left")
-                    && l.contains("Plan 1/2 done")),
+                .any(|l| l.contains("Weekly left · Codex — │ Claude 72% │ AGY —")),
             "{plain:?}"
         );
+        assert!(plain.iter().any(|l| l.contains("Plan 1/2 done")));
         assert!(plain.iter().any(|l| l.contains("[⚑ review]")));
-        assert!(plain.iter().any(|l| l.contains("[✓ done]")));
+        assert!(plain.iter().any(|l| l.contains("[✓ exited]")));
         // Untrusted CSI/OSC from title must be stripped cleanly and Hangul cells must keep border aligned.
         let joined = plain.join("\n");
         assert!(!joined.contains('\u{1b}'));
@@ -2082,14 +3352,17 @@ mod tests {
         assert_eq!(w1["state"], json!("done"));
         assert_eq!(w1["title"], json!("Worker label"));
 
-        let nav = navigation::Navigation::default();
+        let nav = navigation::Navigation {
+            view: View::Compact,
+            ..Default::default()
+        };
         let read = BTreeMap::new();
         let lines = frame_styled(&report, &nav, 90, 24, &read, false, false);
         let joined = lines.join("\n");
         assert!(joined.contains("att_8aa76df1 main"), "{joined}");
         assert!(joined.contains("Main Tower"), "{joined}");
         assert!(joined.contains("W1 worker · Worker label"), "{joined}");
-        assert!(joined.contains("[✓ done]"), "{joined}");
+        assert!(joined.contains("[✓ exited]"), "{joined}");
         assert!(!joined.contains(": blocked:"), "{joined}");
         assert!(!joined.contains("blocked:\n"), "{joined}");
         assert!(joined.contains("blocked"), "{joined}");

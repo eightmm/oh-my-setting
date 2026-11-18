@@ -123,6 +123,15 @@ pub fn snapshot(
         "attempts":{"active":active,"recent":recent},"room_attempts":room_attempts,"collection":{"ok":true},"capacity_stale":false});
     Ok(Snapshot { report, status: 0 })
 }
+/// Native mains join the room with their attempt id unless an explicit participant is recorded.
+pub fn main_participant(attempt: &Value) -> &str {
+    attempt["refs"]["panel_room_participant"]
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .or_else(|| attempt["attempt_id"].as_str())
+        .unwrap_or("")
+}
+
 pub fn active_mains(attempts: &[Value], room: &str, owner: &str) -> Vec<Value> {
     attempts
         .iter()
