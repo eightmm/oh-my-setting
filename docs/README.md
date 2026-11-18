@@ -50,6 +50,11 @@ another Team implementation plan.
 specifies the missing native consumers for managed Team/write-WIP retirement,
 active cancellation and held-domain recovery, with reusable producers and fixtures.
 
+[Implementation work queue](ORCHESTRATOR-WORK-QUEUE.md) connects the existing
+P0 work to 17 additional source-backed performance, reliability, verification
+and optional remote-artifact packets in PRs #260–#263. It records dependencies,
+shared-file ownership and an implementation-agent handoff; these are specifications.
+
 [Bounded team orchestration](TEAM-ORCHESTRATION-PLAN.md) retains the original
 architecture and ten implementation slices. Some contract/admission/projection
 slices are now implemented; interactive native provider sessions remain a separate
