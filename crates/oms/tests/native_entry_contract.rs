@@ -2693,6 +2693,315 @@ impl Landing {
 }
 
 #[test]
+fn public_inline_main_uses_native_resource_admission_and_keeps_unknown_custody() {
+    use oms_command_telemetry::store::{dispatch, physical, resources, usage};
+    use std::io::Read;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    const NAME: &str =
+        "public_inline_main_uses_native_resource_admission_and_keeps_unknown_custody";
+    if let Some(probe) = std::env::var_os("OMS_NATIVE_MAIN_PROBE") {
+        let repo = PathBuf::from(std::env::var_os("OMS_STATE_REPO").unwrap());
+        let call = std::env::var("OMS_PROVIDER_CALL_ID").unwrap();
+        let owner = std::env::var("OMS_PANEL_MAIN_ATTEMPT").unwrap();
+        let room = std::env::var("OMS_ROOM_ID").unwrap();
+        let operation = std::env::var("OMS_OPERATION_ID").unwrap();
+        assert_eq!(std::env::current_dir().unwrap(), repo);
+        let stop = AtomicBool::new(false);
+        let intents = physical::load(&repo, &stop).unwrap();
+        assert_eq!(intents.len(), 1);
+        let intent = &intents[0];
+        assert_eq!(intent.phase, physical::Phase::Ready);
+        assert_eq!(intent.identity.call_id, call);
+        assert_eq!(intent.identity.operation_id, operation);
+        assert_eq!(intent.identity.provider, "claude");
+        assert_eq!(
+            intent.identity.selected_model.as_deref(),
+            Some("fixture-model")
+        );
+        let binding = intent.resource_binding.as_ref().unwrap();
+        assert_eq!(binding.root_owner, owner);
+        assert!(binding.team.is_none());
+        let (events, _) = oms_command_operations::load_projection(&repo).unwrap();
+        let created = events
+            .iter()
+            .find(|row| {
+                row.get("attempt_id").text() == Some(owner.as_str())
+                    && row.get("event_type").text() == Some("attempt.created")
+            })
+            .unwrap();
+        assert_eq!(
+            Some(binding.root_generation.as_str()),
+            created.get("event_id").text()
+        );
+        assert_eq!(
+            created.get("refs").get("panel_room_id").text().unwrap(),
+            room
+        );
+        let receipts = usage::load(&repo).unwrap();
+        assert_eq!(receipts.calls.len(), 1);
+        assert_eq!(receipts.calls[0].receipt.phase, usage::Phase::Pending);
+        assert!(!repo.join(".oms/plan/tasks.json").exists());
+        let lock = oms_lock::Lock::for_file(
+            &repo.join(dispatch::REGISTRY),
+            oms_lock::Settings::from_env().unwrap(),
+        )
+        .unwrap();
+        lock.try_acquire().unwrap().check().unwrap();
+        oms_command_operations::lock::FileLock::acquire_before(
+            &oms_command_operations::event_path(&repo),
+            &stop,
+            Instant::now() + Duration::from_millis(100),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        assert!(
+            oms_panel_core::Store::open(&repo)
+                .unwrap()
+                .transaction("panel-main-session", Duration::from_millis(20))
+                .is_err(),
+            "Main session lock must span its native child"
+        );
+        let marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(probe)
+            .unwrap();
+        serde_json::to_writer(
+            marker,
+            &serde_json::json!({"call":call,"owner":owner,"room":room}),
+        )
+        .unwrap();
+        println!("native Main fixture");
+        println!("{{\"usage\":{{\"total_tokens\":0}},\"total_cost_usd\":0}}");
+        return;
+    }
+    let l = Landing::new();
+    let paths = std::env::var_os("PATH").unwrap();
+    for name in ["awk", "wc", "sort"] {
+        let found = std::env::split_paths(&paths)
+            .map(|p| p.join(name))
+            .find(|p| p.is_file())
+            .unwrap();
+        symlink(std::fs::canonicalize(found).unwrap(), l.tools.join(name)).unwrap();
+    }
+    let (name, found) = ["sha256sum", "shasum", "openssl"]
+        .into_iter()
+        .find_map(|name| {
+            std::env::split_paths(&paths)
+                .map(|p| p.join(name))
+                .find(|p| p.is_file())
+                .map(|p| (name, p))
+        })
+        .unwrap();
+    symlink(std::fs::canonicalize(found).unwrap(), l.tools.join(name)).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let executable = executable.to_str().unwrap().replace('\'', "'\\''");
+    let provider = l.tools.join("claude");
+    std::fs::write(
+        &provider,
+        format!("#!/bin/sh\nexec '{executable}' --exact {NAME} --nocapture\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let public = |words: &[&str]| {
+        let mut command = Command::new(l.tools.join("bash"));
+        l.env(&mut command);
+        command
+            .arg(l.f.0.join("scripts/oms"))
+            .args(words)
+            .current_dir(&l.repo);
+        command
+    };
+    let host = public(&["runtime", "resources", "host"]).output().unwrap();
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    let host: serde_json::Value = serde_json::from_slice(&host.stdout).unwrap();
+    let policy = resources::Policy {
+        domain: "native-main-fixture".into(),
+        epoch: "one".into(),
+        host_generation_sha256: host["host_generation_sha256"].as_str().unwrap().into(),
+        max_teams: 1,
+        max_invocations: 1,
+        max_open_processes: 1,
+        max_write_wip: 1,
+        reviewer_headroom: 0,
+    };
+    std::fs::write(l.repo.join("policy.json"), policy.to_json().unwrap()).unwrap();
+    let activate = public(&[
+        "runtime",
+        "resources",
+        "activate",
+        "--policy",
+        "policy.json",
+    ])
+    .output()
+    .unwrap();
+    assert!(
+        activate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&activate.stderr)
+    );
+    assert!(!l.repo.join(".oms/plan/tasks.json").exists());
+    let probe = l.f.0.join("main-proof.json");
+    let launch = || {
+        let flags = rustix::pty::OpenptFlags::RDWR | rustix::pty::OpenptFlags::NOCTTY;
+        let master = rustix::pty::openpt(flags).unwrap();
+        rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC).unwrap();
+        rustix::pty::grantpt(&master).unwrap();
+        rustix::pty::unlockpt(&master).unwrap();
+        let name = rustix::pty::ptsname(&master, Vec::new()).unwrap();
+        let slave = rustix::fs::open(
+            name.as_c_str(),
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let slave = std::fs::File::from(slave);
+        rustix::fs::fcntl_setfl(
+            &master,
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK,
+        )
+        .unwrap();
+        let mut master = std::fs::File::from(master);
+        let mut command = public(&[
+            "panel",
+            "--launch",
+            "claude",
+            "--host",
+            "inline",
+            "--layout",
+            "inline",
+            "--model",
+            "fixture-model",
+        ]);
+        command
+            .env("OMS_NATIVE_MAIN_PROBE", &probe)
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave);
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut output = Vec::new();
+        loop {
+            let mut bytes = [0; 4096];
+            match master.read(&mut bytes) {
+                Ok(n) => output.extend_from_slice(&bytes[..n]),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("PTY read: {error}");
+                }
+            }
+            if Instant::now() >= deadline || output.len() > 64 * 1024 {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "bounded Main fixture failed: {}",
+                    String::from_utf8_lossy(&output)
+                );
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                // The child is reaped before any assertions can unwind.
+                return (status, output);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let (status, output) = launch();
+    assert!(status.success(), "{}", String::from_utf8_lossy(&output));
+    let proof = std::fs::read(&probe).unwrap();
+    let proof: serde_json::Value = serde_json::from_slice(&proof).unwrap();
+    let stop = AtomicBool::new(false);
+    let receipts = usage::load(&l.repo).unwrap();
+    assert_eq!(receipts.calls.len(), 1);
+    let receipt = &receipts.calls[0].receipt;
+    assert_eq!(receipt.identity.call_id, proof["call"]);
+    assert_eq!(receipt.phase, usage::Phase::Unknown);
+    assert_eq!(receipt.cleanup_complete, None);
+    assert_eq!(receipt.source_sha256, None);
+    assert_eq!(receipt.cost, usage::Cost::Unknown);
+    assert!(receipts.calls[0].tokens.is_none());
+    let occupancy = resources::snapshot(&l.repo, &stop)
+        .unwrap()
+        .unwrap()
+        .occupancy;
+    assert_eq!(
+        (
+            occupancy.teams,
+            occupancy.invocations,
+            occupancy.open_processes,
+            occupancy.write_wip
+        ),
+        (0, 1, 1, 1)
+    );
+    assert!(!l.repo.join(".oms/plan/tasks.json").exists());
+    let report = public(&["runtime", "resources", "status"])
+        .output()
+        .unwrap();
+    assert!(report.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(report["active"], true);
+    assert_eq!(report["host_matches_policy"], true);
+    assert_eq!(
+        report["occupancy"],
+        serde_json::json!({"teams":0,"invocations":1,"open_processes":1,"write_wip":1})
+    );
+    let room = public(&[
+        "room",
+        "show",
+        "--id",
+        proof["room"].as_str().unwrap(),
+        "--json",
+    ])
+    .output()
+    .unwrap();
+    assert!(
+        room.status.success(),
+        "{}",
+        String::from_utf8_lossy(&room.stderr)
+    );
+    let room: serde_json::Value = serde_json::from_slice(&room.stdout).unwrap();
+    assert!(
+        room["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| member["participant"] == proof["owner"]
+                && member["joined"] == true
+                && member["role"] == "main")
+    );
+    let room = std::fs::read_to_string(l.repo.join(".oms/lifecycle/events.jsonl")).unwrap();
+    assert!(room.contains(proof["owner"].as_str().unwrap()));
+    let (status, output) = launch();
+    assert!(!status.success(), "{}", String::from_utf8_lossy(&output));
+    assert_eq!(usage::load(&l.repo).unwrap().calls.len(), 1);
+    assert_eq!(physical::load(&l.repo, &stop).unwrap().len(), 1);
+    assert_eq!(
+        resources::snapshot(&l.repo, &stop)
+            .unwrap()
+            .unwrap()
+            .occupancy,
+        occupancy
+    );
+    assert_eq!(status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&output).contains("ResourceCapacity(\"invocations\")"),
+        "{}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+#[test]
 fn landing_plain_approval_and_recover_converge_through_native_services() {
     let l = Landing::new();
     l.patch("b");
