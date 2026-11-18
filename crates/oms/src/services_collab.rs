@@ -9,8 +9,7 @@
 //! cancellation, and argv is never shell-parsed.
 //!
 //! Known gaps, reported by the methods themselves rather than hidden:
-//! `swap_main_host`, `deliver_result` and `publication_receipt` keep their
-//! fail-closed defaults; `tick_maintenance` reports the Codex plugin cache as
+//! `swap_main_host` keeps its fail-closed default; `tick_maintenance` reports the Codex plugin cache as
 //! `skipped` (no native producer refreshes it); `refresh_catalogs` ages only
 //! catalogs already on disk (a never-probed provider has none to age);
 //! `install --star` has no native producer and is refused; and
@@ -675,7 +674,187 @@ fn staged_prefix(command: NativeCommand, cwd: &Path) -> Vec<OsString> {
     }
 }
 
+fn room_error(message: impl ToString) -> oms_command_room::Error {
+    oms_command_room::Error::new(message.to_string())
+}
+
+struct RoomOperations<'a> {
+    repo: PathBuf,
+    attempts: Vec<oms_command_room::Attempt>,
+    fingerprint: String,
+    stop: &'a AtomicBool,
+    _guard: Box<dyn oms_command_plan::services::LifecycleGuard + 'a>,
+}
+
+fn room_operations_projection(
+    repo: &Path,
+) -> oms_command_room::Result<(String, Vec<oms_command_room::Attempt>)> {
+    let (rows, projected) = oms_command_operations::load_projection(repo).map_err(room_error)?;
+    let mut hash = Sha256::new();
+    for row in rows {
+        hash.update(row.json(false).map_err(room_error)?);
+        hash.update(b"\n");
+    }
+    let attempts = projected
+        .iter()
+        .map(|row| {
+            let raw = row.json(false).map_err(room_error)?;
+            let row = oms_command_room::value::parse(&raw, oms_command_room::MAX_ROW)?;
+            oms_command_room::Attempt::from_projection_row(&row)
+        })
+        .collect::<oms_command_room::Result<Vec<_>>>()?;
+    Ok((format!("{:x}", hash.finalize()), attempts))
+}
+
+impl oms_command_room::OperationsRead for RoomOperations<'_> {
+    fn attempts(&self) -> &[oms_command_room::Attempt] {
+        &self.attempts
+    }
+    fn check(&self) -> oms_command_room::Result<()> {
+        if self.stop.load(Ordering::Acquire) {
+            return Err(oms_command_room::Error::new("room operation interrupted"));
+        }
+        if room_operations_projection(&self.repo)?.0 != self.fingerprint {
+            return Err(oms_command_room::Error::new(
+                "operations changed during room publication",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn room_delivery_receipt(
+    value: Value,
+) -> oms_command_room::Result<oms_command_room::DeliveryReceipt> {
+    let status = value["status"]
+        .as_str()
+        .ok_or_else(|| oms_command_room::Error::new("native delivery status unavailable"))?
+        .to_owned();
+    let delivery_unknown = value["delivery_unknown"]
+        .as_bool()
+        .ok_or_else(|| oms_command_room::Error::new("native delivery uncertainty unavailable"))?;
+    let turn_id = match value.get("turn_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if id.is_empty() => None,
+        Some(Value::String(id)) => Some(id.clone()),
+        _ => {
+            return Err(oms_command_room::Error::new(
+                "invalid native delivery turn identity",
+            ));
+        }
+    };
+    let raw = serde_json::to_vec(&value).map_err(room_error)?;
+    Ok(oms_command_room::DeliveryReceipt {
+        status,
+        delivery_unknown,
+        turn_id,
+        fields: oms_command_room::value::parse(&raw, oms_command_room::MAX_ROW)?,
+    })
+}
+
+impl oms_command_room::Services for CollabServices<'_> {
+    fn state_repository(&self, repo: &Path) -> oms_command_room::Result<PathBuf> {
+        oms_command_autonomy::Services::state_repository(&self.control, repo, self.interrupted)
+            .map_err(room_error)
+    }
+    fn canonical_provider(&self, provider: &str) -> oms_command_room::Result<String> {
+        oms_command_room::Services::canonical_provider(&oms_command_room::LocalServices, provider)
+    }
+    fn current_claude_session(&self) -> oms_command_room::Result<String> {
+        self.check(self.interrupted).map_err(room_error)?;
+        oms_command_hooks::notify::current_claude_session().map_err(room_error)
+    }
+    fn operations<'a>(
+        &'a self,
+        repo: &Path,
+    ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
+        self.check(self.interrupted).map_err(room_error)?;
+        let guard = oms_command_plan::Services::lifecycle_writer(&self.control, repo)
+            .map_err(room_error)?;
+        let (fingerprint, attempts) = room_operations_projection(repo)?;
+        Ok(Box::new(RoomOperations {
+            repo: repo.to_owned(),
+            attempts,
+            fingerprint,
+            stop: self.interrupted,
+            _guard: guard,
+        }))
+    }
+    fn delivery_available(&self, _: oms_command_room::App) -> bool {
+        // This is availability of the compiled producer, not proof of a live
+        // receiver. Its receipt preserves absent, busy and uncertain outcomes.
+        true
+    }
+    fn deliver(
+        &self,
+        request: oms_command_room::DeliveryRequest<'_>,
+    ) -> oms_command_room::Result<oms_command_room::DeliveryReceipt> {
+        self.check(self.interrupted).map_err(room_error)?;
+        let value = match request.app {
+            oms_command_room::App::Codex => {
+                if request.allow_wakeup || request.consumer.is_some() {
+                    return Err(oms_command_room::Error::new(
+                        "invalid Codex delivery options",
+                    ));
+                }
+                oms_command_hooks::notify::deliver_codex(request.repository, request.text, 10.0)
+            }
+            oms_command_room::App::Claude => oms_command_hooks::notify::deliver_claude(
+                request.repository,
+                request.text,
+                request.consumer.unwrap_or(""),
+                request.allow_wakeup,
+            ),
+        };
+        // Do not turn cancellation after submission into a no-delivery claim.
+        room_delivery_receipt(value)
+    }
+}
+
 impl PanelServices for CollabServices<'_> {
+    fn publication_receipt(
+        &self,
+        repo: &Path,
+        execution: &Path,
+        commit: &str,
+        receipt_sha256: &str,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<Vec<u8>> {
+        self.check(stop).map_err(panel_error)?;
+        if receipt_sha256.len() != 64
+            || !receipt_sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(panel_error("publication receipt digest is required"));
+        }
+        let request = oms_command_plan::Request::new(oms_command_plan::Action::Status);
+        let mut context = oms_command_plan::Context::from_environment(&request, execution)
+            .map_err(panel_error)?;
+        context.state_repo = repo.to_owned();
+        context.plan_file = repo.join(".oms/plan/tasks.json");
+        let plan =
+            oms_command_plan::Plan::open(context, &self.control, stop).map_err(panel_error)?;
+        let proof =
+            oms_command_plan::completion::commit_landing(&plan, commit, Some(receipt_sha256))
+                .map_err(panel_error)?;
+        self.check(stop).map_err(panel_error)?;
+        Ok(proof.raw)
+    }
+
+    fn deliver_result(
+        &self,
+        repo: &Path,
+        message: &str,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<Value> {
+        self.check(stop).map_err(panel_error)?;
+        // This producer targets only its saved Codex receiver. Claude wakeups
+        // require the explicit recipient and authority on `room publish`.
+        Ok(oms_command_hooks::notify::deliver_codex(
+            repo, message, 10.0,
+        ))
+    }
     /// In process; the repository is the working directory every native parser
     /// defaults to, so arguments are passed through unchanged.
     fn command(
@@ -719,7 +898,9 @@ impl PanelServices for CollabServices<'_> {
                 &self.source,
                 interrupted,
             ),
-            NativeCommand::Room => oms_command_room::run(args, repo, interrupted),
+            NativeCommand::Room => {
+                oms_command_room::run_with_services(args, repo, interrupted, self)
+            }
             NativeCommand::Events => oms_command_operations::run(
                 oms_command_operations::App::Events,
                 args,
@@ -2006,6 +2187,146 @@ mod tests {
             host.load_contract(root.path()),
             Err(ContractError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn room_delivery_adapter_preserves_uncertainty_and_requires_wakeup_authority() {
+        let producer = json!({"status":"submitted", "submitted":true,
+            "delivery_unknown":true, "persisted":false, "turn_id":"turn-fixture",
+            "desktop_notification_observed":false});
+        let receipt = room_delivery_receipt(producer).unwrap();
+        assert_eq!(receipt.status, "submitted");
+        assert!(receipt.delivery_unknown);
+        assert_eq!(receipt.turn_id.as_deref(), Some("turn-fixture"));
+        assert_eq!(receipt.fields["persisted"].as_bool(), Some(false));
+        assert_eq!(
+            receipt.fields["desktop_notification_observed"].as_bool(),
+            Some(false)
+        );
+        assert!(room_delivery_receipt(json!({"status":"persisted"})).is_err());
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = CollabServices::new(&stop, source()).unwrap();
+        let root = Fixture::new();
+        // False wake authority returns before native registry/socket discovery.
+        let receipt = oms_command_room::Services::deliver(
+            &host,
+            oms_command_room::DeliveryRequest {
+                repository: root.path(),
+                app: oms_command_room::App::Claude,
+                text: "test receipt",
+                consumer: None,
+                allow_wakeup: false,
+            },
+        )
+        .unwrap();
+        assert!(["wakeup_required", "disabled"].contains(&receipt.status.as_str()));
+        assert!(!receipt.delivery_unknown);
+        assert_eq!(receipt.fields["submitted"].as_bool(), Some(false));
+        stop.store(true, Ordering::Release);
+        assert!(PanelServices::deliver_result(&host, root.path(), "cancelled", &stop).is_err());
+        assert!(
+            oms_command_room::Services::deliver(
+                &host,
+                oms_command_room::DeliveryRequest {
+                    repository: root.path(),
+                    app: oms_command_room::App::Codex,
+                    text: "cancelled",
+                    consumer: None,
+                    allow_wakeup: false,
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn room_operations_adapter_holds_the_producer_lock_and_checks_the_snapshot() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = CollabServices::new(&stop, source()).unwrap();
+        let root = Fixture::new();
+        let read = oms_command_room::Services::operations(&host, root.path()).unwrap();
+        assert!(read.attempts().is_empty());
+        read.check().unwrap();
+        let (ready, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let _guard = oms_command_operations::lock::FileLock::acquire(
+                    &oms_command_operations::event_path(root.path()),
+                    &stop,
+                )
+                .unwrap();
+                ready.send(()).unwrap();
+            });
+            assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
+            drop(read);
+            received.recv_timeout(Duration::from_secs(5)).unwrap();
+            writer.join().unwrap();
+        });
+        let first = oms_command_operations::create_attempt(
+            root.path(),
+            &oms_command_operations::StartRequest {
+                tool: "peer-delegate".into(),
+                provider: "codex".into(),
+                task_id: "first".into(),
+                ..Default::default()
+            },
+            &stop,
+        )
+        .unwrap();
+        let second = oms_command_operations::create_attempt(
+            root.path(),
+            &oms_command_operations::StartRequest {
+                tool: "peer-delegate".into(),
+                provider: "claude".into(),
+                task_id: "second".into(),
+                ..Default::default()
+            },
+            &stop,
+        )
+        .unwrap();
+        let read = oms_command_room::Services::operations(&host, root.path()).unwrap();
+        assert_eq!(
+            read.attempts()
+                .iter()
+                .map(|a| a.attempt_id.as_str())
+                .collect::<Vec<_>>(),
+            [first.as_str(), second.as_str()]
+        );
+        assert!(!read.attempts()[0].terminal);
+        assert_eq!(read.attempts()[1].provider, "claude");
+        stop.store(true, Ordering::Release);
+        assert!(read.check().is_err());
+    }
+
+    #[test]
+    fn publication_adapter_never_synthesizes_a_missing_receipt() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = CollabServices::new(&stop, source()).unwrap();
+        let root = Fixture::new();
+        assert!(
+            PanelServices::publication_receipt(
+                &host,
+                root.path(),
+                root.path(),
+                &"a".repeat(40),
+                "",
+                &stop
+            )
+            .unwrap_err()
+            .message
+            .contains("digest is required")
+        );
+        assert!(
+            PanelServices::publication_receipt(
+                &host,
+                root.path(),
+                root.path(),
+                &"a".repeat(40),
+                &"b".repeat(64),
+                &stop
+            )
+            .is_err()
+        );
     }
 
     #[test]

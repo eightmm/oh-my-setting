@@ -1,0 +1,4 @@
+interface:
+  display_name: "Panel Orchestrator"
+  short_description: "Run the OMS terminal panel as a parallel multi-provider control tower"
+  default_prompt: "Use $oms-panel-orchestrator to split work into disjoint scoped slices, dispatch them concurrently across providers and accounts with oms panel, and verify, land and finalize each slice."

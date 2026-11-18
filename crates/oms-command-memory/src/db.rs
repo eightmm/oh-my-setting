@@ -156,7 +156,18 @@ fn sync_db(db: &mut Connection, s: &Store, flag: &AtomicBool) -> Result<()> {
                 image.digest.clone(),
             ))
         {
-            continue;
+            // Parser changes can invalidate derived identities without changing source bytes.
+            let indexed = tx
+                .prepare("select event_id from memory_entries where source=? order by ordinal")?
+                .query_map([source], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if indexed
+                .iter()
+                .map(String::as_str)
+                .eq(entries.iter().map(|e| e.event_id.as_str()))
+            {
+                continue;
+            }
         }
         tx.execute("delete from memory_entries where source=?", [source])?;
         for e in entries {
@@ -347,6 +358,7 @@ pub(crate) struct Query<'a> {
     pub include_superseded: bool,
     pub targets: &'a str,
     pub drop_scoped: bool,
+    pub context_only: bool,
     pub handoffs: Option<&'a Path>,
 }
 pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Output> {
@@ -356,6 +368,11 @@ pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Outp
     sync_db(&mut db, s, flag)?;
     let (notes, pins) = s.logs()?;
     let status = records::states(&notes, &pins);
+    let eligible = if opt.context_only {
+        Some(crate::review::context_filter(s)?)
+    } else {
+        None
+    };
     let by_id: HashMap<_, _> = notes
         .iter()
         .chain(&pins)
@@ -378,7 +395,19 @@ pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Outp
     let mut rest = Vec::new();
     for e in entries {
         check(flag)?;
-        let provenance = by_id.get(e.event_id.as_str()).copied().unwrap_or(&e);
+        let provenance = by_id.get(e.event_id.as_str()).copied();
+        let memory_source = matches!(e.source.as_str(), "shared" | "pins");
+        if opt.context_only && memory_source && provenance.is_none() {
+            continue;
+        }
+        let provenance = provenance.unwrap_or(&e);
+        if memory_source
+            && eligible
+                .as_ref()
+                .is_some_and(|eligible| !eligible(provenance))
+        {
+            continue;
+        }
         if let Some(citation) = store::validate_citation(provenance, &s.repo, &mut cache, flag) {
             let stale = citation["status"] == "stale";
             validation.insert(e.event_id.clone(), citation);

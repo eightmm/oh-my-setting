@@ -375,7 +375,7 @@ fn line(out: &mut dyn Write, s: impl std::fmt::Display) -> Result<()> {
 fn json(out: &mut dyn Write, row: &V) -> Result<()> {
     out.write_all(&row.json(true)?).map_err(|e| e.to_string())
 }
-fn finish(job: &mut V, state: &str, exit: V) {
+fn finish(job: &mut V, state: &str, exit: V, settlement: (&str, &str, &str)) {
     job.set("runtime_state", state);
     job.set("exit_code", exit);
     for key in ["pid", "runner_pid"] {
@@ -385,6 +385,142 @@ fn finish(job: &mut V, state: &str, exit: V) {
         job.set(key, "");
     }
     job.set("finished_at", storage::now());
+    let (target, reason, key) = settlement;
+    let mut facts = obj([
+        ("schema", 1usize.into()),
+        ("state", target.into()),
+        ("reason_code", reason.into()),
+        ("idempotency_key", key.into()),
+    ]);
+    if matches!(target, "review" | "done") {
+        // Written only after owned cleanup/output and the completion contract
+        // have been checked; an exit code alone never creates this proof.
+        facts.set("command_sha256", job.get("command_sha256").clone());
+        facts.set("completion_state", job.get("completion_state").clone());
+    }
+    job.set("finish", facts);
+}
+
+fn finish_facts(job: &V) -> Result<V> {
+    let facts = job.get("finish");
+    if facts == &V::Null {
+        // Older records cannot distinguish successful output/cleanup from an
+        // interrupted runner that happened to observe exit zero.
+        let (state, reason) = match text(job, "runtime_state") {
+            "cancelled" => ("cancelled", "cancelled_by_owner"),
+            "finished" if optional_integer(job, "exit_code")?.is_some_and(|n| n != 0) => {
+                ("failed", "terminal_exit_nonzero")
+            }
+            _ => ("blocked", "terminal_evidence_missing"),
+        };
+        return Ok(obj([
+            ("state", state.into()),
+            ("reason_code", reason.into()),
+            ("idempotency_key", "reconcile-legacy-terminal".into()),
+        ]));
+    }
+    if facts.get("schema") != &V::from(1usize)
+        || ![
+            "blocked",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "review",
+            "done",
+        ]
+        .contains(&text(facts, "state"))
+        || facts.get("reason_code").text().is_none()
+        || !ops::projection::id(text(facts, "idempotency_key"))
+    {
+        return Err("invalid supervised finish facts".into());
+    }
+    Ok(facts.clone())
+}
+
+fn settlement_pending(job: &V, attempt: &V) -> Result<bool> {
+    let current = text(attempt, "state");
+    if text(attempt, "tool") != "agent-supervisor" || !life::nonterminal(current) {
+        return Ok(false);
+    }
+    if job.get("finish") == &V::Null
+        && current == "review"
+        && text(job, "completion_state") != "done"
+        && job.get("exit_code") == &V::from(0i64)
+    {
+        // An existing canonical review already settles a legacy review
+        // contract; replay need not infer new success from its exit status.
+        return Ok(false);
+    }
+    let facts = finish_facts(job)?;
+    let target = text(&facts, "state");
+    // A later block is not authority to reopen work.
+    Ok(current != target && (!matches!(target, "review" | "done") || current != "blocked"))
+}
+
+fn settle_finish(repo: &Path, job: &V, interrupted: &AtomicBool) -> Result<()> {
+    let id = text(job, "attempt_id");
+    let facts = finish_facts(job)?;
+    let target = text(&facts, "state");
+    let mut current = life::projection(repo)?.get(id).cloned().unwrap_or(V::Null);
+    if !settlement_pending(job, &current)? {
+        return Ok(());
+    }
+    if matches!(target, "review" | "done") {
+        if !matches!(text(&current, "state"), "working" | "verifying" | "review") {
+            return life::transition(
+                repo,
+                id,
+                "blocked",
+                "terminal_settlement_conflict",
+                "reconcile-terminal-conflict",
+                interrupted,
+            );
+        }
+        let specification = spec(repo, id)?;
+        if text(job, "runtime_state") != "finished"
+            || job.get("exit_code") != &V::from(0i64)
+            || text(&facts, "command_sha256").is_empty()
+            || facts.get("command_sha256") != specification.get("command_sha256")
+            || facts.get("command_sha256") != job.get("command_sha256")
+            || facts.get("command_sha256") != current.get("refs").get("command_sha256")
+            || facts.get("completion_state") != specification.get("completion_state")
+            || facts.get("completion_state") != job.get("completion_state")
+            || facts.get("completion_state").text() != Some(target)
+            || text(&specification, "profile") != "trusted-local"
+        {
+            return Err(
+                "supervised finish proof does not match immutable completion intent".into(),
+            );
+        }
+        if hard_budget(&current) {
+            return life::transition(
+                repo,
+                id,
+                "failed",
+                "hard_budget_unsupported",
+                "runner-hard-budget-unsupported",
+                interrupted,
+            );
+        }
+        if text(&current, "state") == "working" {
+            life::transition(repo, id, "verifying", "", "runner-verifying", interrupted)?;
+            current = life::projection(repo)?.get(id).cloned().unwrap_or(V::Null);
+        }
+        if text(&current, "state") == "verifying" {
+            life::transition(repo, id, "review", "", "runner-review", interrupted)?;
+        }
+        if target == "review" {
+            return Ok(());
+        }
+    }
+    life::transition(
+        repo,
+        id,
+        target,
+        text(&facts, "reason_code"),
+        text(&facts, "idempotency_key"),
+        interrupted,
+    )
 }
 fn command(argv: &[OsString]) -> Result<(Vec<OsString>, V, String)> {
     let argv = if argv.first().is_some_and(|s| s == "--") {
@@ -813,7 +949,12 @@ fn cancel(
         let mut job = store.load(&id)?;
         let state = text(&job, "runtime_state").to_owned();
         if state == "queued" {
-            finish(&mut job, "cancelled", V::Null);
+            finish(
+                &mut job,
+                "cancelled",
+                V::Null,
+                ("cancelled", "cancelled_by_owner", "owner-cancelled"),
+            );
             store.save(&mut job)?;
             life::transition(
                 repo,
@@ -835,6 +976,15 @@ fn cancel(
                 job.set("pid", 0usize);
                 job.set("pid_identity", "");
                 job.set("finished_at", storage::now());
+                job.set(
+                    "finish",
+                    obj([
+                        ("schema", 1usize.into()),
+                        ("state", "failed".into()),
+                        ("reason_code", "process_identity_mismatch".into()),
+                        ("idempotency_key", "process-identity-mismatch".into()),
+                    ]),
+                );
             } else {
                 job.set("runtime_state", "cancel_requested");
             }
@@ -970,7 +1120,16 @@ fn dispatch(
             let _queue = FileLock::acquire(&store.queue_path(), interrupted)?;
             let mut job = store.load(&id)?;
             if text(&job, "runtime_state") == "cancel_requested" {
-                finish(&mut job, "cancelled", V::Null);
+                finish(
+                    &mut job,
+                    "cancelled",
+                    V::Null,
+                    (
+                        "cancelled",
+                        "cancelled_by_owner",
+                        "dispatch-cancelled-before-spawn",
+                    ),
+                );
                 store.save(&mut job)?;
                 life::transition(
                     repo,
@@ -1003,7 +1162,16 @@ fn dispatch(
             Err(_) => {
                 let _queue = FileLock::acquire(&store.queue_path(), interrupted)?;
                 let mut job = store.load(&id)?;
-                finish(&mut job, "interrupted", V::Null);
+                finish(
+                    &mut job,
+                    "interrupted",
+                    V::Null,
+                    (
+                        "blocked",
+                        "runner_launch_failed",
+                        "dispatch-runner-launch-failed",
+                    ),
+                );
                 store.save(&mut job)?;
                 life::transition(
                     repo,
@@ -1143,6 +1311,7 @@ fn resume(
     if let V::Obj(ref mut m) = job {
         for key in [
             "finished_at",
+            "finish",
             "reserved_tokens",
             "reserved_cost_microusd",
             "launch_started_at",
@@ -1259,6 +1428,31 @@ fn reconcile(
     for mut job in jobs {
         check(interrupted)?;
         let state = text(&job, "runtime_state").to_owned();
+        if ["finished", "cancelled", "interrupted", "abandoned"].contains(&state.as_str()) {
+            let id = text(&job, "attempt_id");
+            let attempt = attempts.get(id).unwrap_or(&V::Null);
+            if settlement_pending(&job, attempt)?
+                && !process_matches(
+                    integer(&job, "runner_pid"),
+                    text(&job, "runner_pid_identity"),
+                    host,
+                    interrupted,
+                )?
+                && !process_matches(
+                    integer(&job, "pid"),
+                    text(&job, "pid_identity"),
+                    host,
+                    interrupted,
+                )?
+                && !group_alive(integer(&job, "pid"))
+            {
+                selected.push(id.into());
+                if args.flag("apply") {
+                    settle_finish(repo, &job, interrupted)?;
+                }
+            }
+            continue;
+        }
         if !ACTIVE.contains(&state.as_str()) {
             continue;
         }
@@ -1284,7 +1478,16 @@ fn reconcile(
             continue;
         }
         if mismatch && !alive {
-            finish(&mut job, "interrupted", V::Null);
+            finish(
+                &mut job,
+                "interrupted",
+                V::Null,
+                (
+                    "failed",
+                    "process_identity_mismatch",
+                    "process-identity-mismatch",
+                ),
+            );
             store.save(&mut job)?;
             attempts = life::projection(repo)?;
             if attempts
@@ -1338,6 +1541,15 @@ fn reconcile(
                 "interrupted"
             },
             V::Null,
+            if cancelled {
+                (
+                    "cancelled",
+                    "cancelled_by_owner",
+                    "reconcile-runner-cancelled",
+                )
+            } else {
+                ("blocked", "runner_lost", "reconcile-runner-lost")
+            },
         );
         store.save(&mut job)?;
         attempts = life::projection(repo)?;
@@ -1526,7 +1738,16 @@ fn runner(
         let _queue = FileLock::acquire(&store.queue_path(), interrupted)?;
         job = store.load(id)?;
         if text(&job, "runtime_state") == "cancel_requested" {
-            finish(&mut job, "cancelled", V::Null);
+            finish(
+                &mut job,
+                "cancelled",
+                V::Null,
+                (
+                    "cancelled",
+                    "cancelled_by_owner",
+                    "runner-cancelled-before-launch",
+                ),
+            );
             store.save(&mut job)?;
             life::transition(
                 repo,
@@ -1542,7 +1763,16 @@ fn runner(
             return Ok(0);
         }
         if hard_budget(&job) {
-            finish(&mut job, "finished", 78i64.into());
+            finish(
+                &mut job,
+                "finished",
+                78i64.into(),
+                (
+                    "failed",
+                    "hard_budget_unsupported",
+                    "runner-hard-budget-unsupported",
+                ),
+            );
             store.save(&mut job)?;
             life::transition(
                 repo,
@@ -1568,8 +1798,19 @@ fn runner(
         // A pre-spawn failure has no child, and is safe to mark interrupted.
         let _queue = FileLock::acquire(&store.queue_path(), &cleanup)?;
         let mut current = store.load(id)?;
+        if current.get("finish") != &V::Null {
+            // A completed runner may fail while publishing lifecycle events.
+            // Its durable outcome remains the reconciliation authority.
+            settle_finish(repo, &current, &cleanup)?;
+            return Err(error);
+        }
         if text(&current, "runtime_state") != "cleanup_failed" {
-            finish(&mut current, "interrupted", V::Null);
+            finish(
+                &mut current,
+                "interrupted",
+                V::Null,
+                ("blocked", "supervisor_error", "runner-interrupted"),
+            );
             store.save(&mut current)?;
         }
         if life::projection(repo)?
@@ -1675,7 +1916,12 @@ fn runner_start(
             store.finish_log(&mut log, b"")?;
             let _queue = FileLock::acquire(&store.queue_path(), &cleanup)?;
             let mut job = store.load(id)?;
-            finish(&mut job, "finished", 124i64.into());
+            finish(
+                &mut job,
+                "finished",
+                124i64.into(),
+                ("timed_out", "wall_budget_exceeded", "runner-timed-out"),
+            );
             store.save(&mut job)?;
             life::transition(
                 repo,
@@ -1697,7 +1943,12 @@ fn runner_start(
             store.finish_log(&mut log, bytes)?;
             let _queue = FileLock::acquire(&store.queue_path(), &cleanup)?;
             let mut job = store.load(id)?;
-            finish(&mut job, "finished", 127i64.into());
+            finish(
+                &mut job,
+                "finished",
+                127i64.into(),
+                ("failed", "launch_failed", "runner-launch-failed"),
+            );
             job.set("log_bytes", bytes.len());
             job.set("log_truncated", raw.len() > max_log as usize);
             store.save(&mut job)?;
@@ -1833,6 +2084,32 @@ fn runner_start(
             let _queue = FileLock::acquire(&store.queue_path(), &cleanup)?;
             final_job = store.load(id)?;
             cancelled |= text(&final_job, "runtime_state") == "cancel_requested";
+            identity_failed |= text(&final_job, "runtime_state") == "interrupted";
+            let settlement = if execution.stop == Some(StopReason::Deadline) {
+                ("timed_out", "wall_budget_exceeded", "runner-timed-out")
+            } else if cancelled {
+                ("cancelled", "cancelled_by_owner", "runner-cancelled")
+            } else if identity_failed {
+                (
+                    "failed",
+                    "process_identity_mismatch",
+                    "process-identity-mismatch",
+                )
+            } else if execution.stop.is_some() {
+                ("blocked", "supervisor_error", "runner-interrupted")
+            } else if code != 0 {
+                ("failed", "command_failed", "runner-command-failed")
+            } else if life::projection(repo)?.get(id).is_some_and(hard_budget) {
+                (
+                    "failed",
+                    "hard_budget_unsupported",
+                    "runner-hard-budget-unsupported",
+                )
+            } else if text(&final_job, "completion_state") == "done" {
+                ("done", "", "runner-done")
+            } else {
+                ("review", "", "runner-review")
+            };
             finish(
                 &mut final_job,
                 if identity_failed {
@@ -1843,6 +2120,7 @@ fn runner_start(
                     "finished"
                 },
                 (code as i64).into(),
+                settlement,
             );
             final_job.set("log_bytes", execution.stdout.bytes.len());
             final_job.set(
@@ -1851,42 +2129,14 @@ fn runner_start(
             );
             store.save(&mut final_job)?;
         }
+        settle_finish(repo, &final_job, &cleanup)?;
         if execution.stop == Some(StopReason::Deadline) {
-            life::transition(
-                repo,
-                id,
-                "timed_out",
-                "wall_budget_exceeded",
-                "runner-timed-out",
-                &cleanup,
-            )?;
             return Ok(124);
         }
         if cancelled {
-            life::transition(
-                repo,
-                id,
-                "cancelled",
-                "cancelled_by_owner",
-                "runner-cancelled",
-                &cleanup,
-            )?;
             return Ok(130);
         }
         if identity_failed {
-            if life::projection(repo)?
-                .get(id)
-                .is_some_and(|a| life::nonterminal(text(a, "state")))
-            {
-                life::transition(
-                    repo,
-                    id,
-                    "failed",
-                    "process_identity_mismatch",
-                    "process-identity-mismatch",
-                    &cleanup,
-                )?;
-            }
             return Ok(78);
         }
         if execution.stop.is_some() {
@@ -1904,32 +2154,10 @@ fn runner_start(
             }
         }
         if code != 0 {
-            life::transition(
-                repo,
-                id,
-                "failed",
-                "command_failed",
-                "runner-command-failed",
-                &cleanup,
-            )?;
             return Ok(code);
         }
-        life::transition(repo, id, "verifying", "", "runner-verifying", &cleanup)?;
-        let attempts = life::projection(repo)?;
-        if attempts.get(id).is_some_and(hard_budget) {
-            life::transition(
-                repo,
-                id,
-                "failed",
-                "hard_budget_unsupported",
-                "runner-hard-budget-unsupported",
-                &cleanup,
-            )?;
+        if text(final_job.get("finish"), "reason_code") == "hard_budget_unsupported" {
             return Ok(78);
-        }
-        life::transition(repo, id, "review", "", "runner-review", &cleanup)?;
-        if text(&final_job, "completion_state") == "done" {
-            life::transition(repo, id, "done", "", "runner-done", &cleanup)?;
         }
         Ok(0)
     })();
@@ -1962,6 +2190,9 @@ fn runner_start(
             let mut current = store.load(id)?;
             let done =
                 active.is_none() && observed.as_ref().is_some_and(Completion::cleanup_complete);
+            if done && current.get("finish") != &V::Null {
+                return Ok(());
+            }
             if done {
                 finish(
                     &mut current,
@@ -1971,9 +2202,13 @@ fn runner_start(
                         .and_then(|e| e.exit)
                         .map(|e| V::from(e.code.unwrap_or_else(|| -e.signal.unwrap_or(0)) as i64))
                         .unwrap_or(V::Null),
+                    ("blocked", "supervisor_error", "runner-interrupted"),
                 );
             } else {
                 current.set("runtime_state", "cleanup_failed");
+                if let V::Obj(ref mut fields) = current {
+                    fields.remove(b"finish".as_slice());
+                }
                 if let Some(snapshot) = &snapshot {
                     current.set("pid", snapshot.pid as i64);
                     current.set("pid_identity", child_identity.clone());

@@ -739,7 +739,14 @@ fn routes_output(
 ) -> Result<Output> {
     let policy = policy(source)?;
     let owner = owner(options);
-    let inputs = routing_inputs(repo, Some(cwd), room(options).as_deref(), services, stop)?;
+    let inputs = routing_inputs(
+        repo,
+        Some(cwd),
+        room(options).as_deref(),
+        Some(&owner),
+        services,
+        stop,
+    )?;
     let mut base = serde_json::to_value(&policy).map_err(Error::new)?;
     let mut kinds: Vec<String> = policy.roles.keys().cloned().collect();
     kinds.sort();
@@ -753,8 +760,8 @@ fn routes_output(
             "read"
         };
         let mut role_inputs = inputs.clone();
-        if let Some(target) = options.get("to") {
-            role_inputs.preferred = Some(target.to_owned());
+        if let Some(target) = route_target(options)?.0 {
+            role_inputs.preferred = Some(target);
             role_inputs.explicit_target = true;
         }
         match routing::allocate(&policy, &owner, role, None, access, None, &role_inputs) {
@@ -782,10 +789,46 @@ fn routes_output(
     output(base)
 }
 
+/// Split `--to PROVIDER[:account=ID]` and merge `--account ID`.
+fn route_target(options: &Options) -> Result<(Option<String>, Option<String>)> {
+    let (provider, inline) = match options.get("to") {
+        Some(to) => match to.split_once(":account=") {
+            Some((p, a)) => {
+                require(!p.is_empty(), "--to :account= requires a provider")?;
+                (Some(p.to_owned()), Some(a.to_owned()))
+            }
+            None => (Some(to.to_owned()), None),
+        },
+        None => (None, None),
+    };
+    let flag = options.get("account").map(str::to_owned);
+    if let (Some(a), Some(b)) = (&inline, &flag) {
+        require(a == b, "--to :account= conflicts with --account")?;
+    }
+    let account = inline.or(flag);
+    if let Some(id) = &account {
+        require(
+            !id.is_empty()
+                && id.len() <= 64
+                && (id.as_bytes()[0].is_ascii_lowercase() || id.as_bytes()[0].is_ascii_digit())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b)),
+            "invalid account id",
+        )?;
+        require(
+            provider.is_some() || options.has("continue"),
+            "--account requires --to PROVIDER or --continue",
+        )?;
+    }
+    Ok((provider, account))
+}
+
 fn routing_inputs(
     repo: Option<&Path>,
     cwd: Option<&Path>,
     room_id: Option<&str>,
+    owner_hint: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<routing::RoutingInputs> {
@@ -801,7 +844,7 @@ fn routing_inputs(
     require(providers.is_array(), "provider catalog unavailable")?;
     let mut inputs = routing::RoutingInputs {
         installed: Some(Default::default()),
-        owner_model: std::env::var("OMS_MODEL").ok().filter(|v| !v.is_empty()),
+        owner_model: None,
         accounts: routing::Accounts::configured().ok().flatten(),
         ..Default::default()
     };
@@ -826,7 +869,24 @@ fn routing_inputs(
         inputs.catalogs.insert(name.into(), models);
     }
 
+    let env_owner = std::env::var("OMS_PANEL_OWNER")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let owner_matches_env = match (env_owner.as_deref(), owner_hint) {
+        (Some(eo), Some(oh)) => eo == oh,
+        _ => true,
+    };
+    let env_main_attempt = owner_matches_env
+        .then(|| std::env::var("OMS_PANEL_MAIN_ATTEMPT").ok())
+        .flatten()
+        .filter(|v| !v.is_empty());
+    let env_room_participant = owner_matches_env
+        .then(|| std::env::var("OMS_ROOM_PARTICIPANT").ok())
+        .flatten()
+        .filter(|v| !v.is_empty());
+
     let mut report_stub = Value::Null;
+    let mut ambiguous_active_main = false;
     if let Some(repo_path) = repo {
         let attempts = query(
             services,
@@ -849,20 +909,59 @@ fn routing_inputs(
         if let Some(ref room_state) = room_rows {
             report_stub = json!({"room": room_state});
         }
+
+        let mut terminal_main_ids = std::collections::BTreeSet::new();
+        let mut active_mains: Vec<(String, String, String)> = Vec::new();
         for row in rows(&attempts) {
             let room_match = room_id.is_none_or(|id| {
-                row["refs"]["panel_room"].as_str() == Some(id)
+                row["refs"]["panel_room_id"].as_str() == Some(id)
+                    || row["refs"]["panel_room"].as_str() == Some(id)
                     || row["panel"]["room_id"].as_str() == Some(id)
             });
             let prov = text(row, "provider");
-            if room_match && !prov.is_empty() && row["refs"]["panel_role"].as_str().is_some() {
+            if room_match
+                && !prov.is_empty()
+                && row["refs"]["panel_role"]
+                    .as_str()
+                    .is_some_and(|r| r != "main")
+            {
                 *inputs.recent.entry(prov.to_owned()).or_insert(0) += 1;
             }
             let state = text(row, "state");
+            let is_main =
+                text(&row["refs"], "panel_role") == "main" || text(row, "tool") == "panel-main";
+            let is_terminal = row["terminal"] == true
+                || (!state.is_empty() && oms_panel_core::state::TERMINAL_STATES.contains(&state));
+            if is_main && is_terminal {
+                for id in [
+                    text(row, "attempt_id"),
+                    text(&row["refs"], "panel_room_participant"),
+                ] {
+                    if !id.is_empty() {
+                        terminal_main_ids.insert(id.to_owned());
+                    }
+                }
+            }
+            if room_match
+                && is_main
+                && !is_terminal
+                && matches!(owner_hint, Some(o) if text(&row["refs"], "panel_owner") == o || prov == o)
+            {
+                active_mains.push((
+                    text(row, "attempt_id").to_owned(),
+                    text(&row["refs"], "panel_room_participant").to_owned(),
+                    text(&row["refs"], "panel_model").to_owned(),
+                ));
+            }
             if state == "working" || state == "running" {
                 let acc = text(&row["refs"], "panel_account");
                 if !acc.is_empty() {
-                    *inputs.running_accounts.entry(acc.to_owned()).or_insert(0) += 1;
+                    let key = if acc.contains(':') || prov.is_empty() {
+                        acc.to_owned()
+                    } else {
+                        format!("{prov}:{acc}")
+                    };
+                    *inputs.running_accounts.entry(key).or_insert(0) += 1;
                 }
             }
             if (prov == "pi" || text(&row["refs"], "panel_harness") == "pi")
@@ -871,6 +970,117 @@ fn routing_inputs(
             {
                 installed.remove("pi");
             }
+        }
+
+        let selected_active = env_main_attempt
+            .as_deref()
+            .and_then(|target| active_mains.iter().find(|(aid, _, _)| aid == target))
+            .or_else(|| {
+                env_room_participant.as_deref().and_then(|target| {
+                    active_mains
+                        .iter()
+                        .find(|(aid, pid, _)| pid == target || aid == target)
+                })
+            })
+            .or_else(|| {
+                if active_mains.len() == 1 {
+                    active_mains.last()
+                } else if !active_mains.is_empty() {
+                    let families: Option<Vec<&'static str>> = owner_hint.and_then(|o| {
+                        active_mains
+                            .iter()
+                            .map(|(_, _, model)| {
+                                if model.is_empty() {
+                                    None
+                                } else {
+                                    routing::model_family(o, model).ok()
+                                }
+                            })
+                            .collect()
+                    });
+                    if let Some(fams) = families
+                        && let Some(first) = fams.first().copied()
+                        && fams.iter().all(|f| *f == first)
+                    {
+                        active_mains.last()
+                    } else {
+                        ambiguous_active_main = true;
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+        if let Some((aid, pid, model)) = selected_active {
+            if !model.is_empty() {
+                inputs.owner_model = Some(model.clone());
+            } else if let Some(ref room_state) = room_rows {
+                inputs.owner_model = rows(&room_state["participants"])
+                    .iter()
+                    .rev()
+                    .find(|p| {
+                        let p_id = text(p, "participant");
+                        let p_att = text(p, "attempt");
+                        p["role"] == "main"
+                            && p["joined"] == true
+                            && (!pid.is_empty() && p_id == pid
+                                || (!aid.is_empty() && (p_id == aid || p_att == aid)))
+                    })
+                    .map(|p| text(p, "model").to_owned())
+                    .filter(|m| !m.is_empty());
+            }
+        } else if !ambiguous_active_main
+            && active_mains.is_empty()
+            && let Some(ref room_state) = room_rows
+        {
+            let owner = owner_hint.unwrap_or_default();
+            let participants = rows(&room_state["participants"]);
+            let non_terminal_main = |p: &&Value| -> bool {
+                let p_id = text(p, "participant");
+                let p_att = text(p, "attempt");
+                let p_att_id = text(p, "attempt_id");
+                p["role"] == "main"
+                    && p["joined"] == true
+                    && (text(p, "provider") == owner || p_id == owner)
+                    && ![p_id, p_att, p_att_id]
+                        .into_iter()
+                        .any(|id| !id.is_empty() && terminal_main_ids.contains(id))
+            };
+            let matched = env_room_participant
+                .as_deref()
+                .and_then(|target| {
+                    participants
+                        .iter()
+                        .rev()
+                        .find(|p| non_terminal_main(p) && text(p, "participant") == target)
+                })
+                .or_else(|| {
+                    env_main_attempt.as_deref().and_then(|target| {
+                        participants.iter().rev().find(|p| {
+                            non_terminal_main(p)
+                                && (text(p, "attempt") == target || text(p, "attempt_id") == target)
+                        })
+                    })
+                })
+                .or_else(|| participants.iter().rev().find(non_terminal_main));
+            inputs.owner_model = matched
+                .map(|p| text(p, "model").to_owned())
+                .filter(|m| !m.is_empty());
+        }
+    }
+
+    if inputs.owner_model.is_none() && !ambiguous_active_main {
+        if owner_hint == Some("antigravity")
+            && env_owner.as_deref().is_none_or(|eo| eo == "antigravity")
+        {
+            inputs.owner_model = crate::native_panel::detect_antigravity_model();
+        } else if !matches!(owner_hint, Some("codex" | "claude"))
+            && env_owner
+                .as_deref()
+                .is_some_and(|eo| Some(eo) == owner_hint)
+        {
+            inputs.owner_model = std::env::var("OMS_MODEL").ok().filter(|v| !v.is_empty());
         }
     }
 
@@ -936,6 +1146,8 @@ fn dispatch_command(
     } else {
         Some(main_attempt(repo, options, services, stop)?)
     };
+    let mut continued_account = None;
+    let mut continued_provider = None;
     if options.has("continue")
         && let Some(defaults) = dispatch::continuation_defaults(
             repo,
@@ -960,16 +1172,38 @@ fn dispatch_command(
         if !options.has("scope") {
             scopes = defaults.scopes;
         }
+        continued_account = defaults.account;
+        continued_provider = defaults.provider;
     }
     let mut inputs = routing_inputs(
         Some(repo),
         Some(execution),
         room(options).as_deref(),
+        Some(&owner),
         services,
         stop,
     )?;
-    inputs.preferred = options.get("to").map(str::to_owned);
-    inputs.explicit_target = options.has("to");
+    let (target, flag_account) = route_target(options)?;
+    // A continuation binding follows its recorded provider; an explicit `--to`
+    // for another provider drops it, an explicit account always wins.
+    let continued = continued_account.filter(|_| {
+        flag_account.is_none()
+            && target
+                .as_deref()
+                .is_none_or(|t| Some(t) == continued_provider.as_deref())
+    });
+    inputs.preferred = target
+        .clone()
+        .or_else(|| continued.as_ref().and(continued_provider.clone()));
+    inputs.explicit_target = target.is_some();
+    if (flag_account.is_some() || continued.is_some())
+        && let Some(scope) = target.clone().or(continued_provider.clone())
+        && let Some(installed) = inputs.installed.as_mut()
+    {
+        installed.retain(|p| *p == scope);
+    }
+    inputs.requested_account = flag_account.or(continued);
+    inputs.requested_model = options.get("model").map(str::to_owned);
     let mut route = routing::allocate(
         &policy,
         &owner,
@@ -979,7 +1213,11 @@ fn dispatch_command(
         purpose.as_deref(),
         &inputs,
     )?;
-    if let Some(provider) = options.get("to") {
+    require(
+        inputs.requested_account.is_none() || route.account_pinned,
+        "requested account is not configured for the routed provider",
+    )?;
+    if let Some(provider) = target.as_deref() {
         require(
             route.candidate.provider == provider,
             &format!(

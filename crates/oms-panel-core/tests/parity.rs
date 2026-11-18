@@ -1146,6 +1146,426 @@ fn empty_salvage_inventory() {
     assert!(oms_panel_core::salvage::salvage(&repo, &request, &fake, &STOP).is_err());
 }
 
+fn multi_provider_accounts() {
+    assert_eq!(
+        routing::model_family("x", "Orchestrator").unwrap(),
+        "google"
+    );
+    assert_eq!(
+        routing::model_family("x", "Gemini 3 Pro").unwrap(),
+        "google"
+    );
+    assert_eq!(
+        routing::model_family("x", "Claude Opus").unwrap(),
+        "anthropic"
+    );
+    assert_eq!(routing::model_family("x", "GPT 6").unwrap(), "openai");
+    assert!(routing::model_family("x", "mystery").is_err());
+
+    let root = repo("accounts");
+    let home = |name: &str| {
+        let path = root.join(name);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        path
+    };
+    let config = home("config");
+    let (c1, c2, k1, p1) = (home("c1"), home("c2"), home("k1"), home("p1"));
+    let file = config.join("provider-accounts.json");
+    let write_config = |value: Value| {
+        std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+        routing::Accounts::load(&file)
+    };
+    let entry = |id: &str, dir: &Path| json!({"id": id, "home": dir});
+    let good = json!({"schema":1,"providers":{
+        "codex":{"accounts":[entry("a", &c1), entry("work", &c2)],"policy":"spread"},
+        "claude":{"accounts":[entry("work", &k1)]},
+        "pi":{"accounts":[entry("main", &p1)]}}});
+    let accounts = write_config(good).unwrap().unwrap();
+    assert_eq!(accounts.providers.len(), 3);
+
+    let mut bad = json!({"schema":1,"providers":{"antigravity":{"accounts":[entry("a", &c1)]}}});
+    let err = write_config(bad.clone()).unwrap_err();
+    assert!(err.message.contains("isolation is unproved"));
+    bad = json!({"schema":1,"providers":{
+        "codex":{"accounts":[entry("a", &c1)]},"claude":{"accounts":[entry("b", &c1)]}}});
+    assert!(
+        write_config(bad)
+            .unwrap_err()
+            .message
+            .contains("duplicate account home")
+    );
+    let dup =
+        json!({"schema":1,"providers":{"pi":{"accounts":[entry("a", &p1), entry("a", &k1)]}}});
+    assert!(write_config(dup).is_err());
+    let empty = json!({"schema":1,"providers":{"pi":{"accounts":[]}}});
+    assert!(write_config(empty).is_err());
+
+    // Claude's private registry fills in when the shared file omits Claude.
+    write_config(json!({"schema":1,"providers":{"codex":{"accounts":[entry("a", &c1)]}}})).unwrap();
+    let sibling = config.join("provider-accounts.claude.json");
+    let claude = json!({"schema":1,"provider":"claude","accounts":[entry("work", &k1)]});
+    std::fs::write(&sibling, serde_json::to_vec(&claude).unwrap()).unwrap();
+    let loaded = routing::Accounts::load(&file).unwrap().unwrap();
+    let ids: Vec<_> = loaded.providers["claude"]
+        .accounts
+        .iter()
+        .map(|a| a.id.as_str())
+        .collect();
+    assert!(ids.contains(&"work"));
+    let wrong = json!({"schema":1,"provider":"codex","accounts":[entry("work", &k1)]});
+    std::fs::write(&sibling, serde_json::to_vec(&wrong).unwrap()).unwrap();
+    assert!(routing::Accounts::load(&file).is_err());
+    std::fs::write(&sibling, serde_json::to_vec(&claude).unwrap()).unwrap();
+
+    // Selection: lower bucketed use wins, exhausted accounts are skipped unless
+    // explicit, running load spreads equal buckets, a requested account pins.
+    let accounts = write_config(json!({"schema":1,"providers":{
+        "codex":{"accounts":[entry("a", &c1), entry("work", &c2)],"policy":"spread"},
+        "claude":{"accounts":[entry("work", &k1)]}}}))
+    .unwrap()
+    .unwrap();
+    let now = oms_panel_core::timestamp();
+    let reading = |used: u64| json!({"weekly_used": used, "observed_at": now});
+    let none = std::collections::BTreeMap::new();
+    let readings = json!({"a": reading(55), "work": reading(12)});
+    let (picked, _) = accounts
+        .select("codex", "m", &readings, &none, false, None)
+        .unwrap();
+    assert_eq!(picked.id, "work");
+    let readings = json!({"a": reading(95), "work": reading(97)});
+    assert!(
+        accounts
+            .select("codex", "m", &readings, &none, false, None)
+            .is_err()
+    );
+    let (picked, reason) = accounts
+        .select("codex", "m", &readings, &none, true, None)
+        .unwrap();
+    assert_eq!(
+        (picked.id.as_str(), reason.as_str()),
+        ("a", "explicit target")
+    );
+    let tied = json!({"a": reading(51), "work": reading(52)});
+    let running = std::collections::BTreeMap::from([("codex:a".to_owned(), 2)]);
+    assert_eq!(
+        accounts
+            .select("codex", "m", &tied, &running, false, None)
+            .unwrap()
+            .0
+            .id,
+        "work"
+    );
+    assert_eq!(
+        accounts
+            .select("codex", "m", &tied, &running, true, None)
+            .unwrap()
+            .0
+            .id,
+        "work"
+    );
+    let (picked, reason) = accounts
+        .select("codex", "m", &tied, &running, false, Some("a"))
+        .unwrap();
+    assert_eq!(
+        (picked.id.as_str(), reason.as_str()),
+        ("a", "requested account")
+    );
+    assert!(
+        accounts
+            .select("codex", "m", &tied, &none, false, Some("nope"))
+            .is_err()
+    );
+    assert!(
+        accounts
+            .select("pi", "m", &tied, &none, false, None)
+            .is_err()
+    );
+    assert_eq!(
+        accounts
+            .select("claude", "m", &Value::Null, &none, false, None)
+            .unwrap()
+            .0
+            .id,
+        "work"
+    );
+    assert_eq!(
+        accounts.home("claude", "work").unwrap(),
+        k1.canonicalize().unwrap()
+    );
+    assert!(accounts.home("claude", "a").is_err());
+    std::fs::set_permissions(&k1, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+    assert!(
+        accounts
+            .select("claude", "m", &Value::Null, &none, false, None)
+            .is_err()
+    );
+    std::fs::set_permissions(&k1, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+
+    // Allocation pins only an explicitly requested account.
+    let policy = routing::Policy::bundled().unwrap();
+    let mut inputs = routing::RoutingInputs {
+        installed: Some(["claude".to_owned()].into()),
+        accounts: Some(accounts),
+        explicit_target: true,
+        preferred: Some("claude".into()),
+        ..Default::default()
+    };
+    let route = routing::allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+    assert_eq!(
+        (route.account.as_deref(), route.account_pinned),
+        (Some("work"), false)
+    );
+    inputs.requested_account = Some("work".into());
+    let route = routing::allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+    assert_eq!(
+        (route.account.as_deref(), route.account_pinned),
+        (Some("work"), true)
+    );
+    inputs.requested_account = Some("other".into());
+    assert!(routing::allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+
+    // A requested account skips providers without a registry, and an exhausted
+    // account stays usable when requested.
+    inputs.requested_account = Some("work".into());
+    inputs.explicit_target = false;
+    inputs.preferred = None;
+    inputs.installed = Some(["claude".to_owned(), "codex".to_owned(), "pi".to_owned()].into());
+    inputs.status = json!({"claude": {"accounts": {"work": reading(97)}}});
+    let route = routing::allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+    assert_eq!(route.candidate.provider, "claude");
+    assert!(route.account_pinned);
+    inputs.requested_account = Some("nope".into());
+    assert!(routing::allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+
+    // When only one native provider has a weekly reading (!all_known), recent room
+    // dispatches still spread across native providers rather than starving Codex.
+    let spread_base = routing::RoutingInputs {
+        installed: Some(["claude".to_owned(), "codex".to_owned()].into()),
+        status: json!({"codex": {"weekly_used": 17, "observed_at": now}}),
+        ..Default::default()
+    };
+    let mut s = spread_base.clone();
+    assert_eq!(
+        routing::allocate(&policy, "antigravity", "builder", None, "write", None, &s)
+            .unwrap()
+            .candidate
+            .provider,
+        "claude"
+    );
+    s.recent.insert("claude".into(), 1);
+    assert_eq!(
+        routing::allocate(&policy, "antigravity", "builder", None, "write", None, &s)
+            .unwrap()
+            .candidate
+            .provider,
+        "codex"
+    );
+    s.recent.insert("codex".into(), 1);
+    assert_eq!(
+        routing::allocate(&policy, "antigravity", "builder", None, "write", None, &s)
+            .unwrap()
+            .candidate
+            .provider,
+        "claude"
+    );
+
+    // The default-home fallback needs a private directory; the child case sets
+    // the home variable because this runner never mutates its own environment.
+    let wide = home("wide");
+    std::fs::set_permissions(&wide, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+    let fake_home = repo("claude-default-home");
+    for (mode, ok) in [(0o777, false), (0o700, true)] {
+        std::fs::set_permissions(&wide, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("zz_fallback_child")
+            .env("HOME", &fake_home)
+            .env("CLAUDE_CONFIG_DIR", &wide)
+            .env("OMS_PARITY_FALLBACK_OK", if ok { "1" } else { "0" })
+            .status()
+            .unwrap();
+        assert!(status.success(), "fallback child mode {mode:o}");
+    }
+}
+
+fn zz_fallback_child() {
+    let Some(ok) = std::env::var_os("OMS_PARITY_FALLBACK_OK") else {
+        return;
+    };
+    let dir = repo(&format!("fallback-child-{}", ok.to_string_lossy()));
+    let blocked = dir.join("missing");
+    let file = dir.join("provider-accounts.json");
+    let body = json!({"schema":1,"providers":{"claude":{"accounts":[{"id":"w","home":blocked}]}}});
+    std::fs::write(&file, serde_json::to_vec(&body).unwrap()).unwrap();
+    let accounts = routing::Accounts::load(&file).unwrap().unwrap();
+    let none = std::collections::BTreeMap::new();
+    let picked = accounts.select("claude", "m", &Value::Null, &none, true, None);
+    assert_eq!(picked.is_ok(), ok == "1", "{picked:?}");
+    if let Ok((account, _)) = picked {
+        assert_eq!(account.id, "default");
+    }
+    if ok == "1" {
+        let claude_dir = repo("claude-implicit-default");
+        let work = claude_dir.join("work");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&work)
+            .unwrap();
+        let reg = claude_dir.join("provider-accounts.claude.json");
+        std::fs::write(
+            &reg,
+            serde_json::to_vec(
+                &json!({"schema":1,"provider":"claude","accounts":[{"id":"work","home":work}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let loaded = routing::Accounts::load(&claude_dir.join("provider-accounts.json"))
+            .unwrap()
+            .unwrap();
+        assert!(loaded.home("claude", "default").is_err());
+        assert!(
+            accounts
+                .select("claude", "m", &Value::Null, &none, false, Some("default"))
+                .is_err()
+        );
+        let dot_claude = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dot_claude)
+            .unwrap();
+        let (pinned_default, reason) = accounts
+            .select("claude", "m", &Value::Null, &none, false, Some("default"))
+            .unwrap();
+        assert_eq!(pinned_default.home, dot_claude.canonicalize().unwrap());
+        assert_eq!(reason, "requested account; default home");
+        let loaded = routing::Accounts::load(&claude_dir.join("provider-accounts.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.home("claude", "default").unwrap(),
+            dot_claude.canonicalize().unwrap()
+        );
+        let shared = claude_dir.join("provider-accounts.json");
+        std::fs::write(
+            &shared,
+            serde_json::to_vec(
+                &json!({"schema":1,"providers":{"codex":{"accounts":[{"id":"steal","home":dot_claude}]}}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let dup_home = routing::Accounts::load(&shared).unwrap_err();
+        assert!(
+            dup_home.message.contains("duplicate account home"),
+            "{dup_home}"
+        );
+        let _ = std::fs::remove_file(&shared);
+        std::fs::write(
+            &reg,
+            serde_json::to_vec(
+                &json!({"schema":1,"provider":"claude","accounts":[{"id":"default","home":work}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let dup_id = routing::Accounts::load(&shared).unwrap_err();
+        assert!(dup_id.message.contains("duplicate account id"), "{dup_id}");
+
+        let alt_reg = dir.join("registered-default-bad.json");
+        std::fs::write(
+            &alt_reg,
+            serde_json::to_vec(
+                &json!({"schema":1,"providers":{"claude":{"accounts":[{"id":"default","home":blocked}]}}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let alt_loaded = routing::Accounts::load(&alt_reg).unwrap().unwrap();
+        assert!(
+            alt_loaded
+                .select("claude", "m", &Value::Null, &none, false, Some("default"))
+                .is_err()
+        );
+        assert!(
+            alt_loaded
+                .select("claude", "m", &Value::Null, &none, true, None)
+                .is_err()
+        );
+
+        let stolen_reg = dir.join("stolen-default-home.json");
+        std::fs::write(
+            &stolen_reg,
+            serde_json::to_vec(&json!({
+                "schema": 1,
+                "providers": {
+                    "codex": {"accounts": [{"id": "steal", "home": dot_claude}]},
+                    "claude": {"accounts": [{"id": "blocked", "home": blocked}]}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let stolen = routing::Accounts::load(&stolen_reg).unwrap().unwrap();
+        assert!(
+            stolen
+                .select("claude", "m", &Value::Null, &none, false, Some("default"))
+                .is_err()
+        );
+
+        let active_claude = std::env::var_os("CLAUDE_CONFIG_DIR").unwrap();
+        let active_stolen_reg = dir.join("stolen-active-home.json");
+        std::fs::write(
+            &active_stolen_reg,
+            serde_json::to_vec(&json!({
+                "schema": 1,
+                "providers": {
+                    "codex": {"accounts": [{"id": "steal", "home": PathBuf::from(&active_claude)}]},
+                    "claude": {"accounts": [{"id": "blocked", "home": blocked}]}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let active_stolen = routing::Accounts::load(&active_stolen_reg)
+            .unwrap()
+            .unwrap();
+        assert!(
+            active_stolen
+                .select("claude", "m", &Value::Null, &none, true, None)
+                .is_err()
+        );
+
+        let omitted_reg = dir.join("stolen-omitted-provider.json");
+        std::fs::write(
+            &omitted_reg,
+            serde_json::to_vec(&json!({
+                "schema": 1,
+                "providers": {
+                    "codex": {"accounts": [{"id": "steal", "home": PathBuf::from(&active_claude)}]}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let omitted = routing::Accounts::load(&omitted_reg).unwrap().unwrap();
+        let policy = routing::Policy::bundled().unwrap();
+        let inputs = routing::RoutingInputs {
+            installed: Some(["claude".to_owned()].into()),
+            accounts: Some(omitted),
+            explicit_target: true,
+            preferred: Some("claude".into()),
+            ..Default::default()
+        };
+        assert!(
+            routing::allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err()
+        );
+    }
+}
+
 fn main() {
     if std::env::var_os("OMS_PANEL_CORE_FIXTURE").is_none() {
         let root = std::env::temp_dir().join(format!(
@@ -1194,6 +1614,8 @@ fn main() {
         ("live_reader_fence", live_reader_fence),
         ("empty_salvage_inventory", empty_salvage_inventory),
         ("restart_generations", restart_generations),
+        ("multi_provider_accounts", multi_provider_accounts),
+        ("zz_fallback_child", zz_fallback_child),
     ];
     let mut count = 0;
     for (name, run) in cases {

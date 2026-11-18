@@ -374,84 +374,138 @@ fn extension_configs(paths: &Paths) -> Vec<(&'static str, &'static str, PathBuf)
         ),
     ]
 }
-type DoctorSpecs = (Vec<(String, Value)>, Vec<String>);
-
-fn specs(paths: &Paths) -> Result<DoctorSpecs> {
-    let mut specs = Vec::new();
-    let mut unknown = Vec::new();
-    for (provider, scope, path) in extension_configs(paths) {
-        if !r::exists(&path) {
-            continue;
-        }
-        match r::value(&path) {
-            Ok(v) if v.is_object() => {
-                if let Some(servers) = v["mcpServers"].as_object() {
-                    for (name, spec) in servers {
-                        specs.push((format!("{provider}:{scope}:{name}"), spec.clone()));
+struct DoctorSpec {
+    key: String,
+    provider: String,
+    scope: String,
+    name: String,
+    spec: Value,
+}
+#[derive(Default)]
+struct DoctorSpecs {
+    servers: Vec<DoctorSpec>,
+    unknown: Vec<String>,
+    layers: Vec<Value>,
+}
+impl DoctorSpecs {
+    fn layer(&mut self, provider: &str, scope: &str, path: &Path, toml: bool) {
+        let state = match fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing",
+            Err(_) => "unknown",
+            Ok(_) => {
+                let value = if toml {
+                    crate::config::read_toml(path)
+                } else {
+                    r::value(path)
+                };
+                match value {
+                    Ok(value) if value.is_object() => {
+                        match value.get(if toml { "mcp_servers" } else { "mcpServers" }) {
+                            None => "parsed",
+                            Some(Value::Object(servers)) => {
+                                let mut state = "parsed";
+                                for (name, spec) in servers {
+                                    if spec.is_object() {
+                                        // Preserve the existing pin key spelling for plugins;
+                                        // use original names separately for collision identity.
+                                        let key_name = if scope.starts_with("plugin-") {
+                                            clean(name)
+                                        } else {
+                                            name.clone()
+                                        };
+                                        self.servers.push(DoctorSpec {
+                                            key: format!("{provider}:{scope}:{key_name}"),
+                                            provider: provider.into(),
+                                            scope: scope.into(),
+                                            name: name.clone(),
+                                            spec: spec.clone(),
+                                        });
+                                    } else {
+                                        state = "unknown";
+                                    }
+                                }
+                                state
+                            }
+                            Some(_) => "unknown",
+                        }
                     }
-                } else if !v["mcpServers"].is_null() {
-                    unknown.push(provider.into());
+                    _ => "unknown",
                 }
             }
-            _ => unknown.push(provider.into()),
+        };
+        self.layer_state(provider, scope, state);
+    }
+    fn layer_state(&mut self, provider: &str, scope: &str, state: &str) {
+        if state == "unknown" {
+            self.unknown.push(provider.into());
         }
+        self.layers.push(json!({"provider":provider,"scope":clean(scope),"status":state,"reason":match state {
+            "parsed" => "configuration parsed; runtime selection not checked",
+            "missing" => "file not found; runtime selection unknown",
+            _ => "configuration unsafe, unreadable, or malformed; declarations may be incomplete",
+        }}));
+    }
+    fn collisions(&self) -> Vec<Value> {
+        let mut groups = BTreeMap::<(&str, &str), Vec<&str>>::new();
+        for server in &self.servers {
+            groups
+                .entry((&server.provider, &server.name))
+                .or_default()
+                .push(&server.scope);
+        }
+        groups
+            .into_iter()
+            .filter_map(|((provider, name), mut scopes)| {
+                scopes.sort_unstable();
+                scopes.dedup();
+                (scopes.len() > 1).then(|| json!({
+                    "provider":provider,"name":clean(name),"scopes":scopes,
+                    "effective":"unknown","reason":"scope precedence and runtime selection not established"
+                }))
+            })
+            .collect()
+    }
+}
+fn specs(paths: &Paths) -> Result<DoctorSpecs> {
+    let mut inventory = DoctorSpecs::default();
+    for (provider, scope, path) in extension_configs(paths) {
+        inventory.layer(provider, scope, &path, false);
     }
     let plugins = paths.home.join(".gemini/config/plugins");
-    if plugins.is_dir() {
-        for entry in fs::read_dir(plugins)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let file = entry.path().join("mcp_config.json");
-            if !r::exists(&file) {
-                continue;
-            }
-            match r::value(&file) {
-                Ok(v) => {
-                    if let Some(servers) = v["mcpServers"].as_object() {
-                        for (name, spec) in servers {
-                            specs.push((
-                                format!(
-                                    "antigravity:plugin-{}:{}",
-                                    clean(&entry.file_name().to_string_lossy()),
-                                    clean(name)
-                                ),
-                                spec.clone(),
-                            ));
-                        }
-                    } else {
-                        unknown.push("antigravity".into());
-                    }
+    match fs::read_dir(&plugins) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    inventory.layer_state("antigravity", "plugins", "unknown");
+                    continue;
+                };
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => inventory.layer(
+                        "antigravity",
+                        &format!("plugin-{}", clean(&entry.file_name().to_string_lossy())),
+                        &entry.path().join("mcp_config.json"),
+                        false,
+                    ),
+                    Ok(_) => (),
+                    Err(_) => inventory.layer_state("antigravity", "plugins", "unknown"),
                 }
-                Err(_) => unknown.push("antigravity".into()),
             }
         }
-    }
-    let codex = paths.codex_config()?;
-    if r::exists(&codex) {
-        match crate::config::read_toml(&codex) {
-            Ok(v) => match v.get("mcp_servers") {
-                Some(Value::Object(servers)) => {
-                    for (name, spec) in servers {
-                        specs.push((format!("codex:user:{name}"), spec.clone()));
-                    }
-                }
-                None => (),
-                _ => unknown.push("codex".into()),
-            },
-            Err(_) => unknown.push("codex".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            inventory.layer_state("antigravity", "plugins", "missing");
         }
+        Err(_) => inventory.layer_state("antigravity", "plugins", "unknown"),
     }
-    for (key, spec) in &specs {
-        if !spec.is_object() {
-            unknown.push(key.split(':').next().unwrap_or("").into());
-        }
-    }
-    specs.retain(|(_, spec)| spec.is_object());
-    unknown.sort();
-    unknown.dedup();
-    Ok((specs, unknown))
+    inventory.layer("codex", "user", &paths.codex_config()?, true);
+    inventory.unknown.sort();
+    inventory.unknown.dedup();
+    inventory.layers.sort_by_key(|row| {
+        (
+            row["provider"].as_str().unwrap().to_owned(),
+            row["scope"].as_str().unwrap().to_owned(),
+        )
+    });
+    Ok(inventory)
 }
 fn safe_target(spec: &Value) -> String {
     if let Some(url) = spec["url"]
@@ -578,10 +632,14 @@ fn extensions(
     if options.has("--pin") {
         r::child_guard()?;
     }
-    let (specs, unknown) = specs(paths)?;
+    let inventory = specs(paths)?;
+    let specs = &inventory.servers;
+    let unknown = &inventory.unknown;
+    let collisions = inventory.collisions();
     let mut rows = Vec::new();
     let mut current = serde_json::Map::new();
-    for (key, spec) in &specs {
+    for server in specs {
+        let (key, spec) = (&server.key, &server.spec);
         let mut env_names = spec["env"]
             .as_object()
             .map(|m| m.keys().cloned().collect::<Vec<_>>())
@@ -590,26 +648,26 @@ fn extensions(
         let material = json!({"type":spec.get("type").or_else(||spec.get("transport")),"command":spec.get("command"),"args":spec.get("args"),"url":spec.get("url").or_else(||spec.get("httpUrl")).or_else(||spec.get("serverUrl")),"env_names":env_names});
         let compact = r::canonical_ascii(&material)?;
         current.insert(key.clone(), json!(r::hash(&compact)));
-        rows.push(json!({"server":clean(key),"transport":if spec["command"].is_string(){"stdio"}else{"http"},"target":safe_target(spec),"env_names":env_names.len(),"disabled":spec["disabled"]==true || spec["enabled"]==false,"risks":risks(spec)}));
+        rows.push(json!({"server":clean(key),"transport":if spec["command"].is_string(){"stdio"}else{"http"},"target":safe_target(spec),"env_names":env_names.len(),"disabled":spec["disabled"]==true || spec["enabled"]==false,"configuration":if spec["disabled"]==true || spec["enabled"]==false{"disabled"}else{"configured"},"effective":"unknown","effective_reason":if unknown.iter().any(|provider| key.starts_with(&format!("{provider}:"))){"provider configuration incomplete"}else{"scope precedence and runtime selection not established"},"runtime":"unknown","risks":risks(spec)}));
     }
     let plugins = plugin_inventory(paths)?;
     if !pins {
         return r::json(
-            &json!({"schema":1,"kind":"oms-doctor-extensions","servers":rows,"plugins":plugins,"unknown":unknown}),
+            &json!({"schema":1,"kind":"oms-doctor-extensions","servers":rows,"plugins":plugins,"unknown":unknown,"config_layers":inventory.layers,"collisions":collisions}),
         );
     }
     let probed = if let Some(name) = options.get("--probe-tools") {
         let selected = specs
             .iter()
-            .filter(|(key, _)| key == name || key.splitn(3, ':').nth(2) == Some(name))
+            .filter(|server| server.key == name || server.name == name)
             .collect::<Vec<_>>();
         if selected.len() != 1 {
             return r::fail("--probe-tools must name exactly one configured server");
         }
-        let (key, spec) = selected[0];
+        let server = selected[0];
         Some((
-            key.clone(),
-            crate::mcp_probe::cached(spec, &paths.cwd, flag)?,
+            server.key.clone(),
+            crate::mcp_probe::cached(&server.spec, &paths.cwd, flag)?,
         ))
     } else {
         None
@@ -682,7 +740,7 @@ fn extensions(
         json!({"server":key,"tools":now.len(),"baseline":if old.is_some(){"recorded"}else{"none"},"added":names("new"),"changed":names("changed"),"removed":old.map(|o| o.keys().filter(|k| !now.contains_key(*k)).map(|k| clean(k)).collect::<Vec<_>>()).unwrap_or_default()})
     });
     r::json(
-        &json!({"schema":1,"kind":"oms-mcp-pins","servers":rows,"new":added,"changed":changed,"removed":removed,"unknown":unknown,"pinned":options.has("--pin"),"probe":probe}),
+        &json!({"schema":1,"kind":"oms-mcp-pins","servers":rows,"new":added,"changed":changed,"removed":removed,"unknown":unknown,"config_layers":inventory.layers,"collisions":collisions,"pinned":options.has("--pin"),"probe":probe}),
     )
 }
 fn residue(paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
@@ -802,6 +860,255 @@ fn tool_lock(paths: &Paths) -> Result<Vec<Value>> {
         "tool lock schema, HTTPS URLs and payload digests validated",
     )])
 }
+/// Read-only report of registered provider accounts: home safety and
+/// ownership-receipt health. Never mutates and never contacts a provider.
+fn accounts(paths: &Paths) -> Vec<Value> {
+    use std::os::unix::fs::MetadataExt;
+    const SECTION: &str = "provider accounts";
+    const LIMIT: usize = 64;
+    let load = |name: &str| -> Option<std::result::Result<Value, ()>> {
+        let path = paths.config.join(name);
+        r::exists(&path).then(|| r::value(&path).map_err(|_| ()))
+    };
+    let mut rows = Vec::new();
+    let reg_opt = load("provider-accounts.json");
+    let claude_registry = load("provider-accounts.claude.json");
+    let receipt_meta = [
+        ("codex", "codex-account-links.json", "link receipt"),
+        ("pi", "pi-account-links.json", "link receipt"),
+        ("claude", "provider-account-effects.json", "effects receipt"),
+    ];
+    let raw_receipts = receipt_meta.map(|(_, name, _)| load(name));
+    if reg_opt.is_none() && claude_registry.is_none() && raw_receipts.iter().all(Option::is_none) {
+        return rows;
+    }
+    let registry = match reg_opt {
+        None => None,
+        Some(Ok(v)) if v["schema"] == 1 && v["providers"].is_object() => Some(v),
+        Some(_) => {
+            return vec![finding(
+                SECTION,
+                "warn",
+                "provider-accounts.json is unreadable",
+            )];
+        }
+    };
+    if let Some(result) = &claude_registry
+        && !matches!(result, Ok(doc) if doc["schema"] == 1 && doc["provider"] == "claude" && doc["accounts"].is_array())
+    {
+        rows.push(finding(
+            SECTION,
+            "warn",
+            "Claude account registry unreadable or invalid",
+        ));
+    }
+    for (index, receipt) in raw_receipts.iter().enumerate() {
+        let (_, file_name, _) = receipt_meta[index];
+        match receipt {
+            None => (),
+            Some(Err(())) => {
+                rows.push(finding(
+                    SECTION,
+                    "warn",
+                    format!("{file_name} receipt unreadable"),
+                ));
+            }
+            Some(Ok(doc)) => {
+                let valid = if index == 2 {
+                    doc["schema"] == 1 && doc["accounts"].is_array()
+                } else {
+                    doc.is_array()
+                };
+                if !valid {
+                    rows.push(finding(SECTION, "warn", "account receipt schema invalid"));
+                }
+            }
+        }
+    }
+    let receipts = raw_receipts
+        .iter()
+        .map(|entry| entry.as_ref().map(|res| res.as_ref().ok().cloned()))
+        .collect::<Vec<_>>();
+    let claude_fallback = match &claude_registry {
+        Some(Ok(doc)) if doc["schema"] == 1 && doc["provider"] == "claude" => {
+            doc["accounts"].as_array()
+        }
+        _ => None,
+    };
+    let mut visited: Vec<(&'static str, Value, Value)> = Vec::new();
+    let mut seen = 0;
+    for provider in ["codex", "claude", "pi"] {
+        let Some(list) = registry
+            .as_ref()
+            .and_then(|reg| reg["providers"][provider]["accounts"].as_array())
+            .or_else(|| (provider == "claude").then_some(claude_fallback).flatten())
+        else {
+            continue;
+        };
+        let (index, label) = match provider {
+            "codex" => (0, "link receipt"),
+            "pi" => (1, "link receipt"),
+            _ => (2, "effects receipt"),
+        };
+        for account in list.iter().filter(|a| a["id"] != "default") {
+            seen += 1;
+            if seen > LIMIT {
+                rows.push(finding(SECTION, "note", "account report truncated"));
+                return rows;
+            }
+            visited.push((provider, account["id"].clone(), account["home"].clone()));
+            let id = clean(account["id"].as_str().unwrap_or("?"));
+            let home = account["home"].as_str().map(PathBuf::from);
+            let mut problems = Vec::new();
+            match home.as_ref().map(fs::symlink_metadata) {
+                Some(Ok(m)) if m.is_dir() => {
+                    if m.uid() != rustix::process::geteuid().as_raw() {
+                        problems.push("home is not user-owned".to_owned());
+                    }
+                    if m.mode() & 0o022 != 0 {
+                        problems.push(format!(
+                            "home mode {:o} is group/other-writable",
+                            m.mode() & 0o777
+                        ));
+                    }
+                }
+                Some(Ok(_)) => problems.push("home is not a directory".into()),
+                _ => problems.push("home is missing".into()),
+            }
+            let row = match &receipts[index] {
+                None => None,
+                Some(None) => {
+                    problems.push(format!("{label} unreadable"));
+                    None
+                }
+                Some(Some(doc)) => doc
+                    .as_array()
+                    .or_else(|| doc["accounts"].as_array())
+                    .and_then(|rows| {
+                        rows.iter()
+                            .find(|r| r["id"] == account["id"] && r["home"] == account["home"])
+                    }),
+            };
+            match row {
+                None if !problems.iter().any(|p| p.ends_with("unreadable")) => {
+                    problems.push(format!("no {label}"));
+                }
+                None => (),
+                Some(row) => {
+                    let expected = if provider == "claude" {
+                        &row["identity"]
+                    } else {
+                        row
+                    };
+                    if let Some(Ok(meta)) = home.as_ref().map(fs::symlink_metadata)
+                        && (expected["st_dev"].as_u64() != Some(meta.dev())
+                            || expected["st_ino"].as_u64() != Some(meta.ino()))
+                    {
+                        problems.push("home identity changed".into());
+                    }
+                    if provider == "claude"
+                        && !matches!(&claude_registry, Some(Ok(doc)) if doc["schema"] == 1 && doc["provider"] == "claude" && doc["accounts"].as_array().is_some_and(|entries| entries.iter().any(|entry| entry["id"] == account["id"] && entry["home"] == account["home"])))
+                    {
+                        problems.push("Claude registry entry missing or invalid".into());
+                    }
+                    let allowed_links: &[&str] = match provider {
+                        "claude" => &["CLAUDE.md", "skills", "output-styles/oms-korean.md"],
+                        "pi" => &["AGENTS.md", "skills"],
+                        _ => &[
+                            "AGENTS.md",
+                            "config.toml",
+                            "hooks.json",
+                            ".hook-trust",
+                            "plugins",
+                            "rules",
+                            "skills",
+                        ],
+                    };
+                    match row["links"].as_object() {
+                        None => problems.push("receipt links missing or invalid".into()),
+                        Some(links) => {
+                            let broken = links
+                                .iter()
+                                .filter(|(name, rec)| {
+                                    let target = if provider == "claude" {
+                                        rec["target"].as_str()
+                                    } else {
+                                        rec.as_str()
+                                    };
+                                    let path = allowed_links
+                                        .contains(&name.as_str())
+                                        .then(|| home.as_ref().map(|h| h.join(name)))
+                                        .flatten();
+                                    !path.zip(target).is_some_and(|(p, t)| {
+                                        fs::read_link(&p).is_ok_and(|actual| actual == Path::new(t))
+                                            && (provider != "claude"
+                                                || fs::symlink_metadata(&p).is_ok_and(|m| {
+                                                    rec["identity"]["st_uid"].as_u64()
+                                                        == Some(m.uid() as u64)
+                                                        && rec["identity"]["st_dev"].as_u64()
+                                                            == Some(m.dev())
+                                                        && rec["identity"]["st_ino"].as_u64()
+                                                            == Some(m.ino())
+                                                }))
+                                    })
+                                })
+                                .count();
+                            if broken > 0 {
+                                problems.push(format!("{broken} owned link(s) missing or changed"));
+                            }
+                        }
+                    }
+                }
+            }
+            rows.push(if problems.is_empty() {
+                finding(
+                    SECTION,
+                    "ok",
+                    format!("{provider}:{id} home private; {label} ok"),
+                )
+            } else {
+                finding(
+                    SECTION,
+                    "warn",
+                    format!("{provider}:{id} {}", clean(&problems.join("; "))),
+                )
+            });
+        }
+    }
+    for (index, receipt) in receipts.iter().enumerate() {
+        let (provider, _, label) = receipt_meta[index];
+        let Some(Some(doc)) = receipt else {
+            continue;
+        };
+        let Some(list) = (if index == 2 {
+            doc["accounts"].as_array()
+        } else {
+            doc.as_array()
+        }) else {
+            continue;
+        };
+        for row in list.iter().filter(|r| r["id"] != "default") {
+            let already_reported = visited
+                .iter()
+                .any(|(p, id, home)| *p == provider && *id == row["id"] && *home == row["home"]);
+            if already_reported {
+                continue;
+            }
+            seen += 1;
+            if seen > LIMIT {
+                rows.push(finding(SECTION, "note", "account report truncated"));
+                return rows;
+            }
+            let id = clean(row["id"].as_str().unwrap_or("?"));
+            rows.push(finding(
+                SECTION,
+                "warn",
+                format!("{provider}:{id} orphaned {label} without registry entry"),
+            ));
+        }
+    }
+    rows
+}
 fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     match paths.load() {
@@ -909,6 +1216,7 @@ fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> R
             ),
         ));
     }
+    rows.extend(accounts(paths));
     match crate::install::skill_sources(paths) {
         Ok(s) => rows.push(finding(
             "skills",
@@ -1286,7 +1594,9 @@ fn contract(
             format!("unadopted hook no-op: {name}"),
         ));
     }
-    let (servers, unknown) = specs(paths)?;
+    let inventory = specs(paths)?;
+    let servers = &inventory.servers;
+    let unknown = &inventory.unknown;
     let mut registrations = std::collections::BTreeSet::new();
     for (provider, binary) in [
         ("claude", "claude"),
@@ -1295,9 +1605,7 @@ fn contract(
     ] {
         let matching = servers
             .iter()
-            .filter(|(name, _)| {
-                name.starts_with(&format!("{provider}:")) && name.ends_with(":oh-my-setting")
-            })
+            .filter(|server| server.provider == provider && server.name == "oh-my-setting")
             .collect::<Vec<_>>();
         if matching.is_empty() && r::find(binary, &paths.cwd).is_some() {
             rows.push(finding(
@@ -1306,7 +1614,8 @@ fn contract(
                 format!("{provider}: managed MCP registration missing"),
             ));
         }
-        for (_, spec) in matching {
+        for server in matching {
+            let spec = &server.spec;
             registrations.insert(r::canonical_ascii(
                 &json!({"command":spec["command"],"args":spec["args"]}),
             )?);

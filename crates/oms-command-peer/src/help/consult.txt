@@ -15,13 +15,16 @@ Options:
   --diff               Attach sanitized git status and diff.
   --artifact-dir PATH  Answer artifacts. Default: REPO/.oms/artifacts/consult.
   --to TARGET          Ask this target instead of the automatic pick. Repeatable.
-                       TARGET is PROVIDER or PROVIDER:model=NAME for an exact
-                       model. Repeating a provider with different models is
-                       allowed and each answer is recorded separately.
+                       TARGET is PROVIDER, optionally with :model=NAME for an
+                       exact model and :account=ID for an account.
+                       Repeating a provider with different models or accounts
+                       is allowed; each answer is recorded separately.
   --all                Ask every installed peer (not the caller) in parallel
                        and record all answers in the thread.
   --model MODEL        Exact model; requires one plain, explicit --to PROVIDER.
   --fallback-model M   One-shot capacity fallback; same target requirement.
+  --account ID         Run on a registered codex, claude or pi account (also
+                       PROVIDER:account=ID); requires exactly one provider.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --thread ID          Use this thread. Default: the current one, created on
                        first use so a series of consults stays one conversation.

@@ -115,6 +115,8 @@ fn pin(s: &str) -> Option<(&str, &str, &str)> {
 }
 /// Parses canonical logs, discarding interrupted link records. Byte spans retain
 /// untouched source bytes for explicit redaction, including non-UTF-8 neighbors.
+/// Timestamp headings delimit metadata-free legacy records; metadata-framed
+/// bodies extend to the next reserved metadata marker, even across such headings.
 pub fn parse(raw: &[u8], source: &str) -> Vec<Entry> {
     let ranges = line_ranges(raw);
     let decoded: Vec<_> = ranges
@@ -197,7 +199,10 @@ pub fn parse(raw: &[u8], source: &str) -> Vec<Entry> {
             continue;
         }
         if let Some((when, agent)) = header(l)
-            && (current.is_none() || !pending.is_empty() || iso_header_re.is_match(when))
+            && (current.is_none()
+                || !pending.is_empty()
+                || (iso_header_re.is_match(when)
+                    && current.as_ref().is_some_and(|(_, _, _, m, _)| m.is_empty())))
         {
             finish(&mut out, &mut current, i, &offsets);
             current = Some((

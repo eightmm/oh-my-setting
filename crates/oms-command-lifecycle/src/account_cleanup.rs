@@ -92,20 +92,12 @@ pub(crate) fn plan(paths: &Paths) -> Result<Plan> {
         links: Vec::new(),
         writes: Vec::new(),
     };
-    let codex = paths.config.join("codex-account-links.json");
-    let links = load(&codex, json!([]))?;
-    let mut retained = Vec::new();
-    for row in links
-        .as_array()
-        .ok_or_else(|| r::Error(2, "invalid Codex account ownership receipt".into()))?
-    {
-        let directory = home(row, row)?;
-        let entries = row["links"]
-            .as_object()
-            .ok_or_else(|| r::Error(2, "invalid Codex account links".into()))?;
-        let mut keep = row.clone();
-        for (name, target) in entries {
-            if ![
+    let mut cleaned = Vec::new();
+    for (file, provider, allowed, label) in [
+        (
+            "codex-account-links.json",
+            "codex",
+            &[
                 "AGENTS.md",
                 "skills",
                 ".hook-trust",
@@ -113,46 +105,80 @@ pub(crate) fn plan(paths: &Paths) -> Result<Plan> {
                 "rules",
                 "hooks.json",
                 "plugins",
-            ]
-            .contains(&name.as_str())
-            {
-                return r::fail("unrecognized account link name");
-            }
-            let target = PathBuf::from(
-                target
-                    .as_str()
-                    .ok_or_else(|| r::Error(2, "invalid account link target".into()))?,
-            );
-            if !target.is_absolute() {
-                return r::fail("invalid account link target");
-            }
-            let path = directory.join(name);
-            if exact_link(&path, &target) {
-                let main = paths.codex_home()?.join(name);
-                if r::physical(&target)? == r::physical(&main)?
-                    || r::physical(&target)?.starts_with(&paths.source)
-                {
-                    plan.links.push(Link {
-                        path: path.clone(),
-                        target,
-                        parent: identity(&directory)?,
-                        entry: identity(&path)?,
-                    });
+            ][..],
+            "Codex",
+        ),
+        (
+            "pi-account-links.json",
+            "pi",
+            &["AGENTS.md", "skills"][..],
+            "Pi",
+        ),
+    ] {
+        let receipt = paths.config.join(file);
+        let links = load(&receipt, json!([]))?;
+        let mut retained = Vec::new();
+        let main_home = if links.as_array().is_some_and(|rows| !rows.is_empty()) {
+            Some(if provider == "codex" {
+                paths.codex_home()?
+            } else {
+                paths.pi_home()?
+            })
+        } else {
+            None
+        };
+        for row in links
+            .as_array()
+            .ok_or_else(|| r::Error(2, format!("invalid {label} account ownership receipt")))?
+        {
+            let directory = home(row, row)?;
+            cleaned.push((provider.to_owned(), row["id"].clone(), row["home"].clone()));
+            let entries = row["links"]
+                .as_object()
+                .ok_or_else(|| r::Error(2, format!("invalid {label} account links")))?;
+            let mut keep = row.clone();
+            for (name, target) in entries {
+                if !allowed.contains(&name.as_str()) {
+                    return r::fail("unrecognized account link name");
+                }
+                let target = PathBuf::from(
+                    target
+                        .as_str()
+                        .ok_or_else(|| r::Error(2, "invalid account link target".into()))?,
+                );
+                if !target.is_absolute() {
+                    return r::fail("invalid account link target");
+                }
+                let path = directory.join(name);
+                if exact_link(&path, &target) {
+                    let main = main_home.as_ref().unwrap().join(name);
+                    if r::physical(&target)? == r::physical(&main)?
+                        || r::physical(&target)?.starts_with(&paths.source)
+                    {
+                        plan.links.push(Link {
+                            path: path.clone(),
+                            target,
+                            parent: identity(&directory)?,
+                            entry: identity(&path)?,
+                        });
+                        keep["links"].as_object_mut().unwrap().remove(name);
+                    }
+                } else {
                     keep["links"].as_object_mut().unwrap().remove(name);
                 }
-            } else {
-                keep["links"].as_object_mut().unwrap().remove(name);
+            }
+            if !keep["links"].as_object().unwrap().is_empty() {
+                retained.push(keep);
             }
         }
-        if !keep["links"].as_object().unwrap().is_empty() {
-            retained.push(keep);
+        if !retained.is_empty() {
+            return r::fail(format!(
+                "{label} account cleanup incomplete; outside targets retained"
+            ));
         }
-    }
-    if !retained.is_empty() {
-        return r::fail("Codex account cleanup incomplete; outside targets retained");
-    }
-    if r::exists(&codex) {
-        plan.writes.push((codex, json!([])));
+        if r::exists(&receipt) {
+            plan.writes.push((receipt, json!([])));
+        }
     }
     let effects_file = paths.config.join("provider-account-effects.json");
     let registry_file = paths.config.join("provider-accounts.claude.json");
@@ -167,7 +193,7 @@ pub(crate) fn plan(paths: &Paths) -> Result<Plan> {
     let rows = effects["accounts"]
         .as_array()
         .ok_or_else(|| r::Error(2, "invalid Claude account effects".into()))?;
-    let legacy = load(
+    let mut legacy = load(
         &paths.config.join("provider-accounts.json"),
         json!({"schema":1,"providers":{}}),
     )?;
@@ -247,6 +273,28 @@ pub(crate) fn plan(paths: &Paths) -> Result<Plan> {
                 });
             }
         }
+    }
+    for row in rows {
+        cleaned.push(("claude".to_owned(), row["id"].clone(), row["home"].clone()));
+    }
+    if let Some(providers) = legacy["providers"].as_object_mut() {
+        for (provider, id, home) in cleaned {
+            if let Some(accounts) = providers
+                .get_mut(&provider)
+                .and_then(|v| v["accounts"].as_array_mut())
+            {
+                accounts.retain(|entry| {
+                    entry["id"] == "default" || entry["id"] != id || entry["home"] != home
+                });
+                if accounts.iter().all(|entry| entry["id"] == "default") {
+                    providers.remove(&provider);
+                }
+            }
+        }
+    }
+    let legacy_file = paths.config.join("provider-accounts.json");
+    if r::exists(&legacy_file) {
+        plan.writes.push((legacy_file, legacy));
     }
     registry["accounts"] = json!([]);
     if r::exists(&registry_file) {

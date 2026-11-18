@@ -160,6 +160,25 @@ Antigravity and Pi transcripts are not read. The transcript is capped at
 256 MiB and opened without following a final symlink. A marked harness child
 may read the ledger but not a transcript.
 
+The same report includes `async_context`: bytes observed in typed Claude
+`attachment.async_hook_response` records whose `hookSpecificOutput` contains
+nonempty `additionalContext`. Ordinary messages that mention those names are
+not observations. `recorded_bytes` includes every matching row;
+`identified_bytes` counts each unambiguous recorded session/UUID once (both
+identities must be present), with
+separate duplicate, conflicting, missing-identity and identity-limit counts.
+At most 4096 identities are retained during this read. Neither attachment text,
+hook names nor session/UUID values are returned or stored.
+
+This distinguishes provider-recorded asynchronous context from hook stdout in
+`--injections`. It does not join the two sources, attribute a response to OMS,
+or establish that the model used it: `producer_attribution` and `model_use`
+remain `unknown`. `not_observed` means the selected transcript contained no
+supported nonempty attachment; synchronous hooks, unrecorded delivery and
+other provider formats remain outside this measurement. The projection is
+read-only and is recomputed from the bounded input, so repeated inspection
+does not append cumulative counts to the hook ledger.
+
 `--session TRANSCRIPT.jsonl --timeline` reads the same transcript as an
 ordered list instead: one `oms-context-timeline` step per tool call with the
 tool name, the recorded gap between the call row and its result row

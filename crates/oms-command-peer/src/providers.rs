@@ -8,6 +8,8 @@ use crate::{
     process::{Completed, Invocation},
     storage, text,
 };
+use sha2::{Digest, Sha256};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
     collections::BTreeSet,
@@ -21,6 +23,7 @@ use std::{
 pub struct Target {
     pub provider: String,
     pub model: String,
+    pub account: String,
     pub optional: bool,
 }
 impl Target {
@@ -28,16 +31,55 @@ impl Target {
         let (raw, optional) = raw
             .strip_suffix(":optional")
             .map_or((raw, false), |s| (s, true));
-        let (provider, model) = raw.split_once(":model=").unwrap_or((raw, ""));
+        let (provider, rest) = match raw.find(':') {
+            Some(at) => (&raw[..at], &raw[at..]),
+            None => (raw, ""),
+        };
         let provider = normalize(provider)?;
+        let (mut model, mut account) = ("", "");
+        let mut seen_model = false;
+        // `:model=` may contain `:`, so it owns the text up to a later `:account=`.
+        let mut rest = rest;
+        while !rest.is_empty() {
+            if let Some(tail) = rest.strip_prefix(":account=") {
+                if !account.is_empty() {
+                    return fail("duplicate account selector");
+                }
+                let end = tail.find(":model=").unwrap_or(tail.len());
+                account = &tail[..end];
+                account_id(account)?;
+                rest = &tail[end..];
+            } else if let Some(tail) = rest.strip_prefix(":model=") {
+                if seen_model {
+                    return fail("duplicate model selector");
+                }
+                seen_model = true;
+                let end = tail.find(":account=").unwrap_or(tail.len());
+                model = &tail[..end];
+                if model.is_empty() || model.contains(":model=") {
+                    return fail("invalid model selector");
+                }
+                rest = &tail[end..];
+            } else {
+                return fail("unsupported provider target suffix");
+            }
+        }
         if !model.is_empty() {
             model_name(model)?;
         }
         Ok(Self {
             provider,
             model: model.into(),
+            account: account.into(),
             optional,
         })
+    }
+}
+pub fn account_id(value: &str) -> Result<()> {
+    if cached_regex!(r"\A[a-z0-9][a-z0-9_-]{0,63}\z").is_match(value) {
+        Ok(())
+    } else {
+        fail("invalid provider account id")
     }
 }
 pub fn normalize(raw: &str) -> Result<String> {
@@ -193,6 +235,10 @@ pub struct Route {
     pub model: String,
     pub effort: String,
     pub explicit: bool,
+    /// Bound provider account id; empty until pinned or bound.
+    pub account: String,
+    /// True only when the caller asked for the account (`--account`/`:account=`).
+    pub account_pinned: bool,
 }
 pub(crate) fn route(
     context: &Context<'_>,
@@ -257,6 +303,9 @@ fn route_with_source(
         }
     }
     model_name(&selected)?;
+    if !target.account.is_empty() && isolated(&target.provider).is_none() {
+        return fail("provider account isolation is unproved");
+    }
     if target.provider == "claude"
         && !resolved.is_empty()
         && !matches!(resolved.as_str(), "low" | "medium" | "high" | "max")
@@ -268,6 +317,8 @@ fn route_with_source(
         model: selected,
         effort: resolved,
         explicit,
+        account: target.account.clone(),
+        account_pinned: !target.account.is_empty(),
     })
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -292,6 +343,7 @@ fn penalty(h: Option<&SeatHealth>, now: u64) -> u64 {
 
 #[derive(Clone, Debug)]
 pub struct Account {
+    pub provider: String,
     pub id: String,
     pub home: PathBuf,
     pub used: Option<f64>,
@@ -299,22 +351,17 @@ pub struct Account {
     pub usable: bool,
     pub models: Option<BTreeSet<String>>,
 }
-pub fn select_account(
-    accounts: &[Account],
-    spread: bool,
-    explicit: bool,
-    model: &str,
-) -> Option<Account> {
-    select_account_adaptive(
-        accounts,
-        spread,
-        explicit,
-        model,
-        &std::collections::BTreeMap::new(),
-        0,
-    )
+/// Health/spread key: `provider:id`, or the bare provider when no account is bound.
+pub fn seat_key(provider: &str, account: &str) -> String {
+    if account.is_empty() {
+        provider.into()
+    } else {
+        format!("{provider}:{account}")
+    }
 }
 
+/// Ranks eligible accounts by `(cooling down, penalty, 10% quota bucket, running
+/// count when `spread`, registry order)`. `explicit` waives the weekly-quota cap.
 pub fn select_account_adaptive(
     accounts: &[Account],
     spread: bool,
@@ -327,48 +374,19 @@ pub fn select_account_adaptive(
         .iter()
         .filter(|a| {
             a.usable
-                && a.used.is_none_or(|v| v < 90.0)
+                && (explicit || a.used.is_none_or(|v| v < 90.0))
                 && (model == "provider-default"
                     || a.models.as_ref().is_none_or(|m| m.contains(model)))
         })
         .collect::<Vec<_>>();
-    eligible.sort_by(|a, b| {
-        let ha = health.get(&a.id);
-        let hb = health.get(&b.id);
-        let cool_a = ha.is_some_and(|h| h.cooldown_until > now);
-        let cool_b = hb.is_some_and(|h| h.cooldown_until > now);
-        let pen_a = penalty(ha, now);
-        let pen_b = penalty(hb, now);
-        let ua = a.used.unwrap_or(100.0);
-        let ub = b.used.unwrap_or(100.0);
-        cool_a
-            .cmp(&cool_b)
-            .then_with(|| {
-                if spread && !explicit {
-                    a.running.cmp(&b.running)
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .then_with(|| pen_a.cmp(&pen_b))
-            .then_with(|| ua.total_cmp(&ub))
-            .then_with(|| {
-                let la = ha.map_or(u64::MAX, |h| {
-                    if h.latency_ms == 0 {
-                        u64::MAX
-                    } else {
-                        h.latency_ms
-                    }
-                });
-                let lb = hb.map_or(u64::MAX, |h| {
-                    if h.latency_ms == 0 {
-                        u64::MAX
-                    } else {
-                        h.latency_ms
-                    }
-                });
-                la.cmp(&lb)
-            })
+    eligible.sort_by_key(|a| {
+        let h = health.get(&seat_key(&a.provider, &a.id));
+        (
+            h.is_some_and(|h| h.cooldown_until > now),
+            penalty(h, now),
+            a.used.map_or(10, |u| (u.clamp(0.0, 100.0) / 10.0) as u64),
+            if spread { a.running } else { 0 },
+        )
     });
     eligible.first().map(|a| (*a).clone())
 }
@@ -439,6 +457,7 @@ fn record_seat_health(
     }
     let rows = map
         .into_iter()
+        .filter(|(k, _)| k.contains(':') || builtin_binary(k).is_some())
         .map(|(k, h)| {
             (
                 k,
@@ -541,32 +560,74 @@ fn quota(home: &Path) -> Option<f64> {
     }
     None
 }
-type AccountEnv = (Vec<(OsString, OsString)>, Option<String>);
+/// A provider whose per-account home is selected by one environment variable and
+/// whose state stays inside that home. Anything else is refused as unproved.
+struct Isolated {
+    name: &'static str,
+    env: &'static str,
+    home_sub: &'static str,
+    quota: Option<fn(&Path) -> Option<f64>>,
+}
+const ISOLATED: [Isolated; 3] = [
+    Isolated {
+        name: "codex",
+        env: "CODEX_HOME",
+        home_sub: ".codex",
+        quota: Some(quota),
+    },
+    Isolated {
+        name: "claude",
+        env: "CLAUDE_CONFIG_DIR",
+        home_sub: ".claude",
+        quota: None,
+    },
+    Isolated {
+        name: "pi",
+        env: "PI_CODING_AGENT_DIR",
+        home_sub: ".pi/agent",
+        quota: None,
+    },
+];
+fn isolated(provider: &str) -> Option<&'static Isolated> {
+    ISOLATED.iter().find(|i| i.name == provider)
+}
+const UNPROVED: &str = "provider account isolation is unproved";
+const CLAUDE_CREDENTIAL_ENV: [&str; 3] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+];
 
-fn account_environment(
-    route: &Route,
-    excluded: &BTreeSet<String>,
-    repo: &Path,
-) -> Result<AccountEnv> {
-    if route.provider != "codex" || std::env::var_os("OMS_RESUME_SESSION").is_some() {
-        return Ok((Vec::new(), None));
-    }
-    let home = std::env::var_os("HOME")
+#[derive(Clone, Debug)]
+pub(crate) struct Entry {
+    pub id: String,
+    pub home: PathBuf,
+}
+pub(crate) struct ProviderAccounts {
+    pub spread: bool,
+    pub entries: Vec<Entry>,
+}
+type Registry = std::collections::BTreeMap<String, ProviderAccounts>;
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| Error::new(2, "account home is unavailable"))?;
-    if let Some(current) = std::env::var_os("CODEX_HOME")
-        && PathBuf::from(current).canonicalize().ok() != home.join(".codex").canonicalize().ok()
-    {
-        return Ok((Vec::new(), None));
-    }
-    let root = std::env::var_os("XDG_CONFIG_HOME")
+        .ok_or_else(|| Error::new(2, "account home is unavailable"))
+}
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_owned())
+}
+fn config_dir(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| home.join(".config"));
-    let path = root.join("oh-my-setting/provider-accounts.json");
-    let bytes = match storage::file(&path) {
+        .unwrap_or_else(|| home.join(".config"))
+        .join("oh-my-setting")
+}
+fn read_config(path: &Path) -> Result<Option<(V, Vec<u8>)>> {
+    let bytes = match storage::file(path) {
         Ok(bytes) => bytes,
-        Err(_) if !path.exists() => return Ok((Vec::new(), None)),
+        Err(_) if !path.exists() => return Ok(None),
         Err(e) => return Err(e),
     };
     let parsed = oms_context::parse_json(&bytes)
@@ -574,40 +635,16 @@ fn account_environment(
     if !unique_keys(&parsed) {
         return fail("duplicate provider accounts configuration key");
     }
-    let config = V::parse(&bytes)?;
-    if !keys_are(&config, &["schema", "providers"])
-        || !keys_are(config.get("providers"), &["codex"])
-    {
-        return fail("unknown or unsupported provider accounts configuration keys");
-    }
-    if config.get("schema") != &1usize.into() {
-        return fail("unsupported provider accounts schema");
-    }
-    let settings = config.get("providers").get("codex");
-    if matches!(settings, V::Null) {
-        return Ok((Vec::new(), None));
-    }
-    if !keys_are(settings, &["policy", "accounts"]) {
-        return fail("unknown account policy keys");
-    }
-    let policy = text(settings, "policy");
-    if !["", "ordered", "spread"].contains(&policy) {
-        return fail("unsupported provider accounts policy");
-    }
-    let entries = settings.get("accounts").array();
-    if entries.is_empty() {
-        return fail("provider accounts must be a non-empty list");
-    }
-    let running = if policy == "spread" && !route.explicit {
-        running_accounts(repo)?
-    } else {
-        std::collections::BTreeMap::new()
-    };
-    let mut accounts = Vec::new();
-    let mut ids = BTreeSet::new();
-    let mut homes = BTreeSet::new();
+    Ok(Some((V::parse(&bytes)?, bytes)))
+}
+fn parse_entries(
+    settings: &V,
+    homes: &mut BTreeSet<PathBuf>,
+    entries: &mut Vec<Entry>,
+) -> Result<()> {
     let id_re = cached_regex!(r"\A[a-z0-9][a-z0-9_-]{0,63}\z");
-    for entry in entries {
+    let mut ids: BTreeSet<String> = entries.iter().map(|e| e.id.clone()).collect();
+    for entry in settings.get("accounts").array() {
         if !keys_are(entry, &["id", "home"]) || !entry.has("id") || !entry.has("home") {
             return fail("unknown or missing provider account fields");
         }
@@ -616,56 +653,371 @@ fn account_environment(
         if !id_re.is_match(ident) || !raw.is_absolute() {
             return fail("invalid provider account id or home");
         }
-        let location = raw.canonicalize().unwrap_or_else(|_| raw.to_owned());
+        let location = canonical(raw);
         if !ids.insert(ident.to_owned()) || !homes.insert(location.clone()) {
             return fail("duplicate provider account id or canonical home");
         }
-        let usable = std::fs::metadata(&location).ok().is_some_and(|m| {
-            m.is_dir() && m.uid() == rustix::process::getuid().as_raw() && m.mode() & 0o022 == 0
-        }) && !excluded.contains(ident);
-        let models = storage::read(&location, Path::new("models_cache.json"), true)
-            .ok()
-            .filter(|b| b.len() <= 4 * 1024 * 1024)
-            .and_then(|b| V::parse(&b).ok())
-            .and_then(|v| {
-                let mut values = BTreeSet::new();
-                if !matches!(v.get("models"), V::Arr(_)) {
-                    return None;
-                }
-                for r in v.get("models").array() {
-                    let slug = text(r, "slug");
-                    if slug.is_empty() {
-                        return None;
-                    }
-                    values.insert(slug.to_owned());
-                }
-                Some(values)
-            });
-        accounts.push(Account {
+        entries.push(Entry {
             id: ident.into(),
-            used: quota(&location),
-            running: running.get(ident).copied().unwrap_or(0),
             home: location,
-            usable,
-            models,
         });
     }
+    Ok(())
+}
+fn policy_of(settings: &V) -> Result<bool> {
+    match settings.get("policy") {
+        V::Null => Ok(false),
+        other => match other.text() {
+            Some("ordered") => Ok(false),
+            Some("spread") => Ok(true),
+            _ => fail("unsupported provider accounts policy"),
+        },
+    }
+}
+/// Registered accounts per isolated provider. Canonical homes must be unique
+/// across all providers; ids are provider-local. Claude falls back to its own
+/// registry file with the standard home as the implicit `default`.
+pub(crate) fn load_registry(home: &Path) -> Result<Registry> {
+    let dir = config_dir(home);
+    let mut registry = Registry::new();
+    let mut homes = BTreeSet::new();
+    let mut claude_listed = false;
+    if let Some((config, _)) = read_config(&dir.join("provider-accounts.json"))? {
+        if !keys_are(&config, &["schema", "providers"])
+            || !matches!(config.get("providers"), V::Obj(_))
+        {
+            return fail("unknown or unsupported provider accounts configuration keys");
+        }
+        if config.get("schema") != &1usize.into() {
+            return fail("unsupported provider accounts schema");
+        }
+        if let V::Obj(fields) = config.get("providers") {
+            for (key, val) in fields {
+                if !ISOLATED.iter().any(|i| key == i.name.as_bytes()) {
+                    return fail(UNPROVED);
+                }
+                if !keys_are(val, &["policy", "accounts"]) {
+                    return fail("unknown account policy keys");
+                }
+            }
+        }
+        for spec in &ISOLATED {
+            let settings = config.get("providers").get(spec.name);
+            if matches!(settings, V::Null) {
+                continue;
+            }
+            if !keys_are(settings, &["policy", "accounts"]) {
+                return fail("unknown account policy keys");
+            }
+            let spread = policy_of(settings)?;
+            if settings.get("accounts").array().is_empty() {
+                return fail("provider accounts must be a non-empty list");
+            }
+            let mut entries = Vec::new();
+            parse_entries(settings, &mut homes, &mut entries)?;
+            claude_listed |= spec.name == "claude";
+            registry.insert(spec.name.into(), ProviderAccounts { spread, entries });
+        }
+    }
+    if !claude_listed
+        && let Some((config, _)) = read_config(&dir.join("provider-accounts.claude.json"))?
+    {
+        if !keys_are(&config, &["schema", "provider", "policy", "accounts"])
+            || text(&config, "provider") != "claude"
+            || !matches!(config.get("accounts"), V::Arr(_))
+        {
+            return fail("unknown or unsupported provider accounts configuration keys");
+        }
+        if config.get("schema") != &1usize.into() {
+            return fail("unsupported provider accounts schema");
+        }
+        let spread = policy_of(&config)?;
+        if !config.get("accounts").array().is_empty() {
+            let spec = isolated("claude").ok_or_else(|| Error::new(2, UNPROVED))?;
+            let default = canonical(&home.join(spec.home_sub));
+            // Reserve the implicit home so no provider can alias ~/.claude.
+            if !homes.insert(default.clone()) {
+                return fail("duplicate provider account id or canonical home");
+            }
+            let mut entries = vec![Entry {
+                id: "default".into(),
+                home: default,
+            }];
+            parse_entries(&config, &mut homes, &mut entries)?;
+            registry.insert("claude".into(), ProviderAccounts { spread, entries });
+        }
+    }
+    Ok(registry)
+}
+/// `(provider, home)` for every registered account, for session discovery.
+/// Fails closed when an account registry exists and is invalid or unreadable.
+pub(crate) fn configured_homes() -> Result<Vec<(String, PathBuf)>> {
+    let Ok(home) = home_dir() else {
+        return Ok(Vec::new());
+    };
+    Ok(load_registry(&home)?
+        .into_iter()
+        .flat_map(|(provider, list)| {
+            list.entries
+                .into_iter()
+                .map(move |e| (provider.clone(), e.home))
+        })
+        .collect())
+}
+
+#[derive(Default)]
+struct Bound {
+    environment: Vec<(OsString, OsString)>,
+    remove: Vec<OsString>,
+    id: Option<String>,
+}
+fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bound> {
+    if spec.name == "claude"
+        && canonical(&location) != canonical(&home.join(spec.home_sub))
+        && CLAUDE_CREDENTIAL_ENV
+            .iter()
+            .any(|name| nonempty_env(name).is_some())
+    {
+        return fail("credential environment overrides the selected Claude account");
+    }
+    Ok(Bound {
+        environment: vec![(spec.env.into(), location.into_os_string())],
+        // A session directory override would leave transcripts outside the account.
+        remove: if spec.name == "pi" {
+            vec!["PI_CODING_AGENT_SESSION_DIR".into()]
+        } else {
+            Vec::new()
+        },
+        id: Some(id.into()),
+    })
+}
+pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>);
+
+pub(crate) fn session_environment(provider: &str, location: &Path) -> Result<SessionEnv> {
+    let spec = isolated(provider).ok_or_else(|| Error::new(2, UNPROVED))?;
+    if !owned_private(location) {
+        return fail("requested provider account is unavailable");
+    }
+    let bound = bind(spec, &home_dir()?, "", location.to_path_buf())?;
+    Ok((bound.environment, bound.remove))
+}
+fn owned_private(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).ok().is_some_and(|m| {
+        m.file_type().is_dir()
+            && m.uid() == rustix::process::getuid().as_raw()
+            && m.mode() & 0o022 == 0
+    })
+}
+
+fn codex_models(home: &Path) -> Option<BTreeSet<String>> {
+    storage::read(home, Path::new("models_cache.json"), true)
+        .ok()
+        .filter(|b| b.len() <= 4 * 1024 * 1024)
+        .and_then(|b| V::parse(&b).ok())
+        .and_then(|v| {
+            if !matches!(v.get("models"), V::Arr(_)) {
+                return None;
+            }
+            let mut values = BTreeSet::new();
+            for r in v.get("models").array() {
+                let slug = text(r, "slug");
+                if slug.is_empty() {
+                    return None;
+                }
+                values.insert(slug.to_owned());
+            }
+            (!values.is_empty()).then_some(values)
+        })
+}
+fn account_serves_model(spec: &Isolated, home: &Path, model: &str) -> bool {
+    model == "provider-default"
+        || spec.name != "codex"
+        || codex_models(home).is_none_or(|m| m.contains(model))
+}
+
+fn home_claimed_by_other(registry: &Registry, provider: &str, location: &Path) -> bool {
+    let location = canonical(location);
+    registry.iter().any(|(other_provider, accounts)| {
+        other_provider != provider
+            && accounts
+                .entries
+                .iter()
+                .any(|entry| canonical(&entry.home) == location)
+    })
+}
+
+fn account_environment(route: &Route, excluded: &BTreeSet<String>, repo: &Path) -> Result<Bound> {
+    let Some(spec) = isolated(&route.provider) else {
+        return if route.account.is_empty() {
+            Ok(Bound::default())
+        } else {
+            fail(UNPROVED)
+        };
+    };
+    let home = home_dir()?;
+    let registry = load_registry(&home)?;
+    let pinned = route.account_pinned;
+    let listed = registry.get(spec.name);
+    let resuming = nonempty_env("OMS_RESUME_SESSION").is_some();
+    if !pinned && let Some(current) = nonempty_env(spec.env) {
+        let current_loc = canonical(Path::new(&current));
+        if current_loc != canonical(&home.join(spec.home_sub)) {
+            if home_claimed_by_other(&registry, spec.name, &current_loc) {
+                return fail("requested provider account is unavailable");
+            }
+            if let Some(entry) =
+                listed.and_then(|l| l.entries.iter().find(|e| canonical(&e.home) == current_loc))
+            {
+                if excluded.contains(&entry.id)
+                    || !owned_private(&entry.home)
+                    || !account_serves_model(spec, &entry.home, &route.model)
+                {
+                    return fail("requested provider account is unavailable");
+                }
+                return bind(spec, &home, &entry.id, entry.home.clone());
+            }
+            if spec.name == "claude"
+                && CLAUDE_CREDENTIAL_ENV
+                    .iter()
+                    .any(|name| nonempty_env(name).is_some())
+            {
+                return fail("credential environment overrides the selected Claude account");
+            }
+            return Ok(Bound {
+                remove: if spec.name == "pi" {
+                    vec!["PI_CODING_AGENT_SESSION_DIR".into()]
+                } else {
+                    Vec::new()
+                },
+                ..Bound::default()
+            });
+        }
+    }
+    if resuming && !pinned {
+        // A native session lives in one account home; guessing could resume nothing.
+        return match listed {
+            Some(l)
+                if l.entries.len() == 1
+                    && canonical(&l.entries[0].home) == canonical(&home.join(spec.home_sub)) =>
+            {
+                if !owned_private(&l.entries[0].home) {
+                    return fail("requested provider account is unavailable");
+                }
+                bind(spec, &home, &l.entries[0].id, l.entries[0].home.clone())
+            }
+            Some(_) => fail("session resume is ambiguous across provider accounts; pass --account"),
+            None if home_claimed_by_other(&registry, spec.name, &home.join(spec.home_sub)) => {
+                Err(Error::new(2, format!("no eligible {} account", spec.name)))
+            }
+            None => Ok(Bound::default()),
+        };
+    }
+    let wanted = (!route.account.is_empty() && !excluded.contains(&route.account))
+        .then_some(route.account.as_str());
+    if pinned && wanted.is_none() {
+        return fail("requested provider account is unavailable");
+    }
+    if let Some(id) = wanted {
+        let found = listed.and_then(|l| l.entries.iter().find(|e| e.id == id));
+        let location = match found {
+            Some(entry) => Some(entry.home.clone()),
+            None if id == "default" => {
+                let candidate = canonical(&home.join(spec.home_sub));
+                (!home_claimed_by_other(&registry, spec.name, &candidate)).then_some(candidate)
+            }
+            None => None,
+        };
+        match location {
+            Some(location)
+                if owned_private(&location)
+                    && account_serves_model(spec, &location, &route.model) =>
+            {
+                return bind(spec, &home, id, location);
+            }
+            _ if pinned => return fail("requested provider account is unavailable"),
+            _ => {}
+        }
+    }
+    let Some(listed) = listed else {
+        if home_claimed_by_other(&registry, spec.name, &home.join(spec.home_sub)) {
+            return Err(Error::new(2, format!("no eligible {} account", spec.name)));
+        }
+        return Ok(Bound::default());
+    };
+    let spread = listed.spread && !pinned;
+    let running = if spread {
+        running_accounts(repo)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let accounts = listed
+        .entries
+        .iter()
+        .map(|entry| {
+            let models = (spec.name == "codex")
+                .then(|| codex_models(&entry.home))
+                .flatten();
+            Account {
+                provider: spec.name.into(),
+                id: entry.id.clone(),
+                used: spec.quota.and_then(|read| read(&entry.home)),
+                running: running
+                    .get(&seat_key(spec.name, &entry.id))
+                    .copied()
+                    .unwrap_or(0),
+                usable: owned_private(&entry.home) && !excluded.contains(&entry.id),
+                home: entry.home.clone(),
+                models,
+            }
+        })
+        .collect::<Vec<_>>();
     let health = load_seat_health(repo);
     match select_account_adaptive(
         &accounts,
-        policy == "spread",
+        spread,
         route.explicit,
         &route.model,
         &health,
         crate::seconds(),
     ) {
-        Some(account) => Ok((
-            vec![("CODEX_HOME".into(), account.home.into_os_string())],
-            Some(account.id),
-        )),
-        None if route.explicit => Ok((Vec::new(), Some("default".into()))),
-        None => fail("no eligible Codex account"),
+        Some(account) => bind(spec, &home, &account.id, account.home),
+        None if route.explicit
+            && !pinned
+            && excluded.is_empty()
+            && !listed.entries.iter().any(|e| e.id == "default") =>
+        {
+            let fallback = canonical(&home.join(spec.home_sub));
+            if owned_private(&fallback)
+                && !home_claimed_by_other(&registry, spec.name, &fallback)
+                && account_serves_model(spec, &fallback, &route.model)
+            {
+                bind(spec, &home, "default", fallback)
+            } else {
+                Err(Error::new(2, format!("no eligible {} account", spec.name)))
+            }
+        }
+        None => Err(Error::new(2, format!("no eligible {} account", spec.name))),
     }
+}
+/// Binds the account before an attempt is recorded so its `panel_account` ref
+/// reflects the home that will run. Unconfigured providers stay unbound.
+pub(crate) fn bind_account(route: &mut Route, repo: &Path) -> Result<()> {
+    if let Some(id) = account_environment(route, &BTreeSet::new(), repo)?.id {
+        route.account = id;
+    }
+    Ok(())
+}
+/// `panel_account` ref for the bound account, or empty when none is bound.
+pub(crate) fn panel_account(route: &Route) -> String {
+    if route.account.is_empty() {
+        String::new()
+    } else {
+        seat_key(&route.provider, &route.account)
+    }
+}
+pub(crate) fn panel_implicit_target() -> bool {
+    std::env::var_os("OMS_PANEL_DISPATCH").as_deref() == Some(OsStr::new("1"))
+        && std::env::var_os("OMS_PANEL_EXPLICIT_TARGET").as_deref() == Some(OsStr::new("0"))
 }
 pub fn answer_quality(raw: &str) -> &'static str {
     let mut from = 0;
@@ -1363,9 +1715,113 @@ fn transport(
     }
     Ok(cmd)
 }
+/// Writable dirs named by the child environment: the cargo target and every
+/// isolated provider's account home.
+fn env_rw_dirs(environment: &[(OsString, OsString)]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for (k, v) in environment {
+        if k == "CARGO_TARGET_DIR" || ISOLATED.iter().any(|i| k == i.env) {
+            let p = PathBuf::from(v);
+            if p.is_dir() && !dirs.contains(&p) {
+                dirs.push(p);
+            }
+        }
+    }
+    dirs
+}
+fn repo_state(context: &Context<'_>, cwd: &Path) -> Option<[u8; 32]> {
+    const MAX_PATHS: usize = 4096;
+    const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+    let head = crate::process::git(context, cwd, &["rev-parse", "HEAD"]).ok()?;
+    let staged = crate::process::git(
+        context,
+        cwd,
+        &["diff", "--binary", "--no-ext-diff", "--cached"],
+    )
+    .ok()?;
+    let status = crate::process::git(
+        context,
+        cwd,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
+    .ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update((head.len() as u64).to_le_bytes());
+    hasher.update(&head);
+    hasher.update((staged.len() as u64).to_le_bytes());
+    hasher.update(&staged);
+    hasher.update((status.len() as u64).to_le_bytes());
+    hasher.update(&status);
+    let mut count = 0usize;
+    let mut total = 0usize;
+    let mut parts = status.split(|&b| b == 0);
+    while let Some(record) = parts.next() {
+        if record.is_empty() {
+            continue;
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            return None;
+        }
+        let (x, y, rel) = (record[0], record[1], &record[3..]);
+        if rel.is_empty() {
+            return None;
+        }
+        count += 1;
+        if count > MAX_PATHS {
+            return None;
+        }
+        hasher.update([x, y, b' ']);
+        hasher.update((rel.len() as u64).to_le_bytes());
+        hasher.update(rel);
+        if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
+            let orig = parts.next()?;
+            hasher.update((orig.len() as u64).to_le_bytes());
+            hasher.update(orig);
+        }
+        let full = cwd.join(OsStr::from_bytes(rel));
+        match std::fs::symlink_metadata(&full) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => hasher.update(b"D\0"),
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&full).ok()?;
+                let raw = target.as_os_str().as_bytes();
+                total = total.checked_add(raw.len())?;
+                if total > MAX_TOTAL_BYTES {
+                    return None;
+                }
+                hasher.update(b"L\0");
+                hasher.update((raw.len() as u64).to_le_bytes());
+                hasher.update(raw);
+            }
+            Ok(meta) if meta.file_type().is_file() => {
+                if meta.len() > MAX_FILE_BYTES {
+                    return None;
+                }
+                let bytes = std::fs::read(&full).ok()?;
+                total = total.checked_add(bytes.len())?;
+                if total > MAX_TOTAL_BYTES {
+                    return None;
+                }
+                hasher.update(b"F\0");
+                hasher.update((meta.mode() & 0o7777).to_le_bytes());
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(&bytes);
+            }
+            _ => return None,
+        }
+    }
+    Some(hasher.finalize().into())
+}
+fn is_clean_retry(snapshot: &Option<Option<[u8; 32]>>, context: &Context<'_>, cwd: &Path) -> bool {
+    match snapshot {
+        None => true,
+        Some(Some(before)) => repo_state(context, cwd).as_ref() == Some(before),
+        Some(None) => false,
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_env(
-    route: &Route,
+    route: &mut Route,
     prompt: &[u8],
     cwd: &Path,
     write: bool,
@@ -1416,6 +1872,8 @@ pub(crate) fn execute_env(
         return fail("provider does not support read access through this transport");
     }
     let transport = transport(route, prompt, cwd, write, timeout)?;
+    let extra_env = crate::usage::operation_env(extra_env)?;
+    let usage_repo = crate::usage::state_repository(account_repo, &extra_env)?;
     let remove_environment: Vec<OsString> = std::env::vars_os()
         .map(|(k, _)| k)
         .filter(|k| {
@@ -1428,8 +1886,24 @@ pub(crate) fn execute_env(
         })
         .collect();
     let mut excluded = BTreeSet::new();
+    let mut rebound = None;
     for overflow in 0..2 {
-        let (mut environment, account) = account_environment(route, &excluded, account_repo)?;
+        let write_snapshot =
+            (overflow == 0 && write && !route.account_pinned).then(|| repo_state(context, cwd));
+        let bound = match rebound.take() {
+            Some(bound) => bound,
+            None => account_environment(route, &excluded, account_repo)?,
+        };
+        let Bound {
+            mut environment,
+            remove,
+            id: account,
+        } = bound;
+        if let Some(id) = &account {
+            route.account.clone_from(id);
+        }
+        let mut remove_environment = remove_environment.clone();
+        remove_environment.extend(remove);
         environment.extend([
             ("OMS_HARNESS_CHILD".into(), "1".into()),
             ("OMS_HARNESS_DELEGATE_DEPTH".into(), "1".into()),
@@ -1459,15 +1933,15 @@ pub(crate) fn execute_env(
             && !(mode == oms_supervisor::sandbox::SandboxMode::Auto && route.provider == "codex")
             && let Some((program, rest)) = exec_argv.split_first()
         {
-            let mut extra_rw_dirs = Vec::new();
-            for (k, v) in &environment {
-                if k == "CARGO_TARGET_DIR" || k == "CODEX_HOME" {
-                    let p = PathBuf::from(v);
-                    if p.is_dir() {
-                        extra_rw_dirs.push(p);
-                    }
-                }
+            let mut view = environment.clone();
+            if let Some(spec) = isolated(&route.provider)
+                && !view.iter().any(|(key, _)| key == spec.env)
+                && !remove_environment.iter().any(|key| key == spec.env)
+                && let Some(value) = nonempty_env(spec.env)
+            {
+                view.push((spec.env.into(), value));
             }
+            let mut extra_rw_dirs = env_rw_dirs(&view);
             if write {
                 extra_rw_dirs.extend(oms_supervisor::sandbox::git_writable_dirs(cwd));
             }
@@ -1475,6 +1949,12 @@ pub(crate) fn execute_env(
                 for sub in [".claude", ".codex", ".gemini", ".config", ".cache"] {
                     let p = PathBuf::from(&home).join(sub);
                     if p.is_dir() {
+                        extra_rw_dirs.push(p);
+                    }
+                }
+                if route.provider == "pi" {
+                    let p = PathBuf::from(&home).join(".pi");
+                    if p.is_dir() && !extra_rw_dirs.contains(&p) {
                         extra_rw_dirs.push(p);
                     }
                 }
@@ -1489,22 +1969,52 @@ pub(crate) fn execute_env(
                     .map_err(|e| Error::new(2, e))?;
             exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
         }
+        let usage_receipt = crate::usage::begin(
+            &usage_repo,
+            route,
+            account.as_deref(),
+            &extra_env,
+            context.interrupted,
+        )?;
+        environment.push((
+            "OMS_PROVIDER_CALL_ID".into(),
+            usage_receipt.identity.call_id.clone().into(),
+        ));
         let started = std::time::Instant::now();
-        let mut result = context.executor.execute(
+        let result = context.executor.execute(
             Invocation {
                 argv: exec_argv,
                 cwd: cwd.to_owned(),
                 input: transport.input.clone(),
                 environment,
-                remove_environment: remove_environment.clone(),
+                remove_environment,
                 timeout: Duration::from_secs(timeout),
                 max_bytes: 64 * 1024 * 1024,
                 merge: false,
             },
             context.interrupted,
-        )?;
+        );
+        let mut result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false);
+                return Err(error);
+            }
+        };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let (decoded, terminal) = decode_output(&route.provider, &result.stdout);
+        crate::usage::finish(
+            &usage_repo,
+            usage_receipt,
+            &result.stdout,
+            result.complete && terminal,
+        )
+        .map_err(|error| {
+            Error::new(
+                error.code,
+                format!("provider usage accounting failed; reconcile before retrying: {error}"),
+            )
+        })?;
         result.stdout = decoded.into_bytes();
         if !result.stdout.is_empty()
             && let Some(model) = configured
@@ -1514,51 +2024,35 @@ pub(crate) fn execute_env(
                 .extend_from_slice(format!("\nconfigured model\n{model}\n").as_bytes());
         }
         result.complete &= terminal;
-        let seat_key = account.as_deref().unwrap_or(&route.provider);
         let cap_hit = capacity(&result);
         record_seat_health(
             account_repo,
-            seat_key,
+            &seat_key(&route.provider, account.as_deref().unwrap_or_default()),
             result.code == 0 && result.complete && !cap_hit,
             elapsed_ms,
             cap_hit,
             provider_fault(&result, cap_hit),
             context.interrupted,
         );
+        // One same-provider retry on another account when the worktree stays untouched.
         if overflow == 0
             && cap_hit
-            && let Some(account) = account.filter(|s| s != "default")
+            && !route.account_pinned
+            && let Some(account) = account
+            && is_clean_retry(&write_snapshot, context, cwd)
         {
             excluded.insert(account);
-            continue;
+            match account_environment(route, &excluded, account_repo) {
+                Ok(next) if next.id.is_some() => {
+                    rebound = Some(next);
+                    continue;
+                }
+                _ => {}
+            }
         }
         return Ok(result);
     }
     fail("account capacity overflow exhausted")
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_with_fallback(
-    route: &mut Route,
-    fallback: &str,
-    prompt: &[u8],
-    cwd: &Path,
-    write: bool,
-    timeout: u64,
-    account_repo: &Path,
-    context: &Context<'_>,
-) -> Result<Completed> {
-    execute_with_fallback_env(
-        route,
-        fallback,
-        prompt,
-        cwd,
-        write,
-        timeout,
-        account_repo,
-        &[],
-        context,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1573,6 +2067,9 @@ pub(crate) fn execute_with_fallback_env(
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
+    let extra_env = crate::usage::operation_env(extra_env)?;
+    let write_snapshot = (write && !fallback.is_empty() && fallback != route.model)
+        .then(|| repo_state(context, cwd));
     let result = execute_env(
         route,
         prompt,
@@ -1580,13 +2077,20 @@ pub(crate) fn execute_with_fallback_env(
         write,
         timeout,
         account_repo,
-        extra_env,
+        &extra_env,
         context,
     )?;
-    if !fallback.is_empty() && fallback != route.model && capacity(&result) {
+    if !fallback.is_empty()
+        && fallback != route.model
+        && capacity(&result)
+        && is_clean_retry(&write_snapshot, context, cwd)
+    {
         model_name(fallback)?;
         route.model = fallback.into();
         route.explicit = true;
+        if !route.account_pinned {
+            route.account.clear();
+        }
         execute_env(
             route,
             prompt,
@@ -1594,7 +2098,7 @@ pub(crate) fn execute_with_fallback_env(
             write,
             timeout,
             account_repo,
-            extra_env,
+            &extra_env,
             context,
         )
     } else {
@@ -1696,7 +2200,7 @@ fn running_accounts(repo: &Path) -> Result<std::collections::BTreeMap<String, us
         } else {
             text(refs, "panel_provider")
         };
-        if provider != "codex"
+        if isolated(provider).is_none()
             || !["worker", "researcher", "advisor", "reviewer", "delegate"]
                 .contains(&text(refs, "panel_role"))
             || ![
@@ -1712,9 +2216,14 @@ fn running_accounts(repo: &Path) -> Result<std::collections::BTreeMap<String, us
         {
             continue;
         }
-        let account = text(refs, "panel_account").to_owned();
+        let account = text(refs, "panel_account");
         if !account.is_empty() {
-            *counts.entry(account).or_insert(0) += 1;
+            let key = if account.contains(':') {
+                account.to_owned()
+            } else {
+                seat_key(provider, account)
+            };
+            *counts.entry(key).or_insert(0) += 1;
         }
     }
     Ok(counts)
@@ -1871,7 +2380,103 @@ mod bridge_route_tests {
             interrupted: &stop,
             executor: capture,
         };
-        execute_env(route, prompt, cwd, write, 12, repo, &[], &context)
+        let mut route = route.clone();
+        execute_env(&mut route, prompt, cwd, write, 12, repo, &[], &context)
+    }
+    #[test]
+    fn physical_provider_calls_record_fallback_and_timeout_usage() {
+        isolated_transport(
+            "physical_provider_calls_record_fallback_and_timeout_usage",
+            "normal",
+            |repo, cwd| {
+                use oms_command_telemetry::store::usage::{self, Phase};
+                struct Reports(std::sync::atomic::AtomicUsize, PathBuf);
+                impl Executor for Reports {
+                    fn execute(&self, request: Invocation, _: &AtomicBool) -> Result<Completed> {
+                        if request.argv[0] == "git" {
+                            return Ok(Completed {
+                                code: 0,
+                                stdout: vec![],
+                                stderr: vec![],
+                                complete: true,
+                                elapsed: Duration::ZERO,
+                            });
+                        }
+                        let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let calls = usage::load(&self.1).unwrap().calls;
+                        assert_eq!(calls.last().unwrap().receipt.phase, Phase::Pending);
+                        assert!(
+                            request
+                                .environment
+                                .iter()
+                                .any(|(k, _)| k == "OMS_PROVIDER_CALL_ID")
+                        );
+                        Ok(Completed {
+                        code:if n == 0 {1} else if n == 2 {124} else {0},
+                        stdout:format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fixture answer\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":2,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":0}},\"total_cost_usd\":0.0000{}}}\n",n+1).into_bytes(),
+                        stderr:if n == 0 {b"rate limit".to_vec()} else {vec![]},
+                        complete:n != 2,elapsed:Duration::ZERO,
+                    })
+                    }
+                }
+                let stop = AtomicBool::new(false);
+                let state = repo.join("shared-state");
+                std::fs::create_dir(&state).unwrap();
+                let reports = Reports(std::sync::atomic::AtomicUsize::new(0), state.clone());
+                let context = Context {
+                    cwd,
+                    source: repo,
+                    interrupted: &stop,
+                    executor: &reports,
+                };
+                let mut route = Route {
+                    provider: "claude".into(),
+                    model: "first".into(),
+                    effort: String::new(),
+                    explicit: true,
+                    account: String::new(),
+                    account_pinned: false,
+                };
+                let extra = vec![
+                    ("OMS_STATE_REPO".into(), state.as_os_str().to_owned()),
+                    ("OMS_OPERATION_ID".into(), "op_campaign".into()),
+                    ("OMS_GOAL_ID".into(), "goal_campaign".into()),
+                    ("OMS_TASK_ID".into(), "task_one".into()),
+                    ("OMS_ATTEMPT_ID".into(), "att_one".into()),
+                ];
+                let result = execute_with_fallback_env(
+                    &mut route, "second", b"fixture", cwd, true, 12, repo, &extra, &context,
+                )
+                .unwrap();
+                assert_eq!(result.code, 0);
+                let calls = usage::load(&state).unwrap().calls;
+                assert!(usage::load(repo).unwrap().calls.is_empty());
+                assert_eq!(calls.len(), 2);
+                assert_ne!(
+                    calls[0].receipt.identity.call_id,
+                    calls[1].receipt.identity.call_id
+                );
+                assert!(
+                    calls
+                        .iter()
+                        .all(|c| c.receipt.identity.operation_id == "op_campaign"
+                            && c.receipt.identity.attempt_id.as_deref() == Some("att_one"))
+                );
+                assert_eq!(
+                    calls.iter().map(|c| c.cost_microusd.unwrap()).sum::<u64>(),
+                    30
+                );
+                assert!(calls.iter().all(|c| c.receipt.phase == Phase::Final));
+                let timed = execute_env(
+                    &mut route, b"fixture", cwd, true, 12, repo, &extra, &context,
+                )
+                .unwrap();
+                assert_eq!(timed.code, 124);
+                let calls = usage::load(&state).unwrap().calls;
+                assert_eq!(calls[2].receipt.phase, Phase::Unknown);
+                assert_eq!(calls[2].cost_microusd, Some(30));
+            },
+        );
     }
     #[test]
     fn native_write_transports() {
@@ -1992,6 +2597,8 @@ mod bridge_route_tests {
                             .into(),
                             effort: if exact { "high" } else { "" }.into(),
                             explicit: true,
+                            account: String::new(),
+                            account_pinned: false,
                         };
                         let capture = Capture::default();
                         assert_eq!(
@@ -2073,6 +2680,8 @@ mod bridge_route_tests {
                         model: "fixture-model".into(),
                         effort: String::new(),
                         explicit: true,
+                        account: String::new(),
+                        account_pinned: false,
                     };
                     let capture = Capture::default();
                     assert!(
@@ -2087,6 +2696,8 @@ mod bridge_route_tests {
                         model: "provider-default".into(),
                         effort: String::new(),
                         explicit: false,
+                        account: String::new(),
+                        account_pinned: false,
                     };
                     let capture = Capture::default();
                     assert!(direct(&route, b"inspect", false, repo, repo, &capture).is_err());
@@ -2101,6 +2712,8 @@ mod bridge_route_tests {
                         model: "provider-default".into(),
                         effort: String::new(),
                         explicit: false,
+                        account: String::new(),
+                        account_pinned: false,
                     };
                     let capture = Capture::default();
                     std::thread::scope(|scope| {
@@ -2153,6 +2766,8 @@ mod bridge_route_tests {
                         model: "provider-default".into(),
                         effort: String::new(),
                         explicit: false,
+                        account: String::new(),
+                        account_pinned: false,
                     };
                     for prompt in [
                         vec![],
@@ -2175,6 +2790,8 @@ mod bridge_route_tests {
                     model: "provider-default".into(),
                     effort: String::new(),
                     explicit: false,
+                    account: String::new(),
+                    account_pinned: false,
                 };
                 for size in [0, 120000, 120001] {
                     let capture = Capture::default();
@@ -2214,78 +2831,174 @@ mod bridge_route_tests {
         assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());
     }
 
+    fn seat(id: &str, used: Option<f64>, running: usize) -> Account {
+        Account {
+            provider: "codex".into(),
+            id: id.into(),
+            home: PathBuf::from("$HOME/seat").join(id),
+            used,
+            running,
+            usable: true,
+            models: None,
+        }
+    }
+    fn pick(
+        accounts: &[Account],
+        spread: bool,
+        explicit: bool,
+        health: &std::collections::BTreeMap<String, SeatHealth>,
+        now: u64,
+    ) -> Option<String> {
+        select_account_adaptive(accounts, spread, explicit, "provider-default", health, now)
+            .map(|a| a.id)
+    }
     #[test]
-    fn adaptive_routing_prefers_healthy_low_latency_accounts_and_strict_sandbox() {
-        let accounts = vec![
-            Account {
-                id: "slow-or-cooled".into(),
-                home: PathBuf::from("/tmp/a1"),
-                used: Some(20.0),
-                running: 0,
-                usable: true,
-                models: None,
-            },
-            Account {
-                id: "fast-healthy".into(),
-                home: PathBuf::from("/tmp/a2"),
-                used: Some(20.0),
-                running: 0,
-                usable: true,
-                models: None,
-            },
-        ];
+    fn adaptive_ranking_orders_cooldown_penalty_quota_spread_then_registry() {
         let mut health = std::collections::BTreeMap::new();
+        let accounts = [seat("a", Some(20.0), 0), seat("b", Some(20.0), 0)];
+        // Equal everything: registry order decides, latency is not a tie-break.
         health.insert(
-            "slow-or-cooled".into(),
+            "codex:a".into(),
             SeatHealth {
-                ok: 1,
-                err: 0,
                 latency_ms: 900,
-                cooldown_until: 2000,
-                last_error_ts: 0,
+                ..SeatHealth::default()
             },
         );
         health.insert(
-            "fast-healthy".into(),
+            "codex:b".into(),
             SeatHealth {
-                ok: 3,
-                err: 0,
-                latency_ms: 120,
-                cooldown_until: 0,
-                last_error_ts: 0,
+                latency_ms: 10,
+                ..SeatHealth::default()
             },
         );
-        let picked =
-            select_account_adaptive(&accounts, true, false, "provider-default", &health, 1000)
-                .unwrap();
-        assert_eq!(picked.id, "fast-healthy");
-
-        // When cooldown has expired, lower latency still wins ties at identical quota.
-        let picked_after =
-            select_account_adaptive(&accounts, true, false, "provider-default", &health, 3000)
-                .unwrap();
-        assert_eq!(picked_after.id, "fast-healthy");
-
-        // Errors are bounded and decay: a stale/old error no longer starves a seat.
+        assert_eq!(pick(&accounts, true, false, &health, 1000).unwrap(), "a");
+        // Cooldown outranks everything and expires at `now`.
+        health.get_mut("codex:a").unwrap().cooldown_until = 2000;
+        assert_eq!(pick(&accounts, true, false, &health, 1000).unwrap(), "b");
+        assert_eq!(pick(&accounts, true, false, &health, 2000).unwrap(), "a");
+        // Bare legacy keys are not seat keys.
+        let mut bare = std::collections::BTreeMap::new();
+        bare.insert(
+            "a".into(),
+            SeatHealth {
+                cooldown_until: 9,
+                ..SeatHealth::default()
+            },
+        );
+        assert_eq!(pick(&accounts, true, false, &bare, 1).unwrap(), "a");
+        // Penalty is bounded, decays, and ranks above quota.
         let mut decay = std::collections::BTreeMap::new();
         decay.insert(
-            "slow-or-cooled".into(),
+            "codex:a".into(),
             SeatHealth {
                 err: 50,
                 last_error_ts: 100,
                 ..SeatHealth::default()
             },
         );
-        let pick = |now| {
-            select_account_adaptive(&accounts, true, false, "provider-default", &decay, now)
-                .unwrap()
-                .id
-        };
-        assert_eq!(pick(200), "fast-healthy");
-        assert_eq!(penalty(decay.get("slow-or-cooled"), 200), 3);
-        assert_eq!(penalty(decay.get("slow-or-cooled"), 100 + 1801), 0);
-        assert_eq!(pick(5000), "slow-or-cooled");
-
+        assert_eq!(pick(&accounts, true, false, &decay, 200).unwrap(), "b");
+        assert_eq!(penalty(decay.get("codex:a"), 200), 3);
+        assert_eq!(penalty(decay.get("codex:a"), 100 + 1801), 0);
+        assert_eq!(pick(&accounts, true, false, &decay, 5000).unwrap(), "a");
+        let none = std::collections::BTreeMap::new();
+        // Quota buckets are 10 points wide; unknown quota ranks as the worst bucket.
+        let quota = [
+            seat("unknown", None, 0),
+            seat("heavy", Some(89.0), 0),
+            seat("light", Some(31.0), 0),
+            seat("same-bucket", Some(35.0), 0),
+        ];
+        assert_eq!(pick(&quota, false, false, &none, 0).unwrap(), "light");
+        let tied = [seat("x", Some(31.0), 0), seat("y", Some(39.0), 0)];
+        assert_eq!(pick(&tied, false, false, &none, 0).unwrap(), "x");
+        // Spread breaks equal buckets by running count; ordered/pinned ignores it.
+        let busy = [seat("busy", Some(20.0), 3), seat("idle", Some(20.0), 1)];
+        assert_eq!(pick(&busy, true, false, &none, 0).unwrap(), "idle");
+        assert_eq!(pick(&busy, false, false, &none, 0).unwrap(), "busy");
+        // Weekly quota gate at 90 is waived only by an explicit route.
+        let full = [seat("full", Some(90.0), 0), seat("ok", Some(10.0), 0)];
+        assert_eq!(pick(&full[..1], false, false, &none, 0), None);
+        assert_eq!(pick(&full[..1], false, true, &none, 0).unwrap(), "full");
+        assert_eq!(pick(&full, false, false, &none, 0).unwrap(), "ok");
+        // Unusable and model-mismatched accounts are never eligible.
+        let mut closed = seat("closed", Some(0.0), 0);
+        closed.usable = false;
+        assert_eq!(pick(&[closed], false, true, &none, 0), None);
+        let mut cached = seat("cached", Some(0.0), 0);
+        cached.models = Some(BTreeSet::from(["m-1".to_owned()]));
+        assert!(
+            select_account_adaptive(&[cached.clone()], false, false, "m-2", &none, 0).is_none()
+        );
+        assert!(select_account_adaptive(&[cached], false, false, "m-1", &none, 0).is_some());
+        assert_eq!(pick(&[], false, false, &none, 0), None);
+    }
+    #[test]
+    fn seat_keys_and_target_account_syntax() {
+        assert_eq!(seat_key("codex", ""), "codex");
+        assert_eq!(seat_key("claude", "work"), "claude:work");
+        let t = Target::parse("codex:account=work:model=gpt-x:optional").unwrap();
+        assert_eq!(
+            (t.account.as_str(), t.model.as_str(), t.optional),
+            ("work", "gpt-x", true)
+        );
+        let t = Target::parse("claude:model=m:1:account=a_1").unwrap();
+        assert_eq!((t.account.as_str(), t.model.as_str()), ("a_1", "m:1"));
+        let t = Target::parse("pi:account=x").unwrap();
+        assert_eq!((t.provider.as_str(), t.model.as_str()), ("pi", ""));
+        for bad in [
+            "codex:account=",
+            "codex:account=Bad",
+            "codex:account=-x",
+            "codex:account=a:account=b",
+            "codex:bogus=1",
+            "codex:model=",
+            "codex:model=:model=x",
+            "codex:model=x:model=y",
+        ] {
+            assert!(Target::parse(bad).is_err(), "{bad}");
+        }
+        assert!(Target::parse(&format!("codex:account={}", "a".repeat(65))).is_err());
+        assert!(Target::parse(&format!("codex:account={}", "a".repeat(64))).is_ok());
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let pinned = resolve_route(source, "codex:account=w", "", "auto", "worker").unwrap();
+        assert!(pinned.account_pinned && pinned.account == "w" && !pinned.explicit);
+        let free = resolve_route(source, "codex", "", "auto", "worker").unwrap();
+        assert!(!free.account_pinned && free.account.is_empty());
+        let err =
+            resolve_route(source, "antigravity:account=w", "m", "auto", "worker").unwrap_err();
+        assert_eq!(err.message, UNPROVED);
+    }
+    #[test]
+    fn sandbox_rw_dirs_cover_every_isolated_account_home() {
+        let root = std::env::temp_dir().join(format!("oms-rw-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut env = Vec::new();
+        for (name, sub) in [
+            ("CODEX_HOME", "c"),
+            ("CLAUDE_CONFIG_DIR", "l"),
+            ("PI_CODING_AGENT_DIR", "p"),
+            ("CARGO_TARGET_DIR", "t"),
+        ] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+            env.push((OsString::from(name), root.join(sub).into_os_string()));
+        }
+        env.push(("CODEX_HOME_MISSING".into(), root.join("c").into_os_string()));
+        env.push((
+            "PI_CODING_AGENT_DIR".into(),
+            root.join("absent").into_os_string(),
+        ));
+        env.push(("CODEX_HOME".into(), root.join("c").into_os_string()));
+        let dirs = env_rw_dirs(&env);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            dirs,
+            ["c", "l", "p", "t"].map(|s| root.join(s)).to_vec(),
+            "unrelated, missing and duplicate entries are dropped"
+        );
+        assert!(env_rw_dirs(&[]).is_empty());
+    }
+    #[test]
+    fn adaptive_routing_enforces_strict_sandbox_without_backend() {
         if std::env::var_os("SANDBOX_STRICT_PROBE").as_deref() == Some(OsStr::new("1")) {
             let dir = std::env::temp_dir().join(format!("oms-sbx-{}", std::process::id()));
             let _ = fs::create_dir_all(&dir);
@@ -2294,6 +3007,8 @@ mod bridge_route_tests {
                 model: "provider-default".into(),
                 effort: String::new(),
                 explicit: false,
+                account: String::new(),
+                account_pinned: false,
             };
             let capture = Capture::default();
             let err = direct(&route, b"probe", true, &dir, &dir, &capture).unwrap_err();
@@ -2311,7 +3026,7 @@ mod bridge_route_tests {
             .env_clear()
             .args([
                 "--exact",
-                "providers::bridge_route_tests::adaptive_routing_prefers_healthy_low_latency_accounts_and_strict_sandbox",
+                "providers::bridge_route_tests::adaptive_routing_enforces_strict_sandbox_without_backend",
             ])
             .env("HOME", &probe_bin)
             .env("PATH", &probe_bin)

@@ -56,8 +56,17 @@ impl Paths {
     pub fn codex_home(&self) -> Result<PathBuf> {
         r::physical(
             &env::var_os("CODEX_HOME")
+                .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| self.home.join(".codex")),
+        )
+    }
+    pub fn pi_home(&self) -> Result<PathBuf> {
+        r::physical(
+            &env::var_os("PI_CODING_AGENT_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.home.join(".pi/agent")),
         )
     }
     pub fn codex_config(&self) -> Result<PathBuf> {

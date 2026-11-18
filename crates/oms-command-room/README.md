@@ -24,6 +24,25 @@ Operations guards must fence concurrent lifecycle writes through publication,
 with room-before-producer lock ordering. The tests keep those unavailable
 services fail-closed and inject an empty read guard for local lifecycle cases.
 
+The installed native `oms room` entry and panel room calls now supply the
+compiled collaboration services. Operations are projected through the canonical
+producer while holding its writer lock, in original creation order; the guard
+also checks the snapshot before room publication. Shared-state resolution uses
+the same explicit state-root contract as the control plane.
+
+Room publication uses the existing native Codex/Claude notification producers.
+Codex targets its saved receiver; Claude requires the enrolled recipient and
+explicit `--wakeup` authority. Submission, uncertainty, turn identity, persistence
+and UI-observation fields pass through unchanged. An acknowledgment is not proof
+that an agent consumed the text or that the user approved it. The library's
+`LocalServices` defaults, and a bare binary without validated source metadata,
+still refuse integrations that have no producer. Tests do not send live messages.
+
+Panel result notification uses the saved Codex receiver without granting Claude
+wakeup authority. Panel publication finalization retrieves the exact raw receipt
+through the plan producer's existing gate/push/CI and target-reachability checks,
+using the required SHA-256; a commit alone never becomes a receipt.
+
 No room production writes changed in W2. Existing room logs use locked append;
 a second caller revalidates under the lock. A kill can leave an incomplete tail,
 which subsequent writes refuse pending reconciliation. The CURRENT pointer uses

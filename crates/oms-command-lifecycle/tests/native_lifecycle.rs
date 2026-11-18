@@ -142,6 +142,222 @@ fn native_only(value: &Value) {
     }
 }
 
+// Keep diagnostics in the canonical isolated lifecycle fixture: the same read-only
+// contract applies to both inventory and pin comparison, without --pin or probes.
+fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeServices) {
+    fn snapshot(root: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
+        fn visit(base: &Path, path: &Path, rows: &mut Vec<(PathBuf, u32, Vec<u8>)>) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            let body = if metadata.is_symlink() {
+                fs::read_link(path)
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec()
+            } else if metadata.is_file() {
+                fs::read(path).unwrap()
+            } else {
+                Vec::new()
+            };
+            rows.push((
+                path.strip_prefix(base).unwrap().to_owned(),
+                metadata.mode(),
+                body,
+            ));
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(base, &entry.unwrap().path(), rows);
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        visit(root, root, &mut rows);
+        rows.sort();
+        rows
+    }
+    let home = root.join("home");
+    let command = root.join("bin/doctor-server");
+    fs::write(
+        &command,
+        "#!/bin/sh\nprintf called > \"$OMS_LIFECYCLE_FIXTURE/doctor-executed\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+    let hidden = "fixture-private-material";
+    let spec = json!({"command":command,"args":[hidden],"env":{"PRIVATE_VALUE":hidden}});
+    let user = home.join(".claude.json");
+    let project = source.join(".mcp.json");
+    let codex = home.join(".codex/config.toml");
+    let agy_user = home.join(".gemini/settings.json");
+    let agy_legacy = home.join(".gemini/config/mcp_config.json");
+    let agy_project = source.join(".gemini/mcp_config.json");
+    let agy_plugin = home.join(".gemini/config/plugins/fixture:variant/mcp_config.json");
+    write(
+        &user,
+        &json!({"mcpServers":{"shared":spec,"user-only":spec}}),
+    );
+    write(
+        &project,
+        &json!({"mcpServers":{"shared":{"command":command,"disabled":true}}}),
+    );
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(
+        &codex,
+        format!(
+            "[mcp_servers.shared]\ncommand = \"{}\"\nenabled = false\nargs = [\"{hidden}\"]\n",
+            command.display()
+        ),
+    )
+    .unwrap();
+    let remote = [
+        "https://",
+        "user:",
+        hidden,
+        "@example.test/private?",
+        hidden,
+    ]
+    .concat();
+    for file in [&agy_user, &agy_legacy, &agy_project, &agy_plugin] {
+        write(
+            file,
+            &json!({"mcpServers":{"shared":{"url":remote,"headers":{"Private":hidden}}}}),
+        );
+    }
+    let baseline = snapshot(root);
+    let services = host.0.borrow().clone();
+    for mode in ["--extensions", "--mcp"] {
+        let raw = success(call("doctor", &[mode, "--json"], source, host));
+        assert!(!String::from_utf8_lossy(&raw).contains(hidden));
+        assert!(!String::from_utf8_lossy(&raw).contains("PRIVATE_VALUE"));
+        let report: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(report["collisions"].as_array().unwrap().len(), 2);
+        let claude = report["collisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["provider"] == "claude")
+            .unwrap();
+        assert_eq!(claude["scopes"], json!(["project", "user"]));
+        let agy = report["collisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["provider"] == "antigravity")
+            .unwrap();
+        assert_eq!(
+            agy["scopes"],
+            json!(["legacy", "plugin-fixture:variant", "project", "user"])
+        );
+        assert!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["effective"] == "unknown" && v["runtime"] == "unknown")
+        );
+        assert_eq!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|v| v["configuration"] == "disabled" && v["disabled"] == true)
+                .count(),
+            2
+        );
+        assert_eq!(report["unknown"], json!([]));
+        assert!(
+            report["config_layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["status"] == "parsed")
+        );
+        assert!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["server"] == "claude:user:user-only"
+                    && v["configuration"] == "configured")
+        );
+    }
+    assert_eq!(snapshot(root), baseline);
+    assert_eq!(*host.0.borrow(), services);
+    assert!(!root.join("doctor-executed").exists());
+    assert!(!root.join("config/oh-my-setting/mcp-pins.json").exists());
+    // A malformed peer never makes a readable entry effective. A missing layer
+    // is distinguished from an unreadable one, without guessing runtime state.
+    fs::write(&project, format!("{{invalid {hidden}")).unwrap();
+    fs::remove_file(&agy_legacy).unwrap();
+    fs::remove_file(&agy_project).unwrap();
+    symlink(&agy_user, &agy_project).unwrap();
+    fs::write(&codex, "[mcp_servers.invalid\n").unwrap();
+    write(
+        &agy_plugin,
+        &json!({"mcpServers":{"invalid":42,"shared":spec}}),
+    );
+    let pins = root.join("config/oh-my-setting/mcp-pins.json");
+    write(
+        &pins,
+        &json!({"schema":1,"pins":{"claude:project:previous":"prior-digest","codex:user:previous":"prior-digest"}}),
+    );
+    let baseline = snapshot(root);
+    for mode in ["--extensions", "--mcp"] {
+        let raw = success(call("doctor", &[mode, "--json"], source, host));
+        assert!(!String::from_utf8_lossy(&raw).contains(hidden));
+        let report: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(report["unknown"], json!(["antigravity", "claude", "codex"]));
+        for (provider, scope, expected) in [
+            ("claude", "project", "unknown"),
+            ("codex", "user", "unknown"),
+            ("antigravity", "legacy", "missing"),
+            ("antigravity", "project", "unknown"),
+            ("antigravity", "plugin-fixture:variant", "unknown"),
+        ] {
+            let layer = report["config_layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["provider"] == provider && v["scope"] == scope)
+                .unwrap();
+            assert_eq!(layer["status"], expected);
+            assert!(layer["reason"].is_string());
+        }
+        assert!(
+            report["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v["effective"] == "unknown"
+                    && v["effective_reason"] == "provider configuration incomplete")
+        );
+        if mode == "--mcp" {
+            // A manually supplied prior pin is comparison data, never permission
+            // to probe or to overwrite a malformed provider's baseline.
+            assert_eq!(report["probe"], Value::Null);
+            assert_eq!(report["removed"], json!([]));
+        }
+    }
+    assert_eq!(snapshot(root), baseline);
+    assert_eq!(*host.0.borrow(), services);
+    for file in [
+        &user,
+        &project,
+        &codex,
+        &agy_user,
+        &agy_legacy,
+        &agy_project,
+        &agy_plugin,
+        &command,
+        &pins,
+    ] {
+        if fs::symlink_metadata(file).is_ok() {
+            fs::remove_file(file).unwrap();
+        }
+    }
+    fs::remove_dir(agy_plugin.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn native_configuration_and_services() {
     if let Some(root) =
@@ -317,6 +533,7 @@ esac
     let source = root.join("source");
     let home = root.join("home");
     let host = NativeServices::default();
+    doctor_configuration_diagnostics(&source, &root, &host);
     assert!(
         Command::new("git")
             .arg("init")
@@ -608,6 +825,10 @@ esac
         &agy_plugin.join("mcp_config.json"),
         &json!({"mcpServers":{"oh-my-setting":{"command":legacy_python,"args":[source.join("scripts/oms-mcp-server.py")]}}}),
     );
+    write(
+        &agy_plugin.join("hooks.json"),
+        &json!({"oh-my-setting":{"PreToolUse":[{"matcher":"invoke_subagent","hooks":[{"type":"command","command":format!("{} pretooluse", source.join("scripts/oms").display())}]}]}}),
+    );
     success(call("install-agy-plugin", &["--remove"], &source, &host));
     assert!(!agy_plugin.exists());
     write(
@@ -892,5 +1113,678 @@ esac
     ] {
         success(host.install_extras(phase, &source, &[], &flag));
         success(host.incoming_lifecycle(phase, &source, "", b"{}", &[], &flag));
+    }
+}
+
+#[test]
+fn agy_native_calls_reach_panel_attempts() {
+    use oms_command_operations::{StartRequest, create_attempt, load_projection, value::obj};
+    if let Some(root) = std::env::var_os("OMS_AGY_CALL_FIXTURE").map(PathBuf::from) {
+        let action = std::env::var("OMS_AGY_CALL_ACTION").unwrap();
+        let host = NativeServices::default();
+        let output = call("agy-hook", &[&action], &root, &host);
+        assert_eq!(output.0, 0);
+        fs::write(root.join("last-hooks.txt"), host.0.borrow().join(",")).unwrap();
+        print!("{}", String::from_utf8(output.1).unwrap());
+        return;
+    }
+    if std::env::var_os("OMS_AGY_TEST_RUN").is_none() {
+        let locks = std::env::temp_dir().join(format!("oms-agy-locks-{}", std::process::id()));
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agy_native_calls_reach_panel_attempts",
+                "--nocapture",
+            ])
+            .env("OMS_AGY_TEST_RUN", "1")
+            .env("OMS_LOCK_DIR", &locks)
+            .output()
+            .unwrap();
+        if locks.exists() {
+            fs::remove_dir_all(locks).unwrap();
+        }
+        assert!(
+            out.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("oms-agy-calls-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let fixture = Fixture(root.clone());
+    fs::create_dir(root.join(".oms")).unwrap();
+    let flag = AtomicBool::new(false);
+    let main = create_attempt(
+        &root,
+        &StartRequest {
+            provider: "antigravity".into(),
+            tool: "agy".into(),
+            refs: obj([
+                ("panel_role", "main".into()),
+                ("panel_room_id", "room-test".into()),
+                ("native_session", "main".into()),
+            ]),
+            ..Default::default()
+        },
+        &flag,
+    )
+    .unwrap();
+    let invoke = |action: &str, payload: Value| -> Value {
+        let input = root.join("input.json");
+        fs::write(&input, serde_json::to_vec(&payload).unwrap()).unwrap();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agy_native_calls_reach_panel_attempts",
+                "--nocapture",
+            ])
+            .env_remove("OMS_HARNESS_CHILD")
+            .env("OMS_LOCK_DIR", root.join("locks"))
+            .env("OMS_AGY_CALL_FIXTURE", &root)
+            .env("OMS_AGY_CALL_ACTION", action)
+            .env_remove("OMS_PANEL_MAIN_ATTEMPT")
+            .env_remove("OMS_ROOM_ID")
+            .stdin(fs::File::open(input).unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let start = stdout.find('{').unwrap();
+        serde_json::Deserializer::from_str(&stdout[start..])
+            .into_iter::<Value>()
+            .next()
+            .unwrap()
+            .unwrap()
+    };
+    for (id, name, args) in [
+        ("s", "invoke_subagent", json!({"TypeName":"research"})),
+        ("w", "swarm", json!({"action":"add"})),
+        ("f", "run_workflow", json!({})),
+    ] {
+        assert_eq!(
+            invoke(
+                "pretooluse",
+                json!({"workspacePaths":[root],"conversationId":"main", "toolCall":{"id":id,"name":name,"args":args}})
+            ),
+            json!({"decision":"allow"})
+        );
+    }
+    let (_, rows) = load_projection(&root).unwrap();
+    let children: Vec<_> = rows
+        .iter()
+        .filter(|v| v.get("parent_attempt_id").text() == Some(main.as_str()))
+        .collect();
+    assert_eq!(children.len(), 3);
+    assert!(
+        children
+            .iter()
+            .all(|v| v.get("state").text() == Some("working")
+                && v.get("refs").get("panel_room_id").text() == Some("room-test")),
+        "{children:?}"
+    );
+    invoke(
+        "posttooluse",
+        json!({"workspacePaths":[root],"toolCall":{"id":"f"},"error":"failure"}),
+    );
+    invoke(
+        "posttooluse",
+        json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"k-fail","name":"manage_subagents","args":{"Action":"kill_all"}},"error":"kill failed"}),
+    );
+    let (_, after_fail_kill) = load_projection(&root).unwrap();
+    assert_eq!(
+        after_fail_kill
+            .iter()
+            .find(|v| v.get("tool").text() == Some("agy-subagent"))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("working")
+    );
+    invoke(
+        "posttooluse",
+        json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"k-ok","name":"manage_subagents","args":{"Action":"kill_all"}}}),
+    );
+    invoke(
+        "stop",
+        json!({"workspacePaths":[root],"conversationId":"main","fullyIdle":true}),
+    );
+    let (_, rows) = load_projection(&root).unwrap();
+    for (tool, state) in [
+        ("agy-subagent", "cancelled"),
+        ("agy-swarm", "done"),
+        ("agy-workflow", "failed"),
+    ] {
+        assert_eq!(
+            rows.iter()
+                .find(|v| v.get("tool").text() == Some(tool))
+                .unwrap()
+                .get("state")
+                .text(),
+            Some(state)
+        );
+    }
+    fs::write(
+        root.join(".oms/panel-state/agy-native-calls.json"),
+        b"{corrupt",
+    )
+    .unwrap();
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"c2","name":"invoke_subagent","args":{"TypeName":"self","Prompt":"inspect c2"}}})
+        ),
+        json!({"decision":"allow"})
+    );
+    let (_, recovered) = load_projection(&root).unwrap();
+    assert!(
+        recovered
+            .iter()
+            .any(|v| v.get("refs").get("agy_tool_call_id").text() == Some("c2"))
+    );
+
+    // An unrelated main conversation does not hijack a single pending subagent,
+    // while matching initial prompt correlates PreInvocation -> child Stop.
+    let other_pre = invoke(
+        "preinvocation",
+        json!({"workspacePaths":[root],"conversationId":"other-main","invocationNum":1,"lastUserInput":"unrelated prompt"}),
+    );
+    assert!(other_pre["injectSteps"].is_array(), "{other_pre}");
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"other-main","fullyIdle":true,"terminationReason":"GOAL"})
+        ),
+        json!({})
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("last-hooks.txt")).unwrap(),
+        "hook,hook"
+    );
+    let (_, untouched) = load_projection(&root).unwrap();
+    assert_eq!(
+        untouched
+            .iter()
+            .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some("c2"))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("working")
+    );
+
+    assert_eq!(
+        invoke(
+            "preinvocation",
+            json!({"workspacePaths":[root],"conversationId":"child-c2","invocationNum":1,"lastUserInput":"inspect c2"})
+        ),
+        json!({})
+    );
+    assert_eq!(fs::read_to_string(root.join("last-hooks.txt")).unwrap(), "");
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"child-c2","fullyIdle":true,"terminationReason":"GOAL"})
+        ),
+        json!({})
+    );
+    assert_eq!(fs::read_to_string(root.join("last-hooks.txt")).unwrap(), "");
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"child-c2","fullyIdle":true,"terminationReason":"GOAL"})
+        ),
+        json!({})
+    );
+    assert_eq!(fs::read_to_string(root.join("last-hooks.txt")).unwrap(), "");
+    let (_, settled) = load_projection(&root).unwrap();
+    assert_eq!(
+        settled
+            .iter()
+            .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some("c2"))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("done")
+    );
+    for (id, role) in [("p1", "first"), ("p2", "second")] {
+        assert_eq!(
+            invoke(
+                "pretooluse",
+                json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":id,"name":"invoke_subagent","args":{"TypeName":"self","Role":role,"Prompt":"shared prompt"}}})
+            ),
+            json!({"decision":"allow"})
+        );
+    }
+    let ambig_pre = invoke(
+        "preinvocation",
+        json!({"workspacePaths":[root],"conversationId":"ambig-child","invocationNum":1,"lastUserInput":"shared prompt"}),
+    );
+    assert!(ambig_pre["injectSteps"].is_array(), "{ambig_pre}");
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"ambig-child","fullyIdle":true,"terminationReason":"GOAL"})
+        ),
+        json!({})
+    );
+    let (_, still_working) = load_projection(&root).unwrap();
+    for id in ["p1", "p2"] {
+        assert_eq!(
+            still_working
+                .iter()
+                .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some(id))
+                .unwrap()
+                .get("state")
+                .text(),
+            Some("working")
+        );
+    }
+    // Unrelated conversations without verified ownership never attach to the active main.
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"other-main","toolCall":{"id":"unrel-1","name":"invoke_subagent","args":{"TypeName":"research","Prompt":"unrelated work"}}})
+        ),
+        json!({"decision":"allow"})
+    );
+    let (_, after_unrelated) = load_projection(&root).unwrap();
+    assert!(
+        after_unrelated
+            .iter()
+            .all(
+                |v| v.get("refs").get("agy_tool_call_id").text() != Some("unrel-1")
+                    && v.get("refs").get("agy_parent_conversation").text() != Some("other-main")
+            )
+    );
+
+    // Replay after interruption restores agy-native-calls.json for an already working attempt.
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"replay-1","name":"invoke_subagent","args":{"TypeName":"worker","Role":"Replay Test","Prompt":"replay prompt"}}})
+        ),
+        json!({"decision":"allow"})
+    );
+    let (_, before_drop) = load_projection(&root).unwrap();
+    let replay_row = before_drop
+        .iter()
+        .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some("replay-1"))
+        .unwrap();
+    assert_eq!(replay_row.get("state").text(), Some("working"));
+    let replay_attempt = replay_row.get("attempt_id").text().unwrap().to_owned();
+    let calls_path = root.join(".oms/panel-state/agy-native-calls.json");
+    let mut dropped = read(&calls_path);
+    dropped["calls"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|e| e["call_id"] != "replay-1");
+    write(&calls_path, &dropped);
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"replay-1","name":"invoke_subagent","args":{"TypeName":"worker","Role":"Replay Test","Prompt":"replay prompt"}}})
+        ),
+        json!({"decision":"allow"})
+    );
+    let restored = read(&calls_path);
+    assert!(
+        restored["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| { e["call_id"] == "replay-1" && e["attempt_id"] == replay_attempt.as_str() })
+    );
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"main","fullyIdle":true})
+        ),
+        json!({})
+    );
+    let (_, after_replay_stop) = load_projection(&root).unwrap();
+    assert_eq!(
+        after_replay_stop
+            .iter()
+            .find(|v| v.get("attempt_id").text() == Some(replay_attempt.as_str()))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("done")
+    );
+
+    // Another active main submitting the exact same prompt is never attached as a child,
+    // and losing agy-native-calls.json while children run recovers from the durable ledger on Stop.
+    let main2 = create_attempt(
+        &root,
+        &StartRequest {
+            provider: "antigravity".into(),
+            tool: "agy".into(),
+            refs: obj([
+                ("panel_role", "main".into()),
+                ("panel_room_id", "room-test".into()),
+                ("native_session", "second-main".into()),
+            ]),
+            ..Default::default()
+        },
+        &flag,
+    )
+    .unwrap();
+    let _ = main2;
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"same-prompt-1","name":"invoke_subagent","args":{"TypeName":"worker","Role":"Shared Prompt","Prompt":"shared main prompt"}}})
+        ),
+        json!({"decision":"allow"})
+    );
+    let second_pre = invoke(
+        "preinvocation",
+        json!({"workspacePaths":[root],"conversationId":"second-main","invocationNum":1,"lastUserInput":"shared main prompt"}),
+    );
+    assert!(second_pre["injectSteps"].is_array(), "{second_pre}");
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"second-main","fullyIdle":true,"terminationReason":"GOAL"})
+        ),
+        json!({})
+    );
+    let (_, after_second_main) = load_projection(&root).unwrap();
+    assert_eq!(
+        after_second_main
+            .iter()
+            .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some("same-prompt-1"))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("working")
+    );
+    fs::remove_file(&calls_path).unwrap();
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"main","fullyIdle":true})
+        ),
+        json!({})
+    );
+    let (_, recovered_stop) = load_projection(&root).unwrap();
+    assert_eq!(
+        recovered_stop
+            .iter()
+            .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some("same-prompt-1"))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("done")
+    );
+
+    // Positive WaitMsBeforeAsync can time out and background a workflow; non-error PostToolUse keeps it working until Stop.
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"wf-wait","name":"run_workflow","args":{"Description":"Timed wait","WaitMsBeforeAsync":5000}}})
+        ),
+        json!({"decision":"allow"})
+    );
+    assert_eq!(
+        invoke(
+            "posttooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"wf-wait","name":"run_workflow","args":{"Description":"Timed wait","WaitMsBeforeAsync":5000}}})
+        ),
+        json!({})
+    );
+    let (_, after_wait_post) = load_projection(&root).unwrap();
+    assert_eq!(
+        after_wait_post
+            .iter()
+            .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some("wf-wait"))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("working")
+    );
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"main","fullyIdle":true})
+        ),
+        json!({})
+    );
+    let (_, after_wait_stop) = load_projection(&root).unwrap();
+    assert_eq!(
+        after_wait_stop
+            .iter()
+            .find(|v| v.get("refs").get("agy_tool_call_id").text() == Some("wf-wait"))
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("done")
+    );
+
+    // Distinct conversations reusing the same call_id stay isolated across PreToolUse, PostToolUse errors, and Stop.
+    let main2_id = create_attempt(
+        &root,
+        &StartRequest {
+            provider: "antigravity".into(),
+            tool: "agy".into(),
+            refs: obj([
+                ("panel_role", "main".into()),
+                ("panel_room_id", "room-test".into()),
+                ("native_session", "conv-shared-2".into()),
+            ]),
+            ..Default::default()
+        },
+        &flag,
+    )
+    .unwrap();
+    for (conv, desc) in [("main", "Main shared"), ("conv-shared-2", "Second shared")] {
+        assert_eq!(
+            invoke(
+                "pretooluse",
+                json!({"workspacePaths":[root],"conversationId":conv,"toolCall":{"id":"shared-id","name":"run_workflow","args":{"Description":desc}}})
+            ),
+            json!({"decision":"allow"})
+        );
+    }
+    let (_, shared_created) = load_projection(&root).unwrap();
+    let shared_rows: Vec<_> = shared_created
+        .iter()
+        .filter(|v| {
+            v.get("refs").get("agy_tool_call_id").text() == Some("shared-id")
+                && v.get("state").text() == Some("working")
+        })
+        .collect();
+    assert_eq!(shared_rows.len(), 2, "{shared_rows:?}");
+    assert!(
+        shared_rows
+            .iter()
+            .any(|v| v.get("parent_attempt_id").text() == Some(main.as_str()))
+    );
+    assert!(
+        shared_rows
+            .iter()
+            .any(|v| v.get("parent_attempt_id").text() == Some(main2_id.as_str()))
+    );
+    invoke(
+        "posttooluse",
+        json!({"workspacePaths":[root],"conversationId":"conv-shared-2","toolCall":{"id":"shared-id","name":"run_workflow","args":{}},"error":"boom"}),
+    );
+    let (_, after_second_err) = load_projection(&root).unwrap();
+    assert_eq!(
+        after_second_err
+            .iter()
+            .find(
+                |v| v.get("refs").get("agy_tool_call_id").text() == Some("shared-id")
+                    && v.get("parent_attempt_id").text() == Some(main2_id.as_str())
+            )
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("failed")
+    );
+    assert_eq!(
+        after_second_err
+            .iter()
+            .find(
+                |v| v.get("refs").get("agy_tool_call_id").text() == Some("shared-id")
+                    && v.get("parent_attempt_id").text() == Some(main.as_str())
+            )
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("working")
+    );
+    assert_eq!(
+        invoke(
+            "stop",
+            json!({"workspacePaths":[root],"conversationId":"main","fullyIdle":true})
+        ),
+        json!({})
+    );
+    let (_, after_shared_stop) = load_projection(&root).unwrap();
+    assert_eq!(
+        after_shared_stop
+            .iter()
+            .find(
+                |v| v.get("refs").get("agy_tool_call_id").text() == Some("shared-id")
+                    && v.get("parent_attempt_id").text() == Some(main.as_str())
+            )
+            .unwrap()
+            .get("state")
+            .text(),
+        Some("done")
+    );
+
+    drop(fixture);
+}
+
+#[test]
+fn agy_surface_probe_exercises_tool_hooks() {
+    if let Some(root) = std::env::var_os("OMS_AGY_SURFACE_ROOT").map(PathBuf::from) {
+        let out = call(
+            "update",
+            &["--probe-agy-surfaces"],
+            &root,
+            &NativeServices::default(),
+        );
+        assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
+        let text = String::from_utf8_lossy(&out.1);
+        assert!(text.contains("agy-surfaces: verified (ok)"), "{text}");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("oms-agy-probe-{}", std::process::id()));
+    fs::create_dir_all(root.join("host-home")).unwrap();
+    let _fixture = Fixture(root.clone());
+    let fake_bin = root.join("fake-agy");
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+cap_state="${HOME}/fake-agy-plugin"
+case "${1:-}" in
+  --version)
+    echo "agy 0.1.0-test"
+    exit 0
+    ;;
+  plugin)
+    if [ "${2:-}" = "validate" ]; then
+      if [ "${OMS_FAKE_AGY_REJECT_TOOL_SCHEMA:-0}" = "1" ] && grep -q "PreToolUse" "${3:?}/hooks.json"; then
+        exit 1
+      fi
+      printf '{"valid":true,"components":{"hooks":2}}\n'
+      exit 0
+    elif [ "${2:-}" = "install" ]; then
+      printf '%s' "${3:?}" > "$cap_state"
+      exit 0
+    fi
+    exit 2
+    ;;
+esac
+prompt=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    prompt="${1:-}"
+  fi
+  shift || true
+done
+plugin_dir="$(cat "$cap_state")"
+ws="$PWD"
+printf '%s\n' "$prompt" >> "${HOME}/prompts.log"
+(
+  cd "$plugin_dir"
+  printf '{"conversationId":"probe-conv","workspacePaths":["%s"]}\n' "$ws" | bash ./probe-hook.sh preinvocation >/dev/null
+  if printf '%s' "$prompt" | grep -q "manage_subagents" && [ "${OMS_FAKE_AGY_SKIP_TOOLS:-0}" != "1" ]; then
+    if [ "${OMS_FAKE_AGY_OMIT_CALL_ID:-0}" = "1" ]; then
+      printf '{"conversationId":"probe-conv","workspacePaths":["%s"],"toolCall":{"name":"manage_subagents","args":{"Action":"list"}}}\n' "$ws" | bash ./probe-hook.sh pretooluse >/dev/null
+      printf '{"conversationId":"probe-conv","workspacePaths":["%s"],"toolCall":{"name":"manage_subagents","args":{"Action":"list"}}}\n' "$ws" | bash ./probe-hook.sh posttooluse >/dev/null
+    else
+      printf '{"conversationId":"probe-conv","workspacePaths":["%s"],"toolCall":{"id":"t1","name":"manage_subagents","args":{"Action":"list"}}}\n' "$ws" | bash ./probe-hook.sh pretooluse >/dev/null
+      printf '{"conversationId":"probe-conv","workspacePaths":["%s"],"toolCall":{"id":"t1","name":"manage_subagents","args":{"Action":"list"}}}\n' "$ws" | bash ./probe-hook.sh posttooluse >/dev/null
+    fi
+  fi
+  printf '{"conversationId":"probe-conv","workspacePaths":["%s"],"terminationReason":"GOAL"}\n' "$ws" | bash ./probe-hook.sh stop >/dev/null
+)
+printf 'ok\n'
+"#;
+    fs::write(&fake_bin, script).unwrap();
+    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o700)).unwrap();
+
+    for (case, skip_tools, reject_schema, omit_id, expected) in [
+        ("with-tools", "0", "0", "0", "tool_hooks_verified=yes"),
+        ("without-tools", "1", "0", "0", "tool_hooks_verified=no"),
+        (
+            "tool-schema-rejected",
+            "0",
+            "1",
+            "0",
+            "tool_hooks_verified=no",
+        ),
+        ("missing-call-id", "0", "0", "1", "tool_hooks_verified=no"),
+    ] {
+        let cap = root.join(format!("cap-{case}"));
+        let locks = root.join(format!("locks-{case}"));
+        let home = root.join("host-home").join(case);
+        fs::create_dir_all(&cap).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agy_surface_probe_exercises_tool_hooks",
+                "--nocapture",
+            ])
+            .env_remove("OMS_HARNESS_CHILD")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("XDG_STATE_HOME", &home)
+            .env("XDG_CACHE_HOME", &home)
+            .env("OMS_AGY_SURFACE_ROOT", &root)
+            .env("OMS_AGY_BIN", &fake_bin)
+            .env("OMS_CAPABILITY_DIR", &cap)
+            .env("OMS_LOCK_DIR", &locks)
+            .env("OMS_FAKE_AGY_SKIP_TOOLS", skip_tools)
+            .env("OMS_FAKE_AGY_REJECT_TOOL_SCHEMA", reject_schema)
+            .env("OMS_FAKE_AGY_OMIT_CALL_ID", omit_id)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{case}: {} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let env_file = fs::read_to_string(cap.join("agy-surfaces.env")).unwrap();
+        assert!(
+            env_file.contains("verdict=verified\n") && env_file.contains("reason=ok\n"),
+            "{case}:\n{env_file}"
+        );
+        assert!(
+            env_file.contains(&format!("{expected}\n")),
+            "{case}:\n{env_file}"
+        );
     }
 }

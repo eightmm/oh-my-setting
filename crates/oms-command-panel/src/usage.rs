@@ -364,11 +364,14 @@ fn provider_snapshot(
             }
         }
         _ => {
-            unreported.insert("5h".into(), json!("agy reports no quota window locally"));
-            unreported.insert(
-                "weekly".into(),
-                json!("agy reports no quota window locally"),
-            );
+            let label = if provider == "antigravity" {
+                "agy"
+            } else {
+                provider
+            };
+            let msg = format!("{label} reports no quota window locally");
+            unreported.insert("5h".into(), json!(msg));
+            unreported.insert("weekly".into(), json!(msg));
         }
     }
 
@@ -387,7 +390,8 @@ fn provider_snapshot(
         .map(|pct| json!({"percent": pct}))
         .unwrap_or_else(|| json!({"unreported": "no cache read share recorded"}));
 
-    let account = if provider == "codex"
+    let account_provider = oms_panel_core::routing::ACCOUNT_PROVIDERS.contains(&provider);
+    let account = if account_provider
         && let Some(label) = ps["account_label"].as_str().filter(|s| !s.is_empty())
     {
         let mut obj = Map::new();
@@ -396,8 +400,12 @@ fn provider_snapshot(
             obj.insert("accounts".into(), ps["accounts"].clone());
         }
         Value::Object(obj)
-    } else if provider == "codex" && ps["accounts"].is_object() {
+    } else if account_provider && ps["accounts"].is_object() {
         json!({"accounts": ps["accounts"]})
+    } else if account_provider
+        && let Some(err) = ps["accounts_error"].as_str().filter(|s| !s.is_empty())
+    {
+        json!({"unreported": format!("{provider} account registry invalid: {err}")})
     } else {
         json!({"unreported": format!("{provider} exposes no account label locally")})
     };
@@ -443,10 +451,11 @@ pub fn snapshot(report: &Value, now: f64) -> Value {
     let seats = seats_by_provider(report);
     let warn_pct = warn_threshold();
     let mut providers = Map::new();
-    for provider in PROVIDERS {
-        let count = seats.get(*provider).copied().unwrap_or((0, 0));
+    let include_pi = report["provider_status"]["pi"].is_object() || seats.contains_key("pi");
+    for provider in PROVIDERS.iter().copied().chain(include_pi.then_some("pi")) {
+        let count = seats.get(provider).copied().unwrap_or((0, 0));
         providers.insert(
-            (*provider).into(),
+            provider.into(),
             provider_snapshot(
                 provider,
                 &report["provider_status"][provider],
@@ -473,6 +482,7 @@ fn provider_title(name: &str) -> &str {
         "claude" => "Claude",
         "codex" => "Codex",
         "antigravity" => "Antigravity",
+        "pi" => "Pi",
         _ => name,
     }
 }
@@ -483,16 +493,27 @@ pub fn text(snap: &Value) -> String {
     let mut lines = vec![format!(
         "Provider usage (fresh <= {fresh_mins}m; local readings only):"
     )];
-    for name in PROVIDERS {
+    let include_pi = snap["providers"]["pi"].is_object();
+    for name in PROVIDERS.iter().copied().chain(include_pi.then_some("pi")) {
         let p = &snap["providers"][name];
         let seats = &p["seats"];
-        lines.push(format!(
+        let mut header = format!(
             "{} · {} live ({} main, {} worker)",
             provider_title(name),
             seats["live"].as_u64().unwrap_or(0),
             seats["main"].as_u64().unwrap_or(0),
             seats["workers"].as_u64().unwrap_or(0)
-        ));
+        );
+        if let Some(label) = p["account"]["label"].as_str().filter(|s| !s.is_empty()) {
+            header.push_str(&format!(" · account {label}"));
+        } else if let Some(accounts) = p["account"]["accounts"]
+            .as_object()
+            .filter(|a| !a.is_empty())
+        {
+            let names: Vec<&str> = accounts.keys().map(String::as_str).collect();
+            header.push_str(&format!(" · accounts {}", names.join(", ")));
+        }
+        lines.push(header);
         for w in array(&p["windows"]) {
             let wname = w["name"].as_str().unwrap_or("window");
             let used = w["used"].as_u64().unwrap_or(0);

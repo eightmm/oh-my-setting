@@ -406,6 +406,29 @@ pub(crate) fn record_comments(
     append(state, &rows, c.interrupted)
 }
 
+/// Optional observation failures must not replace an ordinary CI/comment view.
+/// Raw storage and subprocess errors can contain private paths or remote text.
+pub(crate) fn optional_result(result: Result<usize>) -> Result<(V, Vec<u8>)> {
+    match result {
+        Ok(added) => Ok((
+            obj([("status", "recorded".into()), ("added", added.into())]),
+            vec![],
+        )),
+        Err(error) if error.code == 130 => Err(error),
+        Err(error) => Ok((
+            obj([
+                ("status", "unavailable".into()),
+                ("error_code", i64::from(error.code).into()),
+            ]),
+            format!(
+                "warning: feedback observation unavailable (code {}); durable feedback may be incomplete or stale\n",
+                error.code
+            )
+            .into_bytes(),
+        )),
+    }
+}
+
 pub(crate) fn api(c: &Context<'_>, endpoint: &str, wall: Duration) -> Result<V> {
     let value = ci::gh(
         c,
@@ -477,6 +500,9 @@ pub(crate) fn poll(
         .map(|run| ci_event(&slug, branch, &observed_head, &number, run))
         .collect::<Result<Vec<_>>>()?;
     let mut added = append(state, &rows, c.interrupted)?;
+    // Preserve available CI evidence even when PR association cannot be read,
+    // but report the incomplete poll instead of claiming a successful refresh.
+    require(matches!(pulls?, V::Arr(_)), "review PR lookup unavailable")?;
     if number != V::Null {
         let listed = api(
             c,
@@ -485,10 +511,8 @@ pub(crate) fn poll(
                 number.py()
             ),
             wall,
-        );
-        if let Ok(listed) = listed {
-            added += record_comments(c, state, &slug, &number, &observed_head, &listed)?;
-        }
+        )?;
+        added += record_comments(c, state, &slug, &number, &observed_head, &listed)?;
     }
     Ok(added)
 }

@@ -50,7 +50,7 @@ require `--allow-host-commands`.
 | Common Git `info/exclude`, optional Git index removal | Exclude writers share the common-directory lock, including linked worktrees. User text outside the managed block survives. `--untrack` stages index removal before exclude publication; interruption can leave that staged removal with the disk file intact. This command does not edit project `.gitignore`. |
 | Local `SKILL.md`, admissions JSONL, provider discovery links | The skill-store authority lock serializes mutation. Add refuses a preexisting name and requires `oms-`; read paths accept legacy names. A kill can leave a stored skill without admission or with only some links; explicit admit/link repairs that state. Foreign discovery entries are preserved. |
 | Imported immutable revisions and `lock.json` | Revision contents are copied and digest-checked before publication. The authority lock serializes pointer changes. A kill can leave quarantine directories or unreferenced revisions; the previous pointer remains until replacement. Link changes across provider roots are separate from pointer publication. |
-| Codex account registry and link ownership receipts | The registry lock serializes calls. Directory identity binds link changes; intent is written before creating each link. Removal retires receipt entries after unlink. A kill can leave pending ownership or links before registry publication. Homes, login stores and sessions are preserved. Pending Claude home reservations block collisions. |
+| Provider account registry and ownership receipts (`codex`, `claude`, `pi`) | The registry lock serializes calls. Directory identity binds link changes. Codex/Pi record intent in `codex-account-links.json` / `pi-account-links.json` before creating each link; Claude records `provider-account-effects.json` (home, parent and link identities) after creating each link, then `provider-accounts.claude.json`, then `provider-accounts.json`. Removal retires receipt entries after unlink and the registry before the receipt. A kill can leave pending ownership or links before registry publication (an unrecorded Claude link is never removed by uninstall). Homes, login stores and sessions are preserved. |
 | Capability `.env`, `.models`, `.efforts` files | Per-provider snapshot locks serialize writers. Each file replaces atomically; readers can see different generations across the three files after interruption. No cross-file atomic snapshot is claimed. |
 | Slurm reference and optional raw snapshots | One reference lock covers publication and raw capture. Each file is atomic. A kill between raw writes can leave mixed capture generations. No submission command runs. |
 | Imported answer artifact and artifact-index row | The index lock covers artifact publication before row publication. Random artifact names keep concurrent imports distinct. A kill can leave an unindexed artifact; a published row follows its completed artifact write. External artifacts are marked unowned. |
@@ -62,11 +62,15 @@ Subprocess output and elapsed time are bounded, with process-group cleanup.
 
 ## Remaining implementation gaps
 
-- Claude account registration, repair and removal fail before mutation. The
-  existing source invokes `install-claude-hooks.sh --ownership-receipt` from
-  `scripts/lib/provider_accounts.py`; the required dependency set has no native
-  owned-hook installer entrypoint. Porting or supplying that writer and its
-  receipt protocol remains necessary. No shell fallback is used.
+- Account isolation is proved only for env-isolated `codex` (`CODEX_HOME`),
+  `claude` (`CLAUDE_CONFIG_DIR`) and `pi` (`PI_CODING_AGENT_DIR`).
+  `connect-services --account PROVIDER:ID` registers, `--repair`s, `--remove`s
+  and `--verify`s them; any other provider, including `antigravity`, is refused
+  before mutation. A canonical home is unique across providers; the same id may
+  exist under different providers. Claude hooks inside an account home are
+  installed separately by `install-claude-hooks --ownership-receipt`, and
+  removal of an account with installed hooks is refused until they are removed.
+  `oms doctor` reports account home safety and receipt health read-only.
 - Project diagnostics are bounded native implementations, but full source
   parity remains unfinished: team digest comparison, complete contract
   evidence, prompt sentence duplication, exact budget normalization and all

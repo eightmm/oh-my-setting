@@ -38,7 +38,16 @@ became of each. A gate run checks every reported file:line against the diff
 the seats saw and the file itself (in-diff, context, outside-scope,
 anchor-not-found; unclassified when no diff was attached) and records them
 beside the review-scope artifact; no model is called and the GATE verdict is
-unchanged. A finding is open until someone records otherwise: fix is a claim,
+unchanged. A full quote occurring once in a tracked source file resolves its
+starting line, including multiline quotes after whitespace normalization.
+Matching is case-sensitive and rejects partial identifier tokens. `line` and
+scope classification use that location; `reported_line` preserves the seat's
+line, `resolved_line` and `source_sha256` record the evidence, and
+`line_anchor_status` explains relocation or unverified evidence. Repeated,
+missing, truncated or unsafe quotes never relocate. A changed review snapshot
+leaves citations unverified and the gate incomplete. Without a quote, the
+reported line retains its existing classification and quote_found stays null.
+A finding is open until someone records otherwise: fix is a claim,
 verify needs a fix recorded with --commit SHA and the artifact id or file name
 of a passing gate-verify receipt recorded after it. The receipt must pin a
 scope with a clean tracked tree at that commit, cover the cited file and use
@@ -81,6 +90,8 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   One-shot capacity fallback; requires one provider.
+  --account ID         Run on a registered codex, claude or pi account (also
+                       PROVIDER:account=ID); requires exactly one provider.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --no-diff            Do not attach git diff/status context.
   --candidate-patch P  Automatic panel gate: indexed patch in the owner repo.

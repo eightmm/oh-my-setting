@@ -851,3 +851,801 @@ fn harness_dry_run_is_pure_and_refused_in_workers() {
     }
     assert!(tree_is_empty(&cache));
 }
+
+#[test]
+fn python_layout_and_doctor() {
+    if let Some(target) = std::env::var_os("OMS_TEST_PYTHON_DRY") {
+        let target = PathBuf::from(target);
+        let (code, out, err) = call(
+            "apply-project-template",
+            &[
+                "general",
+                target.to_str().unwrap(),
+                "--python-layout",
+                "--no-private",
+            ],
+            target.parent().unwrap(),
+        );
+        assert_eq!(code, 0, "{out} {err}");
+        assert!(out.contains("would ensure"));
+        assert!(!target.exists());
+        return;
+    }
+    let dry = TempDir::new("python-dry");
+    let target = dry.path().join("missing");
+    let result = Command::new(std::env::current_exe().unwrap())
+        .env("OMS_TEST_PYTHON_DRY", &target)
+        .env("OH_MY_SETTING_DRY_RUN", "1")
+        .args(["--exact", "python_layout_and_doctor"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!target.exists());
+    let edges = TempDir::new("python-edges");
+    let root = edges.path();
+    let long = format!("a{}", "b".repeat(63));
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--package", &long, "--no-private"],
+            root
+        )
+        .0,
+        2
+    );
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &[
+                "general",
+                ".",
+                "--python-layout",
+                "--package",
+                &format!("{long}b"),
+                "--no-private"
+            ],
+            root
+        )
+        .0,
+        2
+    );
+    write_all(root, &[("tests/existing_test.py", "existing")]);
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &[
+                "general",
+                ".",
+                "--python-layout",
+                "--package",
+                &long,
+                "--no-private"
+            ],
+            root
+        )
+        .0,
+        0
+    );
+    assert!(!root.join("tests/test_smoke.py").exists());
+    assert!(
+        fs::read_to_string(root.join("PROJECT.md"))
+            .unwrap()
+            .contains("bash scripts/check.sh fast tests/existing_test.py")
+    );
+    let blocked = TempDir::new("python-link");
+    std::os::unix::fs::symlink(root, blocked.path().join("src")).unwrap();
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--python-layout", "--no-private"],
+            blocked.path()
+        )
+        .0,
+        2
+    );
+    assert!(!blocked.path().join("PROJECT.md").exists());
+    let tmp = TempDir::new("python-layout");
+    let repo = tmp.path();
+    let (code, out, err) = call(
+        "apply-project-template",
+        &[
+            "general",
+            ".",
+            "--python-layout",
+            "--package",
+            "my_ai",
+            "--full-docs",
+            "--no-private",
+        ],
+        repo,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    for path in [
+        "pyproject.toml",
+        "src/my_ai/__init__.py",
+        "src/my_ai/py.typed",
+        "tests/test_smoke.py",
+        "scripts/check.sh",
+        ".gitignore",
+        "PROJECT.md",
+        "docs/ARCHITECTURE.md",
+        "docs/DECISIONS.md",
+        ".oms/skills/oms-python-ai/SKILL.md",
+    ] {
+        assert!(repo.join(path).is_file(), "missing {path}");
+    }
+    assert!(repo.join(".agents/skills/oms-python-ai").exists());
+    let pyproj = fs::read_to_string(repo.join("pyproject.toml")).unwrap();
+    assert!(
+        pyproj.contains("[dependency-groups]")
+            && pyproj.contains("\"pytest\"")
+            && pyproj.contains("\"ruff\""),
+        "{pyproj}"
+    );
+    let spec_body = fs::read_to_string(repo.join("PROJECT.md")).unwrap();
+    assert!(
+        spec_body.contains("uv sync")
+            && spec_body.contains("bash scripts/check.sh fast tests/test_smoke.py"),
+        "{spec_body}"
+    );
+    assert!(
+        spec_body.contains("docs/ARCHITECTURE.md, docs/DECISIONS.md"),
+        "{spec_body}"
+    );
+    let ml_tmp = TempDir::new("python-ml-full-docs");
+    let ml_root = ml_tmp.path();
+    let (code, out, err) = call(
+        "apply-project-template",
+        &[
+            "ml",
+            ".",
+            "--python-layout",
+            "--package",
+            "ml_pkg",
+            "--full-docs",
+            "--no-private",
+        ],
+        ml_root,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let ml_spec = fs::read_to_string(ml_root.join("PROJECT.md")).unwrap();
+    assert!(!ml_spec.contains("docs/ARCHITECTURE.md"), "{ml_spec}");
+    fs::write(repo.join("pyproject.toml"), "keep").unwrap();
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &[
+                "general",
+                ".",
+                "--python-layout",
+                "--package",
+                "my_ai",
+                "--no-private"
+            ],
+            repo
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("pyproject.toml")).unwrap(),
+        "keep"
+    );
+    for name in [
+        "",
+        "123bad",
+        "bad-name",
+        "trailing_",
+        "annotationlib",
+        "base64",
+        "bisect",
+        "class",
+        "compileall",
+        "for",
+        "if",
+        "json",
+        "lambda",
+        "match",
+        "src",
+    ] {
+        assert_eq!(
+            call(
+                "apply-project-template",
+                &[
+                    "general",
+                    ".",
+                    "--python-layout",
+                    "--package",
+                    name,
+                    "--no-private"
+                ],
+                repo
+            )
+            .0,
+            2,
+            "{name}"
+        );
+    }
+    let (_, out, _) = call("project-doctor", &["."], repo);
+    assert!(
+        out.contains("ok: Python package sources live under src/")
+            && out.contains("ok: docs/ hierarchy is shallow"),
+        "{out}"
+    );
+    fs::remove_dir_all(repo.join("src")).unwrap();
+    write_all(
+        repo,
+        &[
+            ("docs/nested/spec.md", "x"),
+            ("stray.py", "x"),
+            ("stray.md", "x"),
+        ],
+    );
+    let (_, out, _) = call("project-doctor", &["."], repo);
+    for text in [
+        "warn: nested markdown under docs/",
+        "warn: pyproject.toml present without src/",
+        "warn: top-level python files",
+        "warn: markdown outside docs/",
+    ] {
+        assert!(out.contains(text), "missing {text}: {out}");
+    }
+    let non_ascii = repo.join("프로젝트");
+    fs::create_dir_all(&non_ascii).unwrap();
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--python-layout", "--no-private"],
+            &non_ascii
+        )
+        .0,
+        0
+    );
+    assert!(non_ascii.join("src/pkg/__init__.py").is_file());
+    let bad_gitignore = repo.join("bad_gitignore");
+    fs::create_dir_all(&bad_gitignore).unwrap();
+    fs::write(bad_gitignore.join(".gitignore"), [0xff, 0xfe]).unwrap();
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--python-layout", "--no-private"],
+            &bad_gitignore
+        )
+        .0,
+        2
+    );
+    assert!(!bad_gitignore.join("PROJECT.md").exists());
+    assert!(!bad_gitignore.join("pyproject.toml").exists());
+
+    let uni_tests = repo.join("uni_tests");
+    write_all(
+        &uni_tests,
+        &[("tests/test_모델.py", "def test_u(): pass\n")],
+    );
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--python-layout", "--no-private"],
+            &uni_tests
+        )
+        .0,
+        0
+    );
+    assert!(!uni_tests.join("tests/test_smoke.py").exists());
+    assert!(
+        fs::read_to_string(uni_tests.join("PROJECT.md"))
+            .unwrap()
+            .contains("bash scripts/check.sh fast 'tests/test_모델.py'")
+    );
+
+    let foreign_skill = repo.join("foreign_skill");
+    write_all(
+        &foreign_skill,
+        &[(".agents/skills/oms-python-ai", "foreign")],
+    );
+    let foreign = call(
+        "apply-project-template",
+        &["general", ".", "--python-layout", "--no-private"],
+        &foreign_skill,
+    );
+    assert_eq!(foreign.0, 2);
+    assert!(
+        foreign
+            .2
+            .contains("foreign project skill entry blocks link")
+            && foreign.2.contains("nothing was changed"),
+        "{}",
+        foreign.2
+    );
+    assert!(!foreign_skill.join("PROJECT.md").exists());
+    assert!(!foreign_skill.join("pyproject.toml").exists());
+    assert!(!foreign_skill.join("AGENTS.md").exists());
+
+    let gemini_dir = repo.join("gemini_ok");
+    write_all(&gemini_dir, &[("GEMINI.md", "")]);
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--python-layout", "--no-private"],
+            &gemini_dir
+        )
+        .0,
+        0
+    );
+    let (_, gout, _) = call("project-doctor", &["."], &gemini_dir);
+    assert!(
+        gout.contains("ok: markdown files live under docs/")
+            && !gout.contains("warn: markdown outside docs/"),
+        "{gout}"
+    );
+
+    let deep_docs = repo.join("deep_docs");
+    write_all(&deep_docs, &[("docs/a/b/c/d/e/spec.md", "deep")]);
+    let (_, dout, _) = call("project-doctor", &["."], &deep_docs);
+    assert!(dout.contains("warn: nested markdown under docs/"), "{dout}");
+
+    let ci_layout = repo.join("ci_layout");
+    write_all(
+        &ci_layout,
+        &[
+            (
+                "pyproject.toml",
+                "[project]\nname = \"ci_layout\"\nversion = \"0.1.0\"\n",
+            ),
+            ("uv.lock", "version = 1\n"),
+            ("tests/test_ci.py", "def test_ci(): pass\n"),
+        ],
+    );
+    let ci_res = call(
+        "apply-project-template",
+        &[
+            "general",
+            ".",
+            "--python-layout",
+            "--python-ci",
+            "--no-private",
+        ],
+        &ci_layout,
+    );
+    assert_eq!(ci_res.0, 0, "{} {}", ci_res.1, ci_res.2);
+    assert!(ci_layout.join(".github/workflows/python-ci.yml").is_file());
+    assert!(ci_layout.join("scripts/check.sh").is_file());
+
+    let imported = TempDir::new("python-imported-skill");
+    let imp_root = imported.path();
+    let imp_home = TempDir::new("python-imported-home");
+    let imp_bundle = imp_home.path().join("bundle");
+    write_all(
+        &imp_bundle,
+        &[(
+            "SKILL.md",
+            &named_skill("oms-python-ai", "Validate imported Python AI layout.\n"),
+        )],
+    );
+    let (code, text) = forge(
+        imp_root,
+        imp_home.path(),
+        &["preview", "--source", utf8(&imp_bundle), "--json"],
+    );
+    assert_eq!(code, 0, "{text}");
+    let sha = serde_json::from_str::<serde_json::Value>(text.trim()).unwrap()["bundle_sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (code, text) = forge(
+        imp_root,
+        imp_home.path(),
+        &[
+            "import",
+            "--source",
+            utf8(&imp_bundle),
+            "--apply",
+            "--expected-bundle-sha256",
+            &sha,
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    let imp_apply = call(
+        "apply-project-template",
+        &[
+            "general",
+            ".",
+            "--python-layout",
+            "--package",
+            "imp_pkg",
+            "--no-private",
+        ],
+        imp_root,
+    );
+    assert_eq!(imp_apply.0, 0, "{} {}", imp_apply.1, imp_apply.2);
+    assert!(!imp_root.join(".oms/skills/oms-python-ai").exists());
+    assert!(
+        imp_root
+            .join(".oms/skill-store/oms-python-ai/lock.json")
+            .is_file()
+    );
+    assert!(imp_root.join(".agents/skills/oms-python-ai").exists());
+
+    let anno_dir = repo.join("annotationlib");
+    fs::create_dir_all(&anno_dir).unwrap();
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--python-layout", "--no-private"],
+            &anno_dir
+        )
+        .0,
+        0
+    );
+    assert!(anno_dir.join("src/pkg_annotationlib/__init__.py").is_file());
+
+    let bad_skill_dir = repo.join("bad_skill_dir");
+    write_all(&bad_skill_dir, &[(".agents/skills", "file")]);
+    let bad_res = call(
+        "apply-project-template",
+        &["general", ".", "--python-layout", "--no-private"],
+        &bad_skill_dir,
+    );
+    assert_eq!(bad_res.0, 2);
+    assert!(bad_res.2.contains("nothing was changed"), "{}", bad_res.2);
+    assert!(!bad_skill_dir.join("PROJECT.md").exists());
+    assert!(!bad_skill_dir.join("pyproject.toml").exists());
+    assert!(!bad_skill_dir.join("AGENTS.md").exists());
+
+    let bad_oms_git = repo.join("bad_oms_git");
+    fs::create_dir_all(bad_oms_git.join(".oms/.gitignore")).unwrap();
+    let bad_git_res = call(
+        "apply-project-template",
+        &["general", ".", "--python-layout", "--no-private"],
+        &bad_oms_git,
+    );
+    assert_eq!(bad_git_res.0, 2);
+    assert!(
+        bad_git_res.2.contains("nothing was changed"),
+        "{}",
+        bad_git_res.2
+    );
+    assert!(!bad_oms_git.join("PROJECT.md").exists());
+    assert!(!bad_oms_git.join("pyproject.toml").exists());
+    assert!(!bad_oms_git.join("AGENTS.md").exists());
+
+    let bad_local_skill = repo.join("bad_local_skill");
+    write_all(&bad_local_skill, &[(".oms/skills/oms-python-ai", "file")]);
+    let bad_local_res = call(
+        "apply-project-template",
+        &["general", ".", "--python-layout", "--no-private"],
+        &bad_local_skill,
+    );
+    assert_eq!(bad_local_res.0, 2);
+    assert!(
+        bad_local_res.2.contains("nothing was changed"),
+        "{}",
+        bad_local_res.2
+    );
+    assert!(!bad_local_skill.join("PROJECT.md").exists());
+    assert!(!bad_local_skill.join("pyproject.toml").exists());
+
+    let mono = repo.join("monorepo");
+    fs::create_dir_all(&mono).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&mono)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let nested = mono.join("packages/sub_ai");
+    let first_nested = call(
+        "apply-project-template",
+        &[
+            "general",
+            "packages/sub_ai",
+            "--python-layout",
+            "--no-private",
+        ],
+        &mono,
+    );
+    assert_eq!(first_nested.0, 0, "{} {}", first_nested.1, first_nested.2);
+    assert!(nested.join("src/sub_ai/__init__.py").is_file());
+    assert!(nested.join(".oms/skills/oms-python-ai/SKILL.md").is_file());
+    assert!(nested.join(".agents/skills/oms-python-ai").exists());
+    assert!(nested.join(".claude/skills/oms-python-ai").exists());
+    assert!(!mono.join(".oms").exists());
+    assert!(!mono.join(".agents").exists());
+    assert!(!mono.join(".claude").exists());
+    assert!(!mono.join("PROJECT.md").exists());
+    assert!(!mono.join("pyproject.toml").exists());
+    for link_rel in [
+        "packages/sub_ai/.agents/skills/oms-python-ai",
+        "packages/sub_ai/.claude/skills/oms-python-ai",
+    ] {
+        assert!(
+            Command::new("git")
+                .args(["-C", utf8(&mono), "check-ignore", "-q", link_rel])
+                .status()
+                .unwrap()
+                .success(),
+            "expected {link_rel} to be ignored by enclosing git repo"
+        );
+    }
+    let rerun_nested = call(
+        "apply-project-template",
+        &["general", ".", "--python-layout", "--no-private"],
+        &nested,
+    );
+    assert_eq!(rerun_nested.0, 0, "{} {}", rerun_nested.1, rerun_nested.2);
+    assert!(!mono.join(".oms").exists());
+    assert!(!mono.join(".agents").exists());
+
+    // Whitespace, Git pattern metacharacters, link repair on rerun, and prefix-matching subdirs.
+    for sub in ["packages/my ai", "packages/[demo]"] {
+        let sub_dir = mono.join(sub);
+        let res = call(
+            "apply-project-template",
+            &["general", sub, "--python-layout"],
+            &mono,
+        );
+        assert_eq!(res.0, 0, "{sub}: {} {}", res.1, res.2);
+        assert!(sub_dir.join(".agents/skills/oms-python-ai").exists());
+        assert!(sub_dir.join(".claude/skills/oms-python-ai").exists());
+        for rel in [
+            format!("{sub}/AGENTS.md"),
+            format!("{sub}/.agents/skills/oms-python-ai"),
+            format!("{sub}/.claude/skills/oms-python-ai"),
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(["-C", utf8(&mono), "check-ignore", "-q", &rel])
+                    .status()
+                    .unwrap()
+                    .success(),
+                "expected {rel} to be ignored by enclosing git repo"
+            );
+        }
+        let st = call("project-private", &["status", "--check"], &sub_dir);
+        assert_eq!(st.0, 0, "{sub}: {} {}", st.1, st.2);
+    }
+    let space_dir = mono.join("packages/my ai");
+    fs::remove_file(space_dir.join(".claude/skills/oms-python-ai")).unwrap();
+    let repair = call(
+        "apply-project-template",
+        &["general", ".", "--python-layout", "--no-private"],
+        &space_dir,
+    );
+    assert_eq!(repair.0, 0, "{} {}", repair.1, repair.2);
+    assert!(space_dir.join(".claude/skills/oms-python-ai").exists());
+
+    let pkg_dir = mono.join("packages");
+    write_all(&mono, &[("packages/packages/x", "local\n")]);
+    assert_eq!(
+        call(
+            "project-private",
+            &["apply", "--path", "packages/x"],
+            &pkg_dir
+        )
+        .0,
+        0
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                utf8(&mono),
+                "check-ignore",
+                "-q",
+                "packages/packages/x"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    // Literal pathspecs keep --untrack scoped to packages/[demo] without untracking packages/d.
+    write_all(
+        &mono,
+        &[
+            ("packages/d/AGENTS.md", "keep\n"),
+            ("packages/[demo]/AGENTS.md", "drop\n"),
+        ],
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                utf8(&mono),
+                "--literal-pathspecs",
+                "add",
+                "-f",
+                "--",
+                "packages/d/AGENTS.md",
+                "packages/[demo]/AGENTS.md",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let untrack = call(
+        "project-private",
+        &["apply", "--untrack"],
+        &mono.join("packages/[demo]"),
+    );
+    assert_eq!(untrack.0, 0, "{} {}", untrack.1, untrack.2);
+    let tracked_sibling = Command::new("git")
+        .args([
+            "-C",
+            utf8(&mono),
+            "--literal-pathspecs",
+            "ls-files",
+            "--",
+            "packages/d/AGENTS.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(!tracked_sibling.stdout.is_empty());
+    let tracked_target = Command::new("git")
+        .args([
+            "-C",
+            utf8(&mono),
+            "--literal-pathspecs",
+            "ls-files",
+            "--",
+            "packages/[demo]/AGENTS.md",
+        ])
+        .output()
+        .unwrap();
+    assert!(tracked_target.stdout.is_empty());
+
+    // Scoped privacy removal unignores only that subdirectory (or --path) and preserves siblings.
+    let scoped_rm = call(
+        "project-private",
+        &["remove"],
+        &mono.join("packages/[demo]"),
+    );
+    assert_eq!(scoped_rm.0, 0, "{} {}", scoped_rm.1, scoped_rm.2);
+    for removed_rel in [
+        "packages/[demo]/AGENTS.md",
+        "packages/[demo]/.agents/skills/oms-python-ai",
+    ] {
+        assert!(
+            !Command::new("git")
+                .args(["-C", utf8(&mono), "check-ignore", "-q", removed_rel])
+                .status()
+                .unwrap()
+                .success(),
+            "expected {removed_rel} to be unignored after scoped remove"
+        );
+    }
+    for kept_rel in [
+        "packages/my ai/AGENTS.md",
+        "packages/my ai/.agents/skills/oms-python-ai",
+        "packages/packages/x",
+    ] {
+        assert!(
+            Command::new("git")
+                .args(["-C", utf8(&mono), "check-ignore", "-q", kept_rel])
+                .status()
+                .unwrap()
+                .success(),
+            "expected sibling {kept_rel} to stay ignored"
+        );
+    }
+    assert_eq!(
+        call("project-private", &["status", "--check"], &space_dir).0,
+        0
+    );
+    let path_rm = call(
+        "project-private",
+        &["remove", "--path", "packages/x"],
+        &pkg_dir,
+    );
+    assert_eq!(path_rm.0, 0, "{} {}", path_rm.1, path_rm.2);
+    assert!(
+        !Command::new("git")
+            .args([
+                "-C",
+                utf8(&mono),
+                "check-ignore",
+                "-q",
+                "packages/packages/x"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        call("project-private", &["status", "--check"], &space_dir).0,
+        0
+    );
+
+    // Trailing spaces in a subdirectory name must escape the same way on scoped remove as apply.
+    let trail_sub = "packages/model ";
+    let trail_dir = mono.join(trail_sub);
+    let trail_apply = call(
+        "apply-project-template",
+        &["general", trail_sub, "--python-layout"],
+        &mono,
+    );
+    assert_eq!(trail_apply.0, 0, "{} {}", trail_apply.1, trail_apply.2);
+    write_all(&trail_dir, &[("custom.txt", "keep ignored else\n")]);
+    assert_eq!(
+        call(
+            "project-private",
+            &["apply", "--path", "custom.txt"],
+            &trail_dir
+        )
+        .0,
+        0
+    );
+    for rel in [
+        "packages/model /AGENTS.md",
+        "packages/model /.agents/skills/oms-python-ai",
+        "packages/model /custom.txt",
+    ] {
+        assert!(
+            Command::new("git")
+                .args(["-C", utf8(&mono), "check-ignore", "-q", rel])
+                .status()
+                .unwrap()
+                .success(),
+            "expected {rel} to be ignored before trailing-space remove"
+        );
+    }
+    let trail_rm = call("project-private", &["remove"], &trail_dir);
+    assert_eq!(trail_rm.0, 0, "{} {}", trail_rm.1, trail_rm.2);
+    for rel in [
+        "packages/model /AGENTS.md",
+        "packages/model /.agents/skills/oms-python-ai",
+        "packages/model /custom.txt",
+    ] {
+        assert!(
+            !Command::new("git")
+                .args(["-C", utf8(&mono), "check-ignore", "-q", rel])
+                .status()
+                .unwrap()
+                .success(),
+            "expected {rel} to be unignored after trailing-space remove"
+        );
+    }
+    assert_eq!(
+        call("project-private", &["status", "--check"], &space_dir).0,
+        0
+    );
+
+    // Repair-only reruns preflight broken provider links before mutating template files.
+    let repair_refuse = repo.join("repair_refuse");
+    fs::create_dir_all(&repair_refuse).unwrap();
+    assert_eq!(
+        call(
+            "apply-project-template",
+            &["general", ".", "--python-layout", "--no-private"],
+            &repair_refuse,
+        )
+        .0,
+        0
+    );
+    fs::remove_file(repair_refuse.join("PROJECT.md")).unwrap();
+    fs::remove_file(repair_refuse.join(".agents/skills/oms-python-ai")).unwrap();
+    fs::remove_file(repair_refuse.join(".claude/skills/oms-python-ai")).unwrap();
+    fs::write(
+        repair_refuse.join(".agents/skills/oms-python-ai"),
+        "foreign",
+    )
+    .unwrap();
+    let refused_repair = call(
+        "apply-project-template",
+        &["general", ".", "--python-layout", "--no-private"],
+        &repair_refuse,
+    );
+    assert_eq!(refused_repair.0, 2);
+    assert!(
+        refused_repair.2.contains("nothing was changed"),
+        "{}",
+        refused_repair.2
+    );
+    assert!(!repair_refuse.join("PROJECT.md").exists());
+}

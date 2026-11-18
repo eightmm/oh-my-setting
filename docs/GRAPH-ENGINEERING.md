@@ -1071,6 +1071,34 @@ options: `--repo PATH`, `--pretty`. `build` and `check` accept `--json`;
 (absolute path) relocates the project-graph state directory, which is how
 tests and dogfood runs keep a cache out of the inspected tree.
 
+`project api PATH --json` includes optional `data_contract` and
+`callable_contract` objects on Python symbols; text output prints the same
+objects after each signature. These are declared source data with the file
+digest, path, declaration line and individual field/parameter lines. Annotated
+class bodies expose direct field annotations (including `ClassVar` and
+`InitVar` declarations), whether a default is present, and exact base spelling.
+Direct marker spellings distinguish dataclasses, Pydantic models, TypedDict,
+NamedTuple and `nn.Module`/`torch.nn.Module`; classification explicitly says
+`direct_marker_spelling_only`. Imports and aliases are not resolved, so a
+shadowed marker can match, while an alias or indirect subclass with annotated
+fields has `class_kind: "unknown"`. Classes with neither direct markers nor
+annotated fields have no data contract. Function-form factories, inherited or
+conditional fields, and runtime-generated schemas are outside this view.
+Annotated functions and methods, including `forward`, expose every parameter
+kind, declared annotation and return annotation; unannotated signatures retain
+their existing API row. Annotations preserve source spelling, including quoted
+forward references, unless withheld in full. The existing sensitive-text filter
+checks raw expressions and decoded string/byte literals; sensitive declarations use
+`[redacted: sensitive declaration]`. Expressions exceeding 1024 bytes use
+`[omitted: declaration exceeds 1024 bytes]`, rather than a clipped annotation.
+F-string/template-string expressions use `[omitted: dynamic string declaration]`.
+The existing source and helper-response limits also bound total output.
+`basis: "declared_source"` never means runtime validation,
+successful type checking, inferred data flow or inferred tensor shapes; shape
+comments are not interpreted. Older graphs without these optional objects
+remain readable, and parser/build versions force refreshed metadata on the
+next normal graph read.
+
 The graph exists wherever it is read. `project ensure` runs `check` and then
 builds when the graph is absent, refreshes it through the cache when the
 working tree moved, and writes nothing when it is current; it prints `graph:

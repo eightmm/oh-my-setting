@@ -36,6 +36,7 @@ unavailable request remains unverified.
 | `storage` | Physical roots, descriptor-anchored reads, locks, atomic files and stable-inode logs |
 | `safety` | Shared scrubber, outbound refusal, redaction, hidden Unicode markers and untrusted quotation fences |
 | `providers` | Targets, families, configured models, account validation/ranking, bounded capacity fallback and native result envelopes |
+| `usage` | Canonical pre-invocation liabilities and provider usage receipts before native output decoding |
 | `peer` | `peer-ask`, `agent-call`, `consult`, `advise`, prompt artifacts, threads, debate and synthesis |
 | `delegate` | Detached worktrees, role defaults, patch capture before verification, repair and lifecycle review state |
 | `review` | Criterion coverage, singleton confirmation, incremental review outcomes, finding anchors/dispositions, pinned verification scopes and advisory security pass |
@@ -60,6 +61,29 @@ repository use a detached disposable worktree with the current tracked diff;
 their tracked content and untracked files are checked before successful return.
 This is an execution boundary check, not a whole-machine containment claim.
 
+Every physical invocation in `providers::execute_env` now registers and
+completes a canonical `oms-command-telemetry::store::usage` receipt. Account
+overflow, model fallback, interactive turns and repair calls each receive a
+distinct call identity while retaining their logical operation identity.
+Artifacts link that operation; known task and attempt identities travel in the
+explicit invocation environment. `OMS_STATE_REPO` selects the existing shared
+state root, otherwise the owner repository is used. No credential or raw
+provider output is copied into the receipt: only counts, known identities and
+the output digest are stored. A receipt publication failure stops continuation
+and leaves the registered liability for reconciliation.
+
+The native Codex JSONL decoder takes the latest `turn.completed.usage` as a
+thread cumulative snapshot, keyed by `thread.started.thread_id`; resumed
+sessions without a tracked baseline retain unknown per-call usage. This follows
+the [Codex exec event producer](https://github.com/openai/codex/blob/main/codex-rs/exec/src/event_processor_with_jsonl_output.rs),
+whose current implementation reads the thread total. Claude `result` usage is
+the total for one query, so assistant-step events are not added again.
+`total_cost_usd` is labeled a provider client estimate, following the
+[Claude SDK cost contract](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+Other transports, incomplete envelopes, timeouts and missing measurements
+retain explicit unknowns. Arbitrary answer text is not parsed as accounting
+evidence, and an absent amount is never replaced with zero.
+
 ## Installation data read
 
 The trusted source root supplies:
@@ -82,6 +106,27 @@ location, independently of the trusted source root. Model caches and bounded
 session logs supply account model eligibility and reported quota. No account
 authentication contents are copied into artifacts. Native transcript roots
 are independently checked and bound by provider metadata to the repository.
+
+Provider accounts are limited to providers whose home is one verified environment
+variable: `codex` (`CODEX_HOME`), `claude` (`CLAUDE_CONFIG_DIR`) and `pi`
+(`PI_CODING_AGENT_DIR`, with `PI_CODING_AGENT_SESSION_DIR` removed from the child so
+sessions stay in the account). Any other provider named in
+`provider-accounts.json` or by `--account`/`PROVIDER:account=ID` is refused as
+unproved; Antigravity stays fail-closed. `provider-accounts.json` `providers` accepts
+`codex`, `claude` and `pi`; without `providers.claude`, `provider-accounts.claude.json`
+adds Claude accounts after an implicit `default` (`$HOME/.claude`).
+Canonical homes are unique across all providers; ids are provider-local.
+Unpinned calls rank usable accounts by cooldown, recent-error penalty, 10%
+weekly-quota bucket (Codex session logs only), running count when the policy is
+`spread`, then registry order. A caller-set home variable is respected unless an
+account is pinned. A pinned account never overflows. An unpinned capacity failure
+records a 300s cooldown on `provider:id` and retries once on another account of the
+same provider before any model fallback; with none left the first result stands.
+Binding a non-default Claude account is refused while an Anthropic credential
+variable is set. An unpinned native resume is refused as ambiguous when multiple
+accounts exist or the sole registered home is not the default. Session discovery
+retains registered account ownership when launching a native resume. Health and
+`panel_account` use `provider:id`.
 
 The files in `src/help/` preserve the public shell help as migration reference
 text. They describe the target contract, including options which this snapshot

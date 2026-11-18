@@ -104,7 +104,13 @@ pub(crate) fn human(r: &V) -> String {
     if u["cumulative_reports_excluded"].truth() {
         writeln!(out,"cumulative: {} resumed-session report(s) carry a running total and are left out of the tokens lines",display(&u["cumulative_reports_excluded"])).unwrap();
     }
+    lifetime(r, &mut out);
     out
+}
+fn lifetime(r: &V, out: &mut String) {
+    if let Some(u) = r.get("lifetime_provider_usage") {
+        writeln!(out,"lifetime provider receipts (independent of artifact window): calls={} tokens={} unknown-token-calls={} reported-microUSD={} unknown-cost-calls={} unsettled={} conflicts={} provider-estimate-calls={}",display(&u["calls"]),display(&u["tokens"]),display(&u["unknown_token_calls"]),display(&u["cost_microusd"]),display(&u["unknown_cost_calls"]),display(&u["unsettled_calls"]),display(&u["conflicts"]),display(&u["provider_estimate_calls"])).unwrap();
+    }
 }
 fn reported(total: &V, reports: &V, calls: &V) -> String {
     if !reports.truth() {

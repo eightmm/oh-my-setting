@@ -866,6 +866,18 @@ failing log no recogniser matches is shown as a raw head and tail and labelled
 as such, not as a diagnosis. `--file PATH [--exit-code N]` digests an existing
 capture without running or storing anything; `--json` prints schema 1.
 
+With the default `auto` strategy, Cargo's JSON `compiler-message` records
+(including Clippy diagnostics) become readable diagnostic blocks. The view
+retains rendered source spans and help; records without rendered text use their
+level, code, message, spans and child notes. Errors are selected first, then
+warnings and other diagnostics, within the same byte budget. Mixed stderr and
+unknown or malformed JSON remain ordinary output. Repeated warnings are not
+deduplicated. Oversized diagnostics and omitted records are explicitly marked;
+the `rust-diagnostics` representation is always labelled as a derived, lossy
+view, and the raw capture and command exit code are unchanged. `legacy` keeps
+the original generic line selection. Individual JSON records over 1 MiB and
+captures with more than 10,000 records use that generic fallback.
+
 No model is called. Before the capture is kept, every line the shared secret
 scan flags (the outbound scrubber's pattern and env-value check, no second
 list) is replaced by `[oms-redacted:CLASS]`, CLASS being the scrubber's pattern
@@ -1430,15 +1442,22 @@ non-instruction provider locations (auto-memory, subagent memory, Codex
 memories) when any exist; it uses the same stat-only inventory under a one-second
 limit, prints nothing on any error, and is absent from `--json` and for harness children.
 
-Two kinds of note reach shared memory without a person reading them: the one-line
-outcome `oms agent-task close` promotes and the lessons `oms journal distill`
-writes. `oms agent-memory review` lists those, plus anything brought in by
-`import`, until someone decides: `--accept ID` appends one receipt row to
+`oms agent-task close` archives the resume packet and records the journal outcome;
+automatic task-outcome memory is off by default. Explicit
+`OMS_AGENT_TASK_CLOSE_MEMORY=1` queues that outcome as a pending proposal.
+Daily journal distillation still proposes selected decisions and recurring
+blockers (`OMS_JOURNAL_AUTODISTILL=0` opts out). `oms agent-memory review` lists
+those proposals, plus anything brought in by `import`, until someone decides:
+`--accept ID` appends one receipt row to
 `.oms/memory/reviews.jsonl` and leaves the log untouched; `--retire ID --reason
 TEXT` is the ordinary retirement. `--kind task-close|distill|imported|correction`
 narrows the list and `--json` prints it. A harness child can list but not decide.
-Review is a reading aid: an unreviewed note is still searched, recalled and
-summarized exactly as before, and an accepted one is not thereby verified.
+Pending or rejected automatic notes stay out of compact summaries and provider
+context, including full mode and query-ranked injection. Acceptance preserves
+existing retirement, supersession, source-validation and path-scope behavior.
+Explicitly authored notes, pins and legacy manual notes keep their existing
+eligibility. `show`, `search` and explicit `recall` still expose stored proposals
+for review; no source notes are deleted. Acceptance does not verify a claim.
 
 `oms agent-memory import --from serena|PATH` reads Markdown memory written
 elsewhere — a file, a directory of `.md`/`.txt` files, or the repository's
@@ -1963,8 +1982,18 @@ block, one JSON object per line (`file`, `line`, `severity` of `blocking` or
 blocks from seats that reached a verdict and checks every citation against the
 diff the seats were shown and the file it names: `in-diff` (an added line),
 `context` (an unchanged line inside a hunk), `outside-scope` (anywhere else),
-`anchor-not-found` (no such file or line, or the quote is not within three
-lines of it) and `unclassified` when no diff was attached. Rows go to
+`anchor-not-found` (missing or unverified citation) and `unclassified` when no
+diff was attached. A full quote with one occurrence in a tracked source file
+resolves to that occurrence's starting line, even beyond the reported line.
+Matching preserves case, normalizes whitespace across lines and rejects
+partial identifier tokens. `line` and scope classification use the resolved
+line; `reported_line` preserves the original, `resolved_line` and `source_sha256`
+bind the evidence, and `line_anchor_status` explains the result. Repeated,
+missing, truncated, control-stripped, unreadable or untracked quotes stay
+unverified without relocation. Head, diff and criterion digests are rechecked
+before and after citation reads; drift suppresses positive quote evidence and
+makes the gate incomplete. No-quote findings retain reported-line classification
+and a null `quote_found`. Rows go to
 `_findings-RUN.jsonl` beside the review-scope artifact with its diff digest; a
 malformed line, an absolute path or one that leaves the repository is counted
 as rejected. No model is called and the gate verdict stays the seats' `GATE:`
@@ -2852,9 +2881,11 @@ missing) it still allows it, with the same exit code, but prints one stderr line
 warns when those helpers are missing. An OMS worker in its own
 worktree skips the git rules and keeps the others.
 
-Coverage is Claude Code only. The Codex plugin registers no pre-tool hook and
-the Antigravity plugin carries only certified lifecycle hooks (prompt and
-Stop), so their behaviour is unchanged.
+Coverage is Claude Code only. The Codex plugin registers no pre-tool hook, and
+the Antigravity plugin's `PreToolUse` and `PostToolUse` hooks (enabled when tool-hook
+surfaces pass `tool_hooks_verified=yes` or `OH_MY_SETTING_AGY_HOOKS=1` is set) only
+observe native agent calls (always returning `allow`) alongside prompt and `Stop`, so
+destructive command guarding for those providers is unchanged.
 
 The switch belongs to the person, not the command: `OMS_COMMAND_GUARD=0` in the
 environment the session was started from turns the guard off, while the same
@@ -3035,17 +3066,25 @@ guards see, derived from the `HOOK_SURFACES` table of `install-claude-hooks.sh`,
 instead of this prose.
 
 `oms doctor --extensions [--repo PATH] [--json]` is a standalone read-only inventory of
-what else the provider CLIs load: MCP servers from Claude Code's user, local and project
-configuration, Codex's `config.toml` and Antigravity's settings and plugin
-`mcp_config.json`, plus Claude's `enabledPlugins` and Antigravity's plugin and extension
-directory names. Each server is shown by name, transport, scope and the command's base
-name or the URL's scheme and host; the OMS server is marked. Files are parsed as data:
-no server starts, no provider command runs, nothing is contacted, and arguments,
-environment values, headers and URL paths are never printed (only how many environment
-names a server sets). It notes a server one CLI has and another lacks and one name with
-different targets. A file that cannot be parsed is `unread` and that CLI is left out of
-the comparison. Codex plugin state is not in a file the report parses and is reported as
-not read. Rows never change the exit status.
+configured MCP declarations: Claude Code's user `.claude.json` and project `.mcp.json`,
+Codex's user `config.toml`, and Antigravity's user, legacy, project and plugin
+configuration, plus Claude's `enabledPlugins` and Antigravity's plugin and extension
+directory names. Each server is shown by scoped name, transport and the command's base
+name or the URL's scheme and host. Files are parsed as data: no server starts, no
+provider command runs, nothing is contacted, and arguments, environment values, headers
+and URL paths are never printed (only how many environment names a server sets).
+
+Both `--extensions` and `--mcp` include `config_layers` with `parsed`, `missing` or
+`unknown` states and diagnostic reasons. Unsafe, unreadable, malformed files and invalid
+server entries make their provider `unknown`; readable peer declarations remain visible.
+`collisions` groups the same server name configured in multiple scopes of one provider,
+even when their targets match. These are configuration collisions, not proof of which
+entry a running provider uses: precedence, unparsed policy/session layers and runtime
+selection are not established, so `effective` and `runtime` remain `unknown`. A server's
+`configuration: disabled` describes an explicit `disabled: true` or `enabled: false`
+declaration; it does not prove a process stopped. Missing files likewise do not establish
+runtime absence or health. These additive diagnostics do not change the exit status,
+launch fingerprints or the opt-in requirements for pinning and probing.
 
 `oms doctor --mcp [--pin] [--repo PATH] [--json]` reads the same files and hashes each
 server's launch shape (transport, command, arguments, URL, environment variable names;

@@ -124,6 +124,56 @@ fn shape(path: &Path, stop: bool) -> bool {
             && (!stop || v.get("terminationReason").is_some())
     })
 }
+fn tool_shape(path: &Path) -> bool {
+    shape(path, false)
+        && r::value(path).is_ok_and(|v| {
+            v["toolCall"]["id"].as_str().is_some_and(|s| !s.is_empty())
+                && v["toolCall"]["name"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty())
+        })
+}
+
+fn write_probe_fixture(fixture: &Path, markers: &Path, include_tools: bool) -> Result<()> {
+    r::new_file(
+        &fixture.join("plugin.json"),
+        &r::bytes(
+            &json!({"name":"oms-surface-probe","version":"0.0.0","description":"oh-my-setting Antigravity surface certification probe"}),
+        )?,
+        0o600,
+    )?;
+    let mut entries = serde_json::Map::from_iter([
+        (
+            "PreInvocation".into(),
+            json!([{"type":"command","command":"bash ./probe-hook.sh preinvocation","timeout":5}]),
+        ),
+        (
+            "Stop".into(),
+            json!([{"type":"command","command":"bash ./probe-hook.sh stop","timeout":5},{"type":"command","command":"bash ./probe-slow.sh","timeout":1}]),
+        ),
+    ]);
+    if include_tools {
+        entries.insert(
+            "PreToolUse".into(),
+            json!([{"matcher":"invoke_subagent|swarm|run_workflow|manage_subagents","hooks":[{"type":"command","command":"bash ./probe-hook.sh pretooluse","timeout":5}]}]),
+        );
+        entries.insert(
+            "PostToolUse".into(),
+            json!([{"matcher":"invoke_subagent|swarm|run_workflow|manage_subagents","hooks":[{"type":"command","command":"bash ./probe-hook.sh posttooluse","timeout":5}]}]),
+        );
+    }
+    let hooks = json!({"oms-surface-probe": entries});
+    r::new_file(&fixture.join("hooks.json"), &r::bytes(&hooks)?, 0o600)?;
+    let quoted = r::shell(markers.as_os_str())?;
+    let handler = format!(
+        "#!/bin/sh\nmarkers={quoted}\nevent=\"${{1:-unknown}}\"\ncase \"$event\" in preinvocation|pretooluse|posttooluse|stop) ;; *) exit 2 ;; esac\ncat > \"$markers/$event.json\"\n: > \"$markers/$event.fired\"\nif [ \"$event\" = preinvocation ]; then\n  printf '%s\\n' '{{\"injectSteps\":[{{\"systemMessage\":{{\"systemMessage\":\"oh-my-setting surface probe\"}}}}]}}'\nelif [ \"$event\" = pretooluse ]; then\n  printf '%s\\n' '{{\"decision\":\"allow\"}}'\nelse\n  printf '%s\\n' '{{}}'\nfi\n"
+    );
+    let slow =
+        format!("#!/bin/sh\nsleep 3\n: > {quoted}/timeout-violated\nprintf '%s\\n' '{{}}'\n");
+    r::new_file(&fixture.join("probe-hook.sh"), handler.as_bytes(), 0o700)?;
+    r::new_file(&fixture.join("probe-slow.sh"), slow.as_bytes(), 0o700)?;
+    Ok(())
+}
 
 /// Certifies delivery, payload shape and timeout in a disposable provider home.
 /// Only the bounded verdict is persisted; probe output and account data are not.
@@ -143,34 +193,27 @@ pub(crate) fn probe(paths: &Paths, flag: &AtomicBool) -> Result<crate::Output> {
     let workspace = scratch.0.join("workspace");
     let fixture = scratch.0.join("fixture");
     let markers = scratch.0.join("markers");
-    for dir in [&home, &workspace, &fixture, &markers] {
+    let tool_home = scratch.0.join("tool-home");
+    let tool_fixture = scratch.0.join("tool-fixture");
+    let tool_markers = scratch.0.join("tool-markers");
+    for dir in [
+        &home,
+        &workspace,
+        &fixture,
+        &markers,
+        &tool_home,
+        &tool_fixture,
+        &tool_markers,
+    ] {
         fs::create_dir(dir)?;
     }
-    r::new_file(
-        &fixture.join("plugin.json"),
-        &r::bytes(
-            &json!({"name":"oms-surface-probe","version":"0.0.0","description":"oh-my-setting Antigravity surface certification probe"}),
-        )?,
-        0o600,
-    )?;
-    let hooks = json!({"oms-surface-probe":{
-        "PreInvocation":[{"type":"command","command":"bash ./probe-hook.sh preinvocation","timeout":5}],
-        "Stop":[{"type":"command","command":"bash ./probe-hook.sh stop","timeout":5},{"type":"command","command":"bash ./probe-slow.sh","timeout":1}]
-    }});
-    r::new_file(&fixture.join("hooks.json"), &r::bytes(&hooks)?, 0o600)?;
-    let quoted = r::shell(markers.as_os_str())?;
-    let handler = format!(
-        "#!/bin/sh\nmarkers={quoted}\nevent=\"${{1:-unknown}}\"\ncase \"$event\" in preinvocation|stop) ;; *) exit 2 ;; esac\ncat > \"$markers/$event.json\"\n: > \"$markers/$event.fired\"\nif [ \"$event\" = preinvocation ]; then\n  printf '%s\\n' '{{\"injectSteps\":[{{\"systemMessage\":{{\"systemMessage\":\"oh-my-setting surface probe\"}}}}]}}'\nelse\n  printf '%s\\n' '{{}}'\nfi\n"
-    );
-    let slow =
-        format!("#!/bin/sh\nsleep 3\n: > {quoted}/timeout-violated\nprintf '%s\\n' '{{}}'\n");
-    r::new_file(&fixture.join("probe-hook.sh"), handler.as_bytes(), 0o700)?;
-    r::new_file(&fixture.join("probe-slow.sh"), slow.as_bytes(), 0o700)?;
+    write_probe_fixture(&fixture, &markers, false)?;
     let mut accepted = false;
     let mut pre = false;
     let mut stop = false;
     let mut payload = false;
     let mut bounded = false;
+    let mut tool_ready = false;
     let (mut verdict, mut reason) = ("unverified", "absent");
     let mut version = String::from("unknown");
     if let Some(executable) = invocation.as_deref() {
@@ -279,6 +322,63 @@ pub(crate) fn probe(paths: &Paths, flag: &AtomicBool) -> Result<crate::Output> {
                             verdict = "verified";
                             "ok"
                         };
+                        if verdict == "verified" {
+                            write_probe_fixture(&tool_fixture, &tool_markers, true)?;
+                            let tv = run(
+                                executable,
+                                &[
+                                    "plugin".into(),
+                                    "validate".into(),
+                                    tool_fixture.as_os_str().into(),
+                                    "--json".into(),
+                                ],
+                                &workspace,
+                                &tool_home,
+                                60,
+                                flag,
+                            )?;
+                            r::check(flag)?;
+                            let tool_count = if tv.0 == 0 {
+                                r::parse(&tv.1)
+                                    .ok()
+                                    .and_then(|v| v["components"]["hooks"].as_u64())
+                            } else {
+                                None
+                            };
+                            if tool_count.is_some_and(|c| c > 0) {
+                                let ti = run(
+                                    executable,
+                                    &[
+                                        "plugin".into(),
+                                        "install".into(),
+                                        tool_fixture.as_os_str().into(),
+                                    ],
+                                    &workspace,
+                                    &tool_home,
+                                    60,
+                                    flag,
+                                )?;
+                                r::check(flag)?;
+                                if ti.0 == 0 {
+                                    let tool_out = run(
+                                        executable,
+                                        &[
+                                            "--dangerously-skip-permissions".into(),
+                                            "-p".into(),
+                                            "Call the manage_subagents tool once with Action set to list, then reply with the single word: ok".into(),
+                                            "--output-format".into(),
+                                            "text".into(),
+                                        ],
+                                        &workspace,
+                                        &tool_home,
+                                        60,
+                                        flag,
+                                    )?;
+                                    r::check(flag)?;
+                                    tool_ready = tool_out.0 == 0;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -290,18 +390,26 @@ pub(crate) fn probe(paths: &Paths, flag: &AtomicBool) -> Result<crate::Output> {
         verdict = "unverified";
         reason = "binary_changed";
     }
+    let tool_hooks = verdict == "verified"
+        && tool_ready
+        && !tool_markers.join("timeout-violated").exists()
+        && tool_markers.join("pretooluse.fired").is_file()
+        && tool_markers.join("posttooluse.fired").is_file()
+        && tool_shape(&tool_markers.join("pretooluse.json"))
+        && tool_shape(&tool_markers.join("posttooluse.json"));
     let yes = |v| if v { "yes" } else { "no" };
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let body = format!(
-        "binary_key={original}\nagy_version={version}\nverdict={verdict}\nreason={reason}\nschema_accepted={}\npreinvocation_delivered={}\nstop_delivered={}\npayload_shape={}\nhandler_timeout_enforced={}\nprobe_schema=2\nprobed_at={stamp}\n",
+        "binary_key={original}\nagy_version={version}\nverdict={verdict}\nreason={reason}\nschema_accepted={}\npreinvocation_delivered={}\nstop_delivered={}\npayload_shape={}\nhandler_timeout_enforced={}\ntool_hooks_verified={}\nprobe_schema=2\nprobed_at={stamp}\n",
         yes(accepted),
         yes(pre),
         yes(stop),
         yes(payload),
-        yes(bounded)
+        yes(bounded),
+        yes(tool_hooks)
     );
     let file = cache(paths)?;
     let _guard = r::lock(&file, &paths.cwd)?;
@@ -310,10 +418,10 @@ pub(crate) fn probe(paths: &Paths, flag: &AtomicBool) -> Result<crate::Output> {
     Ok(r::text(format!("agy-surfaces: {verdict} ({reason})")))
 }
 
-pub(crate) fn verified(paths: &Paths) -> Result<bool> {
+fn verification_state(paths: &Paths) -> Result<Option<(bool, bool)>> {
     let file = cache(paths)?;
     if !r::exists(&file) {
-        return Ok(false);
+        return Ok(None);
     }
     let raw = String::from_utf8(r::read(&file, 65536)?)
         .map_err(|_| r::Error(2, "invalid Antigravity surface cache".into()))?;
@@ -326,7 +434,7 @@ pub(crate) fn verified(paths: &Paths) -> Result<bool> {
     };
     let executable = binary(paths);
     let current = identity(paths, executable.as_deref())?;
-    Ok(executable.is_some()
+    let lifecycle_ok = executable.is_some()
         && field("binary_key") == Some(current.as_str())
         && field("probe_schema") == Some("2")
         && field("verdict") == Some("verified")
@@ -338,5 +446,15 @@ pub(crate) fn verified(paths: &Paths) -> Result<bool> {
             "handler_timeout_enforced",
         ]
         .iter()
-        .all(|n| field(n) == Some("yes")))
+        .all(|n| field(n) == Some("yes"));
+    let tool_ok = lifecycle_ok && field("tool_hooks_verified") == Some("yes");
+    Ok(Some((lifecycle_ok, tool_ok)))
+}
+
+pub(crate) fn verified(paths: &Paths) -> Result<bool> {
+    Ok(verification_state(paths)?.is_some_and(|(ok, _)| ok))
+}
+
+pub(crate) fn tool_hooks_verified(paths: &Paths) -> Result<bool> {
+    Ok(verification_state(paths)?.is_some_and(|(ok, tool)| ok && tool))
 }

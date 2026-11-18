@@ -29,6 +29,7 @@ pub mod safety;
 mod session;
 pub mod storage;
 mod thread;
+mod usage;
 mod view;
 
 pub use oms_command_operations::value::{V, obj};

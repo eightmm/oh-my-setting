@@ -542,8 +542,19 @@ struct State {
     until: Option<i64>,
     floor: i64,
     last_run: Option<(i64, i64)>,
+    launch: Option<LaunchIntent>,
     suspended: bool,
     cancelled: bool,
+}
+#[derive(Clone, Debug)]
+struct LaunchIntent {
+    occurrence: i64,
+    receipt: String,
+    stage: String,
+    id: String,
+    /// Only an intent without a subsequent `launching` record proves that
+    /// the host was never called. Neither elapsed time nor Err proves that.
+    prepared: bool,
 }
 fn owner_id(text: &str) -> bool {
     text.strip_prefix("owner_")
@@ -567,7 +578,18 @@ fn read_schedules(repo: &Path, limit: usize) -> std::result::Result<BTreeMap<Str
             return Err(malformed());
         };
         if event["schema"].as_i64() != Some(1)
-            || !["create", "pause", "resume", "cancel", "fired", "skipped"].contains(&kind)
+            || ![
+                "create",
+                "pause",
+                "resume",
+                "cancel",
+                "fired",
+                "skipped",
+                "launch_intent",
+                "launching",
+                "launch_unknown",
+            ]
+            .contains(&kind)
             || !owner_id(contract)
         {
             return Err(malformed());
@@ -602,6 +624,7 @@ fn read_schedules(repo: &Path, limit: usize) -> std::result::Result<BTreeMap<Str
                     until,
                     floor: anchor,
                     last_run: None,
+                    launch: None,
                     suspended: false,
                     cancelled: false,
                 },
@@ -615,6 +638,50 @@ fn read_schedules(repo: &Path, limit: usize) -> std::result::Result<BTreeMap<Str
         match kind {
             "pause" | "resume" => state.paused = kind == "pause",
             "cancel" => state.cancelled = true,
+            "launch_intent" | "launching" | "launch_unknown" => {
+                let occurrence = event["occurrence"]
+                    .as_str()
+                    .and_then(parse_utc)
+                    .ok_or_else(malformed)?;
+                let receipt = event["receipt"]
+                    .as_str()
+                    .filter(|d| crate::hex(d, 64))
+                    .ok_or_else(malformed)?;
+                let stage = event["stage"]
+                    .as_str()
+                    .filter(|s| APPROVED_STAGES.contains(s))
+                    .ok_or_else(malformed)?;
+                let id = event["launch_id"]
+                    .as_str()
+                    .filter(|id| *id == hash16(&[RESUME_SUBJECT, contract, &utc(occurrence)]))
+                    .ok_or_else(malformed)?;
+                if kind == "launch_intent" {
+                    if state.launch.is_some() || occurrence <= state.floor {
+                        return Err(malformed());
+                    }
+                    state.floor = occurrence;
+                    state.launch = Some(LaunchIntent {
+                        occurrence,
+                        receipt: receipt.into(),
+                        stage: stage.into(),
+                        id: id.into(),
+                        prepared: true,
+                    });
+                } else {
+                    let launch = state.launch.as_mut().ok_or_else(malformed)?;
+                    if launch.occurrence != occurrence
+                        || launch.receipt != receipt
+                        || launch.stage != stage
+                        || launch.id != id
+                        || (kind == "launching" && !launch.prepared)
+                        || (kind == "launch_unknown"
+                            && (launch.prepared || !event["reason"].is_string()))
+                    {
+                        return Err(malformed());
+                    }
+                    launch.prepared = false;
+                }
+            }
             _ => {
                 if kind == "skipped" && !event["reason"].is_string() {
                     return Err(malformed());
@@ -633,6 +700,22 @@ fn read_schedules(repo: &Path, limit: usize) -> std::result::Result<BTreeMap<Str
                     state.floor = state.floor.max(o);
                 }
                 if kind == "fired" {
+                    if let Some(launch) = &state.launch {
+                        if launch.prepared
+                            || Some(launch.occurrence) != occurrence
+                            || event["launch_id"] != launch.id
+                            || event["receipt"] != launch.receipt
+                            || event["stage"] != launch.stage
+                            || !event["pid"]
+                                .as_u64()
+                                .is_some_and(|pid| pid > 1 && pid <= i32::MAX as u64)
+                        {
+                            return Err(malformed());
+                        }
+                        state.launch = None;
+                    } else if !event["launch_id"].is_null() {
+                        return Err(malformed());
+                    }
                     state.last_run = Some((at, occurrence.unwrap_or(at)));
                 } else if event["reason"] == "digest-changed" {
                     state.suspended = true;
@@ -1251,9 +1334,10 @@ impl Env<'_> {
 
     /// No live panel main: run the receipt's own `autopilot run` continuation headlessly, once.
     /// Only a contract the user already approved resumes; the launch is recorded in the wake
-    /// ledger (one pool of `WAKE_DAILY_LIMIT` per UTC day) before the spawn. A schedule for the
-    /// receipt's owner id replaces the per-day receipt dedup: only its due occurrence resumes,
-    /// recorded as `fired` before the ledger row.
+    /// ledger (one pool of `WAKE_DAILY_LIMIT` per UTC day) before the spawn. A schedule's
+    /// durable intent can be recovered before `launching`; once that record is durable,
+    /// only a positive host acknowledgment records `fired`. Missing acknowledgments are
+    /// uncertain and are never retried automatically.
     fn resume(&self, dry: bool, once: Option<&Path>, scheduled_only: bool) -> String {
         let outcome = if dry {
             self.resume_attempt(None, dry, once, scheduled_only)
@@ -1424,6 +1508,22 @@ impl Env<'_> {
                 "the user reviews the contract, then `oms tick schedule --cancel` and schedules it again",
             ));
         }
+        let pending = plan.and_then(|p| p.launch.as_ref());
+        if let Some(launch) = pending {
+            if !launch.prepared {
+                return Ok(format!(
+                    "skipped: schedule for {owner} launch {} outcome unknown; reconcile needed before another launch (occurrence {})",
+                    launch.id,
+                    utc(launch.occurrence)
+                ));
+            }
+            if launch.receipt != *digest || launch.stage != *stage {
+                return Ok(format!(
+                    "skipped: schedule for {owner} prepared launch {} no longer matches the approved receipt; reconcile needed before retry",
+                    launch.id
+                ));
+            }
+        }
         if !refusal.is_empty() {
             let note = contract.row["diagnostic"]
                 .as_object()
@@ -1501,6 +1601,7 @@ impl Env<'_> {
         if let Some(plan) = plan {
             let view = schedule_view(plan, now, Some(&contract.contract_digest), Some(owner));
             let (due, following) = schedule_occurrence(plan, now);
+            let due = pending.map(|l| l.occurrence).or(due);
             let named = format!("schedule for {owner}");
             if view == "expired" {
                 return Ok(skip(
@@ -1529,7 +1630,16 @@ impl Env<'_> {
             occurrence = Some(due);
             key = hash16(&[RESUME_SUBJECT, owner, &utc(due)]);
             budget = Some((owner.clone(), plan.every * 3600));
-            if spent.len() >= WAKE_DAILY_LIMIT {
+            let reserved = spent
+                .iter()
+                .any(|w| w["main"] == RESUME_SUBJECT && w["key"] == key.as_str());
+            if spent.len() >= WAKE_DAILY_LIMIT && !reserved {
+                if pending.is_some() {
+                    return Ok(skip(
+                        "prepared autopilot launch waits for wake budget",
+                        "the UTC day rolls over",
+                    ));
+                }
                 if !dry {
                     check_tx(tx)?;
                 }
@@ -1588,6 +1698,12 @@ impl Env<'_> {
             {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if pending.is_some() {
+                        return Ok(skip(
+                            "this tick run already resumed one autopilot; prepared launch retained",
+                            "the next tick run",
+                        ));
+                    }
                     return match (occurrence, &budget) {
                         (Some(o), Some((owner, step))) => self.budget(
                             tx,
@@ -1617,36 +1733,62 @@ impl Env<'_> {
         let log_relative = format!(".oms/tick/autopilot-{short}.log");
         let mut wake = json!({"day": day, "main": RESUME_SUBJECT, "key": key, "outcome": "resumed", "at": utc(now), "stage": stage, "receipt": digest});
         if let Some(o) = occurrence {
-            // The fired event is the dedup evidence, written first: a kill before the spawn
-            // loses a run, never doubles one.
-            self.append(tx, json!({"event": "fired", "contract": owner, "occurrence": utc(o), "receipt": digest, "stage": stage, "at": utc(now)}))?;
+            if pending.is_none() {
+                self.append(tx, json!({"event": "launch_intent", "contract": owner, "occurrence": utc(o), "receipt": digest, "stage": stage, "launch_id": key, "at": utc(now)}))?;
+            }
             wake["schedule"] = utc(o).into();
+            wake["launch_id"] = key.clone().into();
         }
-        record_wake(
-            tx,
-            &self.repo,
-            &ledger,
-            [wakes.clone(), vec![wake]].concat(),
-        )?;
+        if !wakes
+            .iter()
+            .any(|w| w["main"] == RESUME_SUBJECT && w["key"] == key.as_str())
+        {
+            record_wake(
+                tx,
+                &self.repo,
+                &ledger,
+                [wakes.clone(), vec![wake]].concat(),
+            )?;
+        }
         if let Some(tx) = tx
             && tx.check().is_err()
         {
             return Ok(
-                "skipped: autopilot launch aborted after it was recorded (panel lock changed before launch)"
+                "skipped: autopilot launch aborted before host call (panel lock changed; prepared schedule intent can be retried)"
                     .into(),
             );
+        }
+        if let Some(o) = occurrence {
+            // Publication is deliberately before the external effect. A kill
+            // after this line cannot prove whether launch happened.
+            self.append(tx, json!({"event": "launching", "contract": owner, "occurrence": utc(o), "receipt": digest, "stage": stage, "launch_id": key, "at": utc(now)}))?;
         }
         match self
             .host
             .launch(&contract.argv, &self.repo.join(&log_relative), &self.repo)
         {
-            Ok(pid) => Ok(format!(
-                "resumed autopilot ({scheduled}stage {stage}, receipt {short}, pid {pid}, output {log_relative}): {shown}"
-            )),
-            Err(why) => Ok(format!(
-                "skipped: autopilot launch failed after it was recorded ({})",
-                cut(&why, 160)
-            )),
+            Ok(pid) => {
+                if let Some(o) = occurrence {
+                    self.append(tx, json!({"event": "fired", "contract": owner, "occurrence": utc(o), "receipt": digest, "stage": stage, "launch_id": key, "pid": pid, "at": utc(now)}))?;
+                }
+                Ok(format!(
+                    "resumed autopilot ({scheduled}stage {stage}, receipt {short}, pid {pid}, output {log_relative}): {shown}"
+                ))
+            }
+            Err(why) => {
+                if let Some(o) = occurrence {
+                    self.append(tx, json!({"event": "launch_unknown", "contract": owner, "occurrence": utc(o), "receipt": digest, "stage": stage, "launch_id": key, "reason": cut(&why, 160), "at": utc(now)}))?;
+                    Ok(format!(
+                        "skipped: autopilot launch {key} outcome unknown; reconcile needed before retry ({})",
+                        cut(&why, 160)
+                    ))
+                } else {
+                    Ok(format!(
+                        "skipped: autopilot launch failed after it was recorded ({})",
+                        cut(&why, 160)
+                    ))
+                }
+            }
         }
     }
     /// An exhausted budget consumes the occurrence: it is never queued.
@@ -2615,6 +2757,18 @@ impl Env<'_> {
                 state.every,
                 state.until.map_or("never".to_owned(), utc)
             ));
+            if let Some(launch) = &state.launch {
+                out.push_str(&format!(
+                    "  launch {}  occurrence {}  {}\n",
+                    launch.id,
+                    utc(launch.occurrence),
+                    if launch.prepared {
+                        "prepared; host not called; safe to retry after revalidation"
+                    } else {
+                        "outcome unknown; reconcile needed; automatic retry refused"
+                    }
+                ));
+            }
         }
         Ok(out)
     }
@@ -3036,6 +3190,7 @@ mod tests {
             until: until.map(at),
             floor: floor.map_or(at(anchor), at),
             last_run: None,
+            launch: None,
             suspended: false,
             cancelled: false,
         }
@@ -4215,7 +4370,42 @@ mod tests {
         drop(guard);
     }
     #[test]
-    fn a_scheduled_occurrence_fires_before_the_ledger_row_and_never_twice() {
+    fn a_scheduled_occurrence_recovers_prelaunch_intent_and_never_replays_unknown_launches() {
+        for ledger_missing in [false, true] {
+            let retry = Rig::new("driving");
+            retry.schedule(
+                "2026-11-10T08:00:00Z",
+                &["--contract", OWNER, "--every", "1"],
+            );
+            let mut bounded = retry.env("2026-11-10T09:00:00Z");
+            bounded.schedule_max = retry.log().len() + 420;
+            let refused = bounded.resume(false, None, true);
+            assert!(
+                retry.host.launched.borrow().is_empty(),
+                "a pre-launch persistence failure must not spawn: {refused}"
+            );
+            assert!(refused.contains("would exceed"), "{refused}");
+            if ledger_missing {
+                std::fs::remove_file(retry.dir.tick("last.json")).unwrap();
+            }
+            assert!(
+                retry
+                    .tick("2026-11-10T09:05:00Z", true, None)
+                    .starts_with("resumed autopilot")
+            );
+            assert_eq!(retry.host.launched.borrow().len(), 1);
+            assert_eq!(
+                retry.dir.wakes().len(),
+                1,
+                "retrying a prepared intent does not spend another wake"
+            );
+            assert!(
+                retry
+                    .tick("2026-11-10T09:06:00Z", true, None)
+                    .contains("not due")
+            );
+        }
+
         let rig = Rig::new("driving");
         rig.schedule(
             "2026-11-09T21:10:00Z",
@@ -4244,7 +4434,10 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(events[1]["event"], "fired");
+        assert_eq!(events[1]["event"], "launch_intent");
+        assert_eq!(events[2]["event"], "launching");
+        assert_eq!(events[3]["event"], "fired");
+        assert_eq!(events[3]["pid"], 4242);
         assert_eq!(events[1]["occurrence"], "2026-11-10T03:00:00Z");
         let wakes = rig.dir.wakes();
         assert_eq!(
@@ -4265,8 +4458,45 @@ mod tests {
                 .contains("last run 2026-11-10T04:30:00Z (occurrence 2026-11-10T03:00:00Z)")
         );
         assert_eq!(rig.host.launched.borrow().len(), 1);
-        // A kill between the fired event and the ledger row loses a run, never doubles one: the floor already moved.
+        // A missing ledger after acknowledgment never replays the effect.
         rig.dir.put(".oms/tick/last.json", "{\"wakes\":[]}");
+        assert!(rig.tick(due, true, None).contains("not due"));
+        // A missing acknowledgment cannot distinguish a kill before or after
+        // the host call. Both residues refuse automatic replay, even next day.
+        let unknown = events[..3]
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        rig.dir.put(".oms/tick/schedules.jsonl", &unknown);
+        assert!(
+            rig.tick(due, true, None)
+                .contains("outcome unknown; reconcile needed")
+        );
+        assert!(
+            rig.tick("2026-11-11T09:00:00Z", true, None)
+                .contains("outcome unknown; reconcile needed")
+        );
+        assert_eq!(rig.host.launched.borrow().len(), 1);
+        assert!(
+            rig.schedule(due, &["--list"])
+                .1
+                .contains("automatic retry refused")
+        );
+        rig.host.launched.borrow_mut().clear();
+        assert!(
+            rig.tick(due, true, None)
+                .contains("outcome unknown; reconcile needed")
+        );
+        assert!(rig.host.launched.borrow().is_empty());
+        // Pre-protocol `fired` events stay consumed without inventing a safe
+        // retry proof from a missing wake ledger.
+        let mut legacy = events[3].clone();
+        legacy.as_object_mut().unwrap().remove("launch_id");
+        legacy.as_object_mut().unwrap().remove("pid");
+        rig.dir.put(
+            ".oms/tick/schedules.jsonl",
+            &format!("{}\n{legacy}\n", events[0]),
+        );
         assert!(rig.tick(due, true, None).contains("not due"));
     }
     #[test]
@@ -4377,6 +4607,28 @@ mod tests {
         assert!(
             rig.tick("2026-11-10T09:30:00Z", false, None)
                 .contains("already resumed today")
+        );
+        let scheduled = Rig::new("driving");
+        scheduled.schedule(
+            "2026-11-10T08:00:00Z",
+            &["--contract", OWNER, "--every", "1"],
+        );
+        scheduled.host.fail_launch.set(true);
+        assert!(
+            scheduled
+                .tick("2026-11-10T09:00:00Z", true, None)
+                .contains("outcome unknown; reconcile needed")
+        );
+        assert!(scheduled.log().contains("launch_unknown"));
+        scheduled.host.fail_launch.set(false);
+        assert!(
+            scheduled
+                .tick("2026-11-10T11:00:00Z", true, None)
+                .contains("outcome unknown; reconcile needed")
+        );
+        assert!(
+            scheduled.host.launched.borrow().is_empty(),
+            "a generic host error does not prove no side effect"
         );
     }
     #[test]

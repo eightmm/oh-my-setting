@@ -1410,12 +1410,16 @@ fn dispatch_owned(
         );
     }
     if tool == "room" {
-        dispatch_exit(
-            tool,
-            local,
-            &cwd,
-            oms_command_room::run(local, &cwd, interrupted),
-        );
+        let result = match source_root {
+            Some(source) => match services_collab::CollabServices::new(interrupted, source) {
+                Ok(services) => {
+                    oms_command_room::run_with_services(local, &cwd, interrupted, &services)
+                }
+                Err(error) => (2, vec![], format!("error: {error}\n").into_bytes()),
+            },
+            None => oms_command_room::run(local, &cwd, interrupted),
+        };
+        dispatch_exit(tool, local, &cwd, result);
     }
     if tool == "input" {
         let result = match source_root {

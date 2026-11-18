@@ -1255,7 +1255,7 @@ fn close(
                 )?;
             }
         }
-        if env("OMS_AGENT_TASK_CLOSE_MEMORY", b"1") == b"1" && !goal.is_empty() {
+        if env("OMS_AGENT_TASK_CLOSE_MEMORY", b"0") == b"1" && !goal.is_empty() {
             let mut outcome = [b"Closed task: ".as_slice(), &goal].concat();
             if !next.is_empty() {
                 outcome.extend_from_slice(b" | next: ");
@@ -1287,7 +1287,7 @@ fn close(
                 })
                 .is_ok()
             {
-                line(out, &[b"task: outcome noted in project shared memory"])?;
+                line(out, &[b"task: outcome queued for project memory review"])?;
             } else {
                 line(err, &[b"warning: task outcome not added to shared memory"])?;
             }

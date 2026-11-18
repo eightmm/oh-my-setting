@@ -429,6 +429,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
     let has_participants = !participants.is_empty();
     let mut output = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut cached_agy_model: Option<Option<String>> = None;
     for member in participants {
         let attempt = text(member, "attempt");
         let participant = text(member, "participant");
@@ -445,7 +446,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
                     })
                     .flatten()
             });
-        let mut call = normalize(matched.unwrap_or(member));
+        let mut call = normalize(matched.unwrap_or(member), &mut cached_agy_model);
         for key in [
             "participant",
             "parent",
@@ -514,7 +515,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
                 continue;
             }
         }
-        output.push(normalize(attempt));
+        output.push(normalize(attempt, &mut cached_agy_model));
     }
     output.sort_by_key(|v| {
         (
@@ -525,7 +526,7 @@ pub fn calls(report: &Value) -> Vec<Value> {
     output
 }
 
-fn normalize(row: &Value) -> Value {
+fn normalize(row: &Value, cached_agy_model: &mut Option<Option<String>>) -> Value {
     let refs = &row["refs"];
     let choose = |key, reference| {
         row[key]
@@ -554,9 +555,21 @@ fn normalize(row: &Value) -> Value {
     .into_iter()
     .find(|v| !v.is_empty())
     .unwrap_or("");
+    let mut model = choose("model", "panel_model");
+    let provider = choose("provider", "panel_provider");
+    let terminal = matches!(
+        text(row, "state"),
+        "done" | "failed" | "cancelled" | "timed_out" | "abandoned" | "guard_stop"
+    );
+    if model.is_empty() && role == "main" && provider == "antigravity" && !terminal {
+        model = cached_agy_model
+            .get_or_insert_with(crate::native_panel::detect_antigravity_model)
+            .clone()
+            .unwrap_or_default();
+    }
     json!({"participant":participant,"attempt":attempt,"tool":text(row,"tool"),"task_id":text(row,"task_id"),
-        "role":role,"provider":choose("provider","panel_provider"),
-        "model":choose("model","panel_model"),"purpose":choose("purpose","panel_purpose"),
+        "role":role,"provider":provider,
+        "model":model,"purpose":choose("purpose","panel_purpose"),
         "alias":choose("alias","panel_alias"),"title":title,
         "parent":refs["panel_room_parent"].as_str().unwrap_or(text(row,"parent_attempt_id")),
         "state":row["state"],"ending":row["reason_code"],"updated_at":row["updated_at"],"created_at":row["created_at"],"refs":refs})

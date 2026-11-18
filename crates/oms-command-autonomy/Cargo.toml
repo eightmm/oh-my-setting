@@ -9,6 +9,7 @@ rust-version = "1.99.1"
 oms-command-plan = { path = "../oms-command-plan" }
 oms-command-task = { path = "../oms-command-task" }
 oms-command-operations = { path = "../oms-command-operations" }
+oms-command-telemetry = { path = "../oms-command-telemetry" }
 oms-command-room = { path = "../oms-command-room" }
 oms-supervisor = { path = "../oms-supervisor" }
 oms-contract-markdown = { path = "../oms-contract-markdown" }

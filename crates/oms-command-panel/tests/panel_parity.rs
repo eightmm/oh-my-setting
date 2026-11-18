@@ -673,6 +673,44 @@ fn empty_scope_preserved_on_continue_and_dry_run_launch() {
     assert_eq!(plan["route"]["role"], "worker");
     assert_eq!(plan["route"]["workload"], "routine");
 
+    // A recorded `provider:id` account binds only its own provider: an explicit
+    // `--to` for another provider drops it instead of pinning or failing.
+    services.attempts.borrow_mut()[0]["refs"]["panel_account"] = json!("codex:snu");
+    let brief = brief_path.to_string_lossy().into_owned();
+    let repo_arg = repo.path().to_string_lossy().into_owned();
+    let cont = |extra: &[&str]| {
+        let mut args = vec![
+            "--repo",
+            &repo_arg,
+            "--room",
+            "room-cont",
+            "--owner",
+            "claude",
+            "--continue",
+            "task-empty-scope",
+            "--brief-file",
+            &brief,
+            "--dry-run",
+        ];
+        args.extend_from_slice(extra);
+        run_with_services(
+            "panel",
+            &os(&args),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        )
+    };
+    let (code, stdout, stderr) = cont(&["--to", "claude"]);
+    assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+    let plan: Value = serde_json::from_slice(&stdout).unwrap();
+    assert!(!plan["argv"].to_string().contains("--account"), "{plan}");
+    assert!(plan["route"].get("account_pinned").is_none(), "{plan}");
+    // An explicit account that no registry holds is refused, never ignored.
+    let (code, _, _) = cont(&["--to", "codex", "--account", "zz-none"]);
+    assert_ne!(code, 0);
+
     // Native launch dry-run works cleanly before room setup.
     let (lcode, lout, lerr) = run_with_services(
         "panel",
@@ -890,6 +928,311 @@ fn routing_accepts_present_provider_catalog() {
     }
 }
 
+fn account_options_and_target_conflicts() {
+    if std::env::var_os("OMS_ACCOUNT_MODEL_CHILD").is_some() {
+        let repo = TempDir::new("panel-account-model");
+        init_git_repo(repo.path());
+        let services = Fake::default();
+        services.real_catalog.set(true);
+        let run = |extra: &[&str]| {
+            let mut args = vec![
+                "--repo",
+                repo.path().to_str().unwrap(),
+                "--dispatch",
+                "worker",
+            ];
+            args.extend_from_slice(extra);
+            run_with_services(
+                "panel",
+                &os(&args),
+                repo.path(),
+                repo.path(),
+                &STOP,
+                &services,
+            )
+        };
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let cfg = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap()).join("oh-my-setting");
+        let work = home.join("acc/codex-work");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&work)
+            .unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&cfg)
+            .unwrap();
+        std::fs::write(
+            cfg.join("provider-accounts.json"),
+            serde_json::to_vec(&json!({
+                "schema": 1,
+                "providers": {
+                    "codex": {"accounts": [{"id": "work", "home": work}]}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            work.join("models_cache.json"),
+            br#"{"models":[{"slug":"gpt-6.1-sol"}]}"#,
+        )
+        .unwrap();
+        let (code, out, err) = run(&[
+            "--prompt",
+            "look",
+            "--dry-run",
+            "--to",
+            "codex",
+            "--account",
+            "work",
+            "--model",
+            "gpt-6.1-sol",
+        ]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let body: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body["route"]["account"], "work");
+        assert_eq!(body["route"]["account_pinned"], true);
+        assert_eq!(body["route"]["model"], "gpt-6.1-sol");
+
+        let (code, _, _) = run(&[
+            "--prompt",
+            "look",
+            "--dry-run",
+            "--to",
+            "codex",
+            "--account",
+            "work",
+        ]);
+        assert_ne!(code, 0);
+
+        std::fs::write(
+            work.join("models_cache.json"),
+            br#"{"models":[{"slug":"gpt-6.1-terra"}]}"#,
+        )
+        .unwrap();
+        let (code, _, _) = run(&[
+            "--prompt",
+            "look",
+            "--dry-run",
+            "--to",
+            "codex",
+            "--account",
+            "work",
+            "--model",
+            "gpt-6.1-sol",
+        ]);
+        assert_ne!(code, 0);
+        return;
+    }
+
+    let parse = |args: &[&str]| Options::parse(&os(args));
+    assert!(
+        parse(&[
+            "--dispatch",
+            "worker",
+            "--prompt",
+            "x",
+            "--to",
+            "codex:account=work"
+        ])
+        .is_ok()
+    );
+    assert!(
+        parse(&[
+            "--dispatch",
+            "worker",
+            "--prompt",
+            "x",
+            "--to",
+            "pi",
+            "--account",
+            "w"
+        ])
+        .is_ok()
+    );
+    assert!(parse(&["--continue", "t", "--brief-file", "b", "--account", "w"]).is_ok());
+    assert!(parse(&["--usage", "--account", "w"]).is_err());
+    assert!(parse(&["--account"]).is_err());
+
+    let repo = TempDir::new("panel-account-flags");
+    init_git_repo(repo.path());
+    let services = Fake::default();
+    services.real_catalog.set(true);
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--dispatch",
+            "worker",
+        ];
+        args.extend_from_slice(extra);
+        run_with_services(
+            "panel",
+            &os(&args),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        )
+    };
+    let base = ["--prompt", "look", "--dry-run"];
+    for bad in [
+        &["--to", ":account=w"][..],
+        &["--to", "codex:account=-w"][..],
+        &["--to", "codex:account=_w"][..],
+        &["--to", "codex", "--account", "-w"][..],
+        &["--to", "codex:account="][..],
+    ] {
+        let args: Vec<_> = base.iter().chain(bad).copied().collect();
+        let (code, _, err) = run(&args);
+        assert_ne!(code, 0, "{bad:?}");
+        let err = String::from_utf8_lossy(&err);
+        assert!(
+            err.contains("account") || err.contains("requires"),
+            "{bad:?}: {err}"
+        );
+    }
+    for extra in [
+        &["--to", "codex:account=a", "--account", "b"][..],
+        &["--to", "codex", "--account", "Bad Id"][..],
+        &["--account", "w"][..],
+        // No registry in this environment: a requested account cannot pin.
+        &["--to", "codex", "--account", "w"][..],
+        &["--to", "antigravity:account=w"][..],
+    ] {
+        let args: Vec<_> = base.iter().chain(extra).copied().collect();
+        let (code, _, err) = run(&args);
+        assert_ne!(code, 0, "{extra:?}: {}", String::from_utf8_lossy(&err));
+    }
+
+    let home = TempDir::new("oms-panel-account-model-home");
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    clean_env_child(&mut child);
+    for key in [
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "PI_CODING_AGENT_DIR",
+        "OMS_MODEL",
+        "OMS_ANTIGRAVITY_SETTINGS",
+    ] {
+        child.env_remove(key);
+    }
+    let status = child
+        .arg("account_options_and_target_conflicts")
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_STATE_HOME", home.path().join(".state"))
+        .env("XDG_CACHE_HOME", home.path().join(".cache"))
+        .env("OMS_PANEL_PARITY_ROOT", home.path())
+        .env("OMS_ACCOUNT_MODEL_CHILD", "1")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "account_options_and_target_conflicts model child failed"
+    );
+}
+
+fn spread_routes_by_panel_room_id() {
+    if std::env::var_os("OMS_SPREAD_CHILD").is_none() {
+        let home = TempDir::new("oms-panel-spread-home");
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        clean_env_child(&mut child);
+        for key in [
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "PI_CODING_AGENT_DIR",
+            "OMS_MODEL",
+            "OMS_ANTIGRAVITY_SETTINGS",
+        ] {
+            child.env_remove(key);
+        }
+        let status = child
+            .arg("spread_routes_by_panel_room_id")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("XDG_STATE_HOME", home.path().join(".state"))
+            .env("XDG_CACHE_HOME", home.path().join(".cache"))
+            .env("OMS_PANEL_PARITY_ROOT", home.path())
+            .env("OMS_SPREAD_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "spread_routes_by_panel_room_id child failed"
+        );
+        return;
+    }
+
+    let repo = TempDir::new("oms-panel-spread");
+    init_git_repo(repo.path());
+    let brief_dir = TempDir::new("oms-panel-spread-brief");
+    let brief = brief_dir.path().join("brief.md");
+    std::fs::write(&brief, "Goal: check spread\n").unwrap();
+    let services = Fake::default();
+    services.real_catalog.set(true);
+    setup_fake_room(&services, "room-spread");
+    let dispatch = || {
+        let args = os(&[
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--room",
+            "room-spread",
+            "--owner",
+            "antigravity",
+            "--dispatch",
+            "builder",
+            "--access",
+            "write",
+            "--brief-file",
+            brief.to_str().unwrap(),
+            "--scope",
+            "src/lib.rs",
+            "--verify",
+            "cargo test --locked",
+            "--dry-run",
+        ]);
+        let (code, stdout, stderr) =
+            run_with_services("panel", &args, repo.path(), repo.path(), &STOP, &services);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let plan: Value = serde_json::from_slice(&stdout).unwrap();
+        plan["route"]["provider"].as_str().unwrap().to_owned()
+    };
+
+    // Room has only a `main` attempt (`panel_role: main`): excluded from `recent`, so `claude` starts first.
+    assert_eq!(dispatch(), "claude");
+
+    // Recording a non-main worker with ONLY `panel_room_id` spreads next dispatch onto `codex`.
+    services.attempts.borrow_mut().push(json!({
+        "attempt_id": "att-worker-1",
+        "tool": "peer-delegate",
+        "provider": "claude",
+        "state": "completed",
+        "terminal": true,
+        "refs": {
+            "panel_room_id": "room-spread",
+            "panel_role": "worker"
+        }
+    }));
+    assert_eq!(dispatch(), "codex");
+
+    services.attempts.borrow_mut().push(json!({
+        "attempt_id": "att-worker-2",
+        "tool": "peer-delegate",
+        "provider": "codex",
+        "state": "completed",
+        "terminal": true,
+        "refs": {
+            "panel_room_id": "room-spread",
+            "panel_role": "worker"
+        }
+    }));
+    assert_eq!(dispatch(), "claude");
+}
+
 fn usage_sessions_compare_and_routes_parity() {
     let repo = TempDir::new("oms-panel-metrics");
     init_git_repo(repo.path());
@@ -963,6 +1306,35 @@ fn usage_sessions_compare_and_routes_parity() {
         "{txt}"
     );
     assert!(txt.contains("exhaustion projection: unreported"), "{txt}");
+    assert!(snap["providers"].get("pi").is_none());
+
+    let mut report_pi = report.clone();
+    report_pi["provider_status"]["pi"] = json!({
+        "account_label": "work",
+        "accounts": {"work": {"available": true, "weekly_used": null}}
+    });
+    let snap_pi = usage::snapshot(&report_pi, now);
+    assert_eq!(
+        snap_pi["providers"]["pi"]["account"]["label"],
+        json!("work")
+    );
+    assert_eq!(
+        snap_pi["providers"]["pi"]["account"]["accounts"]["work"]["available"],
+        json!(true)
+    );
+    assert_eq!(
+        snap_pi["providers"]["pi"]["windows_unreported"]["5h"],
+        json!("pi reports no quota window locally")
+    );
+    let txt_pi = usage::text(&snap_pi);
+    assert!(
+        txt_pi.contains("Pi · 0 live (0 main, 0 worker) · account work"),
+        "{txt_pi}"
+    );
+    assert!(
+        txt_pi.contains("pi reports no quota window locally"),
+        "{txt_pi}"
+    );
 
     // `--sessions --count --json`
     let (scode, sout, serr) = run_with_services(
@@ -1571,7 +1943,7 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 7] = [
+    let cases: [(&str, fn()); 9] = [
         (
             "missing_entry_refuses_before_mutation",
             missing_entry_refuses_before_mutation,
@@ -1591,6 +1963,14 @@ fn main() {
         (
             "routing_accepts_present_provider_catalog",
             routing_accepts_present_provider_catalog,
+        ),
+        (
+            "account_options_and_target_conflicts",
+            account_options_and_target_conflicts,
+        ),
+        (
+            "spread_routes_by_panel_room_id",
+            spread_routes_by_panel_room_id,
         ),
         (
             "usage_sessions_compare_and_routes_parity",

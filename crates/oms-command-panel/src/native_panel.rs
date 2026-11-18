@@ -27,7 +27,7 @@ const ENV_KEYS: &[&str] = &[
     "OMS_ROOM_PARTICIPANT",
     "OMS_ROOM_REPO",
 ];
-const PANEL_ENV_PASSTHROUGH: &[&str] = &[
+pub const PANEL_ENV_PASSTHROUGH: &[&str] = &[
     "OMS_PANEL_NO_ANIMATION",
     "OMS_PANEL_AUTO_SWAP",
     "OMS_PANEL_ATTENTION_BELL",
@@ -49,6 +49,8 @@ const PANEL_ENV_PASSTHROUGH: &[&str] = &[
     "OMS_PANEL_THEME",
     "COLORFGBG",
     "OMS_EXECUTION_REPO",
+    "OMS_MODEL",
+    "OMS_ANTIGRAVITY_SETTINGS",
 ];
 
 struct MainResolution {
@@ -121,6 +123,7 @@ pub fn dry_run_plan(
         "harness": harness,
         "max_live_mains": MAX_LIVE_MAINS,
         "argv": argv,
+        "model": resolution.as_ref().and_then(|r| r.model.as_deref()),
         "room": room,
         "environment_keys": ENV_KEYS,
         "executes": false,
@@ -274,7 +277,7 @@ fn spawn_main(
     )?;
     {
         let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-        check_legacy_main(repo, &session, services, stop)?;
+        check_legacy_main(repo, &session, None, services, stop)?;
         sess_lock.check()?;
     }
 
@@ -429,7 +432,7 @@ fn split_panel(
         )?;
         {
             let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-            check_legacy_main(repo, &session, services, stop)?;
+            check_legacy_main(repo, &session, None, services, stop)?;
             sess_lock.check()?;
         }
         start_lock.check()?;
@@ -463,7 +466,7 @@ fn split_panel(
     } else {
         {
             let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
-            check_legacy_main(repo, &session, services, stop)?;
+            check_legacy_main(repo, &session, None, services, stop)?;
             sess_lock.check()?;
         }
         let ident = if let Some(resume) = options.get("resume") {
@@ -607,7 +610,8 @@ fn run_native(
     let session_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
     let session = std::env::var("OMS_PANEL_SESSION").unwrap_or_default();
     if !session.is_empty() {
-        check_legacy_main(repo, &session, services, stop)?;
+        let pending = pending_window_id(repo, services, stop);
+        check_legacy_main(repo, &session, pending.as_deref(), services, stop)?;
         session_lock.check()?;
     }
 
@@ -700,11 +704,20 @@ fn run_native(
     if let Some(model) = &resolution.model {
         join_args.extend(["--model", model]);
     }
-    join_args.extend(["--label", &label]);
+    let label_arg = format!("--label={label}");
+    join_args.push(&label_arg);
     if let Some(sid) = &native_session {
-        join_args.extend(["--consumer", sid]);
+        join_args.extend(["--native-session", sid]);
     }
-    if let Err(err) = crate::commands::query(services, NativeCommand::Room, repo, &join_args, stop)
+    join_args.push("--json");
+    if let Err(err) = services
+        .command(
+            NativeCommand::Room,
+            repo,
+            &crate::commands::strings(&join_args),
+            stop,
+        )
+        .and_then(|out| out.success())
     {
         let _ = transition_attempt(
             repo,
@@ -768,6 +781,7 @@ fn run_native(
         .env("OMS_ROOM_REPO", repo)
         .env("OMS_PANEL_MAIN_ATTEMPT", &attempt)
         .env("OMS_PANEL_RESULTS", "1");
+    apply_main_model_env(&mut cmd, harness, resolution.model.as_deref());
     if harness != "pi" && ["codex", "claude", "antigravity"].contains(&resolution.owner.as_str()) {
         cmd.env("OMS_HOOK_AGENT", &resolution.owner);
     } else {
@@ -776,6 +790,7 @@ fn run_native(
     for key in [
         "OMS_ATTEMPT_ID",
         "OMS_PANEL_DISPATCH",
+        "OMS_PANEL_EXPLICIT_TARGET",
         "OMS_PANEL_ROLE",
         "OMS_PANEL_PURPOSE",
         "OMS_PANEL_WORKLOAD",
@@ -835,13 +850,7 @@ fn wait_with_heartbeat(
             }
             Ok(None) => {
                 if last_beat.elapsed() >= Duration::from_secs(60) {
-                    let _ = crate::commands::query(
-                        services,
-                        NativeCommand::Events,
-                        repo,
-                        &["heartbeat", "--attempt", attempt, "--actor", "panel-main"],
-                        stop,
-                    );
+                    let _ = heartbeat_attempt(repo, attempt, services, stop);
                     last_beat = Instant::now();
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -851,22 +860,49 @@ fn wait_with_heartbeat(
     }
 }
 
+fn heartbeat_attempt(
+    repo: &Path,
+    attempt: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    services
+        .command(
+            NativeCommand::Events,
+            repo,
+            &crate::commands::strings(&[
+                "heartbeat",
+                "--attempt",
+                attempt,
+                "--actor",
+                "panel-main",
+            ]),
+            stop,
+        )?
+        .success()
+}
+
 fn event_id(
     repo: &Path,
     args: &[String],
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<String> {
-    let mut os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    os_args.push("--json".into());
+    let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
     let out = services.command(NativeCommand::Events, repo, &os_args, stop)?;
-    let val = out.json()?;
-    let id = text(&val, "attempt_id");
-    if id.is_empty() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    } else {
-        Ok(id.to_owned())
+    out.success()?;
+    let raw = String::from_utf8(out.stdout).map_err(Error::new)?;
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{')
+        && let Ok(val) = oms_panel_core::decode(trimmed.as_bytes(), 1024 * 1024)
+    {
+        let id = text(&val, "attempt_id");
+        if !id.is_empty() {
+            return Ok(id.to_owned());
+        }
     }
+    require(!trimmed.is_empty(), "event start returned no attempt id")?;
+    Ok(trimmed.to_owned())
 }
 
 fn transition_attempt(
@@ -895,8 +931,14 @@ fn transition_attempt(
     if let Some(r) = reason {
         argv.extend(["--reason-code", r]);
     }
-    let _ = crate::commands::query(services, NativeCommand::Events, repo, &argv, stop)?;
-    Ok(())
+    services
+        .command(
+            NativeCommand::Events,
+            repo,
+            &crate::commands::strings(&argv),
+            stop,
+        )?
+        .success()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -997,10 +1039,17 @@ fn match_panel_command(command: &str, canon_repo: &Path) -> Option<bool> {
             2
         }
     } else if head == "oms" {
-        if words.get(1).map(String::as_str) != Some("panel") {
+        let mut start = 1;
+        if words.get(start).map(String::as_str) == Some("--oms-dispatch") {
+            if words.get(start + 3).map(String::as_str) != Some("--") {
+                return None;
+            }
+            start += 4;
+        }
+        if words.get(start).map(String::as_str) != Some("panel") {
             return None;
         }
-        2
+        start + 1
     } else {
         return None;
     };
@@ -1260,7 +1309,7 @@ fn launch_command(
     task: Option<&str>,
     room_id: Option<&str>,
 ) -> String {
-    let mut parts = panel_env_prefix();
+    let mut parts = panel_env_prefix_for(launch == "agy");
     parts.push(format!("OMS_PANEL_SESSION={session}"));
     if let Some(id) = room_id {
         parts.push(format!("OMS_ROOM_ID={id}"));
@@ -1296,7 +1345,7 @@ fn watch_shell(
     owner: Option<&str>,
     session: Option<&str>,
 ) -> String {
-    let mut parts = panel_env_prefix();
+    let mut parts = panel_env_prefix_for(owner.is_none_or(|o| o == "antigravity" || o == "agy"));
     if let Some(s) = session {
         parts.push(format!("OMS_PANEL_SESSION={s}"));
     }
@@ -1320,20 +1369,74 @@ fn watch_shell(
     )
 }
 
-fn entry_prefix(source: &Path) -> Result<Vec<String>> {
-    let entry = crate::executable::resolve(source)
-        .ok_or_else(|| Error::new("oms panel executable unavailable"))?;
+/// Return `(--oms-dispatch, <source>, <rev>, --)` args when `exe` is a verified
+/// staged payload under `<source>/target/oms-native/<rev>/oms`, so child panes
+/// carry source authority rather than failing as bare direct binary calls.
+fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String)> {
+    if exe.file_name().and_then(|v| v.to_str()) != Some("oms") {
+        return None;
+    }
+    let rev_dir = exe.parent()?;
+    let rev = rev_dir.file_name().and_then(|v| v.to_str())?;
+    if rev.len() != 40 || !rev.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let native_dir = rev_dir.parent()?;
+    if native_dir.file_name().and_then(|v| v.to_str()) != Some("oms-native") {
+        return None;
+    }
+    let canon_source = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let canon_parent = std::fs::canonicalize(native_dir).ok()?;
+    if canon_parent != canon_source.join("target/oms-native") {
+        return None;
+    }
+    let is_file = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file());
+    if !is_file(&rev_dir.join("manifest.json")) || !is_file(exe) {
+        return None;
+    }
+    Some((canon_source.to_string_lossy().into_owned(), rev.to_owned()))
+}
+
+fn entry_prefix_for(source: &Path, entry: &crate::executable::Entry) -> Vec<String> {
     let mut prefix = Vec::new();
     if entry.script {
         prefix.push("bash".into());
     }
     prefix.push(entry.path.to_string_lossy().into_owned());
-    Ok(prefix)
+    if !entry.script
+        && let Some((dispatch_source, rev)) = staged_dispatch_args(source, &entry.path)
+    {
+        prefix.extend(["--oms-dispatch".into(), dispatch_source, rev, "--".into()]);
+    }
+    prefix
 }
 
-fn panel_env_prefix() -> Vec<String> {
+fn entry_prefix(source: &Path) -> Result<Vec<String>> {
+    let entry = crate::executable::resolve(source)
+        .ok_or_else(|| Error::new("oms panel executable unavailable"))?;
+    Ok(entry_prefix_for(source, &entry))
+}
+
+/// Apply or scrub `OMS_MODEL` and `OMS_ANTIGRAVITY_SETTINGS` for a spawned main process.
+pub fn apply_main_model_env(cmd: &mut Command, harness: &str, resolved_model: Option<&str>) {
+    if harness == "agy" {
+        if let Some(m) = resolved_model {
+            cmd.env("OMS_MODEL", m);
+        } else {
+            cmd.env_remove("OMS_MODEL");
+        }
+    } else {
+        cmd.env_remove("OMS_MODEL");
+        cmd.env_remove("OMS_ANTIGRAVITY_SETTINGS");
+    }
+}
+
+fn panel_env_prefix_for(keep_agy_model: bool) -> Vec<String> {
     let mut out = vec!["env".into()];
     for name in PANEL_ENV_PASSTHROUGH {
+        if !keep_agy_model && (*name == "OMS_MODEL" || *name == "OMS_ANTIGRAVITY_SETTINGS") {
+            continue;
+        }
         if let Ok(val) = std::env::var(name) {
             out.push(format!("{name}={val}"));
         }
@@ -1486,6 +1589,78 @@ fn native_command(
     }
 }
 
+fn slug_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=160).contains(&b.len())
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._:/-".contains(c))
+        && !["none", "auto", "default", "null", "unknown"].contains(&s)
+}
+
+/// Map an Antigravity display name (or lowercase slug) to its canonical `agy` CLI slug.
+pub fn normalize_antigravity_model(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return None;
+    }
+    if slug_ok(s) {
+        return Some(s.to_owned());
+    }
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "orchestrator (carbon)" => return Some("gemini-pro-orchestrator".into()),
+        "orchestrator (argon)" => return Some("gemini-pro-orchestrator-argon".into()),
+        _ => {}
+    }
+    let (body, effort) = match lower.strip_suffix(')') {
+        Some(rest) => {
+            let (body, effort) = rest.rsplit_once(" (")?;
+            let effort = effort.trim();
+            if effort.is_empty() || !effort.bytes().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            (body, Some(effort))
+        }
+        None => (lower.as_str(), None),
+    };
+    let words: Vec<&str> = body.split_whitespace().collect();
+    let mut slug = match words.as_slice() {
+        ["gemini", ver, variant @ ..] if !variant.is_empty() => {
+            format!("gemini-{ver}-{}", variant.join("-"))
+        }
+        ["claude", tier, ver] => format!("claude-{tier}-{}", ver.replace('.', "-")),
+        ["gpt-oss", size] => format!("gpt-oss-{size}"),
+        _ => return None,
+    };
+    if let Some(e) = effort {
+        slug = format!("{slug}-{e}");
+    }
+    slug_ok(&slug).then_some(slug)
+}
+
+/// Detect the configured Antigravity model from `OMS_MODEL` or antigravity-cli settings.
+pub fn detect_antigravity_model() -> Option<String> {
+    if let Some(m) = std::env::var("OMS_MODEL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        return normalize_antigravity_model(&m);
+    }
+    let path = match std::env::var_os("OMS_ANTIGRAVITY_SETTINGS").filter(|v| !v.is_empty()) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::path::PathBuf::from(std::env::var_os("HOME").filter(|v| !v.is_empty())?)
+            .join(".gemini/antigravity-cli/settings.json"),
+    };
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 256 * 1024 {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let doc: Value = serde_json::from_slice(&bytes).ok()?;
+    normalize_antigravity_model(doc.as_object()?.get("model")?.as_str()?)
+}
+
 fn resolve_main(policy: &routing::Policy, harness: &str, model: Option<&str>) -> MainResolution {
     if harness == "pi" {
         let preset = policy.main.get("codex");
@@ -1501,7 +1676,13 @@ fn resolve_main(policy: &routing::Policy, harness: &str, model: Option<&str>) ->
     if harness == "agy" {
         return MainResolution {
             owner: "antigravity".into(),
-            model: model.map(str::to_owned),
+            model: match model {
+                Some(m) => normalize_antigravity_model(m).or_else(|| {
+                    Some(m.trim().to_owned())
+                        .filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
+                }),
+                None => detect_antigravity_model(),
+            },
             effort: "native-settings".into(),
             transport: "native".into(),
         };
@@ -1746,7 +1927,7 @@ fn ensure_room(
         services,
         NativeCommand::Room,
         repo,
-        &["new", "--title", "Shared work", "--json"],
+        &["new", "--topic", "Shared work", "--json"],
         stop,
     )?;
     let id = text(&created, "id");
@@ -1771,9 +1952,26 @@ fn release_dead_mains(repo: &Path, services: &dyn Services, stop: &AtomicBool) -
     Ok(())
 }
 
+fn pending_window_id(repo: &Path, services: &dyn Services, stop: &AtomicBool) -> Option<String> {
+    if !managed_session() {
+        return None;
+    }
+    let pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|p| crate::commands::valid_target(p, '%'))?;
+    tmux_quiet(
+        services,
+        repo,
+        &["display-message", "-p", "-t", &pane, "#{window_id}"],
+        stop,
+    )
+    .filter(|w| crate::commands::valid_target(w, '@'))
+}
+
 fn check_legacy_main(
     repo: &Path,
     session: &str,
+    pending_window: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<()> {
@@ -1793,7 +1991,7 @@ fn check_legacy_main(
     )?;
     if session_owner(services, repo, session, stop).is_some() {
         require(
-            live_mains(repo, session, None, None, services, stop)? < MAX_LIVE_MAINS,
+            live_mains(repo, session, None, pending_window, services, stop)? < MAX_LIVE_MAINS,
             "another main is live or unverified; finish it before starting another",
         )?;
     }
@@ -2110,5 +2308,312 @@ mod hud_status {
             hud_status_right(&["/o/#oms".into()], Path::new("/w")),
             "oms"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_lifecycle_contract {
+    use super::{event_id, heartbeat_attempt, transition_attempt};
+    use oms_panel_core::{
+        NativeCommand, Result, Services, Value,
+        services::{CommandOutput, ExecutionRequest, PeerExecutor},
+    };
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct TempRepo(PathBuf);
+    impl TempRepo {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "oms-panel-real-parsers-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&p).unwrap();
+            let p = p.canonicalize().unwrap();
+            let init = std::process::Command::new("git")
+                .args(["-C", p.to_str().unwrap(), "init", "-q"])
+                .status()
+                .unwrap();
+            assert!(init.success());
+            Self(p)
+        }
+    }
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct RealCliParsers;
+    impl PeerExecutor for RealCliParsers {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            Err(oms_panel_core::Error::new("unexpected subprocess"))
+        }
+    }
+    impl Services for RealCliParsers {
+        fn command(
+            &self,
+            command: NativeCommand,
+            repo: &Path,
+            args: &[OsString],
+            stop: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            let (code, stdout, stderr) = match command {
+                NativeCommand::Events => oms_command_operations::run(
+                    oms_command_operations::App::Events,
+                    args,
+                    repo,
+                    stop,
+                ),
+                NativeCommand::Room => oms_command_room::run(args, repo, stop),
+                _ => return Err(oms_panel_core::Error::new("unsupported test command")),
+            };
+            if code != 0 {
+                return Err(oms_panel_core::Error::new(format!(
+                    "command exit {code}: {}",
+                    String::from_utf8_lossy(&stderr)
+                )));
+            }
+            Ok(CommandOutput {
+                code,
+                stdout,
+                stderr,
+                cleanup_complete: true,
+                output_complete: true,
+                limited: false,
+            })
+        }
+    }
+
+    #[test]
+    fn native_main_event_and_room_calls_match_real_cli_parsers() {
+        const CHILD: &str = "OMS_NATIVE_LIFECYCLE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = TempRepo::new();
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.env_clear();
+            for key in ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ"] {
+                if let Some(val) = std::env::var_os(key) {
+                    cmd.env(key, val);
+                }
+            }
+            let output = cmd
+                .args([
+                    "--exact",
+                    "native_panel::native_lifecycle_contract::native_main_event_and_room_calls_match_real_cli_parsers",
+                    "--nocapture",
+                ])
+                .env("HOME", &home.0)
+                .env("XDG_CACHE_HOME", home.0.join(".cache"))
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let body = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{body}");
+            assert!(body.contains("1 passed;"), "{body}");
+            return;
+        }
+        let repo = TempRepo::new();
+        let stop = AtomicBool::new(false);
+        let svc = RealCliParsers;
+        let room_id = super::ensure_room(&repo.0, None, &svc, &stop).unwrap();
+        assert!(room_id.starts_with("room-"), "{room_id}");
+
+        let start_args = vec![
+            "start".into(),
+            "--provider".into(),
+            "claude".into(),
+            "--tool".into(),
+            "panel-main".into(),
+            "--ref".into(),
+            "panel_role=main".into(),
+            "--ref".into(),
+            format!("panel_room_id={room_id}"),
+            "--then".into(),
+            "starting".into(),
+            "--then".into(),
+            "working".into(),
+        ];
+        let attempt = event_id(&repo.0, &start_args, &svc, &stop).unwrap();
+        assert!(attempt.starts_with("att_"), "{attempt}");
+
+        svc.command(
+            NativeCommand::Room,
+            &repo.0,
+            &crate::commands::strings(&[
+                "join",
+                "--id",
+                &room_id,
+                "--participant",
+                &attempt,
+                "--provider",
+                "claude",
+                "--role",
+                "main",
+                "--label=-dash-safe",
+                "--native-session",
+                "11111111-1111-1111-1111-111111111111",
+                "--json",
+            ]),
+            &stop,
+        )
+        .unwrap()
+        .success()
+        .unwrap();
+
+        heartbeat_attempt(&repo.0, &attempt, &svc, &stop).unwrap();
+        transition_attempt(
+            &repo.0,
+            &attempt,
+            &["verifying", "review", "done"],
+            Some("native_exit"),
+            &svc,
+            &stop,
+        )
+        .unwrap();
+
+        let shown = crate::commands::query(
+            &svc,
+            NativeCommand::Events,
+            &repo.0,
+            &["show", "--attempt", &attempt, "--json"],
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(shown["state"], Value::from("done"));
+        assert_eq!(shown["terminal"], Value::from(true));
+    }
+
+    #[test]
+    fn staged_entry_prefix_carries_oms_dispatch_and_matches_panes() {
+        let dir = TempRepo::new();
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let staged_dir = dir.0.join("target/oms-native").join(rev);
+        fs::create_dir_all(&staged_dir).unwrap();
+        let exe = staged_dir.join("oms");
+        fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(staged_dir.join("manifest.json"), "{}").unwrap();
+
+        let prefix = super::entry_prefix_for(
+            &dir.0,
+            &crate::executable::Entry {
+                path: exe.clone(),
+                script: false,
+            },
+        );
+        assert_eq!(
+            prefix,
+            vec![
+                exe.to_string_lossy().into_owned(),
+                "--oms-dispatch".to_owned(),
+                dir.0.to_string_lossy().into_owned(),
+                rev.to_owned(),
+                "--".to_owned(),
+            ]
+        );
+        assert!(super::test_entry_matches(&dir.0, &prefix));
+
+        let launch_cmd = super::launch_command(
+            &dir.0,
+            &prefix,
+            "oms-test",
+            "codex",
+            None,
+            None,
+            None,
+            Some("room-1234"),
+        );
+        assert_eq!(super::match_panel_command(&launch_cmd, &dir.0), Some(false));
+        let watch_cmd = super::watch_shell(&dir.0, &prefix, Some("codex"), Some("oms-test"));
+        assert_eq!(super::match_panel_command(&watch_cmd, &dir.0), Some(true));
+
+        let hud = super::hud_status_right(&prefix, &dir.0);
+        assert!(hud.contains("--oms-dispatch"));
+        assert!(hud.contains("hud --tmux --repo"));
+
+        // Incomplete --oms-dispatch prefix is rejected instead of misreading flags.
+        let malformed = format!(
+            "'{}' --oms-dispatch panel --repo '{}'",
+            exe.display(),
+            dir.0.display()
+        );
+        assert_eq!(super::match_panel_command(&malformed, &dir.0), None);
+    }
+
+    #[test]
+    fn check_legacy_main_excludes_callers_own_pending_tmux_window() {
+        struct PendingWindowMock;
+        impl PeerExecutor for PendingWindowMock {
+            fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                let args: Vec<String> = request
+                    .argv
+                    .iter()
+                    .map(|v| v.to_string_lossy().into_owned())
+                    .collect();
+                let stdout = if args.iter().any(|a| a == "has-session") {
+                    Vec::new()
+                } else if args.iter().any(|a| a == "show-options") {
+                    b"/repo\n".to_vec()
+                } else if args.iter().any(|a| a == "list-windows") {
+                    b"codex\troom-1\t\tcodex\t@1\tcodex\n".to_vec()
+                } else {
+                    return Err(oms_panel_core::Error::new("unexpected tmux command"));
+                };
+                Ok(CommandOutput {
+                    code: 0,
+                    stdout,
+                    stderr: Vec::new(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    limited: false,
+                })
+            }
+        }
+        impl Services for PendingWindowMock {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                match command {
+                    NativeCommand::Events => Ok(CommandOutput {
+                        code: 0,
+                        stdout: b"[]".to_vec(),
+                        stderr: Vec::new(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    }),
+                    NativeCommand::Room => Ok(CommandOutput {
+                        code: 0,
+                        stdout: br#"{"closed":false,"participants":[]}"#.to_vec(),
+                        stderr: Vec::new(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    }),
+                    _ => Err(oms_panel_core::Error::new("unexpected native command")),
+                }
+            }
+        }
+
+        let dir = TempRepo::new();
+        let stop = AtomicBool::new(false);
+        assert!(
+            super::check_legacy_main(&dir.0, "oms-test", None, &PendingWindowMock, &stop).is_err()
+        );
+        super::check_legacy_main(&dir.0, "oms-test", Some("@1"), &PendingWindowMock, &stop)
+            .unwrap();
     }
 }

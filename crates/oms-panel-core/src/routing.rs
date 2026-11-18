@@ -180,6 +180,10 @@ pub struct Route {
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub account_pinned: bool,
+    #[serde(default, skip_serializing)]
+    pub explicit_target: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct RoutingInputs {
@@ -195,6 +199,8 @@ pub struct RoutingInputs {
     pub explicit_target: bool,
     pub accounts: Option<Accounts>,
     pub running_accounts: BTreeMap<String, usize>,
+    pub requested_account: Option<String>,
+    pub requested_model: Option<String>,
 }
 pub fn kind(role: &str) -> Result<&'static str> {
     match role {
@@ -240,6 +246,16 @@ pub fn route_family(provider: &str, model: &str) -> Option<(String, Vec<u64>)> {
     Some((family, version))
 }
 pub fn model_family(provider: &str, model: &str) -> Result<&'static str> {
+    let lower = model.to_ascii_lowercase();
+    if lower.starts_with("orchestrator") || lower.starts_with("gemini ") {
+        return Ok("google");
+    }
+    if lower.starts_with("claude ") {
+        return Ok("anthropic");
+    }
+    if lower.starts_with("gpt ") {
+        return Ok("openai");
+    }
     let base = model.rsplit('/').next().unwrap_or(model);
     if base.starts_with("gpt-") || base.starts_with("o3") || base.starts_with("o4") {
         return Ok("openai");
@@ -254,7 +270,6 @@ pub fn model_family(provider: &str, model: &str) -> Result<&'static str> {
         return match provider {
             "codex" => Ok("openai"),
             "claude" => Ok("anthropic"),
-            "antigravity" => Ok("google"),
             _ => Err(Error::new("model family unverified")),
         };
     }
@@ -428,6 +443,17 @@ pub fn allocate(
                 .cloned(),
         );
     }
+    if let Some(req) = &inputs.requested_model {
+        for c in &mut candidates {
+            c.model.clone_from(req);
+        }
+        if let Some(pref) = &inputs.preferred
+            && let Some(c) = candidates.iter().find(|c| &c.provider == pref)
+        {
+            valid_route(c)?;
+        }
+        candidates.retain(|c| valid_route(c).is_ok());
+    }
     candidates.retain(|c| {
         (inputs.explicit_target || role == "security-auditor" || c.model != "claude-fable-5-1")
             && (access != "write" || c.access.as_deref() != Some("read"))
@@ -451,39 +477,57 @@ pub fn allocate(
     let alternatives = candidates.len() > 1 || judged_family.is_some();
     let mut eligible = Vec::new();
     for mut c in candidates {
-        let catalog = inputs
-            .catalogs
-            .get(&c.provider)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let Ok(model) = routable_route_model(&c.provider, &c.model, catalog) else {
-            continue;
-        };
-        c.model = model;
+        if inputs.requested_model.is_none() {
+            let catalog = inputs
+                .catalogs
+                .get(&c.provider)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let Ok(model) = routable_route_model(&c.provider, &c.model, catalog) else {
+                continue;
+            };
+            c.model = model;
+        }
         let mut account = None;
         let mut account_reason = None;
         let mut used = weekly_used(&inputs.status, &c.provider);
-        if c.provider == "codex"
-            && let Some(accounts) = &inputs.accounts
+        if inputs.requested_account.is_some()
+            && !inputs
+                .accounts
+                .as_ref()
+                .is_some_and(|a| a.provider(&c.provider).is_some())
         {
+            continue;
+        }
+        if let Some(accounts) = &inputs.accounts
+            && accounts.provider(&c.provider).is_some()
+        {
+            let readings = &inputs.status[c.provider.as_str()]["accounts"];
             match accounts.select(
+                &c.provider,
                 &c.model,
-                &inputs.status["codex"]["accounts"],
+                readings,
                 &inputs.running_accounts,
                 inputs.explicit_target,
+                inputs.requested_account.as_deref(),
             ) {
                 Ok((entry, reason)) => {
-                    used = account_weekly_used(
-                        &inputs.status["codex"]["accounts"][&entry.id],
-                        crate::timestamp(),
-                    );
+                    used = account_weekly_used(&readings[&entry.id], crate::timestamp());
                     account = Some(entry.id);
                     account_reason = Some(reason);
                 }
                 Err(_) => continue,
             }
+        } else if let Some(accounts) = &inputs.accounts
+            && ACCOUNT_PROVIDERS.contains(&c.provider.as_str())
+            && active_account_home(&c.provider)
+                .is_some_and(|home| accounts.home_claimed_by_other(&c.provider, &home))
+        {
+            continue;
         }
         if alternatives
+            && !inputs.explicit_target
+            && inputs.requested_account.is_none()
             && !["pi", "opencode", "antigravity"].contains(&c.provider.as_str())
             && used.is_some_and(|v| v >= 90)
         {
@@ -533,11 +577,7 @@ pub fn allocate(
             (usize::from(used.unwrap_or(100)), false)
         } else {
             (
-                if all_known {
-                    *inputs.recent.get(&c.provider).unwrap_or(&0)
-                } else {
-                    0
-                },
+                *inputs.recent.get(&c.provider).unwrap_or(&0),
                 c.provider == owner,
             )
         }
@@ -591,6 +631,7 @@ pub fn allocate(
     } else {
         None
     };
+    let account_pinned = inputs.requested_account.is_some() && account.is_some();
     Ok(Route {
         candidate,
         role: role.into(),
@@ -603,6 +644,8 @@ pub fn allocate(
         judge_note,
         account,
         account_reason,
+        account_pinned,
+        explicit_target: inputs.explicit_target,
     })
 }
 pub fn weekly_used(status: &Value, provider: &str) -> Option<u8> {
@@ -622,9 +665,102 @@ pub struct Account {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Accounts {
+pub struct ProviderAccounts {
+    #[serde(default = "ordered")]
     pub policy: String,
     pub accounts: Vec<Account>,
+}
+fn ordered() -> String {
+    "ordered".into()
+}
+/// Account-isolated providers: each has a proven per-account home variable.
+pub const ACCOUNT_PROVIDERS: &[&str] = &["codex", "claude", "pi"];
+/// Home variable and default home (relative to `$HOME`) for an account provider.
+pub fn account_home_env(provider: &str) -> Option<(&'static str, &'static str)> {
+    match provider {
+        "codex" => Some(("CODEX_HOME", ".codex")),
+        "claude" => Some(("CLAUDE_CONFIG_DIR", ".claude")),
+        "pi" => Some(("PI_CODING_AGENT_DIR", ".pi/agent")),
+        _ => None,
+    }
+}
+/// The provider's currently active home (environment override or default).
+pub fn active_account_home(provider: &str) -> Option<PathBuf> {
+    let (var, default) = account_home_env(provider)?;
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(default)))
+}
+fn standard_account_home(provider: &str) -> Option<PathBuf> {
+    let (_, default) = account_home_env(provider)?;
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(default))
+}
+pub(crate) fn private_home(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().is_some_and(|m| {
+        m.is_dir() && m.uid() == rustix::process::getuid().as_raw() && m.mode() & 0o022 == 0
+    })
+}
+#[derive(Clone, Debug, Default)]
+pub struct Accounts {
+    pub providers: BTreeMap<String, ProviderAccounts>,
+}
+fn parse_provider(
+    settings: &Value,
+    homes: &mut BTreeSet<PathBuf>,
+    implicit_default: Option<PathBuf>,
+) -> Result<ProviderAccounts> {
+    let mut settings = settings.clone();
+    if settings.get("policy").is_none() {
+        settings["policy"] = "ordered".into();
+    }
+    let mut account: ProviderAccounts =
+        serde_json::from_value(settings).map_err(|_| Error::new("invalid provider accounts"))?;
+    require(
+        ["ordered", "spread"].contains(&account.policy.as_str()),
+        "invalid provider account policy/list",
+    )?;
+    let mut ids = BTreeSet::new();
+    let implicit_home = if let Some(home) = implicit_default {
+        let home = std::fs::canonicalize(&home).unwrap_or(home);
+        ids.insert("default".into());
+        require(homes.insert(home.clone()), "duplicate account home")?;
+        Some(home)
+    } else {
+        None
+    };
+    for entry in &mut account.accounts {
+        require(
+            !entry.id.is_empty()
+                && entry.id.len() <= 64
+                && (entry.id.as_bytes()[0].is_ascii_lowercase()
+                    || entry.id.as_bytes()[0].is_ascii_digit())
+                && entry
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+                && ids.insert(entry.id.clone()),
+            "invalid or duplicate account id",
+        )?;
+        require(entry.home.is_absolute(), "account home must be absolute")?;
+        if let Ok(home) = std::fs::canonicalize(&entry.home) {
+            entry.home = home;
+        }
+        require(homes.insert(entry.home.clone()), "duplicate account home")?;
+    }
+    if let Some(home) = implicit_home
+        && private_home(&home)
+    {
+        account.accounts.insert(
+            0,
+            Account {
+                id: "default".into(),
+                home,
+            },
+        );
+    }
+    Ok(account)
 }
 impl Accounts {
     pub fn load(path: &Path) -> Result<Option<Self>> {
@@ -636,61 +772,75 @@ impl Accounts {
             path.parent()
                 .ok_or_else(|| Error::new("account path parent unavailable"))?,
         )?;
-        let Some(value) = root.json(Path::new(path.file_name().unwrap()), 1024 * 1024, true)?
-        else {
-            return Ok(None);
-        };
-        require(
-            value["schema"].as_u64() == Some(1)
-                && value.as_object().is_some_and(|v| {
-                    v.keys()
-                        .all(|k| ["schema", "providers"].contains(&k.as_str()))
-                }),
-            "invalid provider accounts schema",
-        )?;
-        require(
-            value["providers"].is_object()
-                && value["providers"]
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .all(|v| v == "codex"),
-            "unsupported provider account configuration",
-        )?;
-        let Some(codex) = value["providers"].get("codex") else {
-            return Ok(None);
-        };
-        let mut settings = codex.clone();
-        if settings.get("policy").is_none() {
-            settings["policy"] = "ordered".into();
-        }
-        let mut account: Self = serde_json::from_value(settings)
-            .map_err(|_| Error::new("invalid provider accounts"))?;
-        require(
-            ["ordered", "spread"].contains(&account.policy.as_str())
-                && !account.accounts.is_empty(),
-            "invalid provider account policy/list",
-        )?;
-        let mut ids = BTreeSet::new();
-        let mut homes = BTreeSet::new();
-        for entry in &mut account.accounts {
+        let value = root.json(Path::new(path.file_name().unwrap()), 1024 * 1024, true)?;
+        let mut sections: Vec<(String, Value, bool)> = Vec::new();
+        if let Some(value) = value {
             require(
-                !entry.id.is_empty()
-                    && entry.id.len() <= 64
-                    && entry.id.as_bytes()[0].is_ascii_lowercase()
-                    && entry.id.bytes().all(|b| {
-                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b)
+                value["schema"].as_u64() == Some(1)
+                    && value.as_object().is_some_and(|v| {
+                        v.keys()
+                            .all(|k| ["schema", "providers"].contains(&k.as_str()))
                     })
-                    && ids.insert(entry.id.clone()),
-                "invalid or duplicate account id",
+                    && value["providers"].is_object(),
+                "invalid provider accounts schema",
             )?;
-            require(entry.home.is_absolute(), "account home must be absolute")?;
-            if let Ok(home) = std::fs::canonicalize(&entry.home) {
-                entry.home = home;
+            for (name, settings) in value["providers"].as_object().unwrap() {
+                require(
+                    ACCOUNT_PROVIDERS.contains(&name.as_str()),
+                    "provider account isolation is unproved",
+                )?;
+                sections.push((name.clone(), settings.clone(), false));
             }
-            require(homes.insert(entry.home.clone()), "duplicate account home")?;
         }
-        Ok(Some(account))
+        if !sections.iter().any(|(n, _, _)| n == "claude")
+            && let Some(file) = root.json(
+                Path::new("provider-accounts.claude.json"),
+                1024 * 1024,
+                true,
+            )?
+        {
+            require(
+                file["schema"].as_u64() == Some(1)
+                    && file["provider"] == "claude"
+                    && file.as_object().is_some_and(|v| {
+                        v.keys().all(|k| {
+                            ["schema", "provider", "accounts", "policy"].contains(&k.as_str())
+                        })
+                    })
+                    && file["accounts"].is_array(),
+                "invalid Claude provider accounts schema",
+            )?;
+            if !array(&file["accounts"]).is_empty() {
+                let mut settings = serde_json::json!({"accounts": file["accounts"]});
+                if let Some(policy) = file.get("policy") {
+                    settings["policy"] = policy.clone();
+                }
+                sections.push(("claude".into(), settings, true));
+            }
+        }
+        if sections.is_empty() {
+            return Ok(None);
+        }
+        let mut homes = BTreeSet::new();
+        let mut out = Self::default();
+        for (name, settings, implicit) in sections {
+            let default = if implicit {
+                Some(
+                    standard_account_home(&name)
+                        .filter(|p| p.is_absolute())
+                        .ok_or_else(|| Error::new("home unavailable"))?,
+                )
+            } else {
+                None
+            };
+            let parsed = parse_provider(&settings, &mut homes, default)?;
+            require(
+                !parsed.accounts.is_empty(),
+                "invalid provider account policy/list",
+            )?;
+            out.providers.insert(name, parsed);
+        }
+        Ok(Some(out))
     }
     pub fn configured() -> Result<Option<Self>> {
         let home = std::env::var_os("HOME")
@@ -702,44 +852,63 @@ impl Accounts {
             .unwrap_or_else(|| home.join(".config"));
         Self::load(&config.join("oh-my-setting/provider-accounts.json"))
     }
+    pub fn provider(&self, provider: &str) -> Option<&ProviderAccounts> {
+        self.providers.get(provider)
+    }
+    fn codex_serves_model(home: &Path, model: &str) -> Result<bool> {
+        let root = crate::Store::open(home)?;
+        if let Some(models) = root.json(Path::new("models_cache.json"), 4 * 1024 * 1024, true)? {
+            let models: Vec<_> = array(&models["models"])
+                .iter()
+                .map(|v| text(v, "slug"))
+                .collect();
+            if model != "provider-default"
+                && !models.is_empty()
+                && !models.iter().any(|v| v == model)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    /// Pick an account for `provider`. `requested` pins one account (validated,
+    /// quota ignored); otherwise rank by bucketed weekly use, then running
+    /// count (spread policy, unpinned), then registry order.
     pub fn select(
         &self,
+        provider: &str,
         model: &str,
         readings: &Value,
         running: &BTreeMap<String, usize>,
         explicit: bool,
+        requested: Option<&str>,
     ) -> Result<(Account, String)> {
+        let config = self
+            .providers
+            .get(provider)
+            .ok_or_else(|| Error::new("no accounts configured for provider"))?;
+        let now = crate::timestamp();
         let mut eligible = Vec::new();
-        for (index, entry) in self.accounts.iter().enumerate() {
-            if !entry.home.is_dir() {
+        for (index, entry) in config.accounts.iter().enumerate() {
+            if requested.is_some_and(|r| r != entry.id) || !private_home(&entry.home) {
                 continue;
             }
-            let used = account_weekly_used(&readings[&entry.id], crate::timestamp());
-            if used.is_some_and(|v| v >= 90) {
+            let used = account_weekly_used(&readings[&entry.id], now);
+            if used.is_some_and(|v| v >= 90) && !explicit && requested.is_none() {
                 continue;
             }
-            let root = crate::Store::open(&entry.home)?;
-            if let Some(models) =
-                root.json(Path::new("models_cache.json"), 4 * 1024 * 1024, true)?
-            {
-                let models: Vec<_> = array(&models["models"])
-                    .iter()
-                    .map(|v| text(v, "slug"))
-                    .collect();
-                if model != "provider-default"
-                    && !models.is_empty()
-                    && !models.iter().any(|v| v == model)
-                {
-                    continue;
-                }
+            if provider == "codex" && !Self::codex_serves_model(&entry.home, model)? {
+                continue;
             }
+            let spread = config.policy == "spread" && requested.is_none();
+            let load = running
+                .get(&format!("{provider}:{}", entry.id))
+                .or_else(|| running.get(&entry.id))
+                .copied()
+                .unwrap_or(0);
             eligible.push((
-                used.unwrap_or(100),
-                if self.policy == "spread" && !explicit {
-                    *running.get(&entry.id).unwrap_or(&0)
-                } else {
-                    0
-                },
+                used.map_or(100, |v| usize::from(v) / 10 * 10),
+                if spread { load } else { 0 },
                 index,
                 entry,
             ));
@@ -748,42 +917,80 @@ impl Accounts {
         if let Some((_, _, _, entry)) = eligible.first() {
             return Ok((
                 (*entry).clone(),
-                if explicit {
+                if requested.is_some() {
+                    "requested account".into()
+                } else if explicit {
                     "explicit target".into()
                 } else {
-                    self.policy.clone()
+                    config.policy.clone()
                 },
             ));
         }
-        if explicit {
-            let home = std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::var_os("HOME")
-                        .map(PathBuf::from)
-                        .unwrap_or_default()
-                        .join(".codex")
-                });
-            require(
-                home.is_absolute() && home.is_dir(),
-                "default current account home unavailable",
-            )?;
-            return Ok((
-                Account {
-                    id: "default".into(),
-                    home,
-                },
-                "explicit target; default current home".into(),
-            ));
+        let has_default = config.accounts.iter().any(|e| e.id == "default");
+        if has_default
+            || requested.is_some() && requested != Some("default")
+            || requested.is_none() && !explicit
+        {
+            return Err(Error::new(if requested.is_some() {
+                "requested account unavailable"
+            } else {
+                "no eligible provider account"
+            }));
         }
-        Err(Error::new("no eligible Codex account"))
+        let home = if requested == Some("default") {
+            standard_account_home(provider)
+        } else {
+            active_account_home(provider)
+        }
+        .unwrap_or_default();
+        require(
+            home.is_absolute() && private_home(&home),
+            "default current account home unavailable",
+        )?;
+        let home = std::fs::canonicalize(&home).unwrap_or(home);
+        if self.home_claimed_by_other(provider, &home) {
+            return Err(Error::new(if requested.is_some() {
+                "requested account unavailable"
+            } else {
+                "no eligible provider account"
+            }));
+        }
+        if provider == "codex" && !Self::codex_serves_model(&home, model)? {
+            return Err(Error::new(if requested.is_some() {
+                "requested account unavailable"
+            } else {
+                "no eligible provider account"
+            }));
+        }
+        Ok((
+            Account {
+                id: "default".into(),
+                home,
+            },
+            if requested.is_some() {
+                "requested account; default home".into()
+            } else {
+                "explicit target; default current home".into()
+            },
+        ))
     }
-    pub fn home(&self, ident: &str) -> Result<&Path> {
-        self.accounts
-            .iter()
-            .find(|v| v.id == ident)
+    pub fn home_claimed_by_other(&self, provider: &str, candidate_home: &Path) -> bool {
+        let candidate =
+            std::fs::canonicalize(candidate_home).unwrap_or_else(|_| candidate_home.to_path_buf());
+        self.providers.iter().any(|(other, cfg)| {
+            other != provider
+                && cfg.accounts.iter().any(|entry| {
+                    std::fs::canonicalize(&entry.home).unwrap_or_else(|_| entry.home.clone())
+                        == candidate
+                })
+        })
+    }
+    pub fn home(&self, provider: &str, ident: &str) -> Result<&Path> {
+        self.providers
+            .get(provider)
+            .and_then(|c| c.accounts.iter().find(|v| v.id == ident))
             .map(|v| v.home.as_path())
-            .ok_or_else(|| Error::new("unknown Codex account"))
+            .ok_or_else(|| Error::new("unknown provider account"))
     }
 }
 pub fn account_weekly_used(row: &Value, now: u64) -> Option<u8> {

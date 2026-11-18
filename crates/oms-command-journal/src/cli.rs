@@ -152,7 +152,7 @@ pub fn help_text() -> &'static str {
         "  show         Display summaries, blockers, decisions, recent events, or --grep search\n",
         "  resolve      Record a correction event resolving an active blocker\n",
         "  sync         Explicitly export closed/recent summaries to Notion\n",
-        "  distill      Promote distilled decisions/blockers into project shared memory\n"
+        "  distill      Propose decisions/blockers for agent-memory review\n"
     )
 }
 

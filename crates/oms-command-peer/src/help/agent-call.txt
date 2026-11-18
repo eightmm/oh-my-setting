@@ -12,6 +12,8 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/call.
   --model MODEL        Exact provider model; disables implicit fallback.
   --fallback-model M   Explicit one-shot capacity fallback model.
+  --account ID         Run on a registered codex, claude or pi account (also
+                       PROVIDER:account=ID); requires exactly one provider.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra (default: auto).
   --memory             Attach shared harness memory.
   --task               Attach the active task handoff packet.

@@ -23,6 +23,8 @@ Options:
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/ask.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   One-shot capacity fallback; requires one provider.
+  --account ID         Run on a registered codex, claude or pi account (also
+                       PROVIDER:account=ID); requires exactly one provider.
   --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
   --repo-context       Attach sanitized git status only.
   --diff               Attach sanitized git status and diff.

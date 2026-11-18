@@ -155,6 +155,18 @@ authorize replacing the public Python panel or enabling unimplemented producers.
 * Dispatch writes a launch reservation before execution and updates its registry
   before its process receipt. A kill may retain an orphan launch or unresolved
   reservation. No reservation proves execution or native exit.
+* Scheduled tick resumes append a deterministic `launch_intent` before the wake
+  ledger, `launching` before the host call, and `fired` only after a positive pid
+  acknowledgment. An intent without `launching` proves the host was not called:
+  the next tick revalidates approval, contract, main liveness, pause/expiry and
+  budget, then safely retries that occurrence without spending its wake twice.
+  A missing acknowledgment or generic host error remains unknown; tick output
+  and `tick schedule --list` expose the launch identity and reconciliation need.
+  Such occurrences are never automatically respawned, even after a day rollover.
+  The current detached host has no durable identity lookup or positive
+  not-started receipt, so kills after `launching` remain an explicit recovery
+  limitation. Legacy `fired` events stay consumed. This preserves at-most-once
+  external effects and makes no exactly-once guarantee.
 * Acceptance writes `.oms/panel/acceptances/TASK-DIGEST.json` before application,
   then records commit, plan-review and recorded stages. `index.lock` fences index
   bytes; HEAD publication compares the original ref. A kill can leave an applied

@@ -433,6 +433,21 @@ Direct Pi launch is deferred; its launch dry run reports the resolved owner with
 `argv: null`. Fresh Agy mains use `agy --prompt-interactive` with the OMS bootstrap,
 room contract, unsettled lineage and task as initial user-message context. The task
 appears once as JSON data. This is user context, not system injection. Agy keeps its native model settings; only an explicit `--model` adds a model flag.
+When `--model` is omitted, Agy main model identity resolves from `OMS_MODEL`,
+then `OMS_ANTIGRAVITY_SETTINGS` or the local Antigravity CLI `settings.json`
+(`model` string), normalizing display names (such as Gemini and Claude labels)
+to canonical slugs for panel display (`render`) and independent-judge family
+exclusion. When absent or unrecognized, `main model` renders `unknown` and
+independent review fails closed (`model family unverified`).
+When Antigravity lifecycle surfaces are certified or `OH_MY_SETTING_AGY_HOOKS=1` is set
+at plugin install time, `install-agy-plugin` installs `PreInvocation` and `Stop` hooks
+via `oms agy-hook`; `PreToolUse` and `PostToolUse` hooks register only when tool-hook
+certification succeeds (`tool_hooks_verified=yes`) or `OH_MY_SETTING_AGY_HOOKS=1` is set.
+These tool hooks record native `invoke_subagent`, `swarm`, and `run_workflow` tool calls
+under the active `antigravity` main attempt so `render` surfaces `[agy:...]` rows and
+`PostToolUse` cancellations/errors or `Stop` transitions settle them in the panel state. Native
+tracking always returns an allow decision on `PreToolUse` and is skipped when
+`OH_MY_SETTING_AGY_HOOKS=0` or inside OMS worker subprocesses (`OMS_HARNESS_CHILD=1`).
 By default, Claude and Agy mains use `--dangerously-skip-permissions`, and Codex
 mains use `--dangerously-bypass-approvals-and-sandbox`. Set
 `OMS_PANEL_MAIN_PERMISSIONS=native` to use provider permission settings instead;
@@ -1156,10 +1171,12 @@ Routing is provider-neutral within the configured light, routine, deep and front
 capability tiers. It filters to installed providers and removes candidates reporting at
 least 90% weekly usage when multiple providers are available; a sole installed provider
 remains eligible regardless of usage. With readings for all remaining candidates, more
-weekly quota left goes first; when any reading is missing, routing spreads work away
-from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as
-tied. A tie goes to the provider with fewer dispatches in this room, then to the one
-that is not the main's; configured tier order settles what remains.
+weekly quota left goes first; readings less than 15 points apart (`tie_band.gap`) or
+cases where any native candidate lacks a weekly reading apply recent non-`main`
+room-dispatch spreading (`refs.panel_room_id`, `refs.panel_room`, or `panel.room_id`),
+then prefer the provider that is not the main's; configured tier order settles what
+remains. This keeps native `claude` and `codex` balanced even when one provider's
+HUD weekly quota reading is unavailable.
 
 Weekly quota comes from the provider's available local reading; Codex uses `rate_limits`
 records in its local CLI session logs. Missing, stale or malformed readings stay
@@ -1184,65 +1201,57 @@ source shows no evidence that they need the same namespace, so that stays unveri
 
 #### Register and remove accounts
 
-Codex accounts support routing. Claude accounts support registration, explicit
-verification and owned integration lifecycle; they do not participate in routing or
-quota selection. Antigravity's independent OAuth namespace remains unproved, so
-`antigravity:ID` is rejected before file changes. Changing HOME or supplying an API
+Codex, Claude, and Pi accounts all support isolated registration, routing,
+selection, `oms doctor` health checks, `--repair`, `--remove`, and uninstall
+link cleanup through `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and
+`PI_CODING_AGENT_DIR` (with Pi linking `AGENTS.md` and `skills`). Antigravity's
+independent OAuth namespace remains unproved, so `antigravity:ID` fails closed
+(`provider account isolation is unproved`). Changing HOME or supplying an API
 key does not establish an independent entitled Antigravity account.
 
 For Claude, use `oms connect-services --account claude:work`, optionally with
 `--home PATH`, `--first|--last`, `--repair`, `--remove` or `--verify`. The default
 config root is `${CLAUDE_CONFIG_DIR:-~/.claude}/accounts/work`; it is not an OS HOME.
 Registration reports `registered, login pending` and never runs login or auth status.
-Manually log into **claude.ai** using the printed `CLAUDE_CONFIG_DIR` command.
-Manual config-scoped claude.ai use is documented, but explicit OMS isolation
-verification remains unsupported/uncertain. Matching `configDirectory` and
-`authMethod: claude.ai` do not attest credential origin or establish that shared
-global Anthropic OAuth profiles were excluded. No real independent authenticated
-accounts have been proved here. API-key, helper, external OAuth, keyless Console,
-gateway and unknown modes are unsupported too: an `api_key` status enum cannot
-prove storage origin. Global auth environment overrides refuse verification.
-`--verify` requests only native `claude auth status` in the selected config root,
-checks the nonsecret selection fields, and returns exit 2 until trustworthy origin
-evidence exists. Raw diagnostics and credential contents are never stored or logged. Native status may initialize vendor metadata inside that
-selected config root. OMS registry/effect receipts, main settings and other profiles
-remain unchanged. Registration, doctor, relink and update never run native status.
+Manually log into **claude.ai** using `CLAUDE_CONFIG_DIR=<home> claude`.
+Global auth environment overrides (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN`) refuse `--verify` and fail closed for isolated non-default
+homes. `--verify` checks private home ownership/mode and (when `claude` is on `PATH`)
+invokes `claude auth status` inside that config root without logging raw output, then
+exits `2` until trustworthy credential-origin attestation exists. Pi `--verify`
+similarly validates home permissions and exits `2` without claiming authentication from
+local config files alone. Registration, doctor, relink and update never run native
+auth status.
 
 Claude links only OMS `CLAUDE.md`, `skills` and `output-styles/oms-korean.md` to
-the current checkout, and merges hooks, HUDs and defaults into its own
-`settings.json`. Existing files and user links are preserved rather than adopted.
-Settings ownership lives beside that file in `.oms-claude-hooks.json`; preexisting
-values remain user-owned even when equal to OMS defaults. Removal deletes only
-unchanged recorded effects and preserves user edits and hook siblings. No operation
-removes account directories, credentials, history or sessions, or logs out a provider.
+the current checkout; Claude hooks inside an account home are installed and removed
+separately via `install-claude-hooks --ownership-receipt` (recorded in `.oms-claude-hooks.json`),
+and account `--remove` refuses deletion while installed hooks remain active.
+Existing files and pre-existing user links are kept unowned unless `--repair` explicitly
+adopts them. Removal deletes only unchanged recorded effects and preserves user edits,
+homes, credentials, history, and sessions.
 
-Claude's private `provider-accounts.claude.json` (schema 1, provider `claude`,
-`accounts` containing only `id` and physical `home`) and
-`provider-account-effects.json` sit beside the legacy Codex registry. Claude actions
-never create or rewrite `provider-accounts.json` or `codex-account-links.json`.
-The last Claude removal publishes an empty accounts array. IDs are provider-local:
-`codex:work` and `claude:work` can coexist. Modern lifecycle operations reject
-physical-home collisions across both providers and pending effect reservations.
-Malformed or unknown Claude state blocks modern mutations while passive Codex
-routing keeps its unchanged legacy reader. Doctor reports provider-qualified
-nonsecret integration warnings without executing providers.
+Claude writes both its private `provider-accounts.claude.json` (schema 1, provider
+`claude`, `accounts` with `id` and `home`) plus `provider-account-effects.json` and
+publishes the provider entry to `provider-accounts.json` alongside Codex and Pi
+(`codex-account-links.json` / `pi-account-links.json`). When re-registering an account
+present only in `provider-accounts.claude.json`, its custom `--home` is preserved.
+When `claude` is absent from `provider-accounts.json`, routing and `oms doctor` fall
+back to `provider-accounts.claude.json` (while preserving an implicit `default` home if
+it does not collide with another provider). IDs are provider-local (`codex:work` and
+`claude:work` can coexist), while canonical homes are unique across all providers and
+pending ownership receipts.
 
-Effect intent is durable before home/link/settings changes. The registry publishes
-after effects, and ownership finalizes afterward. These separate files are not one
-atomic transaction. Concurrent OMS calls share the existing registry lock; hook
-writes additionally hold the install lock. Relink refresh runs after the global
-install lock is released. A settings identity or concurrent snapshot mismatch,
-retargeted link, or ambiguous interrupted write preserves data and reservation
-authority with recovery guidance. Equal bytes after a crash cannot prove ownership;
-OMS does not restore a settings backup or adopt a replacement home. Uninstall stops
-before global cleanup or unlink when account cleanup is incomplete. These checks do
-not claim protection against arbitrary mutation by the same UID or root.
+`provider-account-effects.json` records ownership before registry publication, so an
+interrupted write preserves reservation authority and blocks cross-provider collisions.
+Both registries share the same lock file; `provider-accounts.claude.json` is validated
+before any unlink, repair, registration, or removal mutation. These checks do not claim
+protection against arbitrary mutation by the same UID or root.
 
-Rollback preserves legacy Codex reads and selections. Old versions cannot manage
-Claude accounts or their effects, and cannot detect arbitrary `--home` collisions
-with active Claude homes. Perform account mutations with the modern version. An old
-uninstall is not Claude cleanup; returning to a modern version with duplicate homes
-preserves both states and refuses mutation until the conflict is resolved.
+Rollback preserves legacy Codex reads in `provider-accounts.json` while modern
+versions manage Codex, Claude, and Pi consistently across both registries. Old versions
+cannot manage Claude effects or detect `--home` collisions with Claude-private homes.
+Perform account mutations with the modern version.
 
 The global install receipt's optional physical `claude_settings_path` binds
 `hooks_schema` to its main settings target and source owner. Alternate account
@@ -1335,47 +1344,58 @@ registry itself is absent) warn with the same remove/repair guidance. Doctor lea
 homes, links, login state, registry entries and receipt rows unchanged.
 
 Provider accounts are stored machine-wide in
-`${XDG_CONFIG_HOME:-~/.config}/oh-my-setting/provider-accounts.json`.
-A relative `XDG_CONFIG_HOME` is ignored in favor of `~/.config`. This user-local
-file applies to every project. The command writes mode 0600, schema 1, and
-`policy: ordered` when introducing the Codex entry; each account has only `id`
-and its resolved absolute `home`. It preserves other providers and unknown
-fields, refusing malformed state without rewriting it. Routing's existing
-validation still rejects unsupported providers and unknown fields.
+`${XDG_CONFIG_HOME:-~/.config}/oh-my-setting/provider-accounts.json` (plus Claude's
+private `provider-accounts.claude.json`, merged when Claude is absent from
+`provider-accounts.json`). A relative `XDG_CONFIG_HOME` is ignored in favor of
+`~/.config`. This user-local file applies to every project, written with mode 0600,
+schema 1, and `policy: ordered` when introducing a provider entry; each account
+has only `id` and its resolved absolute `home`. It preserves other providers and
+malformed-state guards without rewriting invalid JSON.
 
-Provider names must occur in the routing policy. Only Codex accounts are enabled
-**in this legacy routing file**; Claude
-and Pi entries are rejected with `accounts for PROVIDER are not supported yet`. The
-home-variable table in `scripts/lib/provider_accounts.py` maps Codex to `CODEX_HOME`;
-Claude's `CLAUDE_CONFIG_DIR` and Pi's `PI_CODING_AGENT_DIR` remain disabled for routing.
-Claude registration uses its separate private registry;
-Pi registration remains unavailable. Account entries have only `id` and `home` fields.
-Unknown keys, duplicate IDs or physical homes (including across providers), malformed
-configuration and non-absolute homes are errors.
+Provider names must be account-isolated (`codex`, `claude`, `pi`): Codex maps to
+`CODEX_HOME`, Claude to `CLAUDE_CONFIG_DIR`, and Pi to `PI_CODING_AGENT_DIR` (with
+`PI_CODING_AGENT_SESSION_DIR` cleared on child launch so transcripts stay inside the
+selected home). `antigravity` fails closed with `provider account isolation is
+unproved`. Account entries have only `id` and `home` fields. Unknown keys, duplicate
+IDs or physical homes (including across providers), malformed configuration and
+non-absolute homes are errors.
 
 IDs use 1–64 lowercase letters, digits, underscores or hyphens, beginning with a letter
-or digit. Invalid configuration excludes Codex from tier selection while other providers
-remain available. A missing or unavailable directory is reported per account and that
-account is skipped. Panel collection retains both provider rows and shows
-configuration/home errors on the Codex usage line through `accounts_error`; account
-readings and individual errors are under `accounts`. Where `os.getuid` is available, the
-resolved home must belong to the current user and must not be group/other-writable.
+or digit. Malformed JSON, unknown keys, or schema errors in `provider-accounts.json`
+(or `provider-accounts.claude.json` when consulted) fail closed before provider launch.
+A missing or unsafe individual directory is reported per account during health checks
+and skipped during unpinned selection, while pinned (`--account` / `:account=`) and
+native session resume calls fail closed on unsafe directories. Panel collection retains provider rows (including `pi` when
+configured), marks the active `account_label`, reports `weekly_used` from Codex
+session logs (`weekly_used: null` for providers without per-home quota logs), and
+shows configuration/home errors through `accounts_error` and `accounts`. Where
+`os.getuid` is available, the resolved home must belong to the current user and must
+not be group/other-writable.
 
 Use mode `0700`, or remove group/other write bits with `chmod go-w`; ownership errors
 require restoring ownership or choosing a user-owned home. Directory existence is still
-checked on other platforms. Routing, launch and pinned continuation all recheck this
-validator, so a permission change after selection is refused before the launch anchor.
+checked on other platforms. Routing, launch, pinned selection (`--account ID` or
+`--to PROVIDER:account=ID`) and continuation all recheck this validator, so a
+permission change after selection is refused before the launch anchor.
 
 #### Account selection
 
-Both policies rank fresh measured weekly quota usage ascending, with unknown
-readings after measured ones. Accounts at 90% weekly usage are ineligible during
-tier selection; missing, stale or malformed readings remain eligible.
+For `codex`, `claude`, and `pi`, unpinned tier, `--to PROVIDER`, and headless selection ranks eligible
+accounts by active `provider:id` cooldown, decayed error penalty, 10-point weekly-quota
+buckets (unknown readings placed after measured ones), `spread` running worker counts
+(`panel_account`) in the current repository, and registry order (`policy: spread` applies
+even when `--to PROVIDER` is given as long as no account is pinned). Accounts at 90% weekly
+usage are ineligible during implicit/tier selection (explicit `--to` / `--account`
+waives the 90% quota cap); missing, stale or malformed readings remain eligible. Pass
+`--account ID` (with `--to PROVIDER` or `--continue`) or `--to PROVIDER:account=ID` on
+`panel --dispatch`, `peer-ask`, `peer-review`, `peer-delegate`, `consult`, `advise`, or
+`agent-call` to pin a registered account (`antigravity` rejects account selectors with
+`provider account isolation is unproved`).
 
-| Policy | Equal-quota or unknown-quota tie break |
+| Policy | Equal-bucket or unknown-quota tie break |
 |---|---|
-| `ordered` (default) | Registry configuration order |
-| `spread` | Fewer live OMS workers for that provider/account in this repository, then registry order |
+| `ordered` (default) | Registry configuration order (after cooldown and error penalty) |
+| `spread` | Fewer live OMS workers for `provider:id` in this repository (`panel_account`), then registry order |
 
 `spread` is best-effort: simultaneous decisions can choose the same account,
 and workers in other repositories are outside its count.
@@ -1383,97 +1403,99 @@ and workers in other repositories are outside its count.
 <details>
 <summary>Quota freshness, model availability, headless routes and account bindings</summary>
 
-Per-provider policy defaults to `ordered`. Both `ordered` and `spread` rank eligible
-accounts by measured weekly quota usage ascending (most quota left first), placing
-unknown readings after measured readings. A reading counts as measured only when its own
-recorded event timestamp (`observed_at` from `account_readings`, not session-log file
-`mtime`) is within `ACCOUNT_READING_FRESH_SECONDS` and its reset time has not passed;
-stale, missing or malformed readings are treated as unknown and remain eligible.
-`ordered` breaks equal or unknown quota ties by registry configuration order (and uses
-registry order when all readings are unknown).
+Per-provider policy defaults to `ordered`. Ranking first prefers accounts not in active
+cooldown (`cooldown_until > now`), then lowest decayed error penalty (within 1800s),
+then ascending 10%-wide weekly-quota buckets (`0..9`, with unknown readings in bucket
+`10`), then live `spread` worker count, then registry order. A Codex reading counts as
+measured only when its own recorded event timestamp (`observed_at` from `account_readings`,
+not session-log file `mtime`) is within `ACCOUNT_READING_FRESH_SECONDS` and its reset
+time has not passed; stale, missing or malformed readings are treated as unknown and
+remain eligible. `ordered` breaks equal or unknown ties by registry configuration order.
 
-Each account is ineligible at 90% weekly usage during tier selection, including when
-Codex is the sole provider; missing, stale or malformed readings remain eligible. Codex
-remains a candidate while any account can serve the requested model. Only model slugs
-are read from each home's `models_cache.json` (at most 4 MiB): a readable list omitting
-the requested model excludes that account and appears in `account_reason`. Missing,
-unreadable or malformed caches leave support unknown and eligible. Routing inspects no
-other home files beyond the existing bounded session-log reader.
+Each account is ineligible at 90% weekly usage during tier selection, including when a
+provider has only saturated accounts; missing, stale or malformed readings remain
+eligible. For Codex, only model slugs are read from each home's `models_cache.json` (at
+most 4 MiB): a readable list omitting the requested model excludes that account and
+appears in `account_reason`. Missing, unreadable or malformed caches leave support
+unknown and eligible. Routing inspects no other home files beyond the bounded
+session-log reader.
 
-`spread` uses the same measured-quota-first, unknown-after-known order, but
-breaks equal or unknown quota ties by fewer live OMS workers for that
-provider/account in the current repository's panel attempt records (using the
-launch decision when the attempt has no `panel_account` ref), then list order.
-Two unknown readings use the same worker-count tie break. This is best-effort:
-there is no reservation store, so same-instant decisions can select the same
-account before either worker appears in the records. Other projects share the
-configuration but their workers are outside this repository's count.
+`spread` counts live OMS workers with matching `panel_account` (`provider:id`, or launch
+decision before ref publication) across queued, starting, working, running, waiting, and
+verifying states in the current repository, then falls back to list order. Other
+projects share the registry but their workers are outside this repository's count.
 
 
 ##### Route metadata
 
-Runtime routes carry `account` and `account_reason`. The route line includes
-`codex account=credits (runs under its own home) / MODEL / EFFORT / ACCESS`.
+Runtime routes carry `account` and `account_reason` (plus `account_pinned: true` when
+explicitly pinned via `--account` or `:account=`). The route line includes
+`PROVIDER account=ID (runs under its own home) / MODEL / EFFORT / ACCESS`.
 The private dispatch launch anchor retains that decision under `route` without
-storing the home. New account launches also record `account_applied: true` there
-when applying the home to the child's environment. With no configuration file
-(or no Codex entry), existing routing
-and display behavior is unchanged; the implicit default home is `CODEX_HOME` or
-`~/.codex`. Account fields remain invalid in `config/panel-routing.json`.
+storing the home; when `--account` is pinned, dispatch forwards `--account` to the
+child, while unpinned dispatch delegates adaptive account selection and capacity
+overflow handling to the headless runner (`panel_account` records the selected account).
+With no configuration file (or no provider entry), existing routing and display behavior
+is unchanged; the implicit default home comes from the provider's home variable
+(`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`) or `$HOME` subpath. Account
+fields remain invalid in `config/panel-routing.json`.
 
 
 ##### Headless calls
 
-Headless Codex calls through peer review, peer ask, consult/advise, agent-call,
-delegation and autonomy workers share this account policy at the common runner. Explicit
-Codex targets (`--to codex` on direct calls/delegation, `--providers` on peer
-ask/review, or `--model`) follow the panel's rule: select from eligible accounts in the
-same measured-quota-first, registry-tie-break order, falling back to the caller's home
-if none qualifies. Implicit/tier routes keep the configured ordered/spread policy and
-require an eligible account. Automatic consult and advise selections use that implicit
-policy and may try the next peer after a failed call; explicit provider choices retain
-caller-home fallback.
+Headless calls (`peer-review`, `peer-ask`, `consult`, `advise`, `agent-call`,
+`peer-delegate`, and autonomy workers) share this account policy at the common runner.
+Explicit provider targets (`--to PROVIDER` on direct calls/delegation, `--providers` on
+peer ask/review, or `--model`) select from eligible accounts using the same adaptive
+ranking (`cooldown`, `penalty`, 10% bucket, `spread`, registry order), falling back to
+the caller's home when unpinned and no account qualifies; pinned `--account ID` or
+`PROVIDER:account=ID` fails closed if unavailable or on `antigravity`. For isolated Claude
+accounts (non-default `CLAUDE_CONFIG_DIR`), global `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN` environment overrides are refused
+so credentials never bleed across accounts. Implicit/tier routes keep the configured
+`ordered`/`spread` policy and require an eligible account.
 
-A direct `--resume-session ID` without a panel account decision keeps the caller's home
-and selects nothing. A malformed account registry emits one warning with the
-configuration error and runs under the caller's home; panel dispatch still validates its
-own registry and refuses invalid configuration.
+A direct `--resume-session ID` without a pinned account refuses ambiguity when multiple
+registered accounts exist for that provider (`pass --account`). For isolated providers
+(`codex`, `claude`, `pi`), a malformed account registry fails closed rather than silently
+falling back; non-isolated providers (such as `antigravity`) leave `provider-accounts.json`
+unread and remain unaffected unless `--account` is explicitly requested.
 
 ##### Applied account identity
 
-An explicit `CODEX_HOME` differing from the main `~/.codex` home takes precedence.
-Panel dispatch marks its route with internal `OMS_CODEX_ACCOUNT_ROUTE` so the
-runner preserves that decision, including unbound legacy continuations, without
-selecting again. The marker is removed from the provider child's environment.
-Without registered accounts, the runner leaves the environment and attempt
-record unchanged. Other providers and native panel mains are unaffected.
-Applied accounts appear as `account` and `account_applied: true` in the existing
-`.attempts.json` record; session lookup can resolve that recorded id rather than
-the caller's current home. Provider-default calls have no model pin, so model
-cache filtering applies only when a model is specified.
+An explicit provider home override (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+`PI_CODING_AGENT_DIR`) differing from the main default home takes precedence unless an
+account is explicitly pinned. Dispatch records `account`, `account_reason`, and
+`account_pinned` under `route` (forwarding `--account` only when pinned), while applied
+accounts publish `panel_account` (`provider:id`) in attempt lifecycle `refs`; session
+lookup can check every registered account home for that provider. Provider-default calls
+have no model pin, so model cache filtering applies only when a model is specified.
 
 </details>
 
 #### Continuation and fallback
 
 At launch, the selected id is resolved again and its directory is rechecked. Only the
-Codex child's `CODEX_HOME` changes; the caller and independently routed calls keep their
-own environment. OMS never reads or transfers account credentials. `--continue TASK`
-reuses the previous write attempt's account when resuming its native Codex session. A
-removed account or missing home refuses native resume with the id and recovery
-instructions: re-register the account, or continue on a non-Codex provider using `--to
-PROVIDER --model MODEL` or a `--workload TIER` routed to another provider for a fresh
-worker.
+child's isolated home variable (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or
+`PI_CODING_AGENT_DIR`) changes (and `PI_CODING_AGENT_SESSION_DIR` is cleared for Pi);
+the caller and independently routed calls keep their own environment. OMS never reads or
+transfers account credentials. `--continue TASK` reuses the previous write attempt's
+account when resuming its native session (an explicit `--account` overrides it, and an
+explicit `--to` for another provider drops it). A removed account or missing home refuses
+native resume with the id and recovery instructions: re-register the account, or continue
+on another provider using `--to PROVIDER --model MODEL` or a `--workload TIER` routed to
+another provider for a fresh worker.
 
 Switching to another provider uses the existing summary handoff without the old account.
-Attempts without a recorded account, including implicit default-home selections, retain
-the current home. Selection-only anchors without `account_applied: true` and missing or
-invalid anchors also continue without an account binding under the current home.
-Implicit selections are not recorded as an account in new launch anchors. A recorded
-Codex capacity/usage-limit failure can overflow once to the next eligible account in
-quota order across all remaining configured accounts serving the same model (not only
-accounts listed after the failed one), provided the failed worker left the worktree
-unchanged.
+Continuation (`continuation_defaults`) inherits `panel_account` from recorded lifecycle
+`refs`; attempts without a recorded `panel_account` (including implicit default-home
+selections or when missing) continue under the current home. Unconfigured providers stay
+unbound rather than recording an applied account. When unpinned (neither `--account` nor
+`:account=`), a recorded capacity/usage-limit failure can overflow once in-process within
+the same provider (`codex`, `claude`, or `pi`) to the next eligible account in adaptive
+order across remaining configured accounts serving the same model, provided the failed
+worker left the worktree unchanged; `panel_account` updates on the attempt's terminal
+transition.
 
 Both launch anchors retain their respective account ids. Account overflow is
 capacity-only; the tier provider fallback remains available for
@@ -1481,8 +1503,8 @@ provider-down/model-unavailable failures and after the overflow account fails. E
 fallback is bounded to one use. Policy refusals and verification failures never trigger
 account overflow or provider fallback. The home is rechecked before publishing the
 launch anchor. When a primary applies an account home, provider fallback runs as a
-separate call with the parent-derived environment: `CODEX_HOME` returns to the parent's
-value or is absent if the parent left it unset.
+separate call with the parent-derived environment: the provider's home variable returns
+to the parent's value or is absent if the parent left it unset.
 
 This also applies after account overflow. Once child exit is confirmed, the controller
 records the withheld in-delegate decision as `panel_fallback_decision: deferred` through

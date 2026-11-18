@@ -334,6 +334,11 @@ pub fn command(request: &DispatchRequest, store: &Store) -> Result<(NativeComman
     if route.role != "reviewer" && route.candidate.model != "provider-default" {
         argv.extend(["--model".into(), route.candidate.model.clone().into()]);
     }
+    if route.account_pinned
+        && let Some(account) = &route.account
+    {
+        argv.extend(["--account".into(), account.clone().into()]);
+    }
     if route.candidate.provider != "opencode" {
         argv.extend([
             "--reasoning-effort".into(),
@@ -663,6 +668,15 @@ pub fn dispatch(
         ("OMS_TASK_ID".into(), request.task_id.clone().into()),
         ("OMS_PANEL_REPO".into(), store.repo().into()),
         ("OMS_ROOM_REPO".into(), store.repo().into()),
+        (
+            "OMS_PANEL_EXPLICIT_TARGET".into(),
+            if request.route.explicit_target {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
+        ),
     ];
     execution_request.remove_environment = crate::services::args(&[
         "OMS_ATTEMPT_ID",
@@ -761,13 +775,6 @@ pub fn dispatch(
         execution_request
             .environment
             .push(("OMS_PANEL_NO_WEB".into(), "1".into()));
-    }
-    if let Some(account) = &request.route.account {
-        let config = crate::routing::Accounts::configured()?
-            .ok_or_else(|| Error::new("selected account configuration disappeared"))?;
-        execution_request
-            .environment
-            .push(("CODEX_HOME".into(), config.home(account)?.into()));
     }
     let output = service.command_context(native, &execution_request, stop).map_err(|e| Error {
         publication_uncertain:true,
@@ -972,6 +979,7 @@ pub struct ContinuationDefaults {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub account: Option<String>,
 }
 
 /// Inherit role, recorded scopes, workload, verifier and purpose from the newest
@@ -1134,6 +1142,20 @@ pub fn continuation_defaults(
             .filter(|v| !v.is_empty())
             .map(str::to_owned);
 
+        // `panel_account` is `provider:id` or a legacy bare `id`.
+        let raw = refs["panel_account"].as_str().unwrap_or_default();
+        let (account_provider, account) = match raw.split_once(':') {
+            Some((p, id)) if !p.is_empty() && !id.is_empty() => {
+                (Some(p.to_owned()), Some(id.to_owned()))
+            }
+            _ => (None, Some(raw.to_owned()).filter(|v| !v.is_empty())),
+        };
+        let recorded = pick("provider", "panel_provider")
+            .or_else(|| row["provider"].as_str().map(str::to_owned));
+        // A binding to another provider than the recorded one is inconsistent: drop it.
+        let account = account.filter(|_| {
+            account_provider.is_none() || recorded.is_none() || account_provider == recorded
+        });
         return Ok(Some(ContinuationDefaults {
             attempt_id: text(row, "attempt_id"),
             member,
@@ -1143,9 +1165,11 @@ pub fn continuation_defaults(
             verify,
             purpose: pick("purpose", "panel_purpose"),
             provider: pick("provider", "panel_provider")
-                .or_else(|| row["provider"].as_str().map(str::to_owned)),
+                .or_else(|| row["provider"].as_str().map(str::to_owned))
+                .or(account_provider),
             model: pick("model", "panel_model"),
             effort: pick("effort", "panel_effort"),
+            account,
         }));
     }
     Ok(None)
@@ -1177,6 +1201,8 @@ mod tests {
                 judge_note: None,
                 account: None,
                 account_reason: None,
+                account_pinned: false,
+                explicit_target: false,
             },
             task_id: "t1".into(),
             prompt: Some("task".into()),
@@ -1278,5 +1304,29 @@ mod tests {
         assert_eq!(calls["call-stale-no-att"]["state"], "settled");
         assert_eq!(calls["call-rev"]["state"], "awaiting");
         assert_eq!(calls["call-inflight"]["state"], "reserved");
+    }
+
+    #[test]
+    fn pinned_account_is_forwarded_and_unpinned_is_not() {
+        let store = Store::open(Path::new(".")).unwrap();
+        let mut req = sample_request("att_main_1");
+        req.route.role = "worker".into();
+        req.route.access = "read".into();
+        req.route.purpose = "explain".into();
+        req.verify = None;
+        req.brief = None;
+        req.route.account = Some("work".into());
+        let account = |req: &DispatchRequest| {
+            let (_, argv) = command(req, &store).unwrap();
+            argv.iter()
+                .position(|v| v == "--account")
+                .map(|i| argv[i + 1].clone())
+        };
+        assert!(!req.route.explicit_target);
+        assert_eq!(account(&req), None);
+        req.route.account_pinned = true;
+        assert_eq!(account(&req), Some("work".into()));
+        req.route.account = None;
+        assert_eq!(account(&req), None);
     }
 }

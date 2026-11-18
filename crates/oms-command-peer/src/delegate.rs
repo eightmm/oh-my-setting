@@ -506,7 +506,8 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     } else {
         None
     };
-    let target = Target::parse(args.required("to")?)?;
+    let mut target = Target::parse(args.required("to")?)?;
+    peer::apply_account(args, std::slice::from_mut(&mut target))?;
     let question = peer::question(args, context)?;
     let repo = storage::repository(context, &args.path("repo", context.cwd))?;
     let directory = peer::directory(args, &repo, "delegate")?;
@@ -552,7 +553,8 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         args.value("reasoning-effort", "auto"),
         role,
     )?;
-    route.explicit = true;
+    route.explicit = !providers::panel_implicit_target() || route.account_pinned;
+    providers::bind_account(&mut route, &repo)?;
     let run = peer::run_id()?;
     let artifact = directory.join(format!("{}-delegate-{run}.md", target.provider));
     let patch = directory.join(format!("{}-delegate-{run}.patch", target.provider));
@@ -795,6 +797,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             parent_attempt_id = main_id;
         }
     }
+    if !providers::panel_account(&route).is_empty() {
+        attempt_refs.set("panel_account", V::from(providers::panel_account(&route)));
+    }
     let attempt = oms_command_operations::create_attempt(
         &repo,
         &oms_command_operations::StartRequest {
@@ -818,7 +823,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut needs_keep = args.has("keep-worktree");
     let mut interactive_stdout = String::new();
     let cargo_slot = acquire_cargo_slot(&repo, &target.provider);
-    let extra_env: Vec<(OsString, OsString)> = cargo_slot
+    let mut extra_env: Vec<(OsString, OsString)> = cargo_slot
         .as_ref()
         .map(|slot| {
             vec![(
@@ -827,7 +832,15 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             )]
         })
         .unwrap_or_default();
+    extra_env = crate::usage::operation_env(&extra_env)?;
+    extra_env.push(("OMS_ATTEMPT_ID".into(), attempt.clone().into()));
+    if !task_id.is_empty() {
+        extra_env.push(("OMS_TASK_ID".into(), task_id.clone().into()));
+    }
     for round in 0..=repair {
+        if round > 0 && !route.account_pinned {
+            route.account.clear();
+        }
         crate::check(context.interrupted)?;
         verify_exit_code = None;
         worktree.identity(context)?;
@@ -1111,12 +1124,16 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     } else {
         "failed"
     };
-    let refs = obj([
+    let mut refs = obj([
         ("artifact", artifact.to_string_lossy().into_owned().into()),
         ("patch", patch.to_string_lossy().into_owned().into()),
         ("verify_status", verified.into()),
         ("admit", "pending".into()),
     ]);
+    if !providers::panel_account(&route).is_empty() {
+        // An overflow may have moved the run off the account bound at start.
+        refs.set("panel_account", V::from(providers::panel_account(&route)));
+    }
     transition(&repo, &attempt, state, refs, context)?;
     body.extend_from_slice(format!("\n## Exit\n\n{code}\n\n- outcome: {}\n- verification: {verified}\n- admission: pending\n",if no_change{"no_change"}else if code==0{"review"}else{"failed"}).as_bytes());
     let artifact_sha256 = storage::hash(&body);
@@ -1131,6 +1148,18 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             ("ts", now().into()),
             ("artifact_id", crate::id("art_")?.into()),
             ("attempt_id", attempt.into()),
+            (
+                "operation_id",
+                extra_env
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == "OMS_OPERATION_ID")
+                    .unwrap()
+                    .1
+                    .to_string_lossy()
+                    .into_owned()
+                    .into(),
+            ),
             ("task_id", task_id.into()),
             ("provider", target.provider.into()),
             ("model", route.model.into()),
