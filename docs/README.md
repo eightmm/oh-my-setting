@@ -8,7 +8,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 |---|---|---|
 | Install or update OMS | [Install](INSTALL.md) · [한국어](INSTALL.ko.md) | Host requirements, profiles and maintenance |
 | Find a command | [Components](COMPONENTS.md) | Command catalog, workflows and authority boundaries |
-| Choose the right feature scope | [Feature scope](FEATURE-SCOPE.md) | Core behavior, optional workflows and adoption criteria |
+| Choose the right feature scope | [Feature scope](FEATURE-SCOPE.md) | Current roles/authority, optional implementations, excluded expansion and adoption criteria |
 | Define a project | [Project context](PROJECT-CONTEXT.md) | Purpose, decisions and work evidence |
 
 ## Using OMS
@@ -53,13 +53,15 @@ another Team implementation plan.
 specifies the missing native consumers for managed Team/write-WIP retirement,
 active cancellation and held-domain recovery, with reusable producers and fixtures.
 
-[Implementation work queue](ORCHESTRATOR-WORK-QUEUE.md) connects the existing
-P0 work to 17 additional source-backed performance, reliability, verification
-and optional remote-artifact packets in PRs #260–#263. It records dependencies,
-shared-file ownership and an implementation-agent handoff; these are specifications.
-The [graph retrieval comparison in PR #264](https://github.com/eightmm/oh-my-setting/pull/264)
-adds 13 correctness, delivery, evaluation and conditional semantic/hybrid packets,
-linked to the same queue and the existing lexical-cache optimization work.
+[Implementation work queue](ORCHESTRATOR-WORK-QUEUE.md) is the current scheduling
+index for 40 follow-up IDs from PRs #260–#265: 16 retained, nine absorbed into
+existing owner work, and 15 conditional. LC-01–04 remain separate core lifecycle
+work. These IDs are specifications and evidence references, not 40 mandatory
+projects. The queue records activation conditions, shared-file ownership and the
+implementation handoff; older CP/TM/MR/UX/NF documents retain acceptance detail.
+The [graph retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md) supplies the
+retrieval-specific evidence; small correctness fixes use their nearest fixtures,
+while broader ranking/semantic evaluation needs a concrete decision.
 
 [Bounded team orchestration](TEAM-ORCHESTRATION-PLAN.md) retains the original
 architecture and ten implementation slices. Some contract/admission/projection

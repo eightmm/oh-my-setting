@@ -1,8 +1,9 @@
 # Native task command
 
-This standalone crate implements the active `agent-task` packet over the
-existing `.oms/task/current.md` and adjacent `archive/` records. The parent
-registers it in the workspace and CLI; this crate does not install itself.
+This workspace crate implements the active `agent-task` packet over the
+existing `.oms/task/current.md` and adjacent `archive/` records. The root
+CLI routes it through `ControlServices::task` and `run_with_io`; installation
+is owned by the native lifecycle component.
 There is no Python or Bash implementation bridge. Bash is invoked only for
 the user's stored Verify command, with its declared `bash -c` semantics.
 The packet is a resume note; `agent-plan` owns execution tasks, claims and
@@ -28,7 +29,7 @@ and verification-contract operations for native callers.
 
 The internal adapters have these existing consumers:
 
-| Native API | Existing consumer being replaced |
+| Native API | Historical porting anchor / consumer contract |
 | --- | --- |
 | `projection::task_packet` | `oms_runtime.projection._task_packet`, runtime envelope and context |
 | `lifecycle::lifecycle` | `goal_lifecycle.py`, task status, goal-drive lifecycle overlay |
@@ -121,11 +122,12 @@ verification can replace it. No schema or implicit migration was added.
 Unsafe or unavailable plan evidence yields an explicit unknown lifecycle,
 rather than silently treating an unreadable record as absent.
 
-Parent work still required: workspace/lock/CLI registration, real service
-injection, native caller cutovers, integration/security review, canonical
-tests, CI and installation. Those files and records are outside this crate's
-write scope. Standalone compilation and disposable fixtures are implementation
-evidence, not lifecycle acceptance or publication approval.
+Current native wiring is in [root dispatch](../oms/src/main.rs) and
+[task services](../oms/src/services_control.rs). The latter supplies reference
+ownership, journal observation and opt-in memory proposals. Other embeddings
+must supply the same service contracts. The legacy source names and disposable
+checks below record the original component migration, not outstanding root
+registration work or fresh verification of an installed host.
 
 Implementation evidence retained from disposable fixtures: Rust 1.99.1
 `cargo build --lib --locked --offline` and `cargo fmt -- --check` passed;

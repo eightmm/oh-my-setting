@@ -1,11 +1,13 @@
-# Overall Main / provider orchestrator: 구현 대기 작업과 실행 순서
+# Overall Main / provider orchestrator: 남은 작업과 채택 조건
 
 작성일: 2026-11-18. 소스 기준:
 [`f9a695ea2de90a160754252c1ee9cbaa4dd7a488`](https://github.com/eightmm/oh-my-setting/commit/f9a695ea2de90a160754252c1ee9cbaa4dd7a488).
 이 문서는 코드 변경과 아직 구현하지 않은 작업 명세를 연결하는 index다.
 최신 source와 PR 상태는 구현 착수 시 다시 확인한다. 문서 병합은 해당 runtime 기능 완료가 아니다.
-호출 통폐합 조사 시 main `283ab6c1`까지 다시 확인했다. #259~#264는 문서 PR로 병합되었고
-runtime source는 위 기준과 동일하다. #258은 여전히 draft다.
+개념 점검 기준은 main `189bfdaa28b6b628f0d4d50a4ca3d0df28396b88`이다.
+#259~#265는 문서 PR로 병합되었고 runtime source는 위 기준과 동일하다. #258은 draft다.
+제품 범위와 개념의 구분은 [Feature scope](FEATURE-SCOPE.md), 실제 착수 상태는 이 큐가 소유한다.
+이전 CP/TM/MR/UX/NF 번호는 acceptance의 출처이며 별도 전체 구현 지시가 아니다.
 
 ## 1. PR 지도
 
@@ -18,13 +20,16 @@ runtime source는 위 기준과 동일하다. #258은 여전히 draft다.
 | [#262](https://github.com/eightmm/oh-my-setting/pull/262) | [VW-01~05](ORCHESTRATOR-VERIFICATION-WORK-PACKETS.md) | 병합된 명세. 범위 판정·검증 중복·실패 진단·fixture 효율 |
 | [#263](https://github.com/eightmm/oh-my-setting/pull/263) | [AR-01~04](REMOTE-ARTIFACT-WORK-PACKETS.md) | 병합된 명세. 선택형 원격 수집·bundle 재개·cache 공간 관리 |
 | [#264](https://github.com/eightmm/oh-my-setting/pull/264) | [Graph retrieval 비교](GRAPH-RETRIEVAL-COMPARISON.md)와 [GR-01~13](GRAPH-RETRIEVAL-WORK-PACKETS.md), native README 교정 | 병합된 비교·명세. Rust/Python/shell/notebook 정확성, worker 전달, 평가, 조건부 semantic/hybrid 실험 |
-| [CC-01~10](CALLABLE-CONSOLIDATION-WORK-PACKETS.md) | [호출 경로·중복 감사](CALLABLE-CONSOLIDATION-AUDIT.md), 통폐합 명세, MCP/Main swap 문서 교정 | 명세. 실제 caller와 existing core를 연결하고 중복 규칙의 제거 조건 지정 |
+| [#265](https://github.com/eightmm/oh-my-setting/pull/265) | [호출 경로·중복 감사](CALLABLE-CONSOLIDATION-AUDIT.md), [CC-01~10](CALLABLE-CONSOLIDATION-WORK-PACKETS.md), MCP/Main swap 문서 교정 | 병합된 명세. 실제 caller, 재사용 대상과 제거 조건 |
 
-추가 조사 명세는 성능·신뢰성·검증·원격 산출물 **17개**, graph retrieval **13개**,
-호출 통폐합 **10개**, 총 **40개 패킷**이다. 기존 LC-01~04는 별도 핵심 연결 작업이다.
-패킷 하나는 하나 이상의 작은 코드 PR로 나눌 수 있다.
-예를 들어 REL-03의 총 deadline과 cooldown admission, PERF-03의 계측과 저장 형식 변경은
-같은 코드 PR에 강제로 묶지 않는다. #260–#264의 명세는 main에서 함께 참조할 수 있다.
+기존 40개 ID는 근거를 추적하기 위해 보존한다. **유지 16개, 기존 owner 작업에 흡수 9개,
+조건부 15개**로 재분류했으며 40개 독립 프로젝트나 모두 완료해야 할 출시 조건이 아니다.
+LC-01~04는 별도 핵심 연결 작업이다. “흡수”는 동등한 기능의 검증·연결을 한 owner가 관리한다는
+뜻이며 모든 caller를 하나의 큰 PR에 합치거나 domain 계약을 제거하라는 뜻이 아니다.
+
+- **유지:** 현재 caller에서 확인한 정확성·연결·일관성 문제. 우선순위에 따라 작은 PR로 진행한다.
+- **흡수:** 해당 기능의 producer/consumer 또는 canonical fixture 변경에 포함한다. 독립 엔진·대장을 추가하지 않는다.
+- **조건부:** 아래 필요·측정·API 조건이 충족되면 착수한다. 기존 구현을 삭제하거나 미지원으로 바꾸는 뜻이 아니다.
 
 ## 2. 먼저 이어갈 기존 핵심 연결 작업
 
@@ -43,73 +48,58 @@ runtime source는 위 기준과 동일하다. #258은 여전히 draft다.
 새 성능/CI 개선은 이 P0의 예약·사용량·소유권·검증 의미를 유지해야 한다.
 시간이 오래 걸린다는 이유로 checked API, fsync, exact-SHA proof를 생략하지 않는다.
 
-## 3. 추가 구현 큐
+## 3. 패킷별 채택 상태
 
-아래 우선순위는 작업 간 제안 순서다. 실제 서버에서 측정한 병목 순위가 아니다.
+상세 source·fixture·완료 조건은 위 연결된 패킷에 보존한다. 이 표의 채택 조건을 먼저 적용한다.
+시작점은 LC-01/02, CC-02/04, VW-01이다. Graph의 명확한 parser/전달 오류는 해당 작은 회귀
+fixture와 함께 고치며, 대규모 retrieval 평가를 기다리지 않는다. 우선순위는 측정된 병목 순위가 아니다.
 
-| ID | 우선순위 | 구체적 결과 | 선행 / 보존할 조건 |
+| ID | 채택 | 현재 범위 / 흡수할 owner | 착수·보존 조건 |
 |---|---|---|---|
-| VW-01 | P0 | docs/mode 판정에서 native build와 state 준비 분리 | 기존 path classifier 사용; mixed/critical/unknown은 필요한 coverage 유지 |
-| PERF-02 | P1 | 한 panel refresh에서 Plan을 한 번 취득해 projection 공유 | UI read set은 mutation 권한이 아님 |
-| REL-01 | P1 | 실제 0개와 unavailable/partial/unsupported/omission 구분 | 기존 bounded observer·redaction·PID identity 유지 |
-| PERF-01 | P1 | native transcript 증분 읽기 및 bounded 재검증 | REL-01 이후; metadata hit는 cached observation |
-| REL-02 | P1 | typed failure와 재실행 적격성 | account pin·기존 최대 호출 수·physical receipt 보존 |
-| REL-03 | P1 | 선택적 총 operation deadline과 cooldown admission | cooldown 부분은 REL-02 이후; 기존 per-call timeout 유지 |
-| REL-04 | P1 | auth/catalog Broker의 write/read/pagination/cleanup 감독 | 기존 Reactor duplex; 새 provider 권한 없음 |
-| VW-04 | P1 | 기존 Rust timing parser와 bounded 실패 증거 연결 | 기본 업로드 없음; 원래 exit와 scrub 경계 보존 |
-| VW-03 | P1 | 측정된 build/install 중복 제거와 coverage label 정렬 | VW-04 측정; exact-SHA/full-proof classifier와 동시 변경 |
-| VW-05 | P1 | 실제 clock 대기 축소와 deterministic native fixture | 실제 child ownership/cleanup 시험은 유지 |
-| AR-01 | P1, 원격 경로 사용 시 | collect의 취소·총 deadline·게시 불명 처리 | local client cleanup과 remote job 취소 구분 |
-| PERF-04 | P2 | graph lexical 전처리 재사용 | GR-05/06의 identity·품질 기준과 연결; 기존 순위/점수/source validation oracle 보존 |
-| PERF-03 | P2 | usage write amplification 계측과 필요한 작은 개선 | LC lock 순서·durable pending 보존; 저장 형식 변경은 별도 근거 |
-| VW-02 | P2 | noncritical leaf의 안전한 affected test closure | VW-01 이후; advisory 비교 후 executor 연결, 불명은 full |
-| AR-02 | P2, 선택형 | run/snapshot에 묶인 bounded artifact manifest | 실제 묶음 수집 필요; 파일·총량·경로 상한 |
-| AR-03 | P2, 선택형 | partial/resume과 묶음 완료 receipt | AR-01 + AR-02; 모든 필수 artifact 확인 전 완료 금지 |
-| AR-04 | P2, 선택형 | cache 공간 inventory·정리 계획 | inventory 독립; 삭제 apply는 durable completion producer 선행 |
+| PERF-01 | 조건부 | REL-01 observer의 증분 읽기 후속 | 관측 상태를 먼저 고정하고 실제 반복 read 비용을 측정 |
+| PERF-02 | 유지 | 한 refresh의 Plan read set 공유 | 새 global cache/atomic multi-store snapshot/권한 없음 |
+| PERF-03 | 조건부 | LC 작업의 필요한 계측; 별도 저장 최적화 | 실제 write amplification 확인 후 batch/형식 판단; pending/history 보존 |
+| PERF-04 | 조건부 | GR-05 이후 기존 lexical 전처리 재사용 | 반복 query 비용과 동일 순위·source validation oracle |
+| REL-01 | 유지 | native 관측의 zero/unknown/partial 분리 | bounded source·redaction·identity·coverage 유지 |
+| REL-02 | 유지 | typed failure와 재실행 적격성 | pin·호출 상한·physical receipt·권한 거절 유지 |
+| REL-03 | 조건부 | 선택적 총 deadline / hard cooldown 정책 | 실제 caller 요구; 기존 per-call timeout과 정렬용 cooldown을 묵시 변경하지 않음 |
+| REL-04 | 유지 | 기존 Reactor에 Broker I/O 감독 연결 | auth/catalog framing·credential 정책 유지; CC-06과 공통 API owner 조정 |
+| VW-01 | 유지 | docs/affected planning과 native 준비 분리 | crate README 포함 두 classifier 일치; critical/unknown과 required status 유지 |
+| VW-02 | 조건부 | noncritical leaf affected closure | 반복되는 실제 leaf 변경과 Cargo/feature/target 근거; 불명은 기존 coverage |
+| VW-03 | 흡수 | VW-01과 같은 CI 정리 owner | 동일 환경·입력의 중복이 입증된 실행만 축소; full-proof classifier 함께 유지 |
+| VW-04 | 흡수 | VW-01/03의 기존 timing·실패 진단 | 필요한 계측만; VW-01을 막는 별도 telemetry 프로젝트 없음 |
+| VW-05 | 흡수 | LC와 변경 중인 각 canonical fixture | clock wait 축소; 실제 process/platform 경계 시험 유지 |
+| AR-01 | 조건부 | 원격 collect를 사용하는 경로의 신뢰성 수정 | local cleanup과 remote job cancel 구분; 일반 Main의 선행 아님 |
+| AR-02 | 조건부 | AR-03과 한 선택형 bundle 기능 | 여러 필수 artifact 실수요; 기존 단일 immutable bundle 수집부터 비교 |
+| AR-03 | 조건부 | AR-02 manifest의 실제 consumer | AR-01/02 및 모든 필수 artifact 완료 receipt; manifest-only 기능 추가 금지 |
+| AR-04 | 조건부 | cache 공간 inventory와 필요 시 정리 | 공간 문제 관측; 삭제는 durable completion과 명시적 적용 조건, 자동 GC 기본 제외 |
+| GR-01 | 유지 | Rust scope별 symbol ID·span·signature | 동명 impl method 손실 방지; 기존 parser/query 사용 |
+| GR-02 | 유지 | Rust nested module·path 관계 | GR-01과 같은 parser owner; 잘못된 EXTRACTED edge 거절 |
+| GR-03 | 유지 | Worker의 no-match/partial/error 전달 | GR-04와 한 producer→consumer 계약; 정상 no-match로 Python 제외 rebuild 금지 |
+| GR-04 | 유지 | Parse·resolve·query coverage | 기존 syntax_valid/omission 재사용; 새 coverage store 없음 |
+| GR-05 | 유지 | Source freshness와 engine identity 근거 | stat cache hit와 byte verification 구분; PERF-04와 독립적인 정확성 |
+| GR-06 | 흡수 | 각 parser/consumer 수정의 회귀 검증 | 작은 adversarial fixture 필수; held-out 한영/latency 평가는 ranking·GR-12/13 판단 때 |
+| GR-07 | 흡수 | GR-03의 source 전달 품질 | GR-01 identity 이후 관련 선언 우선; truncation/omission을 consumer까지 전달 |
+| GR-08 | 흡수 | GR-01/04 parser-index의 test metadata | 검색 분류만; Cargo/test 실행 생략의 권한으로 사용 금지 |
+| GR-09 | 유지 | 기존 notebook provenance·좌표 정합성 | 새 code-only body 검색은 수요/평가 조건부; output을 code로 취급하지 않음 |
+| GR-10 | 유지 | Python lexical binding·nested identity | 기존 fixture 재사용; 의도적 semantic correction 명시 |
+| GR-11 | 유지 | Shell command 위치와 data argument 구분 | lexical/heredoc 재사용; false call 방지 |
+| GR-12 | 조건부 | 필요한 경우 Rust LSP/SCIP enrichment | syntax fix 뒤에도 남는 type-resolution 실패 corpus와 설치된 bounded producer |
+| GR-13 | 조건부 | 필요한 경우 한국어·본문 검색 확장 | 실제 no-match 평가; 기존 body/query expansion부터, 의존성은 measured gain 이후 |
+| CC-01 | 유지 | Provider identity/alias/discovery 공유 | 현재 ID validation 차이 교정; target·권한·account 정책은 adapter에 유지 |
+| CC-02 | 유지 | 전체 catalog의 routing consumer | display 20개와 allocation 분리; legacy/empty/unknown 구분 |
+| CC-03 | 흡수 | CC-01의 provider 계약 정리 owner | registry decode만 공유; preview/execute 오류·선택·Claude default 의미 유지 |
+| CC-04 | 유지 | 광고된 output reader와 canonical reference 연결 | 기존 capture core; SHA·root·권한·withhold·응답 cap 보존 |
+| CC-05 | 조건부 | Actual installer의 ownership/convergence 정리 | 설치 경로 수정이나 실제 drift가 있을 때; bare/absolute corpus와 rollback 선행 |
+| CC-06 | 흡수 | REL-04와 공통 supervisor API owner | caller별 작은 PR: Plan → graph → task; task API 동등성 전 기존 verify 유지 |
+| CC-07 | 조건부 | Lock cancellation watcher 제거 | 실제 contention/thread 비용 또는 관련 lock 변경; 의미 없는 API 확대 금지 |
+| CC-08 | 조건부 | Current-source verification 집계 공유 | 실제 결과 drift 또는 두 production consumer의 필요; 단순 line 감소만으로 착수하지 않음 |
+| CC-09 | 조건부 | Unsupported 표시 교정; host swap은 별도 | 구체적 handoff 수요와 LC/identity/cleanup 증거; quota만으로 자동 교체하지 않음 |
+| CC-10 | 흡수 | CC-01/04와 실제 CLI/MCP 변경의 정합성 | 기존 등록/argv/schema fixture 재사용; 모든 CLI의 MCP 복제·범용 router 제외 |
 
-### Graph retrieval 후속 큐
-
-[GR 상세 패킷](GRAPH-RETRIEVAL-WORK-PACKETS.md)은
-owner, source, canonical fixture와 완료 조건을 지정한다. 비교 분석은 새 DB보다 기존
-SQLite/graph/context 경계의 정확성 보완을 우선하며 검색 성능 수치는 아직 측정하지 않았다.
-
-| ID | 우선순위 | 구체적 결과 | 선행 / 보존할 조건 |
-|---|---|---|---|
-| GR-01 | P0 | Rust scope별 symbol ID·본문 span·signature | 동명 impl method 손실 방지; 기존 API/query 재사용 |
-| GR-02 | P0 | Rust nested module·`#[path]` 관계 | GR-01과 같은 parser 파일은 순차; 잘못된 EXTRACTED edge 금지 |
-| GR-03 | P0 | Worker에 no-match/partial/오류와 snapshot 근거 전달 | 정상 no-match로 Python 제외 rebuild 금지; 기존 bundle/pack 사용 |
-| GR-04 | P0 | Parse·resolve·query coverage | 이미 있는 syntax_valid 재사용; invalid/unsupported/unknown 구분 |
-| GR-05 | P1 | Freshness 근거·engine fingerprint | stat reuse와 byte verification 구분; PERF-04 cache identity 선행 |
-| GR-06 | P0 | 동일 corpus/budget의 retrieval 평가 | 기존 history/parity 보존; 한영 seed와 holdout, entry/file/shown-symbol 분리 |
-| GR-07 | P1 | 관련 선언을 먼저 싣는 byte budget | GR-01/03/06; truncation·omission을 consumer까지 전달 |
-| GR-08 | P1 | Rust test metadata의 탐색 분류 | production file 전체를 test-only로 만들지 않음; 실행 범위 축소는 별도 |
-| GR-09 | P1 | Notebook code-only 검색·좌표 정합성 | 기존 cell 추출 재사용; output은 검색 제외 |
-| GR-10 | P1 | Python lexical binding·nested identity | legacy golden의 의도적 semantic correction 명시 |
-| GR-11 | P1 | Shell command 위치와 data argument 구분 | 기존 lexical/heredoc 처리 재사용; false call 방지 |
-| GR-12 | P2, 조건부 | Rust LSP/SCIP enrichment | identity/coverage/평가 이후; 설치된 도구·bounded supervisor·fallback |
-| GR-13 | P2, 조건부 | 한국어·본문 hybrid 검색 실험 | GR-06/07과 PERF-04; measured gain 전 새 의존성 채택 보류 |
-
-### 호출 가능한 기능 통폐합 큐
-
-[CC 상세 패킷](CALLABLE-CONSOLIDATION-WORK-PACKETS.md)은 기존 함수의 실제 caller,
-제거 가능한 중복과 보존할 adapter 계약을 지정한다. CC-02/04의 P0는 즉시 손볼
-consumer/callable 결함을 뜻하며 LC 작업의 예약·cleanup 우선순위를 대체하지 않는다.
-
-| ID | 우선순위 | 구체적 결과 | 선행 / 보존할 조건 |
-|---|---|---|---|
-| CC-02 | P0 | 전체 catalog를 routing에 전달 | 표시용 20개 limit 유지 가능; legacy/empty/unknown 구분 |
-| CC-04 | P0 | 광고된 output reader 등록과 canonical reference 연결 | 기존 capture core; SHA·root·권한·withhold·응답 cap 보존 |
-| CC-01 | P1 | provider identity/alias/discovery 공유 | target 문법·account·권한은 caller에 유지; REL-02/03 writer 조정 |
-| CC-05 | P1 | hook ownership/convergence의 실제 owner 하나 | absolute native/legacy corpus 먼저; lifecycle transaction 유지 |
-| CC-06 | P1, 단계별 | Plan Git → graph → task supervisor 재사용 | stdin·live output·signal·tail·cleanup 동등성; REL-04/AR-01 조정 |
-| CC-03 | P1 | account decode/validation 공유 | preview/execute의 error·선택·Claude default 정책 유지 |
-| CC-10 | P1 | CLI/MCP/skill 설명·owner·parser 정합성 | discovery와 권한 분리; CC-04/09 지원 상태 반영 |
-| CC-07 | P2 | lock cancellation watcher thread 제거 | 기존 lock/release/timeout 의미 유지 |
-| CC-08 | P2 | current-source verification 집계 공유 | raw path·state/work root·출력·cancel adapter 유지 |
-| CC-09 | P1, host 연결 별도 | native Main swap 지원 계약과 host 연결 | unsupported 표시 우선; LC cleanup·lineage·기존 core 재사용 |
-
-MCP symbol slice와 graph tool 확장은 GR-01/03/06의 기존 producer에 연결한다.
-새 parser나 provider별 실행기를 별도 패킷으로 중복 추가하지 않는다.
+MCP symbol slice는 GR-01의 identity/span을 소비하는 adapter로 연결한다. CLI와 MCP의
+노출 범위를 같게 만드는 것 자체를 완료 목표로 삼지 않는다. 같은 supervisor를 쓰더라도
+Broker protocol, SSH 파일 게시, task stdin/live output은 별도의 caller 계약이다.
 
 ## 4. 병렬 작업과 직렬 연결
 
@@ -130,29 +120,22 @@ MCP symbol slice와 graph tool 확장은 GR-01/03/06의 기존 producer에 연�
 
 ## 5. 구현 에이전트 전달문
 
-> 최신 main과 관련 코드 PR을 확인하고, 문서가 아닌 실제 구현이 완료된 패킷은 건너뛰세요.
-> 이 조사 시점 #259~#264는 문서로 병합되었고 #258은 draft입니다.
-> 우선 #259의 LC-01/02와 native assignment 연결을 유지하면서 VW-01, PERF-02, REL-01,
-> REL-02를 각기 좁은 코드 PR로 진행하세요. 같은 파일의 writer는 한 명으로 고정합니다.
+> 최신 main의 실제 caller와 구현 PR을 확인하고 위 채택 표에서 가장 작은 유지 작업을 선택하세요.
+> LC-01/02의 예약 반환, CC-02의 catalog consumer, CC-04의 output reader, VW-01의 문서 판정을
+> 우선할 수 있습니다. 같은 파일의 writer는 한 명으로 정하고 작업별 critical gate를 지키세요.
+> GR-01/02/03/04의 정확성 수정에는 GR-06의 작은 회귀를 함께 넣으세요. 더 넓은 평가·최적화는
+> 필요한 알고리즘/비용 판단이 생길 때 수행하며 별도 benchmark 완료를 모든 fix의 선행으로 만들지 마세요.
+> 흡수 항목은 해당 owner의 acceptance에 포함하세요. 조건부 항목은 실제 trigger를 기록한 뒤 착수하세요.
 > 기존 Plan/Room/peer/supervisor/usage/landing과 canonical fixture를 재사용하세요.
-> REL-01 다음에 PERF-01, REL-02 다음에 cooldown 정책, AR-01/02 다음에 AR-03을 연결하세요.
-> Graph는 GR-06의 기준선을 고정하며 GR-03/04 전달 계약, GR-01/02 Rust 정확성을 먼저 보완하세요.
-> GR-05의 source/engine identity를 PERF-04에 연결하고 GR-12/13은 평가 후 선택하세요.
-> 호출 경로는 CC-02의 catalog consumer와 CC-04의 output reader부터 작은 코드 PR로 연결하세요.
-> CC-01/03은 REL-02/03과 같은 provider writer를 조정하고 CC-06은 Plan → graph → task로 나누세요.
-> CC-05는 actual installer corpus, CC-09는 unsupported 표시와 실제 host handshake를 먼저 다루세요.
-> CC-07/08의 순수 중복 제거와 CC-10의 callable 정합성은 해당 adapter 계약을 보존하세요.
-> 기능의 존재, 실제 public caller 연결, fixture 통과, live provider 증거를 구분해 보고하세요.
-> 빠진 usage·cleanup·관측을 성공이나 0으로 채우지 마세요. 성능은 동일 workload의 bytes,
-> metadata/subprocess/fsync, lock hold, RSS, p50/p95를 cold/warm으로 나눠 비교하세요.
-> 새 hosted CI job/matrix/schedule, 유료 모델/GPU 실행, storage upload를 기본으로 추가하지 마세요.
-> Scope가 작은 기존 검사를 실행하고, runtime/permission/state 경계를 바꾸면 저장소의 required gate를 지키세요.
-> 각 PR에 실제 수정·재사용·실행한 검사·남은 제한을 적고 검토를 위해 열어 두세요.
+> 기능 존재, production wiring, fixture, live provider 증거를 구분하고 unknown을 성공/0으로 채우지 마세요.
+> 새 계층·DB·router·기본 telemetry·hosted CI job/matrix/schedule을 패킷 수 때문에 만들지 마세요.
+> 성능 변경은 같은 workload/환경의 관측으로 판단하고 유료 모델/GPU/원격 실행을 기본 검증에 넣지 마세요.
+> 실제 변경·재사용·검증·남은 제한을 PR에 적고 검토를 위해 열어 두세요.
 
 이 전달문은 구현 범위의 지시이며 merge·설치·배포·계정 변경·데이터 삭제를 승인하는 문서가 아니다.
 AR-04는 정리 기능을 구현하는 작업이고 실제 사용자 cache 삭제는 별도 명시된 요청이 있어야 한다.
 
-## 6. 이번 조사에서 추가하지 않은 중복 작업
+## 6. 제외한 중복 확장과 검토 범위
 
 - Reader rendered-line cache, graph parser cache, Room append reader는 이미 있다.
 - Account cooldown 기록·pinned account·한정된 fallback·campaign admission·physical receipt도 이미 있다.
@@ -162,6 +145,7 @@ AR-04는 정리 기능을 구현하는 작업이고 실제 사용자 cache 삭�
 - Task/Plan, capture/peer-result reference, preview/execute account 선택, 두 JSON 표현은 각 계약을 보존한다.
 - Python gate helper, 별도 검색 서비스, provider별 task DB나 상주 fleet scheduler를 복원·추가하지 않는다.
 
-새 명세는 source와 nearest fixture, 공식 provider/GitHub/OpenSSH 문서를 대조해 작성했다.
-새 문서가 baseline에서 독립적으로 링크되는지와 문서 참조·diff 공백을 검사했다.
+이번 재분류는 위 40개 패킷 전체, Team 문서 7개와 주요 native owner/caller를 대조했다.
+과거 외부 비교 문서는 당시의 근거로 보존하며 이번에는 vendor 기능의 최신성을 재검증하지 않았다.
+Runtime API 삭제·config/default·CI classifier 변경은 없다. 문서 검증 결과는 PR 본문에 기록한다.
 Production 성능·실제 청구·실 vendor·SSH/GPU·최소 지원 OS 실행은 측정하지 않았다.

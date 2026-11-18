@@ -121,7 +121,7 @@ Orchestrator는 Carbon/Argon planner와 Hydrogen executor의 복합 profile이�
 
 | 축 | 필요한 정보 | 금지할 혼동 |
 |---|---|---|
-| Task profile | kind, phase, risk, ambiguity, domain tags, verifiability, context need, deadline, minimum tier | 파일 수/줄 수를 난이도·영향도의 완전한 대리값으로 사용 |
+| Task profile | kind, phase, risk, ambiguity, domain tags, verifiability, context need, deadline, 추천 profile와 legacy tier | 파일 수/줄 수나 tier 이름을 난이도·영향도·권한의 완전한 대리값으로 사용 |
 | Identity | harness/version, endpoint, account alias, configured/requested/resolved/served model, provider/model family | Claude CLI라는 이유만으로 실제 모델도 Anthropic이라고 가정 |
 | Effort | requested, native-supported set, applied/default/unknown, override source | 모든 provider의 high를 동일 계산량으로 비교 |
 | Capabilities | read/write, tool/structured output, context, resume, cancel, streaming, usage, native-child observability | 모델 지능으로 부족한 adapter 제어·격리를 보완 |
@@ -136,18 +136,22 @@ Immutable attempt에는 policy revision, task/base/context/verifier identity와 
 
 ## 5. 선택 순서와 재현성
 
-1. 기존 task/phase/risk 규칙으로 workload 요구와 minimum tier를 정한다.
-   Low-risk extraction과 high-risk reasoning을 구분하며 risk floor를 단순 size rule보다
-   먼저 적용한다. LLM의 self-rating만으로 위험도를 낮추거나 권한을 올리지 않는다.
-2. 기존 사용자 pin과 계정 allowlist, 데이터 전송 정책, role/access를 적용한다.
-   Pin이 요구 조건과 충돌하면 설명하고 멈추며 임의 다른 모델로 바꾸지 않는다.
-3. 계정/endpoint에 유효한 catalog로 exact model과 effort/composite profile을 해석한다.
+아래는 전체 model/effort 조합을 선택하는 후속 계약이다. 현재 schema 2의 네 tier,
+tier당 provider 하나, role/family/access 및 low/medium/high 제약은 호환 경로에 남는다.
+이 제약을 문서 변경만으로 해제하지 않으며 실제 변경은 parser/consumer/fixture와
+migration을 함께 다룬다. 이미 있는 최종 resolved eligibility와 exact effort 검사는 재사용한다.
+
+1. 기존 사용자 선택과 account allowlist, task/phase/risk, verifier, 데이터 전송 정책,
+   role/access를 확인한다. 단순 size나 LLM self-rating으로 위험도를 낮추거나 권한을 올리지 않는다.
+2. 계정/endpoint에 유효한 catalog로 exact model과 effort/composite profile을 해석한다.
    Catalog stale/unknown과 documented-only capability를 분리한다.
-4. 최종 resolved 후보에 billing authorization, required capabilities, 독립성,
+3. 최종 resolved 후보에 billing authorization, required capabilities, 독립성,
    scope/context 및 실행 예산을 다시 적용한다. 해석 전 이름에 한 번 검사하고 끝내지 않는다.
-5. 자격을 통과한 후보끼리만 품질 근거, 지연, quota 여유, 실제 비용을 비교한다.
-   초기에는 명시적 우선순위와 기존 tie-break를 사용한다. 임의의 단일 점수로
-   권한 부족·독립성 실패·추가 과금을 상쇄하지 않는다.
+   명시 pin이 요구 조건과 충돌하면 이유를 알리고 임의의 다른 모델로 바꾸지 않는다.
+4. 자격을 통과한 전체 후보에서 명시 선택을 받는다. Tier/role profile은 추천과 기본 선택의
+   설명에 사용하며, 초기 모델 배치표에 없다는 이유로 새 선택 경로에서 후보를 제외하지 않는다.
+5. 자동 추천이 필요한 경우에만 품질 근거, 지연, quota 여유, 실제 비용과 기존 tie-break를
+   비교한다. 임의의 단일 점수로 권한 부족·독립성 실패·추가 과금을 상쇄하지 않는다.
 6. 기존 parent-owned writer에서 account/quota-pool 및 팀 전체 예산을 예약하고
    launch intent/attempt와 route snapshot을 기록한다. 중복 요청은 같은 identity로 조정한다.
 7. 실행 중 served model/effort/fallback/children이 보고되면 attribution을 기록한다.
@@ -257,7 +261,9 @@ AGY Orchestrator는 `Carbon + Hydrogen / native-fixed / usage coverage: partial`
 
 ## 11. 후속 구현 분할과 완료 조건
 
-별도 거대 router 프로젝트를 만들지 않고 #245의 기존 작업에 나눈다.
+MR 묶음은 #245의 기존 작업에 귀속되는 acceptance 참조다.
+현재 착수 범위와 순서는 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따르며,
+아래 표를 이미 연결된 snapshot/consumer를 다시 만드는 별도 router backlog로 사용하지 않는다.
 
 | 묶음 | 기존 작업에 귀속 | 구현 범위 |
 |---|---|---|
@@ -275,7 +281,7 @@ MR-A의 snapshot/consumer 계약을 먼저 정하고 MR-B가 이를 소비한다
 
 | ID | 시나리오와 기대 |
 |---|---|
-| MR-01 | Schema 2 fixture의 기존 route/권한/자동 swap 동작 보존; 미지원 필드 명시 거부 |
+| MR-01 | Schema 2 fixture의 기존 route/권한과 지원되는 native 동작 보존; 미지원 필드·host 조작 명시 거부 |
 | MR-02 | 작은 high-risk 변경은 size shortcut으로 low tier가 되지 않음 |
 | MR-03 | researcher 수집과 scholar 해석의 scope 구분; 연구 키워드만으로 frontier 호출 안 함 |
 | MR-04 | unsupported effort/native-fixed에서 arbitrary effort 전달 차단 |
