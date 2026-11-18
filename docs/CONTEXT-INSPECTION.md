@@ -139,11 +139,11 @@ each physical call; the delegation index retains the existing four context field
 Snapshot-local state does not import the parent's uncommitted task or memory.
 
 Compilation, manifest/bundle mismatch, unsupported parser discovery and outbound
-validation fail before worker registration. Compilation failure cleans up only a
-still-pristine owned snapshot; changed snapshots are preserved. Dry-run and
-export-only keep their existing pre-worktree behavior. The installed adapter uses
-the existing qualified graph helper and native private-group proof; standalone
-adapters without them refuse sources that require those services. This wiring
+validation fail before worker registration. Compilation failure retains its
+snapshot and reports the exact path, without a status/remove cleanup window.
+Dry-run and export-only keep their existing pre-worktree behavior. The installed
+adapter uses the existing qualified graph helper and native private-group proof;
+standalone adapters without them refuse sources that require those services. This wiring
 does not implement automatic graph selection, plan-task claims or patch admission.
 
 Fallback attempts retain separate call manifests under the same operation.

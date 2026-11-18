@@ -740,19 +740,15 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         match prepared {
             Ok(compiled) => Some(compiled),
             Err(error) => {
-                let cleanup = worktree
-                    .pristine(context)
-                    .and_then(|()| worktree.remove(context));
+                // A status observation does not reserve the snapshot against concurrent writes.
+                let retained = format!("context snapshot retained: {}", worktree.path.display());
                 storage::write(&repo, &artifact,
-                    format!("{header}\n## Context preparation\n\nCompilation or outbound validation failed; no worker started.\n").into_bytes(),
-                    true, context.interrupted)?;
+                    format!("{header}\n## Context preparation\n\nCompilation or outbound validation failed; no worker started.\n{retained}\n").into_bytes(),
+                    true, context.interrupted)
+                    .map_err(|e| Error::new(e.code, format!("{}; {retained}", e.message)))?;
                 return Err(Error::new(
                     error.code,
-                    if cleanup.is_err() {
-                        format!("{}; snapshot cleanup deferred", error.message)
-                    } else {
-                        error.message
-                    },
+                    format!("{}; {retained}", error.message),
                 ));
             }
         }

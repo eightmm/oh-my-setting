@@ -2320,11 +2320,13 @@ fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
                     .args(["worktree", "list", "--porcelain"])
                     .output()
                     .unwrap();
+                let retained =
+                    String::from_utf8_lossy(&result.2).contains("context snapshot retained: ");
                 assert_eq!(
                     String::from_utf8_lossy(&worktrees.stdout)
                         .matches("worktree ")
                         .count(),
-                    1
+                    if retained { 2 } else { 1 }
                 );
                 result
             };
@@ -2399,6 +2401,124 @@ fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
             assert_eq!(
                 prepare(&missing_parser, &["--context-pack", "pack.json"]).0,
                 2
+            );
+            struct CleanupRace {
+                snapshot: Mutex<Option<PathBuf>>,
+                statuses: std::sync::atomic::AtomicUsize,
+                removals: std::sync::atomic::AtomicUsize,
+            }
+            impl Executor for CleanupRace {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    assert_eq!(
+                        request.argv[0], "git",
+                        "compile failure must not start a provider"
+                    );
+                    let added = request
+                        .argv
+                        .windows(2)
+                        .any(|p| p[0] == "worktree" && p[1] == "add");
+                    let removing = request
+                        .argv
+                        .windows(2)
+                        .any(|p| p[0] == "worktree" && p[1] == "remove");
+                    let pristine = request.argv.iter().any(|arg| arg == "--ignored=matching");
+                    let snapshot =
+                        added.then(|| PathBuf::from(&request.argv[request.argv.len() - 2]));
+                    let result = Native.execute(request, stop)?;
+                    if let Some(path) = snapshot {
+                        *self.snapshot.lock().unwrap() = Some(path);
+                    }
+                    if pristine && self.statuses.fetch_add(1, Ordering::Relaxed) == 1 {
+                        assert!(
+                            result.stdout.is_empty(),
+                            "inject only after status observed a clean snapshot"
+                        );
+                        let snapshot = self.snapshot.lock().unwrap().clone().unwrap();
+                        fs::create_dir(snapshot.join(".oms")).unwrap();
+                        fs::write(
+                            snapshot.join(".oms/late-marker.txt"),
+                            "after clean status\n",
+                        )
+                        .unwrap();
+                    }
+                    if removing {
+                        self.removals.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(result)
+                }
+            }
+            let raced = provider_repo();
+            raced.write(".gitignore", ".oms/\n");
+            raced.git(&["add", ".gitignore"]);
+            raced.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "ignored race state",
+            ]);
+            let values = args(&[
+                "--repo",
+                raced.0.to_str().unwrap(),
+                "--to",
+                "codex",
+                "--model",
+                "fixture",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--context-manifest",
+                "--verify",
+                "true",
+                "Change tracked.txt",
+            ]);
+            let valid_rules = fs::read(source.0.join("config/context-phases.json")).unwrap();
+            source.write("config/context-phases.json", "{\"schema\":9}");
+            let race = CleanupRace {
+                snapshot: Mutex::new(None),
+                statuses: std::sync::atomic::AtomicUsize::new(0),
+                removals: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let failed = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &values,
+                &raced.0,
+                &source.0,
+                &STOP,
+                &race,
+            );
+            source.write("config/context-phases.json", valid_rules);
+            assert_eq!(failed.0, 2);
+            let snapshot = race.snapshot.lock().unwrap().clone().unwrap();
+            assert!(
+                snapshot.exists(),
+                "snapshot and late marker lost: {} status checks, {} removal(s)",
+                race.statuses.load(Ordering::Relaxed),
+                race.removals.load(Ordering::Relaxed)
+            );
+            assert_eq!(
+                race.removals.load(Ordering::Relaxed),
+                0,
+                "compile failure must retain its snapshot"
+            );
+            assert_eq!(
+                race.statuses.load(Ordering::Relaxed),
+                1,
+                "failure must not enter a status/remove cleanup window"
+            );
+            assert!(String::from_utf8_lossy(&failed.2).contains(&format!(
+                "context snapshot retained: {}",
+                snapshot.display()
+            )));
+            assert_eq!(
+                fs::read_to_string(snapshot.join("tracked.txt")).unwrap(),
+                "baseline\n"
             );
             struct ChangedSnapshot(Mutex<Option<PathBuf>>);
             impl Executor for ChangedSnapshot {
