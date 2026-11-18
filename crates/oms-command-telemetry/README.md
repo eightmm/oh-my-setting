@@ -160,6 +160,14 @@ write rather than forgetting lifetime spend. A pending receipt is durable
 before each physical provider invocation; a crash can therefore leave an
 unresolved liability without needing a completed artifact.
 
+Each new registration or observation reads and validates the complete history,
+then atomically replaces the ledger with that history plus the new receipt.
+Work and replacement bytes therefore grow with ledger size. This bound includes
+every historical revision; there is no automatic pruning, compaction or rotation.
+Reaching the ceiling or finding malformed history refuses further accounting
+and provider continuation. Deleting history would erase spend and unresolved
+liabilities, so storage failure must be reconciled before another call.
+
 Schema 1 records immutable `call_id`, `operation_id`, provider and any known
 selected-model/account/goal/task/attempt/run identities. `selected_model` names
 the selected route and makes no claim about an unreported served model.
@@ -178,6 +186,9 @@ refuses publication. A higher revision is an explicit correction, including a
 downward correction, and supersedes rather than adds to prior observations.
 Older revisions remain auditable without replacing newer evidence. Calls with
 conflicting immutable identity or ordinal refuse publication.
+An identical receipt still validates the complete history under the writer
+lock, but does not replace or fsync the ledger. That no-op is not durability
+reconciliation after an earlier publication error.
 
 Cumulative snapshots retain provider/account/session identity. Projection
 differences successive snapshots in invocation order, not completion order,
