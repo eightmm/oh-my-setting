@@ -2,6 +2,8 @@ Usage: agent-task.sh [options] [path|init|show|context|status|update|append|veri
 
 Maintain the active handoff packet shared by Codex, Claude Code, and
 Antigravity. Project task defaults to REPO/.oms/task/current.md.
+The packet is a resume note; agent-plan owns execution tasks, claims and
+review state.
 
 Options:
   --repo PATH       Project repo/directory. Default: PWD.
@@ -64,3 +66,7 @@ Commands:
                     the evidence first.
   rotate            Archive the current task and initialize a new active task.
   close             Archive current.md under .oms/task/archive/ and remove it.
+                    Memory proposals are off by default. Set
+                    OMS_AGENT_TASK_CLOSE_MEMORY=1 to queue the outcome for
+                    `oms agent-memory review`. Journal capture is independent
+                    of this opt-in.

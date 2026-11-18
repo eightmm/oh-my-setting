@@ -19,11 +19,21 @@ committed citations, and provenance.
 - `run_review` replaces the review helper's `import`, `review`, and private
   `capture` routes. Capture is not added to the public command grammar.
 - `append_project_note` preserves the caller's kind for task-close and journal
-  producers. `scripts/agent-task.sh` writes `task_close` notes; journal
+  producers. Opt-in task-close proposals use `task_close`; journal
   distillation also remains recognizable by its journal author and body prefix.
 - `provider_context` composes global and project memory, compact/full/relevant
   modes, query-ranked recall, path scopes, screening, and existing byte budgets.
   It replaces `ma_write_shared_memory_context` used by peer context assembly.
+
+Automatic task-close, distill and imported notes wait for `review --accept`
+before compact summaries or provider context can include them. The same rule
+applies to full context, query-ranked injection and legacy journal-distill
+notes. Explicitly authored notes and pins keep their existing eligibility;
+`show`, `search` and `recall` retain stored proposals for inspection. Acceptance
+does not verify a claim, and retirement/supersession still remove accepted notes
+from context. A correction copied before an interrupted acceptance also waits
+for its acceptance receipt. Review reads the existing receipt log; no notes
+are deleted or new database schema introduced.
 
 The owner still must register this crate in the production workspace, remove
 its temporary workspace boundary, serialize the lockfile, and wire the public
@@ -87,6 +97,8 @@ contradiction normalization reuses the workspace's pinned Unicode normalizer.
   refresh leaves the Markdown record authoritative.
 - `reviews.jsonl`: decision eligibility, optional correction append, and receipt
   share the decision lock. A second decision refuses an already decided item.
+  Decisions refresh the derived summary; context also checks current receipts
+  when reading, so a stale summary cannot bypass review.
   A kill between a correction note and its receipt leaves the note's
   `accepted_correction` metadata for retry deduplication; retirement itself
   removes a note from the pending set.

@@ -162,7 +162,14 @@ fn status_without_packet_reads_without_services() {
 
 #[test]
 fn lifecycle_init_update_append_verify_close() {
-    if !isolated("lifecycle_init_update_append_verify_close", &[]) {
+    if std::env::var_os("TASK_CONTRACT_ISOLATED").is_none() {
+        for value in [None, Some("0"), Some("1")] {
+            let extra: Vec<_> = value
+                .map(|value| ("OMS_AGENT_TASK_CLOSE_MEMORY", value))
+                .into_iter()
+                .collect();
+            isolated("lifecycle_init_update_append_verify_close", &extra);
+        }
         return;
     }
     let repo = Repo::new();
@@ -200,7 +207,10 @@ fn lifecycle_init_update_append_verify_close() {
     assert!(!packet.exists());
     assert!(repo.path().join(".oms/task/archive").is_dir());
     assert_eq!(svc.journal, ["update", "verify", "close"]);
-    assert_eq!(svc.memory, 1);
+    assert_eq!(
+        svc.memory,
+        usize::from(std::env::var("OMS_AGENT_TASK_CLOSE_MEMORY").as_deref() == Ok("1"))
+    );
 }
 
 #[test]

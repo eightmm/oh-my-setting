@@ -45,7 +45,7 @@ PROJECT.md를 관리하는 프로젝트 담당자와 위임 작업을 준비하�
 수 있다. 없는 PROJECT를 자동 생성하거나 입력 예산을 자동 확대하지 않는다.
 
 `--phase`는 라벨이 아니라 구성 규칙이다. `config/context-phases.json`의 표가
-phase마다 후보 종류(`task-packet`, `pins`, `memory-summary`, `work-journal`,
+phase마다 후보 종류(`task-packet`, `pins`, `work-journal`,
 `related`, `related-test`, `explicit`)의 순위를 얼마나 옮길지와, 필수가 아닌
 자료 하나가 차지할 수 있는 상한(`예산/nonrequired_divisor`)을 정한다.
 `implementation`은 빈 규칙이라 이전과 같고, `verification`은 관련 테스트를
@@ -54,6 +54,13 @@ target, 필수 자료, PROJECT는 어떤 phase도 옮기지 못한다(상한 119
 엄격히 검증하며 모르는 키나 phase가 있으면 컴파일을 거부한다. manifest의
 `phase_rules_sha256`이 사용한 표의 digest이므로, 두 pack은 이 값이 같을 때만
 같은 규칙으로 만든 것이다.
+
+캐시된 `.oms/memory/summary.md`는 검토 전 제안을 포함할 수 있으므로 기본
+후보에서 제외한다. 파일은 삭제하거나 다시 쓰지 않으며, 필요하면
+`--file .oms/memory/summary.md`로 명시적으로 포함할 수 있다. `pins.md`는
+명시적으로 작성한 메모이므로 기본 후보로 유지한다. 기존 phase 설정의
+`memory-summary` 키는 호환성을 위해 허용하지만 자동 후보를 추가하지 않는다.
+provider 메모리 컨텍스트는 별도의 검토 정책으로 승인된 제안만 요약·주입한다.
 
 부모는 누락된 부분을 직접 확인하거나, 필요에 맞게 명시적으로 예산을 조정한다.
 저장소 루트와 명시된 target의 상위 경로에 존재하는 `AGENTS.md`도 필수 자료로

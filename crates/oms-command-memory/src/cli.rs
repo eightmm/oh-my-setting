@@ -670,6 +670,7 @@ fn execute_inner(
                     include_superseded: o.has("--include-superseded"),
                     targets: &target,
                     drop_scoped: false,
+                    context_only: false,
                     handoffs: s
                         .canonical_repo()
                         .map(|r| r.join(".oms/handoffs"))
