@@ -30,6 +30,13 @@ catalog 출처·보고된 나이·exact effort evidence만 표시하며, 실제 
 않는다. 이는 [Panel adapter](../crates/oms-command-panel/README.md)의 읽기 범위이며,
 MR-C의 전체 controls/attribution이나 MR-B 자격·과금 검증 완료를 뜻하지 않는다.
 
+MR-B의 제한된 evidence consumer는 선택적 source-reported account/endpoint와
+observed/expiry를 snapshot에 보존한다. Source scope의 read 시점 freshness와 선택된
+account 일치를 분리하며 TTL 기본값·endpoint 추론·eligibility 권한을 만들지 않는다.
+현재 native catalog는 이 scoped observation을 생산하지 않아 unknown으로 남는다.
+Known fresh/stale positive는 injected catalog→snapshot/renderer fixture 범위이며, 실제 model-list
+context·계정 alias·endpoint·cache generation을 함께 묶는 선행 producer가 필요하다.
+
 ## 1. 현재 구현과 제안의 경계
 
 정적 확인한 소스:

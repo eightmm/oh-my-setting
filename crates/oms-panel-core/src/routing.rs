@@ -175,6 +175,99 @@ pub struct ProviderEvidence {
     pub effort_mechanism: Option<String>,
     pub provider_reported_efforts: Vec<String>,
     pub model_effort_scales: BTreeMap<String, Vec<String>>,
+    pub capability_evidence: Option<CapabilityEvidence>,
+}
+/// Optional producer-reported scope and lifetime. This record supplies no
+/// endpoint selection, authentication, entitlement or launch authority.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityEvidence {
+    pub schema: u64,
+    pub source: String,
+    pub account_alias: Option<String>,
+    pub endpoint: Option<String>,
+    pub observed_at: Option<u64>,
+    pub expires_at: Option<u64>,
+}
+impl CapabilityEvidence {
+    fn parse(value: &Value) -> Result<Self> {
+        let evidence: Self = serde_json::from_value(value.clone())
+            .map_err(|_| Error::new("invalid capability evidence"))?;
+        require(
+            evidence.schema == 1
+                && !evidence.source.is_empty()
+                && evidence.source.len() <= 256
+                && !evidence.source.chars().any(char::is_control),
+            "unsupported capability evidence source or schema",
+        )?;
+        if let Some(account) = &evidence.account_alias {
+            require(
+                !account.is_empty()
+                    && account.len() <= 64
+                    && account.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b)
+                    }),
+                "invalid capability account alias",
+            )?;
+        }
+        if let Some(endpoint) = &evidence.endpoint {
+            // Endpoint labels/URLs are display identities. Refuse credentials,
+            // query strings and fragments rather than persisting private URLs.
+            require(
+                !endpoint.is_empty()
+                    && endpoint.len() <= 256
+                    && endpoint
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._:/-[]".contains(&b))
+                    && !endpoint.starts_with('/')
+                    && (!endpoint.contains("://")
+                        || ["https://", "http://"].iter().any(|prefix| {
+                            endpoint
+                                .strip_prefix(prefix)
+                                .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+                        })),
+                "invalid or private capability endpoint",
+            )?;
+        }
+        require(
+            !evidence
+                .observed_at
+                .zip(evidence.expires_at)
+                .is_some_and(|(observed, expiry)| expiry <= observed),
+            "capability expiry must follow its observation",
+        )?;
+        Ok(evidence)
+    }
+    fn freshness(&self, read_at: Option<u64>) -> CapabilityFreshness {
+        match (self.observed_at, self.expires_at, read_at) {
+            (Some(observed), Some(expiry), Some(read))
+                if self.account_alias.is_some()
+                    && self.endpoint.is_some()
+                    && observed <= read
+                    && observed < expiry =>
+            {
+                if read < expiry {
+                    CapabilityFreshness::ReportedFresh
+                } else {
+                    CapabilityFreshness::ReportedStale
+                }
+            }
+            _ => CapabilityFreshness::Unknown,
+        }
+    }
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityFreshness {
+    ReportedFresh,
+    ReportedStale,
+    #[default]
+    Unknown,
+}
+impl CapabilityFreshness {
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
 }
 impl ProviderEvidence {
     pub fn from_catalog_row(row: &Value) -> Result<Self> {
@@ -237,6 +330,11 @@ impl ProviderEvidence {
             effort_mechanism: bounded_text(row.get("effort_mechanism"))?,
             provider_reported_efforts: efforts(row.get("effort_values"))?,
             model_effort_scales: scales,
+            capability_evidence: row
+                .get("capability_evidence")
+                .filter(|v| !v.is_null())
+                .map(CapabilityEvidence::parse)
+                .transpose()?,
         })
     }
 }
@@ -274,6 +372,14 @@ pub struct CapabilitySnapshot {
     pub probe_age_seconds: Option<u64>,
     pub harness_version: Option<String>,
     pub effort_support: EffortSupport,
+    /// Freshness applies to the reported scope at selection read time. It does
+    /// not establish that the selected route uses that endpoint or account.
+    #[serde(default, skip_serializing_if = "CapabilityFreshness::is_unknown")]
+    pub freshness: CapabilityFreshness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<CapabilityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_account_matches: Option<bool>,
 }
 /// Immutable selection evidence, independent of permission and admission. The
 /// launch writer retains this snapshot; later policy/catalog changes do not
@@ -375,6 +481,34 @@ impl Route {
             snapshot.capabilities.effort_support != EffortSupport::ReportedUnsupported,
             "resolved model does not support requested effort",
         )?;
+        let capability = &snapshot.capabilities;
+        if let Some(evidence) = &capability.evidence {
+            CapabilityEvidence::parse(&serde_json::to_value(evidence).map_err(Error::new)?)?;
+        }
+        require(
+            capability.freshness
+                == capability
+                    .evidence
+                    .as_ref()
+                    .map_or(CapabilityFreshness::Unknown, |evidence| {
+                        evidence.freshness(snapshot.catalog.read_at)
+                    })
+                && capability.selected_account_matches
+                    == capability
+                        .evidence
+                        .as_ref()
+                        .and_then(|v| v.account_alias.as_ref())
+                        .zip(self.account.as_ref())
+                        .map(|(observed, selected)| observed == selected)
+                && match &capability.evidence {
+                    Some(evidence) => {
+                        capability.account_alias == evidence.account_alias
+                            && capability.endpoint == evidence.endpoint
+                    }
+                    None => capability.account_alias.is_none() && capability.endpoint.is_none(),
+                },
+            "capability freshness or scope differs from its source evidence",
+        )?;
         require(
             snapshot.served_model.is_none()
                 && snapshot.served_account.is_none()
@@ -404,6 +538,7 @@ impl Route {
         inputs: Option<&RoutingInputs>,
     ) -> Result<RouteSnapshot> {
         let evidence = inputs.and_then(|v| v.provider_evidence.get(&self.candidate.provider));
+        let capability = evidence.and_then(|v| v.capability_evidence.as_ref());
         let catalog = inputs.and_then(|v| v.catalogs.get(&self.candidate.provider));
         let exact_efforts = evidence
             .and_then(|e| e.model_effort_scales.get(&self.candidate.model))
@@ -460,8 +595,8 @@ impl Route {
             },
             capabilities: CapabilitySnapshot {
                 source: evidence.map(|v| v.source.clone()),
-                account_alias: None,
-                endpoint: None,
+                account_alias: capability.and_then(|v| v.account_alias.clone()),
+                endpoint: capability.and_then(|v| v.endpoint.clone()),
                 exact_model_efforts: exact_efforts,
                 provider_reported_efforts: evidence
                     .map(|v| v.provider_reported_efforts.clone())
@@ -470,6 +605,14 @@ impl Route {
                 probe_age_seconds: evidence.and_then(|v| v.probe_age_seconds),
                 harness_version: evidence.and_then(|v| v.harness_version.clone()),
                 effort_support,
+                freshness: capability.map_or(CapabilityFreshness::Unknown, |v| {
+                    v.freshness(evidence.and_then(|v| v.read_at))
+                }),
+                evidence: capability.cloned(),
+                selected_account_matches: capability
+                    .and_then(|v| v.account_alias.as_ref())
+                    .zip(self.account.as_ref())
+                    .map(|(observed, selected)| observed == selected),
             },
             family_evidence: if model_family.is_some() {
                 "identifier_derived_unverified"
@@ -1393,6 +1536,10 @@ mod tests {
         assert_eq!(snapshot.served_account, None);
         assert_eq!(snapshot.catalog.account_alias, None);
         assert_eq!(snapshot.capabilities.endpoint, None);
+        assert_eq!(
+            snapshot.capabilities.freshness,
+            CapabilityFreshness::Unknown
+        );
         let saved = serde_json::to_value(snapshot).unwrap();
         let old_digest = route.snapshot_sha256().unwrap();
         inputs.requested_model = Some("claude-sonnet-5-5".into());
@@ -1426,6 +1573,25 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&route).unwrap()).unwrap();
         loaded.freeze_snapshot().unwrap();
         assert_eq!(loaded.snapshot, route.snapshot);
+        // Captured from 30c1a329's existing canonical fixture, with its read
+        // time pinned to 1000. New unknown fields must preserve stored bytes.
+        let previous = concat!(
+            r#"{"account_pinned":false,"binding_sha256":"20d176ca3ee026bf1be0066d8089a53265b12d33556454b3a88640491c2c201d","capabilities":{"account_alias":null,"effort_mechanism":null,"effort_support":"unknown","endpoint":null,"exact_model_efforts":null,"harness_version":null,"probe_age_seconds":172801,"provider_reported_efforts":["low","medium","high"],"source":"oms-models"},"catalog":{"account_alias":null,"catalog_age_seconds":86401,"count":1,"endpoint":null,"models_sha256":"10c29b6cd22cedfd053a31874f4994ec5a5bcaeb2c0bde084f95a66dc86ca77d","read_at":1000,"reported_probe":"failed","resolved_present":true,"source":"oms-models"},"configured":{"access":null,"effort":"medium","model":"claude-sonnet-5-5","provider":"claude","public_only":false},"execution_profile":null,"family_evidence":"identifier_derived_unverified","model_family":"anthropic","policy_schema":2,"policy_sha256":"667f37d3f54583628e818455a224c0acdbfc39d2a9e75a51e035f0eb3c94c601","requested_account":null,"requested_effort":null,"requested_model":null,"resolved":{"access":null,"effort":"medium","model":"claude-sonnet-5-6","provider":"claude","public_only":false},"schema":1,"selected_account":null,"served_account":null,"served_effort":null,"served_model":null,"served_source":null}"#,
+            "\n"
+        );
+        loaded.snapshot = Some(serde_json::from_str(previous).unwrap());
+        loaded.freeze_snapshot().unwrap();
+        assert_eq!(
+            crate::value::encoded(
+                &serde_json::to_value(loaded.snapshot.as_ref().unwrap()).unwrap()
+            )
+            .unwrap(),
+            previous.as_bytes()
+        );
+        assert_eq!(
+            loaded.snapshot_sha256().unwrap().as_deref(),
+            Some("b4330450d6991f266119c046a5969aed883a06e5bd1ff495e7a9f7b601738e48")
+        );
     }
     #[test]
     fn exact_effort_evidence_and_final_fable_eligibility_are_checked() {
@@ -1506,6 +1672,93 @@ mod tests {
         assert_eq!(snapshot.configured.unwrap().model, "claude-fable-5-1");
         assert_eq!(snapshot.resolved.model, "claude-fable-5-2");
         assert_eq!(snapshot.served_model, None);
+    }
+    #[test]
+    fn capability_freshness_keeps_reported_scope_and_selected_account_separate() {
+        let policy = Policy::bundled().unwrap();
+        let observed = json!({"schema":1,"source":"fixture-model-list",
+            "account_alias":"work","endpoint":"https://models.example.invalid/v1",
+            "observed_at":900,"expires_at":1100});
+        let snapshot = |observation: Value, read_at: Option<u64>, account: Option<&str>| {
+            let mut inputs = claude_inputs();
+            let mut evidence =
+                ProviderEvidence::from_catalog_row(&json!({"capability_evidence":observation}))
+                    .unwrap();
+            evidence.read_at = read_at;
+            inputs.provider_evidence.insert("claude".into(), evidence);
+            let mut route =
+                allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+            // This pure projection fixture supplies a selected alias; it does
+            // not attest a native account or endpoint producer.
+            route.account = account.map(str::to_owned);
+            route.snapshot = Some(route.selection_snapshot(None, None, Some(&inputs)).unwrap());
+            route.freeze_snapshot().unwrap();
+            route
+        };
+        for (read_at, expected) in [
+            (Some(1000), CapabilityFreshness::ReportedFresh),
+            (Some(1100), CapabilityFreshness::ReportedStale),
+            (Some(899), CapabilityFreshness::Unknown),
+            (None, CapabilityFreshness::Unknown),
+        ] {
+            let route = snapshot(observed.clone(), read_at, Some("work"));
+            let cap = &route.snapshot.as_ref().unwrap().capabilities;
+            assert_eq!(cap.freshness, expected);
+            assert_eq!(cap.selected_account_matches, Some(true));
+            assert_eq!(cap.account_alias.as_deref(), Some("work"));
+            assert_eq!(cap.endpoint.as_deref(), observed["endpoint"].as_str());
+            assert_eq!(route.snapshot.as_ref().unwrap().served_account, None);
+        }
+        let mismatch = snapshot(observed.clone(), Some(1000), Some("other"));
+        let cap = &mismatch.snapshot.as_ref().unwrap().capabilities;
+        assert_eq!(cap.freshness, CapabilityFreshness::ReportedFresh);
+        assert_eq!(cap.selected_account_matches, Some(false));
+        assert_eq!(
+            snapshot(observed.clone(), Some(1000), None)
+                .snapshot
+                .unwrap()
+                .capabilities
+                .selected_account_matches,
+            None
+        );
+        for field in ["account_alias", "endpoint", "observed_at", "expires_at"] {
+            let mut incomplete = observed.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                snapshot(incomplete, Some(1000), Some("work"))
+                    .snapshot
+                    .unwrap()
+                    .capabilities
+                    .freshness,
+                CapabilityFreshness::Unknown,
+                "{field} cannot be inferred"
+            );
+        }
+        let mut tampered = mismatch.clone();
+        tampered
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .selected_account_matches = Some(true);
+        assert!(tampered.freeze_snapshot().is_err());
+        for (field, forged) in [
+            ("freshness", json!("reported_stale")),
+            ("account_alias", json!("other")),
+            ("endpoint", json!("https://other.example.invalid")),
+        ] {
+            let mut tampered = serde_json::to_value(&mismatch).unwrap();
+            tampered["snapshot"]["capabilities"][field] = forged;
+            let mut tampered: Route = serde_json::from_value(tampered).unwrap();
+            assert!(tampered.freeze_snapshot().is_err(), "{field} rebinding");
+        }
+        let mut unbound = serde_json::to_value(mismatch).unwrap();
+        let cap = unbound["snapshot"]["capabilities"].as_object_mut().unwrap();
+        for field in ["freshness", "evidence", "selected_account_matches"] {
+            cap.remove(field);
+        }
+        let mut unbound: Route = serde_json::from_value(unbound).unwrap();
+        assert!(unbound.freeze_snapshot().is_err());
     }
     #[test]
     fn legacy_composite_and_family_evidence_stay_unknown_without_a_producer() {
@@ -1590,6 +1843,12 @@ mod tests {
             json!({"effort_values":vec!["high";17]}),
             json!({"model_effort_scales":{"model":true}}),
             json!({"version":"bad\nversion"}),
+            json!({"capability_evidence":{"schema":2,"source":"fixture"}}),
+            json!({"capability_evidence":{"schema":1,"source":"fixture","observed_at":10,"expires_at":10}}),
+            json!({"capability_evidence":{"schema":1,"source":"fixture","account_alias":"private/home"}}),
+            json!({"capability_evidence":{"schema":1,"source":"fixture","endpoint":concat!("https://user:", "password", "@example.invalid")}}),
+            json!({"capability_evidence":{"schema":1,"source":"fixture","endpoint":"https://example.invalid/?private=value"}}),
+            json!({"capability_evidence":{"schema":1,"source":"fixture","expires_at":-1}}),
         ] {
             assert!(ProviderEvidence::from_catalog_row(&row).is_err());
         }

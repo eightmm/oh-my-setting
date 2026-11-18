@@ -259,6 +259,7 @@ struct Fake {
     commands_seen: RefCell<Vec<(String, Vec<String>)>>,
     native_seen: RefCell<Vec<(NativeCommand, Vec<OsString>)>>,
     real_catalog: std::cell::Cell<bool>,
+    capability_evidence: RefCell<Option<Value>>,
 }
 
 impl PeerExecutor for Fake {
@@ -377,6 +378,11 @@ impl Services for Fake {
                         rows.push(
                             json!({"provider": provider, "installed": true, "models": models}),
                         );
+                    }
+                }
+                if let Some(evidence) = self.capability_evidence.borrow().as_ref() {
+                    for row in &mut rows {
+                        row["capability_evidence"] = evidence.clone();
                     }
                 }
                 Ok(json_out(json!({"providers": rows})))
@@ -994,6 +1000,7 @@ fn routing_accepts_present_provider_catalog() {
     assert!(rendered.contains("Exact effort support: unknown"));
     assert!(rendered.contains("Entitlement: unknown · billing: unknown · quota: unknown"));
     assert!(rendered.contains("endpoint unknown"));
+    assert!(rendered.contains("Reported scope freshness at read: unknown"));
     let envelope = json!({"kind":"oms-panel-routes","routes":rt});
     let missing = repo.path().join("absent-reader-repository");
     for width in 19..=200 {
@@ -1046,6 +1053,13 @@ fn routing_accepts_present_provider_catalog() {
     snapshot["requested_account"] = "requested-seat".into();
     snapshot["selected_account"] = "selected-seat".into();
     snapshot["account_pinned"] = true.into();
+    snapshot["capabilities"]["account_alias"] = "observed-seat".into();
+    snapshot["capabilities"]["endpoint"] = "https://models.example.invalid/v1".into();
+    snapshot["capabilities"]["evidence"] = json!({"schema":1,"source":"fixture-model-list",
+        "account_alias":"observed-seat","endpoint":"https://models.example.invalid/v1",
+        "observed_at":900,"expires_at":1100});
+    snapshot["capabilities"]["freshness"] = "reported_fresh".into();
+    snapshot["capabilities"]["selected_account_matches"] = false.into();
     snapshot["capabilities"]["effort_support"] = "reported_supported".into();
     snapshot["capabilities"]["exact_model_efforts"] = json!(["low", "medium"]);
     let rendered = render::routes(&evidence, 200);
@@ -1061,8 +1075,25 @@ fn routing_accepts_present_provider_catalog() {
         "pinned true",
         "Exact effort support: reported_supported",
         "exact model values: low, medium",
+        "Capability account: observed-seat",
+        "Reported scope freshness at read: reported_fresh",
+        "selected account matches false",
+        "source fixture-model-list",
+        "observed 900",
+        "expires 1100",
+        "Selected endpoint binding: unknown",
     ] {
         assert!(rendered.contains(expected), "{expected}: {rendered}");
+    }
+    evidence["chosen"]["builder"]["snapshot"]["capabilities"]["freshness"] =
+        "reported_stale".into();
+    assert!(render::routes(&evidence, 200).contains("freshness at read: reported_stale"));
+    for width in 19..=200 {
+        assert!(
+            render::routes(&evidence, width)
+                .lines()
+                .all(|line| render::width(line) <= width)
+        );
     }
     evidence["chosen"]["builder"]["snapshot"]["capabilities"]["effort_support"] =
         "reported_unsupported".into();
@@ -1165,6 +1196,26 @@ fn routing_accepts_present_provider_catalog() {
             !err.contains("no eligible installed provider"),
             "{dispatch:?}: {err}"
         );
+    }
+    // Injected catalog metadata covers the real consumer path, not a native
+    // scoped producer. No account selection or provider call is attested.
+    for (expiry, expected) in [(2, "reported_stale"), (u64::MAX, "reported_fresh")] {
+        *services.capability_evidence.borrow_mut() = Some(json!({"schema":1,
+            "source":"fixture-model-list","account_alias":"observed-seat",
+            "endpoint":"https://models.example.invalid/v1","observed_at":1,
+            "expires_at":expiry}));
+        let (code, out, err) = run(&["--routes", "--json"]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        for route in report["chosen"].as_object().unwrap().values() {
+            let cap = &route["snapshot"]["capabilities"];
+            assert_eq!(cap["freshness"], expected);
+            assert_eq!(cap["evidence"]["expires_at"], expiry);
+            assert_eq!(cap["account_alias"], "observed-seat");
+            assert_eq!(cap["selected_account_matches"], Value::Null);
+        }
+        assert!(render::routes(&report, 200).contains(expected));
+        assert!(!repo.path().join(".oms").exists());
     }
 }
 
