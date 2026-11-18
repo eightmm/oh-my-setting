@@ -923,6 +923,96 @@ pub(crate) fn recover<S: Services + ?Sized>(
     )
 }
 
+fn accepted_product<S: Services + ?Sized>(
+    execution: &Path,
+    record: &Value,
+    patch: &[u8],
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let base = text(record, "base");
+    let tree = text(record, "tree");
+    let accepted = text(record, "commit");
+    require(
+        record["schema"] == 1
+            && record["patch_sha256"] == crate::digest(patch)
+            && [&base, &tree, &accepted]
+                .iter()
+                .all(|v| crate::hex(v, 40) || crate::hex(v, 64)),
+        "malformed accepted Git or patch identity",
+    )?;
+    require(
+        replay(execution, &base, patch, service, stop)? == tree,
+        "accepted tree differs from reviewed patch",
+    )?;
+    let found = crate::git::run(
+        service,
+        execution,
+        &["cat-file", "-e", &format!("{accepted}^{{commit}}")],
+        None,
+        None,
+        stop,
+    )?;
+    require(
+        found.cleanup_complete && found.output_complete && !found.limited,
+        "accepted commit probe incomplete",
+    )?;
+    if found.code == 0 {
+        let parents = crate::git::text(
+            service,
+            execution,
+            &["rev-list", "--parents", "-n", "1", &accepted],
+            stop,
+        )?;
+        let parents = parents.split_whitespace().collect::<Vec<_>>();
+        require(
+            parents == [accepted.as_str(), base.as_str()]
+                && crate::git::text(
+                    service,
+                    execution,
+                    &["rev-parse", &format!("{accepted}^{{tree}}")],
+                    stop,
+                )? == tree,
+            "accepted commit differs from recorded tree/base",
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_publication_contents<S: Services + ?Sized>(
+    execution: &Path,
+    published: &str,
+    record: &Value,
+    patch: &[u8],
+    push_base: &str,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    require(
+        record.is_object()
+            && (crate::hex(published, 40) || crate::hex(published, 64))
+            && (crate::hex(push_base, 40) || crate::hex(push_base, 64))
+            && published != push_base,
+        "publication product needs exact accepted identities and nonempty push base",
+    )?;
+    accepted_product(execution, record, patch, service, stop)?;
+    crate::git::bytes(
+        service,
+        execution,
+        &[
+            "cat-file",
+            "-e",
+            &format!("{}^{{commit}}", text(record, "commit")),
+        ],
+        None,
+        None,
+        stop,
+    )?;
+    publication_contains(
+        execution, published, record, push_base, patch, service, stop,
+    )
+}
+
 pub(crate) fn validate_landed<S: Services + ?Sized>(
     repo: &Path,
     request: &crate::results::FinalizeRequest,
@@ -983,46 +1073,7 @@ pub(crate) fn validate_landed<S: Services + ?Sized>(
                 && record["review_gate"] == snapshot["review_gate"],
             "stored acceptance identity changed",
         )?;
-        let base = text(record, "base");
-        let tree = text(record, "tree");
-        let accepted = text(record, "commit");
-        require(
-            [&base, &tree, &accepted]
-                .iter()
-                .all(|v| crate::hex(v, 40) || crate::hex(v, 64)),
-            "malformed accepted Git identity",
-        )?;
-        require(
-            replay(&execution, &base, &patch, service, stop)? == tree,
-            "accepted tree differs from reviewed patch",
-        )?;
-        if crate::git::run(
-            service,
-            &execution,
-            &["cat-file", "-e", &format!("{accepted}^{{commit}}")],
-            None,
-            None,
-            stop,
-        )?
-        .code
-            == 0
-        {
-            require(
-                crate::git::text(
-                    service,
-                    &execution,
-                    &["rev-parse", &format!("{accepted}^")],
-                    stop,
-                )? == base
-                    && crate::git::text(
-                        service,
-                        &execution,
-                        &["rev-parse", &format!("{accepted}^{{tree}}")],
-                        stop,
-                    )? == tree,
-                "accepted commit differs from recorded tree/base",
-            )?;
-        }
+        accepted_product(&execution, record, &patch, service, stop)?;
     }
     // Exercise the native finish proof against a private plan before moving the
     // canonical task. The native domain owns publication receipt authentication.

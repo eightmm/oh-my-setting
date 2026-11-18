@@ -1627,7 +1627,7 @@ mod tests {
         plan_run(control, &f.repo, &f.repo, request, &AtomicBool::new(false))
     }
     /// A committed repository whose plan task `t1` is in review under a lease.
-    fn reviewed(control: &ControlServices<'_>, root: &Path) -> Fixture {
+    fn reviewed(control: &ControlServices<'_>, root: &Path, review: bool) -> Fixture {
         let repo = root.join("repo");
         std::fs::create_dir(&repo).unwrap();
         git_ok(&repo, &["init", "-q"]);
@@ -1680,18 +1680,33 @@ mod tests {
                 .with("provider", "codex"),
         )
         .unwrap();
-        let lease = state(control, &f).text("lease_id").to_owned();
-        plan(
-            control,
-            &f,
-            Request::new(Action::Review)
-                .with("id", "t1")
-                .with("lease-id", lease)
-                .with("artifact", ".oms/p/r.md")
-                .with("patch", ".oms/p/p.patch"),
-        )
-        .unwrap();
+        if review {
+            let lease = state(control, &f).text("lease_id").to_owned();
+            plan(
+                control,
+                &f,
+                Request::new(Action::Review)
+                    .with("id", "t1")
+                    .with("lease-id", lease)
+                    .with("artifact", ".oms/p/r.md")
+                    .with("patch", ".oms/p/p.patch"),
+            )
+            .unwrap();
+        }
         f
+    }
+    fn public_plan(control: &ControlServices<'_>, repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
+        let (code, out, err) = oms_command_plan::run_with_services(
+            &argv(args),
+            repo,
+            &AtomicBool::new(false),
+            control,
+        );
+        if code == 0 {
+            Ok(out)
+        } else {
+            Err(fail(String::from_utf8_lossy(&err)))
+        }
     }
     fn request<'a>(f: &'a Fixture) -> LandingRequest<'a> {
         LandingRequest {
@@ -1728,7 +1743,269 @@ mod tests {
     fn run_case(case: &str, root: &Path) {
         let stop = Arc::new(AtomicBool::new(false));
         let control = ControlServices::new(&stop, root).unwrap();
-        let f = reviewed(&control, root);
+        if case == "publication-review" {
+            public_plan(
+                &control,
+                &root.join("repo"),
+                &[
+                    "review",
+                    "--id",
+                    "t1",
+                    "--lease-id",
+                    &std::env::var("OMS_LANDING_UT_LEASE").unwrap(),
+                    "--artifact",
+                    ".oms/p/r.md",
+                    "--patch",
+                    ".oms/p/p.patch",
+                ],
+            )
+            .unwrap();
+            return;
+        }
+        let f = reviewed(&control, root, case != "publication-product");
+        if case == "publication-product" {
+            use oms_command_plan::services::PublicationProduct;
+            use std::os::unix::fs::PermissionsExt;
+            git_ok(
+                &f.repo,
+                &[
+                    "apply",
+                    "--index",
+                    f.repo.join(".oms/p/p.patch").to_str().unwrap(),
+                ],
+            );
+            git_ok(&f.repo, &["commit", "-qm", "accepted product"]);
+            let commit = git_ok(&f.repo, &["rev-parse", "HEAD"]);
+            let tree = git_ok(&f.repo, &["rev-parse", "HEAD^{tree}"]);
+            let all = oms_command_plan::json::parse(
+                &std::fs::read(f.repo.join(".oms/plan/tasks.json")).unwrap(),
+            )
+            .unwrap();
+            let task = all.get("tasks").get("t1");
+            let lease = task.text("lease_id").to_owned();
+            let record = serde_json::json!({"schema":1,"task_id":"t1","plan_id":all.text("plan_id"),"lease_id":lease,
+                "candidate_event_id":"evt-native","candidate_attempt_id":"attempt-native","patch_sha256":f.patch_sha,
+                "artifact":".oms/p/r.md","patch":".oms/p/p.patch","commit":commit,"tree":tree,"base":f.base,
+                "review_gate":{"event_id":"review-native","patch_sha256":f.patch_sha,"exit":0,"gate_verify_exit":0,"seat_verdicts":["pass"]}});
+            let review = |record: &serde_json::Value| {
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "services_landing::tests::isolated_entry",
+                        "--exact",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CASE, "publication-review")
+                    .env("OMS_LANDING_UT_LEASE", &lease)
+                    .env(
+                        "OMS_PANEL_ACCEPT_RECORD_JSON",
+                        serde_json::to_string(record).unwrap(),
+                    )
+                    .output()
+                    .unwrap()
+            };
+            for (key, value) in [
+                ("task_id", "other".to_owned()),
+                ("lease_id", format!("lease_{}", "0".repeat(32))),
+                ("tree", "0".repeat(40)),
+                ("commit", "0".repeat(40)),
+                ("patch_sha256", "0".repeat(64)),
+            ] {
+                let mut bad = record.clone();
+                bad[key] = value.into();
+                assert!(!review(&bad).status.success(), "forged acceptance {key}");
+                assert_eq!(state(&control, &f).text("state"), "claimed");
+            }
+            let out = review(&record);
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let finish = || {
+                public_plan(
+                    &control,
+                    &f.repo,
+                    &[
+                        "finish",
+                        "--id",
+                        "t1",
+                        "--lease-id",
+                        &lease,
+                        "--landed-commit",
+                        &commit,
+                    ],
+                )
+            };
+            assert!(
+                finish().is_err(),
+                "missing publication cannot complete the task"
+            );
+            assert_eq!(state(&control, &f).text("state"), "review");
+            let mut checksum = Command::new("cksum")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            std::io::Write::write_all(
+                checksum.stdin.take().as_mut().unwrap(),
+                f.repo.as_os_str().as_encoded_bytes(),
+            )
+            .unwrap();
+            let checksum = checksum.wait_with_output().unwrap();
+            assert!(checksum.status.success());
+            let sum = String::from_utf8(checksum.stdout).unwrap();
+            let mut words = sum.split_whitespace();
+            let receipt_dir = root
+                .join("home/.local/state/oh-my-setting/land")
+                .join(format!(
+                    "repo-{}-{}",
+                    words.next().unwrap(),
+                    words.next().unwrap()
+                ));
+            std::fs::create_dir_all(&receipt_dir).unwrap();
+            std::fs::set_permissions(&receipt_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let receipt_path = receipt_dir.join(format!("{commit}-native.json"));
+            let receipt = serde_json::to_vec(&serde_json::json!({"schema":1,"sha":commit,"state":"passed","remote":"fixture","target":"main","gate":{"rc":0},"push":{"rc":0,"moved":1,"base":f.base},"ci":{"conclusion":"success"}})).unwrap();
+            std::fs::write(&receipt_path, &receipt).unwrap();
+            std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            assert!(
+                finish().is_err(),
+                "receipt without actual pushed target is insufficient"
+            );
+            git_ok(
+                &f.repo,
+                &["update-ref", "refs/remotes/fixture/main", &commit],
+            );
+            let value =
+                oms_command_plan::json::parse(&serde_json::to_vec(&record).unwrap()).unwrap();
+            let product = |record: &oms_command_plan::json::Value| -> oms_command_plan::Result<PublicationProduct> {
+                oms_command_plan::Services::publication_product(&control, &f.repo, &commit, record, f.raw.as_bytes())
+            };
+            for (key, text) in [
+                ("tree", "0".repeat(40)),
+                ("base", commit.clone()),
+                ("commit", "0".repeat(40)),
+                ("patch_sha256", "0".repeat(64)),
+            ] {
+                let mut bad = value.clone();
+                bad.set(key, oms_command_plan::json::string(text)).unwrap();
+                assert!(
+                    product(&bad).is_err(),
+                    "native content proof must refuse {key}"
+                );
+            }
+            finish().unwrap();
+            let captured = product(&value).unwrap();
+            assert_eq!(
+                (
+                    captured.commit,
+                    captured.accepted_tree,
+                    captured.base,
+                    captured.patch_sha256,
+                    captured.raw_proof
+                ),
+                (
+                    commit.clone(),
+                    tree,
+                    f.base.clone(),
+                    f.patch_sha.clone(),
+                    receipt.clone()
+                )
+            );
+            let completed = state(&control, &f);
+            assert_eq!(completed.text("state"), "done");
+            assert_eq!(completed.get("landing").text("sha"), commit);
+            assert_eq!(
+                completed.get("landing").text("receipt_sha256"),
+                oms_command_plan::json::sha(&receipt)
+            );
+            let before = std::fs::read(f.repo.join(".oms/plan/tasks.json")).unwrap();
+            let base_tree = git_ok(&f.repo, &["rev-parse", &format!("{}^{{tree}}", f.base)]);
+            let other_parent = git_ok(
+                &f.repo,
+                &[
+                    "commit-tree",
+                    &base_tree,
+                    "-p",
+                    &f.base,
+                    "-m",
+                    "other parent",
+                ],
+            );
+            let merge = git_ok(
+                &f.repo,
+                &[
+                    "commit-tree",
+                    value.text("tree"),
+                    "-p",
+                    &f.base,
+                    "-p",
+                    &other_parent,
+                    "-m",
+                    "not the accepted parent",
+                ],
+            );
+            let mut wrong_parent = value.clone();
+            wrong_parent
+                .set("commit", oms_command_plan::json::string(merge))
+                .unwrap();
+            assert!(
+                product(&wrong_parent)
+                    .err()
+                    .unwrap()
+                    .message
+                    .contains("tree/base"),
+                "native proof must reject extra accepted parents"
+            );
+            assert!(
+                oms_command_plan::Services::publication_product(
+                    &control,
+                    &f.repo,
+                    &commit,
+                    &value,
+                    b"changed patch"
+                )
+                .is_err()
+            );
+            let other_repo = root.join("other-repo");
+            std::fs::create_dir(&other_repo).unwrap();
+            git_ok(&other_repo, &["init", "-q"]);
+            assert!(
+                oms_command_plan::Services::publication_product(
+                    &control,
+                    &other_repo,
+                    &commit,
+                    &value,
+                    f.raw.as_bytes()
+                )
+                .is_err(),
+                "another repository cannot reuse publication evidence"
+            );
+            stop.store(true, std::sync::atomic::Ordering::Release);
+            assert_eq!(product(&value).err().unwrap().code, 130);
+            stop.store(false, std::sync::atomic::Ordering::Release);
+            finish().unwrap();
+            assert_eq!(
+                std::fs::read(f.repo.join(".oms/plan/tasks.json")).unwrap(),
+                before
+            );
+            let mut changed: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
+            changed["gate"]["rc"] = 1.into();
+            std::fs::write(&receipt_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(
+                finish().is_err(),
+                "changed publication evidence must refuse reuse"
+            );
+            assert_eq!(
+                std::fs::read(f.repo.join(".oms/plan/tasks.json")).unwrap(),
+                before
+            );
+            return;
+        }
         let off = AtomicBool::new(false);
         let req = request(&f);
         let intent = intent(&control, &f);
@@ -1961,5 +2238,9 @@ mod tests {
     #[test]
     fn admission_context_scopes_allowed_paths_and_fails_closed() {
         isolated("context");
+    }
+    #[test]
+    fn panel_publication_product_finishes_through_the_native_plan_entry() {
+        isolated("publication-product");
     }
 }

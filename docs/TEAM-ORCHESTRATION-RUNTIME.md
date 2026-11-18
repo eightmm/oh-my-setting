@@ -364,6 +364,29 @@ review를 요구하면 실제 served model family 증거로 판정한다. CLI/pr
 다르거나 모델이 unreported이면 독립성 충족으로 표시하지 않는다. Native verifier
 sign-off는 보조 evidence이지 OMS acceptance를 대체하지 않는다.
 
+### Native single-task publication prerequisite
+
+The native `agent-plan finish --landed-commit` adapter now supplies the existing
+publication-product service for a parent `panel_accept` record. It authenticates
+the canonical landed receipt in the selected execution/state repositories,
+reuses Core's private-index patch replay and accepted tree/base/parent checks,
+checks that publication contains the accepted product, then rechecks the exact
+receipt. Task/plan/lease/review binding remains the canonical Plan writer's job.
+Receipt JSON or a commit alone grants no new approval or publication authority.
+The native path requires the accepted commit object to remain available.
+
+The nearest isolated native landing fixture exercises public Review then finish,
+missing/changed receipt and target-ref refusal, forged task/lease/patch/tree,
+extra accepted parent, wrong repository, cancellation and idempotent retry.
+Its publication metadata is a controlled fixture with actual Git objects/local
+tracking refs; it does not claim a live remote push or CI run.
+
+This repairs a single-task adapter gap. Team component capture, reviewed required
+versus optional membership/partial-result policy, ordered composite artifact and
+composed-tree independent review, and multi-candidate acceptance remain separate
+TM-05 prerequisites. Existing `panel accept` still requires one unique worker
+candidate; this adapter does not synthesize one from several Team members.
+
 | 변경/실패 | 금지되는 처리 |
 |---|---|
 | Review 후 candidate bytes/base/verifier 변경 | 옛 green을 현재 결과에 사용 |
