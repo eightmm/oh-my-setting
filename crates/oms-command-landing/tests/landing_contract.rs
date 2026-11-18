@@ -878,6 +878,37 @@ esac
             ("user", obj([("login", "reviewer".into())])),
         ])])
     }
+    fn candidate(&self, event: &str, payloads: &[(&str, V)]) -> (i32, String, String) {
+        fs::write(&self.gh, r#"#!/bin/bash
+case "${@: -1}" in
+  'repos/example/project/pulls/19') printf '%s\n' "$OMS_CT_PULL";;
+  'repos/example/project/pulls/comments/42') printf '%s\n' "$OMS_CT_COMMENT";;
+  'repos/example/project/actions/runs/73') printf '%s\n' "$OMS_CT_RUN";;
+  'repos/example/project/actions/runs/73/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_JOBS";;
+  'repos/example/project/actions/workflows/7/runs?'*) printf '%s\n' "$OMS_CT_BASE_RUNS";;
+  'repos/example/project/actions/runs/74/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_BASE_JOBS";;
+  *) exit 2;;
+esac
+"#).unwrap();
+        let mut env = payloads
+            .iter()
+            .map(|(name, row)| {
+                (
+                    (*name).to_owned(),
+                    String::from_utf8(row.json(false).unwrap()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        env.push(("OMS_GH_BIN".into(), self.gh.to_str().unwrap().into()));
+        self.isolated.run_env(
+            "feedback-candidate",
+            &self.repo,
+            &[event, &self.head],
+            &env.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>(),
+        )
+    }
     fn draft_comments(&self, comments: &V, json: bool) -> (i32, String, String) {
         let path = self.repo.join(".oms/publish/feedback.json");
         if !path.exists() {
@@ -947,37 +978,6 @@ esac
                     &String::from_utf8(comments.json(false).unwrap()).unwrap(),
                 ),
             ],
-        )
-    }
-    fn candidate(&self, event: &str, payloads: &[(&str, V)]) -> (i32, String, String) {
-        fs::write(&self.gh, r#"#!/bin/bash
-case "${@: -1}" in
-  'repos/example/project/pulls/19') printf '%s\n' "$OMS_CT_PULL";;
-  'repos/example/project/pulls/comments/42') printf '%s\n' "$OMS_CT_COMMENT";;
-  'repos/example/project/actions/runs/73') printf '%s\n' "$OMS_CT_RUN";;
-  'repos/example/project/actions/runs/73/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_JOBS";;
-  'repos/example/project/actions/workflows/7/runs?'*) printf '%s\n' "$OMS_CT_BASE_RUNS";;
-  'repos/example/project/actions/runs/74/attempts/1/jobs?per_page=100') printf '%s\n' "$OMS_CT_BASE_JOBS";;
-  *) exit 2;;
-esac
-"#).unwrap();
-        let mut env = payloads
-            .iter()
-            .map(|(name, row)| {
-                (
-                    (*name).to_owned(),
-                    String::from_utf8(row.json(false).unwrap()).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-        env.push(("OMS_GH_BIN".into(), self.gh.to_str().unwrap().into()));
-        self.isolated.run_env(
-            "feedback-candidate",
-            &self.repo,
-            &[event, &self.head],
-            &env.iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>(),
         )
     }
 }
