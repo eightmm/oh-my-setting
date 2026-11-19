@@ -898,7 +898,9 @@ mod tests {
         for prompt in [STARTUP_PROMPT, assignment.as_str()] {
             assert!(prompt.contains("Provider Lead"));
             assert!(
-                prompt.contains("Complete the assigned scope directly unless independent useful work")
+                prompt.contains(
+                    "Complete the assigned scope directly unless independent useful work"
+                )
             );
             assert!(prompt.contains("Leaf children cannot recursively delegate"));
             assert!(prompt.contains("admission, final acceptance and publication"));
