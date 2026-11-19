@@ -162,8 +162,9 @@ Messages 왕복 변환에서 원래 Responses item의 ID/phase/argument 표현�
 ## 7. Prompt audit와 검증 범위
 
 이번 prompt audit 변경은 기존 `project-doctor --prompts`의 Markdown 범위를 넓힌다.
-스킬의 `references/`와 출력 스타일도 점검하며, depth/byte 한계와 미검사 항목을
-JSON 및 text 결과에 드러낸다. `duplicates: []`는 호환 필드이고 중복 없음의 증거가 아니다.
+스킬의 `references/`와 출력 스타일도 점검하며, JSON에 depth/byte 한계와 미검사 항목을
+기록한다. Text 요약도 미검사 영역을 명시한다. `duplicates: []`는 호환 필드이고
+중복 없음의 증거가 아니다.
 `--budget`의 loaded-instruction 중복 검사는 별도의 기존 기능이다.
 
 Runtime-generated prompt의 추출/검증과 의미 충돌 분석은 남아 있다. 이를 진행할 때는

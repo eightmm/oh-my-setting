@@ -344,8 +344,14 @@ fn prompt_audit_includes_references_and_reports_unchecked_surfaces() {
             ("config/prompt-audit-patterns.txt", "double[- ]check\n"),
             ("rules/global-AGENTS.md", "Use scoped evidence.\n"),
             ("templates/project-general-AGENTS.md", "Project rules.\n"),
-            ("custom-skills/demo/SKILL.md", "Load references on demand.\n"),
-            ("custom-skills/demo/references/routing.md", "Double-check.\n"),
+            (
+                "custom-skills/demo/SKILL.md",
+                "Load references on demand.\n",
+            ),
+            (
+                "custom-skills/demo/references/routing.md",
+                "Double-check.\n",
+            ),
             (
                 "custom-skills/demo/references/nested/source.md",
                 "Double-check.\n",
@@ -391,7 +397,10 @@ fn prompt_audit_includes_references_and_reports_unchecked_surfaces() {
     assert_eq!(report["schema"], 1);
     assert_eq!(report["coverage"]["duplicate_analysis"], "not_run");
     assert_eq!(report["coverage"]["semantic_conflict_analysis"], "not_run");
-    assert_eq!(report["coverage"]["runtime_generated_prompts"], "not_scanned");
+    assert_eq!(
+        report["coverage"]["runtime_generated_prompts"],
+        "not_scanned"
+    );
     assert_eq!(report["coverage"]["runtime_delivery"], "not_verified");
     assert!(
         files
