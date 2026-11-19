@@ -13,6 +13,14 @@ Graph 저장·검색의 비교 분석과 13개 정확성·평가 작업은
 PERF-04와 연결한다. 이 명세들은 runtime 구현 완료를 뜻하지 않는다.
 아래 P0를 유지하면서 중복 구현과 같은 파일의 병렬 변경을 피하는 순서로 진행한다.
 
+2026-11-19 후속 인계는 main
+[`7d9b291592a926ce389693141d11ef8269eccfcd`](https://github.com/eightmm/oh-my-setting/commit/7d9b291592a926ce389693141d11ef8269eccfcd)의
+Plan/Room/lifecycle/result/skill-eval 경계를 다시 확인해 P0-B와 아래 event·평가 패킷을
+구체화했다. **추가된 내용은 구현 명세이며 runtime 연결·provider 실행 검증은 미완료다.**
+이 범위의 Overall Main 선택은 `codex|agy|claude`다. Main host, 추론 model, 작업 권한은
+별도 축이며 Main과 같은 provider의 Lead도 별도 participant/attempt로 사용할 수 있다.
+Provider 이름이 같다는 이유로 역할을 합치거나 모든 provider Lead를 항상 열지 않는다.
+
 ## 1. 결론과 조사 범위
 
 Rust 전환으로 주요 구성요소가 사라졌다기보다, **기존 구성요소와 새 orchestrator 사이의
@@ -155,32 +163,105 @@ held domain의 epoch 재개는 [lifecycle 구현 패킷](ORCHESTRATOR-LIFECYCLE-
 사용자가 실제로 쓰는 경로는 이미 Overall Main → native provider pane이다.
 실행을 표시하는 것과 attempt identity, 결과 보존, 종료 확인, acceptance를 연결하는 것은 다르다.
 기존 managed Team 정산과 달리, 이 작업은 native 대화와 canonical 업무의 상관관계를 만든다.
-새로운 mutable task DB 대신 기존 Plan/Room/private operation binding을 확장한다.
+일반 native 대화는 task binding 없이 그대로 사용한다. 이 binding은 durable assignment와
+결과 acceptance가 필요한 작업에 연결하며, 작은 대화마다 새 Plan 생성을 요구하지 않는다.
+새로운 assignment ID 계열·mutable task DB·scheduler 대신 다음 producer를 연결한다.
 
-1. 전송 전에 parent가 stable assignment ID, task/criterion digest, owner generation,
-   provider/native-session binding, base SHA, scope와 result contract를 기록한다.
-   시간 기반 Turn 문구나 pane label은 durable identity를 대체하지 않는다.
-2. Lead가 작업을 나눌 때 기존 `apply-proposal`과 `peer-delegate` worktree 경로를 우선 연결한다.
-   Native child의 격리를 이용하는 경우 실제 cwd/worktree identity를 관측해야 한다.
-   이미 실행 중인 native 세션에 `cd`를 지시한 것만으로 격리 성공을 표시하지 않는다.
-3. 서로 다른 provider의 writer가 같은 checkout을 사용하면 기존 write-WIP/scope/lease로
-   충돌을 드러낸다. 격리되지 않은 동시 write는 명시적 shared-workspace 모드로 표시하고,
-   native 대화를 managed containment나 hard capacity로 재분류하지 않는다.
-4. 전송 intent를 먼저 저장하고 submit/transport acknowledgement/model consumption/result를
-   구분한다. Enter 이후 응답 손실은 unknown이며 같은 assignment를 자동 재전송하지 않는다.
-5. Native 보고는 검증할 입력으로 읽는다. Parent가 실제 artifact/base/tree를 캡처하고
-   기존 review/admit/landing 경로로 넘겨야 완료다. Team-level 결과 합성은 아래 P1과 연결한다.
+| 기존 owner / source | 이미 있는 계약 | 이번 연결에서 맡을 일 |
+|---|---|---|
+| [Plan engine](../crates/oms-command-plan/src/engine.rs), `claim` / `Snapshot` | `plan_id`, task, `lease_id`/`lease_epoch`, owner·scope·완료 검사 | task/criterion/base와 현재 claim을 전송 전후에 재검증 |
+| [Lifecycle events](../crates/oms-command-operations/src/events.rs), `StartRequest` / `create_attempt` | task·parent attempt·refs, durable spec, start/event idempotency | native 배정의 attempt와 전송 intent를 기존 writer에 기록 |
+| [Room core](../crates/oms-command-room/src/core.rs), `send` / `bind` / `acknowledge`; [cursor](../crates/oms-command-room/src/cursor.rs) | participant/consumer binding, message ID, bounded updates, 명시적 `received` | addressed 전달과 수신 확인, Main 교체·room lineage 연결 |
+| [Dispatch](../crates/oms-panel-core/src/dispatch.rs), [results](../crates/oms-panel-core/src/results.rs), [acceptance](../crates/oms-panel-core/src/acceptance.rs) | 기존 worktree/worker lineage, exact patch·evidence, review/admission | 결과 보존과 검증·수락의 별도 결정 |
 
-최소 계약은 identity·목적·scope·base·기존 evidence reference이며 전체 transcript 복사나
-provider 내부 tool 호출을 임의로 통제하는 새 프로토콜이 아니다. 기존 session의 권한/default를
-바꾸는 migration은 별도이며, 사용자가 선택한 native 작업 흐름을 조용히 재작성하지 않는다.
+`oms-command-task::assignment`는 현재 provider/model/effort/workload의 route validation이다.
+전송 상태나 session record를 이 object에 넣지 않는다. 필요한 versioned binding은 기존
+operation의 private evidence/`refs`에 연결하고 canonical writer가 검증한다. 임의의 JSON이나
+native 출력이 lifecycle·Room·Plan을 직접 쓰는 권한이 되지 않는다.
 
-완료 판단에는 native pane 종료와 native 자식 정리의 차이, owner 변경, 모호한 전송,
-dirty work 보존, result evidence와 현재 task의 binding을 포함한다.
-Known limitation을 숨기기 위해 `unmanaged` 값을 지우거나 campaign guard를 완화하지 않는다.
-최소 수직 fixture는 task binding → 기존 write worktree → durable send intent → 불명 전송 보존
-→ exact result artifact → 기존 admission을 연결해야 한다. 같은 요청 재시도는 기존 결과를
-읽고, unknown 전송은 새 작업을 만들지 않으며, 종료·예산 증거가 없으면 unknown을 유지한다.
+**단계 1 — claim과 전송 intent.** P0-B의 Plan/operations owner가 먼저 작은 PR로 연결한다.
+입력은 canonical plan/task와 criterion digest, 현재 lease, Overall Main attempt/Room membership,
+Lead participant, provider/account/host 및 관측 가능한 native session·pane/process generation,
+base SHA, 허용 scope, 실제 cwd/worktree, 결과·verifier 계약이다. 지원하지 않는 identity는
+명시하고 표시 이름·timestamp·PID만으로 빈 native session binding을 채우지 않는다.
+같은 provider의 Main/Lead도 각 identity를 따로 검증한다.
+
+Parent는 현재 Plan claim을 읽어 동일 배정에서는 다시 claim하지 않고, `create_attempt`의
+idempotency로 재요청을 같은 attempt/spec에 묶는다. 같은 key에 다른 task/lease/scope/body를
+넣으면 거절한다.
+Transport side effect 전에 binding과 payload digest의 intent를 저장하고, 전달 직전에
+owner/lease/native target을 다시 확인한다. 기존 writer의 lock 순서를 지키며 interrupted
+prefix를 보존한다. Claim만 성공했거나 attempt만 생긴 경우를 submitted로 추정하지 않는다.
+출력은 그 attempt와 기존 evidence reference이며 새로운 업무 원장이 아니다.
+
+**단계 2 — 전달과 소비 증거.** P0-B의 Room/host owner가 첫 지원 native surface부터 연결한다.
+아래는 증거의 의미이며 새로운 공통 runtime enum이나 모든 provider의 동일 기능을 가정하지 않는다.
+
+| 관측 | 이를 입증할 최소 근거 | 이를 근거로 주장할 수 없는 것 |
+|---|---|---|
+| intent 보존 | canonical attempt/spec와 같은 binding/payload digest | provider 전송 또는 실행 |
+| submitted / transport ack | 해당 target의 실제 입력/transport receipt | 모델의 소비, task 성공 |
+| consumed | exact Room message의 수신자 ack 또는 지원 transport의 명시적 소비 증거 | 실행 시작·결과 수락; 단순 cursor 이동은 ack도 아님 |
+| result available | 같은 task/lease/attempt에 묶인 immutable artifact와 실제 verification evidence | review/admission 통과 |
+| accepted | 기존 acceptance producer의 exact base/patch/tree/verifier 결정 | push/publish 또는 모든 native child 정리 |
+
+Room의 `received`는 참여자가 소비를 확인한 기록이다. 모델 내부 실행을 추정하는 센서가 아니다.
+Native transcript의 “완료” 문구, idle prompt, pane 종료는 별도의 낮은 수준 관측으로 둔다.
+Enter 이후 receipt 손실·timeout이면 intent와 partial evidence를 보존하고 unknown으로 읽는다.
+기존 attempt/message/transport evidence를 조회해 확인하기 전에는 자동 resend·새 attempt·새 Lead를
+만들지 않는다. 확인된 미전송 또는 검증된 transport idempotency가 있을 때만 같은 의도를 재개한다.
+
+**단계 3 — 실제 결과와 acceptance.** P0-B와 TM-05의 기존 result owner가 연결한다.
+Lead가 OMS canonical task graph나 OMS-managed worker 구성을 확장하는 proposal은 검토된
+`apply-proposal` 뒤 기존 dispatch를 사용한다. Provider 내부 subagent는 Lead에 상속된
+scope·권한 안에서 native loop가 관리하며, 각 native child를 OMS proposal·`peer-delegate`로
+전환할 필요는 없다. OMS-managed writer는 기존 `peer-delegate` worktree와 scope/lease 경로를
+우선 재사용하며, 결과를 연결하는 native working copy는 실제 identity를 확인한다.
+`cd` 지시나 서로 다른 pane은 격리 증거가 아니다. Shared checkout의
+writer 충돌은 기존 write-WIP/scope 정책에 남기고 unmanaged 실행을 managed로 재분류하지 않는다.
+Parent가 task/lease/attempt, base, patch/tree digest, verifier 결과, 원문/로그 reference를 캡처한다.
+Read-only 결과는 기존 research/evidence 완료 계약을 따르며 가짜 patch를 만들지 않는다.
+검증 실패·partial result는 보존하고 task를 accepted로 바꾸지 않는다. 여러 member 합성은 아래
+P1에 남겨 single-task native 연결의 첫 PR을 막지 않는다.
+
+**단계 4 — 취소와 재개.** 기존 LC-03/04, REL-01/02, TM-04 owner의 증거를 재사용한다.
+취소 의도·신규 dispatch 차단, 제어 가능한 owned subtree의 cancel, 실제 종료 관측,
+candidate 처리와 자원 정산을 구분한다. Native parent 종료만으로 모든 child 정리·usage 정산을
+확정하지 않는다. 관측되지 않거나 제어할 수 없는 후손은 unknown/unsupported로 유지하고,
+현재 pane/PID 검색으로 소유하지 않은 작업을 kill하지 않는다.
+재개는 이전 Main/Lead attempt, Room successor/membership, 현재 task lease와 preserved result를
+읽은 뒤 동일 native session의 재결합 가능성을 판단한다. 지원되지 않는 native teammate resume를
+새 team 자동 생성으로 대신하지 않는다. Old owner의 메시지·결과·취소가 새 lease에 적용되지 않게 한다.
+Dirty work와 failed evidence를 먼저 보존하며 claim/receipt를 지워 복구를 가장하지 않는다.
+
+**완료 확인:** 새 suite 대신 operations `lifecycle_idempotence_usage_cas_and_recovery`,
+room `room_lifecycle_and_cursor`, plan `lifecycle_from_unrelated_cwd`, 기존 panel/native entry
+fixture를 해당 producer PR에서 확장한다. 최소 수직 경로는 task claim → worktree/binding →
+durable intent → ambiguous send → exact result → 기존 admission이다. 같은 key의 changed body,
+stale lease/owner, duplicate/out-of-order ack, cancel/result race, surviving child, Main 재시작을
+검사한다. Unknown 전송 재조회는 provider 호출을 만들지 않고, result와 ack만으로 task를 완료하지 않는다.
+`unmanaged`/campaign guard를 유지하며 fixture 성공과 live provider 지원은 따로 보고한다.
+
+### P1 — Native event를 Main의 짧은 근거로 전달한다
+
+**Owner:** REL-01의 관측 coverage + TM-06의 task/result projection, 기존 Room/hook consumer.
+[routing.rs](../crates/oms-command-hooks/src/routing.rs)의 consumer 검증·cursor·명시적 ack,
+기존 [results reader](../crates/oms-panel-core/src/results.rs)와 [CC-04](CALLABLE-CONSOLIDATION-WORK-PACKETS.md)를
+재사용한다. 새 notification bus·LLM 요약 heartbeat·provider별 transcript DB를 추가하지 않는다.
+
+입력은 P0-B binding과 native 관측의 source/event identity·시각·coverage, 검증된 result reference다.
+출력은 task/attempt, 무엇이 바뀌었는지, blocked reason/next actor, 결과·검증 상태, source reference,
+unknown/omission을 담은 짧은 카드다. 원문은 기존 bounded reader로 열고 Room message의
+4,000 UTF-8 byte 한도 안에 요약과 참조를 보낸다. Worker 설명은 untrusted peer data로 남긴다.
+반복 progress는 기존 cursor와 같은 source event 기준으로 묶고 변경된 blocker·result·승인 필요만
+전달한다. 단순 read/refresh가 새 model call이나 자동 wakeup을 만들지 않게 한다.
+요약에서 일부 로그를 생략해도 failed/unknown·미소비 메시지·필수 결과 부재를 숨기지 않는다.
+
+완료 fixture는 Main 세 종류와 same-provider Lead의 서로 다른 consumer, compaction/resume,
+room rollover, duplicate event, rotated/truncated source, 긴 로그·CJK·control character를 포함한다.
+재개한 Main은 같은 task/attempt의 최신 evidence를 읽고, 잘못된 consumer에게는 mail을 보내지 않는다.
+전달 cursor가 이동해도 수신 ack나 acceptance를 자동 기록하지 않는다. Native 관측 누락의 의미는
+REL-01이 소유하고, 결과 원문 reader는 CC-04가 소유하므로 이 패킷에서 다시 구현하지 않는다.
 
 ### P1 — Lead proposal → reviewed plan → existing dispatch
 
@@ -249,6 +330,44 @@ native unmanaged와 managed Team을 같은 완료·비용 숫자로 합치지 �
 Unknown child/usage/cleanup은 null 또는 unreported로 유지한다.
 Live refresh는 기존 incremental 관측을 재사용하고 rotate/truncate·두 panel·좁은 화면을 검증한다.
 
+### P2 — 변경한 skill을 실제 작업 시나리오로 검증한다
+
+**Owner:** 기존 `skill-forge eval`/runtime benchmark와 TM-10·RF-05/06.
+[lifecycle.rs::evaluate](../crates/oms-command-providers-skills/src/lifecycle.rs)는 schema-1 suite의
+`trigger_cases`/`task_cases`, baseline/treatment 및 `--candidate` 비교, `--allow-host-commands`,
+선택적 `--record`를 이미 제공한다. [benchmark.rs](../crates/oms-runtime/src/benchmark.rs)는 그
+aggregate를 읽는다. 별도 evaluator·점수 DB·필수 paid benchmark를 만들지 않는다.
+
+첫 PR은 실제로 변경하는 skill 한 개를 임시 repo의 기존 skill lifecycle로 준비하고 작은 suite를
+추가한다. Trigger에는 독립 작업 분해·명시적 native 복구 요청의 positive와, 단일 파일 수정·단순
+현황 읽기의 negative를 함께 둔다. Skill 이름을 언급했다는 이유만으로 모든 prompt에 팀을 켜지 않는다.
+Task case는 고정 입력에서 기존 실행 command와 별도 verifier를 사용한다.
+
+| 실제 과제 | 관측할 결과 / 독립 oracle |
+|---|---|
+| 작은 순차 수정 | 한 candidate가 acceptance를 만족하고 불필요한 Lead/fan-out이 생기지 않음 |
+| 독립 두 writer와 same-provider Main/Lead | 서로 다른 attempt/worktree·허용 scope; 합친 exact tree의 verifier 통과 |
+| 제출 직후 receipt 손실·중복 알림 | 원래 intent/attempt 보존, 재조회만 수행, 두 번째 provider 호출 없음 |
+| “완료” 보고 뒤 failing verifier 또는 살아 있는 child | task 미수락, failed artifact 보존, cleanup unknown을 성공으로 바꾸지 않음 |
+| compaction/Main 재시작·stale lease 결과 | 현재 claim과 evidence만 재결합, old 결과·ack의 새 task 적용 없음; 전체 transcript 재주입 불필요 |
+| 실행 surface의 지원 밖 요청 | 실제 capability에 따라 unsupported 표시; native fixed-effort/불가한 resume를 성공으로 가장하지 않음 |
+
+Verifier는 파일·Git tree, 기존 lifecycle/Room/result projection과 fake transport의 호출 기록을
+검사한다. Skill 문구를 그대로 찾는 테스트나 모델 자신의 “성공” 판정으로 대체하지 않는다.
+Nearest fixture는 providers-skills `tests/project_parity.rs`의 skill lifecycle helper와 위
+P0-B canonical suite다. 현재 black-box eval 동작의 직접 fixture는 이 조사에서 확인하지 못했으므로,
+새 test runner를 만들지 않고 그 기존 suite에 작은 fake router/command/verifier 사례를 추가한다.
+
+비교에는 같은 suite·skill/candidate digest, task/base, verifier와 command identity를 남긴다.
+현재 evaluator는 skill/suite/candidate bytes를 재확인하지만 외부 router/command/verifier 구현을
+고정하지 않는다. 해당 구현은 fixture에서 고정하거나 기존 run/capture reference로 보완하고,
+aggregate만으로 oracle의 독립성·OS sandbox·모델 품질 향상을 주장하지 않는다.
+실패·취소·unknown case를 결과에서 빼지 않으며 새 semantic evidence가 필요하면 기존 report를 확장한다.
+`--record`는 기존 skill-evals writer만 사용하고 평가 결과가 skill 설치·승격을 자동 수행하지 않는다.
+기본 검증은 local fake provider와 임시 Git repo다. 실제 모델의 skill 효과를 비교할 때만
+[TM-10](TEAM-ORCHESTRATION-VALIDATION.md)의 명시적 과제·provider/account·총량 조건을 적용한다.
+새 hosted CI matrix·일정 실행·유료 호출을 이 패킷의 기본 gate로 추가하지 않는다.
+
 ### P2 — 사용량 저장의 반복 I/O를 줄인다
 
 #249는 validation 중복을 줄였지만 usage writer의 full-history atomic replacement는 남았다.
@@ -296,8 +415,10 @@ P0 lifecycle 패킷, 작은 model override 변경, P1 proposal/integration을 �
 | LC-01/02: 정산 guard와 Team/WIP 반환 | root services + Plan + telemetry checked APIs | 작은 cap에서 작업 A 처리 뒤 작업 B가 실제로 시작 |
 | LC-03/04: active cancel과 epoch | Supervisor + physical binding + resource CAS | cancel 요청/종료/후보 보존/재개를 별도로 확인 |
 | Native assignment + proposal bridge | Plan/Room + apply-proposal + peer dispatch | Main→lead 제안→검토된 worker 실행→기록된 결과 |
+| Native event와 Main 인계 | REL-01 + TM-06 + Room/hook + CC-04 | 짧은 evidence에서 같은 task/attempt 원문을 읽고 명시적으로 소비 확인 |
 | Composite result | 기존 results/review/admission/landing | 개별 green이지만 합성 실패한 후보를 수락하지 않음 |
 | Board와 catalog | 기존 Reader/Team/route projections | 어느 task가 무엇 때문에 막혔고 누가 조치할지 확인 |
+| 변경 skill의 작은 시나리오 | skill-forge eval + TM-10/RF-05/06 | trigger 오탐·누락과 실제 task 결과를 구분; fixture와 live 효과 구분 |
 | Bounded persistence | 기존 usage writer | 같은 history와 correction을 보존하면서 실제 I/O 감소 측정 |
 
 각 PR에는 다음을 포함한다.
