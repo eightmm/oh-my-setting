@@ -21,7 +21,7 @@ It covers startup, navigation, role routing, results, recovery and the contracts
 - [Discussion and results](#discussion-and-results)
 - [Reference](#shared-work-rooms-and-the-graph), [contract and verification](#contract-and-verification), and [recovery](#salvaging-a-stopped-worker)
 
-Run `oms` in a terminal to open the control panel. Native Claude Code, Codex, Agy or Pi keeps
+Run `oms` in a terminal to open the control panel. Native Claude Code, Codex or Agy keeps
 the conversation pane; the OMS sidebar shows recorded main, advisor and worker activity.
 `oms --help` and bare `oms` with redirected input/output retain command help. The panel
 uses existing OMS state, authentication and front doors. Without `--repo`, the panel
@@ -47,7 +47,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 
 ## Quick start
 
-1. Run `oms` in a terminal and choose Claude, Codex or Agy. Enter or EOF opens control only; Ctrl-C exits with 130. Missing CLIs show their reasons. The panel starts at most one live main. Pi remains an explicit alternative (`OMS_PANEL_MAIN=pi` or the Pi start key).
+1. Run `oms` in a terminal to reattach an existing Main or choose a new native Main: `1` Claude, `2` Codex, `3` Agy. Enter, Esc or EOF opens the board only; Ctrl-C exits with 130. Missing CLIs are unavailable. The panel starts at most one live Main. `OMS_PANEL_MAIN=claude|codex|agy` selects a new Main explicitly; Pi is available for standalone harness and worker use, not as Overall Main.
 2. The main window keeps the board on the left whenever the window is wide enough (above the CLI only when it is too narrow); the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
 3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The bottom box contains Log, Detail, Plan, Messages, Past and Attention tabs (Past and Attention stay even when empty), plus Debate while a debate exists. The pinned **Needs you** attention strip stays above activity when the inbox has items.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
@@ -107,6 +107,16 @@ prefix is selected by role (for example, `B` for builder and `W` for worker).
 
 
 ## Starting the sole main
+
+New Overall Mains use only the native Codex, Claude Code or Agy CLI. `--launch`,
+`--spawn-main` and swap targets accept `codex`, `claude` and `agy` (`antigravity`
+is an alias for `agy`). Pi and other harness targets are refused before room,
+lifecycle or terminal mutations, including a Pi launch dry run. No other host or
+model is selected as a fallback.
+
+Overall Main and provider Lead are separate session identities. A Codex Main can
+coordinate a distinct Codex Lead as well as Claude and AGY Leads. Selecting a Main
+does not change worker routes, model presets, effort, permissions or account settings.
 
 Panel mains carry the assigned goal through worker recovery, result inspection,
 integration, required checks and owner finalization. A worker's exit or review
@@ -362,10 +372,9 @@ handoff leaves the checkout untouched.
 
 ### Start a main in an existing panel
 
-The board offers `[+ Claude main]`, `[+ Pi main]` and `[+ Codex main]` for installed harnesses
-when no main is active. A click, or `n` then `1` (Claude), `2` (Pi) or `0` (Codex), starts the
-sole main without leaving the current window. While a main is active or its lifecycle is
-unverified, the row explains the limit and offers no start targets. Startup is serialized;
+Use `--spawn-main claude|codex|agy` to start a Main in an empty existing panel.
+The current board's `1` / `2` / `3` keys open provider Leads; they do not choose or
+replace Overall Main. Startup is serialized;
 an invocation-scoped lease also prevents concurrent inline/Herdr/native main processes.
 Parallel tasks use workers, advisors and reviewers under this main. The panel
 does not start a second live main.
@@ -374,7 +383,7 @@ To start a main in an empty existing panel without a terminal:
 
 ```bash
 oms panel --repo . --spawn-main claude --task 'short task' --json
-oms panel --repo . --launch pi --task 'short task'
+oms panel --repo . --launch agy --task 'short task'
 ```
 
 `--spawn-main` never creates a panel session, attaches a client or moves focus, and returns
@@ -416,12 +425,10 @@ Failed ownership queries preserve the window. SIGTERM/SIGHUP at the prompt resto
 terminal modes before exiting with 143/129. Without a terminal, native launch retains
 its existing exit behavior.
 
-Panel owner fields and `--owner` for dispatch, finalize and review settlement accept
-`claude`, `codex`, `pi` and `antigravity`. The resolver records Claude and Codex under
-their own identities. Pi's default model and effort come from the Codex main preset; an
-explicit model in the full Codex catalog resolves to the gateway with owner `codex`. Any
-other exact Pi model resolves to direct transport with owner `pi`. The `agy` harness
-resolves to registry owner `antigravity`. Deep and frontier tiers also offer read-only
+Panel owner fields and `--owner` for dispatch, finalize and review settlement retain
+`claude`, `codex`, `pi` and `antigravity` for existing records and standalone callers.
+New Main selection is narrower: Claude and Codex retain their own identities, and the
+`agy` harness resolves to registry owner `antigravity`. Deep and frontier tiers also offer read-only
 Antigravity routes after native providers with known weekly quota. Routine independent
 judges can also use the deep-tier Antigravity route.
 
@@ -435,12 +442,7 @@ and restart ownership validate the recorded owner/harness pair without consultin
 current model cache; Pi permits recorded owners `codex` and `pi`, while `agy` uses
 `antigravity`.
 
-A default Pi swap retains the default gateway selection even when its cached catalog is
-empty. Registered native-adapter mains retain their registry identities for watchers,
-dispatch and council. Their registration fallback remains separate from worker tiers.
-
-Direct Pi launch is deferred; its launch dry run reports the resolved owner with
-`argv: null`. Fresh Agy mains use `agy --prompt-interactive` with the OMS bootstrap,
+Fresh Agy mains use `agy --prompt-interactive` with the OMS bootstrap,
 room contract, unsettled lineage and task as initial user-message context. The task
 appears once as JSON data. This is user context, not system injection. Agy keeps its native model settings; only an explicit `--model` adds a model flag.
 When `--model` is omitted, Agy main model identity resolves from `OMS_MODEL`,
@@ -461,22 +463,19 @@ tracking always returns an allow decision on `PreToolUse` and is skipped when
 By default, Claude and Agy mains use `--dangerously-skip-permissions`, and Codex
 mains use `--dangerously-bypass-approvals-and-sandbox`. Set
 `OMS_PANEL_MAIN_PERMISSIONS=native` to use provider permission settings instead;
-`full` selects the default. Pi and adapter mains are unchanged. OMS command guards
+`full` selects the default. OMS command guards
 and hooks remain active.
 The owner is `antigravity`, while the harness and CLI are `agy`. Discovery advertises
 native launch without executing the CLI, and dry runs show the actual fresh-launch argv.
 Agy `--resume` is refused before launch or enrollment: its native session ownership
 cannot yet be verified. Restarting an exited Agy main starts fresh; no conversation ID
 or history binding is invented. Native histories remain separate.
-The available Pi launch uses the existing `oms harness pi`
-bridge and requires Pi 0.80.4 or newer (the bridge waits for `agent_settled`)
-and Codex CLI on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
-`--resume` until Pi session ownership can be verified. It has no Codex native hook or
-context/quota reading, but [`pi-oms-extension.mjs`](../crates/oms-command-providers-skills/assets/pi-oms-extension.mjs)
-forwards Pi activity to `hook_state.py` and delivers room mail through its hook context.
-At Pi's exit prompt, `r` starts a fresh Pi main; it does not resume Pi history. The launch uses Pi's documented
-[`--append-system-prompt` argument](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/args.ts)
-to preserve its base instructions and pass the OMS room and sole-main contract.
+Existing Pi Main processes and historical owner/harness records are retained. Bare
+startup may reattach a proven existing Pi pane, and observation, ownership guards and
+release still recognize it. New Pi launch, restart/resume and Pi swap targets are
+refused. End the existing session through its native interface and explicitly select
+a native Main for subsequent work. OMS does not terminate or migrate it on upgrade.
+Standalone [`oms harness pi`](CODEX-HARNESSES.md) and Pi worker routes remain available.
 
 Only the person ends a main, from its native chat; the native CLI keeps its history where it
 already stores it.
@@ -519,9 +518,9 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `i` | Toggle pane context headers in a managed panel | Run info view |
 | `g` / `t` | Graph / tree view | — |
 | `b` / `v` | Toggle attention-only / expand or collapse the board | — |
-| `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
+| `1` / `2` / `3` | Open or focus the Codex / Claude / Antigravity provider Lead in a managed panel | — |
+| `n` | — | Next search match |
 | `N` | — | Previous search match |
-| `s`, then `1` / `2` / `0` | Swap main to Claude / Pi / Codex in a managed panel | — |
 | `a` / `w` / `c` | Ask advisor / open selected worker worktree / request selected call cancellation | — |
 | `k` / `u` | Capacity / refresh | — |
 | `m` | Cycle Work / Overview / Focus in a managed panel | — |
@@ -536,7 +535,10 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | Shift-drag | Copy terminal selection in a managed panel | — |
 | Mouse click | Select a row/tab; graph calls and the main preview their cards | — |
 
-At the native main's exit prompt, `r` resumes/restarts there and Enter closes the window. The terminal/job workspace has its own controls; this table covers only the board and result reader.
+The startup Main picker has its own `1` Claude / `2` Codex / `3` Agy mapping,
+before the board is active. It selects a Main only for a new session; board keys
+select provider Leads and preserve the current Main. The terminal/job workspace
+has its own controls; this table covers only the board and result reader.
 
 A dispatched call settles only after its supervisor proves the whole process tree
 exited. On macOS and Windows, where that supervisor is unsupported, the call stays
@@ -646,14 +648,11 @@ chat or shows the call's result, and Esc returns. If a refresh removes the selec
 row, the cursor stays near its place and the next Enter only says the selection
 changed; Enter again, or any navigation key first, acts on the row now selected.
 
-An empty list says `Nothing needs you right now`; a room with no main shows `Press 1
-(Claude) or 2 (Pi) to start the sole main`. The menu keeps start (`1` Claude, `2` Pi,
-`0` Codex, `3` Resume, `t` Task), `o` rooms, `9` refresh and quit/detach; board keys are
-not repeated. Enter `?` for all other actions in ordinary scrollable help (chats,
-results, views, advisor, review, council, finalize); existing shortcuts still work. Menu
-keys act at once, without Enter, on a POSIX terminal with raw input; the board's key
-handling is reused. Text prompts (a task title, a provider) stay line-based inside that
-prompt only.
+Main selection happens in the startup picker or through an explicit launch command.
+The native board uses `1` Codex / `2` Claude / `3` Antigravity for provider Leads;
+these keys do not start or replace Overall Main. Enter `?` for the board's current
+actions. A board opened without a Main remains usable for status inspection; use
+an explicit native launch when ready to start work. There is no Pi Main shortcut.
 
 Elsewhere, such as Windows Git Bash or redirected input, the menu reads `oms> ` and
 needs key + Enter. The inbox refreshes every five seconds. The watcher retains its
@@ -698,33 +697,28 @@ checkout on the session.
 
 #### Default main selection
 
-A new or empty panel offers Claude, Codex and Agy, with missing-CLI reasons. The
-startup prompt accepts `1`/`claude`, `2`/`codex` and `3`/`agy`; Enter or EOF selects
-no main and leaves usable control. Ctrl-C exits with 130. These prompt numbers are
-separate from the existing control shortcuts (`1` Claude, `2` Pi, `0` Codex).
-Choosing control only does not allocate or bind a room to a roomless panel.
-In a managed roomless control, numeric start/resume keys and `t` remain blocked.
-Use `o Rooms` to select or create a room first, or `p` Providers then Native.
-Waiting for another poll does not select a room; a failed room query is reported
-separately from an intentionally unset room.
-An explicit `--launch` wins, followed by a set `OMS_PANEL_MAIN` (`claude`, `codex`,
-`agy` or `pi`), then the picker. Empty or whitespace-only `OMS_PANEL_MAIN` opens no
-main; an invalid value opens none with a warning. `OMS_PANEL_HARNESS` selects only
-the control menu's harness and grants no startup launch authority. Inline and Herdr
-use the same choice; selecting none opens their control menu. No preference is saved.
-Generated tmux control panes enter that persistent menu directly, including after a
-reload; they do not repeat the outer startup picker. Herdr keeps the control menu
-running after opening a chosen main in a sibling tab and retains the menu on reload,
-including when no main was selected. Explicit `--launch` and standalone
-inline native launches keep the native session's lifetime.
+Interactive startup with no operation (bare `oms panel`, optionally with repository,
+room or display/host options) first checks for an existing tmux Main. A proven pane
+is reattached without evaluating `OMS_PANEL_MAIN` or prompting. An unverified Main
+blocks a replacement; changing this environment variable never swaps a running Main.
 
-Read-only JSON, watch, dry-run, dispatch, spawn, swap and reopen paths never prompt.
-Non-terminal startup keeps the existing terminal-required error. A proven live or
-unproven main is reattached without a picker or new launch. Provider choice and any
-supported crash-resume offer happen outside construction/session locks; launch
-rechecks sole-main and legacy ownership under the existing guards after input.
-If an ownership query or start lock fails, startup reports that refusal rather than
-reporting an empty selection or a missing CLI.
+For a new session, `OMS_PANEL_MAIN=claude|codex|agy` selects the native harness
+(`antigravity` also names Agy). An empty or whitespace-only value opens the board
+without a Main. An invalid value, including `pi`, fails before new room or terminal
+state is created. When unset, the foreground-terminal picker offers `1` Claude,
+`2` Codex and `3` Agy with missing-CLI reasons. Unavailable choices remain in the
+picker; Enter, Esc or EOF opens the board only, and Ctrl-C exits with 130.
+No preference is saved, and opening only the board does not allocate a room.
+With `TERM=dumb`, use an explicit `--launch`, `OMS_PANEL_MAIN`, or `--watch`.
+
+Explicit `--launch` takes precedence over the environment and never prompts.
+Read-only JSON, watch, dry-run, dispatch, spawn, swap and reopen paths never prompt;
+non-terminal startup remains a read-only board snapshot. Choice happens outside
+construction/session locks. Launch rechecks the sole-Main and legacy ownership
+guards after input, and reattach verifies the same pane and command identity under
+the start lock. A changed or unavailable Main is preserved and reported.
+An explicit `--room` must match that Main's recorded, open room; a different,
+closed or unavailable room is refused without creating a room or changing focus.
 
 
 #### Reattach and concurrent launches
@@ -985,9 +979,10 @@ feature `partial` when only a bounded path is exercised, and `unknown` when the
 current native fixtures cannot establish support. An unknown entry does not remove
 its implementation or its provider registration.
 
-The native panel has launch code for Claude, Codex, Pi and Antigravity. Current launch
-fixture evidence covers Codex planning as a dry run. Pi launch remains gateway-only;
-Antigravity launch remains fresh-session-only. The retired Python implementation
+The native panel permits new Mains only through Claude, Codex and Antigravity.
+Launch fixtures cover command planning and refusal boundaries; they do not establish
+live account access. Pi Main launch is unsupported; its standalone harness and worker
+support are separate. Antigravity launch remains fresh-session-only. The retired Python implementation
 names and test matrix are not evidence for these native paths.
 
 Every physical worker call receives a durable accounting identity. Canonical measured
@@ -1083,8 +1078,8 @@ seconds rather than animating.
 
 A native window binds children by its recorded main attempt ID. Earlier mains'
 calls stay in the room's tree. The control view shows
-repository-wide records. Control option `4 Main` chooses the main harness for
-subsequent manual dispatch; gateway-backed Pi uses the Codex dispatch owner. Main/child links come from explicit
+repository-wide records. Main selection and provider Lead selection are separate;
+neither rewrites a recorded call's owner. Main/child links come from explicit
 lifecycle metadata, never matching a provider name. Legacy unlinked records stay
 repository-wide. A marker and its attempt are coalesced only by their exact
 execution location. Selected/served attribution uses exact attempt IDs; a model
@@ -1125,10 +1120,8 @@ Pi main has no such rows.
 
 | Menu action | Behavior |
 | --- | --- |
-| 1 Claude / 2 Pi / 0 Codex | Start the sole main: native Opus / Pi with Codex inference / native Sol |
-| 3 Resume | Select Claude or Codex and an exact verified native session ID |
-| 4 Main | Choose the main harness; gateway-backed Pi uses the Codex dispatch owner |
-| t Auto task | Enter a task and open the owning native main |
+| Startup picker: 1 Claude / 2 Codex / 3 Agy | Choose a new Overall Main; existing Main reattachment takes precedence |
+| Board: 1 Codex / 2 Claude / 3 Antigravity | Open or focus the separate provider Lead |
 | 5 Explain | Read-only worker; optional tier, else routine |
 | 6 Implement | Optional tier; scoped brief and verifier required |
 | a Advisor | Optional tier, else deep; read-only |
@@ -1150,9 +1143,9 @@ snapshots; `--count N` bounds it. Native launch needs an installed, authenticate
 provider. `installed` means executable found on PATH, not verified login or model
 availability. Shared OMS references carry evidence across providers; native
 conversations remain separate. Use isolated workers for implementation.
-In the CLIs menu, Native for `agy` or `antigravity` uses the built-in Agy harness
-unless an explicit Antigravity native adapter is configured. Capability, model
-syntax and CLI availability are checked before allocating its room.
+Main launch through `agy` or `antigravity` always uses the built-in Agy harness.
+Additional provider registrations remain available to explicit worker routes;
+they do not extend the Overall Main choices.
 
 
 ## Roles and automatic allocation
@@ -1168,7 +1161,7 @@ The launcher does not autonomously fan out before the main has a task.
 | Main harness | Exact model | Effort |
 | --- | --- | --- |
 | Claude main | `claude-opus-5-5` | high |
-| Codex main / gateway-backed Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
+| Codex main | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 | Agy main | Native settings unless `--model` is supplied | Native settings |
 
 Set `OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1` for a dispatch to allow public-only routes in a
@@ -1672,7 +1665,7 @@ without silently selecting another model.
 
 A panel main acts as the control tower: its bootstrap delegates implementation,
 investigation and test repair to bounded workers by default and keeps scope, briefs,
-integration, review, patch admission and coordination. Claude, Codex and Pi share the
+integration, review, patch admission and coordination. Claude, Codex and Agy share the
 compact main contract with their durable `--owner` value; provider launch details and
 the appended room identity remain separate. The contract retains authority, delegation,
 admission, review, finalization and recovery invariants. Command walkthroughs live in
@@ -2827,8 +2820,8 @@ open Codex, Claude or another CLI, the agent joins with its exact native session
 ID and a distinct participant ID. Only the session hash is stored. Without a
 native main role, participants use their assigned room identity for navigation.
 Explicit worker session registration and messaging remain supported; that routing
-record does not grant an owner app link. Custom native CLI mains retain explicit
-session/resume support. Without a
+record does not grant an owner app link. Historical custom native CLI records remain
+readable, but new Overall Mains use the three native harnesses. Without a
 room environment, automatic lookup is bounded to 64 work rooms, 1024 directory
 entries and 8 MiB, including bounded header peeks that exclude ordinary threads.
 Incomplete or ambiguous discovery never establishes a unique receiver; the room
@@ -3181,20 +3174,11 @@ modify OMS owner state or retain background processes.
 
 The inventory distinguishes headless calls, room polling, native launch and unverified
 native hook wiring. A call adapter alone does not attach to an already-open app or wake
-an idle session. For additional native launch, explicitly list canonical provider IDs in
-`OMS_PROVIDER_NATIVE_ADAPTERS` and provide the marker executable `oms-agent-adapter-ID`
-on PATH or in the same adapter directory. Its additional contract is `open --workdir
-PATH --context-file PATH`, with optional `--model` and `--resume`. The file contains
-bounded OMS bootstrap, room participation and the supplied user task; it is removed
-after process exit.
-
-The adapter must preserve interactive stdio, forward exit status, consume that context,
-and translate only supported documented vendor flags. It inherits `OMS_ROOM_ID`,
-`OMS_ROOM_PARTICIPANT` and canonical `OMS_ROOM_REPO` for polling. The `p CLIs` menu's `n
-Native` action or `--launch ID` uses this explicit capability; unsupported native
-adapters fail rather than falling back to a headless call. This opt-in grants no
-write/publication authority. The actual Grok/Muse interactive interfaces have not been
-verified; the contract is covered by protocol fixtures.
+an idle session. Adapter discovery and `OMS_PROVIDER_NATIVE_ADAPTERS` do not widen
+the Overall Main launch set: `--launch`, `--spawn-main` and swap targets accept only
+native Codex, Claude Code and Agy. Use additional transports for explicitly scoped
+worker or advisor calls through the existing adapter contract. Historical native
+session records remain readable; registering an adapter does not replace a Main.
 
 Owner finalization/council retains Codex/Claude's existing policy. No additional daemon,
 dependency or terminal injection is added.

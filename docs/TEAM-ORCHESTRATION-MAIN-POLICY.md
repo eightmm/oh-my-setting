@@ -8,6 +8,13 @@ Source baseline: `de2f547c6a40ddf67c62068bce309050c6d4fa48`.
 모델 추천은 OMS 실측 순위가 아니다. 이 문서를 병합해도 사용자의 선택 모델,
 계정, 과금, 자동 swap 설정, provider 권한 또는 기본값을 변경하지 않는다.
 
+**현재 구현 경계:** 새로운 Overall Main은 native Codex, Claude Code, AGY 중에서
+선택한다. `oms panel`의 새 세션 picker와 `--launch`/`--spawn-main`/swap target에
+이 제한을 적용한다. 기존 Main은 환경 선택과 무관하게 재접속하며, Pi의 기존 세션·기록과
+`oms harness pi` 및 Pi worker는 보존한다. 아래 catalog/attribution/평가 설계 전체가
+구현됐다는 뜻은 아니다. 모델 preset, effort, tier와 권한은 이번 Main 선택 정책으로
+바꾸지 않으며 다른 host로 자동 fallback하지 않는다.
+
 ## 1. Main은 특정 회사의 모델이 아니라 하나의 책임 역할이다
 
 `Main authority != harness != endpoint/provider != selected model != served model`.
@@ -15,6 +22,9 @@ Source baseline: `de2f547c6a40ddf67c62068bce309050c6d4fa48`.
 Main이 Codex라고 하위 팀을 Codex로 제한하지 않으며, Claude Main도 같은 bounded
 OMS runtime으로 Codex·Claude·AGY 팀을 배정할 수 있어야 한다.
 모델이나 CLI 이름이 task ownership/approval/admission 권한을 부여하지 않는다.
+
+Overall Main과 provider Lead는 같은 provider여도 별도 세션이다. 예를 들어 Codex
+Main 아래 Codex Lead를 둘 수 있으며, 이 구분을 위해 Pi 같은 추가 host를 도입하지 않는다.
 
 Main은 사용자의 목표 해석, scope/acceptance 확정, task 분해, 자원 배분 방침,
 충돌 해결, 예외 판단과 최종 설명에 집중한다. 기존

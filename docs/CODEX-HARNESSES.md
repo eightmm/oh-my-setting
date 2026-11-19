@@ -7,6 +7,13 @@ This is an optional experimental bridge. Prefer it when a recurring workflow
 needs another CLI's UI with Codex inference; ordinary OMS work can use native
 provider routes. Bridge compatibility and native provider support are separate.
 
+Overall Main selection in `oms panel` uses only native Codex, Claude Code and Agy.
+Pi is not a Main picker, launch, resume or swap target. `oms harness pi` remains a
+standalone experimental bridge, and Pi worker routes remain available. Choosing
+Codex as Overall Main still permits a separate Codex provider Lead beneath it;
+another harness is not needed to distinguish those session roles. Existing Pi Main
+processes and history are preserved; see [Main selection and recovery](TERMINAL-PANEL.md#default-main-selection).
+
 ## In this guide
 
 - [Data and authority](#data-and-authority)

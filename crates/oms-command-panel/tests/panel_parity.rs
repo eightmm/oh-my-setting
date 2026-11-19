@@ -608,6 +608,39 @@ fn chats_native_identity_binding() {
 }
 
 fn cli_validation_and_repo_conflict_parity() {
+    let refusal_repo = TempDir::new("oms-main-choice-refusal");
+    let services = Fake::default();
+    for option in ["--launch", "--spawn-main", "--swap-main"] {
+        for harness in ["claude", "codex", "agy", "antigravity"] {
+            assert!(Options::parse(&os(&[option, harness])).is_ok());
+        }
+        for harness in ["pi", "grok", "oms-agent-adapter-custom"] {
+            let (code, _, error) = run_with_services(
+                "panel",
+                &os(&[option, harness]),
+                refusal_repo.path(),
+                refusal_repo.path(),
+                &STOP,
+                &services,
+            );
+            assert_eq!(code, 2);
+            assert!(String::from_utf8_lossy(&error).contains("codex, claude or agy"));
+            assert!(services.native_seen.borrow().is_empty());
+            assert!(services.commands_seen.borrow().is_empty());
+            assert!(!refusal_repo.path().join(".oms").exists());
+        }
+    }
+    let (code, _, error) = run_with_services(
+        "panel",
+        &os(&["--launch", "pi", "--dry-run"]),
+        refusal_repo.path(),
+        refusal_repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&error).contains("oms harness pi and worker routes"));
+
     // `--continue --scope` without `--dispatch`/`--access` is permitted.
     let parsed: Options = Options::parse(&os(&[
         "--continue",

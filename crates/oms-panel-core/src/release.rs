@@ -24,8 +24,11 @@ pub fn swap_main(
     crate::parent_only()?;
     crate::identifier(&request.attempt_id)?;
     require(
-        ["codex", "claude", "pi", "antigravity"].contains(&request.provider.as_str())
-            && ["codex", "claude", "pi", "agy"].contains(&request.harness.as_str())
+        ["codex", "claude", "agy"].contains(&request.harness.as_str()),
+        "Overall Main swap target must be native codex, claude or agy; Pi remains available through oms harness pi and worker routes",
+    )?;
+    require(
+        ["codex", "claude", "antigravity"].contains(&request.provider.as_str())
             && oms_command_room::main_owner_matches(&request.harness, &request.provider)
             && !request.model.is_empty()
             && request.model.len() <= 160

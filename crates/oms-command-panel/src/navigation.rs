@@ -147,7 +147,7 @@ pub fn matches_words(call: &serde_json::Value, words: &[String]) -> bool {
 
 pub const BOARD_HINT: &str = "Up/Down Move  Enter Open  Tab View  / Filter  b Attention  g Graph  t Tree  u Refresh  ? Keys  q Quit";
 pub const READER_HINT: &str = "Tab View  r Raw  e Events  d Diff  i Info  x Transcript  f Files  / Search  n/N Match  Space Page  q/Esc close";
-pub const CONTROL_HINT: &str = "1 Claude  2 Pi  0 Codex  s Swap main  o Rooms  k Capacity  9 Refresh  h Chats  r Results  j Terminals and jobs  5 Explain  6 Implement  e Researcher  a Advisor  7 Review  c Council  f Finalize  n Retry delivery  q Quit";
+pub const CONTROL_HINT: &str = "1 Codex lead  2 Claude lead  3 Antigravity lead  k Capacity  9 Refresh  h Chats  R Results  j Terminals and jobs  c Council  q Quit";
 
 #[cfg(test)]
 mod tests {

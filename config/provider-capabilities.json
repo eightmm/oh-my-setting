@@ -20,7 +20,7 @@
   ],
   "profiles": {
     "exec-only": {
-      "launch_main": {"status": "unsupported", "verified": "fixture", "note": "The native panel launch set contains Claude, Codex, Pi and Antigravity only."},
+      "launch_main": {"status": "unsupported", "verified": "fixture", "note": "The native panel Main launch set contains only Claude, Codex and Antigravity; additional transports remain available for worker calls."},
       "worker_call": {
         "status": "supported", "verified": "fixture",
         "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
@@ -143,7 +143,7 @@
       "handoff": {"status": "unknown", "verified": "fixture", "note": "Native prompts-only handoff capture is implemented, but current native fixtures do not establish its digest output; assistant output is unavailable from that source."}
     },
     "pi": {
-      "launch_main": {"status": "unknown", "verified": "fixture", "note": "Native gateway-only panel launch code exists, but no current native fixture establishes the Pi launch branch; direct launch is refused."},
+      "launch_main": {"status": "unsupported", "verified": "fixture", "note": "New Pi Main launches, resumes and swap targets are refused. Existing session observation and cleanup, standalone oms harness pi and Pi worker calls remain separate."},
       "worker_call": {
         "status": "supported", "verified": "fixture",
         "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
@@ -155,7 +155,7 @@
         "test": ["crates/oms-command-hooks/tests/host_adapter.rs::harness_hook_pi_relay_records_idle_and_relay_hint_shows_the_other_agents_card", "crates/oms-command-hooks/tests/host_adapter.rs::panel_safe_point_reads_activity_once_and_keeps_noop_hook_parity"],
         "limit": "Fixture Pi hook payloads update busy/idle activity; no waiting state, native transcript reader or live extension delivery is established."
       },
-      "resume": {"status": "unknown", "verified": "fixture", "note": "Panel launch refuses Pi resume without a verified binding. Standalone native session resume code exists with an installed-help check, but current fixtures do not establish that path."},
+      "resume": {"status": "unknown", "verified": "fixture", "note": "Panel Main resume is refused by Main selection policy. Standalone native session resume code exists with an installed-help check, but current fixtures do not establish that path."},
       "send_message": {"status": "unknown", "verified": "fixture", "note": "Pi hook payloads can supply an idle record, but no current native fixture drives a wake into a Pi main."},
       "stop": {
         "status": "partial", "verified": "fixture",

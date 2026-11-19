@@ -127,6 +127,18 @@ pub struct Options {
     pub count_rows: bool,
 }
 impl Options {
+    pub(crate) fn selects_main(&self) -> bool {
+        self.command.is_none()
+            && !self.count_rows
+            && self
+                .flags
+                .iter()
+                .all(|key| matches!(key.as_str(), "attention-only" | "no-animation"))
+            && self.values.keys().all(|key| {
+                matches!(key.as_str(), "repo" | "room" | "host" | "layout" | "view")
+            })
+    }
+
     pub fn has(&self, key: &str) -> bool {
         self.flags.contains(key) || self.values.contains_key(key)
     }
@@ -359,6 +371,11 @@ impl Options {
         }
         self.choice("dispatch", oms_panel_core::routing::ROLES)?;
         self.choice("workload", oms_panel_core::routing::TIERS)?;
+        for key in ["launch", "spawn-main", "swap-main"] {
+            if let Some(raw) = self.get(key) {
+                crate::native_panel::normalize_harness(raw)?;
+            }
+        }
         for key in ["orchestrator", "focus-orchestrator"] {
             self.choice(key, &crate::orchestrator::PROVIDERS)?;
         }
@@ -716,7 +733,7 @@ impl Options {
 
 pub fn usage() -> String {
     let mut text = String::from(
-        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nBare interactive panel opens or reuses the native Codex Main on tmux. Use --watch for the board alone.\n\n",
+        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nInteractive startup reuses an existing Main or offers native Claude, Codex and Agy. Enter opens the board alone. Use --launch codex|claude|agy for an explicit Main, or --watch for the board.\n\n",
     );
     text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--task TEXT]\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
@@ -743,5 +760,24 @@ mod tests {
             assert!(parse(&["--focus-orchestrator", provider, "--resume", uuid]).is_err());
         }
         assert!(parse(&["--launch", "codex", "--resume", "legacy-session"]).is_ok());
+        for args in [
+            vec![],
+            vec!["--repo", "."],
+            vec!["--layout", "inline"],
+            vec!["--host", "tmux", "--view", "graph"],
+        ] {
+            assert!(parse(&args).unwrap().selects_main(), "{args:?}");
+        }
+        for args in [
+            vec!["--json"],
+            vec!["--watch"],
+            vec!["--dry-run"],
+            vec!["--launch", "claude"],
+            vec!["--spawn-main", "codex"],
+            vec!["--orchestrator", "claude"],
+            vec!["--providers"],
+        ] {
+            assert!(!parse(&args).unwrap().selects_main(), "{args:?}");
+        }
     }
 }

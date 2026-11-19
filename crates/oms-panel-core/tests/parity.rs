@@ -1050,7 +1050,8 @@ fn main_swap_workflow() {
     let fake = Fake::default();
     prepare(&fake, &[]);
     fake.attempts.borrow_mut()[0]["refs"]["panel_host"] = "tmux".into();
-    fake.attempts.borrow_mut()[0]["refs"]["panel_harness"] = "codex".into();
+    // A historical Pi source remains eligible for replacement by a native Main.
+    fake.attempts.borrow_mut()[0]["refs"]["panel_harness"] = "pi".into();
     fake.attempts.borrow_mut()[0]["refs"]["panel_model"] = "previous-model".into();
     fake.room.borrow_mut()["participants"][0]["provider"] = "codex".into();
     let mut request = oms_panel_core::release::MainSwapRequest {
@@ -1063,6 +1064,17 @@ fn main_swap_workflow() {
     request.model = routing::Policy::bundled().unwrap().main["claude"]
         .model
         .clone();
+    let mut pi_target = request.clone();
+    pi_target.provider = "codex".into();
+    pi_target.harness = "pi".into();
+    let before = fake.attempts.borrow().clone();
+    let error = oms_panel_core::release::swap_main(&repo, &pi_target, &fake, &STOP).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("swap target must be native codex, claude or agy")
+    );
+    assert_eq!(*fake.attempts.borrow(), before);
     assert_eq!(
         oms_panel_core::release::swap_main(&repo, &request, &fake, &STOP).unwrap()["provider"],
         "claude"
