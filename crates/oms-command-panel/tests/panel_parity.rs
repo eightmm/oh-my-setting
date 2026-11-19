@@ -259,6 +259,7 @@ struct Fake {
     commands_seen: RefCell<Vec<(String, Vec<String>)>>,
     native_seen: RefCell<Vec<(NativeCommand, Vec<OsString>)>>,
     real_catalog: std::cell::Cell<bool>,
+    catalog_override: RefCell<Option<Value>>,
     capability_evidence: RefCell<Option<Value>>,
 }
 
@@ -363,6 +364,9 @@ impl Services for Fake {
         self.native_seen.borrow_mut().push((command, args.to_vec()));
         match command {
             NativeCommand::ProviderCatalog => {
+                if let Some(catalog) = self.catalog_override.borrow().as_ref() {
+                    return Ok(json_out(catalog.clone()));
+                }
                 let policy = oms_panel_core::routing::Policy::bundled()?;
                 let mut rows = Vec::new();
                 for provider in ["codex", "claude", "antigravity"] {
@@ -1348,6 +1352,42 @@ fn routing_accepts_present_provider_catalog() {
             assert_eq!(cap["selected_account_matches"], Value::Null);
         }
         assert!(render::routes(&report, 200).contains(expected));
+        assert!(!repo.path().join(".oms").exists());
+    }
+
+    let preview = (0..19)
+        .map(|minor| format!("gpt-5.{minor}-sol"))
+        .chain(std::iter::once("gpt-6.1-sol".into()))
+        .collect::<Vec<_>>();
+    let mut catalog = preview.clone();
+    catalog.push("gpt-6.2-sol".into());
+    for row in [
+        json!({"provider":"codex","present":true,"usable":null,"models":preview,"catalog_models":catalog}),
+        json!({"provider":"codex","installed":true,"models":catalog}),
+        json!({"provider":"codex","installed":true,"models":catalog,"catalog_models":[]}),
+    ] {
+        *services.catalog_override.borrow_mut() = Some(json!({"providers":[row]}));
+        let (code, out, err) = run(&[
+            "--dispatch",
+            "worker",
+            "--workload",
+            "deep",
+            "--owner",
+            "claude",
+            "--to",
+            "codex",
+            "--prompt",
+            "inspect source",
+            "--dry-run",
+        ]);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        let route = &report["route"];
+        assert_eq!(route["provider"], "codex");
+        assert_eq!(route["model"], "gpt-6.2-sol");
+        assert_eq!(route["snapshot"]["catalog"]["count"], 21);
+        assert_eq!(route["snapshot"]["catalog"]["resolved_present"], true);
+        assert_eq!(report["executes"], false);
         assert!(!repo.path().join(".oms").exists());
     }
 }

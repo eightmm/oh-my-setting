@@ -98,6 +98,15 @@ bash scripts/uninstall.sh
 | `--reapply` | 기록된 선택을 그대로 다시 적용한다. |
 | `--plan` | 변경 없이 미리 확인한다. |
 
+일반 재설치는 저장된 프로필·주 provider·누락 허용 정책을 유지한다. 옵션 없는
+`install-tools`, `--only`, `--providers`는 도구만 처리하고 이 선택을 덮어쓰지
+않는다. 명시적 profile/full/add/reapply 작업이 선택을 기록한다. Receipt 경로는
+`--receipt`, `OMS_CAPABILITY_RECEIPT`, 기본 OMS 설정 경로 순서로 선택하며 상대
+경로는 호출 디렉터리를 기준으로 한다. 업데이트는 작업 디렉터리를 바꾸기 전에
+선택된 receipt의 경로를 새 프로세스에 전달한다.
+업데이트할 때 명시한 receipt가 없거나 안전하지 않으면 오류를 내며 전체 도구
+갱신으로 바꾸지 않는다.
+
 `OH_MY_SETTING_MCP=0`, `OH_MY_SETTING_AGY_PLUGIN=0`은 각각의 연동 설치를
 건너뛴다. 설치 receipt에 두 선택을 기록하므로 환경 변수가 없는 업데이트와
 예약 실행도 유지한다. `oms update`에 환경 변수를 명시하면 기록된 선택을
@@ -144,14 +153,21 @@ schema-2 JSON 파일을 `OH_MY_SETTING_TOOL_LOCK`으로 지정한다. 상대 경
 설치 스크립트를 실행할 수 있다. 명시적 pin은 기본 vendor update 명령 대신 정확한
 버전의 검증 페이로드 경로를 사용한다.
 
+OMS로 처음 설치한 Antigravity를 vendor updater에 넘길 때는 기존 소유권 checksum
+sidecar를 검증한 뒤 제거한다. 오래됐거나 안전하지 않은 sidecar는 오류로 남긴다.
+Vendor가 바꾼 바이너리가 OMS transaction 밖에 있으므로, 뒤이은 다른 도구의 실패가
+이전 sidecar를 되살리지 않는다. 명시적 pin으로 교체할 때는 계속 OMS 소유권을
+확인한다.
+
 이미 설치된 Pi는 `oms install-tools --providers`에서만 `pi update self`로 갱신한다.
 그 밖에 인식되는 선택형 npm provider는 사용자가 소유하고 쓸 수 있는 global prefix에서
 현재 `latest` dist-tag를 사용한다. 14일 배포 지연이나 npm `--before` 제한은 없다.
 npm lifecycle 스크립트는 패키지 코드를 실행할 수 있다. 명시적 tool lock에는 이
 선택형 도구를 표현하는 항목이 없으므로 해당 갱신을 건너뛴다.
 
-provider 의존성은 함께 선택한다. Claude·Codex·ntn에는 Node를 포함하고 Antigravity에는
-포함하지 않는다. 관리 파일 반영 전에 다운로드와 패키지 이름·버전을 검증하며 설치·
+provider 의존성은 함께 선택한다. Claude·Codex·ntn에는 Node를 포함하며 `--only`에서
+Node를 뒤에 적어도 먼저 설치한다. Antigravity에는 포함하지 않는다. 관리 파일 반영
+전에 다운로드와 패키지 이름·버전을 검증하며 설치·
 업데이트·복구·제거는 되돌릴 수 있는 lifecycle transaction을 공유한다. Vendor update
 명령의 복구는 vendor가 담당하며 해당 바이너리는 OMS 체크아웃 롤백 대상이 아니다.
 
@@ -168,6 +184,19 @@ Runtime edge 채널 적용은 설정한 브랜치의 추적을 유지하고, 검
 검사한 뒤 반영한다. 누락된 locked 의존성은 받을 수 있고 오프라인 실행은 호출자가
 명시적으로 선택한다. 자동 업데이트는 체크아웃의 로컬 수정을 보존하며 해당 실행을
 blocked/skipped로 보고한다. 개인 정책은 추적되는 설치 트리 밖의 사용자 스킬에 둔다.
+
+Incoming 설치는 도구를 다시 설치하거나 capability 선택을 덮어쓰지 않고 OMS 구성만
+맞춘다. 업데이트를 소유한 부모가 core commit 뒤 선택된 도구를 갱신하며,
+`--no-tools`와 rollback에서는 그 갱신도 생략한다.
+Incoming revision의 설치기를 실행하므로, 이 분리 이전의 오래된 revision으로
+rollback하면 그 revision의 기존 설치 동작이 적용된다.
+
+생성된 cron·systemd 작업은 설치 시의 HOME·XDG 위치·receipt 경로·Rust 홈을 유지하고,
+관리 bin과 Cargo 디렉터리를 PATH에 넣는다. 대화형 shell profile이 없어도 실행할 수
+있다. 임시 `RUSTUP_TOOLCHAIN` 값은 저장하지 않으므로 새 체크아웃이 자신의 도구
+체인을 선택한다. 기존 check-only 예약은 계속 확인만 한다.
+명시적 tool-lock과 provider 설정 경로도 유지한다.
+
 systemd 설치는 로그아웃 뒤에도 유지되는지 보고한다. 트리거를 설치할 때
 `OH_MY_SETTING_AUTO_UPDATE_LINGER=1`을 명시하면 켜지고(호스트 권한이 필요할 수
 있다), 아니면 cron을 쓴다. linger는 이 계정의 모든 사용자 서비스에 적용되므로

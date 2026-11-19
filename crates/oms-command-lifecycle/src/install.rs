@@ -562,11 +562,27 @@ fn install(
         row["profile"] = json!(profile);
     }
     receipt::validate(&row)?;
-    let plan = if row["components"]["tools"] == true {
-        Some(crate::tools::plan(paths, options)?)
+    // Incoming reconciliation borrows a verified parent lease. The owning
+    // update refreshes tools only after committing OMS, unless --no-tools or
+    // rollback suppresses that phase; reconciliation must not do it early.
+    let tool_options = if row["components"]["tools"] == true && !crate::update::borrowed(paths)? {
+        let mut selected = options.clone();
+        if !selected.has("--profile")
+            && !selected.has("--full")
+            && r::exists(&crate::tools::receipt_path(paths, &selected)?)
+        {
+            // A reinstall converges the recorded capability selection unless
+            // the caller explicitly chooses a replacement.
+            selected.flags.insert("--reapply".into());
+        }
+        Some(selected)
     } else {
         None
     };
+    let plan = tool_options
+        .as_ref()
+        .map(|selected| crate::tools::plan(paths, selected))
+        .transpose()?;
     if options.preview() {
         return r::json(
             &json!({"schema":1,"install":row,"capabilities":plan,"actions":["stage native payload","converge owned targets and components","publish install receipt"]}),
@@ -642,10 +658,10 @@ fn install(
     if row["components"]["slurm_snapshot"] == true {
         crate::snapshot::slurm(paths, &mut tx, flag)?;
     }
-    if plan.is_some() {
-        let plan = crate::tools::apply(paths, options, &mut tx, flag)?;
+    if let Some(selected) = &tool_options {
+        let plan = crate::tools::apply(paths, selected, &mut tx, flag)?;
         tx.write(
-            &paths.config.join("capabilities.json"),
+            &crate::tools::receipt_path(paths, selected)?,
             &r::bytes(&plan)?,
             0o600,
         )?;

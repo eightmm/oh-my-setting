@@ -322,6 +322,47 @@ fn isolated_child() {
     );
 }
 
+#[test]
+fn models_preview_preserves_full_catalog_routability() {
+    let tmp = TempDir::new("models-catalog");
+    let home = tmp.path().join("home");
+    let cache = home.join("capabilities");
+    fs::create_dir_all(&cache).expect("cache");
+    let preview = (0..19)
+        .map(|minor| format!("gpt-5.{minor}-sol"))
+        .chain(std::iter::once("gpt-6.1-sol".into()))
+        .collect::<Vec<_>>();
+    let mut catalog = preview.clone();
+    catalog.extend(["gpt-6.2-sol".into(), "claude-sonnet-5-5".into()]);
+    fs::write(
+        cache.join("codex.models"),
+        format!("{}\n", catalog.join("\n")),
+    )
+    .expect("catalog");
+    let (code, out, err) = isolated(
+        "models",
+        &["--providers", "codex", "--json"],
+        tmp.path(),
+        &oms_source(),
+        &[
+            ("HOME", utf8(&home)),
+            ("OMS_CAPABILITY_DIR", utf8(&cache)),
+            ("PATH", ""),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("report");
+    let row = &report["providers"][0];
+    assert_eq!(row["models"], serde_json::json!(preview));
+    assert_eq!(row["catalog_models"], serde_json::json!(catalog));
+    assert_eq!(row["routable"], serde_json::json!(["gpt-6.2-sol"]));
+    let mut not_routed = preview;
+    not_routed.push("claude-sonnet-5-5".into());
+    assert_eq!(row["not_routed"], serde_json::json!(not_routed));
+    assert_eq!(row["usable"], serde_json::Value::Null);
+    assert!(!cache.join("codex.env").exists());
+}
+
 fn utf8(path: &Path) -> &str {
     path.to_str().expect("utf8")
 }

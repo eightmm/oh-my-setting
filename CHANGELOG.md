@@ -1054,6 +1054,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Reinstall and incoming OMS updates preserve saved capability profiles, provider
+  choice and allow-missing policy. Ad-hoc tool installs no longer overwrite them,
+  custom receipt paths survive the incoming cwd change, and invalid receipt
+  locations cannot expand refresh to every tool. Updated installers leave tool
+  work to the post-commit phase, which `--no-tools`/rollback skip. Node is
+  installed before npm-based providers even when explicitly listed last.
+- Generated cron/systemd jobs retain the installation and Cargo/Rustup paths, so
+  scheduled updates can build with a minimal host PATH without freezing an old
+  toolchain override. Check-only mode and legacy generated units remain supported.
+- Vendor Antigravity refresh retires a validated ownership sidecar before the
+  updater changes the binary; unrelated transaction rollback cannot resurrect
+  the stale checksum. Modified or unsafe markers still block handoff.
+- Model routability and panel routing use the complete catalog, including models
+  beyond the 20-entry display preview. Legacy preview-only catalogs still work.
 - Native OMS installation/update builds use the incoming checkout's Rust
   toolchain and can fetch missing locked dependencies. Fresh installs follow
   `edge`; fallback and runtime edge apply retain branch tracking instead of

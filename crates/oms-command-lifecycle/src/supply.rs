@@ -406,14 +406,17 @@ fn find_file(root: &Path, name: &str) -> Result<PathBuf> {
     }
     Ok(found.remove(0))
 }
+fn ownership_marker(target: &Path) -> PathBuf {
+    target.with_file_name(format!(
+        "{}.oh-my-setting-managed",
+        target.file_name().unwrap().to_string_lossy()
+    ))
+}
 fn owns(paths: &Paths, target: &Path) -> Result<()> {
     if !r::exists(target) {
         return Ok(());
     }
-    let marker = target.with_file_name(format!(
-        "{}.oh-my-setting-managed",
-        target.file_name().unwrap().to_string_lossy()
-    ));
+    let marker = ownership_marker(target);
     let raw = r::read(&marker, 65536)
         .map_err(|_| r::Error(2, "refusing to replace an unmanaged tool".into()))?;
     let actual = r::hash(&r::read(target, MAX)?);
@@ -455,10 +458,7 @@ fn publish(
     }
     let raw = r::read(source, MAX)?;
     tx.write(target, &raw, 0o755)?;
-    let marker = target.with_file_name(format!(
-        "{}.oh-my-setting-managed",
-        target.file_name().unwrap().to_string_lossy()
-    ));
+    let marker = ownership_marker(target);
     tx.write(
         &marker,
         format!("sha256={}\n", r::hash(&raw)).as_bytes(),
@@ -532,6 +532,97 @@ fn pack(paths: &Paths, row: &Value, dest: &Path, flag: &AtomicBool) -> Result<Pa
     sri(&r::read(&archive, MAX)?, scalar(row, "integrity")?)?;
     Ok(archive)
 }
+fn handoff_agy_marker(paths: &Paths, binary: &Path) -> Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, statat, unlinkat};
+    use std::os::unix::fs::MetadataExt;
+
+    if !vendor(paths, "agy", binary) {
+        return r::fail("AGY ownership handoff requires its recognized vendor path");
+    }
+    let marker = r::leaf(&ownership_marker(binary))?;
+    let parent = marker.parent().unwrap();
+    let directory = fs::File::from(
+        open(
+            parent,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let parent_before = directory.metadata()?;
+    let name = marker.file_name().unwrap();
+    let before = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(value) => value,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    owns(paths, binary)?;
+    let after =
+        statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
+    let parent_after = fs::symlink_metadata(parent)?;
+    if FileType::from_raw_mode(after.st_mode) != FileType::RegularFile
+        || before.st_dev != after.st_dev
+        || before.st_ino != after.st_ino
+        || before.st_size != after.st_size
+        || before.st_ctime != after.st_ctime
+        || before.st_ctime_nsec != after.st_ctime_nsec
+        || after.st_nlink != 1
+        || !parent_after.is_dir()
+        || parent_before.dev() != parent_after.dev()
+        || parent_before.ino() != parent_after.ino()
+    {
+        return r::fail("AGY ownership marker changed before vendor handoff");
+    }
+    // Vendor bytes are outside OMS rollback. Restoring this marker on a later
+    // failure would attach an obsolete checksum, so retire it durably.
+    unlinkat(&directory, name, AtFlags::empty()).map_err(std::io::Error::from)?;
+    directory.sync_all()?;
+    Ok(())
+}
+fn refresh_vendor(paths: &Paths, name: &str, binary: &Path, flag: &AtomicBool) -> Result<()> {
+    r::check(flag)?;
+    if name == "agy" {
+        handoff_agy_marker(paths, binary)?;
+    }
+    let before = r::command(
+        binary,
+        &["--version".into()],
+        &paths.cwd,
+        None,
+        flag,
+        Duration::from_secs(10),
+    )?;
+    if before.0 != 0 || version_number(&before.1).is_none() {
+        return r::fail("vendor provider version unavailable; refresh refused");
+    }
+    let out = r::command(
+        binary,
+        &["update".into()],
+        &paths.cwd,
+        None,
+        flag,
+        Duration::from_secs(180),
+    )?;
+    if out.0 != 0 {
+        return r::fail("vendor provider refresh failed");
+    }
+    let after = r::command(
+        binary,
+        &["--version".into()],
+        &paths.cwd,
+        None,
+        flag,
+        Duration::from_secs(10),
+    )?;
+    if after.0 != 0
+        || version_number(&after.1)
+            .zip(version_number(&before.1))
+            .is_none_or(|(a, b)| a < b)
+    {
+        return r::fail("vendor refresh could not prove a non-downgraded version");
+    }
+    Ok(())
+}
 pub(crate) fn install(
     paths: &Paths,
     selected: &[String],
@@ -584,43 +675,7 @@ pub(crate) fn install(
                 && explicit_lock.is_none()
                 && vendor(paths, name, &binary)
             {
-                let before = r::command(
-                    &binary,
-                    &["--version".into()],
-                    &paths.cwd,
-                    None,
-                    flag,
-                    Duration::from_secs(10),
-                )?;
-                if before.0 != 0 || version_number(&before.1).is_none() {
-                    return r::fail("vendor provider version unavailable; refresh refused");
-                }
-                let out = r::command(
-                    &binary,
-                    &["update".into()],
-                    &paths.cwd,
-                    None,
-                    flag,
-                    Duration::from_secs(180),
-                )?;
-                if out.0 != 0 {
-                    return r::fail("vendor provider refresh failed");
-                }
-                let after = r::command(
-                    binary,
-                    &["--version".into()],
-                    &paths.cwd,
-                    None,
-                    flag,
-                    Duration::from_secs(10),
-                )?;
-                if after.0 != 0
-                    || version_number(&after.1)
-                        .zip(version_number(&before.1))
-                        .is_none_or(|(a, b)| a < b)
-                {
-                    return r::fail("vendor refresh could not prove a non-downgraded version");
-                }
+                refresh_vendor(paths, name, &binary, flag)?;
                 continue;
             }
         }
@@ -1543,6 +1598,18 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    fn fixture_paths(root: &Path) -> Paths {
+        Paths {
+            home: root.join("home"),
+            source: root.to_owned(),
+            receipt: root.join("receipt.json"),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
+            cwd: root.to_owned(),
+        }
+    }
+
     fn response(url: &str, value: Value) -> (String, Vec<u8>) {
         (url.into(), serde_json::to_vec(&value).unwrap())
     }
@@ -1624,15 +1691,7 @@ mod tests {
     #[test]
     fn non_executable_local_placeholder_is_not_an_installed_tool() {
         let scratch = r::Scratch::new().unwrap();
-        let paths = Paths {
-            home: scratch.0.join("home"),
-            source: scratch.0.clone(),
-            receipt: scratch.0.join("receipt.json"),
-            config: scratch.0.join("config"),
-            state: scratch.0.join("state"),
-            data: scratch.0.join("data"),
-            cwd: scratch.0.clone(),
-        };
+        let paths = fixture_paths(&scratch.0);
         let name = "oms-supply-fixture-command";
         let executable = paths.home.join(".local/bin").join(name);
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
@@ -1640,6 +1699,127 @@ mod tests {
         assert!(installed(&paths, name).is_none());
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(installed(&paths, name), Some(executable));
+    }
+
+    #[test]
+    fn agy_vendor_handoff_survives_updater_failure_and_unrelated_rollback() {
+        let flag = AtomicBool::new(false);
+        for updater_exit in [0, 7] {
+            for kind in ["legacy", "native", "absent"] {
+                let scratch = r::Scratch::new().unwrap();
+                let paths = fixture_paths(&scratch.0);
+                let binary = paths.home.join(".local/bin/agy");
+                fs::create_dir_all(binary.parent().unwrap()).unwrap();
+                let marker = binary.with_file_name("agy.oh-my-setting-managed");
+                let replacement = scratch.0.join("replacement");
+                let updated = b"#!/bin/sh\necho 'antigravity 2.0.0'\n";
+                r::new_file(&replacement, updated, 0o755).unwrap();
+                let initial = format!(
+                    "#!/bin/sh\ncase \"${{1:-}}\" in\n--version) echo 'antigravity 1.0.0' ;;\nupdate) /bin/mv {} \"$0\"; exit {updater_exit} ;;\n*) exit 99 ;;\nesac\n",
+                    r::shell(replacement.as_os_str()).unwrap()
+                );
+                r::new_file(&binary, initial.as_bytes(), 0o755).unwrap();
+                let raw = match kind {
+                    "legacy" => format!("sha256={}\n", r::hash(initial.as_bytes())).into_bytes(),
+                    "native" => r::bytes(
+                        &json!({"owner":"oh-my-setting","sha256":r::hash(initial.as_bytes())}),
+                    )
+                    .unwrap(),
+                    _ => Vec::new(),
+                };
+                if !raw.is_empty() {
+                    r::new_file(&marker, &raw, 0o600).unwrap();
+                    owns(&paths, &binary).unwrap();
+                }
+                assert!(vendor(&paths, "agy", &binary));
+                let unrelated = scratch.0.join("unrelated");
+                r::new_file(&unrelated, b"before", 0o600).unwrap();
+                let _guard = r::lock(&paths.receipt, &paths.cwd).unwrap();
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.write(&unrelated, b"after", 0o600).unwrap();
+                let result = refresh_vendor(&paths, "agy", &binary, &flag);
+                assert_eq!(result.is_ok(), updater_exit == 0);
+                assert_eq!(r::read(&binary, MAX).unwrap(), updated);
+                assert!(!r::exists(&marker), "{kind} marker survived vendor handoff");
+                drop(tx);
+                assert_eq!(r::read(&unrelated, 64).unwrap(), b"before");
+                assert_eq!(r::read(&binary, MAX).unwrap(), updated);
+                assert!(
+                    !r::exists(&marker),
+                    "rollback restored a stale {kind} marker"
+                );
+                assert!(
+                    owns(&paths, &binary).is_err(),
+                    "explicit replacement must still require OMS ownership"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agy_vendor_handoff_rejects_changed_or_unsafe_markers_before_execution() {
+        for kind in [
+            "stale",
+            "foreign",
+            "symlink",
+            "hardlink",
+            "unrecognized",
+            "cancelled",
+        ] {
+            let scratch = r::Scratch::new().unwrap();
+            let paths = fixture_paths(&scratch.0);
+            let binary = paths.home.join(if kind == "unrecognized" {
+                ".local/bin/other-agy"
+            } else {
+                ".local/bin/agy"
+            });
+            fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            let invoked = scratch.0.join("invoked");
+            let raw = format!(
+                "#!/bin/sh\nprintf invoked > {}\nexit 99\n",
+                r::shell(invoked.as_os_str()).unwrap()
+            );
+            r::new_file(&binary, raw.as_bytes(), 0o755).unwrap();
+            let marker = ownership_marker(&binary);
+            let good = format!("sha256={}\n", r::hash(raw.as_bytes()));
+            match kind {
+                "stale" => r::new_file(
+                    &marker,
+                    format!("sha256={}\n", "0".repeat(64)).as_bytes(),
+                    0o600,
+                )
+                .unwrap(),
+                "foreign" => r::new_file(
+                    &marker,
+                    &r::bytes(&json!({"owner":"other","sha256":r::hash(raw.as_bytes())})).unwrap(),
+                    0o600,
+                )
+                .unwrap(),
+                "symlink" | "hardlink" => {
+                    let source = scratch.0.join("shared-marker");
+                    r::new_file(&source, good.as_bytes(), 0o600).unwrap();
+                    if kind == "symlink" {
+                        symlink(&source, &marker).unwrap();
+                    } else {
+                        fs::hard_link(&source, &marker).unwrap();
+                    }
+                }
+                _ => r::new_file(&marker, good.as_bytes(), 0o600).unwrap(),
+            }
+            let before = fs::read(&marker).unwrap();
+            assert!(
+                refresh_vendor(
+                    &paths,
+                    "agy",
+                    &binary,
+                    &AtomicBool::new(kind == "cancelled")
+                )
+                .is_err()
+            );
+            assert!(!invoked.exists(), "{kind} marker reached the version probe");
+            assert_eq!(fs::read(&marker).unwrap(), before);
+            assert_eq!(r::read(&binary, MAX).unwrap(), raw.as_bytes());
+        }
     }
 
     #[test]

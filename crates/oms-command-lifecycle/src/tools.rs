@@ -5,7 +5,7 @@ use crate::{
     transaction::Transaction,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, sync::atomic::AtomicBool};
+use std::{collections::BTreeSet, path::PathBuf, sync::atomic::AtomicBool};
 pub(crate) fn strings(v: &Value) -> Result<Vec<String>> {
     v.as_array()
         .ok_or_else(|| r::Error(2, "capability command list must be an array".into()))?
@@ -16,6 +16,29 @@ pub(crate) fn strings(v: &Value) -> Result<Vec<String>> {
                 .ok_or_else(|| r::Error(2, "capability command must be a string".into()))
         })
         .collect()
+}
+pub(crate) fn receipt_path(paths: &Paths, options: &Options) -> Result<PathBuf> {
+    if let Some(path) = options.path("--receipt", &paths.cwd)? {
+        return Ok(path);
+    }
+    let path = std::env::var_os("OMS_CAPABILITY_RECEIPT")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paths.config.join("capabilities.json"));
+    r::leaf(&if path.is_absolute() {
+        path
+    } else {
+        paths.cwd.join(path)
+    })
+}
+// Ad-hoc tool actions do not select the capabilities maintained by future updates.
+fn records_profile(options: &Options) -> bool {
+    !options.has("--only")
+        && !options.has("--providers")
+        && (options.tool == "install-profile"
+            || ["--profile", "--full", "--add", "--reapply"]
+                .iter()
+                .any(|flag| options.has(flag)))
 }
 fn expand(
     name: &str,
@@ -49,9 +72,7 @@ pub(crate) fn plan(paths: &Paths, options: &Options) -> Result<Value> {
     if table["schema"] != 1 {
         return r::fail("unsupported capability profile schema");
     }
-    let receipt = options
-        .path("--receipt", &paths.cwd)?
-        .unwrap_or(paths.config.join("capabilities.json"));
+    let receipt = receipt_path(paths, options)?;
     let previous = if options.has("--reapply") || options.has("--add") {
         if r::exists(&receipt) {
             Some(r::value(&receipt)?)
@@ -213,7 +234,7 @@ pub(crate) fn plan(paths: &Paths, options: &Options) -> Result<Value> {
             }
         }
     }
-    if options.tool == "install-tools" && !options.has("--profile") && !options.has("--only") {
+    if options.tool == "install-tools" && !records_profile(options) && !options.has("--only") {
         managed = ["node", "uv", "claude", "codex", "ntn", "agy", "gh"]
             .into_iter()
             .map(str::to_owned)
@@ -260,8 +281,8 @@ pub(crate) fn plan(paths: &Paths, options: &Options) -> Result<Value> {
         && managed
             .iter()
             .any(|s| ["codex", "claude", "ntn"].contains(&s.as_str()))
-        && !managed.iter().any(|s| s == "node")
     {
+        managed.retain(|s| s != "node");
         managed.insert(0, "node".into());
     }
     Ok(
@@ -319,14 +340,14 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
     }
     r::child_guard()?;
     paths.require_owner()?;
-    let receipt = options
-        .path("--receipt", &paths.cwd)?
-        .unwrap_or(paths.config.join("capabilities.json"));
+    let receipt = receipt_path(paths, options)?;
     let _guard = r::receipt_lock(paths, flag)?;
     let mut tx = Transaction::begin(paths)?;
     let row = apply(paths, options, &mut tx, flag)?;
     r::check(flag)?;
-    tx.write(&receipt, &r::bytes(&row)?, 0o600)?;
+    if records_profile(options) {
+        tx.write(&receipt, &r::bytes(&row)?, 0o600)?;
+    }
     tx.commit()?;
     r::json(&row)
 }

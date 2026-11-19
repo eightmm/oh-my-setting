@@ -440,13 +440,8 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let models = catalog.iter().take(20).cloned().collect::<Vec<_>>();
-        let all_routable = generations(&catalog, &provider);
-        let routable = models
-            .iter()
-            .filter(|m| all_routable.contains(m))
-            .cloned()
-            .collect::<Vec<_>>();
-        let not_routed = models
+        let routable = generations(&catalog, &provider);
+        let not_routed = catalog
             .iter()
             .filter(|m| !routable.contains(m))
             .cloned()
@@ -500,12 +495,12 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
         let configured_standing = configured
             .as_ref()
             .filter(|_| !catalog.is_empty())
-            .map(|m| all_routable.contains(m));
+            .map(|m| routable.contains(m));
         if configured_standing == Some(false) {
             warnings.push(format!(
                 "{provider}: configured default model {} is not routable; routable: {}",
                 configured.as_deref().unwrap_or(""),
-                all_routable.join(", ")
+                routable.join(", ")
             ));
         }
         if doctor {
@@ -537,7 +532,12 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             if routable.is_empty() {
                 "unknown".into()
             } else {
-                routable.join(", ")
+                routable
+                    .iter()
+                    .take(20)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             },
             fields
                 .get("effort_mechanism")

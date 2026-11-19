@@ -443,15 +443,15 @@ fn stop_message(stop: StopReason, supervision: Option<&str>, limit: usize) -> St
 /// Run one staged native command to completion with the update-parent marker
 /// in its environment only. Child exit, deadline and cancellation map to
 /// shell-style codes; incomplete cleanup is never reported as success.
-fn run_staged(
+fn run_staged<T: AsRef<std::ffi::OsStr>>(
     launcher: &[OsString],
-    args: &[&str],
+    args: &[T],
     cwd: &Path,
     environment: Vec<(OsString, OsString)>,
     interrupted: &AtomicBool,
 ) -> Output {
     let mut argv = launcher.to_vec();
-    argv.extend(args.iter().map(OsString::from));
+    argv.extend(args.iter().map(|arg| arg.as_ref().to_owned()));
     let mut job = Job::new(argv, cwd, STAGED_WALL, STAGED_OUTPUT);
     job.environment = environment;
     let (done, _) = match supervise(job, interrupted) {
@@ -1523,24 +1523,51 @@ fn on_path(tool: &str) -> bool {
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
 }
 
-fn capability_receipt() -> Option<PathBuf> {
-    env_text("OMS_CAPABILITY_RECEIPT")
+fn capability_receipt() -> Result<Option<PathBuf>, &'static str> {
+    let selected = std::env::var_os("OMS_CAPABILITY_RECEIPT").filter(|v| !v.is_empty());
+    let explicit = selected.is_some();
+    let path = selected
         .map(PathBuf::from)
         .or_else(|| {
-            let config = env_text("XDG_CONFIG_HOME")
+            let config = std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
-                .or_else(|| env_text("HOME").map(|h| Path::new(&h).join(".config")))?;
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .filter(|v| !v.is_empty())
+                        .map(|h| Path::new(&h).join(".config"))
+                })?;
             Some(config.join("oh-my-setting/capabilities.json"))
         })
+        .ok_or("cannot locate capability receipt")?;
+    let path =
+        std::path::absolute(path).map_err(|_| "cannot resolve capability receipt location")?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(Some(path)),
+        Ok(_) => Err("capability receipt must be a regular file, not a symlink or directory"),
+        // Only an absent default proves this is an older installation without
+        // a selected profile. Broken explicit intent cannot widen tool scope.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("explicit capability receipt is missing; tool refresh refused")
+        }
+        Err(_) => Err("cannot inspect capability receipt; tool refresh refused"),
+    }
 }
 
 /// Tool refresh verb: an install that chose its capabilities reapplies that
 /// choice; an older install keeps the full tool refresh.
-fn tools_refresh(profile_receipt: bool) -> &'static [&'static str] {
-    if profile_receipt {
-        &["install-profile", "--reapply", "--upgrade"]
+fn tools_refresh(profile_receipt: Option<&Path>) -> Vec<OsString> {
+    if let Some(receipt) = profile_receipt {
+        vec![
+            "install-profile".into(),
+            "--reapply".into(),
+            "--upgrade".into(),
+            "--receipt".into(),
+            receipt.as_os_str().to_owned(),
+        ]
     } else {
-        &["install-tools", "--upgrade"]
+        vec!["install-tools".into(), "--upgrade".into()]
     }
 }
 
@@ -1797,10 +1824,36 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
             Ok(l) => l,
             Err(e) => return refuse(2, e),
         };
-        let parent = vec![(
+        let mut parent = vec![(
             OsString::from("OMS_NATIVE_UPDATE_PARENT"),
             OsString::from(std::process::id().to_string()),
         )];
+        // Incoming children run from the source checkout. Preserve explicit
+        // installation paths relative to the original invocation, not that cwd.
+        for name in [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "OMS_INSTALL_RECEIPT",
+            "OMS_CAPABILITY_RECEIPT",
+            "CODEX_HOME",
+            "OMS_CODEX_CONFIG",
+            "OMS_CLAUDE_SETTINGS",
+            "PI_CODING_AGENT_DIR",
+            "OH_MY_SETTING_TOOL_LOCK",
+        ] {
+            if let Some(path) = std::env::var_os(name).filter(|v| !v.is_empty()) {
+                let path = match std::path::absolute(path) {
+                    Ok(path) => path,
+                    Err(_) => return refuse(2, format!("cannot resolve {name} path")),
+                };
+                parent.push((name.into(), path.into_os_string()));
+            }
+        }
         if phase == IncomingPhase::Preflight {
             use std::os::unix::fs::PermissionsExt;
             let Some(canonical_source) = std::fs::canonicalize(source).ok().filter(|p| p.is_dir())
@@ -1886,10 +1939,17 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
             }
             IncomingPhase::Verify => run_staged(&launcher, &["doctor"], cwd, parent, interrupted),
             IncomingPhase::RefreshTools => {
-                let profile = capability_receipt()
-                    .and_then(|p| std::fs::symlink_metadata(p).ok())
-                    .is_some_and(|m| m.file_type().is_file());
-                run_staged(&launcher, tools_refresh(profile), cwd, parent, interrupted)
+                let profile = match capability_receipt() {
+                    Ok(profile) => profile,
+                    Err(error) => return refuse(2, error),
+                };
+                run_staged(
+                    &launcher,
+                    &tools_refresh(profile.as_deref()),
+                    cwd,
+                    parent,
+                    interrupted,
+                )
             }
             IncomingPhase::Preflight => unreachable!("handled above"),
         }
@@ -3658,8 +3718,11 @@ mod tests {
         ));
         assert!(!plan_idle(b"{", 14));
         assert_eq!(env_days("OMS_TICK_COLLAB_TEST_UNSET", 7), Ok(7));
-        assert_eq!(tools_refresh(true)[0], "install-profile");
-        assert_eq!(tools_refresh(false), ["install-tools", "--upgrade"]);
+        assert_eq!(
+            tools_refresh(Some(Path::new("selected.json")))[0],
+            "install-profile"
+        );
+        assert_eq!(tools_refresh(None), ["install-tools", "--upgrade"]);
     }
 
     /// A staged revision directory whose `oms` echoes its argument vector and
@@ -3689,6 +3752,70 @@ mod tests {
     fn incoming_lifecycle_runs_the_staged_checkout_and_returns_its_receipt() {
         use oms_command_lifecycle::Services as Lifecycle;
         let stop = Arc::new(AtomicBool::new(false));
+        let path_overrides = [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "OMS_INSTALL_RECEIPT",
+            "OMS_CAPABILITY_RECEIPT",
+            "CODEX_HOME",
+            "OMS_CODEX_CONFIG",
+            "OMS_CLAUDE_SETTINGS",
+            "PI_CODING_AGENT_DIR",
+            "OH_MY_SETTING_TOOL_LOCK",
+        ];
+        if let Some(root) = std::env::var_os("OMS_REFRESH_RECEIPT_FIXTURE") {
+            let root = PathBuf::from(root);
+            let case = std::env::var("OMS_REFRESH_RECEIPT_CASE").unwrap();
+            let marker = root.join("refresh-child");
+            if marker.exists() {
+                std::fs::remove_file(&marker).unwrap();
+            }
+            let host = CollabServices::new(&stop, &root).expect("source is available");
+            let out = host.incoming_lifecycle(
+                IncomingPhase::RefreshTools,
+                &root,
+                "0123456789abcdef0123456789abcdef01234567",
+                b"{}",
+                &[],
+                &stop,
+            );
+            let expected = match case.as_str() {
+                "custom" | "paths" => Some(format!(
+                    "ran install-profile --reapply --upgrade --receipt {}",
+                    root.join("invocation/selected profiles.json").display()
+                )),
+                "default" | "empty" => Some("ran install-tools --upgrade".into()),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
+                assert_eq!(String::from_utf8_lossy(&out.1), expected);
+                assert!(marker.is_file());
+                if case == "paths" {
+                    let mut expected = vec![root.clone()];
+                    expected.extend(path_overrides.map(|name| {
+                        let path = PathBuf::from(std::env::var_os(name).unwrap());
+                        assert!(path.is_relative(), "parent {name} must stay relative");
+                        root.join("invocation").join(path)
+                    }));
+                    let observed = std::fs::read_to_string(root.join("child-paths")).unwrap();
+                    assert_eq!(
+                        observed.lines().map(PathBuf::from).collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            } else {
+                assert_eq!(out.0, 2, "{case}: {}", String::from_utf8_lossy(&out.2));
+                assert!(String::from_utf8_lossy(&out.2).contains("capability receipt"));
+                assert!(!marker.exists(), "{case} launched a tool refresh child");
+            }
+            return;
+        }
         let fixture = Fixture::new();
         let root = std::fs::canonicalize(fixture.path()).unwrap();
         let host = CollabServices::new(&stop, &root).expect("source is available");
@@ -3732,8 +3859,14 @@ mod tests {
             rev,
             &format!(
                 r#"shift 4
+[ -z "${{OMS_REFRESH_RECEIPT_FIXTURE:-}}" ] || : > "$OMS_REFRESH_RECEIPT_FIXTURE/refresh-child"
+if [ "${{OMS_REFRESH_RECEIPT_CASE:-}}" = paths ]; then
+  printf '%s\n' "$PWD" "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$CARGO_HOME" "$RUSTUP_HOME" "$OMS_INSTALL_RECEIPT" "$OMS_CAPABILITY_RECEIPT" "$CODEX_HOME" "$OMS_CODEX_CONFIG" "$OMS_CLAUDE_SETTINGS" "$PI_CODING_AGENT_DIR" "$OH_MY_SETTING_TOOL_LOCK" > "$OMS_REFRESH_RECEIPT_FIXTURE/child-paths"
+fi
 case "$1" in
 install) printf '{{"schema":2,"parent":"%s"}}' "$OMS_NATIVE_UPDATE_PARENT" > '{r}'; echo "installed native OMS 0123456789abcdef0123456789abcdef01234567; receipt: {r}" ;;
+install-profile) [ "$#" = 5 ] && [ "$4" = --receipt ] && [ -f "$5" ] || exit 9; printf 'ran %s' "$*" ;;
+install-tools) [ "$#" = 2 ] && [ "$2" = --upgrade ] || exit 9; printf 'ran %s' "$*" ;;
 *) printf 'ran %s' "$*"; test "$OMS_NATIVE_UPDATE_PARENT" = "$$PARENT" ;;
 esac"#,
                 r = receipt.display()
@@ -3758,6 +3891,53 @@ esac"#,
         let out = run(IncomingPhase::RefreshTools, rev);
         assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
         assert!(String::from_utf8_lossy(&out.1).starts_with("ran install-"));
+
+        let invocation = root.join("invocation");
+        std::fs::create_dir(&invocation).unwrap();
+        std::fs::write(invocation.join("selected profiles.json"), b"{}").unwrap();
+        std::fs::create_dir(invocation.join("receipt directory")).unwrap();
+        std::os::unix::fs::symlink(
+            "selected profiles.json",
+            invocation.join("linked profiles.json"),
+        )
+        .unwrap();
+        for (case, selected) in [
+            ("custom", Some("selected profiles.json")),
+            ("paths", Some("selected profiles.json")),
+            ("missing", Some("missing profiles.json")),
+            ("directory", Some("receipt directory")),
+            ("symlink", Some("linked profiles.json")),
+            ("metadata", Some("selected profiles.json/child")),
+            ("default", None),
+            ("empty", Some("")),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                    "--exact",
+                    "services_collab::tests::incoming_lifecycle_runs_the_staged_checkout_and_returns_its_receipt",
+                    "--nocapture",
+                ])
+                .env("OMS_REFRESH_RECEIPT_FIXTURE", &root)
+                .env("OMS_REFRESH_RECEIPT_CASE", case)
+                .env("XDG_CONFIG_HOME", root.join("absent config"))
+                .env_remove("OMS_CAPABILITY_RECEIPT")
+                .current_dir(&invocation);
+            if case == "paths" {
+                for name in path_overrides {
+                    child.env(name, format!("relative {name}"));
+                }
+            }
+            if let Some(selected) = selected {
+                child.env("OMS_CAPABILITY_RECEIPT", selected);
+            }
+            let out = child.output().unwrap();
+            assert!(
+                out.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
 
         // A receipt that is not schema 2 is refused rather than returned.
         std::fs::write(&receipt, br#"{"schema":1}"#).unwrap();

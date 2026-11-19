@@ -5,7 +5,12 @@ use crate::{
     transaction::Transaction,
 };
 use serde_json::json;
-use std::{ffi::OsString, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
+use std::{
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+    sync::atomic::AtomicBool,
+    time::Duration,
+};
 
 fn invoke(
     paths: &Paths,
@@ -56,6 +61,126 @@ fn block(raw: &str, name: &str, replacement: &str) -> Result<String> {
     }
     Ok(result)
 }
+
+fn scheduler_environment(paths: &Paths) -> Result<Vec<(&'static str, String)>> {
+    let mut environment = vec![
+        ("HOME", paths.home.clone()),
+        ("XDG_CONFIG_HOME", paths.config.parent().unwrap().to_owned()),
+        ("XDG_DATA_HOME", paths.data.parent().unwrap().to_owned()),
+        ("XDG_STATE_HOME", paths.state.parent().unwrap().to_owned()),
+        ("OMS_INSTALL_RECEIPT", paths.receipt.clone()),
+    ];
+    let mut cargo_home = paths.home.join(".cargo");
+    for name in [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "XDG_CACHE_HOME",
+        "OMS_CAPABILITY_RECEIPT",
+        "OH_MY_SETTING_TOOL_LOCK",
+        "CODEX_HOME",
+        "OMS_CODEX_CONFIG",
+        "OMS_CLAUDE_SETTINGS",
+        "PI_CODING_AGENT_DIR",
+    ] {
+        if let Some(value) = std::env::var_os(name).filter(|v| !v.is_empty()) {
+            let path = PathBuf::from(value);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                paths.cwd.join(path)
+            };
+            let path = if matches!(
+                name,
+                "OMS_CAPABILITY_RECEIPT"
+                    | "OH_MY_SETTING_TOOL_LOCK"
+                    | "OMS_CODEX_CONFIG"
+                    | "OMS_CLAUDE_SETTINGS"
+            ) {
+                r::leaf(&path)?
+            } else {
+                r::physical(&path)?
+            };
+            if name == "CARGO_HOME" {
+                cargo_home = path.clone();
+            }
+            environment.push((name, path));
+        }
+    }
+    // Schedulers do not read shell profiles. Keep the managed tools and the
+    // selected Cargo home reachable without pinning an incoming toolchain.
+    let inherited = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    let inherited = std::env::split_paths(&inherited)
+        .filter(|p| p.is_absolute())
+        .collect::<Vec<_>>();
+    let mut search = vec![paths.home.join(".local/bin")];
+    if let Some(cargo) = r::find("cargo", &paths.cwd)
+        && let Some(directory) = cargo.parent()
+        && inherited.iter().any(|p| p == directory)
+        && !search.iter().any(|p| p == directory)
+    {
+        search.push(directory.to_owned());
+    }
+    let cargo_bin = cargo_home.join("bin");
+    if !search.contains(&cargo_bin) {
+        search.push(cargo_bin);
+    }
+    for path in inherited {
+        if !search.contains(&path) {
+            search.push(path);
+        }
+    }
+    let path = std::env::join_paths(search)
+        .map_err(|_| r::Error(2, "scheduler PATH contains an invalid directory".into()))?;
+    let mut result = vec![("PATH", path)];
+    result.extend(
+        environment
+            .into_iter()
+            .map(|(name, path)| (name, path.into_os_string())),
+    );
+    result
+        .into_iter()
+        .map(|(name, value)| {
+            let value = value
+                .into_string()
+                .map_err(|_| r::Error(2, "scheduler environment must be UTF-8".into()))?;
+            if value.chars().any(char::is_control) {
+                return r::fail("scheduler environment contains a control character");
+            }
+            Ok((name, value))
+        })
+        .collect()
+}
+
+fn systemd_environment(environment: &[(&str, String)]) -> String {
+    environment
+        .iter()
+        .map(|(name, value)| {
+            let value = value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('%', "%%");
+            format!("Environment=\"{name}={value}\"\n")
+        })
+        .collect()
+}
+
+fn cron_environment(environment: &[(&str, String)]) -> Result<String> {
+    environment
+        .iter()
+        .map(|(name, value)| {
+            // Cron interprets percent signs even inside shell quotes. Keep
+            // each escape outside those quotes so cron and the shell agree.
+            let value = value
+                .split('%')
+                .map(|part| r::shell(OsStr::new(part)))
+                .collect::<Result<Vec<_>>>()?
+                .join("\\%");
+            Ok(format!("{name}={value}"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|rows| rows.join(" "))
+}
+
 /// Accepts native units marked with `# oh-my-setting native lifecycle` as well
 /// as legacy shell-era OMS systemd units pointing strictly at this checkout.
 fn owned_systemd_unit(raw: &str, timer: bool, paths: &Paths, tick: bool) -> bool {
@@ -117,7 +242,21 @@ fn owned_systemd_unit(raw: &str, timer: bool, paths: &Paths, tick: bool) -> bool
             let Some((var, _)) = inner.split_once('=') else {
                 return false;
             };
-            if var != "PATH" && !var.starts_with("OH_MY_SETTING_") && !var.starts_with("OMS_") {
+            if !matches!(
+                var,
+                "HOME"
+                    | "PATH"
+                    | "CARGO_HOME"
+                    | "RUSTUP_HOME"
+                    | "XDG_CONFIG_HOME"
+                    | "XDG_DATA_HOME"
+                    | "XDG_STATE_HOME"
+                    | "XDG_CACHE_HOME"
+                    | "CODEX_HOME"
+                    | "PI_CODING_AGENT_DIR"
+            ) && !var.starts_with("OH_MY_SETTING_")
+                && !var.starts_with("OMS_")
+            {
                 return false;
             }
             continue;
@@ -214,6 +353,11 @@ pub(crate) fn apply(
     } else {
         format!("{} auto-update {mode}", r::shell(executable.as_os_str())?)
     };
+    let environment = if remove {
+        Vec::new()
+    } else {
+        scheduler_environment(paths)?
+    };
     if systemd {
         let dir = paths.config.parent().unwrap().join("systemd/user");
         let service = dir.join(format!("oh-my-setting-{name}.service"));
@@ -266,7 +410,8 @@ pub(crate) fn apply(
             } else {
                 format!("auto-update {mode}")
             };
-            tx.write(&service,format!("# oh-my-setting native lifecycle\n[Unit]\nDescription=oh-my-setting {name}\n[Service]\nType=oneshot\nExecStart=\"{command_path}\" {arguments}\n").as_bytes(),0o600)?;
+            let environment = systemd_environment(&environment);
+            tx.write(&service,format!("# oh-my-setting native lifecycle\n[Unit]\nDescription=oh-my-setting {name}\n[Service]\nType=oneshot\n{environment}ExecStart=\"{command_path}\" {arguments}\n").as_bytes(),0o600)?;
             tx.write(&timer,format!("# oh-my-setting native lifecycle\n[Unit]\nDescription=oh-my-setting {name}\n[Timer]\nOnCalendar={}\nPersistent=true\n[Install]\nWantedBy=timers.target\n",if tick{"hourly"}else{"daily"}).as_bytes(),0o600)?;
         }
         if (!remove || user_manager_ready)
@@ -316,6 +461,11 @@ pub(crate) fn apply(
         if command.contains('%') {
             return r::fail("cron command contains an unescaped percent sign");
         }
+        let command = if remove {
+            command
+        } else {
+            format!("{} {command}", cron_environment(&environment)?)
+        };
         let replacement = if remove {
             String::new()
         } else {
@@ -459,6 +609,9 @@ mod tests {
         let legacy_auto_service = concat!(
             "[Unit]\nDescription=oh-my-setting auto-update\n\n",
             "[Service]\nType=oneshot\nEnvironment=OH_MY_SETTING_MCP=1\n",
+            "Environment=\"CARGO_HOME=/opt/rust home\"\nEnvironment=RUSTUP_HOME=/opt/rustup\n",
+            "Environment=XDG_CONFIG_HOME=/opt/config\n",
+            "Environment=CODEX_HOME=/opt/codex\nEnvironment=PI_CODING_AGENT_DIR=/opt/pi\n",
             "ExecStart=\"/usr/bin/bash\" \"/opt/oms-checkout/scripts/auto-update.sh\" apply\n",
         );
         let legacy_auto_timer = concat!(
@@ -509,5 +662,21 @@ mod tests {
             &paths,
             false
         ));
+        assert_eq!(
+            systemd_environment(&[("CARGO_HOME", "/opt/rust home%\"\\$literal".into())]),
+            "Environment=\"CARGO_HOME=/opt/rust home%%\\\"\\\\$literal\"\n"
+        );
+        let value = "/opt/rust home\\%\"$literal";
+        let cron = cron_environment(&[("CARGO_HOME", value.into())]).unwrap();
+        assert_eq!(cron, r#"CARGO_HOME='/opt/rust home\'\%'"$literal'"#);
+        // Cron removes its percent escape before the shell parses the command.
+        let decoded = cron.replace("\\%", "%");
+        let command = format!("{decoded} /bin/sh -c 'printf %s \"$CARGO_HOME\"'");
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &command])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, value.as_bytes());
     }
 }

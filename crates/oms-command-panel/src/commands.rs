@@ -985,9 +985,9 @@ fn routing_inputs(
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect()
         };
-        let mut models = strings("models");
+        let mut models = strings("catalog_models");
         if models.is_empty() {
-            models = strings("catalog_models");
+            models = strings("models");
         }
         inputs.provider_evidence.insert(
             name.into(),

@@ -283,9 +283,11 @@ for current releases, vendor refresh, explicit pins and payload verification.
 > **Pi:** Pi refresh runs only through `install-tools.sh --providers`.
 > Full-tool installs and profile reapply leave Pi unchanged.
 
-Default-channel agy is vendor-managed after a lock-verified bootstrap; refresh
-retires a valid legacy sidecar and doctor warns on a stale one. Explicit locks
-retain strict checks for existing OMS-owned digests.
+Default-channel agy is vendor-managed after a checksum-verified bootstrap;
+refresh validates and retires its ownership sidecar before vendor handoff, while
+a stale sidecar remains a refusal. An unrelated tool rollback cannot restore the
+old digest over vendor-updated bytes. Explicit locks retain strict checks for
+existing OMS-owned digests.
 
 Direct platform payloads and npm wrapper/native packages are verified before use; npm
 installation runs offline with a fresh cache. Install, update, repair, and uninstall

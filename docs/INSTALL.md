@@ -105,6 +105,15 @@ until an agent explicitly migrates them. See
 | `--reapply` | Reuse the recorded selection exactly. |
 | `--plan` | Preview either operation without changes. |
 
+An ordinary reinstall preserves the saved profiles, primary provider and
+allow-missing policy. Bare `install-tools`, `--only` and `--providers` perform
+tool operations without replacing that selection. Explicit profile/full/add/reapply
+operations record it. `--receipt` overrides `OMS_CAPABILITY_RECEIPT`, then the
+default OMS configuration path; relative paths use the invocation directory.
+Updates forward the selected receipt to the incoming process before changing its
+working directory. During updates, an explicitly selected missing or unsafe
+receipt is an error; it never falls back to refreshing every tool.
+
 `OH_MY_SETTING_MCP=0` and `OH_MY_SETTING_AGY_PLUGIN=0` skip their respective
 integrations. Installation records both choices in the receipt; environment-clean
 updates and scheduled triggers preserve them. An explicit environment override
@@ -157,6 +166,12 @@ verified through npm package metadata before publication. `ntn` may run its
 verified package's installation script. Explicit pins use the verified exact
 payload path instead of the default vendor update command.
 
+When a bootstrapped Antigravity binary hands over to its vendor updater, OMS
+validates and retires its ownership checksum sidecar before running the updater.
+A stale or unsafe sidecar remains an error. This handoff is not reversed by an
+unrelated tool failure, because the vendor's changed binary is also outside the
+OMS transaction. An explicit pin still requires OMS ownership before replacement.
+
 Already installed Pi is refreshed with `pi update self` only through
 `oms install-tools --providers`. Other recognized optional npm providers in a
 writable user-owned global prefix use their current `latest` dist-tag; there is
@@ -165,7 +180,8 @@ execute package code. An explicit tool lock skips these optional refreshes
 because its schema does not describe them.
 
 Provider dependencies are selected with the provider: Claude, Codex and ntn
-include Node; Antigravity does not. Downloads and package identities are checked
+include Node, installed first even when `--only` lists it last; Antigravity does
+not. Downloads and package identities are checked
 before managed publication, and local install/update/repair/uninstall changes
 share the reversible lifecycle transaction. Vendor update commands manage their
 own recovery; their binaries are not part of the OMS checkout rollback.
@@ -184,6 +200,20 @@ it, using the incoming checkout's Rust toolchain. Missing locked dependencies
 can be fetched; offline operation is an explicit caller choice. Automatic
 updates preserve local checkout edits and report a blocked/skipped update.
 Keep private policy in user skills outside the tracked install tree.
+
+Incoming installation reconciles OMS components without reinstalling tools or
+rewriting capability choices. The owning update refreshes the selected tools
+after the core commit. `--no-tools` and rollback skip that refresh entirely.
+The incoming revision supplies its own installer: rolling back to an older
+revision that predates this separation retains that older install behavior.
+
+Generated cron and systemd jobs retain the installation's HOME, XDG locations,
+receipt paths and Rust homes, with a PATH that includes the managed bin and Cargo
+directories. They do not depend on an interactive shell profile. A temporary
+`RUSTUP_TOOLCHAIN` override is not saved, so the incoming checkout can select its
+own toolchain. Existing check-only schedules remain check-only.
+Explicit tool-lock and provider configuration paths are retained as well.
+
 Systemd installs report whether logout persistence is available; explicitly set
 `OH_MY_SETTING_AUTO_UPDATE_LINGER=1` when installing the trigger to enable it
 (host permission may be required), or use cron. Linger applies to all this

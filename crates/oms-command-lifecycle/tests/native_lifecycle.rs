@@ -252,6 +252,35 @@ impl Services for ColdUpdateHost {
         }
         assert_eq!(phase, IncomingPhase::Reconcile);
         assert_eq!(self.git(source, &["rev-parse", "HEAD"]), revision);
+        if self.fail == "ok" {
+            // Exercise the actual parent lease, ancestry and held receipt lock.
+            // Merely setting a parent environment variable must not skip tools.
+            for mode in ["borrowed", "forged"] {
+                let out = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "cold_update_prepares_incoming_and_rolls_back_owned_state",
+                        "--nocapture",
+                    ])
+                    .env("OMS_COLD_INSTALL_PROBE", mode)
+                    .env(
+                        "OMS_NATIVE_UPDATE_PARENT",
+                        if mode == "borrowed" {
+                            std::process::id().to_string()
+                        } else {
+                            "0".into()
+                        },
+                    )
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{mode}: {}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
         fs::write(self.frontdoor(), b"incoming frontdoor").unwrap();
         let lib = self.root.join("data/oh-my-setting/libexec").join(revision);
         fs::create_dir_all(&lib).unwrap();
@@ -326,6 +355,12 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                 )
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            if case == "ok" {
+                command.env(
+                    "OMS_CAPABILITY_RECEIPT",
+                    f.0.join("selected capabilities.json"),
+                );
+            }
             if case == "offline" {
                 command
                     .env("CARGO_NET_OFFLINE", "true")
@@ -396,6 +431,25 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         phases: RefCell::new(vec![]),
     };
     let source = host.source();
+    if let Ok(mode) = std::env::var("OMS_COLD_INSTALL_PROBE") {
+        let receipt = fs::read(host.receipt()).unwrap();
+        let capabilities = PathBuf::from(std::env::var_os("OMS_CAPABILITY_RECEIPT").unwrap());
+        let selection = fs::read(&capabilities).unwrap();
+        let out = call("install", &["--plan"], &source, &host);
+        if mode == "borrowed" {
+            let plan: Value = serde_json::from_slice(&success(out)).unwrap();
+            assert_eq!(plan["install"]["components"]["tools"], true);
+            assert!(
+                plan["capabilities"].is_null(),
+                "incoming reconciliation must leave tools to the post-commit refresh"
+            );
+        } else {
+            assert_eq!(out.0, 75, "an unverified parent marker grants no bypass");
+        }
+        assert_eq!(fs::read(host.receipt()).unwrap(), receipt);
+        assert_eq!(fs::read(capabilities).unwrap(), selection);
+        return;
+    }
     if host.fail == "release-override" {
         let state = read(&host.root.join("fixture-state.json"));
         let prior = fs::read(host.receipt()).unwrap();
@@ -488,6 +542,14 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     )
     .unwrap();
     fs::write(source.join("skills.manifest.json"), b"{\"skills\":[]}\n").unwrap();
+    if host.fail == "ok" {
+        fs::create_dir(source.join("config")).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/capability-profiles.json"),
+            source.join("config/capability-profiles.json"),
+        )
+        .unwrap();
+    }
     host.git(&source, &["add", "."]);
     host.git(&source, &["commit", "-qm", "old"]);
     host.before = host.git(&source, &["rev-parse", "HEAD"]);
@@ -549,6 +611,12 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         "native":{"revision":host.before,"frontdoor":host.root.join("data/oh-my-setting/libexec").join(&host.before).join("oms-frontdoor")}});
     if host.fail == "ok" {
         receipt["ref"] = json!("reviewed-tag");
+        receipt["components"]["tools"] = json!(true);
+        write(
+            &PathBuf::from(std::env::var_os("OMS_CAPABILITY_RECEIPT").unwrap()),
+            &json!({"schema":1,"requested":["core","research"],
+                "primary_provider":"agy","allow_missing":true}),
+        );
     } else if host.fail == "fallback" {
         receipt["ref"] = json!("removed-upstream-branch");
     }
@@ -558,6 +626,32 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         let plan: Value =
             serde_json::from_slice(&success(call("install", &["--plan"], &source, &host))).unwrap();
         assert_eq!(plan["install"]["ref"], "reviewed-tag");
+        assert_eq!(
+            plan["capabilities"]["requested"],
+            json!(["core", "research"])
+        );
+        assert_eq!(plan["capabilities"]["primary_provider"], "agy");
+        assert_eq!(plan["capabilities"]["allow_missing"], true);
+        let overridden: Value = serde_json::from_slice(&success(call(
+            "install",
+            &["--plan", "--primary-provider", "codex"],
+            &source,
+            &host,
+        )))
+        .unwrap();
+        assert_eq!(
+            overridden["capabilities"]["requested"],
+            json!(["core", "research"])
+        );
+        assert_eq!(overridden["capabilities"]["primary_provider"], "codex");
+        for args in [
+            &["--plan", "--full"][..],
+            &["--plan", "--profile", "full"][..],
+        ] {
+            let replaced: Value =
+                serde_json::from_slice(&success(call("install", args, &source, &host))).unwrap();
+            assert_eq!(replaced["capabilities"]["requested"], json!(["full"]));
+        }
     }
     fs::create_dir_all(host.frontdoor().parent().unwrap()).unwrap();
     fs::write(host.frontdoor(), b"prior frontdoor").unwrap();
@@ -766,6 +860,22 @@ echo build >> "$root/flow"
         ));
         assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
         assert_eq!(read(&host.receipt())["previous_commit"], target);
+        if host.fail == "ok" {
+            assert_eq!(
+                read(&PathBuf::from(
+                    std::env::var_os("OMS_CAPABILITY_RECEIPT").unwrap()
+                )),
+                json!({"schema":1,"requested":["core","research"],
+                    "primary_provider":"agy","allow_missing":true}),
+                "update --no-tools and rollback preserve the selected capabilities"
+            );
+            assert!(
+                !host
+                    .root
+                    .join("config/oh-my-setting/capabilities.json")
+                    .exists()
+            );
+        }
         assert_eq!(
             fs::read_to_string(host.root.join("flow")).unwrap(),
             "build\nproof\n",
@@ -1199,8 +1309,55 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     assert_eq!(fingerprint(), missing);
 }
 
+fn run_fixture_cron(root: &Path) -> String {
+    let cron = fs::read_to_string(root.join("cron")).unwrap();
+    let command = cron
+        .lines()
+        .find_map(|line| line.strip_prefix("17 4 * * * "))
+        .unwrap();
+    let scheduled = Command::new("/bin/sh")
+        .args(["-c", command])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        scheduled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scheduled.stderr)
+    );
+    fs::read_to_string(root.join("scheduled-environment")).unwrap()
+}
+
 #[test]
 fn native_configuration_and_services() {
+    if let Some(root) = std::env::var_os("OMS_LIFECYCLE_SCHEDULER_PATHS_FIXTURE") {
+        let root = PathBuf::from(root);
+        let source = root.join("source");
+        success(call(
+            "install-autoupdate",
+            &["--method", "cron"],
+            &source,
+            &NativeServices::default(),
+        ));
+        let environment = run_fixture_cron(&root);
+        assert_eq!(
+            environment
+                .lines()
+                .skip(9)
+                .map(PathBuf::from)
+                .collect::<Vec<_>>(),
+            [
+                "selected tools.json",
+                "custom codex",
+                "custom codex/config.toml",
+                "custom claude/settings.json",
+                "custom pi",
+            ]
+            .map(|path| source.join(path))
+        );
+        return;
+    }
     if let Some(root) =
         std::env::var_os("OMS_LIFECYCLE_SYSTEMD_UNINSTALL_FIXTURE").map(PathBuf::from)
     {
@@ -1282,6 +1439,14 @@ esac
             .env("XDG_CONFIG_HOME", fixture.0.join("config"))
             .env("XDG_DATA_HOME", fixture.0.join("data"))
             .env("XDG_STATE_HOME", fixture.0.join("state"))
+            .env("XDG_CACHE_HOME", fixture.0.join("cache"))
+            .env("CARGO_HOME", fixture.0.join("cargo home'$(unused)%"))
+            .env("RUSTUP_HOME", fixture.0.join("rustup home$literal"))
+            .env("RUSTUP_TOOLCHAIN", "must-not-be-persisted")
+            .env(
+                "OMS_CAPABILITY_RECEIPT",
+                fixture.0.join("selected capabilities.json"),
+            )
             .env("TMPDIR", &fixture.0)
             .env("OMS_LIFECYCLE_FIXTURE", &fixture.0)
             .env(
@@ -1616,6 +1781,62 @@ esac
     let cron = fs::read_to_string(root.join("cron")).unwrap();
     assert!(cron.contains(" auto-update apply"));
     assert!(!cron.contains(".sh"));
+    let cargo_home = PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
+    let cargo = cargo_home.join("bin/cargo");
+    fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+    fs::write(&cargo, format!(
+        "#!/bin/sh\n[ \"$1\" = --version ] || exit 9\nprintf '%s\\n' \"$CARGO_HOME\" \"$RUSTUP_HOME\" \"$XDG_CONFIG_HOME\" \"$XDG_DATA_HOME\" \"$XDG_STATE_HOME\" \"$XDG_CACHE_HOME\" \"$OMS_INSTALL_RECEIPT\" \"$OMS_CAPABILITY_RECEIPT\" \"${{RUSTUP_TOOLCHAIN-unset}}\" \"${{OH_MY_SETTING_TOOL_LOCK-}}\" \"${{CODEX_HOME-}}\" \"${{OMS_CODEX_CONFIG-}}\" \"${{OMS_CLAUDE_SETTINGS-}}\" \"${{PI_CODING_AGENT_DIR-}}\" > '{}/scheduled-environment'\n",
+        root.display()
+    )).unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+    let scheduled_oms = home.join(".local/bin/oms");
+    fs::create_dir_all(scheduled_oms.parent().unwrap()).unwrap();
+    fs::write(&scheduled_oms, "#!/bin/sh\nexec cargo --version\n").unwrap();
+    fs::set_permissions(&scheduled_oms, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        run_fixture_cron(&root),
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\nunset\n\n\n\n\n\n",
+            cargo_home.display(),
+            root.join("rustup home$literal").display(),
+            root.join("config").display(),
+            root.join("data").display(),
+            root.join("state").display(),
+            root.join("cache").display(),
+            root.join("config/oh-my-setting/install.json").display(),
+            root.join("selected capabilities.json").display()
+        )
+    );
+    let overrides = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "native_configuration_and_services",
+            "--nocapture",
+        ])
+        .env("OMS_LIFECYCLE_SCHEDULER_PATHS_FIXTURE", &root)
+        .env("OH_MY_SETTING_TOOL_LOCK", "selected tools.json")
+        .env("CODEX_HOME", "custom codex")
+        .env("OMS_CODEX_CONFIG", "custom codex/config.toml")
+        .env("OMS_CLAUDE_SETTINGS", "custom claude/settings.json")
+        .env("PI_CODING_AGENT_DIR", "custom pi")
+        .output()
+        .unwrap();
+    assert!(
+        overrides.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&overrides.stdout),
+        String::from_utf8_lossy(&overrides.stderr)
+    );
+    fs::remove_file(scheduled_oms).unwrap();
+    success(call(
+        "install-autoupdate",
+        &["--method", "cron", "--check-only"],
+        &source,
+        &host,
+    ));
+    let check_cron = fs::read_to_string(root.join("cron")).unwrap();
+    assert!(check_cron.contains(" auto-update check"));
+    assert!(!check_cron.contains(" auto-update apply"));
     success(call("uninstall-autoupdate", &[], &source, &host));
     write(
         &home.join(".claude.json"),
