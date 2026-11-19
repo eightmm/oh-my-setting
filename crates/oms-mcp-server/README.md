@@ -301,10 +301,15 @@ incompatible extreme-stack behaviors.
 
 [`parser-reference.json`](tests/parser-reference.json) contains the original
 43 adversarial exchanges plus 27 boundary/domain/deep-resource exchanges.
-Expectations were captured from the reference, never the candidate. Long
+Parser expectations were captured from the reference, never the candidate. Long
 requests/responses use lossless repeated UTF-8 chunks with lengths and SHA-256
 of the expanded bytes. This removes duplicate fixture bulk without changing the
 frozen bytes. The metadata records runtime, source digest and the 3.11 probe.
+The CC-04 catalog addition updates only the `nonfinite-list-params` response's
+tool list from the independent `definitions.json` fixture: `oms_output_read`
+precedes `oms_state_compact`. Its non-finite request, response envelope, other
+69 exchanges and all frozen source/chunk hashes remain unchanged. This is a
+catalog payload update, not a new parser reference or a relaxed comparison.
 [`value-reference.json`](tests/value-reference.json) independently freezes
 canonical metadata, graph Unicode fields and the raw-path result error.
 
