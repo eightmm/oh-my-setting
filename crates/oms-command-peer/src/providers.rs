@@ -308,7 +308,7 @@ fn route_with_source(
     }
     if target.provider == "claude"
         && !resolved.is_empty()
-        && !matches!(resolved.as_str(), "low" | "medium" | "high" | "max")
+        && !matches!(resolved.as_str(), "low" | "medium" | "high" | "xhigh" | "max")
     {
         return fail("Claude does not support the requested effort");
     }
@@ -3732,6 +3732,14 @@ mod bridge_route_tests {
         let automatic = resolve_route(source, "codex", "", "auto", "worker").unwrap();
         assert!(!automatic.model.is_empty());
         assert!(!automatic.explicit);
+        for effort in ["xhigh", "max"] {
+            let claude =
+                resolve_route(source, "claude", "claude-opus-5-5", effort, "worker").unwrap();
+            assert_eq!(claude.effort, effort);
+            assert_eq!(claude.model, "claude-opus-5-5");
+            assert!(claude.explicit);
+        }
+        assert!(resolve_route(source, "claude", "claude-opus-5-5", "ultra", "worker").is_err());
         assert!(resolve_route(source, "", "", "", "worker").is_err());
         assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());
     }

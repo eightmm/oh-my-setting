@@ -701,6 +701,8 @@ fn routing_defaults_order_and_validation_edges() {
         String::from_utf8_lossy(&result.1)
             .contains("model = \"gpt-6-astra\"\nmodel_reasoning_effort = \"low\"")
     );
+    let claude = f.ok(&["render", "--name", "builder", "--provider", "claude"]);
+    assert!(String::from_utf8_lossy(&claude).contains("model: claude-opus-5-5\neffort: high\n"));
     data["tiers"]["routine"].as_array_mut().unwrap().pop();
     let result = apply(&data);
     assert_eq!(result.0, 0);

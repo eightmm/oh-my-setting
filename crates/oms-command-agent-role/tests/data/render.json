@@ -2,16 +2,16 @@
   {
     "role": "builder",
     "text": "# Role: builder\n\nBUILDER-STRATEGY\n\n## Mandate\n\n- Build \"quoted\" \\ paths café.\n  Keep detail.\n\nSecond paragraph.\n\n## Rules\n\nKeep \"\"\" blocks.\n",
-    "claude-override": "---\nname: oms-builder\ndescription: \"Build \\\"quoted\\\" \\\\ paths café. Keep detail.\"\ntools: Read, Grep, Glob\nmodel: claude-sonnet-5-5\n---\n\n# Role: builder\n\nBUILDER-STRATEGY\n\n## Mandate\n\n- Build \"quoted\" \\ paths café.\n  Keep detail.\n\nSecond paragraph.\n\n## Rules\n\nKeep \"\"\" blocks.\n",
-    "claude-bundled": "---\nname: oms-builder\ndescription: \"Build \\\"quoted\\\" \\\\ paths café. Keep detail.\"\ntools: Read, Grep, Glob, Edit, Write, Bash\nmodel: claude-sonnet-5-5\n---\n\n# Role: builder\n\nBUILDER-STRATEGY\n\n## Mandate\n\n- Build \"quoted\" \\ paths café.\n  Keep detail.\n\nSecond paragraph.\n\n## Rules\n\nKeep \"\"\" blocks.\n",
+    "claude-override": "---\nname: oms-builder\ndescription: \"Build \\\"quoted\\\" \\\\ paths café. Keep detail.\"\ntools: Read, Grep, Glob\nmodel: claude-sonnet-5-5\neffort: medium\n---\n\n# Role: builder\n\nBUILDER-STRATEGY\n\n## Mandate\n\n- Build \"quoted\" \\ paths café.\n  Keep detail.\n\nSecond paragraph.\n\n## Rules\n\nKeep \"\"\" blocks.\n",
+    "claude-bundled": "---\nname: oms-builder\ndescription: \"Build \\\"quoted\\\" \\\\ paths café. Keep detail.\"\ntools: Read, Grep, Glob, Edit, Write, Bash\nmodel: claude-sonnet-5-5\neffort: medium\n---\n\n# Role: builder\n\nBUILDER-STRATEGY\n\n## Mandate\n\n- Build \"quoted\" \\ paths café.\n  Keep detail.\n\nSecond paragraph.\n\n## Rules\n\nKeep \"\"\" blocks.\n",
     "codex-override": "name = \"oms-builder\"\ndescription = \"Build \\\"quoted\\\" \\\\ paths café. Keep detail.\"\nmodel = \"gpt-6.1-terra\"\nmodel_reasoning_effort = \"medium\"\nsandbox_mode = \"read-only\"\ndeveloper_instructions = \"\"\"\n# Role: builder\n\nBUILDER-STRATEGY\n\n## Mandate\n\n- Build \"quoted\" \\\\ paths café.\n  Keep detail.\n\nSecond paragraph.\n\n## Rules\n\nKeep \\\"\\\"\\\" blocks.\n\"\"\"\n",
     "codex-bundled": "name = \"oms-builder\"\ndescription = \"Build \\\"quoted\\\" \\\\ paths café. Keep detail.\"\nmodel = \"gpt-6.1-terra\"\nmodel_reasoning_effort = \"medium\"\nsandbox_mode = \"workspace-write\"\ndeveloper_instructions = \"\"\"\n# Role: builder\n\nBUILDER-STRATEGY\n\n## Mandate\n\n- Build \"quoted\" \\\\ paths café.\n  Keep detail.\n\nSecond paragraph.\n\n## Rules\n\nKeep \\\"\\\"\\\" blocks.\n\"\"\"\n"
   },
   {
     "role": "researcher",
     "text": "# Title\n\nRESEARCHER-STRATEGY\n\nFirst prose café.\nWrapped line.\n\nSecond prose.\n",
-    "claude-override": "---\nname: oms-researcher\ndescription: \"First prose café. Wrapped line.\"\ntools: Read, Grep, Glob\nmodel: claude-haiku-5-5\n---\n\n# Title\n\nRESEARCHER-STRATEGY\n\nFirst prose café.\nWrapped line.\n\nSecond prose.\n",
-    "claude-bundled": "---\nname: oms-researcher\ndescription: \"First prose café. Wrapped line.\"\ntools: Read, Grep, Glob\nmodel: claude-haiku-5-5\n---\n\n# Title\n\nRESEARCHER-STRATEGY\n\nFirst prose café.\nWrapped line.\n\nSecond prose.\n",
+    "claude-override": "---\nname: oms-researcher\ndescription: \"First prose café. Wrapped line.\"\ntools: Read, Grep, Glob\nmodel: claude-haiku-5-5\neffort: low\n---\n\n# Title\n\nRESEARCHER-STRATEGY\n\nFirst prose café.\nWrapped line.\n\nSecond prose.\n",
+    "claude-bundled": "---\nname: oms-researcher\ndescription: \"First prose café. Wrapped line.\"\ntools: Read, Grep, Glob\nmodel: claude-haiku-5-5\neffort: low\n---\n\n# Title\n\nRESEARCHER-STRATEGY\n\nFirst prose café.\nWrapped line.\n\nSecond prose.\n",
     "codex-override": "name = \"oms-researcher\"\ndescription = \"First prose café. Wrapped line.\"\nmodel = \"gpt-6-luna\"\nmodel_reasoning_effort = \"low\"\nsandbox_mode = \"read-only\"\ndeveloper_instructions = \"\"\"\n# Title\n\nRESEARCHER-STRATEGY\n\nFirst prose café.\nWrapped line.\n\nSecond prose.\n\"\"\"\n",
     "codex-bundled": "name = \"oms-researcher\"\ndescription = \"First prose café. Wrapped line.\"\nmodel = \"gpt-6-luna\"\nmodel_reasoning_effort = \"low\"\nsandbox_mode = \"read-only\"\ndeveloper_instructions = \"\"\"\n# Title\n\nRESEARCHER-STRATEGY\n\nFirst prose café.\nWrapped line.\n\nSecond prose.\n\"\"\"\n"
   },
@@ -26,8 +26,8 @@
   {
     "role": "release-engineer",
     "text": "# Title\n\n## Mandate\n\nObserve.\n",
-    "claude-override": "---\nname: oms-release-engineer\ndescription: \"Observe.\"\ntools: Read, Grep, Glob\nmodel: claude-sonnet-5-5\n---\n\n# Title\n\n## Mandate\n\nObserve.\n",
-    "claude-bundled": "---\nname: oms-release-engineer\ndescription: \"Observe.\"\ntools: Read, Grep, Glob\nmodel: claude-sonnet-5-5\n---\n\n# Title\n\n## Mandate\n\nObserve.\n",
+    "claude-override": "---\nname: oms-release-engineer\ndescription: \"Observe.\"\ntools: Read, Grep, Glob\nmodel: claude-sonnet-5-5\neffort: medium\n---\n\n# Title\n\n## Mandate\n\nObserve.\n",
+    "claude-bundled": "---\nname: oms-release-engineer\ndescription: \"Observe.\"\ntools: Read, Grep, Glob\nmodel: claude-sonnet-5-5\neffort: medium\n---\n\n# Title\n\n## Mandate\n\nObserve.\n",
     "codex-override": "name = \"oms-release-engineer\"\ndescription = \"Observe.\"\nmodel = \"gpt-6.1-terra\"\nmodel_reasoning_effort = \"medium\"\nsandbox_mode = \"read-only\"\ndeveloper_instructions = \"\"\"\n# Title\n\n## Mandate\n\nObserve.\n\"\"\"\n",
     "codex-bundled": "name = \"oms-release-engineer\"\ndescription = \"Observe.\"\nmodel = \"gpt-6.1-terra\"\nmodel_reasoning_effort = \"medium\"\nsandbox_mode = \"read-only\"\ndeveloper_instructions = \"\"\"\n# Title\n\n## Mandate\n\nObserve.\n\"\"\"\n"
   },

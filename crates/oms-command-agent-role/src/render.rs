@@ -90,6 +90,7 @@ pub(crate) fn render(
         ];
         if let Some(route) = route {
             lines.push(format!("model: {}", route["model"].as_str().unwrap()));
+            lines.push(format!("effort: {}", route["effort"].as_str().unwrap()));
         }
         lines.extend(["---".into(), String::new(), body]);
         return Ok(lines.join("\n"));

@@ -751,7 +751,7 @@ fn observed_model<'a>(provider: &str, screen: &'a str) -> Option<&'a str> {
                 }
                 "claude" if line.contains(" | ctx ") => {
                     let (model, _) = line.split_once(" | ")?;
-                    if !["Sonnet ", "Opus ", "Haiku "]
+                    if !["Sonnet ", "Opus ", "Haiku ", "Fable "]
                         .iter()
                         .any(|prefix| model.starts_with(prefix))
                     {
@@ -958,6 +958,11 @@ mod tests {
                 "Sonnet 5.5",
             ),
             (
+                "claude",
+                "  Fable 5.2 | branch | xhigh+think | ctx [----] 6%",
+                "Fable 5.2",
+            ),
+            (
                 "antigravity",
                 "Gemini 4 Hydrogen (High) (Antigravity ) | ctx 2% | branch",
                 "Gemini 4 Hydrogen (High)",
@@ -966,6 +971,7 @@ mod tests {
             assert_eq!(observed_model(provider, screen), Some(model));
         }
         assert_eq!(observed_model("codex", "Probably GPT-6.2-Sol"), None);
+        assert_eq!(observed_model("claude", "Probably Fable 5.2"), None);
     }
 
     #[test]
