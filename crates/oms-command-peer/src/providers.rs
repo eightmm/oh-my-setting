@@ -308,7 +308,10 @@ fn route_with_source(
     }
     if target.provider == "claude"
         && !resolved.is_empty()
-        && !matches!(resolved.as_str(), "low" | "medium" | "high" | "xhigh" | "max")
+        && !matches!(
+            resolved.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "max"
+        )
     {
         return fail("Claude does not support the requested effort");
     }
