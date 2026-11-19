@@ -986,7 +986,10 @@ fn output_capture_reads() {
     let (_, other_args) = retained(&other_repo, name, b"other capture\n");
     let mut foreign = args.clone();
     foreign["repo"] = json!(other_repo);
-    rejected(&c.tool("oms_output_read", foreign), "capture_scope_mismatch");
+    rejected(
+        &c.tool("oms_output_read", foreign),
+        "capture_scope_mismatch",
+    );
     good(&c.tool("oms_output_read", other_args.clone())); // Main's explicit repository choice.
     let mut child = Client::new(&source, &repo, false, false, true);
     good(&child.tool("oms_output_read", args.clone()));
@@ -999,7 +1002,11 @@ fn output_capture_reads() {
     std::fs::create_dir(&control_repo).unwrap();
     let control_root = oms_safe_fs::Root::open(&control_repo).unwrap();
     let mut control_digest = digest.clone();
-    assert!(control_digest.retained_capture(&control_root, name).is_err());
+    assert!(
+        control_digest
+            .retained_capture(&control_root, name)
+            .is_err()
+    );
     let control = oms_output_capture::capture_metadata(
         control_root.physical_root(),
         name,
@@ -1012,7 +1019,10 @@ fn output_capture_reads() {
     );
     let mut missing_repo = args.clone();
     missing_repo["repo"] = json!(t.0.join("missing-repo"));
-    rejected(&c.tool("oms_output_read", missing_repo), "invalid_repository");
+    rejected(
+        &c.tool("oms_output_read", missing_repo),
+        "invalid_repository",
+    );
 
     let path = repo.join(".oms/artifacts/output-digest").join(name);
     std::fs::write(&path, b"changed").unwrap();
@@ -1051,7 +1061,12 @@ fn output_capture_reads() {
         let (mut withheld, mut args) = retained(&repo, name, sensitive.as_bytes());
         withheld.withhold("outbound content scan".into());
         let withheld = withheld.json();
-        for key in ["capture_ref", "capture_sha256", "read_tool", "read_arguments"] {
+        for key in [
+            "capture_ref",
+            "capture_sha256",
+            "read_tool",
+            "read_arguments",
+        ] {
             assert!(withheld["raw"].get(key).is_none());
         }
         args["limit"] = json!(4);

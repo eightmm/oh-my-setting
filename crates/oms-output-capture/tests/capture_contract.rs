@@ -332,7 +332,8 @@ fn pinned_reference_projection_corpus() {
 #[test]
 fn real_capture_reads_and_rejects_unsafe_stores() {
     use oms_output_capture::{
-        CaptureError, READ_CAP, RequestError, read_capture, read_capture_checked, read_stored_capture,
+        CaptureError, READ_CAP, RequestError, read_capture, read_capture_checked,
+        read_stored_capture,
     };
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicUsize, Ordering};
