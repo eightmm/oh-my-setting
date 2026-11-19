@@ -40,6 +40,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Consolidation work packets](CALLABLE-CONSOLIDATION-WORK-PACKETS.md) | Ten scoped follow-ups with reusable APIs, callers and canonical fixtures |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
+| [Memory consolidation](MEMORY-CONSOLIDATION.md) | Proposed incremental Dreaming, evidence-linked recovery lessons, memory validity and existing-owner implementation packets |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 
 ## Overall Main and provider orchestration
@@ -59,6 +60,9 @@ existing owner work, and 15 conditional. LC-01–04 remain separate core lifecyc
 work. These IDs are specifications and evidence references, not 40 mandatory
 projects. The queue records activation conditions, shared-file ownership and the
 implementation handoff; older CP/TM/MR/UX/NF documents retain acceptance detail.
+The [memory consolidation follow-ups](MEMORY-CONSOLIDATION.md) add DR-01–06:
+incremental input preservation and semantic distill first, recovery and validity
+next, with conditional wiki work and observation absorbed into existing RF owners.
 The [graph retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md) supplies the
 retrieval-specific evidence; small correctness fixes use their nearest fixtures,
 while broader ranking/semantic evaluation needs a concrete decision.
