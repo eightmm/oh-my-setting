@@ -989,7 +989,9 @@ fn frame_with_capacity(
 
         let groups = provider_groups(&all);
         let main_identity = unique_live_main(&all);
-        let direct_work = calls.iter().any(|call| direct_main_work(call, main_identity));
+        let direct_work = calls
+            .iter()
+            .any(|call| direct_main_work(call, main_identity));
         let provider_chrome = groups.len() + 1 + 2 * usize::from(direct_work);
         // Reserve the footer, omission count, and at least one selectable row.
         let provider_view = nav.view == View::Auto
@@ -3298,7 +3300,8 @@ mod tests {
                     members.push(json!({"participant":"SECOND", "role":"main", "state":"working"}));
                 }
                 _ => {
-                    members.push(json!({"participant":"att-M", "role":"worker", "state":"working"}));
+                    members
+                        .push(json!({"participant":"att-M", "role":"worker", "state":"working"}));
                 }
             }
             let board = board_frame(
