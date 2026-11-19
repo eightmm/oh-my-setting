@@ -89,7 +89,7 @@ fixture와 함께 고치며, 대규모 retrieval 평가를 기다리지 않는�
 | CC-01 | 유지 | Provider identity/alias/discovery 공유 | 현재 ID validation 차이 교정; target·권한·account 정책은 adapter에 유지 |
 | CC-02 | 유지 | 전체 catalog의 routing consumer | display 20개와 allocation 분리; legacy/empty/unknown 구분 |
 | CC-03 | 흡수 | CC-01의 provider 계약 정리 owner | registry decode만 공유; preview/execute 오류·선택·Claude default 의미 유지 |
-| CC-04 | 유지 | 광고된 output reader와 canonical reference 연결 | 기존 capture core; SHA·root·권한·withhold·응답 cap 보존 |
+| CC-04 | 유지 | [이 tree에서 MCP reader·canonical reference 연결](TOOL-CONTEXT-REVIEW.md) | 기존 capture core; SHA·root·권한·전체 저장본 withhold·응답 cap 보존. 설치 revision/CI 증거는 별도 확인 |
 | CC-05 | 조건부 | Actual installer의 ownership/convergence 정리 | 설치 경로 수정이나 실제 drift가 있을 때; bare/absolute corpus와 rollback 선행 |
 | CC-06 | 흡수 | REL-04와 공통 supervisor API owner | caller별 작은 PR: Plan → graph → task; task API 동등성 전 기존 verify 유지 |
 | CC-07 | 조건부 | Lock cancellation watcher 제거 | 실제 contention/thread 비용 또는 관련 lock 변경; 의미 없는 API 확대 금지 |

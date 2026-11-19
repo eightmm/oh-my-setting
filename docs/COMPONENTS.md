@@ -3204,14 +3204,22 @@ oversized input is rejected before provider argv or prompt files are built.
 
 #### Tool discovery profiles
 
-By default `tools/list` exposes 12 core tools: inbox, repo state, journal,
+By default `tools/list` exposes 13 core tools: inbox, repo state, journal,
 handoff list/read, peer start/result/operations, and graph render/query/trace/
-affected. Set `OMS_MCP_TOOL_PROFILE=full` in the MCP server's environment
-and restart its connection to discover all 27 tools; `core` is the default.
+affected, plus `oms_output_read` for retained output captures. Set
+`OMS_MCP_TOOL_PROFILE=full` in the MCP server's environment and restart its
+connection to discover all 32 tools; `core` is the default.
 The profile is fixed at process startup, so cached discovery is stable.
 Unlisted registered tools remain callable for existing clients: this setting
 reduces discovery overhead, not permissions. Schemas, annotations, UI resources,
 and protocol/Tasks negotiation are identical in both profiles.
+
+`oms_output_read` consumes the `read_arguments` returned by `oms output-digest`
+and reads the verified stored capture without rerunning its command. It supports
+bounded pages, literal search and compact multi-query search, with the existing
+scope/SHA/file checks and a whole-capture outbound check. See the
+[tool context review](TOOL-CONTEXT-REVIEW.md) for the contract and current
+native tool-search boundaries.
 
 
 #### Peer operation results

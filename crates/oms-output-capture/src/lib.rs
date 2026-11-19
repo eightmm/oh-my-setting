@@ -528,8 +528,21 @@ pub fn read_stored_capture(
 
 /// Validate the request, read one verified snapshot, then project it without rerunning a command.
 pub fn read_capture(root: &oms_safe_fs::Root, arguments: &Json) -> Result<Value, RequestError> {
+    read_capture_checked(root, arguments, |_| Ok(()))
+}
+
+/// Apply an adapter's outbound policy to the same complete verified snapshot.
+/// Validation, filesystem and SHA/range errors retain `read_capture`'s order;
+/// a rejected snapshot never releases the projected page or search results.
+pub fn read_capture_checked(
+    root: &oms_safe_fs::Root,
+    arguments: &Json,
+    validate_snapshot: impl FnOnce(&[u8]) -> Result<(), CaptureError>,
+) -> Result<Value, RequestError> {
     let request = validate_request(root.physical_root(), arguments)?;
     let data =
         read_stored_capture(root, request.name(), READ_CAP).map_err(RequestError::Capture)?;
-    project_snapshot(&request, &data).map_err(RequestError::Capture)
+    let payload = project_snapshot(&request, &data).map_err(RequestError::Capture)?;
+    validate_snapshot(&data).map_err(RequestError::Capture)?;
+    Ok(payload)
 }

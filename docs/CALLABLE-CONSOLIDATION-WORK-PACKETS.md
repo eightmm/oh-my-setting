@@ -4,7 +4,10 @@
 [`f9a695ea2de90a160754252c1ee9cbaa4dd7a488`](https://github.com/eightmm/oh-my-setting/commit/f9a695ea2de90a160754252c1ee9cbaa4dd7a488).
 #265 작성 기준은 main `283ab6c1`이며, 이번 채택 재분류의 main `189bfdaa`까지 runtime은 동일하다.
 [조사와 source 근거](CALLABLE-CONSOLIDATION-AUDIT.md)를 먼저 읽는다.
-**CC-01~10은 후속 구현 명세이며 이 문서 PR의 runtime 변경이 아니다.**
+**CC-01~10의 최초 문서 PR은 후속 구현 명세였으며 runtime을 바꾸지 않았다.**
+
+2026-11-19 갱신: 아래 CC-04는 이 tree에서 reference producer와 MCP reader를 연결했다.
+[재검토와 구현 범위](TOOL-CONTEXT-REVIEW.md)를 참고한다. 나머지 패킷은 기존 채택 조건을 유지한다.
 
 ## 채택 상태와 의존 관계
 
@@ -109,9 +112,14 @@ Retry/cooldown 정책 변경은 #261 REL-02/03에 남긴다.
 **Owner:** `oms-output-capture`를 canonical reference/read core로 사용하고,
 `oms-output::OutputDigest::retained_capture`, peer `digest::run`, MCP catalog/handler를 연결한다.
 
-**현재 결함:** 실제 digest는 `oms_output_read`와 arguments를 반환하지만 tool은 등록되지 않았다.
+**감사 기준 결함:** 실제 digest는 `oms_output_read`와 arguments를 반환하지만 tool은 등록되지 않았다.
 `oms-output-capture`의 page/search/batch reader는 구현되어 있고 peer Cargo dependency도 있으나
 production caller는 없다. `retained_capture`가 같은 filename/hash/scope 계산을 다시 한다.
+
+**이 tree의 연결:** `retained_capture`는 canonical reference를 사용하며 `oms_output_read`는
+core/full MCP catalog와 handler에 등록된다. 기존 reader에 전체 저장본의 outbound 검사를
+연결하고 producer→reader fixture를 추가한다. 아래 계약은 이 연결의 회귀 조건으로 유지한다.
+Runtime 설치·live provider 동작은 해당 revision과 별도 실행 증거로 확인한다.
 
 **작업:**
 

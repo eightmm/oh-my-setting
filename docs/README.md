@@ -38,6 +38,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Work inspection](WORK-INSPECTION.md) | Evidence matrix, next-step explanation and return briefs |
 | [Callable consolidation audit](CALLABLE-CONSOLIDATION-AUDIT.md) | Actual CLI/MCP/core wiring, duplication and boundaries to preserve |
 | [Consolidation work packets](CALLABLE-CONSOLIDATION-WORK-PACKETS.md) | Ten scoped follow-ups with reusable APIs, callers and canonical fixtures |
+| [Tool context review](TOOL-CONTEXT-REVIEW.md) | November 19 source review, implemented CC-04 output reader and native discovery boundaries |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
 | [Memory consolidation](MEMORY-CONSOLIDATION.md) | Proposed incremental Dreaming, evidence-linked recovery lessons, memory validity and existing-owner implementation packets |

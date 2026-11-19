@@ -986,11 +986,8 @@ impl OutputDigest {
         {
             return Err("invalid retained capture descriptor");
         }
-        let scope = format!(
-            "{:x}",
-            Sha256::digest(format!("{repo}\0{name}\0{}", self.raw.sha256).as_bytes())
-        );
-        let capture_ref = format!("output:{name}:{}:{scope}", self.raw.sha256);
+        let capture_ref =
+            oms_output_capture::capture_reference(root.physical_root(), name, &self.raw.sha256)?;
         self.raw.read_arguments =
             Some(serde_json::json!({"repo": repo, "capture_ref": capture_ref}));
         self.raw.capture_ref = Some(capture_ref);
@@ -1418,6 +1415,20 @@ mod tests {
             doc.raw.capture_ref.as_deref(),
             Some(format!("output:{name}:{}:{scope}", doc.raw.sha256).as_str())
         );
+        let metadata = oms_output_capture::capture_metadata(
+            capture_root.physical_root(),
+            name,
+            &doc.raw.sha256,
+        )
+        .unwrap();
+        assert_eq!(
+            doc.raw.capture_ref.as_deref(),
+            metadata["capture_ref"].as_str()
+        );
+        assert_eq!(
+            doc.raw.read_arguments.as_ref(),
+            Some(&metadata["read_arguments"])
+        );
         let mut too_large = doc.clone();
         too_large.raw.bytes = READ_CAP + 1;
         assert!(too_large.retained_capture(&capture_root, name).is_err());
@@ -1432,6 +1443,9 @@ mod tests {
         assert!(doc.raw.capture_ref.is_some());
         doc.withhold("blocked".into());
         assert!(doc.raw.capture_ref.is_none());
+        assert!(doc.raw.read_tool.is_none());
+        assert!(doc.raw.read_arguments.is_none());
+        assert!(doc.retained_capture(&capture_root, name).is_err());
         drop(capture_root);
         std::fs::remove_dir(&capture_dir).unwrap();
         let number_source = format!(

@@ -1132,7 +1132,10 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "oms-context",
+ "oms-output",
+ "oms-output-capture",
  "oms-safe-fs",
+ "oms-scrub",
  "regex",
  "rustix",
  "ryu",
@@ -1150,6 +1153,7 @@ name = "oms-output"
 version = "0.1.0"
 dependencies = [
  "oms-json",
+ "oms-output-capture",
  "oms-safe-fs",
  "regex",
  "serde",
