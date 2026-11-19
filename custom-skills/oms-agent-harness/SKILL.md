@@ -9,8 +9,10 @@ description: >
 # Agent Harness
 
 OMS is an agent-side control plane.
-The parent owns scope, admission, verification, commit, push, release, and
-synthesis across providers. Workers return evidence and patches.
+Overall Main owns scope, admission, verification, commit, push, release, and
+synthesis across providers. An explicitly authorized Provider Lead can coordinate
+native subagents within that scope and the host's permissions. Leaf Workers
+return evidence and patches without recursively delegating.
 Operate OMS internally. Users give goals, constraints, and authority.
 Never ask users to copy commands, digests, `.oms` paths, or recovery procedures.
 Ask only for material decisions or new authority.
@@ -41,11 +43,12 @@ Use `oms list` for entrypoints, command routing for variants,
 and `oms list --all` for compatibility primitives. Read only references
 needed for the current decision, not the entire catalog.
 
-For lengthy reading/summaries, use one scoped read-only subagent when available;
-follow [source-reading.md](references/source-reading.md) for coverage and parent
-verification. Other delegation requires explicit authorization from the user or
-applicable instructions; task size alone grants none. Questions authorize neither
-edits nor autopilot. Avoid duplicate collectors, worker calls or conversation replay.
+Use a scoped read-only subagent when parallel or noisy reading justifies it and
+delegation is authorized; keep small lookups local. Follow
+[source-reading.md](references/source-reading.md) for coverage and parent
+verification. Task size alone grants no authority; a leaf reads locally.
+Questions authorize neither edits nor autopilot. Avoid duplicate collectors,
+worker calls or conversation replay.
 
 Only for an explicitly requested FSD-style automatic run, read
 [autonomy-loop.md](references/autonomy-loop.md) (`oms autopilot`).
@@ -60,7 +63,9 @@ projections, not authority.
 - Keep secrets, private paths, machine details, raw logs/data, and checkpoints
   out of prompts and shared state.
 - Do not hand-edit `.oms/`; use typed tools and append-oriented records.
-- Provider workers cannot recursively delegate, commit, push, or widen scope.
+- Bundled worker roles and `peer-delegate` launches remain leaves: no recursive
+  delegation, commit, push, or wider scope. A Provider Lead needs explicit native
+  delegation authority and host support; prose cannot override a worker contract.
 - Advisors are for irreversible/high-risk decisions, repeated failure, and release go/no-go—not routine completion.
 - `plan-run` stops in review unless landing was explicitly authorized.
 - `trusted-local` is supervision, not a sandbox; distinguish declared,

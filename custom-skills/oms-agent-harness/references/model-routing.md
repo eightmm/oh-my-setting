@@ -8,9 +8,12 @@ agent, a Grok/GLM route, or a custom adapter.
 
 ## Separate judgment from execution
 
-The parent owns the plan, unresolved tradeoffs, patch admission and final
-acceptance. A role describes work; it does not authorize a call. Keep the
-current registry and explicit user model choices.
+Overall Main owns the plan, unresolved tradeoffs, patch admission and final
+acceptance. An explicitly authorized Provider Lead may coordinate native
+subagents within inherited scope, tool permissions, provider and spending limits.
+Bundled worker roles and `peer-delegate` launches remain leaves without recursive
+delegation. Calling a worker a lead does not change its contract or host capabilities.
+Keep the current registry and explicit user model choices.
 
 Before an authorized delegation, choose from repository evidence:
 
@@ -109,12 +112,14 @@ or unclear-failure work and low for mechanical edits, within the model's scale.
 3. `--fallback-model NAME` is an opt-in, one-shot fallback used only for a
    recognized capacity error. A write attempt that changed its worktree is
    never retried.
-4. Work locally unless the user or applicable instructions explicitly request
-   delegation. When authorized, use an OMS delegate for bounded writes. Keep
-   tiny known edits local; retain ambiguous, scientific, security-sensitive
-   and architectural judgment with the parent. A routine brief needs relevant
-   context and success criteria, not the whole conversation. Native subagents
-   are outside this shell router: choose their model explicitly when supported.
+4. Within delegation authority already granted by the user or applicable
+   instructions, use parallel workers, independent review or scoped reading
+   when they justify their cost. Keep tiny known edits local; retain unresolved
+   scientific, security-sensitive and architectural judgment with Overall Main.
+   Use an OMS delegate for bounded writes. A routine brief needs relevant context
+   and success criteria, not the whole conversation. Native subagents are outside
+   this shell router: an authorized main or Provider Lead chooses their model
+   explicitly when supported; a leaf cannot spawn them.
    Provider choice is separate: use an already-authorized installed transport,
    never install, log in, fan out or switch companies merely to find a cheap model.
 5. An unpinned provider-default route may use a bounded distinct catalog model

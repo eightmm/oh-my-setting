@@ -243,29 +243,56 @@ fn skill_router_detaches_context_pressure_handoff_capture_via_host_services() {
     });
     let host = RecordingHost::default();
     let cancel = AtomicBool::new(false);
-    let (code, stdout, stderr) = run_with_services(
-        "skill-router",
-        &[],
-        payload.to_string().as_bytes(),
-        &repo,
-        tmp.path(),
-        &cancel,
-        &host,
-    );
-    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
-    assert!(
-        String::from_utf8_lossy(&stdout).contains("context"),
-        "stdout: {}",
-        String::from_utf8_lossy(&stdout)
-    );
+    for (used, severity, captures) in [
+        (88000, Some("context low"), 1),
+        (88000, None, 1),
+        (94000, Some("context nearly exhausted"), 2),
+        (94000, None, 2),
+        (20000, None, 2),
+        (88000, Some("context low"), 3),
+    ] {
+        let usage = serde_json::json!({
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {"total_tokens": used},
+                "model_context_window": 100000,
+            },
+        });
+        fs::write(&transcript, format!("{usage}\n")).expect("update rollout");
+        let (code, stdout, stderr) = run_with_services(
+            "skill-router",
+            &[],
+            payload.to_string().as_bytes(),
+            &repo,
+            tmp.path(),
+            &cancel,
+            &host,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let out = String::from_utf8_lossy(&stdout);
+        if let Some(severity) = severity {
+            assert!(out.contains(severity), "stdout: {out}");
+            assert!(out.contains("native in-session compaction"), "{out}");
+            assert!(out.contains("unavailable or fails"), "{out}");
+            assert!(out.contains("oms session-handoff list"), "{out}");
+            assert!(!out.contains("migrate to a fresh session"), "{out}");
+            assert!(!out.contains("continue in a fresh session"), "{out}");
+            assert!(!out.contains("wrap up now"), "{out}");
+        } else {
+            assert!(!out.contains("native in-session compaction"), "{out}");
+        }
+        assert_eq!(host.detached().len(), captures);
+    }
 
     let calls = host.detached();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "session-handoff");
-    assert_eq!(calls[0].1[0], "capture");
-    assert!(calls[0].1.contains(&"--agent".to_owned()));
-    assert!(calls[0].1.contains(&"codex".to_owned()));
-    assert!(calls[0].1.contains(&"sess-router-1".to_owned()));
+    for (tool, args, cwd) in calls {
+        assert_eq!(tool, "session-handoff");
+        assert_eq!(args[0], "capture");
+        assert!(args.contains(&"--agent".to_owned()));
+        assert!(args.contains(&"codex".to_owned()));
+        assert!(args.contains(&"sess-router-1".to_owned()));
+        assert_eq!(cwd, repo);
+    }
 }
 
 fn hook(tmp: &TempDir, name: &str, args: &[&str], stdin: &[u8]) -> (i32, String, String) {

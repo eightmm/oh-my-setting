@@ -694,7 +694,7 @@ fn pressure(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
             );
             if panel() {
                 return format!(
-                    "[oms] ~{}% context left — handoff digest capture {}; check capture completion with oms session-handoff list before compacting at the next step boundary.",
+                    "[oms] ~{}% context left — fallback handoff capture {}; keep working in this session and let supported native compaction handle pressure. Check capture completion with oms session-handoff list if a handoff becomes necessary.",
                     left as u64,
                     if started { "started" } else { "was skipped" }
                 );
@@ -710,33 +710,20 @@ fn pressure(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
         v,
         json!({"action":"context_pressure","status":new_stage,"percent_left":(left*10.).round_ties_even()/10.,"source":source,"capture":if captured{"started"}else{"skipped"}}),
     );
+    let mut hint = format!(
+        "[oms] context {} (~{}% left) — finish or record the current step, then prefer native in-session compaction (/compact in supported Claude/Codex sessions). If compaction is unavailable or fails, preserve task and verification state and verify a handoff with oms session-handoff list before resuming elsewhere. A threshold alone does not require a fresh session. Handoff capture {}.",
+        if new_stage == "urgent" {
+            "nearly exhausted"
+        } else {
+            "low"
+        },
+        left as u64,
+        if captured { "started" } else { "was skipped" }
+    );
     if panel() {
-        return format!(
-            "[oms] context {} (~{}% left) — finish the current step, set your status, then compact in place (Claude: /compact; Codex: /compact) — the panel keeps your room and task.",
-            if new_stage == "warn" {
-                "low"
-            } else {
-                "low, compact now"
-            },
-            left as u64
-        );
+        hint.push_str(" In-place compaction keeps the panel room and task.");
     }
-    if new_stage == "urgent" {
-        format!(
-            "[oms] context nearly exhausted (~{}% left) — wrap up now: finish or record the current step, then migrate to a fresh session; do not start new multi-step work.",
-            left as u64
-        )
-    } else {
-        format!(
-            "[oms] context low (~{}% left) — a handoff digest capture {}; finish the current atomic step, then continue in a fresh session from `oms session-handoff list` (or keep going deliberately).",
-            left as u64,
-            if captured {
-                "was started"
-            } else {
-                "is worth running"
-            }
-        )
-    }
+    hint
 }
 pub(crate) fn collaboration(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     lifecycle::activity(v, repo, ctx);

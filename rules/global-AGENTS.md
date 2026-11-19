@@ -65,11 +65,14 @@ Default: concise, scoped, evidence-driven.
 - Batch independent calls within combined output budgets; serialize dependencies.
   Re-read changes. Wrap long output: `oms output-digest -- CMD` (keeps exit code
   and full output in a file).
-- Read requested documents and applicable instructions/skills fully; label scoped
-  investigations. Check source size, returned ranges and truncation at every tool
-  layer. Page oversized sources contiguously through EOF; recover gaps or disclose
-  unread scope and defer dependent decisions. Downloads/excerpts cannot prove
-  completeness. Never silently slice output.
+- Read applicable instructions/skills fully. When asked to review a whole
+  artifact, read through EOF and recover gaps. For a targeted source question,
+  read relevant definitions, callers and exceptions; label the inspected scope.
+  Check returned ranges and truncation at every tool layer. Disclose unread
+  scope and defer conclusions that depend on it; excerpts cannot prove full coverage.
+- Prefer supported native in-session compaction under measured context pressure.
+  Keep task/verification snapshots and use a verified handoff if compaction is
+  unavailable or fails; a threshold alone does not require a fresh session.
 - Prefer notifications/bounded waits over polling unchanged logs. Respect host
   limits; timeouts imply neither failure nor restart permission.
 
@@ -94,12 +97,14 @@ Default: concise, scoped, evidence-driven.
 
 ## Multi-Agent Work
 
-- Delegate lengthy reading/summaries to one scoped read-only subagent when
-  available; require coverage, gaps and source anchors. Parent checks decisive
-  text. Other delegation needs explicit user/applicable-instruction authority.
-- For authorized delegation, load `oms-agent-harness`; the parent owns
-  admission, verification and publication.
-  Workers cannot widen authority or recursively delegate.
+- Overall Main owns scope, admission, verification and publication. An explicitly
+  authorized Provider Lead may coordinate native subagents within inherited
+  scope, tool permissions, provider and spending limits. Leaf Workers cannot
+  recursively delegate or widen authority; a role label grants no capability.
+- Delegate when parallel work, independent review or noisy source reading
+  justifies it within existing authority; keep small lookups local. Reading
+  workers return coverage, gaps and source anchors; their parent checks decisive
+  text. For authorized delegation, load `oms-agent-harness`.
 - Scope briefs; skip unchanged heartbeats, keep user updates.
 
 ## Harness
