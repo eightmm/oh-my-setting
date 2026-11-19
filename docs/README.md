@@ -67,6 +67,11 @@ The [graph retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md) supplies the
 retrieval-specific evidence; small correctness fixes use their nearest fixtures,
 while broader ranking/semantic evaluation needs a concrete decision.
 
+[Model upgrade adaptation](MODEL-UPGRADE-ADAPTATION.md) maps current GPT/Codex,
+Claude Code and Antigravity guidance to bounded compatibility fixes and existing
+MR/TM/REL owners. It distinguishes implemented prompt-audit coverage from remaining
+capability, observation, research-permission and subscription-bridge work.
+
 [Bounded team orchestration](TEAM-ORCHESTRATION-PLAN.md) retains the original
 architecture and ten implementation slices. Some contract/admission/projection
 slices are now implemented; interactive native provider sessions remain a separate

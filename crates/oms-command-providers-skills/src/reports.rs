@@ -281,6 +281,7 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
         })
         .collect::<Vec<_>>();
     let mut files = vec![];
+    let mut sources = vec![];
     let mut findings = 0usize;
     let mut global_words = 0usize;
     for (base, kind, depth) in [
@@ -288,18 +289,28 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
         ("roles", "on-demand", 1),
         ("templates", "always", 1),
         ("prompts", "unknown", 1),
-        ("custom-skills", "on-demand", 2),
-        ("templates/project-skills", "on-demand", 2),
+        ("output-styles", "on-demand", 1),
+        ("custom-skills", "on-demand", 6),
+        ("templates/project-skills", "on-demand", 6),
     ] {
         let directory = root.join(base);
+        sources.push(json!({"path":base,"max_depth":depth,"present":directory.is_dir()}));
         if !directory.is_dir() {
             continue;
         }
         for path in walk(&directory, depth, &[])? {
             let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let relative = path
+                .strip_prefix(&directory)
+                .map_err(|_| error("prompt outside source directory"))?;
+            let skill_source = relative.components().count() == 2 && filename == "SKILL.md"
+                || relative
+                    .components()
+                    .nth(1)
+                    .is_some_and(|part| part.as_os_str() == "references");
             if !filename.ends_with(".md")
                 || (base == "templates" && !filename.contains("AGENTS"))
-                || (depth == 2 && filename != "SKILL.md")
+                || (matches!(base, "custom-skills" | "templates/project-skills") && !skill_source)
             {
                 continue;
             }
@@ -321,12 +332,25 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
         }
     }
     let providers=["claude","codex","antigravity"].iter().map(|s|json!({"provider":s,"delivery":"link.sh","global_words":global_words,"with_largest_project_templates_words":null})).collect::<Vec<_>>();
-    let row = json!({"schema":1,"kind":"oms-prompt-audit","root":root.file_name().map(|s|s.to_string_lossy()),"files":files,"duplicates":[],"providers":providers,"findings":findings});
+    let coverage = json!({
+        "basis":"source-file-inventory",
+        "sources":sources,
+        "skill_markdown":"SKILL.md and references/**/*.md",
+        "max_file_bytes":1048576,
+        "symlink_entries":"not_followed",
+        "runtime_generated_prompts":"not_scanned",
+        "runtime_delivery":"not_verified",
+        "duplicate_analysis":"not_run",
+        "semantic_conflict_analysis":"not_run"
+    });
+    let row = json!({"schema":1,"kind":"oms-prompt-audit","root":root.file_name().map(|s|s.to_string_lossy()),"files":files,"duplicates":[],"providers":providers,"findings":findings,"coverage":coverage});
     let mut output = if args.has("--json") {
         Output::json(row)
     } else {
         Output::text(format!(
-            "prompt audit: {} files, {findings} findings\n",
+            "prompt audit: {} files, {findings} findings\n\
+             coverage: source Markdown, including skill references and output styles; \
+             runtime-generated prompts, live delivery, duplicates and semantic conflicts not checked\n",
             files.len()
         ))
     };

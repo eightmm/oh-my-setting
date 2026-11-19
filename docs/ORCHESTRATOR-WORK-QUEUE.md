@@ -21,6 +21,14 @@
 | [#263](https://github.com/eightmm/oh-my-setting/pull/263) | [AR-01~04](REMOTE-ARTIFACT-WORK-PACKETS.md) | 병합된 명세. 선택형 원격 수집·bundle 재개·cache 공간 관리 |
 | [#264](https://github.com/eightmm/oh-my-setting/pull/264) | [Graph retrieval 비교](GRAPH-RETRIEVAL-COMPARISON.md)와 [GR-01~13](GRAPH-RETRIEVAL-WORK-PACKETS.md), native README 교정 | 병합된 비교·명세. Rust/Python/shell/notebook 정확성, worker 전달, 평가, 조건부 semantic/hybrid 실험 |
 | [#265](https://github.com/eightmm/oh-my-setting/pull/265) | [호출 경로·중복 감사](CALLABLE-CONSOLIDATION-AUDIT.md), [CC-01~10](CALLABLE-CONSOLIDATION-WORK-PACKETS.md), MCP/Main swap 문서 교정 | 병합된 명세. 실제 caller, 재사용 대상과 제거 조건 |
+| [#281](https://github.com/eightmm/oh-my-setting/pull/281) | Native Claude xhigh·subagent effort·Fable 관측 호환성 | Draft 구현. 전체 capability 통합은 기존 MR-A/TM owner의 후속 |
+| [#282](https://github.com/eightmm/oh-my-setting/pull/282) | Native compaction 우선 안내, Main/Lead/leaf와 source 읽기 범위 명료화 | Draft 구현·지침. 자동 compaction·runtime lead 승격은 포함하지 않음 |
+
+2026-11-19 [모델 업그레이드 후속](MODEL-UPGRADE-ADAPTATION.md)은 공식 지침과 현재 caller를
+대조해 capability, native 관측, 공개 웹 조사 권한, Responses bridge의 완료 조건을
+기존 MR/TM/REL owner에 연결한다. #258 launch와 #276 full catalog 수정, 병합된 #280
+Dreaming 명세를 복제하지 않는다. Prompt audit는 스킬 참조·출력 스타일까지 점검하되
+runtime prompt·실제 주입·중복·의미 충돌 미검사를 명시한다.
 
 기존 40개 ID는 근거를 추적하기 위해 보존한다. **유지 16개, 기존 owner 작업에 흡수 9개,
 조건부 15개**로 재분류했으며 40개 독립 프로젝트나 모두 완료해야 할 출시 조건이 아니다.

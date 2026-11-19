@@ -553,15 +553,23 @@ only under `--strict`. Files are read as text: nothing runs, no model is called,
 on-demand skills, hooks and path-scoped rules are not counted.
 
 `oms project-doctor --prompts [--json] [--strict] [SOURCE_DIR]` audits the prompt text OMS
-ships (`rules/`, `roles/`, `templates/*AGENTS.md`, `prompts/`, skill `SKILL.md`; the
-installation by default). Per file it prints words, bytes and whether the file is injected
-every session, on demand or `unknown`; a class is only named when the script that delivers
-it (`link.sh`, `apply-project-template.sh`, `agent-role.sh`, `skill-doctor.sh`) still holds
-its marker text. Findings are lines matching `config/prompt-audit-patterns.txt` (an
-editable list of over-emphasis phrases written for older models), sentences of eight or
-more words repeated across always-injected files after lowercasing, and the
-always-injected word total per provider. Advisory: exit 0 unless `--strict` and a finding
-exists. Nothing runs and no model is called.
+ships (`rules/`, `roles/`, `templates/*AGENTS.md`, `prompts/`, `output-styles/`, and
+`SKILL.md` plus `references/**/*.md` in custom and project-template skills; the
+installation by default). Skill trees are scanned up to six directory levels; other
+listed directories are scanned at their top level. Symlink entries inside these
+directories are skipped and each file is limited to 1 MiB. Skill assets and unrelated
+Markdown are excluded.
+The JSON report lists words, bytes, declared injection class and pattern matches per
+file. Injection classes describe source conventions; they do not verify live provider
+delivery or mean every on-demand reference is loaded together. Findings count each
+file/pattern pair with a match from `config/prompt-audit-patterns.txt`; per-file hit
+counts retain the number of matching lines. `coverage` records the searched directories
+and limits, and explicitly marks runtime-generated prompts, live delivery, duplicate
+analysis and semantic conflicts as unchecked. The legacy `duplicates: []` field is
+retained for compatibility and is not evidence that no duplicates exist. Use `--budget`
+for its separate loaded-instruction duplicate report. The text summary also states the
+coverage limits. Advisory: exit 0 unless `--strict` and a pattern finding exists.
+Nothing runs and no model is called.
 
 Provider prompt caches match a byte-exact prefix, so text OMS loads ahead of the task
 must not change per render. `scripts/check.sh invariants` (`test_global_rules_stay_compact_and_route_workflows`,

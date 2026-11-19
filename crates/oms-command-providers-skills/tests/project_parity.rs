@@ -334,6 +334,85 @@ fn write_all(base: &Path, files: &[(&str, &str)]) {
     }
 }
 
+#[test]
+fn prompt_audit_includes_references_and_reports_unchecked_surfaces() {
+    let tmp = TempDir::new("prompt-audit");
+    let source = tmp.path();
+    write_all(
+        source,
+        &[
+            ("config/prompt-audit-patterns.txt", "double[- ]check\n"),
+            ("rules/global-AGENTS.md", "Use scoped evidence.\n"),
+            ("templates/project-general-AGENTS.md", "Project rules.\n"),
+            ("custom-skills/demo/SKILL.md", "Load references on demand.\n"),
+            ("custom-skills/demo/references/routing.md", "Double-check.\n"),
+            (
+                "custom-skills/demo/references/nested/source.md",
+                "Double-check.\n",
+            ),
+            ("output-styles/oms-demo.md", "Double-check.\n"),
+            (
+                "templates/project-skills/demo/references/workflow.md",
+                "Double-check.\n",
+            ),
+            ("custom-skills/demo/assets/example.md", "Double-check.\n"),
+            ("custom-skills/demo/notes.md", "Double-check.\n"),
+            ("templates/README.md", "Double-check.\n"),
+            ("crates/example/src/prompt.rs", "Double-check.\n"),
+        ],
+    );
+    std::os::unix::fs::symlink(
+        source.join("custom-skills/demo/notes.md"),
+        source.join("custom-skills/demo/references/linked.md"),
+    )
+    .expect("link");
+
+    let (code, out, err) = call("project-doctor", &["--prompts", "--json", "."], source);
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("report");
+    let files = report["files"].as_array().expect("files");
+    let paths: std::collections::BTreeSet<_> = files
+        .iter()
+        .map(|file| file["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(
+        paths,
+        std::collections::BTreeSet::from([
+            "rules/global-AGENTS.md",
+            "templates/project-general-AGENTS.md",
+            "custom-skills/demo/SKILL.md",
+            "custom-skills/demo/references/routing.md",
+            "custom-skills/demo/references/nested/source.md",
+            "output-styles/oms-demo.md",
+            "templates/project-skills/demo/references/workflow.md",
+        ])
+    );
+    assert_eq!(report["findings"], 4);
+    assert_eq!(report["schema"], 1);
+    assert_eq!(report["coverage"]["duplicate_analysis"], "not_run");
+    assert_eq!(report["coverage"]["semantic_conflict_analysis"], "not_run");
+    assert_eq!(report["coverage"]["runtime_generated_prompts"], "not_scanned");
+    assert_eq!(report["coverage"]["runtime_delivery"], "not_verified");
+    assert!(
+        files
+            .iter()
+            .filter(|file| {
+                file["path"].as_str().is_some_and(|path| {
+                    path.contains("references/") || path.starts_with("output-styles/")
+                })
+            })
+            .all(|file| file["injection"] == "on-demand")
+    );
+
+    let (code, out, err) = call("project-doctor", &["--prompts", "--strict", "."], source);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.contains("7 files, 4 findings"), "{out}");
+    assert!(out.contains("not checked"), "{out}");
+    fs::write(source.join("config/prompt-audit-patterns.txt"), "").expect("patterns");
+    let (code, _, err) = call("project-doctor", &["--prompts", "--strict", "."], source);
+    assert_eq!(code, 0, "{err}");
+}
+
 fn doctor(src: &Path) -> (i32, String) {
     let home = src.join("home");
     fs::create_dir_all(&home).expect("home");
