@@ -1,7 +1,8 @@
 # Worker Roles
 
-Use one strategy role per worker. Resolve project override, then global
-override, then bundled default:
+Use one strategy role per leaf Worker. These profiles do not grant Overall Main
+or Provider Lead authority. Resolve project override, then global override,
+then bundled default:
 
 ```bash
 oms agent-role --repo . --name repo-auditor resolve
@@ -18,6 +19,9 @@ TOML) to stdout from the same role file: name `oms-NAME`, model and effort from
 the role's tier in `config/panel-routing.json`, read-only tools or sandbox
 unless the bundled role is a write role (overrides always render read-only).
 It writes and installs nothing; copy the output yourself if you want it.
+Rendered access settings are requests, not proof of the effective boundary.
+Codex native subagents inherit the parent's sandbox and approval settings;
+a custom role file does not create a separate read-only sandbox.
 
 Put task-specific behavior directly in the brief; do not launch another model
 to generate instructions. Roles specialize the task, never its authority.
@@ -97,12 +101,11 @@ Reviewer finds diff defects; verifier compares the original request with the fin
 Advisor chooses a direction; architect designs structure; critic identifies failure modes.
 Researcher performs bounded lookup at the light tier; scholar performs multi-source research with verified citations.
 
-Per-role models: tier routing stays until a paired experiment shows an advantage.
-After the settlement fix lands, compare 20 paired routine builder tasks on the same
-snapshot and brief (claude-sonnet-5-5 versus gpt-6.1-terra), with blind owner judgment.
-Move one candidate ahead in its tier list only for a >= 15 point first-submission
-acceptance gap, exact McNemar p <= 0.05, and no new P1 defect. Automatic role
-routing reserves claude-fable-5-1 for security-auditor; explicit pins are unchanged.
+Per-role models follow the configured tier policy and available installed/catalog
+candidates, subject to explicit user pins and each model's supported effort.
+Do not turn a historical model comparison into a fixed ranking. Changing routing
+defaults needs relevant evaluation evidence and owner authority; discovering a
+new model neither selects it nor authorizes a paid comparison.
 
 In the terminal panel, `oms panel --dispatch ROLE` accepts `worker`, `researcher`, `scholar`
 and the built-in strategies below. Existing standard names remain valid for
@@ -132,7 +135,10 @@ uses the same separation. Select a compatible reusable session or create an
 authorized instance only when needed; the main retains final acceptance.
 
 Each profile returns source or patch evidence, actual checks, and unresolved
-limits. No profile permits recursive delegation or expands existing authority.
+limits. No leaf profile permits recursive delegation or expands authority.
+An explicitly assigned native Provider Lead follows the separate boundary in
+[delegation-artifacts.md](delegation-artifacts.md); a role label alone cannot
+promote a Worker to Lead.
 
 For panel tasks, choose the role from source evidence: security-auditor for
 risky authentication, permissions, sensitive data, signals, install, deletion,

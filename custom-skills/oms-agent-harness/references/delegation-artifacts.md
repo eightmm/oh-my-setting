@@ -42,10 +42,15 @@ and is not verification evidence; thresholds are
 
 These roles are provider-neutral. A top-level Claude Code session may allocate
 a Codex worker using the same CLI and reviewed `assignment` as the reverse.
-An OMS worker remains a worker even if its native CLI can spawn agents: return
-a requested split or missing decision to the existing parent. Use shared OMS
-task/lease/artifact references, not a Codex-only conversation identifier, for
-cross-provider coordination. Native app threads remain an optional local UI.
+Overall Main retains ownership, admission, final acceptance and publication.
+An explicitly assigned native Provider Lead may complete its scope directly or
+use native subagents/team tools when independent useful work exists, within the
+inherited authority and effective native limits. Leaf Workers launched through
+`--dispatch` or `peer-delegate` cannot recursively delegate even if their native
+CLI can spawn agents; return a requested split or missing decision to the parent.
+Use shared OMS task/lease/artifact references, not a Codex-only conversation
+identifier, for cross-provider coordination. Native app threads remain an
+optional local UI.
 
 For each worker, supply the outcome, relevant source paths, constraints/authority,
 verified facts versus uncertainty, a verifier, and a concise return contract.
@@ -204,7 +209,7 @@ These are OMS guidance adaptations of the
 sections 8.2, 8.3, 8.5 and 9 (reviewed 2026-09-08), not new enforced controls.
 For prompting and harness tuning, use the
 [official Astra guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra#prompting-best-practices);
-its examples do not override OMS's parent-only delegation or release authority.
+its examples do not widen OMS delegation or publication authority.
 
 ## Interactive provider sessions
 
@@ -277,11 +282,20 @@ a clean result as "no repository surface moved", not as "the worker was safe".
 ## Panel main command reference
 
 The persistent main contract keeps authority, admission and recovery invariants;
-load these command details when needed. The same contract serves Claude, Codex
-and Pi mains with their durable `--owner` value. Room identity and addressed-message
-instructions are appended separately; native conversations remain separate from
-shared OMS records.
+load these command details when needed. The user selects Overall Main from
+Codex, Claude Code or AGY, with a durable `--owner` value. Historical Pi Main
+records remain readable evidence; Pi is not a new Main option. Room identity
+and addressed-message instructions are appended separately; native conversations
+remain separate from shared OMS records.
 
+- Native Provider Lead: open `oms panel --orchestrator codex|claude|antigravity
+  --owner OWNER --room ROOM`; add `--task TEXT` to submit an assignment to the
+  connected, idle Lead. This path requires a verified Main in an OMS-managed
+  tmux panel, outside a managed campaign. The Lead may work directly or delegate
+  useful independent work to native leaf children within the assignment. Native
+  child scheduling is outside OMS campaign accounting; do not claim that
+  dispatch WIP limits enforce native fan-out. If the host/path is unavailable, use bounded leaf
+  `--dispatch` work under the existing admission and verification contract.
 - Read judgment: `oms consult --to PROVIDER --repo . --prompt TEXT`.
   Bounded implementation: `oms peer-delegate --to PROVIDER --repo .
   --brief-file PATH --verify COMMAND`. Review: `oms peer-review --providers
@@ -307,10 +321,11 @@ shared OMS records.
   It uses the writer's recorded execution repository for `--repo` and its working
   directory, retaining the room's state repository and passing the fix brief by
   absolute path from that state repository.
-  Dispatch blocks until its worker ends; start each independent ready task in a
-  separate concurrent/background call before waiting, then review and refill
-  as each completes without a wave barrier. A new write dispatch is refused
-  at the WIP limit 6 (running+awaiting) per main; finalize or `--continue` to drain.
+  Dispatch blocks until its worker ends; start independent ready work in
+  separate concurrent/background calls when useful, then review each result
+  without an unnecessary wave barrier. A new write dispatch is refused at the
+  effective runtime WIP limit (`OMS_PANEL_WIP_LIMIT`, running+awaiting per Main);
+  finalize or `--continue` to drain. This ceiling is not a target to fill.
 - Graph lookup syntax is in [graphs.md](graphs.md); use `oms inbox`,
   `oms panel --results` and `oms room updates` for current state. Resume with
   `oms session-handoff` and `oms agent-memory recall`.
@@ -378,4 +393,6 @@ For an authorized debate use `oms panel --council --owner OWNER --task-id ID
 --label TITLE --prompt TEXT`; workload selection is in [model-routing.md](model-routing.md).
 Role routes serve bounded work within the supplied task without making the user
 choose a model for each call; they grant no unrelated work or authority.
-Claude Code is the preferred main harness; Pi is an explicit alternative.
+Honor the user's Main selection. Choose model and effort from the actual
+installed session/catalog and supported scale; a historical model recommendation
+does not change that choice or prove live access. See [model-routing.md](model-routing.md).

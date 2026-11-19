@@ -12,15 +12,30 @@ use std::time::{Duration, Instant};
 pub const PROVIDERS: [&str; 3] = ["codex", "claude", "antigravity"];
 pub const MAIN_WINDOW: &str = "Overall Main";
 
-const STARTUP_PROMPT: &str = "You are this project's provider orchestrator under Overall Main. \
-Wait for an assignment from Overall Main. For each assignment, give this provider's native \
-subagents or team tools bounded, nonoverlapping work and clear completion checks when the \
-work can be split. Coordinate their results, review the changes, and run the relevant checks \
-before reporting back. Report the result, verification evidence, and remaining blockers in \
-this session. When the native child launcher offers a full-permission option, select it \
-for work authorized by the assignment. Keep each child within its assigned scope, leave \
-OMS parent-only actions to Overall Main, and preserve the project's approval requirements. \
-Report effective child permissions as unverified when the provider does not confirm them.";
+const STARTUP_PROMPT: &str = "You are this project's Provider Lead under Overall Main. \
+Wait for an assignment from Overall Main. Complete the assigned scope directly unless \
+independent useful work justifies native subagents or team tools. When delegating, give \
+children bounded, nonoverlapping work and clear completion checks within effective native \
+limits. Leaf children cannot recursively delegate. Wait for any children you start, review \
+their results, and run the relevant checks before reporting back. Report the result, \
+verification evidence, and remaining blockers in this session. When the native child \
+launcher offers a full-permission option, select it for work authorized by the assignment. \
+Keep each child within its assigned scope and preserve the project's approval requirements. \
+Overall Main retains task ownership, admission, final acceptance and publication; leave \
+OMS parent-only actions to Overall Main. Report effective child permissions as unverified \
+when the provider does not confirm them.";
+
+fn task_prompt(turn: &str, task: &str) -> String {
+    format!(
+        "Task from Overall Main for this Provider Lead. Turn {turn}. \
+Complete the assigned scope directly unless independent useful work justifies native \
+subagents or team tools. When delegating, give children bounded, disjoint work and completion \
+checks within effective native limits. Leaf children cannot recursively delegate. Wait for \
+any children you start and verify their output. Report results, verification evidence and \
+unfinished work here. Stay within the assigned authority. Overall Main retains task \
+ownership, admission, final acceptance and publication. Task: {task}"
+    )
+}
 
 fn orchestrator_command(provider: &str) -> Result<Vec<OsString>> {
     let (program, model, permission_flag, prompt_option) = match provider {
@@ -819,9 +834,7 @@ pub fn run(
                 )
                 .as_bytes(),
             );
-            panel.send(provider, &format!(
-                "Task from Overall Main. Work within this task and report the result here. Turn {}. You own this provider's work. Give native subagents bounded, disjoint work and completion checks. Wait for them, verify their output yourself, and report results, checks and unfinished work. Stay within the assigned authority. Task: {task}", &turn[..20]
-            ))?;
+            panel.send(provider, &task_prompt(&turn[..20], task))?;
             "submitted"
         } else if panel.leads.contains_key(provider) {
             "connected"
@@ -841,7 +854,7 @@ pub fn run(
 mod tests {
     use super::{
         STARTUP_PROMPT, input_ready, literal_tmux_arg, live_provider, observed_model,
-        orchestrator_command, weekly_from_usage,
+        orchestrator_command, task_prompt, weekly_from_usage,
     };
 
     #[test]
@@ -881,6 +894,18 @@ mod tests {
                 ]
             );
         }
+        let assignment = task_prompt("assignment-1", "Keep this bounded fix intact.");
+        for prompt in [STARTUP_PROMPT, assignment.as_str()] {
+            assert!(prompt.contains("Provider Lead"));
+            assert!(
+                prompt.contains("Complete the assigned scope directly unless independent useful work")
+            );
+            assert!(prompt.contains("Leaf children cannot recursively delegate"));
+            assert!(prompt.contains("admission, final acceptance and publication"));
+            assert!(prompt.contains("verification evidence"));
+        }
+        assert!(assignment.contains("Turn assignment-1."));
+        assert!(assignment.ends_with("Task: Keep this bounded fix intact."));
     }
 
     #[test]
