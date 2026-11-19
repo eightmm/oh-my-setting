@@ -47,7 +47,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 
 ## Quick start
 
-1. Run `oms` in a terminal to open or reuse the native Codex Main with its tmux board. Use `oms panel --watch` for the board alone, or an explicit `--launch` to choose another supported main. Non-terminal invocations retain the read-only watcher path. The panel starts at most one live main.
+1. Run `oms` in a terminal to reattach an existing Main or choose a new native Main: `1` Claude, `2` Codex, `3` Agy. Enter, Esc or EOF opens the board only; Ctrl-C exits with 130. Missing CLIs are unavailable. The panel starts at most one live Main. `OMS_PANEL_MAIN=claude|codex|agy` selects a new Main explicitly; Pi is available for standalone harness and worker use, not as Overall Main.
 2. The main window keeps the board on the left whenever the window is wide enough (above the CLI only when it is too narrow); the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
 3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The bottom box contains Log, Detail, Plan, Messages, Past and Attention tabs (Past and Attention stay even when empty), plus Debate while a debate exists. The pinned **Needs you** attention strip stays above activity when the inbox has items.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
@@ -115,6 +115,8 @@ user's scope, or records a concrete blocker and the next action. Publication
 still requires the user's authority; a local result can be completed first.
 
 ### Provider orchestrator launch selection
+
+Overall Main startup selection is implemented separately by [PR #286](https://github.com/eightmm/oh-my-setting/pull/286); this section describes the subordinate Provider Lead sessions.
 
 The live Overall Main can open Codex, Claude or Antigravity provider sessions in
 its Room. On a **new** session, `--model MODEL` requests an exact native model ID
