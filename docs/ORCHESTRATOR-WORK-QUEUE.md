@@ -149,3 +149,32 @@ AR-04는 정리 기능을 구현하는 작업이고 실제 사용자 cache 삭�
 과거 외부 비교 문서는 당시의 근거로 보존하며 이번에는 vendor 기능의 최신성을 재검증하지 않았다.
 Runtime API 삭제·config/default·CI classifier 변경은 없다. 문서 검증 결과는 PR 본문에 기록한다.
 Production 성능·실제 청구·실 vendor·SSH/GPU·최소 지원 OS 실행은 측정하지 않았다.
+
+## 7. Memory consolidation 후속 작업
+
+2026-11-19 추가. [증분 Dreaming과 경험 재사용 명세](MEMORY-CONSOLIDATION.md)는
+main `9a37a6ab8e39e3d4f8e11b77961d6c547b2d630b`의 journal/memory와 외부 1차 자료를
+대조한 설계다. 위 기존 40개 작업과 LC의 채택 상태는 유지한다. 아래 DR ID는 그에 추가된
+memory 후속 범위이며 신규 runtime 구현, 자동화 활성화 또는 여섯 독립 프로젝트를 뜻하지 않는다.
+
+| ID | 채택 | 현재 범위 / owner | 착수·보존 조건 |
+|---|---|---|---|
+| DR-01 | 유지 | journal/memory의 증분 입력 보존과 batch 파생 갱신 | cap/marker·날짜 반복을 먼저 재현; retry·crash·동시 writer·legacy 보존. 성능은 직접 측정 |
+| DR-02 | 유지·선택형 | 기존 peer 경로의 semantic distill producer | DR-01 뒤 연결; source/scope/revision 검사와 #250 review eligibility 유지; 가용 model×effort 선택 사용 |
+| DR-03 | 유지 | failure→action→verification 경험과 skill 후보 | DR-02 출처 재사용; #238/#239 repair 및 기존 skill-forge와 연결. 새 repair/CI 정책 없음 |
+| DR-04 | 유지 | 관련 변경에 따른 memory 재검토·대체·폐기 | 기존 hygiene/citation/supersede/retire 사용; 사용자 결정과 임시 가정 구분 |
+| DR-05 | 조건부 | 기존 context 위의 linked wiki/index | 반복된 다중 source 질의의 실제 부족과 비용 비교; GR-03/04/05/07 owner 연결, 파생 뷰로 재생성 |
+| DR-06 | 흡수 | RF-05/06의 memory 귀속·성과 관측 | #240 usage와 task/result 연결, 필요 시 #241; 신규 benchmark/ledger/panel store 없음 |
+
+첫 구현 단위는 DR-01이며, 그 정확성 수정은 semantic 모델 평가나 전체 native Team 완성을
+기다리지 않는다. DR-02는 DR-01 다음으로 연결한다. DR-03/04의 자료와 fixture 준비는 병렬화할
+수 있지만 journal/memory의 공통 writer와 최종 반영은 한 owner가 조정한다. DR-05는 조건부다.
+DR-06의 최소 관측 연결은 producer와 함께 준비하되 별도 평가 플랫폼 구축을 선행시키지 않는다.
+
+Native 기능 연결은 기존 LC/native assignment/composite acceptance, REL-01/RF-03/04에
+남긴다. Catalog 최신성은 CC-01/02/03 및 #258/#276을 따른다. 조사 시점 #258은 draft,
+#276은 open이며 아직 main 구현으로 간주하지 않는다. memory batch는 PERF-03의 usage
+persistence와 별개 owner이고, 검증 선택은 기존 VW owner와 조정한다.
+
+구현 에이전트는 새 명세의 DR별 완료 조건과 공통 전달문을 적용하고 실제 source/병합 상태를
+다시 확인한다. 이 문서 PR은 provider 호출·새 유료 평가·배포·사용자 데이터 삭제를 실행하지 않는다.
