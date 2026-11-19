@@ -346,6 +346,9 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                 .env("XDG_STATE_HOME", f.0.join("state"))
                 .env("XDG_CACHE_HOME", f.0.join("cache"))
                 .env("TMPDIR", &f.0)
+                .env("RUSTUP_TOOLCHAIN", "caller-toolchain")
+                .env("CARGO_HOME", f.0.join("cargo"))
+                .env("RUSTUP_HOME", f.0.join("rustup"))
                 .env("OMS_LOCK_DIR", f.0.join("locks"))
                 .env("OMS_LIFECYCLE_UPDATE_FIXTURE", &f.0)
                 .env("OMS_COLD_CASE", case)
@@ -666,6 +669,7 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     let incoming = br##"#!/bin/sh
 set -eu
 root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
+[ "${RUSTUP_TOOLCHAIN:-}" = caller-toolchain ]
 [ "$#" = 6 ] && [ "$1" = --oms-dispatch ] && [ "$4" = -- ] && [ "$5" = link ] && [ "$6" = --plan ]
 [ "$2" = "$root/incoming" ]
 [ "$(git -C "$2" rev-parse HEAD)" = "$3" ]
@@ -688,8 +692,10 @@ root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
 expected="build --manifest-path $3 --locked --release --bin oms --bin oms-mcp-peer-owner --bin oms-run-bounded-helper --bin oms-state-queue-worker --bin oms-graph-python-helper --target-dir $root/incoming/target/lifecycle-build"
 [ "$*" = "$expected" ]
 # The incoming checkout selects its own toolchain, including a version newer
-# than the updater's checkout. No command-line override can mask that file.
+# than the updater's checkout. No inherited or command-line override masks it.
 [ "$(pwd -P)" = "$root/incoming" ]
+[ "${RUSTUP_TOOLCHAIN+x}" != x ]
+[ "$CARGO_HOME" = "$root/cargo" ] && [ "$RUSTUP_HOME" = "$root/rustup" ]
 { IFS= read -r section; IFS= read -r channel; } < rust-toolchain.toml
 [ "$section" = '[toolchain]' ] && [ "$channel" = 'channel = "1.100.0"' ]
 if [ "$OMS_COLD_CASE" = offline ]; then

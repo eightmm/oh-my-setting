@@ -288,6 +288,27 @@ pub(crate) fn command_env(
 ) -> Result<Output> {
     command_env_limit(program, args, cwd, input, flag, timeout, environment, LIMIT)
 }
+pub(crate) fn command_without_env(
+    program: impl AsRef<OsStr>,
+    args: &[OsString],
+    cwd: &Path,
+    input: Option<&[u8]>,
+    flag: &AtomicBool,
+    timeout: Duration,
+    removed: &[&str],
+) -> Result<Output> {
+    command_environment(
+        program,
+        args,
+        cwd,
+        input,
+        flag,
+        timeout,
+        &[],
+        removed,
+        LIMIT,
+    )
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn command_env_limit(
     program: impl AsRef<OsStr>,
@@ -297,6 +318,30 @@ pub(crate) fn command_env_limit(
     flag: &AtomicBool,
     timeout: Duration,
     environment: &[(&str, &OsStr)],
+    limit: usize,
+) -> Result<Output> {
+    command_environment(
+        program,
+        args,
+        cwd,
+        input,
+        flag,
+        timeout,
+        environment,
+        &[],
+        limit,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn command_environment(
+    program: impl AsRef<OsStr>,
+    args: &[OsString],
+    cwd: &Path,
+    input: Option<&[u8]>,
+    flag: &AtomicBool,
+    timeout: Duration,
+    environment: &[(&str, &OsStr)],
+    removed: &[&str],
     limit: usize,
 ) -> Result<Output> {
     check(flag)?;
@@ -334,6 +379,9 @@ pub(crate) fn command_env_limit(
     }
     for (name, value) in environment {
         command.env(name, value);
+    }
+    for name in removed {
+        command.env_remove(name);
     }
     let mut child = command
         .spawn()

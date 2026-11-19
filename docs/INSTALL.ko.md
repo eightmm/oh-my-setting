@@ -37,7 +37,9 @@ OMS는 Cowork 표면을 시험하지 않았다.
 OMS lifecycle 명령은 Rust 네이티브 바이너리로 실행한다. 설치와 예약 업데이트는
 전용 Python 인터프리터를 만들거나 요구하지 않는다. 검증된 staged payload가 없는
 설치·업데이트는 선택한 체크아웃의 `rust-toolchain.toml`에 선언된 도구 체인과
-Cargo로 빌드하므로 먼저 rustup으로 Rust를 준비한다. `--locked`로 `Cargo.lock`을
+Cargo로 빌드하므로 먼저 rustup으로 Rust를 준비한다. Native·Shell 빌드는 Cargo
+자식 프로세스에서만 상속된 `RUSTUP_TOOLCHAIN`을 제거하며 호출자의 환경은 유지한다.
+`--locked`로 `Cargo.lock`을
 유지하면서 누락된 의존성을 받을 수 있다. 도구 체인과 의존성이 이미 캐시에
 있을 때만 `CARGO_NET_OFFLINE=true`로 오프라인 빌드를 선택한다.
 
@@ -153,8 +155,10 @@ schema-2 JSON 파일을 `OH_MY_SETTING_TOOL_LOCK`으로 지정한다. 상대 경
 설치 스크립트를 실행할 수 있다. 명시적 pin은 기본 vendor update 명령 대신 정확한
 버전의 검증 페이로드 경로를 사용한다.
 
-OMS로 처음 설치한 Antigravity를 vendor updater에 넘길 때는 기존 소유권 checksum
-sidecar를 검증한 뒤 제거한다. 오래됐거나 안전하지 않은 sidecar는 오류로 남긴다.
+OMS로 처음 설치한 Antigravity를 vendor updater에 넘길 때는 바이너리의 버전을
+조회하기 전에 기존 소유권 checksum sidecar를 검증한다. 버전 조회가 실패하면
+sidecar를 유지하고, 실제 updater를 시작하기 직전에 다시 검증한 뒤 제거한다.
+오래됐거나 안전하지 않은 sidecar는 오류로 남긴다.
 Vendor가 바꾼 바이너리가 OMS transaction 밖에 있으므로, 뒤이은 다른 도구의 실패가
 이전 sidecar를 되살리지 않는다. 명시적 pin으로 교체할 때는 계속 OMS 소유권을
 확인한다.
@@ -166,7 +170,12 @@ npm lifecycle 스크립트는 패키지 코드를 실행할 수 있다. 명시�
 선택형 도구를 표현하는 항목이 없으므로 해당 갱신을 건너뛴다.
 
 provider 의존성은 함께 선택한다. Claude·Codex·ntn에는 Node를 포함하며 `--only`에서
-Node를 뒤에 적어도 먼저 설치한다. Antigravity에는 포함하지 않는다. 관리 파일 반영
+Node를 뒤에 적어도 먼저 설치한다. Antigravity에는 포함하지 않는다. npm 기반 설치에는
+기존 Node뿐 아니라 작동하는 npm도 필요하며 다른 prefix의 정상 npm은 재사용한다.
+npm이 없거나 고장 나면 검증된 번들 도구를 준비하고, 이미 요구 버전을 만족하거나
+더 새로운 Node는 그대로 둔다. 다만 선택된 버전의 NVM 디렉터리가 이미 불완전하거나
+손상된 경우에는 소유권을 입증하지 못하는 파일을 교체하지 않고 거부한다. 해당
+디렉터리의 자동 복구는 아직 구현하지 않았다. 관리 파일 반영
 전에 다운로드와 패키지 이름·버전을 검증하며 설치·
 업데이트·복구·제거는 되돌릴 수 있는 lifecycle transaction을 공유한다. Vendor update
 명령의 복구는 vendor가 담당하며 해당 바이너리는 OMS 체크아웃 롤백 대상이 아니다.
@@ -207,11 +216,12 @@ OMS가 기본으로 켜지 않는다.
 바뀌는 것은 마이그레이션 노트(현재 [MIGRATION.md](MIGRATION.md#07))에
 있다.
 
-provider 도구 갱신 뒤에는 시간 제한이 있는 연동 점검으로 Claude hooks,
-Codex plugin, 활성 MCP/Antigravity 인터페이스를 확인한다. 실패하면 core
-업데이트 성공과 연동 상태 실패를 따로 보고하고 실패로 종료한다. provider
-바이너리는 core 롤백 대상이 아니다. `--no-doctor`나 예약 실행의 doctor
-생략 설정을 쓰면 이 검증 근거도 생략한다.
+업데이트는 `--no-doctor`를 선택하지 않으면 core receipt를 확정하기 전에 incoming
+설치의 doctor를 실행한다. 이 검사가 실패하면 core 변경은 롤백 대상이다.
+선택한 provider 도구는 core 반영 뒤 갱신하며 도구별 버전과 capability를 확인한다.
+현재는 이 갱신 뒤에 전체 연동 점검을 다시 실행하지 않는다. 도구 갱신이 실패하면
+core 업데이트는 성공했다고 구분해 보고하며 provider 바이너리는 core 롤백 대상이
+아니다.
 
 ### 설치·업데이트 미리 보기
 

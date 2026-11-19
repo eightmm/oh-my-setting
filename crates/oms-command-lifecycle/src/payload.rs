@@ -273,10 +273,9 @@ fn build(paths: &Paths, revision: &str, flag: &AtomicBool) -> Result<PathBuf> {
     }
     let cargo = r::find("cargo", &paths.cwd)
         .ok_or_else(|| r::Error(2, "native payload missing and cargo unavailable".into()))?;
-    // Cargo/rustup selects the toolchain declared by this checkout. Incoming
-    // revisions may need a newer compiler or dependencies not cached locally;
-    // callers can still opt into Cargo's offline mode through its environment.
-    let result = r::command(
+    // A caller's temporary override must not mask the incoming checkout's
+    // toolchain. Keep Cargo homes and an explicit offline choice intact.
+    let result = r::command_without_env(
         cargo,
         &[
             "build".into(),
@@ -301,6 +300,7 @@ fn build(paths: &Paths, revision: &str, flag: &AtomicBool) -> Result<PathBuf> {
         None,
         flag,
         std::time::Duration::from_secs(1800),
+        &["RUSTUP_TOOLCHAIN"],
     )?;
     if result.0 != 0 {
         return Err(r::Error(

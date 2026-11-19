@@ -51,6 +51,47 @@ fn installed(paths: &Paths, name: &str) -> Option<PathBuf> {
     })
 }
 
+fn npm_runtime(paths: &Paths, flag: &AtomicBool) -> Result<Option<(PathBuf, OsString)>> {
+    let node = installed(paths, "node");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        node.iter()
+            .map(|binary| binary.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&inherited)),
+    )
+    .map_err(|_| {
+        r::Error(
+            2,
+            "Node runtime directory cannot be represented in PATH".into(),
+        )
+    })?;
+    let local = paths.home.join(".local/bin/npm");
+    let mut candidates = r::find("npm", &paths.cwd).into_iter().collect::<Vec<_>>();
+    if !candidates.contains(&local) {
+        candidates.push(local);
+    }
+    for binary in candidates {
+        if !fs::metadata(&binary).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        {
+            continue;
+        }
+        let probe = r::command_env(
+            &binary,
+            &["--version".into()],
+            &paths.cwd,
+            None,
+            flag,
+            Duration::from_secs(10),
+            &[("PATH", path.as_os_str())],
+        );
+        r::check(flag)?;
+        if probe.is_ok_and(|out| out.0 == 0 && version_number(&out.1).is_some()) {
+            return Ok(Some((binary, path)));
+        }
+    }
+    Ok(None)
+}
+
 fn tool_row<'a>(table: &'a Value, name: &str) -> &'a Value {
     match name {
         "claude" | "codex" | "ntn" => &table["npm"][name],
@@ -116,12 +157,25 @@ fn call(
     flag: &AtomicBool,
     large: bool,
 ) -> Result<Vec<u8>> {
-    let binary = r::find(name, &paths.cwd)
-        .or_else(|| {
-            let p = paths.home.join(".local/bin").join(name);
-            p.is_file().then_some(p)
-        })
-        .ok_or_else(|| r::Error(2, format!("{name} required for verified tool installation")))?;
+    let (binary, path) = if name == "npm" {
+        let (binary, path) = npm_runtime(paths, flag)?.ok_or_else(|| {
+            r::Error(
+                2,
+                "working npm required for verified tool installation".into(),
+            )
+        })?;
+        (binary, Some(path))
+    } else {
+        let binary = installed(paths, name).ok_or_else(|| {
+            r::Error(2, format!("{name} required for verified tool installation"))
+        })?;
+        (binary, None)
+    };
+    let environment = path
+        .as_deref()
+        .map(|value| ("PATH", value))
+        .into_iter()
+        .collect::<Vec<_>>();
     let out = r::command_env_limit(
         binary,
         args,
@@ -129,7 +183,7 @@ fn call(
         None,
         flag,
         Duration::from_secs(180),
-        &[],
+        &environment,
         if large { MAX } else { r::LIMIT },
     )?;
     if out.0 != 0 {
@@ -532,7 +586,7 @@ fn pack(paths: &Paths, row: &Value, dest: &Path, flag: &AtomicBool) -> Result<Pa
     sri(&r::read(&archive, MAX)?, scalar(row, "integrity")?)?;
     Ok(archive)
 }
-fn handoff_agy_marker(paths: &Paths, binary: &Path) -> Result<()> {
+fn agy_marker(paths: &Paths, binary: &Path, retire: bool) -> Result<()> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, statat, unlinkat};
     use std::os::unix::fs::MetadataExt;
 
@@ -573,16 +627,18 @@ fn handoff_agy_marker(paths: &Paths, binary: &Path) -> Result<()> {
     {
         return r::fail("AGY ownership marker changed before vendor handoff");
     }
-    // Vendor bytes are outside OMS rollback. Restoring this marker on a later
-    // failure would attach an obsolete checksum, so retire it durably.
-    unlinkat(&directory, name, AtFlags::empty()).map_err(std::io::Error::from)?;
-    directory.sync_all()?;
+    if retire {
+        // Vendor bytes are outside OMS rollback. Restoring this marker on a later
+        // failure would attach an obsolete checksum, so retire it durably.
+        unlinkat(&directory, name, AtFlags::empty()).map_err(std::io::Error::from)?;
+        directory.sync_all()?;
+    }
     Ok(())
 }
 fn refresh_vendor(paths: &Paths, name: &str, binary: &Path, flag: &AtomicBool) -> Result<()> {
     r::check(flag)?;
     if name == "agy" {
-        handoff_agy_marker(paths, binary)?;
+        agy_marker(paths, binary, false)?;
     }
     let before = r::command(
         binary,
@@ -594,6 +650,10 @@ fn refresh_vendor(paths: &Paths, name: &str, binary: &Path, flag: &AtomicBool) -
     )?;
     if before.0 != 0 || version_number(&before.1).is_none() {
         return r::fail("vendor provider version unavailable; refresh refused");
+    }
+    r::check(flag)?;
+    if name == "agy" {
+        agy_marker(paths, binary, true)?;
     }
     let out = r::command(
         binary,
@@ -641,9 +701,16 @@ pub(crate) fn install(
             return r::fail("unknown managed tool");
         }
     }
+    let node_ready =
+        !selected.iter().any(|name| name == "node") || npm_runtime(paths, flag)?.is_some();
     let selected = selected
         .iter()
-        .filter(|name| upgrade || explicit_lock.is_some() || installed(paths, name).is_none())
+        .filter(|name| {
+            upgrade
+                || explicit_lock.is_some()
+                || installed(paths, name).is_none()
+                || name.as_str() == "node" && !node_ready
+        })
         .cloned()
         .collect::<Vec<_>>();
     let host = platform()?;
@@ -654,6 +721,7 @@ pub(crate) fn install(
     let bin = paths.home.join(".local/bin");
     for name in &selected {
         r::check(flag)?;
+        let mut retain_node = false;
         if let Some(binary) = installed(paths, name) {
             if let Some(expected) = tool_row(&lock, name)["version"].as_str() {
                 let out = r::command(
@@ -668,7 +736,13 @@ pub(crate) fn install(
                     return r::fail(format!("{name} version unavailable; refresh refused"));
                 }
                 if out.0 == 0 && satisfies_release(&out.1, expected, explicit_lock.is_none()) {
-                    continue;
+                    if name == "node" && !node_ready {
+                        // Repair the bundled package tooling without replacing an
+                        // already suitable (including newer) installed Node.
+                        retain_node = true;
+                    } else {
+                        continue;
+                    }
                 }
             }
             if ["claude", "codex", "agy"].contains(&name.as_str())
@@ -899,6 +973,9 @@ pub(crate) fn install(
                 }
 
                 for command in ["node", "npm", "npx", "corepack"] {
+                    if command == "node" && retain_node {
+                        continue;
+                    }
                     let source = target.join("bin").join(command);
                     if source.exists() {
                         owns(paths, &bin.join(command))?;
@@ -914,6 +991,9 @@ pub(crate) fn install(
                             0o600,
                         )?;
                     }
+                }
+                if npm_runtime(paths, flag)?.is_none() {
+                    return r::fail("verified Node distribution did not provide working npm");
                 }
             } else {
                 for command in if name == "uv" {
@@ -1689,7 +1769,70 @@ mod tests {
     }
 
     #[test]
-    fn non_executable_local_placeholder_is_not_an_installed_tool() {
+    fn installed_node_requires_working_npm_and_preserves_newer_runtime() {
+        if let Some(root) = std::env::var_os("OMS_SUPPLY_NODE_FIXTURE") {
+            let paths = fixture_paths(Path::new(&root));
+            let kind = std::env::var("OMS_SUPPLY_NODE_CASE").unwrap();
+            if kind == "self-contained" {
+                assert!(installed(&paths, "node").is_none());
+                assert_eq!(
+                    call(
+                        &paths,
+                        "npm",
+                        &["--version".into()],
+                        &AtomicBool::new(false),
+                        false
+                    )
+                    .unwrap(),
+                    b"11.1.0\n"
+                );
+                return;
+            }
+            let original = installed(&paths, "node").unwrap();
+            let before = fs::read(&original).unwrap();
+            let bundled_npm = original.with_file_name("npm");
+            let npm_before = fs::read(&bundled_npm).ok();
+            let _guard = r::lock(&paths.receipt, &paths.cwd).unwrap();
+            let mut tx = Transaction::begin(&paths).unwrap();
+            let result = install(
+                &paths,
+                &["node".into()],
+                false,
+                false,
+                &mut tx,
+                &AtomicBool::new(false),
+            );
+            if kind.starts_with("existing-") {
+                assert_eq!(
+                    result.unwrap_err().1,
+                    "verified Node distribution did not provide working npm"
+                );
+                drop(tx);
+                assert_eq!(fs::read(&original).unwrap(), before);
+                assert_eq!(fs::read(&bundled_npm).ok(), npm_before);
+                for command in ["node", "npm", "npx", "corepack"] {
+                    let shim = paths.home.join(".local/bin").join(command);
+                    assert!(!r::exists(&shim), "{kind} left a {command} shim");
+                    assert!(!r::exists(&ownership_marker(&shim)));
+                }
+                return;
+            }
+            result.unwrap();
+            let reused = matches!(kind.as_str(), "working" | "separate");
+            assert_eq!(paths.cwd.join("requests").exists(), !reused, "{kind}");
+            assert_eq!(fs::read(&original).unwrap(), before, "{kind} replaced Node");
+            assert_eq!(installed(&paths, "node").unwrap(), original);
+            let npm = call(
+                &paths,
+                "npm",
+                &["--version".into()],
+                &AtomicBool::new(false),
+                false,
+            )
+            .unwrap();
+            assert_eq!(npm, if reused { b"11.1.0\n" } else { b"11.2.0\n" });
+            return;
+        }
         let scratch = r::Scratch::new().unwrap();
         let paths = fixture_paths(&scratch.0);
         let name = "oms-supply-fixture-command";
@@ -1699,6 +1842,126 @@ mod tests {
         assert!(installed(&paths, name).is_none());
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(installed(&paths, name), Some(executable));
+
+        let distribution = scratch.0.join("distribution");
+        fs::create_dir_all(distribution.join("bin")).unwrap();
+        r::new_file(
+            &distribution.join("bin/node"),
+            b"#!/bin/sh\necho v26.1.0\n",
+            0o755,
+        )
+        .unwrap();
+        r::new_file(
+            &distribution.join("bin/npm"),
+            b"#!/bin/sh\nnode --version >/dev/null || exit 99\necho 11.2.0\n",
+            0o755,
+        )
+        .unwrap();
+        let archive = scratch.0.join("node.tar.gz");
+        assert!(
+            std::process::Command::new(r::find("tar", &scratch.0).unwrap())
+                .args(["--format=ustar", "-czf"])
+                .arg(&archive)
+                .arg("-C")
+                .arg(&scratch.0)
+                .arg("distribution")
+                .env("COPYFILE_DISABLE", "1")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let archive_digest = r::hash(&fs::read(&archive).unwrap());
+        let host = platform().unwrap().replace("amd64", "x64");
+        let archive_name = format!("node-v26.1.0-{host}.tar.gz");
+        for kind in [
+            "missing",
+            "broken",
+            "working",
+            "separate",
+            "newer",
+            "managed-newer",
+            "self-contained",
+            "existing-missing",
+            "existing-broken",
+        ] {
+            let root = scratch.0.join(kind);
+            let paths = fixture_paths(&root);
+            let bin = root.join("bin");
+            let elsewhere = root.join("elsewhere");
+            fs::create_dir_all(&bin).unwrap();
+            fs::create_dir_all(&elsewhere).unwrap();
+            fs::create_dir_all(paths.home.join(".local/bin")).unwrap();
+            let node = if kind == "managed-newer" {
+                paths.home.join(".local/bin/node")
+            } else if kind.starts_with("existing-") {
+                paths.home.join(".nvm/versions/node/v26.1.0/bin/node")
+            } else {
+                bin.join("node")
+            };
+            fs::create_dir_all(node.parent().unwrap()).unwrap();
+            let node_bytes = if kind.ends_with("newer") {
+                b"#!/bin/sh\necho v27.1.0\n".as_slice()
+            } else {
+                b"#!/bin/sh\necho v26.1.0\n".as_slice()
+            };
+            if kind != "self-contained" {
+                r::new_file(&node, node_bytes, 0o755).unwrap();
+            }
+            if kind == "managed-newer" {
+                r::new_file(
+                    &ownership_marker(&node),
+                    format!("sha256={}\n", r::hash(node_bytes)).as_bytes(),
+                    0o600,
+                )
+                .unwrap();
+            }
+            if kind == "existing-broken" {
+                r::new_file(&node.with_file_name("npm"), b"#!/bin/sh\nexit 7\n", 0o755).unwrap();
+            }
+            if !matches!(kind, "missing" | "existing-missing") {
+                let npm = if kind == "separate" { &elsewhere } else { &bin }.join("npm");
+                r::new_file(
+                    &npm,
+                    if kind == "self-contained" {
+                        b"#!/bin/sh\necho 11.1.0\n"
+                    } else if matches!(kind, "working" | "separate") {
+                        b"#!/bin/sh\nnode --version >/dev/null || exit 99\necho 11.1.0\n"
+                    } else {
+                        b"#!/bin/sh\nexit 7\n"
+                    },
+                    0o755,
+                )
+                .unwrap();
+            }
+            symlink(r::find("gzip", &scratch.0).unwrap(), bin.join("gzip")).unwrap();
+            let curl = format!(
+                "#!/bin/sh\ndestination=\nprevious=\nfor argument do\n  [ \"$previous\" != --output ] || destination=$argument\n  previous=$argument\ndone\nprintf '%s\\n' \"$argument\" >> {}\ncase \"$argument\" in\n  */index.json) printf '%s\\n200' '[{{\"version\":\"v26.1.0\",\"lts\":\"fixture\",\"files\":[\"linux-x64\",\"linux-arm64\",\"osx-x64-tar\",\"osx-arm64-tar\"]}}]' ;;\n  */SHASUMS256.txt) printf '{archive_digest}  {archive_name}\\n\\n200' ;;\n  */{archive_name}) /bin/cp {} \"$destination\" ;;\n  *) exit 99 ;;\nesac\n",
+                r::shell(root.join("requests").as_os_str()).unwrap(),
+                r::shell(archive.as_os_str()).unwrap(),
+            );
+            r::new_file(&bin.join("curl"), curl.as_bytes(), 0o755).unwrap();
+            let path = std::env::join_paths([
+                node.parent().unwrap().to_path_buf(),
+                paths.home.join(".local/bin"),
+                bin,
+                elsewhere,
+            ])
+            .unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "supply::tests::installed_node_requires_working_npm_and_preserves_newer_runtime", "--nocapture"])
+                .env("OMS_SUPPLY_NODE_FIXTURE", &root)
+                .env("OMS_SUPPLY_NODE_CASE", kind)
+                .env("PATH", path)
+                .env_remove("OH_MY_SETTING_TOOL_LOCK")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{kind}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
@@ -1765,6 +2028,9 @@ mod tests {
             "hardlink",
             "unrecognized",
             "cancelled",
+            "probe-fails",
+            "probe-unparseable",
+            "probe-mutates",
         ] {
             let scratch = r::Scratch::new().unwrap();
             let paths = fixture_paths(&scratch.0);
@@ -1775,12 +2041,22 @@ mod tests {
             });
             fs::create_dir_all(binary.parent().unwrap()).unwrap();
             let invoked = scratch.0.join("invoked");
+            let marker = ownership_marker(&binary);
+            let updated = scratch.0.join("updated");
+            let probe = match kind {
+                "probe-unparseable" => "echo unavailable".into(),
+                "probe-mutates" => format!(
+                    "printf foreign > {}; echo 'antigravity 1.0.0'",
+                    r::shell(marker.as_os_str()).unwrap()
+                ),
+                _ => "exit 99".into(),
+            };
             let raw = format!(
-                "#!/bin/sh\nprintf invoked > {}\nexit 99\n",
-                r::shell(invoked.as_os_str()).unwrap()
+                "#!/bin/sh\ncase \"${{1:-}}\" in\n--version) printf invoked > {}; {probe} ;;\nupdate) printf updated > {}; exit 99 ;;\nesac\n",
+                r::shell(invoked.as_os_str()).unwrap(),
+                r::shell(updated.as_os_str()).unwrap(),
             );
             r::new_file(&binary, raw.as_bytes(), 0o755).unwrap();
-            let marker = ownership_marker(&binary);
             let good = format!("sha256={}\n", r::hash(raw.as_bytes()));
             match kind {
                 "stale" => r::new_file(
@@ -1816,8 +2092,16 @@ mod tests {
                 )
                 .is_err()
             );
-            assert!(!invoked.exists(), "{kind} marker reached the version probe");
-            assert_eq!(fs::read(&marker).unwrap(), before);
+            assert_eq!(invoked.exists(), kind.starts_with("probe-"), "{kind}");
+            assert!(!updated.exists(), "{kind} reached the updater");
+            assert_eq!(
+                fs::read(&marker).unwrap(),
+                if kind == "probe-mutates" {
+                    b"foreign".to_vec()
+                } else {
+                    before
+                }
+            );
             assert_eq!(r::read(&binary, MAX).unwrap(), raw.as_bytes());
         }
     }

@@ -105,6 +105,7 @@ ln -s "$profile_home/.codex/packages/standalone/releases/1.0.0/bin/codex" "$prof
 cat > "$profile_bin/npm" <<'EOF_NPM'
 #!/bin/sh
 case "$*" in
+  --version) echo '11.1.0' ;;
   'root -g') printf '%s/npm/lib/node_modules\n' "$HOME" ;;
   'prefix -g') printf '%s/npm\n' "$HOME" ;;
   *) echo 'unexpected npm fixture invocation' >&2; exit 99 ;;

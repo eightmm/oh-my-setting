@@ -57,8 +57,13 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   stays pinned. Optional npm refresh selects installed global packages and their
   current latest release without an age delay; native Pi uses its updater.
   Ad-hoc tool operations preserve capability choices, profile reapply honors the
-  selected receipt, and Node precedes npm-based providers. A valid Antigravity
-  ownership sidecar is retired at vendor handoff outside the core rollback.
+  selected receipt, and Node precedes npm-based providers. Runtime readiness
+  requires working npm; repairing bundled npm preserves an already suitable or
+  newer Node. An existing damaged same-version NVM directory remains a refusal
+  until an owned replacement can be prepared without overwriting foreign files.
+  A valid Antigravity
+  ownership sidecar is validated before the version probe and retired only after
+  that probe succeeds, at vendor handoff outside the core rollback.
   Existing foreign tools are preserved or refused, not silently replaced.
 - `doctor --contract`, `--live-models`, `--strict-diversity`, and `--repair`:
   isolated native template/hook contract fixtures, bounded provider/model
@@ -87,8 +92,9 @@ when their producer is unavailable.
 
 - `prepare_incoming_source`: returns an exact parent-owned managed scratch lease
   with marker, live owner generation and Git registration checks. A cold update
-  builds there with that checkout's toolchain and locked dependencies; offline
-  mode is an explicit caller choice. The incoming binary's
+  builds there with that checkout's toolchain and locked dependencies, removing
+  inherited `RUSTUP_TOOLCHAIN` from the Cargo child only; offline mode is an
+  explicit caller choice. The incoming binary's
   `link --plan` verifies its own embedded source inventory before the frozen
   payload is journaled into the original cache. Existing caches remain subject
   to strict validation. Preparation preserves the live checkout, local refs and

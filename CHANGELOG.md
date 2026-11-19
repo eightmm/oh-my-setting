@@ -1041,7 +1041,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - A worker-guard stop caused by an index or branch-ref change now says the usual cause is a commit, checkout or fast-forward in the canonical or source-clone main checkout during the run, and points to `oms sync-shared` or a linked worktree. `oms autopilot` defers with exit 75 instead of switching the canonical checkout to its work branch while guarded calls are live, leaving their registry entries untouched.
 - The panel main edits directly when the cause is known, the change is local to one or two files and a brief would cost more than the edit, or when a worker has failed the same bounded task twice. It still delegates investigation, multi-file or parallel work, long verification and trust-boundary changes; direct edits use the same review gate and landing path. Release bookkeeping (changelog, version, manifest, inventory) goes to the worker whose change needs it or one documenter per landing batch.
 - Tier routes accept exact Pi and OpenCode models. The routine and light tiers try Pi with `openrouter/thinkingmachines/inkling:free` first, while judge roles stay on native routes unless explicitly sent elsewhere. Pi provider errors fall back once to the next tier candidate; the OpenRouter daily free-model cap cools that route until 00:00 UTC. The provider-error scanner documents Pi's status-line exception, and the cap check reads only Pi status lines so answer text cannot cool a route down.
-- Provider refresh in `oms update` also updates installed optional npm CLIs to their newest release at least 14 days old, applying `npm --before` to the whole dependency tree and restoring a local backup on failure. Lifecycle scripts remain enabled; Git and URL dependencies are not age-filtered by npm.
+- Explicit `oms install-tools --providers` refresh updates installed optional npm CLIs to their current `latest` release, restoring a local backup on failure. Lifecycle scripts remain enabled; there is no release-age filter.
 - `oms panel --metrics` reports retained owner decisions per provider and model through `decisions_by_model`, making each model's acceptance rate visible.
 - Any supported CLI (Claude, Codex, Pi, Antigravity) can own the panel main. Ownership follows the recorded main harness and model family. Judge seats prefer a family other than the main's, and an unknown family fails closed. A main swap hands the room over without exiting before validation.
 - Pi write workers get Pi's `bash` tool so they can run the checks their brief requires; read workers stay without it. Pi has no sandbox: patch admission governs returned changes and worker guards check afterwards.
@@ -1060,20 +1060,30 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   locations cannot expand refresh to every tool. Updated installers leave tool
   work to the post-commit phase, which `--no-tools`/rollback skip. Node is
   installed before npm-based providers even when explicitly listed last.
+  An existing Node with missing or broken npm no longer skips dependency
+  preparation. Working npm in a separate prefix is reused, and repairing npm
+  preserves an already suitable or newer Node.
 - Generated cron/systemd jobs retain the installation and Cargo/Rustup paths, so
   scheduled updates can build with a minimal host PATH without freezing an old
   toolchain override. Check-only mode and legacy generated units remain supported.
 - Vendor Antigravity refresh retires a validated ownership sidecar before the
   updater changes the binary; unrelated transaction rollback cannot resurrect
-  the stale checksum. Modified or unsafe markers still block handoff.
+  the stale checksum. Version-probe failure preserves the sidecar, which is
+  revalidated immediately before handoff. Modified or unsafe markers still block
+  execution.
 - Model routability and panel routing use the complete catalog, including models
   beyond the 20-entry display preview. Legacy preview-only catalogs still work.
-- Native OMS installation/update builds use the incoming checkout's Rust
-  toolchain and can fetch missing locked dependencies. Fresh installs follow
+- Native and shell OMS installation/update builds remove inherited
+  `RUSTUP_TOOLCHAIN` from the Cargo child, use the incoming checkout's Rust
+  toolchain and can fetch missing locked dependencies. The caller's environment
+  and explicit Cargo offline choice remain intact. Fresh installs follow
   `edge`; fallback and runtime edge apply retain branch tracking instead of
   accidentally pinning a commit. Missing release configuration no longer
   invents an old stable promotion. Doctor and fingerprints describe observed
   tool releases without treating them as default pins or installation proof.
+- Installation docs describe the actual update order: doctor runs before the
+  core commit and tool refresh follows it, without a second general integration
+  audit. Obsolete claims about offline npm installation were removed.
 - Affected-mode planning skips maintenance registration and native builds.
   `install.sh --plan` also refuses to auto-build a missing native payload,
   preserving its write-free preview contract when Cargo can fetch dependencies.

@@ -177,6 +177,7 @@ set -euo pipefail
 [ "\${1:-}" = build ] || exit 82
 [ -f rust-toolchain.toml ] || exit 83
 [ "\${CARGO_NET_OFFLINE:-}" = true ] || exit 84
+[ "\${RUSTUP_TOOLCHAIN+x}" != x ] || exit 87
 locked=0
 for arg in "\$@"; do
   case "\$arg" in
@@ -189,8 +190,10 @@ mkdir -p "$case_dir/checkout/target/lifecycle-build/release"
 cp -f "$build_dir"/oms* "$case_dir/checkout/target/lifecycle-build/release/"
 EOF
     chmod +x "$case_dir/bin/cargo"
+    export RUSTUP_TOOLCHAIN=caller-toolchain
     CARGO_NET_OFFLINE=true OMS_NATIVE_NO_AUTO_STAGE=0 "$HOME/.local/bin/oms" doctor --repair --no-model-doctor >/dev/null ||
       fail "doctor --repair failed ($mode)"
+    [ "$RUSTUP_TOOLCHAIN" = caller-toolchain ] || fail "repair changed the caller's toolchain ($mode)"
     "$HOME/.local/bin/oms" list >/dev/null || fail "oms list failed after repair ($mode)"
     broken_found=0
     for broken_dir in "$case_dir/checkout/target/oms-native/.broken-$rev1"-*; do

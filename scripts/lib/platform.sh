@@ -233,6 +233,7 @@ oms_native_stage() {  # oms_native_stage ROOT
   # Fetch missing locked dependencies unless the caller explicitly requests offline.
   (
     cd "$root" || exit 1
+    unset RUSTUP_TOOLCHAIN
     cargo build --manifest-path "$root/Cargo.toml" \
       --locked --release \
       --bin oms \

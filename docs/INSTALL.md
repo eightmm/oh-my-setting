@@ -38,8 +38,10 @@ regular files that `oms doctor` checks for parity instead. OMS has not tested th
 OMS lifecycle commands run as native Rust binaries; installation and scheduled
 updates do not provision or require a private Python interpreter. A cold install
 or update builds the selected checkout with Cargo and the toolchain declared by
-that checkout's `rust-toolchain.toml`. Install Rust through rustup before using a
-source checkout without a verified staged payload. The build keeps `Cargo.lock`
+that checkout's `rust-toolchain.toml`. Native and shell builds remove an inherited
+`RUSTUP_TOOLCHAIN` from the Cargo child only; the caller's environment is preserved.
+Install Rust through rustup before using a source checkout without a verified
+staged payload. The build keeps `Cargo.lock`
 with `--locked` and can fetch missing dependencies. Set `CARGO_NET_OFFLINE=true`
 only when the required toolchain and dependencies are already cached.
 
@@ -167,8 +169,10 @@ verified package's installation script. Explicit pins use the verified exact
 payload path instead of the default vendor update command.
 
 When a bootstrapped Antigravity binary hands over to its vendor updater, OMS
-validates and retires its ownership checksum sidecar before running the updater.
-A stale or unsafe sidecar remains an error. This handoff is not reversed by an
+validates its ownership checksum sidecar before probing the binary's version.
+A failed version probe leaves the sidecar intact. Immediately before the updater
+starts, OMS revalidates and retires the sidecar. A stale or unsafe sidecar remains
+an error. This handoff is not reversed by an
 unrelated tool failure, because the vendor's changed binary is also outside the
 OMS transaction. An explicit pin still requires OMS ownership before replacement.
 
@@ -181,7 +185,13 @@ because its schema does not describe them.
 
 Provider dependencies are selected with the provider: Claude, Codex and ntn
 include Node, installed first even when `--only` lists it last; Antigravity does
-not. Downloads and package identities are checked
+not. An existing Node is ready for npm-based installation only when a working
+npm is also available. A working npm in a separate prefix is reused. Missing or
+broken npm triggers preparation of verified bundled tooling; an already suitable
+or newer Node remains in place. If the selected version already has an incomplete
+or damaged NVM directory, OMS refuses rather than replacing files whose ownership
+it cannot establish; automatic repair of that directory is not implemented.
+Downloads and package identities are checked
 before managed publication, and local install/update/repair/uninstall changes
 share the reversible lifecycle transaction. Vendor update commands manage their
 own recovery; their binaries are not part of the OMS checkout rollback.
@@ -288,11 +298,13 @@ on its first-parent history for a successful descendant of the installed commit.
 Without one it records a normal skip, with an unavailable query distinguished
 from a failed workflow. Rate limits and network errors do not authorize an update.
 
-After refreshing provider tools, updates run a bounded integration audit of
-Claude hooks, the Codex plugin, and enabled MCP/Antigravity interfaces. A failed
-audit returns failure and names the successful core update separately; provider
-binaries are outside the core rollback transaction. `--no-doctor` (or the
-scheduled doctor opt-out) explicitly skips that health evidence.
+Updates run the incoming installation's doctor before committing the core
+receipt, unless `--no-doctor` is selected. A failed doctor check keeps the core
+change within the rollback transaction. Selected provider tools are refreshed
+after that commit, with the tool-specific version and capability checks. There
+is no second general integration audit after this refresh. A refresh failure
+reports that the core update succeeded; provider binaries remain outside the
+core rollback transaction.
 
 Upgrade an existing install with `oms update`; see the
 [migration notes](MIGRATION.md#07) for release changes.

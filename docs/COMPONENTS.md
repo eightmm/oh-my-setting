@@ -284,13 +284,14 @@ for current releases, vendor refresh, explicit pins and payload verification.
 > Full-tool installs and profile reapply leave Pi unchanged.
 
 Default-channel agy is vendor-managed after a checksum-verified bootstrap;
-refresh validates and retires its ownership sidecar before vendor handoff, while
+refresh validates its ownership sidecar before the version probe, then revalidates
+and retires it immediately before vendor handoff. A failed probe preserves it;
 a stale sidecar remains a refusal. An unrelated tool rollback cannot restore the
 old digest over vendor-updated bytes. Explicit locks retain strict checks for
 existing OMS-owned digests.
 
-Direct platform payloads and npm wrapper/native packages are verified before use; npm
-installation runs offline with a fresh cache. Install, update, repair, and uninstall
+Direct platform payloads and npm wrapper/native archives are verified before managed
+publication. Install, update, repair, and uninstall
 share one user-wide lifecycle lock. Lock ownership survives installer `exec` handoff. A
 checkout-selected foreground child may borrow the live parent's critical section only
 after matching its owner, PID, start token, and canonical path; ownership and release
