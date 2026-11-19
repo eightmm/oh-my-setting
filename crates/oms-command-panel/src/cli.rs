@@ -134,9 +134,10 @@ impl Options {
                 .flags
                 .iter()
                 .all(|key| matches!(key.as_str(), "attention-only" | "no-animation"))
-            && self.values.keys().all(|key| {
-                matches!(key.as_str(), "repo" | "room" | "host" | "layout" | "view")
-            })
+            && self
+                .values
+                .keys()
+                .all(|key| matches!(key.as_str(), "repo" | "room" | "host" | "layout" | "view"))
     }
 
     pub fn has(&self, key: &str) -> bool {

@@ -281,11 +281,15 @@ fn pick_main(
         } else {
             " (CLI not on PATH)"
         };
-        writeln!(output, "  {} {}{availability}", index + 1, capitalize(harness))
-            .map_err(Error::new)?;
-    }
-    writeln!(output, "Enter / Esc / Ctrl-D: board only · Ctrl-C: quit")
+        writeln!(
+            output,
+            "  {} {}{availability}",
+            index + 1,
+            capitalize(harness)
+        )
         .map_err(Error::new)?;
+    }
+    writeln!(output, "Enter / Esc / Ctrl-D: board only · Ctrl-C: quit").map_err(Error::new)?;
     output.flush().map_err(Error::new)?;
     loop {
         let interrupted = || Error {
@@ -2223,7 +2227,14 @@ fn check_reattach_room(
     let bound = tmux_quiet(
         services,
         repo,
-        &["show-option", "-w", "-v", "-t", &base.pane, "@oms_panel_room"],
+        &[
+            "show-option",
+            "-w",
+            "-v",
+            "-t",
+            &base.pane,
+            "@oms_panel_room",
+        ],
         stop,
     )
     .ok_or_else(|| Error::new("existing Main room is unavailable; existing sessions preserved"))?;
@@ -2760,7 +2771,9 @@ mod native_lifecycle_contract {
         let mut output = Vec::new();
         assert_eq!(
             super::pick_main(
-                &mut |_| Ok(vec![keys.next().expect("picker ignored an available choice")]),
+                &mut |_| Ok(vec![
+                    keys.next().expect("picker ignored an available choice")
+                ]),
                 &mut output,
                 &[false, false, true],
                 &AtomicBool::new(false),
@@ -2768,7 +2781,11 @@ mod native_lifecycle_contract {
             .unwrap(),
             Some("agy")
         );
-        assert!(String::from_utf8(output).unwrap().contains("Claude CLI is not on PATH"));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Claude CLI is not on PATH")
+        );
         let stop = AtomicBool::new(false);
         let error = super::pick_main(
             &mut |_| {
@@ -3632,9 +3649,8 @@ mod native_lifecycle_contract {
             assert!(
                 crate::commands::resolve_repositories(&options, cwd, Some(&repo.0), true).is_ok()
             );
-            let error =
-                crate::commands::resolve_repositories(&options, cwd, Some(&other.0), true)
-                    .unwrap_err();
+            let error = crate::commands::resolve_repositories(&options, cwd, Some(&other.0), true)
+                .unwrap_err();
             assert!(error.message.contains("conflicts with OMS_ROOM_REPO"));
         }
         let room_id = super::ensure_room(&repo.0, None, &svc, &stop).unwrap();
