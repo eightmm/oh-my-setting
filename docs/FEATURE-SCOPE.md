@@ -30,22 +30,65 @@ instructions just because they were recorded.
 
 ## Roles and authority
 
-Ordinary work can use one Main and a direct worker. A Team is useful when a
-bounded task needs several coordinated members; a separate Lead is not required
-for every call. Provider sessions and managed Teams are different execution paths.
+Ordinary work can be completed by Main, an existing provider Lead, or a bounded
+direct worker. A Team is useful when a task needs several coordinated members;
+a separate Lead or native child is not required for every call. Do not route
+simple work to a direct worker solely because it is simple: context continuity,
+isolation, independent verification and the result contract determine the useful
+path. Provider sessions and managed Teams remain different execution paths.
 
 | Concept | Existing responsibility | Do not infer |
 |---|---|---|
 | Overall Main | Root owner for the room and integration target; decides within the user's authority | A provider coordinator can approve or publish on its own |
 | Native provider orchestrator | Interactive provider session bound to the current Main | Managed Team admission, hard child limits or verified descendant cleanup |
 | Managed Team Lead | Scoped role submitting requests for the parent to validate | A second root owner or permission to launch arbitrary nested Teams |
-| Worker / reviewer | Bounded work or independent evidence under the existing contract | Self-acceptance, publication rights or independence from a role name |
+| Direct Worker / reviewer | Main assigns bounded work or independent evidence through the existing parent front door | Parentage from a shared provider, self-acceptance, publication rights or independence from a role name |
 | Panel / dashboard / inbox / runtime views | Projections over domain-owned records | Another mutable task database or an approval from reading a row |
 
 The native [orchestrator guard](../crates/oms-command-panel/src/orchestrator.rs)
-currently requires an unmanaged Main outside a managed campaign. Keep this UX,
+currently requires a verified Main in an OMS-managed tmux panel, outside a
+managed campaign, with native scheduling recorded as unmanaged. Keep this UX,
 but do not relabel its pane as a managed Team. The
 [Team plan](TEAM-ORCHESTRATION-PLAN.md) keeps direct/single execution available.
+
+### Panel direction and execution connection
+
+The intended Main choice is explicit Codex, Claude or AGY, with one Overall Main
+per room and integration target. The startup picker is a separate unmerged change
+in [#286](https://github.com/eightmm/oh-my-setting/pull/286). The [panel contract](TEAM-ORCHESTRATION-PANEL.md)
+uses one task list and inspector for Main's own work, direct workers and work
+assigned to a provider Lead. Direct workers belong under their recorded Main;
+native children appear under a Lead only when that relationship is evidenced.
+Provider is a session shortcut/filter attribute, never evidence of parentage.
+Ordinary requests need no Lead/direct chooser. Preserve advanced route choices
+and the different capability, scope, permission and publication checks.
+
+OMS worker assignment remains parent-only. A Lead may request additional OMS
+work from Main; it does not recursively dispatch OMS workers. Authorized native
+children stay within the inherited assignment, and a Lead may finish directly.
+Neither opening a session nor a native completion message grants acceptance.
+The corresponding conditional native delegation prompt is a separate unmerged
+change in [#284](https://github.com/eightmm/oh-my-setting/pull/284).
+
+This is a target contract, not a completed UI or execution bridge. At `7d9b291`,
+the default renderer groups calls by provider and the Team inspector is a separate
+read-only view. The current Auto render slice moves only non-Lead, non-native
+observation rows with an exact nonempty parent matching the unique live Main to
+`Overall Main · Direct work`. Other rows retain neutral provider activity groups;
+connected panes use `Lead chat [1/2/3]`, with actual parent labels preserved.
+This display correction does not change dispatch, key/mouse targets or ownership,
+and does not implement common task cards or the assignment bridge.
+Native `--orchestrator --task` sends text rather than producing the same
+task/lease/result binding as managed dispatch. The unimplemented native
+assignment/result bridge is specified by the unmerged design
+[#285 P0-B](https://github.com/eightmm/oh-my-setting/pull/285).
+Reuse its Plan/operations/Room/result writers and TM-06A/B/C consumers; do not add
+another queue, task database or scheduler. General native conversation remains an
+unbound session without mandatory Plan/Team registration. Task cards link existing
+Room/attempt/session targets, supported actions and exact candidate/evidence
+references; missing bindings and coverage remain unknown. An uncertain native
+send must be reconciled, not retried through a new direct worker. Session changes
+and read views must preserve selection/drafts and never imply send or execution.
 
 One owner per state transition does not mean one database for all state:
 
@@ -184,7 +227,7 @@ not API compatibility or the evidence needed to retire existing behavior.
 
 | Expansion excluded from the default plan | Sufficient existing path or condition |
 |---|---|
-| Mandatory Main → provider lead → Team lead → worker for every task | Direct worker first; add a bounded Team only for actual coordination |
+| Mandatory Main → provider lead → Team lead → worker, or a Lead/direct chooser for every task | Main or an existing Lead may finish directly; use bounded workers/Teams when the execution contract needs them |
 | New authoritative task/approval store, universal router or provider-specific scheduler | Existing Plan/Room/admission owners and caller-specific adapters |
 | Reimplement TeamSpec, route snapshots, context compiler, work inspector or duplex supervision | Reuse current producers; implement only the missing consumer or verified semantic correction |
 | Maintain a fixed vendor model ranking in every document | One current catalog with explicit selection; frozen model tables are historical evaluation inputs |

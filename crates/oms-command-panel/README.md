@@ -97,12 +97,26 @@ so known fresh/stale examples cover injected catalog ingestion and rendering onl
 Tree and graph folding is currently library-only state; the interactive board
 does not yet provide fold or unfold keys.
 
-The Auto overview keeps Main and Goal above one weekly-usage row and groups
-recorded work by provider. Provider headers are display rows, never participants
-or control targets. Only an explicit live lead role identifies an orchestrator;
-missing lead and quota evidence remain unreported. Terminal calls collapse into
-history; Tab opens the existing all-calls views, and explicit search or Attention
-also includes matching history. Narrow boards retain the flat summary fallback.
+The Auto overview keeps Main and Goal above the work list. Ordinary calls whose
+nonempty parent exactly matches the unique live Main's participant or attempt
+appear first as `Overall Main · Direct work`. Lead roles and observed native
+children do not become direct workers through a shared provider or missing
+parent. Ambiguous, absent and historical Main relationships remain outside that
+direct group; this read projection grants no authority.
+
+The remaining provider sections are activity groups, not parent/child trees.
+Actual parent labels remain visible. `Lead chat [1/2/3]` identifies an existing
+connected native session; only those session headers are clickable, using the
+existing dock action. An activity row never creates a Lead or task. Terminal
+calls collapse into history; Tab opens the existing all-calls views, and explicit
+search or Attention also includes matching history. Narrow boards retain the
+flat summary fallback and the same selection identity.
+
+The [panel contract](../../docs/TEAM-ORCHESTRATION-PANEL.md) specifies the later
+task-first view and shared result inspector. This grouping change does not bind
+native assignments to canonical tasks, import native children as managed Teams,
+or add acceptance/cancel controls. Those consumers require the existing task,
+Room, attempt, result and capability producers rather than another panel store.
 
 
 On a foreground terminal with tmux available, bare `oms panel` opens a split

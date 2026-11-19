@@ -687,6 +687,45 @@ fn provider_groups(calls: &[Value]) -> Vec<usize> {
     groups
 }
 
+fn unique_live_main(calls: &[Value]) -> Option<&Value> {
+    let mut mains = calls.iter().filter(|call| {
+        call["role"] == "main" && oms_panel_core::state::LIVE_STATES.contains(&text(call, "state"))
+    });
+    let main = mains.next()?;
+    if mains.next().is_some() {
+        return None;
+    }
+    let identities = [text(main, "participant"), text(main, "attempt")];
+    if identities.iter().all(|id| id.is_empty()) {
+        return None;
+    }
+    for id in identities.into_iter().filter(|id| !id.is_empty()) {
+        if calls
+            .iter()
+            .filter(|call| text(call, "participant") == id || text(call, "attempt") == id)
+            .count()
+            != 1
+        {
+            return None;
+        }
+    }
+    Some(main)
+}
+
+fn direct_main_work(call: &Value, main: Option<&Value>) -> bool {
+    let Some(main) = main else {
+        return false;
+    };
+    let parent = text(call, "parent");
+    !parent.is_empty()
+        && call["native_child"] != true
+        && !matches!(
+            text(call, "role"),
+            "main" | "lead" | "team_lead" | "orchestrator"
+        )
+        && [text(main, "participant"), text(main, "attempt")].contains(&parent)
+}
+
 fn collapsed_history(nav: &navigation::Navigation, call: &Value) -> bool {
     nav.view == View::Auto
         && nav.filter.is_empty()
@@ -700,6 +739,7 @@ fn collapsed_history(nav: &navigation::Navigation, call: &Value) -> bool {
 
 fn visible_from(all: Vec<Value>, nav: &navigation::Navigation) -> Vec<Value> {
     let groups = provider_groups(&all);
+    let main = unique_live_main(&all).cloned();
     let words = navigation::words(&nav.filter);
     let mut filtered: Vec<_> = all
         .into_iter()
@@ -723,9 +763,12 @@ fn visible_from(all: Vec<Value>, nav: &navigation::Navigation) -> Vec<Value> {
         .collect();
     if nav.view == View::Auto {
         filtered.sort_by_key(|call| {
-            groups
-                .iter()
-                .position(|group| *group == provider_bucket(call))
+            (
+                !direct_main_work(call, main.as_ref()),
+                groups
+                    .iter()
+                    .position(|group| *group == provider_bucket(call)),
+            )
         });
     }
     filtered
@@ -945,7 +988,9 @@ fn frame_with_capacity(
         }
 
         let groups = provider_groups(&all);
-        let provider_chrome = groups.len() + 1;
+        let main_identity = unique_live_main(&all);
+        let direct_work = calls.iter().any(|call| direct_main_work(call, main_identity));
+        let provider_chrome = groups.len() + 1 + 2 * usize::from(direct_work);
         // Reserve the footer, omission count, and at least one selectable row.
         let provider_view = nav.view == View::Auto
             && use_cards
@@ -1326,23 +1371,51 @@ fn render_provider_rows(
     base: usize,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    let main = unique_live_main(all);
+    let direct: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| direct_main_work(call, main))
+        .collect();
+    if !direct.is_empty() {
+        lines.push(card_top_styled(
+            "Overall Main · Direct work",
+            None,
+            columns,
+            colored,
+            SGR_AMBER_BOLD,
+        ));
+        for (index, call) in direct
+            .into_iter()
+            .filter(|(index, _)| *index >= offset && *index < offset + capacity)
+        {
+            register_worker(worker_rows, base + lines.len(), call);
+            lines.push(activity_row(
+                call,
+                all,
+                index == nav.selected,
+                columns,
+                colored,
+                true,
+            ));
+        }
+        lines.extend(card_bottom(columns, true, colored));
+    }
+    let provider_start = lines.len();
     for &group in groups {
         let label = ["Codex", "Claude", "Antigravity", "Other providers"][group];
         let members: Vec<_> = calls
             .iter()
             .enumerate()
-            .filter(|(_, call)| provider_bucket(call) == group)
+            .filter(|(_, call)| provider_bucket(call) == group && !direct_main_work(call, main))
             .collect();
-        let lead = all
-            .iter()
-            .filter(|call| provider_bucket(call) == group)
-            .find(|call| {
-                matches!(text(call, "role"), "lead" | "team_lead" | "orchestrator")
-                    && oms_panel_core::state::LIVE_STATES.contains(&text(call, "state"))
-            });
         let history = all
             .iter()
-            .filter(|call| provider_bucket(call) == group && collapsed_history(nav, call))
+            .filter(|call| {
+                provider_bucket(call) == group
+                    && !direct_main_work(call, main)
+                    && collapsed_history(nav, call)
+            })
             .count();
         let connected = crate::orchestrator::PROVIDERS
             .get(group)
@@ -1351,12 +1424,11 @@ fn render_provider_rows(
                     .iter()
                     .any(|item| item.as_str() == Some(provider))
             });
-        let orchestration = if connected {
+        let session = if connected {
             provider_rows[group] = Some(lines.len());
-            format!("Orchestrator [{}]", group + 1)
+            format!("Lead chat [{}]", group + 1)
         } else {
-            lead.map(|call| format!("Orchestrator {}", call_label(call)))
-                .unwrap_or_else(|| "Orchestrator: unreported".into())
+            "Activity".into()
         };
         let working = members
             .iter()
@@ -1369,8 +1441,10 @@ fn render_provider_rows(
             .count();
         let mut summary = if working > 0 {
             format!("{working} working")
+        } else if members.is_empty() {
+            "no visible work".into()
         } else {
-            "idle".to_owned()
+            format!("{} recorded", members.len())
         };
         let awaiting = members
             .iter()
@@ -1385,77 +1459,97 @@ fn render_provider_rows(
         let model = crate::orchestrator::PROVIDERS
             .get(group)
             .and_then(|provider| models[*provider].as_str())
-            .or_else(|| lead.map(model_label))
             .unwrap_or("model —");
-        let full_title = if connected || lead.is_some() {
-            format!("{label} · {orchestration} · {model}")
+        let full_title = if connected {
+            format!("{label} · {session} · {model}")
         } else {
-            format!("{label} · {orchestration}")
+            format!("{label} · {session}")
         };
         let title = if connected && width(&full_title) + 6 > columns {
             let label = ["Codex", "Claude", "AGY"][group];
-            format!("[{}] {label} · {model}", group + 1)
+            format!("{label} · {session}")
         } else {
             full_title
         };
         let tag = (width(&title) + width(&summary) + 8 <= columns).then_some(summary.as_str());
         let header = card_top_styled(&title, tag, columns, colored, provider_style(group));
-        lines.push(if !lines.is_empty() {
+        lines.push(if lines.len() > provider_start {
             header.replacen('╭', "├", 1).replacen('╮', "┤", 1)
         } else {
             header
         });
-        let on_page: Vec<_> = members
-            .iter()
+        for (index, call) in members
+            .into_iter()
             .filter(|(index, _)| *index >= offset && *index < offset + capacity)
-            .collect();
-        for (position, &&(index, call)) in on_page.iter().enumerate() {
+        {
             register_worker(worker_rows, base + lines.len(), call);
-            let selected = index == nav.selected;
-            let (glyph, role_sgr) = role_style(text(call, "role"));
-            let (badge, badge_sgr) = if call["returned_at"].is_string() {
-                ("[✓ returned]".into(), SGR_SAGE)
-            } else {
-                state_badge(text(call, "state"))
-            };
-            let parent = all.iter().find(|parent| {
-                let id = text(call, "parent");
-                !id.is_empty()
-                    && (text(parent, "participant") == id || text(parent, "attempt") == id)
-            });
-            let parent_label = parent
-                .map(|parent| format!(" ← {}", call_label(parent)))
-                .unwrap_or_default();
-            lines.push(card_row_lr(
-                vec![
-                    Span::literal(if selected { "▸ " } else { "  " }, Some(SGR_AMBER_BOLD)),
-                    Span::literal(
-                        if position + 1 == on_page.len() {
-                            "└─ "
-                        } else {
-                            "├─ "
-                        },
-                        Some(SGR_BORDER),
-                    ),
-                    Span::literal(glyph, Some(role_sgr)),
-                    Span::literal(" ", None),
-                    Span::raw(call_label(call), 24, Some(SGR_BOLD)),
-                    Span::literal(" ", None),
-                    Span::raw(text(call, "role"), 24, Some(role_sgr)),
-                    Span::literal(" · ", Some(SGR_MUTED)),
-                    Span::raw(text(call, "title"), columns, Some(SGR_TEXT)),
-                    Span::raw(parent_label, 32, Some(SGR_MUTED)),
-                ],
-                model_and_state(call, columns, badge, badge_sgr),
+            lines.push(activity_row(
+                call,
+                all,
+                index == nav.selected,
                 columns,
-                true,
-                (colored && selected).then_some(SGR_SEL_BG),
                 colored,
+                false,
             ));
         }
     }
     lines.extend(card_bottom(columns, true, colored));
     lines
+}
+
+fn activity_row(
+    call: &Value,
+    all: &[Value],
+    selected: bool,
+    columns: usize,
+    colored: bool,
+    show_provider: bool,
+) -> String {
+    let (glyph, role_sgr) = role_style(text(call, "role"));
+    let (badge, badge_sgr) = if call["returned_at"].is_string() {
+        ("[✓ returned]".into(), SGR_SAGE)
+    } else {
+        state_badge(text(call, "state"))
+    };
+    let mut parents = all.iter().filter(|parent| {
+        let id = text(call, "parent");
+        !id.is_empty() && (text(parent, "participant") == id || text(parent, "attempt") == id)
+    });
+    let parent = parents.next().filter(|_| parents.next().is_none());
+    let parent_label = parent
+        .map(|parent| format!(" ← {}", call_label(parent)))
+        .unwrap_or_default();
+    let mut left = vec![
+        Span::literal(if selected { "▸ " } else { "  " }, Some(SGR_AMBER_BOLD)),
+        Span::literal(glyph, Some(role_sgr)),
+        Span::literal(" ", None),
+        Span::raw(call_label(call), 24, Some(SGR_BOLD)),
+        Span::literal(" ", None),
+        Span::raw(text(call, "role"), 24, Some(role_sgr)),
+    ];
+    if show_provider {
+        left.extend([
+            Span::literal(" · ", Some(SGR_MUTED)),
+            Span::raw(
+                text(call, "provider"),
+                24,
+                Some(provider_style(provider_bucket(call))),
+            ),
+        ]);
+    }
+    left.extend([
+        Span::literal(" · ", Some(SGR_MUTED)),
+        Span::raw(text(call, "title"), columns, Some(SGR_TEXT)),
+        Span::raw(parent_label, 32, Some(SGR_MUTED)),
+    ]);
+    card_row_lr(
+        left,
+        model_and_state(call, columns, badge, badge_sgr),
+        columns,
+        true,
+        (colored && selected).then_some(SGR_SEL_BG),
+        colored,
+    )
 }
 
 fn register_worker(hits: &mut BTreeMap<usize, (String, String)>, row: usize, call: &Value) {
@@ -2947,11 +3041,12 @@ mod tests {
         );
 
         let report = json!({"collection":{"ok":true}, "plan":{"goal":"Ship teams"}, "room":{"participants":[
-            {"participant":"M", "provider":"codex", "role":"main", "state":"working", "title":"Own goal"},
+            {"participant":"M", "attempt_id":"att-M", "provider":"codex", "role":"main", "state":"working", "title":"Own goal"},
             {"participant":"CW", "provider":"codex", "role":"worker", "parent":"M", "state":"working", "title":"Codex task"},
             {"participant":"L", "provider":"claude", "role":"lead", "parent":"M", "state":"working", "title":"Coordinate review"},
             {"participant":"LW", "provider":"claude", "role":"worker", "parent":"L", "state":"review", "title":"Claude task"},
-            {"participant":"AW", "provider":"antigravity", "role":"worker", "parent":"M", "state":"working", "title":"AGY task"}
+            {"participant":"AW", "provider":"antigravity", "role":"worker", "parent":"M", "state":"working", "title":"AGY task"},
+            {"participant":"DW", "provider":"claude", "role":"worker", "parent":"att-M", "state":"working", "title":"Direct Claude work"}
         ]}});
         let mut nav = navigation::Navigation::default();
         let visible_calls = visible(&report, &nav);
@@ -2960,13 +3055,14 @@ mod tests {
                 .iter()
                 .map(|call| text(call, "participant"))
                 .collect::<Vec<_>>(),
-            ["CW", "L", "LW", "AW"]
+            ["CW", "DW", "AW", "L", "LW"]
         );
         let read = BTreeMap::new();
         for (columns, height) in [(200, 50), (120, 30), (80, 24), (56, 20), (40, 12), (19, 14)] {
             for (index, call) in visible_calls.iter().enumerate() {
                 nav.selected = index;
-                let plain = frame_styled(&report, &nav, columns, height, &read, false, true);
+                let board = board_frame(&report, &nav, columns, height, &read, false, true);
+                let plain = &board.lines;
                 let color = frame_styled(&report, &nav, columns, height, &read, true, true);
                 assert_eq!(plain.len(), height, "{columns}x{height}: {plain:?}");
                 assert!(plain.iter().all(|line| width(line) <= columns));
@@ -2987,12 +3083,24 @@ mod tests {
                         .any(|line| line.contains('▸') && line.contains(&selected_label)),
                     "{columns}x{height} {index}: {plain:?}"
                 );
+                let selected_row = plain
+                    .iter()
+                    .position(|line| line.contains('▸') && line.contains(&selected_label))
+                    .unwrap();
+                assert_eq!(
+                    board.worker_rows.get(&selected_row),
+                    Some(&(
+                        text(call, "participant").to_owned(),
+                        text(call, "attempt").to_owned()
+                    ))
+                );
                 if columns >= 56 {
                     let joined = plain.join("\n");
                     for required in [
-                        "Codex · Orchestrator: unreported",
-                        "Claude · Orchestrator L",
-                        "Antigravity · Orchestrator: unreported",
+                        "Overall Main · Direct work",
+                        "Codex · Activity",
+                        "Claude · Activity",
+                        "Antigravity · Activity",
                     ] {
                         assert!(
                             joined
@@ -3023,13 +3131,25 @@ mod tests {
         for (columns, height) in [(80, 24), (56, 20)] {
             for (index, call) in visible(&paged, &page_nav).iter().enumerate() {
                 page_nav.selected = index;
-                let frame = frame_styled(&paged, &page_nav, columns, height, &read, false, true);
+                let board = board_frame(&paged, &page_nav, columns, height, &read, false, true);
+                let frame = &board.lines;
                 let identity = format!(" {} ", text(call, "participant"));
                 assert!(
                     frame
                         .iter()
                         .any(|line| line.contains('▸') && line.contains(&identity)),
                     "{columns}x{height} {index}: {frame:?}"
+                );
+                let selected_row = frame
+                    .iter()
+                    .position(|line| line.contains('▸') && line.contains(&identity))
+                    .unwrap();
+                assert_eq!(
+                    board.worker_rows.get(&selected_row),
+                    Some(&(
+                        text(call, "participant").to_owned(),
+                        text(call, "attempt").to_owned()
+                    ))
                 );
                 assert!(frame.len() == height && frame.iter().all(|line| width(line) <= columns));
                 assert!(
@@ -3042,7 +3162,7 @@ mod tests {
         let mut historical = report.clone();
         historical["room"]["participants"][4]["state"] = json!("done");
         nav.selected = 0;
-        assert_eq!(visible(&historical, &nav).len(), 3);
+        assert_eq!(visible(&historical, &nav).len(), 4);
         let history = frame(&historical, &nav, 80, 24, &read).join("\n");
         assert!(
             history.contains("1 past (Tab all)") && !history.contains("AGY task"),
@@ -3052,7 +3172,7 @@ mod tests {
             view: View::Compact,
             ..Default::default()
         };
-        assert_eq!(visible(&historical, &legacy).len(), 5);
+        assert_eq!(visible(&historical, &legacy).len(), 6);
         nav.filter = "AGY task".into();
         assert_eq!(visible(&historical, &nav).len(), 1);
         let searched = frame(&historical, &nav, 80, 24, &read).join("\n");
@@ -3068,9 +3188,9 @@ mod tests {
             &read,
         )
         .join("\n");
-        assert_eq!(
-            empty.matches("Orchestrator: unreported").count(),
-            3,
+        assert_eq!(empty.matches(" · Activity").count(), 3, "{empty}");
+        assert!(
+            empty.contains("no visible work") && !empty.contains("idle"),
             "{empty}"
         );
         let mut connected = report.clone();
@@ -3087,8 +3207,126 @@ mod tests {
         let [Some(codex), None, Some(agy)] = board.provider_rows else {
             panic!("only connected provider headers should be clickable");
         };
-        assert!(clean(&board.lines[codex], 80).contains("Codex · Orchestrator [1]"));
-        assert!(clean(&board.lines[agy], 80).contains("Antigravity · Orchestrator [3]"));
+        assert!(clean(&board.lines[codex], 80).contains("Codex · Lead chat [1]"));
+        assert!(clean(&board.lines[agy], 80).contains("Antigravity · Lead chat [3]"));
+        assert!(!board.worker_rows.contains_key(&codex));
+        assert!(!board.worker_rows.contains_key(&agy));
+        for columns in [56, 44, 40] {
+            let board = board_frame(
+                &connected,
+                &navigation::Navigation::default(),
+                columns,
+                24,
+                &read,
+                false,
+                true,
+            );
+            assert_eq!(board.lines.len(), 24);
+            assert!(board.lines.iter().all(|line| width(line) <= columns));
+            if columns >= 44 {
+                let [Some(codex), None, Some(agy)] = board.provider_rows else {
+                    panic!("connected session targets must survive compact card titles");
+                };
+                assert!(board.lines[codex].contains("Lead chat [1]"));
+                assert!(board.lines[agy].contains("Lead chat [3]"));
+            } else {
+                assert_eq!(board.provider_rows, [None; 3]);
+            }
+        }
+
+        let mut classified = report.clone();
+        classified["room"]["participants"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                json!({"participant":"OLD", "role":"main", "state":"done"}),
+                json!({"participant":"PAST", "provider":"claude", "role":"worker", "parent":"OLD", "state":"working"}),
+                json!({"participant":"EMPTY", "provider":"claude", "role":"worker", "parent":"", "state":"working"}),
+                json!({"participant":"LOST", "provider":"claude", "role":"worker", "parent":"missing", "state":"working"}),
+                json!({"participant":"PREFIX", "provider":"claude", "role":"worker", "parent":"att-M-more", "state":"working"}),
+            ]);
+        classified["native_children"] = json!([
+            {"participant":"NATIVE", "provider":"claude", "role":"subagent", "parent":"M", "native_child":true, "state":"working"}
+        ]);
+        let board = board_frame(
+            &classified,
+            &navigation::Navigation::default(),
+            200,
+            50,
+            &read,
+            false,
+            true,
+        );
+        let direct_top = board
+            .lines
+            .iter()
+            .position(|line| line.contains("Overall Main · Direct work"))
+            .unwrap();
+        let direct_bottom = board
+            .lines
+            .iter()
+            .enumerate()
+            .skip(direct_top + 1)
+            .find(|(_, line)| line.starts_with('╰'))
+            .unwrap()
+            .0;
+        assert!(board.lines[direct_top - 1].starts_with('╰'));
+        assert!(board.lines[direct_bottom + 1].starts_with("╭─ Codex · Activity"));
+        assert_eq!(board.worker_rows.len(), 10);
+        for (row, (participant, _)) in &board.worker_rows {
+            assert_eq!(
+                *row > direct_top && *row < direct_bottom,
+                ["CW", "DW", "AW"].contains(&participant.as_str()),
+                "{participant}: {:?}",
+                board.lines
+            );
+            assert!(!board.lines[*row].contains("├─") && !board.lines[*row].contains("└─"));
+            if participant == "DW" {
+                assert!(board.lines[*row].contains("claude") && board.lines[*row].contains("← M"));
+            }
+            if participant == "LW" {
+                assert!(board.lines[*row].contains("← L"));
+            }
+        }
+        for variant in 0..4 {
+            let mut uncertain = classified.clone();
+            let members = uncertain["room"]["participants"].as_array_mut().unwrap();
+            match variant {
+                0 => members.retain(|call| call["participant"] != "M"),
+                1 => members[0]["state"] = json!("done"),
+                2 => {
+                    members.push(json!({"participant":"SECOND", "role":"main", "state":"working"}));
+                }
+                _ => {
+                    members.push(json!({"participant":"att-M", "role":"worker", "state":"working"}));
+                }
+            }
+            let board = board_frame(
+                &uncertain,
+                &navigation::Navigation::default(),
+                200,
+                50,
+                &read,
+                false,
+                true,
+            );
+            assert!(
+                !board
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("Overall Main · Direct work")),
+                "variant {variant}: {:?}",
+                board.lines
+            );
+            if variant == 3 {
+                let (row, _) = board
+                    .worker_rows
+                    .iter()
+                    .find(|(_, (participant, _))| participant == "DW")
+                    .unwrap();
+                assert!(!board.lines[*row].contains('←'));
+            }
+        }
         nav.filter = "Claude task".into();
         nav.selected = 0;
         assert_eq!(visible(&report, &nav).len(), 1);
@@ -3099,8 +3337,8 @@ mod tests {
                 .any(|line| line.contains('▸') && line.contains("LW")),
             "{filtered}"
         );
-        assert!(filtered.contains("3 filt"), "{filtered}");
-        assert!(filtered.contains("Claude · Orchestrator L"), "{filtered}");
+        assert!(filtered.contains("4 filt"), "{filtered}");
+        assert!(filtered.contains("Claude · Activity"), "{filtered}");
     }
 
     #[test]

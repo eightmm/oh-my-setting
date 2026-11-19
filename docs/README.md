@@ -73,6 +73,11 @@ slices are now implemented; interactive native provider sessions remain a separa
 unmanaged path. Neither code presence nor a pane proves complete native child
 control, usage coverage or multi-member acceptance.
 
+The [panel layout and interaction contract](TEAM-ORCHESTRATION-PANEL.md) connects
+Main-owned direct work, optional Provider Leads and the native session switcher.
+It separates the current Auto grouping correction from the proposed task-first
+assignment/result inspector and links that work to the existing implementation queue.
+
 ## Migration notes
 
 - [MIGRATION.md](MIGRATION.md) — upgrade notes for 0.7 through 0.4, newest first.

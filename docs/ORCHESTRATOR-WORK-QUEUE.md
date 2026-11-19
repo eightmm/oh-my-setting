@@ -45,6 +45,39 @@ LC-01~04는 별도 핵심 연결 작업이다. “흡수”는 동등한 기능�
 - **Catalog와 task 중심 board:** 기존 model/effort catalog·route evidence·Reader를 사용한다.
   #258의 launch 옵션 이후에도 account별 capability 최신성, 실제 적용 설정, task→Team→member 증거 연결은 남는다.
 
+### Overall Main 아래의 작업과 native 세션 연결
+
+2026-11-19, main `7d9b291592a926ce389693141d11ef8269eccfcd`에서 확인한 후속 범위다.
+[패널 계약](TEAM-ORCHESTRATION-PANEL.md)은 하나의 작업 흐름 안에서 Main 직접 작업과
+필요한 Provider Lead를 구분한다. Provider별 분류는 세션 이동·활동 분류이며 배정 관계가 아니다.
+새 작업 큐를 만들지 않고 기존 TM-06과 P0-B/native assignment owner가 아래 순서로 연결한다.
+
+| 기존 owner / 순서 | 이번 변경과 후속 범위 | 완료 조건 / 선행 관계 |
+|---|---|---|
+| TM-06A: 현재 Auto overview | 기록상 유일한 live Main을 정확한 parent로 갖는 일반 Worker·Reviewer·Advisor를 Main 직접 작업 영역으로 분리; provider 영역은 중립적인 활동·세션 표시 | 빈/유실/모호한 parent와 native 관측을 직접 배정으로 추정하지 않음; 선택·검색·페이지·mouse target·기존 session shortcut 보존 |
+| P0-B: 명시적 native 배정 | 기존 task/lease/attempt·Room reference와 native target/turn·결과를 연결 | 일반 native 대화에는 task 생성 강제 없음; 모호한 전송 뒤 direct 재배정·자동 재전송 금지; 작업과 실행 관계가 확인될 때만 공통 카드에 연결 |
+| TM-05 / 기존 landing owner: 결과 수락 | 현재 panel acceptance → native landing parser 연결 오류를 별도 correctness diff로 수정하고 결과 근거를 기존 수락 경로로 소비 | `--panel-accept`를 무시하는 호환 처리 금지; exact owner/task/base/candidate와 검토 근거 재검증; 실제 native parser를 지나는 기존 entry fixture에서 성공·stale·복구 검사 |
+| TM-06A/B: 같은 작업 inspector | 기존 Results/Events/Diff/Transcript reader에 작업·배정·결과 연결과 지원되는 action을 표시 | P0-B의 실제 binding과 해당 action capability를 소비; native 보고·verification·acceptance·publication 구분; 같은 작업을 실행 방식별로 중복 표시하지 않음 |
+| TM-06C / PERF-02 / REL-01 | 연결된 projection의 bounded refresh와 입력·선택 보존 | 동일 snapshot 재사용; 새 모델 호출·전체 transcript 재파싱·state write 없이 열람; cold/warm I/O와 실제 terminal 동작은 별도 측정 |
+
+첫 행은 이 변경의 read projection과 기존 render fixture 범위다. Task-first 통합과 native
+assignment/result/control의 완료를 뜻하지 않는다. Native 배정 설계는
+[#285](https://github.com/eightmm/oh-my-setting/pull/285), Main 선택은
+[#286](https://github.com/eightmm/oh-my-setting/pull/286), 실제 역할 프롬프트는
+[#284](https://github.com/eightmm/oh-my-setting/pull/284)를 함께 읽는다. 이 세 PR은 조사 시점
+open Draft이며, 병합 전 기능을 현재 main에 구현됐다고 표시하지 않는다.
+
+결과 수락 문제의 확인 경로는 `oms-panel-core/src/acceptance.rs`의 `--panel-accept`
+생성 → `oms/src/services_collab.rs`의 인자 전달 → `oms-command-landing/src/cli.rs`의
+해당 option 누락이다. 이는 소스 추적으로 확인한 거절 경로이며 이번 UI diff에서 수정하거나
+live로 재현한 기능이 아니다. Read-only 분류 수정은 이 후속과 독립적으로 검토할 수 있지만,
+수락·취소·복구 조작을 새로 활성화하는 데 필요한 증거를 대신하지 않는다.
+
+Main이 역할과 실행 조건을 판단하며 사용자가 매번 native/direct 모드를 선택하지 않는다.
+기존 Lead의 맥락을 이어 쓰는 작은 작업도 유효하고, 큰 작업의 독립 검토를 direct reviewer로
+맡길 수도 있다. Lead는 native loop 안에서 직접 수행·분업하고 OMS-managed 실행이 필요하면
+Main에 요청한다. Lead의 child marker를 제거하거나 parent-only guard를 완화하지 않는다.
+
 새 성능/CI 개선은 이 P0의 예약·사용량·소유권·검증 의미를 유지해야 한다.
 시간이 오래 걸린다는 이유로 checked API, fsync, exact-SHA proof를 생략하지 않는다.
 
