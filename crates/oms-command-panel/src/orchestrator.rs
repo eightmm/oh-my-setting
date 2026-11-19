@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 pub const PROVIDERS: [&str; 3] = ["codex", "claude", "antigravity"];
 pub const MAIN_WINDOW: &str = "Overall Main";
+pub(crate) const TASK_PREFIX: &str =
+    "Task from Overall Main. Work within this task and report the result here.";
 
 const STARTUP_PROMPT: &str = "You are this project's Provider Lead under Overall Main. \
 Wait for an assignment from Overall Main. Complete the assigned scope directly unless \
@@ -27,7 +29,7 @@ when the provider does not confirm them.";
 
 fn task_prompt(turn: &str, task: &str) -> String {
     format!(
-        "Task from Overall Main for this Provider Lead. Turn {turn}. \
+        "{TASK_PREFIX} Provider Lead assignment. Turn {turn}. \
 Complete the assigned scope directly unless independent useful work justifies native \
 subagents or team tools. When delegating, give children bounded, disjoint work and completion \
 checks within effective native limits. Leaf children cannot recursively delegate. Wait for \
@@ -908,6 +910,17 @@ mod tests {
         }
         assert!(assignment.contains("Turn assignment-1."));
         assert!(assignment.ends_with("Task: Keep this bounded fix intact."));
+        let legacy = concat!(
+            "Task from Overall Main. Work within this task and report the result here. ",
+            "Turn assignment-0. You own this provider's work. Give native subagents bounded, ",
+            "disjoint work and completion checks."
+        );
+        for prompt in [assignment.as_str(), legacy] {
+            let terminal = format!("native output\n> {prompt}\n");
+            let anchor = crate::native_children::agy_task_anchor(&terminal)
+                .expect("native assignment must be observable");
+            assert_eq!(anchor, prompt.chars().take(200).collect::<String>());
+        }
     }
 
     #[test]

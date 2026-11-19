@@ -1,12 +1,10 @@
-use crate::text;
+use crate::{orchestrator::TASK_PREFIX, text};
 use oms_panel_core::{Store, Value, terminals};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
 const TRANSCRIPT: &str = ".system_generated/logs/transcript.jsonl";
 const MAX_TRANSCRIPT: usize = 4 * 1024 * 1024;
-const TASK_PREFIX: &str =
-    "Task from Overall Main. Work within this task and report the result here.";
 
 pub fn observe(
     provider: &str,
@@ -200,7 +198,7 @@ fn claude(pid: u32, repo: &Path) -> Option<Vec<Value>> {
     )
 }
 
-fn agy(repo: &Path, terminal: &str, parent_file: &mut Option<PathBuf>) -> Option<Vec<Value>> {
+pub(crate) fn agy_task_anchor(terminal: &str) -> Option<String> {
     let prompt = terminal
         .lines()
         .rev()
@@ -214,6 +212,11 @@ fn agy(repo: &Path, terminal: &str, parent_file: &mut Option<PathBuf>) -> Option
     if anchor.len() < TASK_PREFIX.len() + 45 {
         return None;
     }
+    Some(anchor)
+}
+
+fn agy(repo: &Path, terminal: &str, parent_file: &mut Option<PathBuf>) -> Option<Vec<Value>> {
+    let anchor = agy_task_anchor(terminal)?;
     let home = PathBuf::from(std::env::var_os("HOME")?).join(".gemini/antigravity-cli/brain");
     let store = Store::open(&home).ok()?;
     let matches_prompt = |rows: &[Value]| {
