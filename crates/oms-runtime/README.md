@@ -12,6 +12,12 @@ occupancy; it does not activate a default. `active` is the recorded domain state
 and `host_matches_policy` separately identifies a stale host binding. Neither
 observation supplies a launch permit.
 
+Status also returns the exact dispatch `snapshot_sha256`, retained Team slots
+and write operations with their custody revisions. `execution_pending` means
+invocation/process custody remains unresolved; `candidate_pending` is separate
+write WIP. These observations do not infer cleanup from a missing PID or a
+withdrawn Team contract.
+
 `resources activate --policy PATH` explicitly activates a policy before Main
 starts. Relative policy paths use the caller's directory, then must remain
 inside the resolved physical execution repository. The native producer accepts
@@ -31,10 +37,45 @@ positive integers. `reviewer_headroom` is a nonnegative integer strictly below
 
 `resources hold --expected-policy-sha256 SHA` blocks new admission for the exact
 current policy while preserving independent custody, usage and settlement.
-Activation and hold refuse harness children and delegated descendants. Host and
+All mutations refuse harness children and delegated descendants. Host and
 status remain read-only for children. The common `--repo` and `--pretty` options
 are supported.
 
-Retirement and epoch recovery require native canonical decision validation.
-They are internal checked producer APIs, with no CLI that treats supplied JSON,
-artifact paths, worker exit or done/cleanup flags as retirement authority.
+`resources discard-write --operation-id ID --expected-revision N --reason TEXT`
+records an explicit candidate disposition from the currently enrolled Main.
+The native producer validates the live Main creation generation, Room, retained
+Team contract and exact physical write binding under producer guards. It refuses
+while any call in the operation retains execution custody. Success releases WIP
+without deleting dirty worktrees, partial patches, logs or usage receipts, and
+without marking a Plan task accepted or done. The returned `decision` names an
+immutable native record; callers cannot submit an evidence file as authority.
+
+`resources retire-team --team-id ID --team-spec-sha256 SHA --expected-revision N`
+releases the exact contract generation only after canonical withdrawal or
+supersession by a newer retained TeamSpec and independently drained execution
+and candidate custody. `agent-plan team-cancel` automatically tries this after
+publishing withdrawal and releasing its producer locks. Its response adds
+`resource_retirement` to that Team's returned record: `retired`, `pending`, or
+`unknown`. The projection is not persisted as a new Plan lifecycle phase.
+Successful `discard-write` retries retirement for its withdrawn/superseded Team
+and reports `team_retirement`; an active contract keeps its Team slot.
+
+Both release commands preserve exact owner/host generations and use revision
+CAS. An identical decision/revision retry is idempotent; a changed disposition,
+stale revision or foreign owner refuses. Old-Main or previous-host unknown
+custody cannot be taken over by these commands.
+
+`resources reconcile --policy PATH --expected-snapshot-sha256 SHA --reason TEXT`
+resumes an exact held, fully drained domain into a new policy epoch on the
+observed host. The existing checked store rejects reused epoch names, a changed
+domain or nonzero Team/invocation/process/WIP occupancy. Previous policies,
+physical intents, retirement decisions and usage liabilities are retained.
+This command does not reset unknown execution or refund unknown cost.
+
+Active member cancellation still belongs to the original Supervisor/transport.
+`team-cancel` withdraws admission and does not promise to kill processes or
+produce cleanup evidence. After the owning execution producer supplies sealed
+cleanup, use the native release flow for remaining candidate/Team custody.
+Automatic accepted-candidate retirement, lost-owner/host recovery and persistent
+session settlement remain unsupported until those producers expose exact owned
+bindings; this API never accepts caller-supplied done/cleanup Booleans.

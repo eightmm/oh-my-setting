@@ -72,6 +72,35 @@ impl Services for Native {
                 assert_eq!(expected_policy_sha256, &"a".repeat(64));
                 ("hold", Value::Null)
             }
+            ResourceAction::Reconcile {
+                policy,
+                expected_snapshot_sha256,
+                reason,
+            } => {
+                assert_eq!(expected_snapshot_sha256, &"a".repeat(64));
+                assert_eq!(reason, "resume drained work");
+                ("reconcile", os(policy.as_os_str()))
+            }
+            ResourceAction::RetireTeam {
+                team_id,
+                spec_sha256,
+                expected_revision,
+            } => {
+                assert_eq!(team_id, "team-a");
+                assert_eq!(spec_sha256, &"a".repeat(64));
+                assert_eq!(*expected_revision, 1);
+                ("retire-team", Value::Null)
+            }
+            ResourceAction::DiscardWrite {
+                operation_id,
+                expected_revision,
+                reason,
+            } => {
+                assert_eq!(operation_id, "operation-a");
+                assert_eq!(*expected_revision, 1);
+                assert_eq!(reason, "candidate superseded");
+                ("discard-write", Value::Null)
+            }
         };
         Ok(object([("action", string(name)), ("policy", policy)]))
     }
@@ -428,7 +457,15 @@ fn help_parse_interruption_and_unavailable_fail_closed() {
             .resource_action(&f.0, &f.0, &oms_runtime::services::ResourceAction::Status)
             .is_err()
     );
-    for action in ["host", "status", "activate", "hold"] {
+    for action in [
+        "host",
+        "status",
+        "activate",
+        "hold",
+        "reconcile",
+        "retire-team",
+        "discard-write",
+    ] {
         let help = f.run(&["resources", action, "--help"], false);
         assert_eq!(help.code, 0);
         assert!(
@@ -442,6 +479,17 @@ fn help_parse_interruption_and_unavailable_fail_closed() {
         vec!["resources", "activate", "--policy", ""],
         vec!["resources", "hold", "--expected-policy-sha256", "bad"],
         vec!["resources", "retire", "--done", "true"],
+        vec!["resources", "retire-team", "--team-id", "team-a"],
+        vec![
+            "resources",
+            "discard-write",
+            "--operation-id",
+            "operation-a",
+            "--expected-revision",
+            "0",
+            "--reason",
+            "candidate superseded",
+        ],
     ] {
         assert_eq!(f.run(&invalid, false).code, 2);
     }
@@ -483,6 +531,52 @@ fn help_parse_interruption_and_unavailable_fail_closed() {
         false,
     );
     assert_eq!(held.code, 0);
+    for args in [
+        vec![
+            "resources",
+            "reconcile",
+            "--policy",
+            "policy.json",
+            "--expected-snapshot-sha256",
+            &"a".repeat(64),
+            "--reason",
+            "resume drained work",
+        ],
+        vec![
+            "resources",
+            "retire-team",
+            "--team-id",
+            "team-a",
+            "--team-spec-sha256",
+            &"a".repeat(64),
+            "--expected-revision",
+            "1",
+        ],
+        vec![
+            "resources",
+            "discard-write",
+            "--operation-id",
+            "operation-a",
+            "--expected-revision",
+            "1",
+            "--reason",
+            "candidate superseded",
+        ],
+    ] {
+        let result = f.run(&args, false);
+        assert_eq!(
+            result.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            oms_runtime::value::parse(&result.stdout)
+                .unwrap()
+                .text("action"),
+            args[1]
+        );
+    }
     assert_eq!(
         oms_runtime::value::parse(&held.stdout)
             .unwrap()

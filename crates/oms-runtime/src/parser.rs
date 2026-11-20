@@ -162,6 +162,33 @@ fn spec(r: &Request) -> Spec {
     ) {
         (Mode::Envelope, _, _) => ("", "output", "", "", 0, 0, false),
         (Mode::Resources, "activate", _) => ("", "policy", "", "policy", 0, 0, false),
+        (Mode::Resources, "reconcile", _) => (
+            "",
+            "policy expected-snapshot-sha256 reason",
+            "",
+            "policy expected-snapshot-sha256 reason",
+            0,
+            0,
+            false,
+        ),
+        (Mode::Resources, "retire-team", _) => (
+            "",
+            "team-id team-spec-sha256 expected-revision",
+            "",
+            "team-id team-spec-sha256 expected-revision",
+            0,
+            0,
+            false,
+        ),
+        (Mode::Resources, "discard-write", _) => (
+            "",
+            "operation-id expected-revision reason",
+            "",
+            "operation-id expected-revision reason",
+            0,
+            0,
+            false,
+        ),
         (Mode::Resources, "hold", _) => (
             "",
             "expected-policy-sha256",
@@ -588,7 +615,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                     "template validate compare register show run launch sweep summarize evaluate invariants"
                 }
                 Mode::Benchmark => "show snapshot record compare",
-                Mode::Resources => "host status activate hold",
+                Mode::Resources => "host status activate hold reconcile retire-team discard-write",
                 _ => "",
             };
             r.action = choose(arg, &choices.split_whitespace().collect::<Vec<_>>())

@@ -3,6 +3,16 @@ use crate::json::{self, Value, object, string};
 use crate::storage::Store;
 use crate::{Result, error, require};
 pub const CATALOG: &str = ".oms/plan/decision-artifacts-v1";
+/// Retains native producer evidence without granting any decision authority.
+/// Callers must validate their own canonical target before and after publication.
+pub fn retain_native(store: &Store, body: &Value) -> Result<Value> {
+    let raw = json::canonical(body)?;
+    require(raw.len() <= 64 * 1024, "native decision exceeds 64 KiB")?;
+    crate::engine::screen(&raw)?;
+    store
+        .immutable(CATALOG, &raw, ".json", 64 * 1024)
+        .map(|(reference, _)| reference)
+}
 pub fn relative(value: &str) -> Result<&str> {
     require(
         !value.is_empty()

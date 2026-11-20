@@ -49,9 +49,32 @@ pub struct Occupancy {
 }
 #[derive(Clone, Debug)]
 pub struct Snapshot {
+    pub sha256: String,
     pub policy: Policy,
     pub active: bool,
     pub occupancy: Occupancy,
+    pub teams: Vec<TeamCustody>,
+    pub writes: Vec<WriteCustody>,
+}
+#[derive(Clone, Debug)]
+pub struct TeamCustody {
+    pub id: String,
+    pub spec_sha256: String,
+    pub root_owner: String,
+    pub root_generation: String,
+    pub revision: u64,
+    pub active: bool,
+    pub execution_pending: bool,
+    pub candidate_pending: bool,
+}
+#[derive(Clone, Debug)]
+pub struct WriteCustody {
+    pub operation_id: String,
+    pub binding: Binding,
+    pub revision: u64,
+    pub active: bool,
+    pub execution_pending: bool,
+    pub call_ids: Vec<String>,
 }
 /// Correlation to an exact canonical producer decision, not authority by itself.
 /// The checked APIs require the parent adapter to retain that producer's owner
@@ -800,12 +823,82 @@ pub fn snapshot(repo: &Path, stop: &AtomicBool) -> Result<Option<Snapshot>, Stor
         return Ok(None);
     };
     let registry = decode(&raw)?;
+    validate(&registry)?;
     read(&registry)?
         .map(|(resource, policy)| {
+            let V::Object(teams) = &resource["teams"] else {
+                unreachable!()
+            };
+            let V::Object(claims) = &resource["claims"] else {
+                unreachable!()
+            };
+            let teams = teams
+                .values()
+                .map(|team| {
+                    Ok(TeamCustody {
+                        id: team["id"].text().unwrap().into(),
+                        spec_sha256: team["spec_sha256"].text().unwrap().into(),
+                        root_owner: team["root_owner"].text().unwrap().into(),
+                        root_generation: team["root_generation"].text().unwrap().into(),
+                        revision: custody_revision(team)?,
+                        active: team["active"] == V::Bool(true),
+                        execution_pending: claims.values().any(|claim| {
+                            claim["binding"]["team"]["spec_sha256"] == team["spec_sha256"]
+                                && (claim["invocation"] == V::Bool(true)
+                                    || claim["process"] == V::Bool(true))
+                        }),
+                        candidate_pending:
+                            claims.values().any(|claim| {
+                                claim["binding"]["team"]["spec_sha256"] == team["spec_sha256"]
+                                    && resource["write_wip"][claim["operation_id"].text().unwrap()]
+                                        ["active"]
+                                        == V::Bool(true)
+                            }),
+                    })
+                })
+                .collect::<Result<Vec<_>, StoreError>>()?;
+            let V::Object(writes) = &resource["write_wip"] else {
+                unreachable!()
+            };
+            let writes = writes
+                .values()
+                .map(|write| {
+                    let related = claims
+                        .values()
+                        .filter(|claim| claim["operation_id"] == write["operation_id"])
+                        .collect::<Vec<_>>();
+                    let binding = related
+                        .iter()
+                        .find(|claim| {
+                            registry["physical"]["calls"][claim["call_id"].text().unwrap()]
+                                        ["request"]["access"]
+                                        .text()
+                                        == Some("write")
+                        })
+                        .ok_or(invalid("write custody has no physical writer"))?;
+                    Ok(WriteCustody {
+                        operation_id: write["operation_id"].text().unwrap().into(),
+                        binding: Binding::decode(&binding["binding"])?,
+                        revision: custody_revision(write)?,
+                        active: write["active"] == V::Bool(true),
+                        execution_pending: related.iter().any(|claim| {
+                            claim["invocation"] == V::Bool(true)
+                                || claim["process"] == V::Bool(true)
+                        }),
+                        call_ids: related
+                            .iter()
+                            .map(|claim| claim["call_id"].text().unwrap().into())
+                            .collect(),
+                    })
+                })
+                .collect::<Result<Vec<_>, StoreError>>()?;
             Ok(Snapshot {
+                sha256: format!("{:x}", Sha256::digest(&raw)),
                 occupancy: count(&registry, resource, &policy)?,
                 active: resource["state"].text() == Some("active"),
                 policy,
+                teams,
+                writes,
             })
         })
         .transpose()
