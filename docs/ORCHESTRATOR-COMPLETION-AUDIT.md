@@ -432,3 +432,30 @@ P0 lifecycle 패킷, 작은 model override 변경, P1 proposal/integration을 �
 완료는 문서나 worker report 생성만으로 판단하지 않는다. 실제 entrypoint가 기존 producer를
 통과하고, 검증 가능한 evidence가 남으며, 실패 뒤에도 기존 task/작업물/책임이 보존되어야 한다.
 이 감사 PR은 위 후속 runtime 기능을 구현했다는 주장을 하지 않는다.
+
+## 10. 2026-11-20 공유 제안의 현재 코드 대조와 구현
+
+[사용자가 공유한 Gemini 논의](https://share.gemini.google/kWau2EnD4Dki)를
+main [`ee6ce7aadc39b6e060b441d116848175a8c290a8`](https://github.com/eightmm/oh-my-setting/commit/ee6ce7aadc39b6e060b441d116848175a8c290a8)에
+대조했다. 공유 논의는 개선 방향의 입력이며 현재 구현의 증거는 아니다. 현재 OMS는
+native Rust 명령과 기존 소유권·receipt·gate를 갖추고 있어, 새 profile/gate 설정이나
+별도 handoff 저장 형식을 먼저 만드는 제안은 그대로 적용하지 않는다.
+
+이번 후속 구현은 이미 있는 producer와 실제 consumer 사이의 세 경계를 보완한다.
+
+| 확인한 문제 | 기존 경로에 연결한 변경 | 검증 경계 |
+|---|---|---|
+| 공개 `session-handoff prompt`가 task/plan 원문을 잘라 붙여 rich renderer를 사용하지 않음 | [peer consumer](../crates/oms-command-peer/src/session.rs)가 기존 [autonomy renderer](../crates/oms-command-autonomy/src/handoff.rs)를 호출; 다섯 고정 읽기를 staged native host로 연결 | 공통 조회 예산, 출력 cap, source 검사, unavailable/partial 구분. 기록은 새 검증이나 resume 권한이 아님 |
+| managed copy의 설치 당시 소유권이 현재 source 일치로 표시됨 | [doctor](../crates/oms-command-lifecycle/src/doctor.rs)가 `owned`와 `source_freshness`를 별도로 진단; 기존 repair를 안내 | copy가 stale여도 ownership은 유지. unsafe/unreadable source는 unknown. 실제 provider가 파일을 읽었다는 증거는 아님 |
+| 설치 capability 선택이 component profile 및 fingerprint와 혼동될 수 있음 | doctor/status에 bounded capability provenance를 추가 | schema-1 fingerprint/hash/compare는 유지하며 capability 선택을 포함하지 않음. runtime 적용은 unknown |
+| 기존 `skill-manifest` gate가 manifest/path만 읽고 host 조건으로 bundle을 건너뜀 | [install-skills](../crates/oms-command-lifecycle/src/install.rs)가 기존 [skill validator](../crates/oms-command-providers-skills/src/skills.rs)를 `requires` 전에 호출 | 모든 enabled bundle의 구조와 managed reference를 검사. 출력 count와 설치 대상의 host 선택 의미는 유지 |
+
+실행 검증은 기존 `peer_contract`, `native_lifecycle`, `project_parity` 및 native
+host adapter fixture에 포함한다. 새 CI job, 모델 호출, 저장 대장, 강제 landing 우회는
+추가하지 않는다. 이 작업의 작성 환경에는 Rust 도구가 없었으므로 실행 결과는 게시된
+커밋의 기존 CI에서 확인한다. Fixture 성공은 유료 모델 품질이나 live provider에서의
+효과를 증명하지 않는다.
+
+실제 스킬의 trigger 오탐·누락과 task 성공률을 비교하는 작업은 위 P2 및 기존
+`skill-forge eval` 경로의 후속 과제다. Native session의 설정 적용 관측, Main 인계
+소비 확인, LC-01~04와 composite acceptance 역시 이 세 변경의 완료로 대체되지 않는다.

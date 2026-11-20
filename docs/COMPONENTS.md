@@ -471,6 +471,18 @@ Doctor checks installed Git HEAD/ref validity without fetching or rewriting
 refs. Damaged references require targeted recovery with preserved originals;
 link repair is not Git recovery.
 
+Managed inventory reports `owned` separately from `source_freshness`. A managed
+copy can still be owned while its source has changed: doctor reports `stale`
+and points to the existing `oms doctor --repair` path. Missing or unsafe source
+content leaves freshness `unknown`; a modified or foreign target remains an
+ownership failure. Matching files do not prove that a running provider loaded
+them. The existing install, repair and removal ownership rules are unchanged.
+
+Doctor also projects the saved tool capability selection. It reports missing,
+invalid and unreadable receipts explicitly and includes only bounded selection
+fields, never the receipt path or extra contents. This selection is separate
+from the installation component profile and repository runtime configuration.
+
 
 ### Workspace and installation status
 
@@ -499,6 +511,14 @@ never runs a provider CLI and never writes. Save it and move it yourself
 FILE [--json]` diffs the local fingerprint against such a file: exit 0 when
 identical, 1 with one `- field: local=… file=…` line per difference, 2 when the
 file is not a schema-1 fingerprint. It reports; it does not repair.
+
+`oms status --json` adds `install_profile_scope` and `capability_selection` to
+make that distinction visible. The latter identifies whether the default
+receipt or an environment override supplied the selection, and reports its
+status and recorded `requested`, `primary_provider` and `allow_missing` fields.
+Its runtime application remains `unknown`. These fields are deliberately
+outside the existing schema-1 fingerprint: saved fingerprints and comparisons
+retain their original identity and cannot detect a capability selection change.
 
 ## Project onboarding
 
@@ -632,6 +652,15 @@ machine-conditional skills only where their command exists (`oms-slurm`,
 skills are named `oms-*` so they cannot collide with your own skills in the
 shared skill roots. Newly forged project skills are also `oms-*`; stored legacy
 names remain readable and are not renamed automatically.
+
+The existing `skill-manifest` check routes through native `install-skills` and
+validates every enabled bundle before applying its host `requires` filter.
+Manifest and frontmatter names must match the source directory. The existing
+skill validator checks portable frontmatter, content budgets, sensitive content
+and managed references, including missing, unsafe and orphan references. Thus
+Slurm and GPU skill content is checked even on a host without their commands.
+No model or host command runs. The printed count still means enabled sources
+available on this host; install, link and doctor retain that selection rule.
 
 `oms skill-doctor` ends with an advisory listing budget: per CLI, how many
 skills are installed and how long their descriptions are in total, against
@@ -1582,24 +1611,25 @@ not approval or verification evidence, and a failed write never fails resume.
 
 `oms session-handoff prompt [--cwd PATH] [--max-bytes N] [--output NEW_FILE]`
 prints an editable next-session prompt for a person to review and paste into a
-fresh session of any provider, instead of relying on a provider's lossy
-compaction. It is a deterministic template over records OMS already holds (no
-model call, no OMS state written, nothing re-run or approved): Goal (task and
-plan goal, criteria ids), State (plan tasks done / ready / blocked with the
-`runtime next --explain` reasons), Decisions (journal, newest first), Open
-findings (blocking first), Verified / Not verified (the task's recorded
-verification lines and gate state, and `runtime evidence matrix` criterion
-status), Next step (the task's `Next Step`, else "not recorded"; none is
-invented) and Pointers (the `oms` commands that open each source, plus the
-newest handoff digest). Every line ends with `[src: ID]`; a source with nothing
-recorded prints "not recorded" and a reader that failed prints "unavailable".
-Lines pass the shared secret scan and a flagged one is replaced by a
-"withheld" notice that keeps its source id. Output is held to `--max-bytes`
-(512-65536, default 4096) and a `truncated:` line always names what was cut.
-`--output` creates a new file and refuses to overwrite one. It complements the
-transcript-based `capture` digest, which holds the conversation rather than the
-recorded work state, and `oms runtime brief`, which compares two saved
-snapshots.
+fresh session of any provider. Native provider compaction remains the ordinary
+same-session continuity path; this command is an explicit, mechanical export
+of recorded work state. The public command uses the existing autonomy renderer:
+Goal from the plan and task packet; State from `agent-task status`; Decisions
+from the task packet and journal; Open findings from the review ledger;
+Verified / Not verified from `runtime evidence matrix`; Next step from
+`runtime next --explain`; and Pointers to local source records.
+
+Five fixed read-only projections share a 40-second read budget and each has a
+64 KiB output cap. They use the staged native launcher and its process
+supervision; no provider, verifier or arbitrary command is selected. Missing,
+failed, partial or oversized projections remain explicit gaps. Recorded text
+is a claim, never fresh verification, approval or resume authority. Output
+lines carry source tags, and the existing outbound checks can refuse unsafe
+source content before trimming. The renderer also withholds flagged lines.
+Output is held to `--max-bytes` (512-65536, default 4096), dropping whole lines
+with omitted and withheld counts. `--output` creates a new file and refuses to
+overwrite one. No pickup or approval receipt is created. Transcript-based
+`capture` and `oms runtime brief` retain their separate purposes.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
