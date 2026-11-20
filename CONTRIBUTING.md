@@ -12,6 +12,7 @@ bash tests/run-smoke-shard.sh --only TEST_NAME
 For a committed range, use `bash scripts/check.sh --affected --changed-from BASE --changed-to HEAD`.
 Ordinary docs use reference checks; critical changes or
 uncertain impact select full coverage. Shell lint requires ShellCheck.
+Run `bash scripts/check.sh --preflight` first: it reports missing ShellCheck, the pinned Rust toolchain, or crate dependencies without installing anything.
 
 When publication is authorized, finish the scoped commits and run `oms land`.
 It owns the gate, unchanged-tree push, CI receipt and eligible installation
