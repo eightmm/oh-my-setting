@@ -6,6 +6,14 @@
 이 문서는 runtime, 전송 한도, 설치 의존성, SSH 설정이나 자동 삭제 정책을 바꾸지 않는다.
 원격 장비·Slurm·GPU·유료 provider는 실행하지 않았다. 아래 완료 조건은 미래 구현의 검증 조건이다.
 
+후속 구현은 [runtime 문서](OMS-RUNTIME.md#bounded-artifact-collection)에 정리한다.
+Ordinary/resume collect는 이제 기존 supervisor를 공유해 취소, 전체 요청 deadline,
+bounded cleanup과 descriptor 기반 최종 게시를 처리한다. 아래 표의 blocking read 설명은
+조사 시점의 기준선이다. [원격 experiment 경로](OMS-RUNTIME.md#remote-experiment-runs)는
+run/contract/seed/snapshot에 묶인 단일 metrics bundle을 기존 run ledger에 연결한다.
+이는 AR-02/03의 임의 다중 파일 manifest, 별도 delivery receipt, publication reconcile,
+cache inventory/GC 전체를 완료했다는 뜻은 아니다.
+
 채택 상태는 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다. AR-01은 원격 collect를 사용하는
 경로의 교정이다. AR-02/03은 실제 여러 산출물의 전달·완료 consumer가 필요한 경우 함께 채택하는
 한 선택 기능이며, AR-04는 cache 공간 문제가 확인된 경우의 inventory부터 검토한다.

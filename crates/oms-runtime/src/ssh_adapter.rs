@@ -8,11 +8,12 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 mod resumable;
+mod stream;
 
-const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]\ncollect: --host HOST --repo REPO --remote-dir DIR --remote-path PATH --dest PATH [--expected-sha256 HEX] [--max-bytes N] [--resume --expected-size N [--chunk-bytes N]]";
+const USAGE: &str = "usage: oms runtime ssh-adapter <probe|sync-bundle|exec|reconcile|cancel|collect> [options] [-- command...]\ncollect: --host HOST --repo REPO --remote-dir DIR --remote-path PATH --dest PATH [--expected-sha256 HEX] [--max-bytes N] [--timeout-seconds N] [--resume --expected-size N [--chunk-bytes N]]";
 const DEFAULT_COLLECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COLLECT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_LEDGER_OUTPUT: usize = 512 * 1024;
@@ -64,6 +65,7 @@ pub fn run(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Response 
     execute(args, cwd, interrupted).unwrap_or_else(Response::failure)
 }
 fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Response> {
+    let started = Instant::now();
     if args.is_empty()
         || args.iter().any(|a| a == "--help" || a == "-h") && !args.iter().any(|a| a == "--")
     {
@@ -104,6 +106,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     let mut chunk_bytes = None;
     let mut resume = false;
     let mut max_bytes = None;
+    let mut timeout_seconds = None;
     let mut pretty = false;
     let mut tail = Vec::new();
     let mut i = 1;
@@ -144,6 +147,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             "--expected-size" if action == "collect" => &mut expected_size,
             "--chunk-bytes" if action == "collect" => &mut chunk_bytes,
             "--max-bytes" if action == "collect" => &mut max_bytes,
+            "--timeout-seconds" if action == "collect" => &mut timeout_seconds,
             _ => return Err(error(format!("unknown option: {flag}"))),
         };
         i += 1;
@@ -205,6 +209,15 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         })
         .transpose()?
         .unwrap_or(DEFAULT_COLLECT_MAX_BYTES);
+    let timeout_seconds = timeout_seconds
+        .map(|raw| {
+            raw.parse::<u64>()
+                .ok()
+                .filter(|n| (1..=86400).contains(n))
+                .ok_or_else(|| error("--timeout-seconds must be in 1..=86400"))
+        })
+        .transpose()?
+        .unwrap_or(300);
     if let Some(digest) = expected_sha256.as_deref() {
         validate_sha256_hex(digest, "--expected-sha256")?;
     }
@@ -239,7 +252,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     }
     let control = ssh_control_path(&host, port)?;
     assert!(control.len() <= 80);
-    if resume.is_some() {
+    if action == "collect" {
         resumable::check_cancelled(interrupted)?;
     } else {
         require(!interrupted.load(Ordering::Relaxed), "interrupted")?;
@@ -321,6 +334,7 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             control: &control,
             pretty,
             interrupted,
+            deadline: started + Duration::from_secs(timeout_seconds),
         });
     }
     value["remote_dir"] = remote.clone().into();
@@ -588,6 +602,21 @@ fn validate_snapshot(repo: &Path, digest: &str) -> Result<crate::value::Value> {
         "snapshot integrity mismatch",
     )?;
     Ok(value)
+}
+
+/// Validate the existing target and exact checkout before reserving a remote
+/// experiment. Execution rechecks these same inputs at its durable front door.
+pub(crate) fn experiment_preflight(
+    repo: &Path,
+    target: &str,
+    host: &str,
+    remote: &str,
+    snapshot: &str,
+) -> Result<()> {
+    validate_target(repo, target, host, remote)?;
+    let snap = validate_snapshot(repo, snapshot)?;
+    verify_snapshot_checkouts(repo, &snap)?;
+    Ok(())
 }
 
 struct SnapshotPins {
@@ -1164,9 +1193,8 @@ fn apply_result_parts(
     Ok(Some(rc))
 }
 
-fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
-    let command = req
-        .tail
+fn command_script(argv: &[OsString]) -> Result<String> {
+    let command = argv
         .iter()
         .map(|v| {
             v.to_str()
@@ -1175,7 +1203,15 @@ fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
         })
         .collect::<Result<Vec<_>>>()?
         .join(" ");
-    let cmd_script = format!("exec {command}");
+    Ok(format!("exec {command}"))
+}
+
+pub(crate) fn command_digest(argv: &[OsString]) -> Result<String> {
+    Ok(sha256(command_script(argv)?.as_bytes()))
+}
+
+fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
+    let cmd_script = command_script(req.tail)?;
     let command_sha256 = sha256(cmd_script.as_bytes());
     let _guard = lock_remote_op(req.repo, req.cwd, req.op_id)?;
 
@@ -1300,6 +1336,7 @@ mv -f -- "$op_dir/meta.json.tmp" "$op_dir/meta.json"
 child=""
 trap '[ -n "$child" ] && {{ kill -TERM -"$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true; }}' TERM
 export OMS_REMOTE_OP_TAG="$op_tag"
+export OMS_REMOTE_OP_DIR="$op_dir"
 cpg_script='pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d " \t\r\n" || true); if [ "$pg" = "$$" ] && [ "$$" -gt 1 ] 2>/dev/null; then pg_ls=$(LC_ALL=C ps -p $$ -o lstart= 2>/dev/null | tr -cd "A-Za-z0-9._: +=,-" || true); printf "%s\n" "$pg_ls" >"$4.tmp" && mv -f -- "$4.tmp" "$4"; printf "%s\n" "$$" >"$3.tmp" && mv -f -- "$3.tmp" "$3"; fi; cd -- "$1" && exec sh "$2"'
 if command -v setsid >/dev/null 2>&1; then
   setsid sh -c "$cpg_script" sh "$rd" "$op_dir/cmd.sh" "$op_dir/child.pgid" "$op_dir/child.lstart" >"$op_dir/stdout" 2>"$op_dir/stderr" </dev/null &
@@ -2127,6 +2164,7 @@ emit_part "$tok" stderr "$op_dir/stderr"
     }
 }
 
+#[derive(Clone, Copy)]
 struct CollectRequest<'a> {
     cwd: &'a Path,
     host: &'a str,
@@ -2140,6 +2178,7 @@ struct CollectRequest<'a> {
     control: &'a str,
     pretty: bool,
     interrupted: &'a AtomicBool,
+    deadline: Instant,
 }
 
 struct TempFileGuard {
@@ -2305,69 +2344,9 @@ fn run_collect(req: CollectRequest<'_>) -> Result<Response> {
         "{}exec cat -- \"$target\"\n",
         collect_target_script(req.remote, req.remote_path_rel)
     );
-    let mut child = build_ssh(req.host, req.port, req.control)
-        .arg(format!("sh -lc {}", quote(&script)))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(error)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| error("missing ssh stdout pipe"))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| error("missing ssh stderr pipe"))?;
-
+    let directory = resumable::open_directory(&parent)?;
     let (mut tmp_file, mut guard) = create_private_temp(&parent)?;
-    let (stream_res, err_bytes) = std::thread::scope(|s| {
-        let err_handle = s.spawn(move || {
-            let mut buf = Vec::new();
-            let _ = (&mut stderr).take(MAX_STDERR_BYTES).read_to_end(&mut buf);
-            buf
-        });
-        let mut reader = stdout.take(req.max_bytes.saturating_add(1));
-        let mut buf = [0u8; 65536];
-        let mut total = 0u64;
-        let mut hasher = Sha256::new();
-        let copy_res: Result<()> = loop {
-            let n = match reader.read(&mut buf) {
-                Ok(0) => break Ok(()),
-                Ok(n) => n,
-                Err(e) => break Err(error(e)),
-            };
-            total = total.saturating_add(n as u64);
-            if total > req.max_bytes {
-                break Err(status(
-                    2,
-                    format!("collected stream exceeded --max-bytes ({})", req.max_bytes),
-                ));
-            }
-            if let Err(e) = tmp_file.write_all(&buf[..n]) {
-                break Err(error(e));
-            }
-            hasher.update(&buf[..n]);
-        };
-        drop(reader);
-        if copy_res.is_err() {
-            let _ = child.kill();
-        }
-        let err_buf = err_handle.join().unwrap_or_default();
-        (copy_res.map(|()| (total, hasher.finish())), err_buf)
-    });
-    let status_out = child.wait().map_err(error)?;
-    let (total_bytes, digest) = stream_res?;
-    let exit = exit_code(status_out);
-    if !status_out.success() {
-        return Err(status(
-            if exit == 0 { 1 } else { exit },
-            format!(
-                "remote collect failed (exit {exit}): {}",
-                String::from_utf8_lossy(&err_bytes).trim()
-            ),
-        ));
-    }
+    let (total_bytes, digest) = stream::collect(&req, &script, &mut tmp_file)?;
     if let Some(expected) = req.expected_sha256 {
         require(
             expected == digest,
@@ -2375,18 +2354,9 @@ fn run_collect(req: CollectRequest<'_>) -> Result<Response> {
         )?;
     }
     tmp_file.sync_all().map_err(error)?;
-    drop(tmp_file);
     destination_lock.check().map_err(error)?;
-    match std::fs::symlink_metadata(&dest_abs) {
-        Ok(meta) => require(
-            meta.is_file() && !meta.file_type().is_symlink(),
-            "destination became a symlink or directory",
-        )?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(error(e)),
-    }
-    std::fs::rename(&guard.path, &dest_abs).map_err(error)?;
-    guard.keep = true;
+    resumable::check_request(&req)?;
+    resumable::publish(&directory, &parent, &tmp_file, &mut guard, &dest_abs)?;
 
     let value = serde_json::json!({
         "schema": 1,
@@ -3843,6 +3813,36 @@ exec sh -c "$last"
         assert_eq!(resumed["chunks_reused"], 1);
         assert_eq!(log(), format!("{before_cancel}0\n1\n1\n2\n"));
 
+        // The request deadline covers all chunks and their child cleanup; it
+        // is shorter than the existing per-chunk ceiling in this fixture.
+        let timed_dest = dest_dir.join("timed.bin");
+        std::fs::write(&timed_dest, b"original").unwrap();
+        let mut timed_args = args(&timed_dest, &digest, payload.len());
+        timed_args.extend(["--timeout-seconds".into(), "1".into()]);
+        std::fs::write(root.join("resume_hold"), "1").unwrap();
+        let started = Instant::now();
+        let timed = request(&timed_args);
+        assert_eq!(
+            timed.code,
+            124,
+            "{}",
+            String::from_utf8_lossy(&timed.stderr)
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(std::fs::read(&timed_dest).unwrap(), b"original");
+        std::fs::remove_file(root.join("resume_hold")).unwrap();
+        std::fs::remove_file(root.join("resume_ready")).unwrap();
+        let resumed = request(&timed_args);
+        assert_eq!(
+            resumed.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let resumed: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+        assert_eq!(resumed["chunks_reused"], 1);
+        assert_eq!(std::fs::read(&timed_dest).unwrap(), payload);
+
         // A live resumable writer excludes both another transfer and legacy collect.
         let exclusive = dest_dir.join("exclusive.bin");
         let exclusive_args = args(&exclusive, &digest, payload.len());
@@ -5003,6 +5003,17 @@ exec sh -c "$last"
             let fake = temp.0.join("ssh");
             let script = r#"#!/bin/sh
 for last do :; done
+if [ -f "$OMS_TEST_DIR/stall" ]; then
+  printf '%s\n' "$$" > "$OMS_TEST_DIR/stall_pid"
+  mode=$(cat "$OMS_TEST_DIR/stall")
+  : > "$OMS_TEST_DIR/stall_ready"
+  case "$mode" in
+    stderr) while :; do printf 'diagnostic-only-output\n' >&2; done ;;
+    closed) exec 1>&- ;;
+    bytes) printf 'complete-bytes-without-eof' ;;
+  esac
+  exec sleep 20
+fi
 if [ -f "$OMS_TEST_OPEN_STDERR_FLOOD" ]; then
   i=0
   while [ "$i" -lt 8192 ]; do
@@ -5088,5 +5099,87 @@ exec sh -c "$last"
         assert_eq!(flood_over.code, 2);
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(!dest_dir.join("flood.txt").exists());
+        std::fs::remove_file(root.join("flood")).unwrap();
+
+        let dest = dest_dir.join("preserved.txt");
+        std::fs::write(&dest, b"original").unwrap();
+        let args: Vec<OsString> = [
+            "collect",
+            "--host",
+            "example",
+            "--repo",
+            rs,
+            "--remote-dir",
+            rd,
+            "--remote-path",
+            "artifact.txt",
+            "--dest",
+            dest.to_str().unwrap(),
+            "--timeout-seconds",
+            "1",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(run(&args, &root, &AtomicBool::new(true)).code, 130);
+        assert!(!root.join("stall_pid").exists());
+        let assert_reaped = || {
+            let pid = std::fs::read_to_string(root.join("stall_pid")).unwrap();
+            assert!(
+                !Command::new("kill")
+                    .args(["-0", pid.trim()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        // Closed stdout and an unlimited stderr writer exercise waits that a
+        // blocking stdout read plus stderr join could never time out.
+        for mode in ["quiet", "closed", "stderr"] {
+            std::fs::write(root.join("stall"), mode).unwrap();
+            let started = Instant::now();
+            let result = run(&args, &root, &AtomicBool::new(false));
+            assert_eq!(
+                result.code,
+                124,
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(started.elapsed() < Duration::from_secs(4));
+            assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+            assert_reaped();
+        }
+        std::fs::write(root.join("stall"), "bytes").unwrap();
+        std::fs::remove_file(root.join("stall_ready")).unwrap();
+        let interrupted = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let started = Instant::now();
+                while !root.join("stall_ready").exists() {
+                    assert!(started.elapsed() < Duration::from_secs(3));
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                interrupted.store(true, Ordering::Relaxed);
+            });
+            let started = Instant::now();
+            let result = run(&args, &root, &interrupted);
+            assert_eq!(
+                result.code,
+                130,
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(started.elapsed() < Duration::from_secs(4));
+        });
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+        assert_reaped();
+        assert!(
+            !std::fs::read_dir(&dest_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().starts_with(".oms-collect-"))
+        );
     }
 }

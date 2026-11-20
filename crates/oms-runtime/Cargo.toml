@@ -23,6 +23,7 @@ oms-json = { path = "../oms-json" }
 oms-lock = { path = "../oms-lock" }
 oms-safe-fs = { path = "../oms-safe-fs" }
 oms-scrub = { path = "../oms-scrub" }
+oms-supervisor = { path = "../oms-supervisor" }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 regex = "=1.13.1"
 serde_json = "=1.0.154"

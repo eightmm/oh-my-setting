@@ -7,6 +7,7 @@ use crate::value::*;
 use crate::{Result, error, require};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+mod remote;
 const RUNS: &str = ".oms/experiments/runs.jsonl";
 const RESERVATIONS: &str = ".oms/experiments/budget-reservations.jsonl";
 pub fn validate(raw: &Value) -> Result<Value> {
@@ -405,6 +406,13 @@ fn settle(
     rt.append(Path::new(RESERVATIONS), &row)
 }
 pub fn record_run(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
+    if r.text("profile", "trusted-local")? == "remote" {
+        return remote::run(rt, r);
+    }
+    require(
+        !r.has("target") && !r.has("snapshot") && !r.has("run-id"),
+        "--target, --snapshot and --run-id require --profile remote",
+    )?;
     let name = r.text("id", "")?;
     let contract = load(rt, name)?;
     let arm = r.text("arm", "")?;
@@ -596,6 +604,9 @@ pub fn record_run(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
         settle(rt, &contract, &run_id, "used", "")?;
     }
     Ok((row, effective))
+}
+pub fn reconcile(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
+    remote::reconcile(rt, r)
 }
 fn arm_summary(
     latest: &BTreeMap<String, Value>,

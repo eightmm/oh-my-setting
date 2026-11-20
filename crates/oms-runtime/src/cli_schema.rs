@@ -370,7 +370,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"}
-   ],"children":[{"name":"launch","help":"pre-register one host command in the run ledger"},{"name":"template","help":""},{"name":"validate","help":""},{"name":"compare","help":""},{"name":"register","help":""},{"name":"show","help":""},{"name":"run","help":""},{"name":"summarize","help":""},{"name":"sweep","help":"enumerate a hyperparameter grid as named cells; runs and submits nothing"},{"name":"evaluate","help":""},{"name":"invariants","help":""}],"groups":[]},
+   ],"children":[{"name":"launch","help":"pre-register one host command in the run ledger"},{"name":"template","help":""},{"name":"validate","help":""},{"name":"compare","help":""},{"name":"register","help":""},{"name":"show","help":""},{"name":"run","help":""},{"name":"reconcile","help":"recover an existing remote experiment"},{"name":"summarize","help":""},{"name":"sweep","help":"enumerate a hyperparameter grid as named cells; runs and submits nothing"},{"name":"evaluate","help":""},{"name":"invariants","help":""}],"groups":[]},
   {"path":["experiment", "launch"],"description":"Provide all seven claim fields or --contract PATH, then -- COMMAND. Uses run-ledger and its project verification gate; preserves command output/exit. Paths resolve from --repo. Do not put secrets in recorded fields or command arguments.",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
@@ -436,8 +436,11 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--id"],"required":true},
     {"names":["--arm"],"required":true,"choices":["baseline","treatment"]},
     {"names":["--seed"],"required":true,"type":"int"},
-    {"names":["--metrics"],"required":true},
+    {"names":["--metrics"],"help":"local metrics JSON; required unless --profile remote"},
     {"names":["--profile"],"default":"trusted-local","choices":["trusted-local","isolated","apptainer","remote"]},
+    {"names":["--target"],"help":"approved SSH target for a remote experiment"},
+    {"names":["--snapshot"],"help":"exact execution snapshot digest for a remote experiment"},
+    {"names":["--run-id"],"help":"remote idempotency identity; default derives from the exact request"},
     {"names":["--image"],"default":""},
     {"names":["--adapter"],"default":""},
     {"names":["--worktree"],"default":""},
@@ -445,6 +448,13 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--allow-existing-metrics"],"action":"store_true"},
     {"names":["--reason"],"default":"","help":"recorded justification for a run past the contract budget.runs"},
     {"names":["remainder"],"nargs":"+"}
+   ],"children":[],"groups":[]},
+  {"path":["experiment", "reconcile"],"description":"Recover the existing remote experiment without relaunching its command.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
+    {"names":["--run-id"],"required":true}
    ],"children":[],"groups":[]},
   {"path":["experiment", "summarize"],"description":"",
    "arguments":[

@@ -638,6 +638,11 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                 code = rc;
                 value
             }
+            "reconcile" => {
+                let (value, rc) = crate::experiment::reconcile(rt, r)?;
+                code = rc;
+                value
+            }
             "launch" => return crate::experiment::launch(rt, r),
             "summarize" => crate::experiment::summarize(rt, r.text("id", "")?)?,
             "evaluate" => crate::experiment::evaluate(
