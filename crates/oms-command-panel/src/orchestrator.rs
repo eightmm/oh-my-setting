@@ -3279,7 +3279,7 @@ impl AlternateComposer {
     }
 
     fn input(&self) -> Option<(&str, &str)> {
-        let (area, _) = codex_chrome(&self.screen)?;
+        let (area, _) = codex_chrome(&self.screen, CodexChromeUse::Composer)?;
         let mut lines = area.split_inclusive('\n');
         let mut offset = 0;
         let mut marker = None;
@@ -4145,7 +4145,7 @@ fn codex_input_state(capture: &str) -> Option<bool> {
     if capture.len() > MAX_CODEX_CAPTURE_BYTES {
         return None;
     }
-    let chrome = codex_chrome(capture);
+    let chrome = codex_chrome(capture, CodexChromeUse::Composer);
     let input = chrome.as_ref().map_or(capture, |(area, _)| area);
     let plain = CHAT_SGR.replace_all(input, "");
     let mut lines = plain.lines();
@@ -4199,7 +4199,12 @@ fn codex_chrome_row<'a>(
     None
 }
 
-fn codex_chrome(capture: &str) -> Option<(&str, String)> {
+enum CodexChromeUse {
+    Composer,
+    ModelObservation,
+}
+
+fn codex_chrome(capture: &str, usage: CodexChromeUse) -> Option<(&str, String)> {
     if capture.len() > MAX_CODEX_CAPTURE_BYTES {
         return None;
     }
@@ -4216,10 +4221,24 @@ fn codex_chrome(capture: &str) -> Option<(&str, String)> {
         )
         .expect("static Codex goal chrome")
     });
+    static CODEX_COMPLETED_GOAL_CHROME: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(concat!(
+                r"^Goal achieved \((?:(?:[0-9]|[1-5][0-9])s|(?:[1-9]|[1-5][0-9])m|",
+                r"(?:[1-9]|1[0-9]|2[0-3])h(?: (?:[1-9]|[1-5][0-9])m)?|",
+                r"[1-9][0-9]{0,3}d (?:[0-9]|1[0-9]|2[0-3])h (?:[0-9]|[1-5][0-9])m",
+                r")\)(?: · ⚠ [0-9]+ warnings? · f2 to view)?$",
+            ))
+            .expect("static Codex completed goal chrome")
+        });
     if !warning.is_empty()
         && !warning.strip_prefix(' ').is_some_and(|text| {
             let tail = text.trim_start_matches(' ');
-            CODEX_WARNING.is_match(tail) || CODEX_GOAL_CHROME.is_match(tail)
+            CODEX_WARNING.is_match(tail)
+                || CODEX_GOAL_CHROME.is_match(tail)
+                // Completed goal text is evidence for the model display only.
+                || (matches!(usage, CodexChromeUse::ModelObservation)
+                    && CODEX_COMPLETED_GOAL_CHROME.is_match(tail))
         })
     {
         return None;
@@ -4237,7 +4256,7 @@ fn codex_chrome(capture: &str) -> Option<(&str, String)> {
 /// the normalized model. The caller proves pane identity and any input safety
 /// separately. A clipped or status-only capture provides no observation.
 pub(crate) fn codex_model_from_chrome(capture: &str) -> Option<String> {
-    codex_chrome(capture).map(|(_, model)| model)
+    codex_chrome(capture, CodexChromeUse::ModelObservation).map(|(_, model)| model)
 }
 
 fn codex_footer_model(line: &str) -> Option<&str> {
@@ -5491,6 +5510,56 @@ mod tests {
         pane[11] = "codex";
         pane[4] = "1";
         assert_eq!(live_provider(&pane, "$1", "%1"), None);
+    }
+
+    #[test]
+    fn completed_codex_goal_footer_is_observation_only() {
+        let status = "  GPT-6.2-Sol high · Context 45% left · weekly 4% left · main · ~/fixture · Main [default]";
+        let keys = "  ← for agents · ? for shortcuts";
+        let prompt = "› \x1b[2mAsk Codex to do anything\x1b[0m";
+        for suffix in [
+            "Goal achieved (1d 0h 0m) · ⚠ 2 warnings · f2 to view",
+            "Goal achieved (2d 23h 59m)",
+            "Goal achieved (0s)",
+            "Goal achieved (59m) · ⚠ 1 warning · f2 to view",
+            "Goal achieved (1h)",
+            "Goal achieved (23h 59m)",
+        ] {
+            let screen = format!("{prompt}\n{status}\n{keys}    {suffix}");
+            assert_eq!(
+                codex_model_from_chrome(&screen).as_deref(),
+                Some("GPT-6.2-Sol"),
+                "{suffix}"
+            );
+            assert!(!input_ready("codex", &screen));
+            let mut alternate = super::AlternateComposer {
+                screen,
+                cursor_x: 2,
+                cursor_y: 0,
+                command: "codex".into(),
+            };
+            assert!(!alternate.ready());
+            alternate.screen = format!("› payload\n{status}\n{keys}    {suffix}");
+            alternate.cursor_x = 9;
+            assert!(!alternate.exact_draft("payload"));
+        }
+        for suffix in [
+            "Goal achieved (60s)",
+            "Goal achieved (60m)",
+            "Goal achieved (24h)",
+            "Goal achieved (0d 0h 0m)",
+            "Goal achieved (10000d 0h 0m)",
+            "Goal achieved (1d 24h 0m)",
+            "Goal achieved (1d 0h 60m)",
+            "Goal achieved (1d 0h 0m) · unknown text",
+            "Goal achieved (1d 0h 0m) · ⚠ unknown warnings · f2 to view",
+            "Goal achieved (1d 0h 0m)\x1b[2J",
+            "Goal achieved (1d 0h 0m)\nmore text",
+        ] {
+            let screen = format!("{prompt}\n{status}\n{keys}    {suffix}");
+            assert!(codex_model_from_chrome(&screen).is_none(), "{suffix:?}");
+            assert!(!input_ready("codex", &screen));
+        }
     }
 
     #[test]
