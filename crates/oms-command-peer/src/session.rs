@@ -1082,19 +1082,19 @@ pub(crate) fn handoff(
         }
         "prompt" => {
             let budget = args.limit("max-bytes", 4096, 512, 65536)?;
-            let task = storage::read(&repo, Path::new(".oms/task/current.md"), true)?;
-            let plan = storage::read(&repo, Path::new(".oms/plan/tasks.json"), true)?;
-            let mut body = format!(
-                "# Next-session prompt\n\nContinue the recorded project goal. Inspect the repository contracts and current state before editing.\n\n{}\n{}\n\nVerification: only recorded mechanical receipts prove completion.\n",
-                String::from_utf8_lossy(&task),
-                String::from_utf8_lossy(&plan)
-            );
-            if body.len() > budget {
-                body = format!(
-                    "{}\ntruncated: remaining OMS context omitted\n",
-                    safety::truncate(&body, budget - 50)
-                );
-            }
+            let services = crate::native::Services(context);
+            let body = oms_command_autonomy::handoff::render_checked(
+                &repo,
+                &repo,
+                budget,
+                &services,
+                context.interrupted,
+                &mut |raw| {
+                    safety::outbound(raw)
+                        .map_err(|e| oms_command_autonomy::Error::new(e.code, e.message))
+                },
+            )
+            .map_err(|e| Error::new(e.code, e.message))?;
             safety::outbound(body.as_bytes())?;
             if args.has("output") {
                 let path = Path::new(args.get("output"));

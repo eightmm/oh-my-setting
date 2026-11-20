@@ -8,7 +8,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SECTIONS: &[&str] = &[
     "Goal",
@@ -36,10 +36,25 @@ pub fn render(
     services: &dyn Services,
     interrupted: &AtomicBool,
 ) -> Result<String> {
+    render_checked(repo, state, max_bytes, services, interrupted, &mut |_| Ok(()))
+}
+
+/// The consumer may refuse complete source bytes before projection or budget
+/// trimming. This adds no execution or resume authority to the resulting draft.
+pub fn render_checked(
+    repo: &Path,
+    state: &Path,
+    max_bytes: usize,
+    services: &dyn Services,
+    interrupted: &AtomicBool,
+    check_source: &mut dyn FnMut(&[u8]) -> Result<()>,
+) -> Result<String> {
     require(
         (512..=65536).contains(&max_bytes),
         "handoff byte budget must be 512..65536",
     )?;
+    crate::checkpoint(interrupted)?;
+    let deadline = Instant::now() + Duration::from_secs(40);
     let ctx = Context::new(
         repo.to_path_buf(),
         state.to_path_buf(),
@@ -55,7 +70,20 @@ pub fn render(
             .unwrap()
             .push((text, source.to_owned()));
     };
-    let plan = ctx.plan_value()?;
+    let request = oms_command_plan::Request::new(oms_command_plan::Action::Show);
+    let context = oms_command_plan::Context::from_selected_state_before(
+        &request,
+        repo,
+        repo,
+        state,
+        interrupted,
+        deadline,
+    )?;
+    let snapshot = oms_command_plan::Plan::open(context, services, interrupted)?.load()?;
+    if let Some(raw) = &snapshot.raw {
+        check_source(raw)?;
+    }
+    let plan = value::from_plan(&snapshot.plan)?;
     push(
         "Goal",
         format!("plan goal: {}", line(value::text(&plan, "goal"), 300)),
@@ -65,6 +93,7 @@ pub fn render(
         .store
         .optional(".oms/task/current.md", 65536)?
         .unwrap_or_default();
+    check_source(&packet)?;
     let goal = oms_command_task::packet::section(&packet, "Goal");
     push(
         "Goal",
@@ -101,10 +130,40 @@ pub fn render(
         ),
     ];
     for (section, tool, arguments) in readers {
-        let mut args = vec!["--repo".into(), ctx.repo.as_os_str().to_owned()];
-        args.extend(arguments.iter().map(|s| (*s).into()));
-        match invoke(&ctx, tool, args, Duration::from_secs(40)) {
+        crate::checkpoint(interrupted)?;
+        let source = format!("{tool} {}", arguments.join(" "));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            push(
+                section,
+                "native producer unavailable: shared read deadline exhausted".into(),
+                &source,
+            );
+            continue;
+        }
+        let mut args = arguments.iter().map(|s| (*s).into()).collect::<Vec<_>>();
+        args.extend(["--repo".into(), ctx.repo.as_os_str().to_owned()]);
+        let output = invoke(&ctx, tool, args, remaining);
+        crate::checkpoint(interrupted)?;
+        if Instant::now() >= deadline {
+            push(
+                section,
+                "native producer unavailable: shared read deadline exhausted".into(),
+                &source,
+            );
+            continue;
+        }
+        match output {
             Ok(out) if out.code == 0 => {
+                if out.stdout.len() > 65536 {
+                    push(
+                        section,
+                        "projection exceeds read budget; open the source".into(),
+                        &source,
+                    );
+                    continue;
+                }
+                check_source(&out.stdout)?;
                 let text = std::str::from_utf8(&out.stdout)
                     .map_err(|_| Error::new(2, "handoff producer returned non-text projection"))?;
                 if let Ok(row) = value::parse(text.as_bytes()) {
@@ -116,27 +175,27 @@ pub fn render(
                             section,
                             String::from_utf8(raw)
                                 .map_err(|_| Error::new(2, "invalid producer JSON"))?,
-                            tool,
+                            &source,
                         );
                     } else {
                         push(
                             section,
                             "projection exceeds line budget; open the source".into(),
-                            tool,
+                            &source,
                         );
                     }
                 } else {
                     push(
                         section,
                         "producer projection unavailable or malformed".into(),
-                        tool,
+                        &source,
                     );
                 }
             }
             _ => push(
                 section,
                 "native producer unavailable; not recorded".into(),
-                tool,
+                &source,
             ),
         }
     }

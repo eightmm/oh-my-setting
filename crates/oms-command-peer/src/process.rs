@@ -33,6 +33,43 @@ pub struct Completed {
     pub owned_cleanup: Option<oms_supervisor::process::OwnedCleanup>,
     pub elapsed: Duration,
 }
+
+/// Fixed native reads for an explicitly requested next-session prompt. These
+/// projections cannot select provider calls, verification or state mutations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandoffProjection {
+    TaskStatus,
+    EvidenceMatrix,
+    NextStep,
+    JournalDecisions,
+    ReviewFindings,
+}
+impl HandoffProjection {
+    pub fn command(self, repo: &Path, state: &Path, timeout: Duration) -> Invocation {
+        let (tool, args): (&str, &[&str]) = match self {
+            Self::TaskStatus => ("agent-task", &["status", "--json"]),
+            Self::EvidenceMatrix => ("runtime", &["evidence", "matrix", "--limit", "100"]),
+            Self::NextStep => ("runtime", &["next", "--explain", "--limit", "100"]),
+            Self::JournalDecisions => ("journal", &["show", "--decisions", "--json"]),
+            Self::ReviewFindings => ("peer-review", &["findings", "list", "--json"]),
+        };
+        let mut argv = vec!["oms".into(), tool.into()];
+        argv.extend(args.iter().map(|arg| OsString::from(*arg)));
+        argv.extend(["--repo".into(), repo.as_os_str().to_owned()]);
+        Invocation {
+            argv,
+            cwd: repo.to_owned(),
+            input: None,
+            environment: vec![("OMS_STATE_REPO".into(), state.as_os_str().to_owned())],
+            remove_environment: Vec::new(),
+            timeout: timeout.min(Duration::from_secs(40)),
+            max_bytes: 65536,
+            merge: false,
+            physical_call: None,
+            launch_fence: None,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TeamLocator {
     pub team_id: String,
@@ -349,6 +386,18 @@ impl TeamLaunchBinding<'_> {
     }
 }
 pub trait Executor: Sync {
+    /// A host with an existing staged native launcher may execute only this
+    /// fixed read. Missing integration is an explicit gap, never a PATH fallback.
+    fn handoff_projection(
+        &self,
+        _projection: HandoffProjection,
+        _repo: &Path,
+        _state: &Path,
+        _timeout: Duration,
+        _interrupted: &AtomicBool,
+    ) -> Result<Completed> {
+        Err(Error::new(2, "native handoff projection service unavailable"))
+    }
     /// Read-only discovery preserves the host's qualified parser and group proof.
     fn context_dependencies(
         &self,

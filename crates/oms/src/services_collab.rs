@@ -789,6 +789,22 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn handoff_projection(
+        &self,
+        projection: oms_command_peer::process::HandoffProjection,
+        repo: &Path,
+        state: &Path,
+        timeout: Duration,
+        interrupted: &AtomicBool,
+    ) -> oms_command_peer::Result<Completed> {
+        self.execute_peer(
+            projection.command(repo, state, timeout),
+            interrupted,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+    }
+
     fn context_dependencies(
         &self,
         repo: &Path,
@@ -2967,10 +2983,41 @@ mod tests {
         let err =
             PeerExecutor::execute(&bare, &request(&["oms", "x"], dir.path()), &stop).unwrap_err();
         assert!(err.message.contains("launcher unavailable"), "{err}");
+        let projection = oms_command_peer::process::HandoffProjection::ReviewFindings;
+        let state = dir.path().join("selected-state");
+        let err = PeerProcessExecutor::handoff_projection(
+            &bare,
+            projection,
+            dir.path(),
+            &state,
+            Duration::from_secs(10),
+            &stop,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("launcher unavailable"), "{err}");
         let host = bare.with_native(sh("printf '%s' \"$*\""));
         let done = PeerExecutor::execute(&host, &request(&["oms", "a", "b"], dir.path()), &stop)
             .expect("staged");
         assert_eq!(done.stdout, b"a b");
+        let host = host.with_native(sh("printf '%s\\n%s' \"$OMS_STATE_REPO\" \"$*\""));
+        let done = PeerProcessExecutor::handoff_projection(
+            &host,
+            projection,
+            dir.path(),
+            &state,
+            Duration::from_secs(10),
+            &stop,
+        )
+        .expect("staged handoff projection");
+        assert!(done.complete);
+        assert_eq!(
+            String::from_utf8_lossy(&done.stdout),
+            format!(
+                "{}\npeer-review findings list --json --repo {}",
+                state.display(),
+                dir.path().display()
+            )
+        );
     }
 
     #[test]

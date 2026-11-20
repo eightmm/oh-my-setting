@@ -25,6 +25,33 @@ explicit verification commands and provider executables run through the
 execution boundary. Online citation lookup additionally needs `curl`; an
 unavailable request remains unverified.
 
+### Session handoff prompt
+
+Explicit `session-handoff prompt` calls the existing autonomy handoff renderer
+through `native::Services`. It reads the selected repository's plan and task
+records, then requests five typed native projections: task status, the runtime
+evidence matrix, explained next actions, journal decisions and review findings.
+`process::Executor::handoff_projection` defaults to unavailable; the root host
+uses its existing staged native launcher and supervised execution. Each request
+has a 65,536-byte combined output cap and uses the remaining shared 40-second
+read budget. Process cleanup may extend return time beyond that budget.
+
+The Markdown draft contains Goal, State, Decisions, Open findings, Verified /
+Not verified, Next step and Pointers with source labels. Failed, incomplete or
+unavailable reads remain labelled gaps. Complete JSON records over the
+2,048-byte line budget are omitted with a source pointer; the final UTF-8
+output respects `--max-bytes` and reports dropped rows. Recorded verification
+claims keep their original values and do not grant resume or landing authority.
+The public prompt refuses sensitive content in complete plan/task snapshots
+and successful bounded producer outputs before trimming, then scans the final
+draft. Refusal returns no draft and writes no `--output` file.
+
+These projections run only for an explicit `prompt` request. Session-start
+hooks, historical transcript capture, pickup receipts and native resume keep
+their existing paths. No provider or model call is requested. The existing
+`peer_contract` fixture exercises the public prompt, incomplete and unavailable
+reads, JSON refusal, output bounds, cancellation and sensitive-source refusal.
+
 ## Modules and implemented paths
 
 | Module | Responsibilities |
@@ -40,11 +67,11 @@ unavailable request remains unverified.
 | `delegate` | Detached worktrees, role defaults, patch capture before verification, repair and lifecycle review state |
 | `review` | Criterion coverage, singleton confirmation, incremental review outcomes, finding anchors/dispositions, pinned verification scopes and advisory security pass |
 | `review_red` | Advisory bare-base control and bounded individual test-patch checks in disposable worktrees |
-| `native` | Runtime criterion projections through native task status, verified plan snapshots, room projection and lifecycle projection |
+| `native` | Runtime criterion projections through native task status, verified plan snapshots, room projection and lifecycle projection; typed handoff read adapter |
 | `context_pack` | Bounded supplied graph-pack validation and reference-only orientation |
 | `ml_context` | Sanitized ML project fields, manifest identifiers, entrypoint names, verification hints and recent experiment summaries |
 | `thread` | Thread creation, typed Room append, context, schema-1 listing/statistics, stale-close preview/apply, current pointer, cursors, updates and consumption receipts |
-| `session` | Repository-bound transcript discovery/search/open, origin-only bookmarks/reopen, guarded resume planning and prompts-only Antigravity handoff capture |
+| `session` | Repository-bound transcript discovery/search/open, origin-only bookmarks/reopen, guarded resume planning, source-labelled handoff prompts and prompts-only Antigravity capture |
 | `digest` | Streamed file digests, capture redaction, retrieval descriptors, collision-resistant capture names and command exit propagation |
 | `receipts` | External receipts, hash drift, DOI/arXiv normalization, offline/online verification and BibTeX export |
 | `manifest` | CSV/TSV/line IDs, hashes, key mappings, provenance, drift, ID/key overlap and ordered time checks |
