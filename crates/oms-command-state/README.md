@@ -41,11 +41,15 @@ and the root lockfile are unchanged; no arbitrary-precision serde feature
 is enabled. The standalone queue worker must be installed beside the parent
 executable, or selected explicitly by `OMS_TSP_WORKER`.
 
-Ordinary native state views use bounded source-health projections.
-`run_with_runtime_host` can accept a full runtime envelope, but the root's
-`run_with_host` route does not inject one. An empty criteria/action list in the
-state fallback is not proof that the canonical runtime has no work; use
-`oms runtime envelope show` or `oms runtime evidence matrix` for that contract view.
+Ordinary native `state`, `state-verify`, `inbox` and `dashboard` views obtain
+the canonical schema-2 envelope through `HostServices::runtime_envelope`.
+The root adapter resolves the selected repository and uses the same native
+projection as `oms runtime envelope show`, without a nested CLI or a persisted
+envelope. Every snapshot, including dashboard watch refreshes, calls the producer
+again. Criteria, evidence and next actions therefore come from the runtime owner.
+An unavailable producer is reported as degraded, not as healthy empty work.
+Library-only callers without that callback retain the bounded source-health
+fallback; callers of `run_with_runtime_host` retain their explicit snapshot.
 
 ## Historical migration findings and source changes
 
@@ -93,9 +97,9 @@ refusals below describe the earlier phase, not current command behavior.
 - Recipe execution/resume/request execution and companion spawning need the
   Runs post-spawn PID/start receipt interface. The current refusal is
   intentional and happens before recipe mutation.
-- The parent owns installation of the queue worker and injection of canonical
-  runtime acceptance data. Native health probes establish readability of
-  captured sources, not a replacement for the complete parent runtime engine.
+- The parent owns installation of the queue worker and the fresh canonical
+  runtime callback. Neither the envelope nor native source-health probes
+  grant mutation, completion or acceptance authority.
 - Frozen human-text/JSON/digest, Unicode width, timezone, malformed-input,
   boundary, concurrency, interrupted-publication and Linux/WSL2/macOS corpus
   comparisons still require behavioral admission. The terminal renderers and

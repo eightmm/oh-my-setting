@@ -115,7 +115,7 @@ fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usi
     }
     Ok((rows, resolved, bad))
 }
-pub(super) fn enrich(ctx: &Context<'_>, state: &mut Value) -> Result<()> {
+pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Value) -> Result<()> {
     let task_text = storage::read(
         &ctx.repo,
         Path::new(".oms/task/current.md"),
@@ -482,12 +482,33 @@ pub(super) fn enrich(ctx: &Context<'_>, state: &mut Value) -> Result<()> {
         failure.set(k, v)?;
     }
     state.set("failures", failure)?;
-    let mut runtime = if let Some(injected) = ctx.runtime {
-        require(
-            injected.get("schema").is_int(2),
-            "runtime service returned unsupported schema",
-        )?;
-        injected.clone()
+    let canonical = ctx
+        .runtime
+        .cloned()
+        .map(Ok)
+        .or_else(|| host.runtime_envelope(&ctx.repo, ctx.interrupted));
+    let runtime = if let Some(canonical) = canonical {
+        match canonical {
+            Ok(mut injected) => {
+                require(
+                    injected.get("schema").is_int(2),
+                    "runtime service returned unsupported schema",
+                )?;
+                injected.set("healthy", Value::Bool(true))?;
+                injected
+            }
+            Err(_) => object([
+                ("schema", number(2)),
+                ("healthy", Value::Bool(false)),
+                ("error", string("canonical-runtime-unavailable")),
+                ("criteria", Value::Array(vec![])),
+                ("next_actions", Value::Array(vec![])),
+                (
+                    "warnings",
+                    Value::Array(vec![string("canonical-runtime-unavailable")]),
+                ),
+            ]),
+        }
     } else {
         let evidence = file(ctx, ".oms/runtime/evidence.json");
         let healthy = state.get("task").get("healthy").truth()
@@ -515,9 +536,6 @@ pub(super) fn enrich(ctx: &Context<'_>, state: &mut Value) -> Result<()> {
             ("warnings", Value::Array(vec![])),
         ])
     };
-    if ctx.runtime.is_some() {
-        runtime.set("healthy", Value::Bool(true))?;
-    }
     state.set("runtime", runtime)?;
     let rules = ["AGENTS.md", "CLAUDE.md"]
         .iter()
