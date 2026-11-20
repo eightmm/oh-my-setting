@@ -81,6 +81,17 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   probe memoization. MCP cache keys include command, execution context, timeout,
   and binary identity; a memo contains validated tool hashes, not arbitrary
   provider output. Unknown model families cannot certify diversity.
+  Managed inventory separates ownership from current-source freshness: an
+  unchanged managed copy can be stale and repaired without becoming foreign.
+  Unsafe or unreadable source content leaves freshness unknown and fails the
+  diagnostic. Doctor findings and `status --json` separately project the saved
+  tool capability selection, with bounded fields and no receipt path or extra
+  contents. This is distinct from the installation component profile; malformed
+  or unreadable capability receipts are reported as such. Schema-1 fingerprints
+  and comparisons retain their existing identity, which excludes this selection.
+  Neither recorded capabilities nor matching installed files prove which
+  configuration a running provider selected; repository runtime profiles are
+  not included in installation identity.
 - Existing status, sandbox, residue, pins, scheduler, and tick behavior remains
   native. Optional external adapters must actually satisfy profile requirements;
   their absence is accepted only by explicit allow-missing policy.
