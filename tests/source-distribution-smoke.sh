@@ -262,6 +262,8 @@ fi
 if grep -Fq -- '--effort' "$ROOT/custom-skills/oms-agent-harness/references/model-routing.md"; then
   fail "model routing skill advertises wrong public effort option"
 fi
+grep -Fq 'Spec stage first' "$ROOT/custom-skills/oms-agent-harness/references/review-gates.md" ||
+  fail "review gates reference lost the spec-compliance stage before deep review"
 
 # 6. CI workflow invariants (gate completeness, no setup-python, no windows-latest)
 workflow="$ROOT/.github/workflows/test.yml"
