@@ -74,6 +74,9 @@ EOF
   expected_ci_record affected false > "$check_probe/expected.out"
   cmp -s "$check_probe/docs.out" "$check_probe/expected.out" || fail "documentation CI selection changed"
 
+  selected="$(invoke_check --affected --list-stages --changed-from "$base" --changed-to "$docs")"
+  [ "$selected" = "$(printf 'doc-references\ncheck: ok')" ] || fail "documentation-only stages are not reference checks only: $selected"
+
   mkdir -p "$repo/crates/oms/src"
   printf 'fn main() {}\n' > "$repo/crates/oms/src/main.rs"
   git -C "$repo" add .

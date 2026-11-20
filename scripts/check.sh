@@ -190,6 +190,7 @@ RUN_FOCUSED=0
 RUN_RUST=0
 RUN_INVARIANTS=0
 RUN_QUICK=0
+RUN_DOCS=0
 RUN_AFFECTED=0
 case "$MODE" in
   full) [ "$SKIP_LINT" = 1 ] || RUN_LINT=1; RUN_FOCUSED=1; RUN_RUST=1 ;;
@@ -374,7 +375,9 @@ prepare_affected_gate() {
   else
     AFFECTED_MODE=full; AFFECTED_REASONS="changed-code-full"
   fi
-  if [ "$AFFECTED_MODE" = affected ]; then
+  if [ "$AFFECTED_REASONS" = documentation-only ]; then
+    RUN_DOCS=1
+  elif [ "$AFFECTED_MODE" = affected ]; then
     RUN_QUICK=1
   elif [ "$CI_PARITY" = 1 ]; then
     [ "$SKIP_LINT" = 1 ] || RUN_LINT=1
@@ -427,6 +430,11 @@ if [ "$RUN_RUST" = 1 ]; then
     cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline &&
       cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
   '
+fi
+
+# Ordinary documentation needs reference checks only: no Cargo, no suite run.
+if [ "$RUN_DOCS" = 1 ]; then
+  stage doc-references bash tests/source-distribution-smoke.sh --docs-only
 fi
 
 if [ "$RUN_INVARIANTS" = 1 ] || [ "$RUN_QUICK" = 1 ]; then
