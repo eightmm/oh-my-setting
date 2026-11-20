@@ -135,7 +135,7 @@ you hold the question; none starts, retries, kills, or merges anything.
 |---|---|---|
 | Should I delegate this? | None: a judgment call. | Use [model-routing.md](model-routing.md) and [roles.md](roles.md). |
 | Is the brief good enough? | `oms peer-delegate --to NAME --brief-file F` (add `--strict-brief` to refuse) | `warning: brief:` lines for a missing goal, scope, output form, stop condition or file pointers; briefs under 240 bytes are not linted. |
-| How deep should the review be? | `oms peer-review advise [--base REF]` | `none`, `single`, `gate+security` or `council`, with reasons. At `gate+security` or `council`, a routine-tier spec and acceptance compliance check runs before the deep review ([review-gates.md](review-gates.md)). |
+| How deep should the review be? | `oms peer-review advise [--base REF]` | `none`, `single`, `gate+security` or `council`, with reasons. |
 | Is something looping? | `oms fail-ledger list --stalls` | Repeated or alternating failures and no-evidence goal-drive runs, or `stalls: none`. |
 | Where did tokens go? | `oms artifact-index telemetry --by role` | Per role: calls, reported tokens, cache share, admitted patches, tokens on unadmitted ones. |
 | How big are injected prompts? | `oms project-doctor --prompts` | Words and bytes per shipped prompt file, whether it loads every session, repeated sentences. |
@@ -154,5 +154,8 @@ you hold the question; none starts, retries, kills, or merges anything.
 | Who wrote this commit? | `oms land blame-session COMMIT_OR_RANGE` | Recorded attribution per commit (ai, human, mixed, unknown, `unrecorded`). |
 | Are checkpoints piling up? | `oms run checkpoints` | Per directory: file count, size, `ok:` or `warn:` against latest/best. |
 | What needs attention? | `oms inbox --repo .` | Ranked items with one exact next command each. |
+
+When review advice recommends `gate+security` or `council`, the coordinator
+applies the [spec stage before deep review](review-gates.md#spec-stage-first).
 
 Read the output as a prompt to look, then verify in the source of record.

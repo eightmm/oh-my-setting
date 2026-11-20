@@ -36,14 +36,21 @@ error; each query and the polling loop have deadlines.
 
 OMS defaults to CI-parity affected checks against the destination. Explicit full local gate: `--gate 'bash scripts/check.sh --parallel'`.
 
-Spec stage first: when `oms peer-review advise` reports `gate+security` or
-`council`, run one routine-tier (the `review` rule in `config/task-routing-rules.json`)
-spec and acceptance compliance check on the diff before the deep quality review
-or council: does it do what the task and its acceptance criteria say, nothing
-missing and nothing out of scope? A diff that fails goes back to the writer;
-only a diff that passes proceeds to the deep review. Depths `none` and `single`
-skip this stage, and the stage is not a gate verdict, a new command or a
-substitute for the deep review.
+## Spec stage first
+
+When `oms peer-review advise` recommends `gate+security` or `council`, the
+coordinator checks the diff against the authorized task, scope, and acceptance
+criteria before requesting deep review. Use a local check or one authorized
+peer call on an available routine-tier model. For a peer check, run plain
+`oms peer-review` with `--providers PROVIDER --model MODEL`, the same
+`--base REF`, and a `--prompt TEXT` asking for unmet criteria and out-of-scope
+changes.
+
+Return missing criteria or scope violations to the writer and check the revised
+diff before proceeding. Depths `none` and `single` skip this stage. Deep review
+and mechanical verification retain their usual gate requirements.
+
+## Review the diff
 
 Before calling reviewers, inspect `git status --short`, the relevant diff or
 explicit base, and any existing verification result. Send the goal, contract,
