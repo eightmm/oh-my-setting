@@ -332,7 +332,8 @@ fn pinned_reference_projection_corpus() {
 #[test]
 fn real_capture_reads_and_rejects_unsafe_stores() {
     use oms_output_capture::{
-        CaptureError, READ_CAP, RequestError, read_capture, read_stored_capture,
+        CaptureError, READ_CAP, RequestError, read_capture, read_capture_checked,
+        read_stored_capture,
     };
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -400,6 +401,28 @@ fn real_capture_reads_and_rejects_unsafe_stores() {
         _ => panic!("unexpected repository error"),
     };
     assert_eq!(
+        code(read_capture_checked(
+            &root,
+            &args(json!({"limit":4})),
+            |snapshot| {
+                assert_eq!(snapshot, data); // The policy sees bytes beyond the safe-looking page.
+                Err(CaptureError {
+                    code: "capture_withheld",
+                    message: "adapter policy withheld the complete snapshot".into(),
+                })
+            },
+        )),
+        "capture_withheld"
+    );
+    assert_eq!(
+        read_capture_checked(&root, &args(json!({"limit":4})), |snapshot| {
+            assert_eq!(snapshot, data);
+            Ok(())
+        })
+        .unwrap(),
+        page
+    );
+    assert_eq!(
         code(read_capture(&root, &args(json!({"query":""})))),
         "invalid_query"
     );
@@ -415,6 +438,12 @@ fn real_capture_reads_and_rejects_unsafe_stores() {
         "invalid_range"
     );
     std::fs::write(&path, b"changed").unwrap();
+    assert_eq!(
+        code(read_capture_checked(&root, &args(json!({})), |_| {
+            panic!("outbound policy must not see a stale snapshot")
+        })),
+        "capture_hash_changed"
+    );
     assert_eq!(
         code(read_capture(&root, &args(json!({})))),
         "capture_hash_changed"

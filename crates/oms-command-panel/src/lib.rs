@@ -74,7 +74,7 @@ pub fn run_with_services(
     if interrupted.load(Ordering::Acquire) {
         return (130, vec![], vec![]);
     }
-    let default_main = args.is_empty()
+    let default_main = options.selects_main()
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
         && parent_only().is_ok();

@@ -6,6 +6,8 @@ rust-version = "1.99.1"
 
 [dependencies]
 oms-context = { path = "../oms-context" }
+oms-output-capture = { path = "../oms-output-capture" }
+oms-scrub = { path = "../oms-scrub" }
 ryu = "=1.0.23"
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.10.9"
@@ -14,6 +16,9 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 rustix = { version = "=1.1.6", features = ["fs", "process", "event", "pipe"] }
 oms-safe-fs = { path = "../oms-safe-fs" }
 unicode-general-category = "=0.6.0"
+
+[dev-dependencies]
+oms-output = { path = "../oms-output" }
 
 [lints.rust]
 unsafe_code = "forbid"

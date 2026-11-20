@@ -6,6 +6,7 @@ use crate::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha512};
 use std::{
+    borrow::Cow,
     ffi::OsString,
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -14,6 +15,10 @@ use std::{
     time::Duration,
 };
 const MAX: usize = 1024 * 1024 * 1024;
+// npm 7.18 added the pack destination used to keep verified tarballs in scratch.
+const NPM_PACK_MINIMUM: &[u64] = &[7, 18, 0];
+// The Codex npm launcher declares Node 16 or later.
+const PROVIDER_NODE_MAJOR: u64 = 16;
 pub(crate) const RELEASE_RECEIPT: &str = "tool-releases.json";
 
 fn catalog() -> Value {
@@ -51,7 +56,37 @@ fn installed(paths: &Paths, name: &str) -> Option<PathBuf> {
     })
 }
 
-fn npm_runtime(paths: &Paths, flag: &AtomicBool) -> Result<Option<(PathBuf, OsString)>> {
+fn provider_node(paths: &Paths, flag: &AtomicBool) -> Result<Option<PathBuf>> {
+    let local = paths.home.join(".local/bin/node");
+    let ambient = r::find("node", &paths.cwd).filter(|path| *path != local);
+    for binary in std::iter::once(local).chain(ambient) {
+        if !fs::metadata(&binary).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        {
+            continue;
+        }
+        let out = r::command(
+            &binary,
+            &["--version".into()],
+            &paths.cwd,
+            None,
+            flag,
+            Duration::from_secs(10),
+        );
+        r::check(flag)?;
+        if out.is_ok_and(|out| {
+            out.0 == 0 && version_number(&out.1).is_some_and(|v| v[0] >= PROVIDER_NODE_MAJOR)
+        }) {
+            return Ok(Some(binary));
+        }
+    }
+    Ok(None)
+}
+
+fn npm_runtime(
+    paths: &Paths,
+    flag: &AtomicBool,
+    needs_pack: bool,
+) -> Result<Option<(PathBuf, OsString, Vec<u64>)>> {
     let node = installed(paths, "node");
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let path = std::env::join_paths(
@@ -85,8 +120,11 @@ fn npm_runtime(paths: &Paths, flag: &AtomicBool) -> Result<Option<(PathBuf, OsSt
             &[("PATH", path.as_os_str())],
         );
         r::check(flag)?;
-        if probe.is_ok_and(|out| out.0 == 0 && version_number(&out.1).is_some()) {
-            return Ok(Some((binary, path)));
+        if let Ok((0, output, _)) = probe
+            && let Some(version) = version_number(&output)
+            && (!needs_pack || version.as_slice() >= NPM_PACK_MINIMUM)
+        {
+            return Ok(Some((binary, path, version)));
         }
     }
     Ok(None)
@@ -158,10 +196,16 @@ fn call(
     large: bool,
 ) -> Result<Vec<u8>> {
     let (binary, path) = if name == "npm" {
-        let (binary, path) = npm_runtime(paths, flag)?.ok_or_else(|| {
+        let needs_pack = args.first().is_some_and(|argument| argument == "pack");
+        let (binary, path, _) = npm_runtime(paths, flag, needs_pack)?.ok_or_else(|| {
             r::Error(
                 2,
-                "working npm required for verified tool installation".into(),
+                if needs_pack {
+                    "npm 7.18.0 or later required for verified npm pack"
+                } else {
+                    "working npm required for verified tool installation"
+                }
+                .into(),
             )
         })?;
         (binary, Some(path))
@@ -466,6 +510,29 @@ fn ownership_marker(target: &Path) -> PathBuf {
         target.file_name().unwrap().to_string_lossy()
     ))
 }
+/// The second value identifies the marker formats eligible for vendor handoff
+/// after a previous updater changed the binary without retiring its marker.
+fn ownership_digest(raw: &[u8]) -> Option<(Cow<'_, str>, bool)> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let (digest, canonical) = if let Some(legacy) = text.strip_prefix("sha256=") {
+        (Cow::Borrowed(legacy.strip_suffix('\n')?), true)
+    } else {
+        let row = r::parse(raw).ok()?;
+        if row["owner"] != "oh-my-setting" {
+            return None;
+        }
+        (
+            Cow::Owned(row["sha256"].as_str()?.to_owned()),
+            row.as_object()?.len() == 2,
+        )
+    };
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some((digest, canonical))
+}
+
 fn owns(paths: &Paths, target: &Path) -> Result<()> {
     if !r::exists(target) {
         return Ok(());
@@ -474,13 +541,7 @@ fn owns(paths: &Paths, target: &Path) -> Result<()> {
     let raw = r::read(&marker, 65536)
         .map_err(|_| r::Error(2, "refusing to replace an unmanaged tool".into()))?;
     let actual = r::hash(&r::read(target, MAX)?);
-    let text = String::from_utf8_lossy(&raw);
-    let legacy = text
-        .strip_prefix("sha256=")
-        .is_some_and(|s| s.len() == 65 && s.ends_with('\n') && s.trim_end() == actual);
-    let native =
-        r::parse(&raw).is_ok_and(|row| row["owner"] == "oh-my-setting" && row["sha256"] == actual);
-    if !legacy && !native {
+    if ownership_digest(&raw).is_none_or(|(digest, _)| digest != actual) {
         return r::fail("managed tool changed; replacement refused");
     }
     let _ = paths;
@@ -594,7 +655,14 @@ struct AgyMarkerCustody {
     parent_dev: u64,
     parent_ino: u64,
     name: OsString,
-    initial: Option<(rustix::fs::Stat, Vec<u8>)>,
+    initial: Option<AgyMarker>,
+}
+
+struct AgyMarker {
+    stat: rustix::fs::Stat,
+    raw: Vec<u8>,
+    binary_digest: String,
+    stale: bool,
 }
 
 impl AgyMarkerCustody {
@@ -736,13 +804,22 @@ impl AgyMarkerCustody {
             Ok(before) => {
                 if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
                     || before.st_nlink != 1
+                    || before.st_uid != rustix::process::getuid().as_raw()
+                    || before.st_mode & 0o022 != 0
                     || before.st_size <= 0
                     || before.st_size > 4096
                 {
                     return r::fail("AGY ownership marker changed before vendor handoff");
                 }
-                let raw_bytes = Self::read_verified_marker(&directory, &name, &before)?;
-                owns(paths, binary)?;
+                let raw = Self::read_verified_marker(&directory, &name, &before)?;
+                let (digest, canonical) = ownership_digest(&raw).ok_or_else(|| {
+                    r::Error(2, "invalid AGY ownership marker; refresh refused".into())
+                })?;
+                let binary_digest = r::hash(&r::read(binary, MAX)?);
+                let stale = digest != binary_digest;
+                if stale && !canonical {
+                    return r::fail("invalid AGY ownership marker; refresh refused");
+                }
                 let after = statat(&directory, &name, AtFlags::SYMLINK_NOFOLLOW)
                     .map_err(std::io::Error::from)?;
                 if FileType::from_raw_mode(after.st_mode) != FileType::RegularFile
@@ -753,7 +830,12 @@ impl AgyMarkerCustody {
                 }
                 Self::verify_parent(&directory, parent, parent_dev, parent_ino)?;
                 Self::verify_binary(&binary_before, binary)?;
-                Some((before, raw_bytes))
+                Some(AgyMarker {
+                    stat: before,
+                    raw,
+                    binary_digest,
+                    stale,
+                })
             }
         };
 
@@ -807,24 +889,22 @@ impl AgyMarkerCustody {
             (None, Ok(_)) | (Some(_), Err(Errno::NOENT)) => {
                 r::fail("AGY ownership marker changed before vendor handoff")
             }
-            (Some((before_stat, before_bytes)), Ok(after_stat)) => {
+            (Some(before), Ok(after_stat)) => {
                 if FileType::from_raw_mode(after_stat.st_mode) != FileType::RegularFile
                     || after_stat.st_nlink != 1
-                    || !Self::stat_matches(before_stat, &after_stat)
+                    || !Self::stat_matches(&before.stat, &after_stat)
                 {
                     return r::fail("AGY ownership marker changed before vendor handoff");
                 }
-                let raw_bytes =
-                    Self::read_verified_marker(&self.directory, &self.name, before_stat)?;
-                if raw_bytes != *before_bytes {
+                let raw = Self::read_verified_marker(&self.directory, &self.name, &before.stat)?;
+                if raw != before.raw || r::hash(&r::read(binary, MAX)?) != before.binary_digest {
                     return r::fail("AGY ownership marker changed before vendor handoff");
                 }
-                owns(paths, binary)?;
                 let recheck = statat(&self.directory, &self.name, AtFlags::SYMLINK_NOFOLLOW)
                     .map_err(std::io::Error::from)?;
                 if FileType::from_raw_mode(recheck.st_mode) != FileType::RegularFile
                     || recheck.st_nlink != 1
-                    || !Self::stat_matches(before_stat, &recheck)
+                    || !Self::stat_matches(&before.stat, &recheck)
                 {
                     return r::fail("AGY ownership marker changed before vendor handoff");
                 }
@@ -836,6 +916,9 @@ impl AgyMarkerCustody {
                     unlinkat(&self.directory, &self.name, AtFlags::empty())
                         .map_err(std::io::Error::from)?;
                     self.directory.sync_all()?;
+                    if before.stale {
+                        eprintln!("warning: retired stale AGY ownership marker for vendor update");
+                    }
                 }
                 Ok(())
             }
@@ -925,16 +1008,26 @@ pub(crate) fn install(
             return r::fail("unknown managed tool");
         }
     }
-    let node_ready =
-        !selected.iter().any(|name| name == "node") || npm_runtime(paths, flag)?.is_some();
+    let needs_install =
+        |name: &str| upgrade || explicit_lock.is_some() || installed(paths, name).is_none();
+    let mut npm_tools = selected
+        .iter()
+        .map(String::as_str)
+        .filter(|name| ["claude", "codex", "ntn"].contains(name) && needs_install(name))
+        .filter(|name| {
+            explicit_lock.is_some()
+                || !installed(paths, name).is_some_and(|binary| vendor(paths, name, &binary))
+        })
+        .peekable();
+    let needs_pack = npm_tools.peek().is_some();
+    let needs_provider_node =
+        explicit_lock.is_none() && npm_tools.any(|name| matches!(name, "codex" | "ntn"));
+    let node_ready = !selected.iter().any(|name| name == "node")
+        || (npm_runtime(paths, flag, needs_pack)?.is_some()
+            && (!needs_provider_node || provider_node(paths, flag)?.is_some()));
     let selected = selected
         .iter()
-        .filter(|name| {
-            upgrade
-                || explicit_lock.is_some()
-                || installed(paths, name).is_none()
-                || name.as_str() == "node" && !node_ready
-        })
+        .filter(|name| needs_install(name) || name.as_str() == "node" && !node_ready)
         .cloned()
         .collect::<Vec<_>>();
     let host = platform()?;
@@ -1052,14 +1145,17 @@ pub(crate) fn install(
                 0o600,
             )?;
             tx.publish_external(&target, &package)?;
+            let node = if explicit_lock.is_none() {
+                provider_node(paths, flag)?
+                    .ok_or_else(|| r::Error(2, "Node 16 or later required for npm tool".into()))?
+            } else if bin.join("node").is_file() {
+                bin.join("node")
+            } else {
+                r::find("node", &paths.cwd)
+                    .ok_or_else(|| r::Error(2, "Node runtime unavailable".into()))?
+            };
             if name == "ntn" && target.join("install.cjs").is_file() {
                 let checkpoint = tx.prepare_external(std::slice::from_ref(&target))?;
-                let node = if bin.join("node").is_file() {
-                    bin.join("node")
-                } else {
-                    r::find("node", &paths.cwd)
-                        .ok_or_else(|| r::Error(2, "Node runtime unavailable".into()))?
-                };
                 let result = r::command(
                     &node,
                     &[
@@ -1087,12 +1183,6 @@ pub(crate) fn install(
                 return r::fail("npm binary escaped its package");
             }
             owns(paths, &bin.join(name))?;
-            let node = if bin.join("node").is_file() {
-                bin.join("node")
-            } else {
-                r::find("node", &paths.cwd)
-                    .ok_or_else(|| r::Error(2, "Node runtime unavailable".into()))?
-            };
             let shim = format!(
                 "#!/bin/sh\n# oh-my-setting managed npm tool\nexec {} {} \"$@\"\n",
                 r::shell(node.as_os_str())?,
@@ -1232,8 +1322,13 @@ pub(crate) fn install(
                         )?;
                     }
                 }
-                if npm_runtime(paths, flag)?.is_none() {
+                if npm_runtime(paths, flag, needs_pack)?.is_none() {
                     return r::fail("verified Node distribution did not provide working npm");
+                }
+                if needs_provider_node && provider_node(paths, flag)?.is_none() {
+                    return r::fail(
+                        "verified Node distribution did not provide a provider runtime",
+                    );
                 }
             } else {
                 for command in if name == "uv" {
@@ -1785,6 +1880,8 @@ pub(crate) fn refresh_optional(
     );
     let root = fs::canonicalize(root)?;
     let bin = prefix.join("bin");
+    let npm_can_pack = npm_runtime(paths, flag, false)?
+        .is_some_and(|(_, _, version)| version.as_slice() >= NPM_PACK_MINIMUM);
     let scratch = r::Scratch::new()?;
     for binary in [
         "cursor-agent",
@@ -1858,6 +1955,9 @@ pub(crate) fn refresh_optional(
         let release = scalar(&candidate, "version")?.to_owned();
         if !optional_upgrade(previous, &release)? {
             continue;
+        }
+        if !npm_can_pack {
+            return r::fail("npm 7.18.0 or later required to refresh this npm prefix");
         }
         let new_bins = if let Some(path) = candidate["bin"].as_str() {
             json!({name.rsplit('/').next().unwrap():path})
@@ -2032,16 +2132,54 @@ mod tests {
             let before = fs::read(&original).unwrap();
             let bundled_npm = original.with_file_name("npm");
             let npm_before = fs::read(&bundled_npm).ok();
+            let legacy = matches!(kind.as_str(), "old-npm" | "old-node");
+            let flag = AtomicBool::new(false);
+            if legacy {
+                assert_eq!(
+                    npm_runtime(&paths, &flag, true).unwrap().is_none(),
+                    kind == "old-npm"
+                );
+                assert_eq!(
+                    provider_node(&paths, &flag).unwrap().is_none(),
+                    kind == "old-node"
+                );
+            }
+            let selected = if legacy {
+                vec!["node".into(), "ntn".into()]
+            } else {
+                vec!["node".into()]
+            };
             let _guard = r::lock(&paths.receipt, &paths.cwd).unwrap();
             let mut tx = Transaction::begin(&paths).unwrap();
-            let result = install(
-                &paths,
-                &["node".into()],
-                false,
-                false,
-                &mut tx,
-                &AtomicBool::new(false),
-            );
+            let result = install(&paths, &selected, false, false, &mut tx, &flag);
+            if legacy {
+                // The fixture stops at the provider's pack response. Node must
+                // already have been provisioned, even outside the initial PATH.
+                assert!(result.is_err());
+                let requests = fs::read_to_string(paths.cwd.join("requests")).unwrap();
+                assert!(
+                    requests.contains("nodejs.org/dist/index.json"),
+                    "{requests}"
+                );
+                assert!(
+                    requests.contains("registry.npmjs.org/ntn/latest"),
+                    "{requests}"
+                );
+                let local = paths.home.join(".local/bin");
+                assert_eq!(
+                    provider_node(&paths, &flag).unwrap(),
+                    Some(local.join("node"))
+                );
+                let (npm, _, _) = npm_runtime(&paths, &flag, true).unwrap().unwrap();
+                if kind == "old-npm" {
+                    assert_eq!(npm, local.join("npm"));
+                    assert!(!paths.cwd.join("old-npm-packed").exists());
+                }
+                drop(tx);
+                assert!(!local.join("node").exists());
+                assert_eq!(fs::read(&original).unwrap(), before);
+                return;
+            }
             if kind.starts_with("existing-") {
                 assert_eq!(
                     result.unwrap_err().1,
@@ -2120,6 +2258,8 @@ mod tests {
             "separate",
             "newer",
             "managed-newer",
+            "old-npm",
+            "old-node",
             "self-contained",
             "existing-missing",
             "existing-broken",
@@ -2139,7 +2279,11 @@ mod tests {
                 bin.join("node")
             };
             fs::create_dir_all(node.parent().unwrap()).unwrap();
-            let node_bytes = if kind.ends_with("newer") {
+            let node_bytes = if kind == "old-node" {
+                b"#!/bin/sh\necho v10.19.0\n".as_slice()
+            } else if kind == "old-npm" {
+                b"#!/bin/sh\necho v18.20.8\n".as_slice()
+            } else if kind.ends_with("newer") {
                 b"#!/bin/sh\necho v27.1.0\n".as_slice()
             } else {
                 b"#!/bin/sh\necho v26.1.0\n".as_slice()
@@ -2164,7 +2308,9 @@ mod tests {
                     &npm,
                     if kind == "self-contained" {
                         b"#!/bin/sh\necho 11.1.0\n"
-                    } else if matches!(kind, "working" | "separate") {
+                    } else if kind == "old-npm" {
+                        b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 6.14.4; else : > old-npm-packed; exit 98; fi\n"
+                    } else if matches!(kind, "working" | "separate" | "old-node") {
                         b"#!/bin/sh\nnode --version >/dev/null || exit 99\necho 11.1.0\n"
                     } else {
                         b"#!/bin/sh\nexit 7\n"
@@ -2175,17 +2321,25 @@ mod tests {
             }
             symlink(r::find("gzip", &scratch.0).unwrap(), bin.join("gzip")).unwrap();
             let curl = format!(
-                "#!/bin/sh\ndestination=\nprevious=\nfor argument do\n  [ \"$previous\" != --output ] || destination=$argument\n  previous=$argument\ndone\nprintf '%s\\n' \"$argument\" >> {}\ncase \"$argument\" in\n  */index.json) printf '%s\\n200' '[{{\"version\":\"v26.1.0\",\"lts\":\"fixture\",\"files\":[\"linux-x64\",\"linux-arm64\",\"osx-x64-tar\",\"osx-arm64-tar\"]}}]' ;;\n  */SHASUMS256.txt) printf '{archive_digest}  {archive_name}\\n\\n200' ;;\n  */{archive_name}) /bin/cp {} \"$destination\" ;;\n  *) exit 99 ;;\nesac\n",
+                "#!/bin/sh\ndestination=\nprevious=\nfor argument do\n  [ \"$previous\" != --output ] || destination=$argument\n  previous=$argument\ndone\nprintf '%s\\n' \"$argument\" >> {}\ncase \"$argument\" in\n  */index.json) printf '%s\\n200' '[{{\"version\":\"v26.1.0\",\"lts\":\"fixture\",\"files\":[\"linux-x64\",\"linux-arm64\",\"osx-x64-tar\",\"osx-arm64-tar\"]}}]' ;;\n  */SHASUMS256.txt) printf '{archive_digest}  {archive_name}\\n\\n200' ;;\n  */{archive_name}) /bin/cp {} \"$destination\" ;;\n  */ntn/latest) printf '%s\\n200' {} ;;\n  *) exit 99 ;;\nesac\n",
                 r::shell(root.join("requests").as_os_str()).unwrap(),
                 r::shell(archive.as_os_str()).unwrap(),
+                r::shell(std::ffi::OsStr::new(
+                    &npm_fixture("ntn", "0.9.1").to_string()
+                ))
+                .unwrap(),
             );
             r::new_file(&bin.join("curl"), curl.as_bytes(), 0o755).unwrap();
-            let path = std::env::join_paths([
+            let candidates = [
                 node.parent().unwrap().to_path_buf(),
                 paths.home.join(".local/bin"),
                 bin,
                 elsewhere,
-            ])
+            ];
+            let path = std::env::join_paths(candidates.into_iter().filter(|directory| {
+                !matches!(kind, "old-npm" | "old-node")
+                    || *directory != paths.home.join(".local/bin")
+            }))
             .unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "supply::tests::installed_node_requires_working_npm_and_preserves_newer_runtime", "--nocapture"])
@@ -2208,7 +2362,7 @@ mod tests {
     fn agy_vendor_handoff_survives_updater_failure_and_unrelated_rollback() {
         let flag = AtomicBool::new(false);
         for updater_exit in [0, 7] {
-            for kind in ["legacy", "native", "absent"] {
+            for kind in ["legacy", "native", "absent", "stale-legacy", "stale-native"] {
                 let scratch = r::Scratch::new().unwrap();
                 let paths = fixture_paths(&scratch.0);
                 let binary = paths.home.join(".local/bin/agy");
@@ -2222,17 +2376,22 @@ mod tests {
                     r::shell(replacement.as_os_str()).unwrap()
                 );
                 r::new_file(&binary, initial.as_bytes(), 0o755).unwrap();
+                let stale = kind.starts_with("stale-");
+                let digest = if stale {
+                    r::hash(b"earlier AGY binary")
+                } else {
+                    r::hash(initial.as_bytes())
+                };
                 let raw = match kind {
-                    "legacy" => format!("sha256={}\n", r::hash(initial.as_bytes())).into_bytes(),
-                    "native" => r::bytes(
-                        &json!({"owner":"oh-my-setting","sha256":r::hash(initial.as_bytes())}),
-                    )
-                    .unwrap(),
+                    "legacy" | "stale-legacy" => format!("sha256={digest}\n").into_bytes(),
+                    "native" | "stale-native" => {
+                        r::bytes(&json!({"owner":"oh-my-setting","sha256":digest})).unwrap()
+                    }
                     _ => Vec::new(),
                 };
                 if !raw.is_empty() {
                     r::new_file(&marker, &raw, 0o600).unwrap();
-                    owns(&paths, &binary).unwrap();
+                    assert_eq!(owns(&paths, &binary).is_err(), stale, "{kind}");
                 }
                 assert!(vendor(&paths, "agy", &binary));
                 let unrelated = scratch.0.join("unrelated");
@@ -2240,8 +2399,17 @@ mod tests {
                 let _guard = r::lock(&paths.receipt, &paths.cwd).unwrap();
                 let mut tx = Transaction::begin(&paths).unwrap();
                 tx.write(&unrelated, b"after", 0o600).unwrap();
+                if stale {
+                    let exact = publish(&paths, &mut tx, &replacement, &binary, "2.0.0", &flag);
+                    assert_eq!(
+                        exact.unwrap_err().1,
+                        "managed tool changed; replacement refused"
+                    );
+                    assert_eq!(fs::read(&marker).unwrap(), raw);
+                    assert_eq!(fs::read(&binary).unwrap(), initial.as_bytes());
+                }
                 let result = refresh_vendor(&paths, "agy", &binary, &flag);
-                assert_eq!(result.is_ok(), updater_exit == 0);
+                assert_eq!(result.is_ok(), updater_exit == 0, "{kind}: {result:?}");
                 assert_eq!(r::read(&binary, MAX).unwrap(), updated);
                 assert!(!r::exists(&marker), "{kind} marker survived vendor handoff");
                 drop(tx);
@@ -2264,15 +2432,19 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         for kind in [
-            "stale",
+            "malformed-stale",
+            "noncanonical-stale",
             "foreign",
             "symlink",
             "hardlink",
+            "writable",
             "unrecognized",
             "cancelled",
             "probe-fails",
+            "probe-fails-stale",
             "probe-unparseable",
             "probe-mutates",
+            "probe-mutates-stale",
             "probe-removes-owned-fixture-marker",
             "probe-replaces-marker",
             "probe-creates-marker",
@@ -2300,7 +2472,7 @@ mod tests {
             let backup = scratch.0.join("bin.old");
             let probe = match kind {
                 "probe-unparseable" => "echo unavailable".into(),
-                "probe-mutates" => format!(
+                "probe-mutates" | "probe-mutates-stale" => format!(
                     "printf foreign > {}; echo 'antigravity 1.0.0'",
                     r::shell(marker.as_os_str()).unwrap()
                 ),
@@ -2363,12 +2535,32 @@ mod tests {
             }
             let good = format!("sha256={}\n", r::hash(raw.as_bytes()));
             match kind {
-                "stale" => r::new_file(
+                "malformed-stale" => r::new_file(
                     &marker,
-                    format!("sha256={}\n", "0".repeat(64)).as_bytes(),
+                    format!("sha256={}\n", "g".repeat(64)).as_bytes(),
                     0o600,
                 )
                 .unwrap(),
+                "noncanonical-stale" => r::new_file(
+                    &marker,
+                    &r::bytes(&json!({
+                        "owner":"oh-my-setting","sha256":r::hash(b"earlier AGY binary"),
+                        "extra":true
+                    }))
+                    .unwrap(),
+                    0o600,
+                )
+                .unwrap(),
+                "probe-fails-stale" | "probe-mutates-stale" => r::new_file(
+                    &marker,
+                    format!("sha256={}\n", r::hash(b"earlier AGY binary")).as_bytes(),
+                    0o600,
+                )
+                .unwrap(),
+                "writable" => {
+                    r::new_file(&marker, good.as_bytes(), 0o600).unwrap();
+                    fs::set_permissions(&marker, fs::Permissions::from_mode(0o662)).unwrap();
+                }
                 "foreign" => r::new_file(
                     &marker,
                     &r::bytes(&json!({"owner":"other","sha256":r::hash(raw.as_bytes())})).unwrap(),
@@ -2413,7 +2605,7 @@ mod tests {
                 "probe-removes-owned-fixture-marker" => {
                     assert!(!r::exists(&marker), "{kind} restored marker");
                 }
-                "probe-mutates" => {
+                "probe-mutates" | "probe-mutates-stale" => {
                     assert_eq!(fs::read(&marker).unwrap(), b"foreign", "{kind}");
                 }
                 "probe-creates-marker" => {
@@ -2497,11 +2689,16 @@ mod tests {
                 &mut tx,
                 &AtomicBool::new(false),
             );
-            assert_eq!(result.is_ok(), kind == "valid", "{kind}: {result:?}");
+            assert_eq!(
+                result.is_ok(),
+                matches!(kind.as_str(), "stale" | "valid"),
+                "{kind}: {result:?}"
+            );
             return;
         }
 
-        for present in [true, false] {
+        for kind in ["valid", "stale", "absent"] {
+            let present = kind != "absent";
             let scratch = r::Scratch::new().unwrap();
             let paths = fixture_paths(&scratch.0);
             let binary = paths.home.join(".local/bin/agy");
@@ -2509,13 +2706,33 @@ mod tests {
             let raw = b"#!/bin/sh\necho 'antigravity 1.0.0'\n";
             r::new_file(&binary, raw, 0o755).unwrap();
             let marker = ownership_marker(&binary);
-            let good = format!("sha256={}\n", r::hash(raw));
+            let digest = r::hash(if kind == "stale" {
+                b"earlier AGY binary"
+            } else {
+                raw
+            });
+            let good = format!("sha256={digest}\n");
             if present {
                 r::new_file(&marker, good.as_bytes(), 0o600).unwrap();
             }
             let custody = AgyMarkerCustody::capture(&paths, &binary).unwrap();
+            let probe = r::command(
+                &binary,
+                &["--version".into()],
+                &paths.cwd,
+                None,
+                &AtomicBool::new(false),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+            assert!(satisfies_release(&probe.1, "1.0.0", true));
+            let before = fs::symlink_metadata(&marker).ok();
             custody.verify_continuity(&paths, &binary, false).unwrap();
             assert_eq!(r::exists(&marker), present);
+            if let Some(before) = before {
+                assert_eq!(fs::read(&marker).unwrap(), good.as_bytes());
+                assert_eq!(fs::symlink_metadata(&marker).unwrap().ino(), before.ino());
+            }
             if present {
                 let staged = scratch.0.join("staged");
                 r::new_file(&staged, good.as_bytes(), 0o600).unwrap();
@@ -2529,7 +2746,7 @@ mod tests {
             }
         }
 
-        for kind in ["stale", "probe-removes-marker", "valid"] {
+        for kind in ["stale", "malformed", "probe-removes-marker", "valid"] {
             let scratch = r::Scratch::new().unwrap();
             let paths = fixture_paths(&scratch.0);
             let binary = paths.home.join(".local/bin/agy");
@@ -2555,11 +2772,12 @@ mod tests {
                 r::shell(replacement.as_os_str()).unwrap(),
             );
             r::new_file(&binary, raw.as_bytes(), 0o755).unwrap();
-            let marker_bytes = if kind == "stale" {
-                format!("sha256={}\n", "0".repeat(64))
-            } else {
-                format!("sha256={}\n", r::hash(raw.as_bytes()))
+            let digest = match kind {
+                "stale" => r::hash(b"earlier AGY binary"),
+                "malformed" => "g".repeat(64),
+                _ => r::hash(raw.as_bytes()),
             };
+            let marker_bytes = format!("sha256={digest}\n");
             r::new_file(&marker, marker_bytes.as_bytes(), 0o600).unwrap();
             let marker_before = fs::symlink_metadata(&marker).unwrap();
 
@@ -2582,10 +2800,20 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
 
-            assert_eq!(invoked.exists(), kind != "stale", "{kind}");
-            assert_eq!(updated.exists(), kind == "valid", "{kind}");
+            assert_eq!(invoked.exists(), kind != "malformed", "{kind}");
+            assert_eq!(
+                updated.exists(),
+                matches!(kind, "stale" | "valid"),
+                "{kind}"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("retired stale AGY ownership marker"),
+                kind == "stale",
+                "{kind}"
+            );
             match kind {
-                "stale" => {
+                "malformed" => {
                     assert_eq!(fs::read(&marker).unwrap(), marker_bytes.as_bytes());
                     assert_eq!(
                         fs::symlink_metadata(&marker).unwrap().ino(),

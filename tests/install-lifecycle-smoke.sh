@@ -115,6 +115,7 @@ EOF
   rev1="$(git -C "$case_dir/checkout" rev-parse HEAD)"
 
   git -C "$case_dir/remote" init -q --bare
+  git -C "$case_dir/remote" symbolic-ref HEAD refs/heads/main
   git -C "$case_dir/checkout" remote add origin "$case_dir/remote"
   git -C "$case_dir/checkout" push -q origin main
 
@@ -132,7 +133,7 @@ EOF
   export OMS_NATIVE_NO_AUTO_STAGE=1
   export OH_MY_SETTING_DIR="$case_dir/checkout"
   export OH_MY_SETTING_LINK_MODE="$mode"
-  export OH_MY_SETTING_REF=main
+  unset OH_MY_SETTING_REF OMS_INSTALL_RECEIPT
   export OH_MY_SETTING_CLAUDE_HOOKS=0
   export OH_MY_SETTING_CODEX_PLUGIN=0
   export OH_MY_SETTING_AGY_PLUGIN=0
@@ -152,9 +153,33 @@ EOF
   else
     [ -L "$HOME/.local/bin/oms" ] || fail "symlink mode did not symlink oms"
   fi
-  jq -e --arg rev "$rev1" --arg mode "$mode" '.schema == 2 and .commit == $rev and .link_mode == $mode' \
-    "$XDG_CONFIG_HOME/oh-my-setting/install.json" >/dev/null ||
-    fail "receipt validation failed ($mode): $(cat "$XDG_CONFIG_HOME/oh-my-setting/install.json")"
+  receipt="$XDG_CONFIG_HOME/oh-my-setting/install.json"
+  jq -e --arg rev "$rev1" --arg mode "$mode" \
+    '.schema == 2 and .commit == $rev and .link_mode == $mode and .ref == "edge"' "$receipt" >/dev/null ||
+    fail "first install should record edge ($mode): $(cat "$receipt")"
+
+  if [ "$mode" = copy ]; then
+    git -C "$case_dir/checkout" commit --allow-empty -qm "advance default branch"
+    git -C "$case_dir/checkout" push -q origin main
+    out="$(OH_MY_SETTING_REF=edge "$case_dir/checkout/install.sh" --ref "$rev1" --no-auto-update 2>&1)" ||
+      fail "explicit ref pin failed: $out"
+    jq -e --arg rev "$rev1" '.commit == $rev and .ref == $rev' "$receipt" >/dev/null ||
+      fail "--ref did not override the environment"
+    out="$("$case_dir/checkout/install.sh" --plan 2>&1)" ||
+      fail "pinned install plan failed: $out"
+    jq -e --arg rev "$rev1" '.install.ref == $rev' <<< "$out" >/dev/null ||
+      fail "install plan changed the saved pin: $out"
+    out="$("$case_dir/checkout/install.sh" --no-auto-update 2>&1)" ||
+      fail "reinstall of the saved pin failed: $out"
+    [ "$(git -C "$case_dir/checkout" rev-parse HEAD)" = "$rev1" ] ||
+      fail "reinstall moved off the pinned checkout"
+    jq -e --arg rev "$rev1" '.commit == $rev and .ref == $rev' "$receipt" >/dev/null ||
+      fail "reinstall changed the saved pin"
+    out="$(OH_MY_SETTING_REF=main "$case_dir/checkout/install.sh" --plan 2>&1)" ||
+      fail "explicit environment install plan failed: $out"
+    jq -e '.install.ref == "main"' <<< "$out" >/dev/null ||
+      fail "install plan did not honor explicit OH_MY_SETTING_REF: $out"
+  fi
 
   (
     cd "$case_dir/checkout"

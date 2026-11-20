@@ -156,12 +156,13 @@ schema-2 JSON 파일을 `OH_MY_SETTING_TOOL_LOCK`으로 지정한다. 상대 경
 버전의 검증 페이로드 경로를 사용한다.
 
 OMS로 처음 설치한 Antigravity를 vendor updater에 넘길 때는 바이너리의 버전을
-조회하기 전에 기존 소유권 checksum sidecar를 검증한다. 버전 조회가 실패하면
-sidecar를 유지하고, 실제 updater를 시작하기 직전에 다시 검증한 뒤 제거한다.
-오래됐거나 안전하지 않은 sidecar는 오류로 남긴다.
-Vendor가 바꾼 바이너리가 OMS transaction 밖에 있으므로, 뒤이은 다른 도구의 실패가
-이전 sidecar를 되살리지 않는다. 명시적 pin으로 교체할 때는 계속 OMS 소유권을
-확인한다.
+조회하기 전에 기존 소유권 checksum sidecar를 검증한다. 이전 vendor 업데이트로
+checksum만 어긋난 경우, 인식된 vendor 경로에서 현재 사용자가 소유한 안전한 OMS
+sidecar를 허용한다. 버전을 조회하는 동안 sidecar와 바이너리가 바뀌지 않았는지
+확인한다. 업데이트가 실행되지 않으면 sidecar를 유지한다. Updater에 넘기기 직전에
+sidecar를 제거하며, checksum이 오래된 경우 경고를 표시한다. 형식이 잘못되거나
+안전하지 않거나 바뀐 sidecar는 거부한다. Vendor 바이너리와 이 인계는 OMS rollback
+범위 밖이다. 명시적 pin으로 교체할 때는 계속 일치하는 소유권 checksum을 요구한다.
 
 이미 설치된 Pi는 `oms install-tools --providers`에서만 `pi update self`로 갱신한다.
 그 밖에 인식되는 선택형 npm provider는 사용자가 소유하고 쓸 수 있는 global prefix에서
@@ -170,10 +171,11 @@ npm lifecycle 스크립트는 패키지 코드를 실행할 수 있다. 명시�
 선택형 도구를 표현하는 항목이 없으므로 해당 갱신을 건너뛴다.
 
 provider 의존성은 함께 선택한다. Claude·Codex·ntn에는 Node를 포함하며 `--only`에서
-Node를 뒤에 적어도 먼저 설치한다. Antigravity에는 포함하지 않는다. npm 기반 설치에는
-기존 Node뿐 아니라 작동하는 npm도 필요하며 다른 prefix의 정상 npm은 재사용한다.
-npm이 없거나 고장 나면 검증된 번들 도구를 준비하고, 이미 요구 버전을 만족하거나
-더 새로운 Node는 그대로 둔다. 다만 선택된 버전의 NVM 디렉터리가 이미 불완전하거나
+Node를 뒤에 적어도 먼저 설치한다. Antigravity에는 포함하지 않는다. 검증된 패키지를
+임시 디렉터리에 받으려면 npm 7.18.0 이상이 필요하다. 기본 관리 Codex와 ntn 실행에는
+Node 16 이상을 사용한다. 다른 prefix의 호환 npm은 재사용한다. 필요한 도구가 없거나
+호환되지 않으면 검증된 Node 번들을 준비하며, npm만 복구할 때는 요구 버전을 만족하는
+Node를 보존한다. 다만 선택된 버전의 NVM 디렉터리가 이미 불완전하거나
 손상된 경우에는 소유권을 입증하지 못하는 파일을 교체하지 않고 거부한다. 해당
 디렉터리의 자동 복구는 아직 구현하지 않았다. 관리 파일 반영
 전에 다운로드와 패키지 이름·버전을 검증하며 설치·

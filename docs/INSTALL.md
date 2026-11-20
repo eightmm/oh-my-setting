@@ -170,11 +170,14 @@ payload path instead of the default vendor update command.
 
 When a bootstrapped Antigravity binary hands over to its vendor updater, OMS
 validates its ownership checksum sidecar before probing the binary's version.
-A failed version probe leaves the sidecar intact. Immediately before the updater
-starts, OMS revalidates and retires the sidecar. A stale or unsafe sidecar remains
-an error. This handoff is not reversed by an
-unrelated tool failure, because the vendor's changed binary is also outside the
-OMS transaction. An explicit pin still requires OMS ownership before replacement.
+An earlier vendor update may have left a valid OMS sidecar with an outdated
+checksum. This case is allowed only on the recognized vendor path for a safe
+sidecar owned by the current user. OMS checks that the sidecar and binary remain
+unchanged through the version probe. If no update runs, the sidecar remains in
+place. Immediately before handing off to the updater, OMS retires the sidecar
+and warns if its checksum was stale. Malformed, unsafe, or changed sidecars
+are refused. The vendor's binary and this handoff are outside OMS rollback.
+An explicit pin still requires a matching ownership checksum before replacement.
 
 Already installed Pi is refreshed with `pi update self` only through
 `oms install-tools --providers`. Other recognized optional npm providers in a
@@ -185,10 +188,11 @@ because its schema does not describe them.
 
 Provider dependencies are selected with the provider: Claude, Codex and ntn
 include Node, installed first even when `--only` lists it last; Antigravity does
-not. An existing Node is ready for npm-based installation only when a working
-npm is also available. A working npm in a separate prefix is reused. Missing or
-broken npm triggers preparation of verified bundled tooling; an already suitable
-or newer Node remains in place. If the selected version already has an incomplete
+not. Verified package downloads use npm 7.18.0 or later for scratch-directory
+packing. The default managed Codex and ntn launchers use Node 16 or later. A
+compatible npm in a separate prefix is reused. Missing or incompatible tooling
+triggers preparation of the verified Node bundle, retaining a suitable installed
+runtime when only npm needs repair. If the selected version already has an incomplete
 or damaged NVM directory, OMS refuses rather than replacing files whose ownership
 it cannot establish; automatic repair of that directory is not implemented.
 Downloads and package identities are checked

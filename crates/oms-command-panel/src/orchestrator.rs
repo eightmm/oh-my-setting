@@ -4331,8 +4331,25 @@ fn observed_model<'a>(provider: &str, screen: &'a str) -> Option<&'a str> {
             let line = line.trim();
             let model = match provider {
                 "claude" if line.contains(" | ctx ") => {
-                    let (model, _) = line.split_once(" | ")?;
-                    if !["Sonnet ", "Opus ", "Haiku ", "Fable "]
+                    let (model, fields) = line.split_once(" | ")?;
+                    if let Some(version) = model.strip_prefix("Fable ") {
+                        // A Fable prefix and a context-like substring can both occur in prose.
+                        let (major, minor) = version.split_once('.')?;
+                        static CONTEXT: std::sync::LazyLock<regex::Regex> =
+                            std::sync::LazyLock::new(|| {
+                                regex::Regex::new(concat!(
+                                    r"^ctx (?:--|\[[#-]{1,10}\] (?:[0-9]|[1-9][0-9]|100)%",
+                                    r"(?: [0-9]+(?:\.[0-9]+)?[kmb]?/[0-9]+(?:\.[0-9]+)?[kmb]?)?)$",
+                                ))
+                                .expect("static Claude context pattern")
+                            });
+                        if ![major, minor].iter().all(|part| {
+                            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                        }) || !fields.split(" | ").any(|field| CONTEXT.is_match(field))
+                        {
+                            return None;
+                        }
+                    } else if !["Sonnet ", "Opus ", "Haiku "]
                         .iter()
                         .any(|prefix| model.starts_with(prefix))
                     {
@@ -5793,6 +5810,12 @@ mod tests {
                 "Fable 5.2",
             ),
             (
+                "claude",
+                "  Fable 5.2 | git branch | ctx [##--------] 21% 214k/1m | 7d 54%",
+                "Fable 5.2",
+            ),
+            ("claude", "  Fable 5.1 | ctx --", "Fable 5.1"),
+            (
                 "antigravity",
                 "Gemini 4 Hydrogen (High) (Antigravity ) | ctx 2% | branch",
                 "Gemini 4 Hydrogen (High)",
@@ -5801,7 +5824,21 @@ mod tests {
             assert_eq!(observed_model(provider, screen), Some(model));
         }
         assert_eq!(observed_model("codex", "Probably GPT-6.2-Sol"), None);
-        assert_eq!(observed_model("claude", "Probably Fable 5.2"), None);
+        for false_footer in [
+            "Probably Fable 5.2",
+            "Fable research notes | ctx example",
+            "Fable research notes | ctx [----] 6%",
+            "Fable 5.2 | branch | ctx example",
+            "Fable 5.2 | branch | ctx [----] 106%",
+        ] {
+            assert_eq!(
+                observed_model("claude", false_footer),
+                None,
+                "{false_footer}"
+            );
+        }
+        let mixed = "  Sonnet 5.5 | branch | ctx [----] 6%\nFable research notes | ctx example";
+        assert_eq!(observed_model("claude", mixed), Some("Sonnet 5.5"));
     }
 
     #[test]

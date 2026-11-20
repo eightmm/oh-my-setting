@@ -604,6 +604,15 @@ pub fn resolve_repositories_with(
     cwd: &Path,
     env_room_raw: Option<&Path>,
 ) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+    resolve_repositories(options, cwd, env_room_raw, false)
+}
+
+pub(crate) fn resolve_repositories(
+    options: &Options,
+    cwd: &Path,
+    env_room_raw: Option<&Path>,
+    selecting_main: bool,
+) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
     let explicit_raw = options.get("repo").map(|raw| {
         let p = PathBuf::from(raw);
         if p.is_absolute() { p } else { cwd.join(p) }
@@ -611,7 +620,8 @@ pub fn resolve_repositories_with(
     let optional_git = options.command.is_none()
         && ((options.has("providers") || options.has("routes")) && explicit_raw.is_none()
             || (options.has("recommend") && !options.has("diff") && explicit_raw.is_none()));
-    let requires_room_match = options.command.is_some()
+    let requires_room_match = selecting_main
+        || options.command.is_some()
         || options.has("dispatch")
         || options.has("continue")
         || options.has("salvage")
@@ -710,7 +720,8 @@ pub(crate) fn run_mode(
     stop: &AtomicBool,
 ) -> Result<Output> {
     let env_room = std::env::var_os("OMS_ROOM_REPO").map(PathBuf::from);
-    let (repo_opt, exec_opt) = resolve_repositories_with(options, cwd, env_room.as_deref())?;
+    let (repo_opt, exec_opt) =
+        resolve_repositories(options, cwd, env_room.as_deref(), default_main)?;
     if default_main
         && let Some(repo) = &repo_opt
         && let Some(output) =

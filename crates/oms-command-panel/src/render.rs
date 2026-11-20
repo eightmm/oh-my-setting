@@ -874,9 +874,10 @@ fn normalize(row: &Value, cached_agy_model: &mut Option<Option<String>>) -> Valu
 pub fn visible(report: &Value, nav: &navigation::Navigation) -> Vec<Value> {
     let all = calls(report);
     let main = overall_main(&report["room"], &all);
+    let direct = direct_work(report, &all, main);
     main.into_iter()
         .chain(
-            board_rows(visible_from(&all, nav, main), nav, main)
+            board_rows(visible_from(&all, nav, main, &direct), nav, main)
                 .into_iter()
                 .map(|entry| entry.call),
         )
@@ -908,6 +909,89 @@ fn overall_main<'a>(room: &Value, calls: &'a [Value]) -> Option<&'a Value> {
     let mut active =
         mains.filter(|call| oms_panel_core::state::LIVE_STATES.contains(&text(call, "state")));
     active.next().filter(|_| active.next().is_none())
+}
+
+fn direct_work<'a>(
+    report: &Value,
+    calls: &'a [Value],
+    main: Option<&Value>,
+) -> BTreeSet<(&'a str, &'a str)> {
+    let room = &report["room"];
+    let room_id = text(room, "id");
+    let Some(main) = main else {
+        return BTreeSet::new();
+    };
+    let owner = room_main_id(room);
+    let main_attempt = text(main, "attempt");
+    let attempt = &report["room_attempts"][main_attempt];
+    if owner.is_empty()
+        || room["closed"] == true
+        || main["participant"] != owner
+        || main["joined"] != true
+        || main_attempt.is_empty()
+        || !oms_panel_core::state::LIVE_STATES.contains(&text(main, "state"))
+        || attempt["attempt_id"] != main_attempt
+        || attempt["tool"] != "panel-main"
+        || attempt["terminal"] != false
+        || !oms_panel_core::state::LIVE_STATES.contains(&text(attempt, "state"))
+        || attempt["provider"] != main["provider"]
+        || oms_panel_core::state::main_participant(attempt) != owner
+        || !event_room_matches(room_id, &attempt["refs"])
+        || calls.iter().any(|call| {
+            !std::ptr::eq(call, main)
+                && ["participant", "attempt"]
+                    .iter()
+                    .any(|key| [owner, main_attempt].contains(&text(call, key)))
+        })
+        || rows(&room["swaps"])
+            .iter()
+            .any(|swap| swap["participant"] == owner && swap["attempt"] == main_attempt)
+    {
+        return BTreeSet::new();
+    }
+    // Room membership proves the direct relationship. Events distinguishes
+    // attempts that share a participant after a Main restart or resume.
+    let members: BTreeSet<_> = rows(&room["participants"])
+        .iter()
+        .filter(|member| member["joined"] == true && member["parent"] == owner)
+        .map(|member| (text(member, "participant"), text(member, "attempt")))
+        .collect();
+    calls
+        .iter()
+        .filter(|call| {
+            matches!(
+                text(call, "role"),
+                "worker" | "reviewer" | "researcher" | "advisor"
+            ) && call["native_child"] != true
+                && call["joined"] == true
+                && call["completed_task"] != true
+                && !call["returned_at"].is_string()
+                && oms_panel_core::state::LIVE_STATES.contains(&text(call, "state"))
+        })
+        .filter_map(|call| {
+            let participant = text(call, "participant");
+            let attempt = text(call, "attempt");
+            let row = &report["room_attempts"][attempt];
+            let refs = &row["refs"];
+            (!participant.is_empty()
+                && !attempt.is_empty()
+                && (members.contains(&(participant, attempt))
+                    || members.contains(&(participant, "")))
+                && row["attempt_id"] == attempt
+                && row["parent_attempt_id"] == main_attempt
+                && row["terminal"] == false
+                && oms_panel_core::state::LIVE_STATES.contains(&text(row, "state"))
+                && row["provider"] == call["provider"]
+                && refs["panel_room_participant"] == participant
+                && event_room_matches(room_id, refs))
+            .then_some((participant, attempt))
+        })
+        .collect()
+}
+
+fn is_direct_work(call: &Value, direct: &BTreeSet<(&str, &str)>) -> bool {
+    call["native_child"] != true
+        && direct.contains(&(text(call, "participant"), text(call, "attempt")))
 }
 
 fn provider_bucket(call: &Value) -> usize {
@@ -1104,6 +1188,7 @@ fn visible_from<'a>(
     all: &'a [Value],
     nav: &navigation::Navigation,
     main: Option<&Value>,
+    direct: &BTreeSet<(&str, &str)>,
 ) -> Vec<&'a Value> {
     let groups = provider_groups(all, main);
     let words = navigation::words(&nav.filter);
@@ -1129,9 +1214,12 @@ fn visible_from<'a>(
         .collect();
     if nav.view == View::Auto {
         filtered.sort_by_key(|call| {
-            groups
-                .iter()
-                .position(|group| *group == provider_bucket(call))
+            (
+                !is_direct_work(call, direct),
+                groups
+                    .iter()
+                    .position(|group| *group == provider_bucket(call)),
+            )
         });
     }
     filtered
@@ -1263,6 +1351,7 @@ fn frame_with_capacity(
     };
     let all = calls(report);
     let pinned = overall_main(&report["room"], &all);
+    let direct = direct_work(report, &all, pinned);
     let pinned_count = usize::from(pinned.is_some());
     let total = all.len() - pinned_count;
     let history = all
@@ -1275,7 +1364,7 @@ fn frame_with_capacity(
         .filter(|call| !pinned.is_some_and(|main| std::ptr::eq(*call, main)))
         .filter(|call| fold_inactive(nav, call))
         .count();
-    let filtered = visible_from(&all, nav, pinned);
+    let filtered = visible_from(&all, nav, pinned, &direct);
     let review = if default_overview(nav) {
         all.iter().filter(|call| awaiting_review(call)).count()
     } else {
@@ -1440,7 +1529,11 @@ fn frame_with_capacity(
         }
         main.truncate(main_room);
         let groups = provider_groups(&all, pinned);
-        let provider_chrome = groups.len() + 1;
+        let has_direct = calls
+            .iter()
+            .any(|entry| is_direct_work(entry.call, &direct));
+        // Keep page capacity steady when the direct rows scroll offscreen.
+        let provider_chrome = groups.len() + 1 + 2 * usize::from(has_direct);
         let content_start = lines.len() + main.len();
         // On short boards, wrapped notices take precedence over decorative chrome.
         let chrome_start = content_start + if short_board { notices.len() } else { 0 };
@@ -1526,6 +1619,7 @@ fn frame_with_capacity(
                 &all,
                 room_main_id(&report["room"]),
                 &calls,
+                &direct,
                 nav,
                 selected_worker,
                 offset,
@@ -1793,7 +1887,7 @@ fn board_brief<'a>(value: &'a str, role: &str) -> &'a str {
 fn render_call_row(
     call: &Value,
     prefix: &str,
-    parent: &str,
+    suffix: &str,
     selected: bool,
     columns: usize,
     use_cards: bool,
@@ -1905,7 +1999,7 @@ fn render_call_row(
         );
     }
     let model = clip(&model_label(call), (columns / 4).max(12));
-    let model_budget = metadata_limit.saturating_sub(width(parent).min(15));
+    let model_budget = metadata_limit.saturating_sub(width(suffix).min(15));
     if use_cards && model != "model —" && width(&model) + spans_width(&right) + 2 <= model_budget
     {
         right.splice(
@@ -1917,19 +2011,19 @@ fn render_call_row(
         );
     }
     let budget = left_budget(inner, spans_width(&right)).saturating_sub(prefix_width);
-    let parent_budget = budget.saturating_sub(text_min.max(budget / 3)).min(32);
-    let parent = if parent_budget >= 5 {
-        clip(parent, parent_budget)
+    let suffix_budget = budget.saturating_sub(text_min.max(budget / 3)).min(32);
+    let suffix = if suffix_budget >= 5 {
+        clip(suffix, suffix_budget)
     } else {
         String::new()
     };
     left.extend(CallDisplay::board_spans(
         name,
         &task,
-        budget.saturating_sub(width(&parent)),
+        budget.saturating_sub(width(&suffix)),
     ));
     left.push(Span {
-        plain: parent,
+        plain: suffix,
         sgr: Some(SGR_MUTED),
     });
     card_row_lr(
@@ -2231,6 +2325,7 @@ fn render_provider_rows(
     all: &[Value],
     room_main: &str,
     calls: &[TreeEntry<'_>],
+    direct: &BTreeSet<(&str, &str)>,
     nav: &navigation::Navigation,
     selected_worker: Option<usize>,
     offset: usize,
@@ -2248,13 +2343,44 @@ fn render_provider_rows(
     base: usize,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    let direct_page = calls
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(capacity)
+        .filter(|(_, entry)| is_direct_work(entry.call, direct));
+    if direct_page.clone().next().is_some() {
+        lines.push(card_top_styled(
+            "Overall Main · Direct work",
+            None,
+            columns,
+            colored,
+            SGR_AMBER_BOLD,
+        ));
+        for (index, entry) in direct_page {
+            let call = entry.call;
+            register_call(worker_rows, base + lines.len(), call);
+            let provider = provider_label(text(call, "provider"));
+            lines.push(render_call_row(
+                call,
+                "",
+                &format!(" · {provider}"),
+                Some(index) == selected_worker,
+                columns,
+                true,
+                colored,
+            ));
+        }
+        lines.extend(card_bottom(columns, true, colored));
+    }
+    let provider_start = lines.len();
     for &group in groups {
         let label = ["Codex", "Claude", "Antigravity", "Other providers"][group];
         let members: Vec<_> = calls
             .iter()
             .map(|entry| entry.call)
             .enumerate()
-            .filter(|(_, call)| provider_bucket(call) == group)
+            .filter(|(_, call)| provider_bucket(call) == group && !is_direct_work(call, direct))
             .collect();
         let lead = all
             .iter()
@@ -2274,12 +2400,11 @@ fn render_provider_rows(
                     .iter()
                     .any(|item| item.as_str() == Some(provider))
             });
-        let orchestration = if connected {
+        let session = if connected {
             provider_rows[group] = Some(lines.len());
-            format!("Orchestrator [{}]", group + 1)
+            format!("Lead chat [{}]", group + 1)
         } else {
-            lead.map(|call| format!("Orchestrator {}", call_label(call)))
-                .unwrap_or_else(|| "Orchestrator: unreported".into())
+            "Activity".into()
         };
         let working = members
             .iter()
@@ -2300,11 +2425,16 @@ fn render_provider_rows(
             Some(state) => state.to_owned(),
             None if working > 0 => format!("{working} working"),
             None if connected => "state unreported".to_owned(),
-            None => "idle".to_owned(),
+            None if members.is_empty() => "no visible work".to_owned(),
+            None => format!("{} recorded", members.len()),
         };
         let awaiting = if default_overview(nav) {
             all.iter()
-                .filter(|call| provider_bucket(call) == group && awaiting_review(call))
+                .filter(|call| {
+                    provider_bucket(call) == group
+                        && !is_direct_work(call, direct)
+                        && awaiting_review(call)
+                })
                 .count()
         } else {
             members
@@ -2324,14 +2454,14 @@ fn render_provider_rows(
             .map(|model| formatted_model(model).to_owned())
             .or_else(|| lead.map(model_label))
             .unwrap_or_else(|| "model —".to_owned());
-        let full_title = if connected || lead.is_some() {
-            format!("{label} · {orchestration} · {model}")
+        let full_title = if connected {
+            format!("{label} · {session} · {model}")
         } else {
-            format!("{label} · {orchestration}")
+            format!("{label} · {session}")
         };
         let mut title = if connected && width(&full_title) + 6 > columns {
             let label = ["Codex", "Claude", "Antigravity"][group];
-            format!("[{}] {label} · {model}", group + 1)
+            format!("{label} · {session}")
         } else {
             full_title
         };
@@ -2370,7 +2500,7 @@ fn render_provider_rows(
             .find(|tag| width(&title) + width(tag) + 8 <= columns)
             .map(String::as_str);
         let header = card_top_styled(&title, tag, columns, colored, provider_style(group));
-        lines.push(if !lines.is_empty() {
+        lines.push(if lines.len() > provider_start {
             header.replacen('╭', "├", 1).replacen('╮', "┤", 1)
         } else {
             header
@@ -4582,7 +4712,7 @@ mod tests {
         assert!(
             output
                 .lines()
-                .any(|line| line.contains("Codex · Orchestrator [1]")
+                .any(|line| line.contains("Codex · Lead chat [1]")
                     && line.contains("state unreported")),
             "{output}"
         );
@@ -5504,9 +5634,9 @@ mod tests {
                 if columns >= 56 {
                     let joined = plain.join("\n");
                     for required in [
-                        "Codex · Orchestrator: unreported",
-                        "Claude · Orchestrator L",
-                        "Antigravity · Orchestrator: unreported",
+                        "Codex · Activity",
+                        "Claude · Activity",
+                        "Antigravity · Activity",
                     ] {
                         assert!(
                             joined
@@ -5586,11 +5716,8 @@ mod tests {
             &read,
         )
         .join("\n");
-        assert_eq!(
-            empty.matches("Orchestrator: unreported").count(),
-            3,
-            "{empty}"
-        );
+        assert_eq!(empty.matches(" · Activity").count(), 3, "{empty}");
+        assert!(empty.contains("no visible work") && !empty.contains("idle"));
         let mut connected = report.clone();
         connected["provider_sessions"] = json!(["codex", "antigravity"]);
         let board = board_frame(
@@ -5605,8 +5732,8 @@ mod tests {
         let [Some(codex), None, Some(agy)] = board.provider_rows else {
             panic!("only connected provider headers should be clickable");
         };
-        assert!(clean(&board.lines[codex], 80).contains("Codex · Orchestrator [1]"));
-        assert!(clean(&board.lines[agy], 80).contains("Antigravity · Orchestrator [3]"));
+        assert!(clean(&board.lines[codex], 80).contains("Codex · Lead chat [1]"));
+        assert!(clean(&board.lines[agy], 80).contains("Antigravity · Lead chat [3]"));
         nav.filter = "Claude task".into();
         nav.selected = 1;
         assert_eq!(visible(&report, &nav).len(), 2);
@@ -5618,7 +5745,143 @@ mod tests {
             "{filtered}"
         );
         assert!(filtered.contains("3 filt"), "{filtered}");
-        assert!(filtered.contains("Claude · Orchestrator L"), "{filtered}");
+        assert!(filtered.contains("Claude · Activity"), "{filtered}");
+    }
+
+    #[test]
+    fn overview_groups_only_work_bound_to_the_live_room_owner_attempt() {
+        let mut report = json!({
+            "collection":{"ok":true},
+            "provider_sessions":["antigravity"],
+            "room":{
+                "id":"room-one", "owner":"M",
+                "participants":[
+                    {"participant":"M","role":"main","attempt":"main-live","provider":"codex","joined":true},
+                    {"participant":"lead","role":"lead","parent":"M","provider":"codex","joined":true,"state":"working"},
+                    {"participant":"old","role":"main","provider":"claude","joined":false,"state":"done"},
+                    {"participant":"direct","role":"worker","parent":"M","provider":"claude","joined":true,"state":"working","title":"Direct changes"},
+                    {"participant":"foreign","role":"reviewer","parent":"M","provider":"codex","joined":true,"state":"working"},
+                    {"participant":"old-work","role":"advisor","parent":"M","provider":"codex","joined":true,"state":"working"},
+                    {"participant":"indirect","role":"worker","parent":"lead","provider":"codex","joined":true,"state":"working","title":"Indirect work"},
+                    {"participant":"unbound","role":"worker","parent":"M","provider":"codex","joined":true,"state":"working"}
+                ]
+            },
+            "room_attempts":{
+                "main-live":{"attempt_id":"main-live","tool":"panel-main","provider":"codex","state":"working","terminal":false,
+                    "refs":{"panel_room_id":"room-one","panel_room_participant":"M"}},
+                "direct-attempt":{"attempt_id":"direct-attempt","parent_attempt_id":"main-live","provider":"claude","state":"working","terminal":false,
+                    "refs":{"panel_room_id":"room-one","panel_room_participant":"direct"}},
+                "foreign-attempt":{"attempt_id":"foreign-attempt","parent_attempt_id":"main-live","provider":"codex","state":"working","terminal":false,
+                    "refs":{"panel_room_id":"room-one","panel_room":"room-two","panel_room_participant":"foreign"}},
+                "old-attempt":{"attempt_id":"old-attempt","parent_attempt_id":"main-old","provider":"codex","state":"working","terminal":false,
+                    "refs":{"panel_room_id":"room-one","panel_room_participant":"old-work"}},
+                "indirect-attempt":{"attempt_id":"indirect-attempt","parent_attempt_id":"main-live","provider":"codex","state":"working","terminal":false,
+                    "refs":{"panel_room_id":"room-one","panel_room_participant":"indirect"}}
+            },
+            "native_children":[{"participant":"native","role":"subagent","parent":"M","provider":"claude","native_child":true,"state":"working"}]
+        });
+        let mut nav = navigation::Navigation::default();
+        let read = BTreeMap::new();
+        let items = visible(&report, &nav);
+        assert_eq!(text(&items[0], "participant"), "M");
+        assert_eq!(text(&items[1], "participant"), "direct");
+        nav.selected = 1;
+        for (columns, height) in [(160, 34), (56, 20), (32, 12)] {
+            let board = board_frame(&report, &nav, columns, height, &read, false, true);
+            let (&hit, value) = board
+                .worker_rows
+                .iter()
+                .find(|(_, (participant, _))| participant == "direct")
+                .unwrap();
+            assert_eq!(value, &("direct".to_owned(), "direct-attempt".to_owned()));
+            assert!(board.lines[hit].contains('▸') && !board.lines[hit].contains('←'));
+            assert!(board.lines.iter().all(|line| width(line) <= columns));
+            assert_eq!(board.lines.len(), height);
+            if columns >= 56 {
+                assert!(board.lines[hit - 1].contains("Overall Main · Direct work"));
+                let agy = board.provider_rows[2].unwrap();
+                assert!(agy > hit && board.lines[agy].contains("Lead chat [3]"));
+                assert!(!board.worker_rows.contains_key(&agy));
+            } else {
+                assert_eq!(board.provider_rows, [None; 3]);
+            }
+            if columns >= 160 {
+                assert!(board.lines[hit].contains("Claude"));
+                assert!(board.lines[hit + 2].starts_with("╭─ Codex · Activity"));
+                for (row, (participant, _)) in &board.worker_rows {
+                    assert!(["M", "direct"].contains(&participant.as_str()) || *row > hit + 2);
+                }
+            }
+        }
+        nav.selected = items.len() - 1;
+        nav.offset = nav.selected;
+        let board = board_frame(&report, &nav, 80, 15, &read, false, true);
+        assert!(!board.lines.iter().any(|line| line.contains("Direct work")));
+        assert!(
+            board.worker_rows.values().any(|(participant, _)| {
+                participant == text(items.last().unwrap(), "participant")
+            })
+        );
+        nav.selected = 1;
+        nav.offset = 0;
+        nav.filter = "indirect".into();
+        let board = board_frame(&report, &nav, 80, 24, &read, false, true);
+        assert!(!board.lines.iter().any(|line| line.contains("Direct work")));
+        assert!(
+            board
+                .lines
+                .iter()
+                .any(|line| line.contains("▸") && line.contains("indirect"))
+        );
+        nav.filter.clear();
+        nav.view = View::Tree;
+        nav.folded.insert("M".into());
+        assert!(
+            !visible(&report, &nav)
+                .iter()
+                .any(|call| call["participant"] == "direct")
+        );
+
+        nav.view = View::Auto;
+        nav.folded.clear();
+        let current = report["room_attempts"]["direct-attempt"].clone();
+        report["room_attempts"]["direct-attempt"]["state"] = json!("done");
+        assert!(
+            !visible(&report, &nav)
+                .iter()
+                .any(|call| call["participant"] == "direct")
+        );
+        nav.filter = "direct changes".into();
+        let board = board_frame(&report, &nav, 100, 24, &read, false, true);
+        assert!(!board.lines.iter().any(|line| line.contains("Direct work")));
+        assert!(
+            board
+                .lines
+                .iter()
+                .any(|line| line.contains("direct") && line.contains("exited"))
+        );
+        nav.filter.clear();
+        report["room_attempts"]["direct-attempt"] = current;
+        report["room_attempts"]["direct-attempt"]["terminal"] = json!(true);
+        let board = board_frame(&report, &nav, 160, 34, &read, false, true);
+        assert!(!board.lines.iter().any(|line| line.contains("Direct work")));
+        report["room_attempts"]["direct-attempt"]["terminal"] = json!(false);
+
+        for change in [
+            json!({"participant":"main-live","role":"worker","state":"working"}),
+            json!({"participant":"M","role":"main","state":"working","joined":true}),
+        ] {
+            let mut ambiguous = report.clone();
+            ambiguous["room"]["participants"]
+                .as_array_mut()
+                .unwrap()
+                .push(change);
+            let board = board_frame(&ambiguous, &nav, 160, 34, &read, false, true);
+            assert!(!board.lines.iter().any(|line| line.contains("Direct work")));
+        }
+        report["room"]["swaps"] = json!([{"participant":"M","attempt":"main-live"}]);
+        let board = board_frame(&report, &nav, 160, 34, &read, false, true);
+        assert!(!board.lines.iter().any(|line| line.contains("Direct work")));
     }
 
     #[test]
@@ -6398,7 +6661,7 @@ mod tests {
             let headers: Vec<_> = board.provider_rows.iter().flatten().copied().collect();
             assert_eq!(headers.len(), usize::from(columns >= 44) * 3, "{columns}");
             for row in headers {
-                assert!(row > 2 && board.lines[row].contains("Orchestrator"));
+                assert!(row > 2 && board.lines[row].contains("Lead chat"));
             }
         }
         let mut pending = report.clone();
@@ -7311,7 +7574,7 @@ mod tests {
                         }
                         for row in board.provider_rows.into_iter().flatten() {
                             assert!(row < painted, "{columns}x{height}: provider hit {row}");
-                            assert!(board.lines[row].contains("Orchestrator"));
+                            assert!(board.lines[row].contains("Lead chat"));
                             checked.0 += 1;
                         }
                         for (row, (participant, _)) in &board.worker_rows {

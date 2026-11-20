@@ -129,6 +129,19 @@ pub struct Options {
     pub count_rows: bool,
 }
 impl Options {
+    pub(crate) fn selects_main(&self) -> bool {
+        self.command.is_none()
+            && !self.count_rows
+            && self
+                .flags
+                .iter()
+                .all(|key| matches!(key.as_str(), "attention-only" | "no-animation"))
+            && self
+                .values
+                .keys()
+                .all(|key| matches!(key.as_str(), "repo" | "room" | "host" | "layout" | "view"))
+    }
+
     pub fn has(&self, key: &str) -> bool {
         self.flags.contains(key) || self.values.contains_key(key)
     }
@@ -793,7 +806,7 @@ pub(crate) fn valid_account_id(value: &str) -> bool {
 
 pub fn usage() -> String {
     let mut text = String::from(
-        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nBare interactive panel opens or reuses a native Main on tmux. Use --watch for the board alone.\n\n",
+        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nInteractive startup reuses a Main or offers installed harnesses on tmux. Set OMS_PANEL_MAIN to select a fresh Main, or use --watch for the board alone.\n\n",
     );
     text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--account ID] [--model MODEL] [--reasoning-effort EFFORT]\nModel and effort apply to new sessions only. The native CLI validates availability.\nAssign an existing provider: --orchestrator PROVIDER [--account ID] --task TEXT\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
     text.push_str("Codex alternate: --orchestrator codex --lead alternate --account ID [--task TEXT] | --focus-orchestrator codex --lead alternate\n\n");
@@ -813,6 +826,33 @@ pub fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::{Options, usage};
+
+    #[test]
+    fn only_startup_options_enter_the_overall_main_picker() {
+        let parse = |args: &[&str]| {
+            Options::parse(&crate::commands::strings(args))
+                .unwrap_or_else(|error| panic!("{args:?}: {error}"))
+        };
+        for args in [
+            &[][..],
+            &["--repo", "."],
+            &["--room", "room-one"],
+            &["--repo", ".", "--room", "room-one", "--layout", "inline"],
+        ] {
+            assert!(parse(args).selects_main(), "{args:?}");
+        }
+        for args in [
+            &["--watch", "--owner", "codex"][..],
+            &["--watch", "--count", "1"],
+            &["--launch", "claude", "--room", "room-one"],
+            &["--spawn-main", "codex"],
+            &["--json"],
+            &["--dry-run"],
+            &["terminal", "list", "--repo", "."],
+        ] {
+            assert!(!parse(args).selects_main(), "{args:?}");
+        }
+    }
 
     #[test]
     fn alternate_lead_is_only_for_explicit_codex_launch_task_and_focus() {

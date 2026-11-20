@@ -346,11 +346,9 @@ pub(crate) fn default_main(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Option<Output>> {
-    if !wants_split(options) {
-        return Ok(None);
-    }
     parent_only()?;
-    let (work_root, is_git) = state::work_repository(cwd)?;
+    let launch_root = if options.has("repo") { repo } else { cwd };
+    let (work_root, is_git) = state::work_repository(launch_root)?;
     if !is_git {
         return Ok(None);
     }
@@ -358,10 +356,19 @@ pub(crate) fn default_main(
         state::repository_for(&work_root, false)? == repo,
         "current repository conflicts with the inherited OMS_ROOM_REPO",
     )?;
+    if !wants_split(options) {
+        let Some(raw) = std::env::var_os("OMS_PANEL_MAIN") else {
+            return Ok(None);
+        };
+        let Some(capability) = environment_main(&raw)? else {
+            return Ok(None);
+        };
+        return launch(repo, source, capability.harness, options, services, stop).map(Some);
+    }
     oms_command_peer::admission::interactive_state(repo).map_err(admission_error)?;
     let prefix = entry_prefix(source)?;
     let policy = load_policy(source)?;
-    split_panel(
+    let attached = split_panel(
         repo,
         &prefix,
         &policy,
@@ -370,7 +377,7 @@ pub(crate) fn default_main(
         services,
         stop,
     )?;
-    Ok(Some((0, vec![], vec![])))
+    Ok(attached.then(|| (0, vec![], vec![])))
 }
 
 fn reopen(
@@ -627,11 +634,12 @@ fn split_panel<'a>(
     options: &'a Options,
     services: &dyn Services,
     stop: &AtomicBool,
-) -> Result<()> {
+) -> Result<bool> {
     let auto_providers = matches!(&request, SplitRequest::ReuseOrPick);
     let store = Store::open(repo)?;
     let repo_str = repo.to_string_lossy().into_owned();
     let take_start_lock = || store.transaction("panel-main-start", Duration::from_secs(3));
+    let requested_room = options.get("room");
     let (mut session, mut owner);
 
     let (main, relay, start_lock) = match request {
@@ -646,29 +654,53 @@ fn split_panel<'a>(
                 let start_lock = take_start_lock()?;
                 (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
                 if owner.is_some()
-                    && try_reuse_native_main(repo, prefix, &session, &start_lock, services, stop)?
+                    && try_reuse_native_main(
+                        repo,
+                        prefix,
+                        &session,
+                        requested_room,
+                        &start_lock,
+                        services,
+                        stop,
+                    )?
                 {
                     drop(start_lock);
-                    return attach_session(&session);
+                    return attach_session(&session).map(|()| true);
                 }
                 Some(start_lock)
             } else {
                 None
             };
-            full_main_permissions()?;
             ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
             drop(lock);
-            let chosen = pick_main(stop)?;
+            let chosen = match std::env::var_os("OMS_PANEL_MAIN") {
+                Some(raw) => environment_main(&raw)?,
+                None => {
+                    full_main_permissions()?;
+                    Some(pick_main(stop)?)
+                }
+            };
             if stop.load(Ordering::Acquire) {
                 return Err(main_selection_cancelled());
             }
+            let Some(chosen) = chosen else {
+                return Ok(false);
+            };
             let start_lock = take_start_lock()?;
             (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
             if owner.is_some()
-                && try_reuse_native_main(repo, prefix, &session, &start_lock, services, stop)?
+                && try_reuse_native_main(
+                    repo,
+                    prefix,
+                    &session,
+                    requested_room,
+                    &start_lock,
+                    services,
+                    stop,
+                )?
             {
                 drop(start_lock);
-                return attach_session(&session);
+                return attach_session(&session).map(|()| true);
             }
             ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
             let main = MainAdmission::admit(chosen, policy, options)?;
@@ -705,7 +737,7 @@ fn split_panel<'a>(
             )?
         {
             drop(start_lock);
-            return attach_session(&session);
+            return attach_session(&session).map(|()| true);
         }
         ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
     }
@@ -884,7 +916,7 @@ fn split_panel<'a>(
     }
 
     drop(start_lock);
-    attach_session(&session)
+    attach_session(&session).map(|()| true)
 }
 
 fn mark_main_account_ready(
@@ -930,6 +962,7 @@ fn try_reuse_native_main(
     repo: &Path,
     prefix: &[String],
     session: &str,
+    requested_room: Option<&str>,
     start_lock: &oms_panel_core::Transaction<'_>,
     services: &dyn Services,
     stop: &AtomicBool,
@@ -946,6 +979,8 @@ fn try_reuse_native_main(
     let Some(base) = candidates.first() else {
         return Ok(false);
     };
+    start_lock.check()?;
+    check_reattach_room(repo, base, requested_room, services, stop)?;
     start_lock.check()?;
     reopen_pane(repo, prefix, base, false, services, stop)?;
     start_lock.check()?;
@@ -1261,6 +1296,19 @@ fn ensure_no_active_main(
         )?;
     }
     Ok(())
+}
+
+fn environment_main(raw: &std::ffi::OsStr) -> Result<Option<&'static MainCapability>> {
+    let selector = raw
+        .to_str()
+        .ok_or_else(|| Error::new("OMS_PANEL_MAIN must be UTF-8"))?
+        .trim();
+    if selector.is_empty() {
+        return Ok(None);
+    }
+    main_capability(selector)
+        .map(Some)
+        .ok_or_else(|| Error::new("unsupported OMS_PANEL_MAIN; choose codex, claude, agy or pi"))
 }
 
 fn pick_main(stop: &AtomicBool) -> Result<&'static MainCapability> {
@@ -3064,6 +3112,48 @@ fn recorded_room(
     }
 }
 
+fn check_reattach_room(
+    repo: &Path,
+    base: &PanelPane,
+    requested: Option<&str>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    crate::identifier(requested)?;
+    let bound = tmux_quiet(
+        services,
+        repo,
+        &[
+            "show-option",
+            "-w",
+            "-v",
+            "-t",
+            &base.pane,
+            "@oms_panel_room",
+        ],
+        stop,
+    )
+    .ok_or_else(|| Error::new("existing Main room is unavailable; existing sessions preserved"))?;
+    require(
+        bound == requested,
+        "existing Main belongs to a different room; existing sessions preserved",
+    )?;
+    let room = crate::commands::query(
+        services,
+        NativeCommand::Room,
+        repo,
+        &["show", "--id", requested, "--exact", "--json"],
+        stop,
+    )?;
+    require(
+        room["id"] == requested && room["closed"] == false,
+        "selected Main room is unavailable or closed; existing sessions preserved",
+    )
+}
+
 fn panel_room(
     repo: &Path,
     session: &str,
@@ -3552,6 +3642,54 @@ mod native_lifecycle_contract {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn startup_selects_the_explicit_repo_and_preserves_the_bound_room_repo() {
+        const CHILD: &str = "OMS_PANEL_TEST_STARTUP_REPO";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "native_panel::native_lifecycle_contract::startup_selects_the_explicit_repo_and_preserves_the_bound_room_repo",
+                ])
+                .env(CHILD, "1")
+                .env_remove("OMS_ROOM_REPO")
+                .env_remove("OMS_STATE_REPO")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let repo = TempRepo::new();
+        let other = TempRepo::new();
+        let options = crate::cli::Options::parse(&crate::commands::strings(&[
+            "--repo",
+            repo.0.to_str().unwrap(),
+            "--room",
+            "room-fixture",
+        ]))
+        .unwrap();
+        assert!(options.selects_main());
+        for cwd in [repo.0.parent().unwrap(), other.0.as_path()] {
+            let (state, work) =
+                crate::commands::resolve_repositories(&options, cwd, Some(&repo.0), true).unwrap();
+            assert_eq!(state.as_deref(), Some(repo.0.as_path()));
+            assert_eq!(work.as_deref(), Some(repo.0.as_path()));
+            assert!(
+                crate::commands::resolve_repositories(&options, cwd, Some(&other.0), true)
+                    .unwrap_err()
+                    .message
+                    .contains("conflicts with OMS_ROOM_REPO")
+            );
+        }
+        assert!(!repo.0.join(".oms").exists());
+        assert!(!other.0.join(".oms").exists());
     }
 
     struct RealCliParsers;
@@ -4545,7 +4683,7 @@ exec "$OMS_PI_FIXTURE_TMUX" -L "$OMS_PI_FIXTURE_SOCKET" -f /dev/null "$@""#,
     case "$4" in
       --host) export OMS_PI_FIXTURE_REPO="$3"
               printf '%s\000' "$@" > "$OMS_PI_FIXTURE_REPO/relay-argv"
-              OMS_PI_FIXTURE_STAGE=main exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
+              OMS_PI_FIXTURE_STAGE=main OMS_PANEL_MAIN=unsupported-fixture exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
       --room) OMS_PI_FIXTURE_STAGE=orchestrator OMS_PI_FIXTURE_ROOM="$5" OMS_PI_FIXTURE_PROVIDER="$7" exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
       --watch) exec /bin/sleep 30;;
     esac;;
@@ -5864,6 +6002,7 @@ exec /bin/sleep 30
             terminal: bool,
             matrix: bool,
             control_only: bool,
+            closed_room: bool,
         }
         impl PeerExecutor for PendingWindowMock {
             fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
@@ -5876,6 +6015,8 @@ exec /bin/sleep 30
                     Vec::new()
                 } else if args.iter().any(|a| a == "show-options") {
                     b"/repo\n".to_vec()
+                } else if args.last().is_some_and(|arg| arg == "@oms_panel_room") {
+                    b"room-1\n".to_vec()
                 } else if args.iter().any(|a| a == "list-windows") {
                     if self.control_only {
                         b"@1\tcodex\troom-1\tunrelated\tcodex\tcodex\t\t.\n".to_vec()
@@ -5924,11 +6065,16 @@ exec /bin/sleep 30
                     }),
                     NativeCommand::Room => Ok(CommandOutput {
                         code: 0,
-                        stdout: if self.matrix {
-                            br#"{"closed":false,"participants":[{"participant":"main-1","role":"main","joined":true}]}"#.to_vec()
-                        } else {
-                            br#"{"closed":false,"participants":[]}"#.to_vec()
-                        },
+                        stdout: serde_json::to_vec(&serde_json::json!({
+                            "id":"room-1",
+                            "closed":self.closed_room,
+                            "participants": if self.matrix {
+                                serde_json::json!([{"participant":"main-1","role":"main","joined":true}])
+                            } else {
+                                serde_json::json!([])
+                            },
+                        }))
+                        .unwrap(),
                         stderr: Vec::new(),
                         cleanup_complete: true,
                         output_complete: true,
@@ -5946,6 +6092,36 @@ exec /bin/sleep 30
             terminal: false,
             matrix: false,
             control_only: false,
+            closed_room: false,
+        };
+        let pane = super::PanelPane {
+            session: "oms-test".into(),
+            window: "@1".into(),
+            pane: "%1".into(),
+            mode: super::PaneMode::Native,
+            signature: "fixture".into(),
+        };
+        super::check_reattach_room(&dir.0, &pane, Some("room-1"), &pending, &stop).unwrap();
+        assert!(
+            super::check_reattach_room(&dir.0, &pane, Some("room-other"), &pending, &stop)
+                .unwrap_err()
+                .message
+                .contains("different room")
+        );
+        let closed = PendingWindowMock {
+            closed_room: true,
+            ..pending
+        };
+        assert!(
+            super::check_reattach_room(&dir.0, &pane, Some("room-1"), &closed, &stop)
+                .unwrap_err()
+                .message
+                .contains("unavailable or closed")
+        );
+        super::check_reattach_room(&dir.0, &pane, None, &closed, &stop).unwrap();
+        let pending = PendingWindowMock {
+            closed_room: false,
+            ..closed
         };
         assert!(super::check_legacy_main(&dir.0, "oms-test", None, &pending, &stop).is_err());
         super::check_legacy_main(&dir.0, "oms-test", Some("@1"), &pending, &stop).unwrap();
@@ -5957,6 +6133,7 @@ exec /bin/sleep 30
                     terminal,
                     matrix: true,
                     control_only: false,
+                    closed_room: false,
                 };
                 let expected = usize::from(!terminal || reference == Some(Value::from("foreign")));
                 assert_eq!(
@@ -5977,6 +6154,7 @@ exec /bin/sleep 30
                         terminal,
                         matrix: true,
                         control_only: true,
+                        closed_room: false,
                     };
                     assert_eq!(
                         super::live_mains(&dir.0, "oms-test", Some("room-1"), None, &svc, &stop)
@@ -5996,6 +6174,34 @@ mod main_selection_tests {
     use std::os::fd::AsFd;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn environment_supports_typed_main_selectors_and_board_only() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        for (raw, harness) in [
+            ("codex", "codex"),
+            (" claude ", "claude"),
+            ("agy", "agy"),
+            ("antigravity", "agy"),
+            ("pi", "pi"),
+        ] {
+            assert_eq!(
+                super::environment_main(OsStr::new(raw))
+                    .unwrap()
+                    .unwrap()
+                    .harness,
+                harness
+            );
+        }
+        assert!(
+            super::environment_main(OsStr::new(" \t"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::environment_main(OsStr::new("unsupported")).is_err());
+        assert!(super::environment_main(OsStr::from_bytes(&[0xff])).is_err());
+    }
 
     fn input(bytes: &[u8]) -> (PipeReader, PipeWriter) {
         let (reader, mut writer) = std::io::pipe().unwrap();

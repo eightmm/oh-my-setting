@@ -8,6 +8,7 @@
 pub mod value;
 mod command;
 mod extra;
+mod output;
 pub use command::{Captured, CommandExecutor, CommandRequest, SubprocessExecutor};
 mod peer;
 mod storage;
@@ -31,7 +32,7 @@ const META_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const EXTENSION: &str = "io.modelcontextprotocol/tasks";
 const GRAPH_URI: &str = "ui://oms/project-graph/v1.html";
 const MIME: &str = "text/html;profile=mcp-app";
-const CORE: [&str; 12] = [
+const CORE: [&str; 13] = [
     "oms_inbox",
     "oms_repo_state",
     "oms_handoffs",
@@ -40,6 +41,7 @@ const CORE: [&str; 12] = [
     "oms_peer_start",
     "oms_peer_result",
     "oms_peer_operations",
+    "oms_output_read",
     "oms_project_graph_render",
     "oms_project_graph_query",
     "oms_project_graph_trace",
@@ -475,6 +477,7 @@ impl<'a> Server<'a> {
                         "oms_state_compact" => self.state_compact(tool, args),
                         "oms_failure_diagnose" => self.failure_diagnose(args),
                         "oms_symbol_slice" => self.symbol_slice(args),
+                        "oms_output_read" => self.output_read(args),
                         _ => self.run_tool(tool, args),
                     };
                     match output {

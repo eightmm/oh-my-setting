@@ -2,7 +2,7 @@
 name: oms-panel-orchestrator
 description: >
   Use when asked to act as the OMS panel control tower: split work across
-  parallel workers with oms panel, balance claude and codex accounts, or
+  native provider leads or bounded workers with oms panel, or
   "control tower", "panel orchestrat", "패널로 분배", "일 분배", "직접 다하지말고",
   "oms panel로", "멀티 계정 병렬", $oms-panel-orchestrator or
   /oms-panel-orchestrator. Skip single self-contained edits.
@@ -10,17 +10,38 @@ description: >
 
 # Panel Orchestrator
 
-The sole panel `main` is a control tower: it decomposes, dispatches, reviews,
-lands and finalizes. Workers write; main does not hand-edit sliced paths.
-Authority comes from the user: never commit, push, install or publish without
-explicit user authority.
+The user chooses the sole Overall Main from the installed panel launch
+options. Main scopes and assigns the work, reviews evidence, verifies the
+integrated result and owns acceptance. It limits direct edits to necessary
+integration and unblocking. Commit, push, install or publish only with explicit
+user authority.
+
+## Choose the execution path
+
+- In an OMS-managed tmux panel, open or reuse an explicitly assigned native
+  Provider Lead with `oms panel --orchestrator PROVIDER --owner OWNER --room ROOM_ID`
+  (`codex`, `claude`, or `antigravity`). Use the same command with
+  `--task "ASSIGNMENT"` to send the role, scope and completion checks to the
+  connected, idle session.
+- Leads assign independent work to native children when the provider supports it,
+  with disjoint paths, checks and least permissions. They wait for results,
+  review evidence and verify their integrated scope. Limit direct Lead edits
+  to necessary integration and unblocking. Leaf children return work to their
+  parent without delegating further.
+- Use managed dispatch below for a bounded leaf task or when a native Lead is
+  unavailable, including inline and Herdr sessions. Main retains admission
+  and publication authority. Verify native returns against the task before
+  accepting them. See the
+  [delegation contract](../oms-agent-harness/references/delegation-artifacts.md)
+  for recovery and evidence.
 
 ## Decompose and dispatch
 
 - Split work into disjoint write slices; give each `--scope PATH` (repeat per
   path). Overlapping scopes serialize; do not dispatch them together.
-- Keep WIP <= 6. Refill a free slot as soon as one slice finishes; do not wait
-  for a wave barrier.
+- Follow the effective dispatch WIP limit and available review capacity.
+  Start independent ready work as capacity frees up. Respect native capacity
+  and permission limits when coordinating through a Lead.
 - Dispatch independent write slices concurrently with explicit write, brief, and
   verifier flags:
   `oms panel --dispatch builder --access write --owner OWNER --room ROOM_ID --task-id ID --brief-file BRIEF.md --verify "CMD" --scope PATH`
@@ -32,14 +53,18 @@ explicit user authority.
 
 ## Providers and accounts
 
-- Let tier routing balance `claude` and `codex` by quota and room spread by
-  default, or pin a provider explicitly with `--to claude` or `--to codex`.
-- Register additional isolated Codex accounts with
-  `oms connect-services --account codex:ID` (`provider-accounts.json` holds
-  `policy: spread` or `ordered`; `--account claude:ID` is refused while native
-  Claude account isolation is unavailable).
-- Keep a worker's native context and fixes: `--continue TASK_ID` (add `--to`
-  when switching providers).
+- Preserve the user's Main and account choices. Inspect the installed session
+  and cached `oms models` catalog before selecting an exact model and its
+  supported effort. Check account access and spend authority separately.
+- Choose the worker role separately from the provider. Use configured tier routing
+  by default and inspect `oms panel --routes` before explicitly pinning a provider
+  or model. `provider-accounts.json` has `spread` and `ordered` policies.
+- Use `oms connect-services --account codex:ID` or
+  `oms connect-services --account claude:ID` to register an additional account.
+  Claude account verification reports that credential origin cannot be attested.
+  Report the actual account only when the runtime has verified it.
+- Continue a managed Worker with `--continue TASK_ID` (add `--to` when switching
+  providers). Reuse the connected Lead for its follow-up.
 - After an interrupted write attempt, run `--salvage TASK_ID` first, before
   any fresh dispatch of that slice.
 

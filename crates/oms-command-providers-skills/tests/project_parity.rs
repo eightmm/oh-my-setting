@@ -473,6 +473,7 @@ fn prompt_audit_includes_references_and_reports_unchecked_surfaces() {
         &[
             ("outside.md", "Double-check. Outside fixture marker.\n"),
             ("project-foreign-AGENTS.md", "Outside fixture marker.\n"),
+            ("prompt-audit-patterns.txt", "double[- ]check\n"),
             (
                 "project-skills/demo/references/outside.md",
                 "Outside fixture marker.\n",
@@ -558,6 +559,61 @@ fn prompt_audit_includes_references_and_reports_unchecked_surfaces() {
     assert_eq!(report["files"].as_array().expect("files").len(), 5);
     assert!(!source_present(&report, "templates"));
     assert!(!source_present(&report, "templates/project-skills"));
+
+    fs::rename(source.join("config"), source.join("saved-config")).expect("move config");
+    let (code, out, err) = call("project-doctor", &["--prompts", "--strict", "."], source);
+    assert_eq!(code, 0, "{out} {err}");
+    std::os::unix::fs::symlink(outside.path(), source.join("config"))
+        .expect("link config directory");
+    let (code, out, err) = call("project-doctor", &["--prompts", "--strict", "."], source);
+    assert_eq!(code, 2, "{out} {err}");
+    assert!(err.contains("unsafe"), "{err}");
+}
+
+#[test]
+fn prompt_audit_counts_only_relevant_files_toward_the_file_limit() {
+    let tmp = TempDir::new("prompt-audit-budget");
+    let source = tmp.path();
+    write_all(
+        source,
+        &[(
+            "custom-skills/demo/references/workflow.md",
+            "Review evidence.\n",
+        )],
+    );
+    let skill = source.join("custom-skills/demo");
+    let assets = skill.join("assets");
+    fs::create_dir(&assets).expect("assets");
+    for n in 0..=10_000 {
+        fs::write(assets.join(format!("{n}.txt")), "").expect("asset");
+    }
+
+    let assert_reference = || {
+        let (code, out, err) = call("project-doctor", &["--prompts", "--json", "."], source);
+        assert_eq!(code, 0, "{out} {err}");
+        let report: serde_json::Value = serde_json::from_str(&out).expect("report");
+        let files = report["files"].as_array().expect("files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0]["path"],
+            "custom-skills/demo/references/workflow.md"
+        );
+    };
+    assert_reference();
+    let reference_assets = skill.join("references/assets");
+    fs::rename(assets, &reference_assets).expect("move non-Markdown files");
+    assert_reference();
+
+    for n in 0..=10_000 {
+        fs::rename(
+            reference_assets.join(format!("{n}.txt")),
+            reference_assets.join(format!("{n}.md")),
+        )
+        .expect("rename scanned reference");
+    }
+    let (code, out, err) = call("project-doctor", &["--prompts", "--json", "."], source);
+    assert_eq!(code, 2, "{out} {err}");
+    assert!(err.contains("Markdown file budget"), "{err}");
 }
 
 fn doctor(src: &Path) -> (i32, String) {

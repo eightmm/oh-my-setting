@@ -1,4 +1,5 @@
 use crate::common::*;
+use oms_safe_fs::{ByteReadOptions, Root};
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use serde_json::{Value, json};
@@ -297,49 +298,111 @@ fn audit_source(root: &OwnedFd, path: &Path) -> Result<Option<OwnedFd>> {
     Ok(directory)
 }
 
+const AUDIT_MAX_FILES: usize = 10_000;
+// Directory entries and Markdown files have distinct costs and limits.
+const AUDIT_MAX_ENTRIES: usize = 100_000;
+const AUDIT_MAX_FILE_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum AuditScope {
+    Markdown,
+    AgentTemplates,
+    Skills,
+    Skill,
+}
+
+impl AuditScope {
+    fn includes_file(self, name: &OsStr) -> bool {
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        match self {
+            Self::Markdown => name.ends_with(".md"),
+            Self::AgentTemplates => name.ends_with(".md") && name.contains("AGENTS"),
+            Self::Skills => false,
+            Self::Skill => name == "SKILL.md",
+        }
+    }
+
+    fn descend(self, name: &OsStr) -> Option<Self> {
+        match self {
+            Self::Skills => Some(Self::Skill),
+            Self::Markdown => Some(Self::Markdown),
+            Self::Skill if name == "references" => Some(Self::Markdown),
+            _ => None,
+        }
+    }
+}
+
 fn audit_walk(
     directory: &OwnedFd,
     depth: usize,
     prefix: &Path,
+    scope: AuditScope,
+    visited: &mut usize,
     files: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let mut entries = Vec::new();
     for entry in fs::Dir::read_from(directory).map_err(std::io::Error::from)? {
         let entry = entry.map_err(std::io::Error::from)?;
         let name = OsStr::from_bytes(entry.file_name().to_bytes());
-        if name != "." && name != ".." {
-            entries.push((name.to_owned(), entry.file_type()));
+        if name == "." || name == ".." {
+            continue;
         }
-    }
-    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    for (name, kind) in entries {
-        if files.len() >= 10000 {
-            return Err(error("directory scan exceeded the entry budget"));
+        *visited += 1;
+        if *visited > AUDIT_MAX_ENTRIES {
+            return Err(error("prompt audit exceeded the directory entry budget"));
         }
+        let include_file = scope.includes_file(name);
+        let child_scope = if depth > 1 { scope.descend(name) } else { None };
+        if !include_file && child_scope.is_none() {
+            continue;
+        }
+        let kind = entry.file_type();
         let kind = if kind == FileType::Unknown {
-            let stat = fs::statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+            let stat = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(std::io::Error::from)?;
             FileType::from_raw_mode(stat.st_mode)
         } else {
             kind
         };
-        if kind == FileType::RegularFile {
+        if kind == FileType::RegularFile && include_file {
+            if files.len() == AUDIT_MAX_FILES {
+                return Err(error("prompt audit exceeded the Markdown file budget"));
+            }
             files.push(prefix.join(name));
         } else if kind == FileType::Directory
-            && depth > 1
-            && let Some(child) = audit_directory(directory, &name)?
+            && let Some(child_scope) = child_scope
+            && let Some(child) = audit_directory(directory, name)?
         {
-            audit_walk(&child, depth - 1, &prefix.join(name), files)?;
+            audit_walk(
+                &child,
+                depth - 1,
+                &prefix.join(name),
+                child_scope,
+                visited,
+                files,
+            )?;
         }
     }
     Ok(())
 }
 
 fn prompts(args: &Args, root: &Path) -> Result<Output> {
-    let raw = optional(&root.join("config/prompt-audit-patterns.txt"))?;
     let directory =
         fs::open(root, AUDIT_DIRECTORY_FLAGS, Mode::empty()).map_err(std::io::Error::from)?;
-    let store = Store::open(root)?;
+    let store = Root::open(root).map_err(|_| error("cannot open repository storage root"))?;
+    if store.physical_root() != root {
+        return Err(error("prompt audit root changed before reading"));
+    }
+    let raw = store
+        .read_no_follow(
+            Path::new("config/prompt-audit-patterns.txt"),
+            ByteReadOptions {
+                missing_ok: true,
+                max_bytes: LIMIT,
+            },
+        )
+        .map_err(|_| error("prompt audit pattern file is unsafe, changed, or too large"))?;
     let patterns = String::from_utf8_lossy(&raw)
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
@@ -354,14 +417,19 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
     let mut sources = vec![];
     let mut findings = 0usize;
     let mut global_words = 0usize;
-    for (base, kind, depth) in [
-        ("rules", "always", 1),
-        ("roles", "on-demand", 1),
-        ("templates", "always", 1),
-        ("prompts", "unknown", 1),
-        ("output-styles", "on-demand", 1),
-        ("custom-skills", "on-demand", 6),
-        ("templates/project-skills", "on-demand", 6),
+    for (base, kind, depth, scope) in [
+        ("rules", "always", 1, AuditScope::Markdown),
+        ("roles", "on-demand", 1, AuditScope::Markdown),
+        ("templates", "always", 1, AuditScope::AgentTemplates),
+        ("prompts", "unknown", 1, AuditScope::Markdown),
+        ("output-styles", "on-demand", 1, AuditScope::Markdown),
+        ("custom-skills", "on-demand", 6, AuditScope::Skills),
+        (
+            "templates/project-skills",
+            "on-demand",
+            6,
+            AuditScope::Skills,
+        ),
     ] {
         let source = audit_source(&directory, Path::new(base))?;
         sources.push(json!({"path":base,"max_depth":depth,"present":source.is_some()}));
@@ -369,22 +437,27 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
             continue;
         };
         let mut paths = Vec::new();
-        audit_walk(&source, depth, Path::new(""), &mut paths)?;
+        let mut visited = 0;
+        audit_walk(
+            &source,
+            depth,
+            Path::new(""),
+            scope,
+            &mut visited,
+            &mut paths,
+        )?;
+        paths.sort_unstable();
         for relative in paths {
-            let filename = relative.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let skill_source = relative.components().count() == 2 && filename == "SKILL.md"
-                || relative
-                    .components()
-                    .nth(1)
-                    .is_some_and(|part| part.as_os_str() == "references");
-            if !filename.ends_with(".md")
-                || (base == "templates" && !filename.contains("AGENTS"))
-                || (matches!(base, "custom-skills" | "templates/project-skills") && !skill_source)
-            {
-                continue;
-            }
             let path = Path::new(base).join(relative);
-            let raw = store.read(&path, 1024 * 1024)?;
+            let raw = store
+                .read_no_follow(
+                    &path,
+                    ByteReadOptions {
+                        missing_ok: false,
+                        max_bytes: AUDIT_MAX_FILE_BYTES,
+                    },
+                )
+                .map_err(|_| error("file is missing, unsafe, changed, or too large"))?;
             let body = String::from_utf8_lossy(&raw);
             let words = body.split_whitespace().count();
             let mut emphasis = BTreeMap::new();
@@ -406,7 +479,7 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
         "basis":"source-file-inventory",
         "sources":sources,
         "skill_markdown":"SKILL.md and references/**/*.md",
-        "max_file_bytes":1048576,
+        "max_file_bytes":AUDIT_MAX_FILE_BYTES,
         "symlink_entries":"not_followed",
         "runtime_generated_prompts":"not_scanned",
         "runtime_delivery":"not_verified",

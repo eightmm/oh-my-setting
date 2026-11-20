@@ -7,6 +7,10 @@ PR 기준 main은 [`283ab6c1`](https://github.com/eightmm/oh-my-setting/commit/2
 이 문서는 **정적 조사와 후속 구현 명세**다. 아래 결함의 runtime 수정이나 native host 연결이
 완료되었다는 뜻이 아니다. 현재 설치본의 동작은 그 설치 revision을 별도로 확인해야 한다.
 
+**2026-11-19 갱신:** 이 tree는 CC-04의 canonical reference와 MCP output reader를 연결한다.
+[최신 근거와 구현 범위](TOOL-CONTEXT-REVIEW.md)를 함께 읽는다. 아래 31/full·12/core 집계와
+미등록 결함은 위 기준 revision의 감사 기록이며, 이 변경 이후 목록은 32/full·13/core다.
+
 ## 1. 결론과 조사 기준
 
 재사용 가능한 Rust core와 실제 호출 경로는 이미 많다. 우선할 일은 새 범용 실행기나

@@ -491,7 +491,7 @@ fn discovery_protocols() {
     let listed = c.call("tools/list", json!({"_meta":modern()}));
     let golden: Value = serde_json::from_str(include_str!("definitions.json")).unwrap();
     assert_eq!(listed["result"]["tools"], golden);
-    assert_eq!(golden.as_array().unwrap().len(), 31);
+    assert_eq!(golden.as_array().unwrap().len(), 32);
     assert_eq!(listed["result"]["ttlMs"], 300000);
     let d = c.call("server/discover", json!({}));
     assert_eq!(
@@ -565,7 +565,7 @@ fn discovery_protocols() {
             .as_array()
             .unwrap()
             .len(),
-        12
+        13
     );
     good(&core.tool("oms_task_state", json!({})));
     assert_eq!(
@@ -854,6 +854,257 @@ fn output_bounds() {
     let r = c.tool("oms_inbox", json!({}));
     good(&r);
     assert_eq!(r["result"]["content"][0]["text"], "ok");
+}
+fn output_capture_reads() {
+    use oms_output_capture::{COMPACT_RESPONSE_BYTES, READ_CAP};
+    use std::os::unix::fs::symlink;
+
+    // Exercise the actual digest producer, not a separately reconstructed reference.
+    fn retained(repo: &Path, name: &str, data: &[u8]) -> (oms_output::OutputDigest, Value) {
+        let dir = repo.join(".oms/artifacts/output-digest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), data).unwrap();
+        let root = oms_safe_fs::Root::open(repo).unwrap();
+        let mut digest = oms_output::build(data, &oms_output::Options::default()).unwrap();
+        digest.retained_capture(&root, name).unwrap();
+        let metadata = digest.json();
+        assert_eq!(metadata["raw"]["read_tool"], "oms_output_read");
+        let args = metadata["raw"]["read_arguments"].clone();
+        (digest, args)
+    }
+    fn rejected(response: &Value, code: &str) {
+        bad(response, code);
+        let error = payload(response);
+        assert_eq!(error["error"]["code"], code);
+        assert!(error.get("content").is_none());
+        assert!(response["result"].get("structuredContent").is_none());
+    }
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    let name = "20261119T000000Z-1.log";
+    let data = "가나다 hello\n".repeat(1600);
+    let (digest, args) = retained(&repo, name, data.as_bytes());
+    let mut c = Client::new(&source, &repo, false, false, false);
+    for full in [false, true] {
+        let mut client = Client::new(&source, &repo, full, false, false);
+        let listed = client.call("tools/list", json!({}));
+        assert!(
+            listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "oms_output_read")
+        );
+        let response = client.tool("oms_output_read", args.clone());
+        good(&response); // Returned arguments are accepted verbatim in either profile.
+        let page = payload(&response);
+        assert_eq!(page["capture_sha256"], digest.raw.sha256);
+        assert_eq!(page["capture_bytes"], data.len());
+        assert_eq!(page["content"], &data[..16384]);
+        assert!(response["result"].get("structuredContent").is_none());
+    }
+    let mut next = args.clone();
+    let mut whole = String::new();
+    loop {
+        let response = c.tool("oms_output_read", next);
+        good(&response);
+        let page = payload(&response);
+        assert_eq!(page["capture_sha256"], digest.raw.sha256);
+        whole.push_str(page["content"].as_str().unwrap());
+        if page["has_more"] == false {
+            break;
+        }
+        next = page["next_read_arguments"].clone();
+    }
+    assert_eq!(whole, data);
+
+    let mut request = args.clone();
+    request["limit"] = json!(4);
+    let page = payload(&c.tool("oms_output_read", request.clone()));
+    assert_eq!(page["content"], "가");
+    assert_eq!(page["end"], 3);
+    request["offset"] = json!(1);
+    rejected(&c.tool("oms_output_read", request), "invalid_range");
+
+    let mut request = args.clone();
+    request["query"] = json!("hello");
+    let response = c.tool("oms_output_read", request);
+    good(&response);
+    let search = payload(&response);
+    assert_eq!(search["matches"].as_array().unwrap().len(), 8);
+    let response = c.tool("oms_output_read", search["next_search_arguments"].clone());
+    good(&response);
+    assert!(payload(&response)["offset"].as_u64().unwrap() > 0);
+    good(&c.tool(
+        "oms_output_read",
+        search["matches"][0]["read_arguments"].clone(),
+    ));
+
+    let mut request = args.clone();
+    request["compact"] = json!(true);
+    request["queries"] = json!(["hello", "absent"]);
+    let response = c.tool("oms_output_read", request.clone());
+    good(&response);
+    let batch = payload(&response);
+    assert_eq!(batch["representation"], "compact-v1");
+    assert_eq!(batch["searches"][0]["matches"].as_array().unwrap().len(), 4);
+    assert_eq!(batch["searches"][1]["matches"], json!([]));
+    let mut next = batch["read_base"].clone();
+    next.as_object_mut().unwrap().extend(
+        batch["searches"][0]["next_search"]
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    good(&c.tool("oms_output_read", next));
+    request["limit"] = json!(4);
+    rejected(&c.tool("oms_output_read", request), "invalid_query");
+    for (field, value, code) in [
+        ("capture_ref", json!("../../outside"), "invalid_reference"),
+        ("offset", json!(true), "invalid_range"),
+        ("limit", json!(3), "invalid_range"),
+        ("compact", json!("yes"), "invalid_representation"),
+        ("query", json!(""), "invalid_query"),
+        ("queries", json!(["hello"]), "invalid_query"),
+    ] {
+        let mut request = args.clone();
+        request[field] = value;
+        rejected(&c.tool("oms_output_read", request), code);
+    }
+
+    let mut unsafe_search = args.clone();
+    let private_query = ["/ho", "me/private/work"].concat();
+    unsafe_search["compact"] = json!(true);
+    unsafe_search["queries"] = json!([private_query.clone()]);
+    let response = c.tool("oms_output_read", unsafe_search);
+    rejected(&response, "capture_withheld");
+    assert!(!response.to_string().contains(&private_query));
+
+    let other_repo = t.0.join("other-repo");
+    std::fs::create_dir(&other_repo).unwrap();
+    let (_, other_args) = retained(&other_repo, name, b"other capture\n");
+    let mut foreign = args.clone();
+    foreign["repo"] = json!(other_repo);
+    rejected(
+        &c.tool("oms_output_read", foreign),
+        "capture_scope_mismatch",
+    );
+    good(&c.tool("oms_output_read", other_args.clone())); // Main's explicit repository choice.
+    let mut child = Client::new(&source, &repo, false, false, true);
+    good(&child.tool("oms_output_read", args.clone()));
+    rejected(
+        &child.tool("oms_output_read", other_args),
+        "capture_repository_denied",
+    );
+
+    let control_repo = t.0.join("control\nrepo");
+    std::fs::create_dir(&control_repo).unwrap();
+    let control_root = oms_safe_fs::Root::open(&control_repo).unwrap();
+    let mut control_digest = digest.clone();
+    assert!(
+        control_digest
+            .retained_capture(&control_root, name)
+            .is_err()
+    );
+    let control = oms_output_capture::capture_metadata(
+        control_root.physical_root(),
+        name,
+        &digest.raw.sha256,
+    )
+    .unwrap();
+    rejected(
+        &c.tool("oms_output_read", control["read_arguments"].clone()),
+        "invalid_repository",
+    );
+    let mut missing_repo = args.clone();
+    missing_repo["repo"] = json!(t.0.join("missing-repo"));
+    rejected(
+        &c.tool("oms_output_read", missing_repo),
+        "invalid_repository",
+    );
+
+    let path = repo.join(".oms/artifacts/output-digest").join(name);
+    std::fs::write(&path, b"changed").unwrap();
+    rejected(
+        &c.tool("oms_output_read", args.clone()),
+        "capture_hash_changed",
+    );
+    std::fs::remove_file(&path).unwrap();
+    rejected(&c.tool("oms_output_read", args.clone()), "capture_missing");
+    std::fs::write(&path, data.as_bytes()).unwrap();
+    let linked = t.0.join("capture-link");
+    std::fs::hard_link(&path, &linked).unwrap();
+    rejected(&c.tool("oms_output_read", args.clone()), "unsafe_capture");
+    std::fs::remove_file(&linked).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    symlink("missing", &path).unwrap();
+    rejected(&c.tool("oms_output_read", args.clone()), "unsafe_capture");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(READ_CAP as u64 + 1)
+        .unwrap();
+    rejected(&c.tool("oms_output_read", args), "capture_too_large");
+
+    // An apparently safe page cannot bypass a block or machine path elsewhere.
+    for sensitive in [
+        concat!(
+            "safe page\n-----BEG",
+            "IN PRIV",
+            "ATE KEY-----\nhidden\n-----END PRIV",
+            "ATE KEY-----\n"
+        )
+        .to_owned(),
+        format!("safe page\n{}{}\n", "/ho", "me/private/work"),
+    ] {
+        let (mut withheld, mut args) = retained(&repo, name, sensitive.as_bytes());
+        withheld.withhold("outbound content scan".into());
+        let withheld = withheld.json();
+        for key in [
+            "capture_ref",
+            "capture_sha256",
+            "read_tool",
+            "read_arguments",
+        ] {
+            assert!(withheld["raw"].get(key).is_none());
+        }
+        args["limit"] = json!(4);
+        let response = c.tool("oms_output_read", args.clone());
+        rejected(&response, "capture_withheld");
+        assert!(!response.to_string().contains("hidden"));
+        args.as_object_mut().unwrap().remove("limit");
+        args["query"] = json!("safe");
+        rejected(&c.tool("oms_output_read", args), "capture_withheld");
+    }
+
+    // The serialized payload budget is inclusive and never truncates JSON.
+    let mut bytes = vec![b'a'; 16384];
+    let (_, args) = retained(&repo, name, &bytes);
+    let response = c.tool("oms_output_read", args);
+    good(&response);
+    let baseline = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .len();
+    let extra = COMPACT_RESPONSE_BYTES - baseline;
+    bytes[..extra / 5].fill(1); // Each control byte adds five JSON escape bytes.
+    bytes[extra / 5..extra / 5 + extra % 5].fill(b'"');
+    let (_, args) = retained(&repo, name, &bytes);
+    let response = c.tool("oms_output_read", args);
+    good(&response);
+    assert_eq!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .len(),
+        COMPACT_RESPONSE_BYTES
+    );
+    bytes[extra / 5 + extra % 5] = b'"';
+    let (_, args) = retained(&repo, name, &bytes);
+    rejected(&c.tool("oms_output_read", args), "response_too_large");
+    // Reads and failures never execute a command.
+    assert!(!source.join("last-call.json").exists());
 }
 fn graph_render() {
     let t = Temp::new();
@@ -2768,7 +3019,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 29] = [
+    let cases: [(&str, fn()); 30] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -2786,6 +3037,7 @@ fn main() {
         ("new_command_tools", new_command_tools),
         ("symbol_slice", symbol_slice),
         ("output_bounds", output_bounds),
+        ("output_capture_reads", output_capture_reads),
         ("graph_render", graph_render),
         ("peer_reading", peer_reading),
         ("peer_status_tasks", peer_status_tasks),

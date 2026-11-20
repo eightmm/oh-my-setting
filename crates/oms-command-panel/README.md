@@ -97,10 +97,18 @@ so known fresh/stale examples cover injected catalog ingestion and rendering onl
 Tree and graph folding is currently library-only state; the interactive board
 does not yet provide fold or unfold keys.
 
-The Auto overview groups recorded work by provider. The title uses the Room
-name or ID, followed by weekly quota left. Plan progress appears only for work
-linked to the current Room. Click the weekly line or press `w` for each provider's
-reading, source and reset time (scrollable with the existing overlay scroll).
+The Auto overview puts Overall Main above the work list. An active managed call
+appears first as direct work when its joined Room membership and lifecycle
+parent attempt both identify the current live owner. Wide boards label this
+area `Overall Main · Direct work`. Provider Leads, native observations and calls
+with incomplete or historical parent evidence stay in provider activity groups.
+Provider sections show recorded work and retain confirmed session activity.
+Click `Lead chat [1/2/3]` to dock a connected provider's existing native session.
+
+The title uses the project name and the Board shows weekly quota left when space
+allows. Plan progress appears only for work linked to the current Room.
+Click the weekly line or press `w` for each provider's reading, source and
+reset time (scrollable with the existing overlay scroll).
 Current Codex quota stays unlabelled unless positively verified for the live
 Main or Codex lead and its per-home quota receipt; registered Codex accounts
 appear separately with their session-log reading, log age and reset, withholding
@@ -109,10 +117,13 @@ progress until a fresh snapshot arrives. Press `U` to refresh quota from idle
 Claude or AGY sessions. `Esc` returns to the Board. Missing readings show `—`.
 Aged or reset readings carry their own status.
 
-Only a connected provider header opens a native pane. Terminal calls collapse
-into history. Tab opens the existing all-calls views, and explicit search or
-Attention includes matching history. Narrow boards use the flat summary view.
+Terminal calls collapse into history. `Tab` opens the all-calls views, and explicit
+search or Attention includes matching history. Narrow boards use the flat view
+and preserve the same selection identity.
 
+The [panel contract](../../docs/TEAM-ORCHESTRATION-PANEL.md) describes the
+task-first view, native assignment binding and shared result inspector planned
+on top of the existing task, Room, attempt and result records.
 
 On a foreground terminal with tmux available, bare `oms panel` opens a split
 board and offers installed Codex, Claude, AGY, and Pi Main harnesses for the
@@ -141,6 +152,7 @@ the conversation. Only live panes from the selected repository and Room can
 receive board usage refreshes. Native provider scheduling is outside OMS campaign
 accounting and requires an Overall Main recorded outside a managed campaign.
 
-Click a Codex native child row or select it and press Enter to open its recent
-replies. The board verifies the exact Room, Main, provider pane, assignment
-turn, and child identity before showing text. Esc closes the replies.
+Click a Codex, Claude or AGY native child row, or select it and press Enter.
+The Board opens available recent replies after verifying the Room, Main,
+provider pane, assignment turn and child identity. A recorded parent summary
+may be available without the child chat. `Esc` closes the reader.

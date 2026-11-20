@@ -1,6 +1,6 @@
 # Native MCP component
 
-This crate implements the native persistent stdio server and 31 OMS tools.
+This crate implements the native persistent stdio server and 32 OMS tools.
 At source revision `f9a695ea` (2026-11-18), the root executable already connects
 it through `serve_with_services`; lifecycle integration registers the installed
 absolute `oms` executable with the `mcp-server` argument. The private
@@ -15,15 +15,15 @@ exercised by the documentation audit.
 | Service entry and configuration | [root dispatch](../oms/src/main.rs), `mcp-server` branch; pins `oms_program` and the sibling peer owner |
 | Command execution | [CollabServices](../oms/src/services_collab.rs), `CommandExecutor::execute`; staged native command under supervisor timeout, cancellation and output bounds |
 | Provider registration | [lifecycle integrations](../oms-command-lifecycle/src/integrations.rs), `mcp`; preserves foreign configuration ownership |
-| Definitions and handlers | [tools.json](src/tools.json), [lib.rs](src/lib.rs), [command.rs](src/command.rs), [peer.rs](src/peer.rs), [extra.rs](src/extra.rs) |
+| Definitions and handlers | [tools.json](src/tools.json), [lib.rs](src/lib.rs), [command.rs](src/command.rs), [peer.rs](src/peer.rs), [extra.rs](src/extra.rs), [output.rs](src/output.rs) |
 | Public boundary fixtures | Root `mcp_executor_runs_staged_native_and_honors_timeout_and_cancel`, `mcp_executor_reports_output_limit_distinctly`; this crate's `tests/native.rs` |
 
-Core discovery lists 12 tools and full discovery lists 31. Both profiles accept
-the same 31 tool names through `tools/call`, subject to their request and child
+Core discovery lists 13 tools and full discovery lists 32. Both profiles accept
+the same 32 tool names through `tools/call`, subject to their request and child
 restrictions; discovery is not authorization. There is one graph UI resource and
-no prompt API. The advertised `oms_output_read` from output-digest metadata is
-not registered here at this revision; its existing reader core and missing
-adapter are tracked in the [callable consolidation audit](../../docs/CALLABLE-CONSOLIDATION-AUDIT.md).
+no prompt API. `oms_output_read` is registered in both profiles and accepts the
+`read_arguments` returned by output-digest. Its in-process adapter uses the
+canonical capture reader, with no command execution or arbitrary path input.
 
 Unqualified reference line numbers and retired Python/Bash paths below describe
 frozen migration evidence. The Rust files above own current production behavior.
@@ -83,7 +83,7 @@ or cancellation grants. No latency, physical-disk or HPC performance claim is ma
 | `initialize` | Supported session revision or 2025-06-18 fallback; lines 2018–2038 |
 | `ping` | Revision-dependent complete discriminator; lines 2039–2040 |
 | `tools/list` | Stable full/core definitions, cache hints; lines 2041–2045 |
-| `tools/call` | All 31 tools remain callable in both discovery profiles; lines 2112–2180 |
+| `tools/call` | All 32 tools remain callable in both discovery profiles; legacy reference lines 2112–2180, native reader in `src/output.rs` |
 | `resources/list`, `resources/read` | Exact versioned graph template, MIME and CSP metadata; lines 2046–2063 and 914–941 |
 | `tasks/get` | Opt-in modern capability check, live/terminal snapshot and embedded final result; lines 2064–2111 and 1786–1826 |
 | `tasks/update` | Canonical refusal: no outstanding input requests; same handle branch |
@@ -111,7 +111,7 @@ non-executable files are ignored; nothing found is an error, not a bare `oms`.
 Embedding callers can implement `CommandExecutor` with
 `serve_with_services` / `Server::with_executor`. The current root host uses a
 supervised staged native process; the trait does not imply in-process dispatch.
-There are 23 literal `argv` descriptors and eight specialized tool handlers.
+There are 23 literal `argv` descriptors and nine specialized tool handlers.
 Legacy `bash scripts/*.sh` descriptor spellings are converted to native verbs by
 `command.rs`; they do not launch Bash scripts. `oms_peer_start` launches the private
 `peer_owner` process; it receives `Config::oms_program` as an optional fourth
@@ -155,6 +155,7 @@ module during development, never by a production subprocess or build script.
 | `oms_memory_recall` | `agent-memory recall --json --limit N QUERY` (native addition) | n/a |
 | `oms_symbol_slice` | In-process bounded numbered slice; no spawn, no scrubber crate (local fail-closed secret screen) | n/a |
 | `oms_failure_diagnose` | One of `runtime failure classify`, `fail-ledger check --cmd CMD`, `fail-ledger list --json --limit 10` (native addition) | n/a |
+| `oms_output_read` | In-process `oms-output-capture::read_capture_checked` with shared outbound scan; retained bytes only | n/a |
 | `oms_state_compact` | `state compact --dry-run` by default; `keep_recent` retains a per-family count (default 25), and `older_than_days` retains newer files (default 7 days) | n/a |
 
 The table anchors identify canonical definitions. Execution handlers are at
@@ -208,6 +209,43 @@ against another process with the same filesystem rights.
 Mutation opens require owned, real ancestry. Existing directory modes are
 preserved; newly created directories use 0700. Receipt files cannot follow links.
 A completed result does not promote its data into approval or verification.
+
+## Retained output reads
+
+`oms_output_read` closes the CC-04 digest-to-reader path. Pass a digest's
+`raw.read_arguments` unchanged for the first page, then reuse
+`next_read_arguments`, `next_search_arguments` or a hit's `read_arguments`.
+`query` performs literal search; `queries` batches one to eight literals with
+`compact=true`. Compact responses return `read_base` plus relative continuation
+fields to merge into that base. This store is separate from the normalized
+operation answers read with `oms_peer_result.answer_ref`.
+
+The main caller retains the existing explicit `repo` choice. Delegated workers
+can read only their captured caller repository. A physical UTF-8 root without
+control characters is required; a reference binds repository, filename and
+SHA-256 but does not authorize a different root or filesystem path. The reader
+opens only `.oms/artifacts/output-digest/<capture-name>`, preserving no-follow,
+single-link, root/path identity, change detection, the 64 MiB stored-byte bound,
+and SHA checks from `oms-output-capture` and `oms-safe-fs`.
+
+The adapter scans the same complete verified snapshot with `oms-scrub` before
+returning any page or hit, so a key block outside a selected page still withholds
+the result. It uses the producer's bounded OS environment scan semantics and
+also checks search text that could be echoed. A scan finding or failure returns
+`capture_withheld` without capture content. The producer's `withhold` behavior
+still removes retrieval metadata; this reader adds no completeness or
+verification claim to a stored capture.
+
+Pages contain up to 16384 decoded UTF-8 bytes and use character boundaries.
+Search has an eight-hit budget. The complete JSON text payload is limited to
+65536 serialized UTF-8 bytes, inclusive; oversize returns `response_too_large`
+instead of truncating JSON. This bound excludes the MCP envelope and its JSON
+string escaping. Results use the existing text content form without a second
+`structuredContent` copy. Execution failures set `isError=true` and carry
+`{"error":{"code":"...","message":"..."}}`, retaining canonical capture
+error codes. Missing, changed, unsafe or oversized captures never rerun a
+command. The existing native fixture `output_capture_reads` exercises producer
+metadata through discovery and the real stdio reader, including these boundaries.
 
 ## Historical component admission evidence
 
@@ -263,10 +301,15 @@ incompatible extreme-stack behaviors.
 
 [`parser-reference.json`](tests/parser-reference.json) contains the original
 43 adversarial exchanges plus 27 boundary/domain/deep-resource exchanges.
-Expectations were captured from the reference, never the candidate. Long
+Parser expectations were captured from the reference, never the candidate. Long
 requests/responses use lossless repeated UTF-8 chunks with lengths and SHA-256
 of the expanded bytes. This removes duplicate fixture bulk without changing the
 frozen bytes. The metadata records runtime, source digest and the 3.11 probe.
+The CC-04 catalog addition updates only the `nonfinite-list-params` response's
+tool list from the independent `definitions.json` fixture: `oms_output_read`
+precedes `oms_state_compact`. Its non-finite request, response envelope, other
+69 exchanges and all frozen source/chunk hashes remain unchanged. This is a
+catalog payload update, not a new parser reference or a relaxed comparison.
 [`value-reference.json`](tests/value-reference.json) independently freezes
 canonical metadata, graph Unicode fields and the raw-path result error.
 

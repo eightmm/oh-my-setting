@@ -8,6 +8,13 @@ Source baseline: `de2f547c6a40ddf67c62068bce309050c6d4fa48`.
 모델 추천은 OMS 실측 순위가 아니다. 이 문서를 병합해도 사용자의 선택 모델,
 계정, 과금, 자동 swap 설정, provider 권한 또는 기본값을 변경하지 않는다.
 
+**현재 구현 범위** — 새 Main은 설치된 native Codex, Claude Code, AGY에서 고를 수 있다.
+Pi·Codex·OMS가 설치된 경우 picker나 `--launch pi`로 Codex gateway를 쓰는 Pi Main을
+열 수 있다. 활성 Main은 다시 연결한다. Pi와 AGY에서 종료된 세션을 복구하려면 검증된
+native session binding이 필요하다. 지원되는 옵션과 재접속 조건은
+[Main 선택과 복구](TERMINAL-PANEL.md#default-main-selection)에 기록했다. 아래 모델과
+평가 기준은 설계에 해당한다.
+
 ## 1. Main은 특정 회사의 모델이 아니라 하나의 책임 역할이다
 
 `Main authority != harness != endpoint/provider != selected model != served model`.
@@ -15,6 +22,8 @@ Source baseline: `de2f547c6a40ddf67c62068bce309050c6d4fa48`.
 Main이 Codex라고 하위 팀을 Codex로 제한하지 않으며, Claude Main도 같은 bounded
 OMS runtime으로 Codex·Claude·AGY 팀을 배정할 수 있어야 한다.
 모델이나 CLI 이름이 task ownership/approval/admission 권한을 부여하지 않는다.
+같은 provider의 Overall Main과 Provider Lead도 별도 세션이다. Codex Main은 같은
+Room에서 Codex Lead를 열 수 있다.
 
 Main은 사용자의 목표 해석, scope/acceptance 확정, task 분해, 자원 배분 방침,
 충돌 해결, 예외 판단과 최종 설명에 집중한다. 기존

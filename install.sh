@@ -54,8 +54,9 @@ install_original_args=("$@")
 
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
-INSTALLER_DEFAULT_REF="edge"
-REF="${OH_MY_SETTING_REF:-$INSTALLER_DEFAULT_REF}"
+REF="${OH_MY_SETTING_REF:-edge}"
+REF_EXPLICIT=0
+[ -z "${OH_MY_SETTING_REF:-}" ] || REF_EXPLICIT=1
 PROFILE="${OH_MY_SETTING_PROFILE:-minimal}"
 GENERATE_SLURM="${OH_MY_SETTING_GENERATE_SLURM:-0}"
 # Default auto: skills that plan GPU/Slurm/tsp work read local/machine.md, so
@@ -98,7 +99,8 @@ Options:
                       change nothing: no clone, fetch, lock, link, backup,
                       settings edit or registration. Steps with no write-free
                       preview are listed as not-previewed, not guessed.
-  --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
+  --ref REF           Install edge, a tag, branch, or commit. Otherwise reuse
+                      saved tracking, or follow edge for a first install.
   --profile NAME      Add a capability profile to the default core install:
                       council, github, notion, research, hpc, container,
                       remote, or full. Repeatable. Fresh default: core (Bash,
@@ -158,6 +160,7 @@ while [ "$#" -gt 0 ]; do
     --ref)
       [ "$#" -ge 2 ] || { echo "error: --ref requires a value" >&2; exit 2; }
       REF="$2"
+      REF_EXPLICIT=1
       shift
       ;;
     --plan)
@@ -297,15 +300,20 @@ case "$GENERATE_MACHINE:$GENERATE_SLURM" in
   0:0|0:1|0:auto|1:0|1:1|1:auto|auto:0|auto:1|auto:auto) ;;
   *) echo "error: snapshot modes must be 0, 1, or auto" >&2; exit 2 ;;
 esac
-case "$REF" in
-  edge) ;;
-  ""|-*|/*|*/|.*|*.|*..*|*//*|*/.*|*.lock|*.lock/*|*[!A-Za-z0-9._/-]*)
-    echo "error: unsafe OH_MY_SETTING_REF: $REF" >&2
-    exit 2
-    ;;
-esac
-
-export OH_MY_SETTING_REF="$REF"
+validate_install_ref() {
+  case "$1" in
+    ""|-*|/*|*/|.*|*.|*..*|*//*|*/.*|*.lock|*.lock/*|*[!A-Za-z0-9._/-]*)
+      echo "error: unsafe OH_MY_SETTING_REF: $1" >&2
+      return 2
+      ;;
+  esac
+}
+if [ "$REF_EXPLICIT" = 1 ]; then
+  validate_install_ref "$REF" || exit $?
+  export OH_MY_SETTING_REF="$REF"
+else
+  unset OH_MY_SETTING_REF
+fi
 export OH_MY_SETTING_PROFILE="$PROFILE"
 # --plan stops here, before the lifecycle lock, the clone or fetch and every
 # step: the preview reads the checkout that is already on disk and writes
@@ -872,6 +880,27 @@ if [ -d "$DEST/.git" ]; then
     exit 1
   fi
 fi
+
+# Resolve recorded tracking before moving the checkout. The verified native
+# update planner already validates the receipt and its checkout ownership.
+if [ "$REF_EXPLICIT" = 0 ]; then
+  install_receipt="${OMS_INSTALL_RECEIPT-${XDG_CONFIG_HOME-$HOME/.config}/oh-my-setting/install.json}"
+  if [ -e "$install_receipt" ] || [ -L "$install_receipt" ]; then
+    REF="$(
+      [ -f "$DEST/scripts/lib/platform.sh" ] || exit 2
+      # shellcheck disable=SC1091
+      . "$DEST/scripts/lib/platform.sh"
+      oms_bash_enter
+      install_update_plan="$(oms_native_route strict "$DEST" update --plan)" || exit $?
+      oms_lock_scalar /dev/stdin ref <<< "$install_update_plan"
+    )" || {
+      echo "error: cannot resolve saved install tracking from the managed checkout" >&2
+      exit 2
+    }
+    validate_install_ref "$REF" || exit $?
+  fi
+fi
+export OH_MY_SETTING_REF="$REF"
 
 if [ "$REF" = "edge" ]; then
   if [ -d "$DEST/.git" ]; then

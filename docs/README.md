@@ -38,6 +38,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Work inspection](WORK-INSPECTION.md) | Evidence matrix, next-step explanation and return briefs |
 | [Callable consolidation audit](CALLABLE-CONSOLIDATION-AUDIT.md) | Actual CLI/MCP/core wiring, duplication and boundaries to preserve |
 | [Consolidation work packets](CALLABLE-CONSOLIDATION-WORK-PACKETS.md) | Ten scoped follow-ups with reusable APIs, callers and canonical fixtures |
+| [Tool context review](TOOL-CONTEXT-REVIEW.md) | November 19 source review, implemented CC-04 output reader and native discovery boundaries |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
 | [Memory consolidation](MEMORY-CONSOLIDATION.md) | Proposed incremental Dreaming, evidence-linked recovery lessons, memory validity and existing-owner implementation packets |
@@ -77,6 +78,11 @@ architecture and ten implementation slices. Some contract/admission/projection
 slices are now implemented; interactive native provider sessions remain a separate
 unmanaged path. Neither code presence nor a pane proves complete native child
 control, usage coverage or multi-member acceptance.
+
+The [panel layout and interaction contract](TEAM-ORCHESTRATION-PANEL.md) connects
+Main-owned direct work, optional Provider Leads and the native session switcher.
+It separates the current Auto grouping correction from the proposed task-first
+assignment/result inspector and links that work to the existing implementation queue.
 
 ## Migration notes
 

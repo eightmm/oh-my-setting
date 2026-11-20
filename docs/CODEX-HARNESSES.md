@@ -7,6 +7,17 @@ This is an optional experimental bridge. Prefer it when a recurring workflow
 needs another CLI's UI with Codex inference; ordinary OMS work can use native
 provider routes. Bridge compatibility and native provider support are separate.
 
+The OMS panel offers native Codex, Claude Code, and AGY as Overall Main.
+Where Pi, Codex, and OMS are installed, the picker or `oms panel --launch pi`
+can start a Pi Main through the Codex gateway. That session uses the Codex OMS
+owner. The panel can reattach to a live Pi Main. Resuming a stopped Pi Main
+requires a verified native session binding and currently returns an explicit
+error. `oms harness pi` also supports a standalone Pi UI. See
+[Main selection and recovery](TERMINAL-PANEL.md#default-main-selection).
+
+Overall Main and a Provider Lead use separate sessions even when both use
+Codex. A Codex Main can open a Codex Lead in the same Room.
+
 ## In this guide
 
 - [Data and authority](#data-and-authority)

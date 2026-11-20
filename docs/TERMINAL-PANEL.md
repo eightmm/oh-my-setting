@@ -735,8 +735,9 @@ with the selected Main and its Board, and records the checkout on the session.
 
 #### Default main selection
 
-Bare foreground `oms panel` in a Git checkout reuses a discoverable Main in its
-owned tmux session or offers the installed entries below, in this order.
+Foreground `oms panel` reuses a discoverable Main in the checkout's owned tmux
+session or offers the installed entries below, in this order. Use `--repo PATH`
+to select the checkout or `--room ID` to select the Room on startup.
 
 | Main selector | OMS owner | Transport | Executables on PATH |
 | --- | --- | --- | --- |
@@ -747,9 +748,13 @@ owned tmux session or offers the installed entries below, in this order.
 
 The picker numbers the available entries consecutively. Enter selects the first
 one. EOF or Ctrl-C cancels with exit status 130. These numbers are separate from
-the existing Board start shortcuts. An explicit `--launch SELECTOR` bypasses the
-picker and requires a terminal. `--spawn-main` targets an existing managed session.
-Use `--watch` for the Board alone and `--dry-run` to inspect the launch plan.
+the Board start shortcuts. An existing Main is reused before startup evaluates
+`OMS_PANEL_MAIN`. For a fresh Main, set `OMS_PANEL_MAIN` to a selector in the
+table. A blank value opens the Board alone. Inline and Herdr startup without a
+selector also open the Board. An explicit `--launch SELECTOR` takes precedence
+over the environment setting and requires a terminal. `--spawn-main` targets an
+existing managed session. Use `--watch` for the Board alone and `--dry-run` to
+inspect the launch plan.
 
 Main selection uses the [typed `MAIN_CAPABILITIES` table in `native_panel.rs`](../crates/oms-command-panel/src/native_panel.rs).
 Add a Main entry there with its canonical harness, a supported OMS owner, a typed
@@ -761,9 +766,10 @@ or pane.
 
 #### Reattach and concurrent launches
 
-Bare startup rechecks the checkout's session ownership and sole-Main limit after
-the picker closes. If another caller already opened a discoverable Main there,
-startup reuses it. Explicit `--launch` adds a native window to an eligible
+Startup rechecks the checkout's session ownership and sole-Main limit after the
+picker closes. If another caller already opened a discoverable Main there,
+startup reuses it. An explicit `--room` must match that Main's recorded open
+Room. Explicit `--launch` adds a native window to an eligible
 checkout-owned session or opens a new session. Unproved ownership and a failed
 start lock cause refusal.
 
