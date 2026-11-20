@@ -37,13 +37,6 @@ pub fn socket_path() -> PathBuf {
 pub fn thread_id() -> String {
     text(&load(&state_path()), "thread_id").into()
 }
-fn random<const N: usize>() -> Result<[u8; N], String> {
-    let mut b = [0; N];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut b))
-        .map_err(|_| "native random source unavailable")?;
-    Ok(b)
-}
 fn base64(raw: &[u8]) -> String {
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();

@@ -47,15 +47,15 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 
 ## Quick start
 
-1. Run `oms` in a terminal and choose Claude, Codex or Agy. Enter or EOF opens control only; Ctrl-C exits with 130. Missing CLIs show their reasons. The panel starts at most one live main. Pi remains an explicit alternative (`OMS_PANEL_MAIN=pi` or the Pi start key).
+1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. Choose an installed Main by number, or press Enter for the first choice. A new Main from this picker can open installed provider orchestrators in background windows. An existing Main is reused without another choice. Use `oms panel --watch` for the board by itself or `oms panel --launch pi` to select Pi explicitly.
 2. The main window keeps the board on the left whenever the window is wide enough (above the CLI only when it is too narrow); the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
-3. The compact goal banner and Plan tab show a bounded goal preview (up to 200 characters and, in Plan, two wrapped lines); `oms agent-plan list` prints the full plan. The bottom box contains Log, Detail, Plan, Messages, Past and Attention tabs (Past and Attention stay even when empty), plus Debate while a debate exists. The pinned **Needs you** attention strip stays above activity when the inbox has items.
+3. Weekly quota left sits directly below the Room title. Click the weekly line or press `w` for provider readings, sources and reset times. A dash means the Board has no verified reading. The header shows plan progress for work linked to the current Room.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
-5. `Tab` cycles visible tabs; arrows move within the current surface; Enter opens or expands. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
+5. On the Board, `Tab` switches between Overview and all tasks, `g` or `t` opens Relationships, and `D` inspects the selected call. In a reader, `Tab` switches reader views. Arrows move selection and Enter opens the selected item. Click a Codex native child row or select it and press Enter to read its verified recent replies. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
 6. At a main's exit prompt, `r` resumes or restarts in that pane and Enter closes the window. `F9` switches between chat and board; `F5` opens the control window, and from that window returns to the previous one; `F12` shows panel-wide keys.
 
 ```bash
-oms                                      # open the control panel
+oms panel                                # open the Main picker or reuse the current Main
 oms panel --repo . --launch codex         # start a Codex main
 oms panel --repo . --launch agy           # start a fresh Agy main
 oms panel --repo . --results              # read retained results
@@ -65,8 +65,7 @@ oms panel --repo . --results              # read retained results
 <summary>All launch, layout, status and council command examples</summary>
 
 ```bash
-oms panel --repo . --layout inline         # portable menu, no tmux needed
-oms panel --repo . --layout split          # uses an already-installed tmux
+oms panel --repo . --host inline --launch codex # run a native Main in this terminal
 oms panel --repo . --host tmux --launch codex   # team graph left of native chat
 oms panel --repo . --host tmux --launch claude
 oms panel --repo . --reopen                # restore only a missing tmux board
@@ -113,6 +112,27 @@ integration, required checks and owner finalization. A worker's exit or review
 handoff is an intermediate step. The main continues actionable work within the
 user's scope, or records a concrete blocker and the next action. Publication
 still requires the user's authority; a local result can be completed first.
+
+### Provider orchestrator launch selection
+
+Overall Main can open a Codex, Claude, or Antigravity orchestrator in its Room.
+For a new provider session, `--model MODEL` requests a native model ID or alias,
+and `--reasoning-effort EFFORT` requests a native effort token. Omitting both
+uses the provider's existing launch settings. For example,
+
+```bash
+oms panel --orchestrator codex --room ROOM --model MODEL --reasoning-effort EFFORT
+```
+
+Codex uses a `model_reasoning_effort` configuration override. Claude and
+Antigravity use their native `--effort` flag. An Antigravity fixed-effort
+Orchestrator model rejects an explicit effort override. Model availability
+and supported effort values depend on the selected provider and account.
+
+Reuse a connected session with `--orchestrator PROVIDER --room ROOM`. Model
+and effort options apply only at launch. Add `--task TEXT` to submit to a
+verified idle input. A `started` response confirms pane creation. The actual
+model, effort, and account require separate provider evidence.
 
 ### Swap the main
 
@@ -418,9 +438,8 @@ its existing exit behavior.
 
 Panel owner fields and `--owner` for dispatch, finalize and review settlement accept
 `claude`, `codex`, `pi` and `antigravity`. The resolver records Claude and Codex under
-their own identities. Pi's default model and effort come from the Codex main preset; an
-explicit model in the full Codex catalog resolves to the gateway with owner `codex`. Any
-other exact Pi model resolves to direct transport with owner `pi`. The `agy` harness
+their own identities. A native Pi Main uses the Codex gateway with owner `codex`.
+Its default model and effort come from the Codex Main preset. The `agy` harness
 resolves to registry owner `antigravity`. Deep and frontier tiers also offer read-only
 Antigravity routes after native providers with known weekly quota. Routine independent
 judges can also use the deep-tier Antigravity route.
@@ -435,12 +454,8 @@ and restart ownership validate the recorded owner/harness pair without consultin
 current model cache; Pi permits recorded owners `codex` and `pi`, while `agy` uses
 `antigravity`.
 
-A default Pi swap retains the default gateway selection even when its cached catalog is
-empty. Registered native-adapter mains retain their registry identities for watchers,
-dispatch and council. Their registration fallback remains separate from worker tiers.
-
-Direct Pi launch is deferred; its launch dry run reports the resolved owner with
-`argv: null`. Fresh Agy mains use `agy --prompt-interactive` with the OMS bootstrap,
+A native Pi launch dry run reports the resolved owner and gateway argv.
+Fresh Agy mains use `agy --prompt-interactive` with the OMS bootstrap,
 room contract, unsettled lineage and task as initial user-message context. The task
 appears once as JSON data. This is user context, not system injection. Agy keeps its native model settings; only an explicit `--model` adds a model flag.
 When `--model` is omitted, Agy main model identity resolves from `OMS_MODEL`,
@@ -461,16 +476,16 @@ tracking always returns an allow decision on `PreToolUse` and is skipped when
 By default, Claude and Agy mains use `--dangerously-skip-permissions`, and Codex
 mains use `--dangerously-bypass-approvals-and-sandbox`. Set
 `OMS_PANEL_MAIN_PERMISSIONS=native` to use provider permission settings instead;
-`full` selects the default. Pi and adapter mains are unchanged. OMS command guards
-and hooks remain active.
-The owner is `antigravity`, while the harness and CLI are `agy`. Discovery advertises
-native launch without executing the CLI, and dry runs show the actual fresh-launch argv.
+`full` selects the default. Pi uses the gateway transport's permission handling.
+OMS command guards and hooks remain active.
+Agy has owner `antigravity`; both `--launch agy` and `--launch antigravity` select
+the same `agy` harness and CLI. A dry run shows the actual fresh-launch argv.
 Agy `--resume` is refused before launch or enrollment: its native session ownership
 cannot yet be verified. Restarting an exited Agy main starts fresh; no conversation ID
 or history binding is invented. Native histories remain separate.
 The available Pi launch uses the existing `oms harness pi`
 bridge and requires Pi 0.80.4 or newer (the bridge waits for `agent_settled`)
-and Codex CLI on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
+and the Codex CLI and `oms` launcher on PATH. Pi owns its tools and UI. Pi history is separate: this integration refuses
 `--resume` until Pi session ownership can be verified. It has no Codex native hook or
 context/quota reading, but [`pi-oms-extension.mjs`](../crates/oms-command-providers-skills/assets/pi-oms-extension.mjs)
 forwards Pi activity to `hook_state.py` and delivers room mail through its hook context.
@@ -490,9 +505,29 @@ The board's bottom dock has Log, Detail, Plan, Messages, Past and Attention tabs
 plus Debate while a debate exists. Needs you is an attention strip above activity. The
 dock opens on Log (the recorded session events) and takes every row the activity tree leaves.
 Call rows keep status, token totals and age aligned; fresh calls show their
-recorded role and queued state before an attempt exists. Detail parses live
+recorded role and queued state before an attempt exists. The Board shows a
+token total for the displayed attempt when space permits. It uses the receipt
+total when all tracked physical calls have attributable totals and their sum
+fits, then falls back to the exact Events total. Press `D` for Call Detail,
+which identifies the source, receipt coverage, and recorded input, output,
+cache reads and writes by provider. Input follows each provider's cache
+convention. Missing or incompatible component counts show `?`, and an
+explicit zero is reported as zero. During pending or failed refreshes, usage
+retained for the same Room is marked `last observed`. Detail parses live
 provider-stream activity for running calls and shows a What it did summary for
 finished calls; tree rows include the latest event.
+
+When space permits, the Weekly quota strip includes activity for each connected
+lead. Wide boards spell out `working`, `idle`, `unknown`, `pending`, or `stale`.
+When the words exceed the available width, the strip uses the suffixes `*`,
+`-`, `?`, `~`, and `!`, respectively, and keeps the full provider names when
+they fit. Click Weekly or press `w` to see the activity key alongside quota details.
+Pending indicates an in-flight Board refresh. Stale indicates retained activity
+after a failed or held refresh. Narrow boards give the quota readings priority.
+The AGY reading comes from the Gemini section of a recognized Models & Quota
+dialog. The Board withholds a new reading when the captured viewport lacks
+enough evidence to identify the current dialog and its Gemini section. Weekly
+details show its reset as unreported.
 
 | Board area | What it shows |
 | --- | --- |
@@ -522,7 +557,9 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
 | `N` | — | Previous search match |
 | `s`, then `1` / `2` / `0` | Swap main to Claude / Pi / Codex in a managed panel | — |
-| `a` / `w` / `c` | Ask advisor / open selected worker worktree / request selected call cancellation | — |
+| `a` / `c` | Ask advisor / request selected call cancellation | — |
+| `w` or click Weekly | Open weekly usage details. Quota appears when the Board snapshot is fresh | — |
+| `U` | Refresh weekly quota from idle Claude or AGY sessions. Also available in weekly details | — |
 | `k` / `u` | Capacity / refresh | — |
 | `m` | Cycle Work / Overview / Focus in a managed panel | — |
 | `[` / `]` / `o` | `[` / `]` scroll the Log tab older / newer while it is active; the wheel scrolls over its body | Previous / next section / outline |
@@ -665,7 +702,7 @@ exit. If a board was explicitly removed, `oms panel --reopen` restores it withou
 restarting the native CLI.
 
 Repeating the operation preserves an existing board. Inside an OMS window, bare `oms
-panel` does the same; the control menu also provides `z` for this action. Restore
+panel` does the same. Restore
 accepts only this checkout's front door with a matching repository, refuses
 ambiguous/replaced input panes, and does not restart a terminated CLI.
 
@@ -693,51 +730,42 @@ characters turned into `-`, at most 32 characters (`project` when nothing is lef
 name is held by another checkout or by a session OMS did not create, the panel uses
 `oms-<project>-` plus the first 6 hex digits of the SHA-256 of the resolved path, and neither
 session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the checkout stays in use
-under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
-checkout on the session.
+under its name, because its processes carry that name. A fresh split starts
+with the selected Main and its Board, and records the checkout on the session.
 
 #### Default main selection
 
-A new or empty panel offers Claude, Codex and Agy, with missing-CLI reasons. The
-startup prompt accepts `1`/`claude`, `2`/`codex` and `3`/`agy`; Enter or EOF selects
-no main and leaves usable control. Ctrl-C exits with 130. These prompt numbers are
-separate from the existing control shortcuts (`1` Claude, `2` Pi, `0` Codex).
-Choosing control only does not allocate or bind a room to a roomless panel.
-In a managed roomless control, numeric start/resume keys and `t` remain blocked.
-Use `o Rooms` to select or create a room first, or `p` Providers then Native.
-Waiting for another poll does not select a room; a failed room query is reported
-separately from an intentionally unset room.
-An explicit `--launch` wins, followed by a set `OMS_PANEL_MAIN` (`claude`, `codex`,
-`agy` or `pi`), then the picker. Empty or whitespace-only `OMS_PANEL_MAIN` opens no
-main; an invalid value opens none with a warning. `OMS_PANEL_HARNESS` selects only
-the control menu's harness and grants no startup launch authority. Inline and Herdr
-use the same choice; selecting none opens their control menu. No preference is saved.
-Generated tmux control panes enter that persistent menu directly, including after a
-reload; they do not repeat the outer startup picker. Herdr keeps the control menu
-running after opening a chosen main in a sibling tab and retains the menu on reload,
-including when no main was selected. Explicit `--launch` and standalone
-inline native launches keep the native session's lifetime.
+Bare foreground `oms panel` in a Git checkout reuses a discoverable Main in its
+owned tmux session or offers the installed entries below, in this order.
 
-Read-only JSON, watch, dry-run, dispatch, spawn, swap and reopen paths never prompt.
-Non-terminal startup keeps the existing terminal-required error. A proven live or
-unproven main is reattached without a picker or new launch. Provider choice and any
-supported crash-resume offer happen outside construction/session locks; launch
-rechecks sole-main and legacy ownership under the existing guards after input.
-If an ownership query or start lock fails, startup reports that refusal rather than
-reporting an empty selection or a missing CLI.
+| Main selector | OMS owner | Transport | Executables on PATH |
+| --- | --- | --- | --- |
+| `codex` | `codex` | Native Codex CLI | `codex` |
+| `claude` | `claude` | Native Claude CLI | `claude` |
+| `agy` or `antigravity` | `antigravity` | Native `agy` CLI | `agy` |
+| `pi` | `codex` | Pi UI through `oms harness pi` with Codex gateway inference | `pi`, `codex`, `oms` |
+
+The picker numbers the available entries consecutively. Enter selects the first
+one. EOF or Ctrl-C cancels with exit status 130. These numbers are separate from
+the existing Board start shortcuts. An explicit `--launch SELECTOR` bypasses the
+picker and requires a terminal. `--spawn-main` targets an existing managed session.
+Use `--watch` for the Board alone and `--dry-run` to inspect the launch plan.
+
+Main selection uses the [typed `MAIN_CAPABILITIES` table in `native_panel.rs`](../crates/oms-command-panel/src/native_panel.rs).
+Add a Main entry there with its canonical harness, a supported OMS owner, a typed
+transport and executable prerequisites. A new owner or transport requires typed
+startup and ownership handling with fixture coverage. Only the typed table
+admits Main choices. An unsupported selector is rejected before creating a Room
+or pane.
 
 
 #### Reattach and concurrent launches
 
-Reattaching opens a main the same way only when the panel has no live main, under the
-same start guards; when none can open, the control view shows why (for example an empty
-`OMS_PANEL_MAIN` or a missing CLI). A main window whose startup fails waits for Enter
-before closing, so its error stays readable. Later launches attach to it (or switch the
-current tmux client), and `--launch` adds a native window there instead of opening a
-second session. A session with that name recorded for another checkout is refused. A
-launch that loses a creation race, or arrives before a just-created session has recorded
-its checkout, waits up to two seconds and joins it; the owner marker is written after
-the session's room, so a joining launch follows that room.
+Bare startup rechecks the checkout's session ownership and sole-Main limit after
+the picker closes. If another caller already opened a discoverable Main there,
+startup reuses it. Explicit `--launch` adds a native window to an eligible
+checkout-owned session or opens a new session. Unproved ownership and a failed
+start lock cause refusal.
 
 New mains default to the panel's recorded room while it is open and has
 participant/message headroom; otherwise, or when `--room` is given, the existing room
@@ -944,6 +972,13 @@ cue and is not in `--health`), and Antigravity reports no quota window locally, 
 counts of the calls OMS delegated to it (7 days), not a quota. No provider records a per-day
 token total here, and quota is never estimated from tokens.
 
+On supported Linux filesystems, the explicit usage command also shows the first
+weekly observation from an explicitly pinned, managed Claude lead by configured
+alias. `local_weekly_observations` includes the reported percentage, callback age
+and reset. The reading expires after ten minutes or at reset, whichever comes
+first. Vendor acquisition time is unreported and the record carries
+`ranking_eligible: false`.
+
 A proven existing tmux pane can supply numeric fields from its last eight visible native
 footer lines. `TUI` or `HUD/TUI` labels those mirrored readings; native output may lag
 while idle and changed footer formats become unknown. The watcher performs no native
@@ -985,10 +1020,13 @@ feature `partial` when only a bounded path is exercised, and `unknown` when the
 current native fixtures cannot establish support. An unknown entry does not remove
 its implementation or its provider registration.
 
-The native panel has launch code for Claude, Codex, Pi and Antigravity. Current launch
-fixture evidence covers Codex planning as a dry run. Pi launch remains gateway-only;
-Antigravity launch remains fresh-session-only. The retired Python implementation
-names and test matrix are not evidence for these native paths.
+The private tmux fixture checks the ordered Main picker with a peer-only Gemini
+stand-in on PATH. It exercises Pi's Codex gateway argv and owner binding, automatic
+Codex orchestrator startup, and a fresh Antigravity alias launch with the exact
+task argument. Claude launch fixtures exercise the native argv, Room and Main
+binding, and managed account selection at launch. Live authentication, effective
+permissions and compatibility with the installed provider CLIs remain unverified
+by these fixtures.
 
 Every physical worker call receives a durable accounting identity. Canonical measured
 usage currently comes from Claude result envelopes and Codex cumulative thread
@@ -1140,7 +1178,6 @@ Pi main has no such rows.
 | 8 Dashboard / 9 Refresh | Read shared dashboard; no model call |
 | v Detail / b Attention | Cycle auto / compact / detail; toggle action-needed calls |
 | h Chats / o Rooms | Browse the room's chats; list rooms and switch or create one |
-| p CLIs / z Panel | Show provider CLIs and pick a target; reopen the panel session |
 | q Quit | Exit inline or detach the owned split session |
 
 `NO_COLOR` disables color unless the panel explicitly selects
@@ -1150,9 +1187,7 @@ snapshots; `--count N` bounds it. Native launch needs an installed, authenticate
 provider. `installed` means executable found on PATH, not verified login or model
 availability. Shared OMS references carry evidence across providers; native
 conversations remain separate. Use isolated workers for implementation.
-In the CLIs menu, Native for `agy` or `antigravity` uses the built-in Agy harness
-unless an explicit Antigravity native adapter is configured. Capability, model
-syntax and CLI availability are checked before allocating its room.
+See [Additional CLIs and adapters](#additional-clis-and-adapters) for provider discovery.
 
 
 ## Roles and automatic allocation
@@ -1412,6 +1447,47 @@ waives the 90% quota cap); missing, stale or malformed readings remain eligible.
 `spread` is best-effort: simultaneous decisions can choose the same account,
 and workers in other repositories are outside its count.
 
+For a fresh native Claude lead, run `oms panel --orchestrator claude --spread-accounts`
+from its authorized Main. With Claude registry `policy: spread`, OMS chooses the
+eligible private home with the fewest active OMS worker attempts recorded in this
+repository with the exact `panel_account=claude:<alias>` reference. Registry order
+breaks ties. This native selection uses the worker count alone. Existing leads
+retain their accounts, and `--account` and `--spread-accounts` are mutually
+exclusive. Inherited Claude home and known credential or gateway overrides keep
+the usual ambient launch behavior, as does a registry without a usable spread
+account. On supported Linux hosts, an automatically selected Claude lead can
+show Weekly from a local statusline callback verified for its current launch.
+The detail shows callback age and reset. An observation with missing proof or
+an elapsed window leaves Weekly unavailable. This reading stays outside
+account ranking.
+
+From the current Main of an unmanaged room, open one separate Codex lead with
+`oms panel --orchestrator codex --lead alternate --account ID`. The primary Codex
+lead must already have a verified account binding. OMS rechecks both configured
+home directories and requires distinct accounts and directory identities. An
+ambient primary or a binding without directory identity cannot establish that
+separation. Opening the alternate leaves the current pane in focus.
+
+From that same Main, use `oms panel --focus-orchestrator codex --lead alternate`
+to focus the alternate. `oms panel --focus-orchestrator codex` still focuses the
+primary. Before focusing the alternate, OMS verifies the exact Room, Main, tmux
+pane and private binding, plus the current identities and mappings of both account
+homes. The slot becomes available when the alternate exits, even if tmux
+retains its dead pane. If the primary closes first, opening a new primary
+requires a verified home distinct from the live alternate's home.
+
+From that same Main, assign one task to the already-open alternate with
+`oms panel --orchestrator codex --lead alternate --account ID --task TEXT`.
+`ID` must match the alternate's pinned account. The alternate needs to be in the
+background with its native composer empty and ready. OMS sends one bracketed paste
+containing the assignment, role instructions and exact read-only Room locator.
+The complete payload may contain up to 1,000 characters, including the assignment
+instructions and locator. OMS withholds Enter if it cannot verify the full draft
+from the pane capture, including when Codex obscures the text, terminal wrapping
+hides a separator, or the capture changes after pasting. A draft may remain in
+the alternate pane. If submission is unconfirmed, inspect that pane before
+trying again.
+
 <details>
 <summary>Quota freshness, model availability, headless routes and account bindings</summary>
 
@@ -1641,8 +1717,18 @@ Independence ordering applies to reviewer, verifier, security-auditor and critic
 security-auditor) in `panel_role`; the strategy is generally the recorded purpose
 (plain workers record explain/investigate/implement, and scholar records research).
 Dispatches also pass the selected strategy in `OMS_PANEL_STRATEGY` alongside the board kind in `OMS_PANEL_ROLE`; lifecycle refs retain it as `panel_strategy`. `oms panel --routes`
-prints each role's tier and chosen candidate, plus
-these kinds and the write-capable roles. Dispatch and council owner defaults use
+shows each role's tier and proposed provider and account alongside the board
+kinds and write-capable roles. Its JSON and reader show the account policy and
+the deciding comparison: eligible accounts are ranked by recorded weekly-use
+bucket, then by repository-wide working and running attempts under the spread
+policy, then by registry order. The provider spread input counts non-Main
+attempts in the selected Room, or across the repository when no Room is selected.
+An unavailable Events read leaves those counts unknown in the preview.
+Dispatch forwards an explicit account pin to the headless adapter.
+For an unpinned account, the adapter can select another seat at launch using its
+current eligibility, quota, health and broader active-attempt counts, including
+queued work. Served account identity stays unknown in the preview.
+Dispatch and council owner defaults use
 `OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
 Codex's `CODEX_SANDBOX` marker, otherwise Codex; `--owner` overrides detection.
 
@@ -1919,8 +2005,9 @@ catalog, excluding models shown as not routed by `oms models`. Codex and Claude
 seats also pin the newest catalog model in their configured family. If that Gemini
 name is absent, routing may select the newest generation of another Gemini name
 at the same level only when exactly one name is routable there. An installed
-Codex or Claude CLI with an empty catalog retains the configured model: Claude
-Code cannot enumerate models, and Codex may not have refreshed its catalog yet.
+Claude CLI that reports catalog probing as unsupported keeps its configured model.
+Other empty model catalogs are unavailable. Council skips routes marked
+`public_only` and records the reason in its dry-run plan.
 
 
 Installation and catalog lookup checks still apply to every seat. When `codex`,
@@ -2755,7 +2842,7 @@ The wheel scrolls only the band or detail under the pointer.
 ### Footer and quick actions
 
 The footer shows at most three hints chosen by the selection (a main: `Enter Chat`,
-`a Ask advisor`; a call: `Enter Show`, `w Worktree` when it applies;
+`a Ask advisor`; a call: `Enter Show`;
 `Esc Close` while a preview or detail is open; on the Messages and Debate tabs the arrows, `Enter` and the filter or target keys) and always ends with the fixed panel keys
 `F9 Chat⇄Board  m Modes  F12 Keys  ? Keys` when space allows (`q Quit` and `? Keys` on a standalone watcher); narrow managed footers drop `F12 Keys` before `? Keys`. `?` swaps in the full list of keys
 that work in that view, with `v Expand` or `v Collapse` following the board's state, `x Transcript`
@@ -2778,12 +2865,15 @@ failed call keeps the popup open with its exit status. Selecting or clicking nev
 a model. A prompt-less `--dispatch advisor` on a terminal asks its question
 interactively.
 
-`w` on a selected, finished worker opens a plain shell window at its kept
-worktree. The recorded `worktree:PARENT/NAME` label must match exactly one entry
-of `git worktree list`; a running worker, a cleaned-up or ambiguous worktree
-and repository-local calls are refused, and recorded results stay available.
-The shell has no worker authority; edits there are not part of the recorded
-patch. Outside tmux the board shows the path.
+Click the current Weekly line or press `w` to open the overlay (which scrolls
+with the existing overlay scroll keys when entries exceed the viewport). Provider
+readings, sources and reset times require a successfully refreshed Board; the
+current Codex reading stays unlabelled unless positively verified for the live
+Main or Codex lead and its per-home quota receipt, while registered Codex
+accounts are listed separately with their session-log reading, log age and reset
+(withholding percentages for stale, expired or missing entries). If Weekly is
+unavailable, press `u` in the overlay to retry the Board refresh. Press `Esc` to
+close the overlay.
 
 The board is an overview above and a detail area below. Cards keep only the rows their
 content needs (an unrecorded location stays in the detail), and a provider without a
@@ -3000,6 +3090,28 @@ lookup examines bounded filenames and Codex's first metadata row, without
 copying transcript bodies or native session IDs into the shared room log.
 Navigation success is a request, not evidence that an app window appeared.
 
+The selected Codex child reader can show **Codex recorded response usage** below
+verified replies when the same bounded read includes a recent, unambiguous
+response usage record. Its input, output and total apply to that response.
+Cache is shown as read/write, with `?` for zeros that may mean missing cache
+details. The sample can come from an incomplete response or compaction. The
+reader leaves usage unreported when it cannot verify a record.
+
+On explicit selected open, the Antigravity (`agy`) native child reader prepends
+a **Recorded AGY setup (OS/shell access unverified)** header above verified
+child replies from the same bounded lead transcript read whenever at least one
+setup field is recorded: an exact allowlisted OMS role slug from
+`config/role-contracts.json`, `Workspace` mode (`inherit`, `branch`, or `share`)
+cross-checked against proven repository and linked-worktree URIs, or
+`EnableWriteTools`/`EnableSubagentTools` from a unique, confirmed
+`define_subagent` earlier in the active Turn. Unrecorded, built-in,
+non-allowlisted, prior-turn, conflicting, or mismatched fields render as
+`unknown` (or `missing (unknown)` for omitted optional grant booleans, and
+`shared linked worktree; unverified isolation` when active-turn spawns share a
+worktree URI). Unconfigured invocations with no recorded setup field omit the
+header and show ordinary verified chat, and setup metadata never participates in
+locator custody or open-dock invalidation or establishes OS/shell enforcement.
+
 A native main launched by the panel binds its first real prompt-hook session to its
 explicitly enrolled participant. This preserves the original join boundary, pending
 messages and cursor. An existing unbound Claude participant can also be bound by its own
@@ -3122,7 +3234,7 @@ Sources: [Desktop shared configuration](https://code.claude.com/docs/en/desktop#
 
 ## Additional CLIs and adapters
 
-The `p CLI peers` menu reads the same provider registry as `oms models`. Grok,
+Use `oms panel --providers --json` to read the same provider registry as `oms models`. Grok,
 Antigravity (`agy`), Gemini, Cursor and other registered transports need no
 panel-specific registration. An executable `oms-agent-adapter-ID` on PATH or
 in the configured adapter directory also appears automatically. Discovery only
@@ -3179,22 +3291,9 @@ exit status, print the answer on stdout and diagnostics on stderr. Unsupported
 access or arguments must fail explicitly. An adapter must not commit, push,
 modify OMS owner state or retain background processes.
 
-The inventory distinguishes headless calls, room polling, native launch and unverified
-native hook wiring. A call adapter alone does not attach to an already-open app or wake
-an idle session. For additional native launch, explicitly list canonical provider IDs in
-`OMS_PROVIDER_NATIVE_ADAPTERS` and provide the marker executable `oms-agent-adapter-ID`
-on PATH or in the same adapter directory. Its additional contract is `open --workdir
-PATH --context-file PATH`, with optional `--model` and `--resume`. The file contains
-bounded OMS bootstrap, room participation and the supplied user task; it is removed
-after process exit.
-
-The adapter must preserve interactive stdio, forward exit status, consume that context,
-and translate only supported documented vendor flags. It inherits `OMS_ROOM_ID`,
-`OMS_ROOM_PARTICIPANT` and canonical `OMS_ROOM_REPO` for polling. The `p CLIs` menu's `n
-Native` action or `--launch ID` uses this explicit capability; unsupported native
-adapters fail rather than falling back to a headless call. This opt-in grants no
-write/publication authority. The actual Grok/Muse interactive interfaces have not been
-verified; the contract is covered by protocol fixtures.
+The inventory tracks headless calls, Room polling, native launch and hook
+wiring separately. Headless adapters belong to the peer catalog. The
+[default Main selection](#default-main-selection) lists the typed startup entries.
 
 Owner finalization/council retains Codex/Claude's existing policy. No additional daemon,
 dependency or terminal injection is added.

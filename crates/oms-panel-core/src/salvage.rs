@@ -3,12 +3,32 @@ use crate::services::ExecutionRequest;
 use crate::{Error, Result, Services, Store, Value, require};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 pub const MAX_EVIDENCE: usize = 8 * 1024 * 1024;
 pub const PREFIX: &str = "# oms-salvage: ";
+// Bound directory traversal independently from memory retained for one task.
+const INVENTORY_RAW_LIMIT: usize = 100_000;
+const INVENTORY_RELEVANT_LIMIT: usize = 10_000;
+// Bound actual sidecar and patch reads, including oversized-file probes.
+const SIDECAR_LIMIT: usize = 1_024;
+const SIDECAR_BYTES: usize = 64 * 1024 * 1024;
+#[derive(Clone, Copy)]
+struct Limits {
+    raw: usize,
+    relevant: usize,
+    sidecars: usize,
+    bytes: usize,
+}
+const LIMITS: Limits = Limits {
+    raw: INVENTORY_RAW_LIMIT,
+    relevant: INVENTORY_RELEVANT_LIMIT,
+    sidecars: SIDECAR_LIMIT,
+    bytes: SIDECAR_BYTES,
+};
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Result<Self> {
@@ -955,9 +975,41 @@ pub fn empty_provenance(store: &Store, task: &str, attempt: &str) -> Result<bool
             && v["salvaged_from"]["outcome"] == "nothing_to_recover"
     }))
 }
+fn header(body: &[u8]) -> Result<Value> {
+    let tail = body
+        .strip_prefix(PREFIX.as_bytes())
+        .ok_or_else(|| Error::new("salvage header absent"))?;
+    let end = tail
+        .iter()
+        .position(|v| *v == b'\n')
+        .ok_or_else(|| Error::new("salvage header incomplete"))?;
+    crate::decode(&tail[..end], MAX_EVIDENCE)
+}
+fn budgeted_read(
+    store: &Store,
+    path: &Path,
+    per_record: usize,
+    remaining: &mut usize,
+) -> Result<Vec<u8>> {
+    // The no-follow reader probes one extra byte to detect oversized inputs.
+    // Reserve that byte from the aggregate budget even when the read fails.
+    require(*remaining > 0, "salvage evidence exceeds bounded byte scan")?;
+    let maximum = per_record.min(*remaining - 1);
+    let bytes = store.read(path, maximum, false)?;
+    *remaining -= bytes.len();
+    Ok(bytes)
+}
 /// Select only paired, digest-checked patches with matching provenance. A patch
 /// without its sidecar, or provenance without its patch, remains unconfirmed.
 pub fn continuation_patch(store: &Store, task: &str, attempt: &str) -> Result<Option<Value>> {
+    continuation_within(store, task, attempt, LIMITS)
+}
+fn continuation_within(
+    store: &Store,
+    task: &str,
+    attempt: &str,
+    limits: Limits,
+) -> Result<Option<Value>> {
     crate::identifier(task)?;
     crate::identifier(attempt)?;
     let directory = store.repo().join(".oms/artifacts/delegate");
@@ -966,21 +1018,27 @@ pub fn continuation_patch(store: &Store, task: &str, attempt: &str) -> Result<Op
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(Error::new(e)),
     };
-    let mut names = Vec::new();
-    for entry in entries.into_iter().flatten() {
-        let entry = entry.map_err(Error::new)?;
+    let prefix = format!("salvage-{task}-");
+    let mut names = std::collections::BTreeSet::new();
+    for (count, entry) in entries.into_iter().flatten().enumerate() {
         require(
-            names.len() < 10000,
-            "salvage inventory exceeds bounded scan",
+            count < limits.raw,
+            "salvage inventory exceeds bounded raw scan",
         )?;
-        let name = entry
-            .file_name()
+        let entry = entry.map_err(Error::new)?;
+        let name = entry.file_name();
+        if !name.as_bytes().starts_with(prefix.as_bytes()) {
+            continue;
+        }
+        require(
+            names.len() < limits.relevant,
+            "salvage inventory exceeds bounded relevant scan",
+        )?;
+        let name = name
             .into_string()
             .map_err(|_| Error::new("non-UTF-8 salvage name"))?;
-        names.push(name);
+        names.insert(name);
     }
-    names.sort();
-    let prefix = format!("salvage-{task}-");
     let mut selected = Vec::new();
     let mut covered = std::collections::BTreeSet::new();
     for name in &names {
@@ -992,31 +1050,52 @@ pub fn continuation_patch(store: &Store, task: &str, attempt: &str) -> Result<Op
             "salvage publication incomplete: patch has no sidecar",
         )?;
     }
-    for name in &names {
-        if !name.starts_with(&prefix) || !name.ends_with(".patch.json") {
-            continue;
-        }
+    let sidecars: Vec<&String> = names
+        .iter()
+        .filter(|n| n.ends_with(".patch.json"))
+        .collect();
+    require(
+        sidecars.len() <= limits.sidecars,
+        "salvage inventory exceeds bounded sidecar scan",
+    )?;
+    let mut remaining = limits.bytes;
+    for name in sidecars {
         let path = format!(".oms/artifacts/delegate/{}", &name[..name.len() - 5]);
-        let meta = store
-            .json(Path::new(&format!("{path}.json")), MAX_EVIDENCE, false)?
-            .ok_or_else(|| Error::new("salvage sidecar missing"))?;
+        let raw = budgeted_read(
+            store,
+            Path::new(&format!("{path}.json")),
+            MAX_EVIDENCE,
+            &mut remaining,
+        )?;
+        let meta = crate::decode(&raw, MAX_EVIDENCE)?;
+        let owner = crate::value::text(&meta["salvaged_from"], "task");
+        let foreign = owner != task
+            && owner.starts_with(&format!("{task}-"))
+            && crate::identifier(&owner).is_ok()
+            && name.starts_with(&format!("salvage-{owner}-"));
         require(
-            meta["salvaged_from"]["task"] == task,
+            owner == task || foreign,
             "salvage task differs from filename",
         )?;
-        if meta["salvaged_from"]["attempt"] != attempt {
+        if !foreign && meta["salvaged_from"]["attempt"] != attempt {
             continue;
         }
-        require(meta["patch"] == path, "salvage patch identity differs")?;
-        let body = crate::results::verified_patch(store, &meta)?;
-        let tail = body
-            .strip_prefix(PREFIX.as_bytes())
-            .ok_or_else(|| Error::new("salvage header absent"))?;
-        let end = tail
-            .iter()
-            .position(|v| *v == b'\n')
-            .ok_or_else(|| Error::new("salvage header incomplete"))?;
-        let header = crate::decode(&tail[..end], MAX_EVIDENCE)?;
+        require(
+            meta["patch"] == path
+                && crate::hex(meta["patch_sha256"].as_str().unwrap_or_default(), 64),
+            "invalid indexed patch identity",
+        )?;
+        let body = budgeted_read(
+            store,
+            Path::new(&path),
+            crate::results::PATCH_MAX,
+            &mut remaining,
+        )?;
+        require(
+            crate::digest(&body) == meta["patch_sha256"],
+            "indexed patch digest changed",
+        )?;
+        let header = header(&body)?;
         for key in [
             "salvaged_from",
             "salvaged_at",
@@ -1046,8 +1125,10 @@ pub fn continuation_patch(store: &Store, task: &str, attempt: &str) -> Result<Op
                 }),
             "salvage provenance does not bind this patch",
         )?;
-        covered.insert(sha);
-        selected.push(meta);
+        if !foreign {
+            covered.insert(sha);
+            selected.push(meta);
+        }
     }
     let proof_dir = store.repo().join(".oms/salvage-provenance");
     if proof_dir.exists() {
@@ -1137,4 +1218,239 @@ fn registered_empty<S: Services + ?Sized>(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStringExt;
+
+    fn delegate_dir(scratch: &Scratch) -> PathBuf {
+        let directory = scratch.0.join(".oms/artifacts/delegate");
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+    fn touch(directory: &Path, name: &str) {
+        std::fs::File::create(directory.join(name)).unwrap();
+    }
+    fn failure(store: &Store, limits: Limits) -> String {
+        continuation_within(store, "target", "attempt", limits)
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn continuation_scans_flat_inventory_above_relevant_limit() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        for i in 0..=INVENTORY_RELEVANT_LIMIT {
+            touch(&directory, &format!("delegate-{i}.patch"));
+        }
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            continuation_patch(&store, "target", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        touch(&directory, "salvage-target-incomplete.patch");
+        assert!(failure(&store, LIMITS).contains("patch has no sidecar"));
+    }
+
+    #[test]
+    fn continuation_filters_unrelated_names_but_rejects_invalid_relevant_utf8() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        let make = |name: &[u8]| {
+            std::fs::File::create(directory.join(OsString::from_vec(name.to_vec()))).is_ok()
+        };
+        // Filesystems such as APFS refuse non-UTF-8 names; nothing to test there.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        assert!(make(b"other-\xff"));
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            continuation_patch(&store, "target", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        assert!(make(b"salvage-target-\xff"));
+        assert!(failure(&store, LIMITS).contains("non-UTF-8 salvage name"));
+    }
+
+    #[test]
+    fn continuation_limits_bound_scan_and_sidecar_bytes() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        touch(&directory, "unrelated-1");
+        touch(&directory, "unrelated-2");
+        let store = Store::open(&scratch.0).unwrap();
+        let tiny = Limits { raw: 1, ..LIMITS };
+        assert!(failure(&store, tiny).contains("bounded raw scan"));
+        touch(&directory, "salvage-target-1");
+        touch(&directory, "salvage-target-2");
+        let tiny = Limits {
+            relevant: 1,
+            ..LIMITS
+        };
+        assert!(failure(&store, tiny).contains("bounded relevant scan"));
+        std::fs::remove_file(directory.join("salvage-target-1")).unwrap();
+        std::fs::remove_file(directory.join("salvage-target-2")).unwrap();
+        publish(&directory, "salvage-target-1.patch", "target", "target");
+        publish(&directory, "salvage-target-2.patch", "target", "target");
+        let tiny = Limits {
+            sidecars: 1,
+            ..LIMITS
+        };
+        assert!(failure(&store, tiny).contains("bounded sidecar scan"));
+        // Each read is capped by the remaining total, not by a prior stat.
+        let tiny = Limits { bytes: 8, ..LIMITS };
+        assert!(failure(&store, tiny).contains("refused"));
+    }
+
+    #[test]
+    fn continuation_rejects_unpaired_relevant_provenance() {
+        let scratch = Scratch::new().unwrap();
+        let directory = scratch.0.join(".oms/salvage-provenance");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("proof.json"), br#"{"payload_sha256":"abc","records":[{"salvaged_from":{"task":"target","attempt":"attempt"}}]}"#).unwrap();
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(failure(&store, LIMITS).contains("provenance has no paired patch"));
+    }
+
+    fn publish(directory: &Path, name: &str, task: &str, claimed: &str) {
+        let from = serde_json::json!({"task":task,"attempt":"x"});
+        let payload = format!("diff --git a/{task} b/{task}\n");
+        let sha = crate::digest(payload.as_bytes());
+        let head = serde_json::json!({"salvaged_from":from,"salvaged_at":"now","payload_sha256":sha,"base_sha":"base","encoding_warnings":[]});
+        let body = format!("{PREFIX}{head}\n{}", payload);
+        std::fs::write(directory.join(name), &body).unwrap();
+        let path = format!(".oms/artifacts/delegate/{name}");
+        let mut meta = head.clone();
+        meta["salvaged_from"]["task"] = claimed.into();
+        meta["patch"] = path.into();
+        meta["patch_sha256"] = crate::digest(body.as_bytes()).into();
+        std::fs::write(directory.join(format!("{name}.json")), meta.to_string()).unwrap();
+        let proof_dir = directory
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("salvage-provenance");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        let proof = serde_json::json!({"schema":1,"payload_sha256":sha,"records":[{"salvaged_from":from,"base_sha":"base"}]});
+        std::fs::write(proof_dir.join(format!("{sha}.json")), proof.to_string()).unwrap();
+    }
+
+    #[test]
+    fn continuation_skips_only_proven_longer_task_pair() {
+        let scratch = Scratch::new().unwrap();
+        let directory = scratch.0.join(".oms/artifacts/delegate");
+        std::fs::create_dir_all(&directory).unwrap();
+        publish(&directory, "salvage-a-b-1.patch", "a-b", "a-b");
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            continuation_patch(&store, "a", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        // Header names a different task than the sidecar: tampered, not foreign.
+        publish(&directory, "salvage-a-b-2.patch", "other", "a-b");
+        assert!(
+            continuation_patch(&store, "a", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("header differs")
+        );
+        // A sidecar claiming an unrelated task is never skipped.
+        publish(&directory, "salvage-a-b-2.patch", "zzz", "zzz");
+        assert!(
+            continuation_patch(&store, "a", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("task differs")
+        );
+    }
+    #[test]
+    fn continuation_bounds_patch_bytes_for_foreign_prefix() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        publish(
+            &directory,
+            "salvage-target-long-1.patch",
+            "target-long",
+            "target-long",
+        );
+        let sidecar = std::fs::metadata(directory.join("salvage-target-long-1.patch.json"))
+            .unwrap()
+            .len() as usize;
+        let store = Store::open(&scratch.0).unwrap();
+        let limits = Limits {
+            bytes: sidecar + 4,
+            ..LIMITS
+        };
+        assert!(failure(&store, limits).contains("refused"));
+    }
+    #[test]
+    fn continuation_bounds_aggregate_patch_reads() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        publish(
+            &directory,
+            "salvage-target-long-1.patch",
+            "target-long",
+            "target-long",
+        );
+        publish(
+            &directory,
+            "salvage-target-longer-2.patch",
+            "target-longer",
+            "target-longer",
+        );
+        let bytes = |name: &str| std::fs::metadata(directory.join(name)).unwrap().len() as usize;
+        let budget = bytes("salvage-target-long-1.patch.json")
+            + bytes("salvage-target-long-1.patch")
+            + bytes("salvage-target-longer-2.patch.json")
+            + bytes("salvage-target-longer-2.patch")
+            - 1;
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            failure(
+                &store,
+                Limits {
+                    bytes: budget,
+                    ..LIMITS
+                }
+            )
+            .contains("refused")
+        );
+        assert!(
+            continuation_within(
+                &store,
+                "target",
+                "attempt",
+                Limits {
+                    bytes: budget + 2,
+                    ..LIMITS
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn continuation_rejects_foreign_pair_without_provenance() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        publish(
+            &directory,
+            "salvage-target-long-1.patch",
+            "target-long",
+            "target-long",
+        );
+        std::fs::remove_dir_all(scratch.0.join(".oms/salvage-provenance")).unwrap();
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(failure(&store, LIMITS).contains("refused"));
+    }
 }

@@ -107,6 +107,45 @@ impl ExecutionRequest {
         }
     }
 }
+/// One reserved Panel dispatch. This travels only over the controller's
+/// authenticated staged channel, independent of the provider environment.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchLaunch {
+    pub nonce: String,
+    pub repo: PathBuf,
+    pub execution: PathBuf,
+    pub room: String,
+    pub main: String,
+    pub main_attempt: String,
+    pub main_created: String,
+    pub main_provider: String,
+    pub member: String,
+    pub task: String,
+    pub provider: String,
+    pub membership_sha256: String,
+    pub reservation_sha256: String,
+    pub reservation_generation: [i128; 5],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchProcess {
+    pub pid: u32,
+    pub birth: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchProof {
+    pub launch: DispatchLaunch,
+    pub stage: DispatchProcess,
+    pub provider: DispatchProcess,
+    pub call: String,
+    pub attempt: String,
+    pub exit: i32,
+}
+
 /// In-process hosts can provide their existing supervised process reactor.
 pub trait PeerExecutor {
     fn execute(
@@ -277,6 +316,16 @@ pub trait Services: PeerExecutor {
         interrupted: &AtomicBool,
     ) -> Result<Value> {
         crate::results::finalize_snapshot(repo, request, self, interrupted)
+    }
+    fn dispatch_context(
+        &self,
+        command: NativeCommand,
+        request: &ExecutionRequest,
+        _launch: Option<&DispatchLaunch>,
+        interrupted: &AtomicBool,
+    ) -> Result<(CommandOutput, Option<DispatchProof>)> {
+        self.command_context(command, request, interrupted)
+            .map(|output| (output, None))
     }
     fn command_context(
         &self,

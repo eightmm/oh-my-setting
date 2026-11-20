@@ -569,7 +569,34 @@ fn branch_label(repo: Option<&Path>) -> String {
         None => String::new(),
     }
 }
-fn agy(v: &Value, ctx: &Context<'_>) -> String {
+fn agy_weekly_remaining(v: &Value, ctx: &Context<'_>) -> Option<String> {
+    let bucket = v.get("quota")?.get("gemini-weekly")?;
+    if !matches!(bucket.get("disabled"), None | Some(Value::Bool(false))) {
+        return None;
+    }
+    let fraction = bucket["remaining_fraction"].as_f64()?;
+    if !(0.0..=1.0).contains(&fraction) {
+        return None;
+    }
+    let reset = bucket["reset_time"].as_str().filter(|stamp| {
+        stamp.len() <= 64 && matches!(stamp.as_bytes().get(10), Some(b'T' | b't'))
+    })?;
+    let reset = chrono::DateTime::parse_from_rfc3339(reset).ok()?;
+    let now = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time());
+    let until = reset.signed_duration_since(now);
+    if until <= chrono::TimeDelta::zero() || until > chrono::TimeDelta::days(7) {
+        return None;
+    }
+    Some(match fraction {
+        0.0 => "0%".into(),
+        1.0 => "100%".into(),
+        n if n < 0.01 => "<1%".into(),
+        n if n > 0.99 => ">99%".into(),
+        n => format!("{}%", (100.0 * n + 0.5) as u32),
+    })
+}
+
+fn agy(v: &Value, unambiguous: bool, ctx: &Context<'_>) -> String {
     let mut parts = Vec::new();
     let model = &v["model"];
     let model = if model.is_object() {
@@ -588,6 +615,9 @@ fn agy(v: &Value, ctx: &Context<'_>) -> String {
     if let Some(p) = pct(&v["context_window"]["used_percentage"]) {
         parts.push(format!("ctx {p}%"));
     }
+    if unambiguous && let Some(remaining) = agy_weekly_remaining(v, ctx) {
+        parts.push(format!("Gemini weekly {remaining} left"));
+    }
     let cwd = first(v, &["cwd"]);
     let repo = root(
         if cwd.trim().is_empty() {
@@ -602,7 +632,25 @@ fn agy(v: &Value, ctx: &Context<'_>) -> String {
         parts.push(branch);
     }
     let mode = clean(&v["vim"]["mode"], "", 12, false);
-    let state = clean(&v["state"], "", 16, false);
+    let state = match v.get("agent_state") {
+        None => clean(&v["state"], "", 16, false),
+        Some(Value::String(state))
+            if unambiguous
+                && matches!(
+                    state.as_str(),
+                    "idle"
+                        | "working"
+                        | "tool_use"
+                        | "reviewing"
+                        | "authenticating"
+                        | "initializing"
+                        | "error"
+                ) =>
+        {
+            state.clone()
+        }
+        _ => String::new(),
+    };
     let mode = [mode, state]
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -686,16 +734,575 @@ pub fn run(name: &str, raw: &[u8], ctx: &Context<'_>) -> Output {
     if raw.len() > max {
         return empty();
     }
+    if name == "agy-statusline" {
+        // Only unambiguous JSON can supply the current AGY fields.
+        let (value, unambiguous) = match strict_document(raw) {
+            Ok(value) => (Some(value), true),
+            Err(_) => (document(raw), false),
+        };
+        return value.map_or_else(empty, |value| {
+            out(format!("{}\n", agy(&value, unambiguous, ctx)))
+        });
+    }
     let Some(v) = document(raw) else {
         return empty();
     };
     if name == "claude-subagent-statusline" {
         out(subagent(&v))
-    } else if name == "agy-statusline" {
-        out(format!("{}\n", agy(&v, ctx)))
     } else {
         let line = main_line(&v, ctx);
         context_cache(&v);
+        #[cfg(target_os = "linux")]
+        if name == "claude-statusline" {
+            let _ = local_observation::record(&v, raw, ctx.source);
+        }
         out(format!("{line}\n"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod local_observation {
+    use super::{Value, hash, json};
+    use oms_reference::process::{IdentitySource, NativeIdentity, Owner};
+    use rustix::fd::OwnedFd;
+    use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, StatxFlags};
+    use rustix::process::{getegid, getuid};
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Component, Path, PathBuf};
+
+    const SWITCH: &str = "OMS_PANEL_CLAUDE_OBSERVATION";
+    const AUTO_SWITCH: &str = "OMS_PANEL_CLAUDE_AUTO_OBSERVATION";
+    const SLOT: &str = ".oms-claude-weekly-candidate.json";
+    const AUTO_SLOT: &str = ".oms-claude-auto-weekly.json";
+    const DIR: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+    const OVERRIDES: &[&str] = &[
+        concat!("ANTHROPIC_API_", "KEY"),
+        concat!("ANTHROPIC_AUTH_", "TOKEN"),
+        concat!("CLAUDE_CODE_OAUTH_", "TOKEN"),
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    ];
+
+    pub(super) fn record(input: &Value, raw: &[u8], oms_source: &Path) -> Option<()> {
+        let pinned = std::env::var_os(SWITCH);
+        let auto = std::env::var_os(AUTO_SWITCH);
+        let (marker, auto) = match (pinned.as_deref(), auto.as_deref()) {
+            (Some(pinned), None) => (pinned.to_str()?, None),
+            (None, Some(auto)) => {
+                let (launch, home) = auto.to_str()?.split_once(':')?;
+                if !hex64(launch) {
+                    return None;
+                }
+                (home, Some(launch))
+            }
+            _ => return None,
+        };
+        if !hex64(marker)
+            || OVERRIDES
+                .iter()
+                .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+        {
+            return None;
+        }
+        let validated;
+        let input = if auto.is_some() {
+            validated = crate::common::strict_document(raw).ok()?;
+            &validated
+        } else {
+            input
+        };
+        let home = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR")?);
+        let id = input["session_id"].as_str().filter(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })?;
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|t| t.as_secs_f64())
+        };
+        let week = &input["rate_limits"]["seven_day"];
+        let used = week["used_percentage"]
+            .as_f64()
+            .filter(|n| (0.0..=100.0).contains(n))?;
+        let reset = week["resets_at"].as_f64()?;
+        let in_window = |at| reset > at && reset <= at + 7.0 * 86400.0;
+        let callback_observed_at = now()?;
+        if !in_window(callback_observed_at) {
+            return None;
+        }
+        let dir = open_home(&home, marker)?;
+        let parent = NativeIdentity.foreground_parent().ok()?;
+        let auto_value = auto.map(|launch| format!("{launch}:{marker}"));
+        let source = |dir: &OwnedFd| {
+            if NativeIdentity.foreground_parent().ok()? != parent {
+                return None;
+            }
+            let proves = |owner: &Owner| {
+                proves_callback(owner, dir, id, auto.is_some())
+                    && auto_value
+                        .as_deref()
+                        .is_none_or(|value| auto_parent_scope(owner, &home, value))
+            };
+            if proves(&parent) {
+                return Some(parent.clone());
+            }
+            let native = shell_parent(&parent, oms_source)?;
+            proves(&native).then_some(native)
+        };
+        let owner = source(&dir)?;
+        let process = hash(format!("claude-process\0{}\0{}", owner.pid, owner.birth));
+        let slot = if auto.is_some() { AUTO_SLOT } else { SLOT };
+        fs::flock(&dir, fs::FlockOperation::NonBlockingLockExclusive).ok()?;
+        match fs::statat(&dir, slot, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => {
+                let old = read_slot(&dir, slot, 1024, false)?;
+                let prior = if auto.is_some() {
+                    crate::common::strict_document(&old).ok()?
+                } else {
+                    crate::common::document(&old)?
+                };
+                let blocked = if auto.is_some() {
+                    let previous = &prior["observation"];
+                    // Two live launches can share a home. Keep the first active window,
+                    // and let the reader's exact launch proof determine who can use it.
+                    !prior["launch"].as_str().is_some_and(hex64)
+                        || previous["schema"] != 1
+                        || previous["home"] != marker
+                        || !previous["resets_at"]
+                            .as_f64()
+                            .is_some_and(|reset| reset <= callback_observed_at)
+                } else {
+                    prior["schema"] != 1
+                        || (prior["home"] == marker
+                            && prior["resets_at"]
+                                .as_f64()
+                                .is_some_and(|reset| reset > callback_observed_at))
+                };
+                if blocked {
+                    return None;
+                }
+            }
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return None,
+        }
+        if source(&dir)? != owner || !in_window(now()?) {
+            return None;
+        }
+        open_home(&home, marker)?;
+        let observation = json!({"schema":1,"home":marker,"process":process,
+            "session":hash(format!("claude-session\0{id}")),"weekly_used":used,"resets_at":reset,
+            "callback_observed_at":callback_observed_at});
+        let record = match auto {
+            Some(launch) => json!({"launch":launch, "observation":observation}),
+            None => observation,
+        };
+        write_slot(&dir, slot, &serde_json::to_vec(&record).ok()?)
+    }
+
+    fn hex64(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    fn open_home(home: &Path, expected: &str) -> Option<OwnedFd> {
+        let mut dir = fs::open("/", DIR, Mode::empty()).ok()?;
+        let mut parts = home.components();
+        if parts.next()? != Component::RootDir {
+            return None;
+        }
+        for part in parts {
+            let Component::Normal(name) = part else {
+                return None;
+            };
+            dir = fs::openat(&dir, name, DIR, Mode::empty()).ok()?;
+        }
+        (mounted_identity(&dir).as_deref() == Some(expected)).then_some(dir)
+    }
+
+    fn mounted_identity(dir: &OwnedFd) -> Option<String> {
+        let mask = StatxFlags::BASIC_STATS | StatxFlags::BTIME | StatxFlags::MNT_ID;
+        let stat = fs::statx(dir, "", AtFlags::EMPTY_PATH, mask).ok()?;
+        if stat.stx_mask & mask.bits() != mask.bits()
+            || stat.stx_uid != getuid().as_raw()
+            || stat.stx_mode & 0o022 != 0
+            || stat.stx_ino == 0
+            || stat.stx_btime.tv_sec <= 0
+            || stat.stx_mnt_id == 0
+        {
+            return None;
+        }
+        Some(hash(format!(
+            "claude-home\0{}\0{}\0{}\0{}\0{}\0{}",
+            stat.stx_dev_major,
+            stat.stx_dev_minor,
+            stat.stx_ino,
+            stat.stx_btime.tv_sec,
+            stat.stx_btime.tv_nsec,
+            stat.stx_mnt_id
+        )))
+    }
+
+    fn proc_bytes(pid: u32, leaf: &str, cap: u64) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        File::open(format!("/proc/{pid}/{leaf}"))
+            .ok()?
+            .take(cap + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= cap).then_some(bytes)
+    }
+
+    fn auto_parent_scope(owner: &Owner, home: &Path, expected: &str) -> bool {
+        let read = || {
+            let env = proc_bytes(owner.pid, "environ", 256 * 1024)?;
+            let fields = || env.split(|b| *b == 0);
+            let exact = |prefix: &[u8], expected: &[u8]| {
+                let mut values = fields().filter_map(|entry| entry.strip_prefix(prefix));
+                values.next() == Some(expected) && values.next().is_none()
+            };
+            Some(
+                exact(b"OMS_PANEL_CLAUDE_AUTO_OBSERVATION=", expected.as_bytes())
+                    && exact(b"CLAUDE_CONFIG_DIR=", home.as_os_str().as_bytes())
+                    && !fields().any(|entry| {
+                        entry.starts_with(b"OMS_PANEL_CLAUDE_OBSERVATION=")
+                            || entry.iter().position(|b| *b == b'=').is_some_and(|pos| {
+                                pos + 1 < entry.len()
+                                    && OVERRIDES.iter().any(|key| key.as_bytes() == &entry[..pos])
+                            })
+                    })
+                    && NativeIdentity.owner_identity(owner.pid).ok()?.eq(owner),
+            )
+        };
+        read() == Some(true)
+    }
+
+    fn shell_parent(shell: &Owner, oms_source: &Path) -> Option<Owner> {
+        let image = std::fs::metadata(format!("/proc/{}/exe", shell.pid)).ok()?;
+        if !["/bin/sh", "/bin/bash"].into_iter().any(|path| {
+            std::fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == (image.dev(), image.ino()))
+        }) {
+            return None;
+        }
+        let args = proc_bytes(shell.pid, "cmdline", 4096)?;
+        let args: Vec<_> = args.strip_suffix(&[0])?.split(|b| *b == 0).collect();
+        let [_, b"-c", cmd] = args.as_slice() else {
+            return None;
+        };
+        let words = shlex::split(std::str::from_utf8(cmd).ok()?)?;
+        let [path, verb] = words.as_slice() else {
+            return None;
+        };
+        if verb != "claude-statusline" || !Path::new(path).is_absolute() {
+            return None;
+        }
+        let invoked = std::fs::metadata(path).ok()?;
+        if ![
+            PathBuf::from("/proc/self/exe"),
+            oms_source.join("scripts/oms"),
+        ]
+        .iter()
+        .any(|launcher| {
+            std::fs::metadata(launcher).is_ok_and(|current| {
+                (current.dev(), current.ino()) == (invoked.dev(), invoked.ino())
+            })
+        }) {
+            return None;
+        }
+        let stat = proc_bytes(shell.pid, "stat", 4096)?;
+        let stat = std::str::from_utf8(&stat).ok()?;
+        let pid = stat
+            .rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()?;
+        let owner = NativeIdentity.owner_identity(pid).ok()?;
+        (NativeIdentity.owner_identity(shell.pid).ok()? == *shell).then_some(owner)
+    }
+
+    fn proves_callback(owner: &Owner, dir: &OwnedFd, session: &str, strict: bool) -> bool {
+        let proof = || {
+            for leaf in ["root", "ns/mnt"] {
+                let current = std::fs::metadata(format!("/proc/self/{leaf}")).ok()?;
+                let native = std::fs::metadata(format!("/proc/{}/{leaf}", owner.pid)).ok()?;
+                if (current.dev(), current.ino()) != (native.dev(), native.ino()) {
+                    return None;
+                }
+            }
+            // The switch filters callbacks. The Board separately checks the live process environment.
+            let sessions = fs::openat(dir, "sessions", DIR, Mode::empty()).ok()?;
+            let filename = format!("{}.json", owner.pid);
+            let bytes = read_slot(&sessions, &filename, 16 * 1024, true)?;
+            let record = if strict {
+                crate::common::strict_document(&bytes).ok()?
+            } else {
+                crate::common::document(&bytes)?
+            };
+            (record["pid"].as_u64() == Some(u64::from(owner.pid))
+                && record["procStart"].as_str() == Some(owner.birth.rsplit_once(':')?.1)
+                && record["sessionId"].as_str() == Some(session)
+                && NativeIdentity.owner_identity(owner.pid).ok()? == *owner)
+                .then_some(())
+        };
+        proof().is_some()
+    }
+
+    fn read_slot(dir: &OwnedFd, name: &str, cap: u64, session: bool) -> Option<Vec<u8>> {
+        let uid = getuid().as_raw();
+        let parent = fs::fstat(dir).ok()?;
+        if parent.st_uid != uid || parent.st_mode & 0o022 != 0 {
+            return None;
+        }
+        let fd = fs::openat(
+            dir,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
+            Mode::empty(),
+        )
+        .ok()?;
+        let before = fs::fstat(&fd).ok()?;
+        if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
+            || before.st_uid != uid
+            || before.st_nlink != 1
+            || before.st_mode & 0o002 != 0
+            || (before.st_mode & 0o020 != 0
+                && !(session && parent.st_mode & 0o077 == 0 && before.st_gid == getegid().as_raw()))
+            || (!session && before.st_mode & 0o777 != 0o600)
+        {
+            return None;
+        }
+        let file = File::from(fd);
+        let mut bytes = Vec::new();
+        (&file).take(cap + 1).read_to_end(&mut bytes).ok()?;
+        let after = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        let same = |a: &fs::Stat, b: &fs::Stat| {
+            (
+                a.st_dev,
+                a.st_ino,
+                a.st_mode,
+                a.st_uid,
+                a.st_nlink,
+                a.st_size,
+                a.st_ctime,
+                a.st_ctime_nsec,
+            ) == (
+                b.st_dev,
+                b.st_ino,
+                b.st_mode,
+                b.st_uid,
+                b.st_nlink,
+                b.st_size,
+                b.st_ctime,
+                b.st_ctime_nsec,
+            )
+        };
+        (bytes.len() as u64 <= cap && bytes.len() as i64 == before.st_size && same(&before, &after))
+            .then_some(bytes)
+    }
+
+    fn write_slot(dir: &OwnedFd, slot: &str, bytes: &[u8]) -> Option<()> {
+        let suffix = hash(crate::common::random::<16>().ok()?);
+        let tmp = format!(".oms-claude-observation-{}", &suffix[..24]);
+        let mode = Mode::from_raw_mode(0o600);
+        let fd = fs::openat(
+            dir,
+            tmp.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode,
+        )
+        .ok()?;
+        let mut file = File::from(fd);
+        let written = fs::fchmod(&file, mode).is_ok()
+            && file.write_all(bytes).is_ok()
+            && file.sync_all().is_ok()
+            && fs::renameat(dir, tmp.as_str(), dir, slot).is_ok();
+        if !written {
+            let _ = fs::unlinkat(dir, tmp.as_str(), AtFlags::empty());
+        }
+        written.then_some(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        #[test]
+        fn local_weekly_callback_checks_native_parent_and_keeps_first_observation() {
+            const CASE: &str = "OMS_LOCAL_WEEKLY_FIXTURE";
+            const SESSION: &str = "fixture-native-session";
+            const TEST: &str = "statusline::local_observation::tests::local_weekly_callback_checks_native_parent_and_keeps_first_observation";
+            let run = |case: &str, dir: &Path, marker: &str, gateway: bool| {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", TEST])
+                    .env_clear()
+                    .env(CASE, case)
+                    .env(
+                        if marker.contains(':') {
+                            AUTO_SWITCH
+                        } else {
+                            SWITCH
+                        },
+                        marker,
+                    )
+                    .env("CLAUDE_CONFIG_DIR", dir);
+                if gateway {
+                    command.env("CLAUDE_CODE_USE_BEDROCK", "1");
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "synthetic callback {case}: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+            };
+            if let Ok(case) = std::env::var(CASE) {
+                if matches!(case.as_str(), "auto-owner" | "contending-owner") {
+                    let dir = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap());
+                    let marker = std::env::var(AUTO_SWITCH).unwrap();
+                    let pid = std::process::id();
+                    let owner = NativeIdentity.owner_identity(pid).unwrap();
+                    let start = owner.birth.rsplit_once(':').unwrap().1;
+                    std::fs::write(
+                        dir.join(format!("sessions/{pid}.json")),
+                        json!({"pid":pid,"procStart":start,"sessionId":SESSION}).to_string(),
+                    )
+                    .unwrap();
+                    if case == "contending-owner" {
+                        run("contended", &dir, &marker, false);
+                        return;
+                    }
+                    for case in ["duplicate-key", "elapsed", "future", "other-session"] {
+                        run(case, &dir, &marker, false);
+                    }
+                    run("override", &dir, &marker, true);
+                    assert!(!dir.join(AUTO_SLOT).exists());
+                    run("valid", &dir, &marker, false);
+                    let path = dir.join(AUTO_SLOT);
+                    let first = std::fs::read(&path).unwrap();
+                    let inode = std::fs::metadata(&path).unwrap().ino();
+                    run("duplicate", &dir, &marker, false);
+                    assert_eq!(std::fs::read(&path).unwrap(), first);
+                    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+                    return;
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let reset = match case.as_str() {
+                    "elapsed" => now - 1,
+                    "future" => now + 8 * 86400,
+                    _ => now + 3600,
+                };
+                let id = if case == "other-session" {
+                    "different-session"
+                } else {
+                    SESSION
+                };
+                let raw = json!({"session_id":id,"rate_limits":{"seven_day":{"used_percentage":14.0,"resets_at":reset}}});
+                let mut bytes = raw.to_string();
+                if case == "duplicate-key" {
+                    bytes.insert_str(1, &format!(r#""session_id":"{SESSION}","#));
+                }
+                assert_eq!(
+                    record(&raw, bytes.as_bytes(), Path::new("/unused")).is_some(),
+                    case == "valid"
+                );
+                return;
+            }
+            struct Temp(PathBuf);
+            impl Drop for Temp {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let temp = Temp(std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "oms-weekly-{}",
+                &hash(crate::common::random::<16>().unwrap())[..24]
+            )));
+            let pid = std::process::id();
+            let parent = NativeIdentity.owner_identity(pid).unwrap();
+            let start = parent.birth.rsplit_once(':').unwrap().1;
+            let native = json!({"pid":pid,"procStart":start,"sessionId":SESSION});
+            let fixture = |name| {
+                let home = temp.0.join(name);
+                let sessions = home.join("sessions");
+                std::fs::create_dir_all(&sessions).unwrap();
+                std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+                std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                std::fs::write(sessions.join(format!("{pid}.json")), native.to_string()).unwrap();
+                let fd = fs::open(&home, DIR, Mode::empty()).unwrap();
+                (home, mounted_identity(&fd))
+            };
+            let (home, Some(identity)) = fixture("one") else {
+                return;
+            };
+            let (other, Some(other_identity)) = fixture("two") else {
+                return;
+            };
+            for case in ["elapsed", "future", "other-session"] {
+                run(case, &home, &identity, false);
+            }
+            run("override", &home, &identity, true);
+            run("wrong-home", &other, &identity, false);
+            assert!(!home.join(SLOT).exists() && !other.join(SLOT).exists());
+            run("valid", &home, &identity, false);
+            let stored = std::fs::read(home.join(SLOT)).unwrap();
+            let inode = std::fs::metadata(home.join(SLOT)).unwrap().ino();
+            run("duplicate", &home, &identity, false);
+            assert_eq!(std::fs::metadata(home.join(SLOT)).unwrap().ino(), inode);
+            assert_eq!(std::fs::read(home.join(SLOT)).unwrap(), stored);
+            assert_eq!(
+                std::fs::metadata(home.join(SLOT)).unwrap().mode() & 0o777,
+                0o600
+            );
+            assert!(!String::from_utf8(stored).unwrap().contains(SESSION));
+            run("valid", &other, &other_identity, false);
+            let second =
+                crate::common::document(&std::fs::read(other.join(SLOT)).unwrap()).unwrap();
+            assert_eq!(second["home"], other_identity);
+
+            let auto = format!("{}:{identity}", "a".repeat(64));
+            run("spoofed-child", &home, &auto, false);
+            run("wrong-home", &other, &auto, false);
+            let path = home.join(AUTO_SLOT);
+            assert!(!path.exists() && !other.join(AUTO_SLOT).exists());
+            run("auto-owner", &home, &auto, false);
+            let first = std::fs::read(&path).unwrap();
+            let meta = std::fs::metadata(&path).unwrap();
+            assert_eq!(meta.mode() & 0o777, 0o600);
+            let receipt = crate::common::strict_document(&first).unwrap();
+            assert_eq!(receipt["launch"], "a".repeat(64));
+            assert_eq!(receipt["observation"]["weekly_used"], 14.0);
+            assert!(!String::from_utf8_lossy(&first).contains(SESSION));
+            run(
+                "contending-owner",
+                &home,
+                &format!("{}:{identity}", "b".repeat(64)),
+                false,
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), first);
+            assert_eq!(std::fs::metadata(&path).unwrap().ino(), meta.ino());
+            assert_eq!(std::fs::metadata(home.join(SLOT)).unwrap().ino(), inode);
+        }
     }
 }

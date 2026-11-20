@@ -292,19 +292,30 @@ pub fn project_values(rows: &[V]) -> Result<BTreeMap<String, V>, String> {
 #[derive(Default)]
 pub(crate) struct Projection {
     pub(crate) attempts: BTreeMap<String, V>,
+    pub(crate) order: Vec<String>,
     events: HashSet<String>,
     keys: HashSet<(String, String)>,
-    count: usize,
+    pub(crate) count: usize,
 }
 impl Projection {
     pub(crate) fn extend(&mut self, rows: &[V]) -> Result<(), String> {
+        self.extend_checked(rows, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    pub(crate) fn extend_checked(
+        &mut self,
+        rows: &[V],
+        interrupted: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), String> {
         let Self {
             attempts,
+            order,
             events,
             keys,
             count,
         } = self;
         for row in rows {
+            crate::checkpoint(interrupted)?;
             *count += 1;
             let index = *count - 1;
             validate(row, index + 1)?;
@@ -371,6 +382,7 @@ impl Projection {
                 ] {
                     attempt.set(k, row.default(k, ""));
                 }
+                order.push(key.clone());
                 attempts.insert(key, attempt);
                 continue;
             }
@@ -431,7 +443,22 @@ impl Projection {
                 a.set("refs", refs);
             }
         }
+        crate::checkpoint(interrupted)?;
         Ok(())
+    }
+
+    pub(crate) fn ordered_attempts(&self) -> Vec<V> {
+        self.order
+            .iter()
+            .filter_map(|key| self.attempts.get(key).cloned())
+            .collect()
+    }
+
+    pub(crate) fn into_ordered_attempts(mut self) -> Vec<V> {
+        self.order
+            .into_iter()
+            .filter_map(|key| self.attempts.remove(&key))
+            .collect()
     }
 }
 pub fn select<'a>(attempts: &'a BTreeMap<String, V>, id: &str) -> Option<&'a V> {

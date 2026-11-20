@@ -34,19 +34,17 @@ symlink나 hard link인 `~/.claude/CLAUDE.md`를 건너뛴다고 적는다. 기�
 `OH_MY_SETTING_LINK_MODE=copy`는 일반 파일로 설치하고 `oms doctor`가 원본과의 일치를 검사한다.
 OMS는 Cowork 표면을 시험하지 않았다.
 
-Python 요구 사항은 상한 없는 3.11 이상이며 `tools.lock.json`에 고정된 3.12
-런타임을 설치한다. Ubuntu 20.04/22.04나 macOS Command Line Tools의 오래된
-시스템 Python은 바꾸지 않는다.
+OMS lifecycle 명령은 Rust 네이티브 바이너리로 실행한다. 설치와 예약 업데이트는
+전용 Python 인터프리터를 만들거나 요구하지 않는다. 검증된 staged payload가 없는
+설치·업데이트는 선택한 체크아웃의 `rust-toolchain.toml`에 선언된 도구 체인과
+Cargo로 빌드하므로 먼저 rustup으로 Rust를 준비한다. Native·Shell 빌드는 Cargo
+자식 프로세스에서만 상속된 `RUSTUP_TOOLCHAIN`을 제거하며 호출자의 환경은 유지한다.
+`--locked`로 `Cargo.lock`을
+유지하면서 누락된 의존성을 받을 수 있다. 도구 체인과 의존성이 이미 캐시에
+있을 때만 `CARGO_NET_OFFLINE=true`로 오프라인 빌드를 선택한다.
 
-시스템 `python3`가 없거나 3.11 미만이면 설치기는 고정 버전 uv를 받아 sha256을
-확인하고, `tools.lock.json`의 Python을 직접 만든 뒤 관리형 `python3` shim이
-그것을 가리키게 한다. Alpine 같은 musl 기반 Linux는 지원하지 않는다. 고정된
-빌드가 glibc를 요구하기 때문이다.
-
-provider 앱의 PATH가 `/usr/bin:/bin`뿐이어도 hook launcher는 관리형
-인터프리터를 선택한다. Antigravity MCP 등록은 해석된 인터프리터의 절대 경로를
-저장한다. 관리형 런타임이 없어도 오래된 시스템 Python으로 제거와 lifecycle
-도움말을 실행할 수 있다.
+관리 도구의 배포 대상은 amd64/arm64의 glibc Linux와 macOS다. Alpine 같은
+musl 기반 Linux는 이 배포 대상에 포함되지 않는다.
 
 Ubuntu 24.04+에서 AppArmor가 비특권 user namespace를 제한하면 `oms doctor`가
 Codex sandbox 실행 실패 가능성을 경고한다. AppArmor 프로필에서 `bwrap`의
@@ -60,7 +58,7 @@ WSL1이 아닌 **WSL2**를 사용한다. 저장소와 `~/.oh-my-setting`, WSL �
 WSL 안에 설치하고 실행하며 위 Linux 요구 사항을 따른다.
 네이티브 Windows(Git Bash/MSYS2/Cygwin)는 지원하지 않으며 OMS 실행을 거부한다.
 `scripts/install-tools.sh`와 `scripts/doctor.sh`를 직접 실행해도 거부하며,
-`tools.lock.json`에는 Windows 페이로드가 고정되어 있지 않다.
+관리 도구의 배포 목록에는 네이티브 Windows 대상이 없다.
 
 <details>
 <summary>기존 네이티브 Windows 설치 제거 절차</summary>
@@ -83,13 +81,13 @@ bash scripts/uninstall.sh
 
 ## 프로필과 도구
 
-기본 설치는 `core` capability를 고른다. 하네스, Bash, Git, Python, 코딩 agent
+기본 설치는 `core` capability를 고른다. 하네스, Bash, Git, OMS 네이티브 런타임, 코딩 agent
 하나다. GitHub CLI, Notion CLI, 세 provider 전부, 연구 도구, 클러스터 도구는
 필수가 아니다. `full` 호환 프로필은 예전의 전체 provider·GitHub·Notion·연구
 도구 구성이 필요한 머신에만 쓴다.
 
 프로필은 `core`, `council`, `github`, `notion`, `research`, `hpc`,
-`container`, `remote`, `full`이다. 선택형 설치기는 기존 잠금 다운로드 절차를
+`container`, `remote`, `full`이다. 선택형 설치기는 기존 검증 다운로드 절차를
 그대로 쓰고, 요청한 프로필을 비공개 receipt에 기록해 업데이트 때 그 도구
 묶음만 다시 적용한다. capability receipt가 없는 기존 설치는 agent가 명시적으로
 옮기기 전까지 예전의 전체 도구 업데이트 경로를 유지한다.
@@ -102,114 +100,113 @@ bash scripts/uninstall.sh
 | `--reapply` | 기록된 선택을 그대로 다시 적용한다. |
 | `--plan` | 변경 없이 미리 확인한다. |
 
+일반 재설치는 저장된 프로필·주 provider·누락 허용 정책을 유지한다. 옵션 없는
+`install-tools`, `--only`, `--providers`는 도구만 처리하고 이 선택을 덮어쓰지
+않는다. 명시적 profile/full/add/reapply 작업이 선택을 기록한다. Receipt 경로는
+`--receipt`, `OMS_CAPABILITY_RECEIPT`, 기본 OMS 설정 경로 순서로 선택하며 상대
+경로는 호출 디렉터리를 기준으로 한다. 업데이트는 작업 디렉터리를 바꾸기 전에
+선택된 receipt의 경로를 새 프로세스에 전달한다.
+업데이트할 때 명시한 receipt가 없거나 안전하지 않으면 오류를 내며 전체 도구
+갱신으로 바꾸지 않는다.
+
 `OH_MY_SETTING_MCP=0`, `OH_MY_SETTING_AGY_PLUGIN=0`은 각각의 연동 설치를
 건너뛴다. 설치 receipt에 두 선택을 기록하므로 환경 변수가 없는 업데이트와
 예약 실행도 유지한다. `oms update`에 환경 변수를 명시하면 기록된 선택을
 바꾼다. Antigravity는 `auto`(기본: 있을 때 설치), `1`(필수)도 받는다.
 
-## Provider 설치와 갱신
+## 도구 설치와 갱신
 
-없는 Git·tar·gzip·find를 설치할 때를 빼면 root가 필요 없다. 관리 도구의
-부트스트랩 버전, 플랫폼 URL, 무결성 값은 `tools.lock.json`에 고정되어 있다.
-새 provider 설치는 안정판을 찾아 비공개 `provider-tools.lock.json` 스냅샷에
-기록한다. 고정 페이로드는 amd64/arm64의 Linux와 macOS를 다룬다. 이전
-스냅샷이나 명시적 lock에 남은 퇴역 Windows 대상 행은 무시한다. 새 Claude는
-공식 HTTPS manifest의 SHA-256으로
-네이티브 바이너리를 검증한 뒤 `install VERSION`을 실행한다. manifest에
-OMS가 GPG 서명을 별도로 검증하지는 않는다. 새 Codex와 agy도 기존 검증 설치
-경로를 유지한다.
+없는 Git·tar·gzip·find를 설치할 때를 빼면 root가 필요 없다. 관리 도구의 이름과
+배포처는 네이티브 설치기에 정의하고, 누락된 도구를 설치하거나 업그레이드할 때
+공식 배포처에서 버전을 조회한다. 저장소에 기본 버전 lock을 두지 않는다.
+일반 설치는 이미 있는 도구를 유지하고, `oms update`는 `--no-tools`를 지정하지
+않으면 선택된 도구 묶음을 갱신한다.
 
-인식된 vendor 설치 경로의 동작은 다음과 같다.
-
-| Provider | 일반 갱신 | 명시적 lock 적용 |
+| 도구 | 기본 릴리스 선택 | 페이로드 검증 |
 |---|---|---|
-| Claude | `claude update` | `claude install VERSION` 후 정확한 버전 확인 |
-| Codex(네이티브) | `codex update` | 버전 불일치 시 갱신 전 거부; 일치하면 유지 |
-| agy(네이티브) | `agy update`; 기본 채널은 vendor가 관리 | pin 불일치·OMS 관리 바이트 변조 시 거부; 일치하면 유지 |
-| Pi | `install-tools.sh --providers`에서만 `pi update self` | Pi 항목이 없어 갱신 생략 |
+| Node | 공식 배포 인덱스의 최신 LTS | 버전이 명시된 archive와 `SHASUMS256.txt`의 SHA-256 |
+| uv | `astral-sh/uv`의 최신 정식 GitHub 릴리스 | 현재 호스트의 정확한 asset과 릴리스 SHA-256 digest |
+| gh | `cli/cli`의 최신 정식 GitHub 릴리스 | 현재 호스트의 정확한 asset과 릴리스 SHA-256 digest |
+| Claude·Codex·ntn | 각 npm 패키지의 `latest` dist-tag | 패키지 이름·정확한 버전·SHA-512 SRI, Claude/Codex의 native 패키지도 동일 검증 |
+| Antigravity | 공식 updater의 현재 호스트 manifest | 버전이 명시된 URL과 SHA-512 |
 
-> Pi는 이미 설치된 경우에만 갱신한다. 전체 도구 설치와 프로필 재적용은
-> Pi를 갱신하지 않는다. 수동 `--no-tools`는 도구 갱신을 건너뛴다.
+Node는 prerelease나 가장 높은 Current 메이저가 아닌 LTS를 따른다. 현재 호스트의
+페이로드만 준비되어 있으면 되므로 다른 플랫폼의 배포 지연이 이 호스트를 막지
+않는다. metadata 조회 실패나 잘못된 응답은 오류로 보고하며 과거 기록의 버전으로
+대체하지 않는다. 이미 설치된 버전이 조회된 버전보다 새로우면 기본 업데이트가
+이를 낮추지 않는다.
 
-<details>
-<summary>상세 갱신 규칙: 무결성, 중단 복구, Claude migration과 사본 점검</summary>
+OMS data 디렉터리의 비공개 `tool-releases.json`에는 조회한 버전, URL 또는 패키지
+좌표, 무결성 값과 조회 시각을 기록한다. 다음 업데이트를 고정하는 정책이나 모든
+기록된 버전의 설치 증명은 아니다. 예전 `provider-tools.lock.json`의 provider 관측
+기록은 가져올 수 있지만 다음 버전 선택에는 쓰지 않는다. `oms doctor --tool-lock`은
+이 기록 또는 명시적 pin의 형식을 검사하며 upstream 조회나 설치 바이트 검증을
+뜻하지 않는다. fingerprint에는 조회 시각을 반영하지 않는다.
 
-인식된 Claude, Codex, agy는 각 vendor의 update 명령으로 갱신한다.
-Pi 갱신은 `install-tools.sh --providers`에서만 `pi update self`로 실행한다.
-전체 도구 설치와 프로필 재적용은 Pi를 갱신하지 않는다. OMS는 vendor 경로 유지, `--version` 성공,
-버전 하락 여부를 확인하며 스냅샷 버전과 같을 것을 요구하지 않는다.
-Pi는 이미 설치된 경우에만 갱신한다. 예약 업데이트도 설치된 provider를
-갱신하며, 선택적 npm provider는 게시된 지 14일 이상인 안정판을 사용한다.
-npm lifecycle 스크립트는 실행될 수 있고 git/URL 의존성에는 이 기간이
-적용되지 않는다. 수동 `--no-tools`는 도구 갱신을 건너뛴다.
+정확한 버전이 필요하면 선택한 도구와 현재 호스트의 페이로드 metadata가 든
+schema-2 JSON 파일을 `OH_MY_SETTING_TOOL_LOCK`으로 지정한다. 상대 경로는 명령의
+현재 작업 디렉터리를 기준으로 해석한다. 명시적 pin은 검증 후 이전 버전도 선택할
+수 있다. 환경 변수 지정을 없애면 저장소 수정 없이 기본 upstream 조회로 돌아간다.
 
+인식된 vendor-native Claude·Codex·Antigravity 설치는 vendor의 update 명령을
+유지한다. OMS는 버전 조회 성공과 버전이 낮아지지 않았는지 확인하며 vendor 관리
+바이트가 과거 OMS 관측 기록과 일치한다고 주장하지 않는다. 새 Claude/Codex 관리
+페이로드는 npm metadata와 패키지를 검증한 뒤 설치한다. `ntn`은 검증한 패키지의
+설치 스크립트를 실행할 수 있다. 명시적 pin은 기본 vendor update 명령 대신 정확한
+버전의 검증 페이로드 경로를 사용한다.
 
+OMS로 처음 설치한 Antigravity를 vendor updater에 넘길 때는 바이너리의 버전을
+조회하기 전에 기존 소유권 checksum sidecar를 검증한다. 버전 조회가 실패하면
+sidecar를 유지하고, 실제 updater를 시작하기 직전에 다시 검증한 뒤 제거한다.
+오래됐거나 안전하지 않은 sidecar는 오류로 남긴다.
+Vendor가 바꾼 바이너리가 OMS transaction 밖에 있으므로, 뒤이은 다른 도구의 실패가
+이전 sidecar를 되살리지 않는다. 명시적 pin으로 교체할 때는 계속 OMS 소유권을
+확인한다.
 
-#### 고정 버전과 무결성
+이미 설치된 Pi는 `oms install-tools --providers`에서만 `pi update self`로 갱신한다.
+그 밖에 인식되는 선택형 npm provider는 사용자가 소유하고 쓸 수 있는 global prefix에서
+현재 `latest` dist-tag를 사용한다. 14일 배포 지연이나 npm `--before` 제한은 없다.
+npm lifecycle 스크립트는 패키지 코드를 실행할 수 있다. 명시적 tool lock에는 이
+선택형 도구를 표현하는 항목이 없으므로 해당 갱신을 건너뛴다.
 
-명시한 `OH_MY_SETTING_TOOL_LOCK`이 있으면 Claude는 `claude install VERSION`으로
-고정하고 정확한 버전을 확인한다. 네이티브 Codex와 agy는 고정 버전과 다르면
-변경 전에 거부한다. 현재 lock에는 Pi 항목이 없어 명시적인 lock이 있으면
-안내 한 줄과 함께 Pi 갱신만 건너뛰고 성공으로 끝낸다. 기본 채널의 agy는
-lock으로 검증한 첫 설치 뒤 vendor가 갱신하며 소유 digest를 남기지 않는다.
-갱신은 `~/.local`과 `~/.local/bin`이 실제 디렉터리이고 기존 sidecar 형식이
-정상일 때만 sidecar를 지운다. 바이트 불일치는 경고 후 vendor 갱신을 진행하지만,
-잘못된 형식·링크·digest 읽기 오류·삭제 실패는 계속 거부한다.
-
-명시적 lock에서는 기존 OMS 소유 marker의 digest가 실행 전에 일치해야 한다.
-검증된 바이너리와 marker를 복원하거나 둘 다 보존한 뒤 프로필을 다시 적용한다.
-marker 없는 vendor 설치는 그대로 vendor 소유이며, pin이 같으면 marker를 만들지
-않고 유지한다.
-
-중단된 OMS 직접 설치의 잔여 상태는 고정 payload의 checksum을 검증한 뒤
-먼저 복구한다. 명시적 lock에서 OMS marker가 남아 있는 agy의 변조는 복구 근거가
-없으면 계속 거부한다. doctor는 provider/model 실행 전에 관리 도구를 검증한다.
-기본 채널의 검증 가능한 stale agy sidecar는 한 번 경고하고 선택된 도구의 probe를
-허용하지만, 잘못된 형식이나 그 밖의 무효한 소유권 근거는 실행을 건너뛴다.
-버전 명령은 PATH에서 선택된 CLI에만 실행한다. 추가 사본은 sidecar digest가
-일치해도 실행하지 않고 `not executed`로 표시한다. npm 버전은 패키지 metadata에서 읽는다.
-`digest` 상태는 `matched`, `unmarked`, `invalid`, `unknown`이며 바이트 확인
-결과를 나타낼 뿐 추가 사본의 실행을 허가하지 않는다.
-vendor 보관 버전은 PATH에 있어도 한 설치로 묶고 삭제 명령을 제안하지 않는다.
-줄 또는 필드 구분자가 들어간 항목은 이스케이프해서 unknown으로 표시하고 실행하지 않는다.
-무결성 오류로 버전 확인을 건너뛰면 `not probed`로 표시한다. 직접 설치 도구의
-중단된 트랜잭션 잔여 상태는 vendor 버전을 정상으로 판단하기 전에 보고한다.
-
-
-
-#### Claude migration과 추가 사본
-
-네이티브 versions 디렉터리가 없거나 비었거나 유효한 실행 파일이 없으면
-기존 npm/shim 경로를 유지한다. OMS 소유 Claude npm shim과 기존 네이티브 버전이 함께 있으면 최신 네이티브
-바이너리의 설치기로 launcher를 복원하고, shim에 기록된 prefix의 npm 사본만
-제거한다. 소유권을 증명할 수 없으면 변경 전에 거부하고 복구 방법을 알린다.
-vendor 설치 후 npm 정리 전에 중단되면 backup을 유지한다. 재실행은 PATH
-순서와 무관하게 네이티브 launcher를 직접 확인하고 재설치 없이 정리한다.
-활성 npm 루트의 Claude launcher는 `~/.local` prefix에서도 그대로 허용한다.
-
-
-#### 사본 점검과 정리
-
-`oms doctor`는 PATH, vendor 루트, 모든 nvm Node prefix의 사본을 나열하고
-선택된 경로, 채널, 버전과 중복 제거 명령을 표시한다. 정리 명령은 선택되지
-않은 npm 패키지나 외부 launcher만 대상으로 하며, alias는 버전 점검을 추가하지 않는다.
-제거와 복구는 vendor launcher나 루트를 지우지 않는다.
-
-</details>
-
-provider 의존성은 provider와 함께 정해진다. Codex와 Claude는 고정된 Node를
-포함하고 Antigravity는 포함하지 않는다. 새로 받은 파일은 쓰기 전에 검증한다.
-정확히 같은 버전의 기존 외부 CLI는 재사용하고 doctor가 버전만 확인된 것으로
-표시한다. 설치, 업데이트, 복구, 제거는 사용자 단위 수명주기 잠금 하나를
-공유한다.
+provider 의존성은 함께 선택한다. Claude·Codex·ntn에는 Node를 포함하며 `--only`에서
+Node를 뒤에 적어도 먼저 설치한다. Antigravity에는 포함하지 않는다. npm 기반 설치에는
+기존 Node뿐 아니라 작동하는 npm도 필요하며 다른 prefix의 정상 npm은 재사용한다.
+npm이 없거나 고장 나면 검증된 번들 도구를 준비하고, 이미 요구 버전을 만족하거나
+더 새로운 Node는 그대로 둔다. 다만 선택된 버전의 NVM 디렉터리가 이미 불완전하거나
+손상된 경우에는 소유권을 입증하지 못하는 파일을 교체하지 않고 거부한다. 해당
+디렉터리의 자동 복구는 아직 구현하지 않았다. 관리 파일 반영
+전에 다운로드와 패키지 이름·버전을 검증하며 설치·
+업데이트·복구·제거는 되돌릴 수 있는 lifecycle transaction을 공유한다. Vendor update
+명령의 복구는 vendor가 담당하며 해당 바이너리는 OMS 체크아웃 롤백 대상이 아니다.
 
 ## 업데이트
 
-설치와 예약 업데이트는 `tools.lock.json`에 고정된 전용 uv Python을 쓴다.
-시스템이나 프로젝트 Python은 부트스트랩일 뿐 타이머의 인터프리터가 아니다.
-자동 업데이트는 체크아웃의 로컬 수정을 보존하고 `blocked`로 보고한다. 개인
-정책은 추적되는 설치 트리 밖의 사용자 스킬에 둔다. systemd 설치는 로그아웃
-뒤에도 유지되는지 보고한다. 트리거를 설치할 때
+새 설치의 기본 추적 대상은 origin 저장소의 기본 브랜치를 따르는 `edge`다.
+명시한 `OH_MY_SETTING_REF`, `--ref`, 저장된 추적 선택은 유지한다.
+`--fallback-to-edge`가 성공하면 다음 업데이트도 `edge`를 따르도록 기록한다.
+Runtime edge 채널 적용은 설정한 브랜치의 추적을 유지하고, 검토한 stable 릴리스
+적용은 그 커밋을 고정한다. 채널 manifest가 없으면 stable은 명시적으로 승격하기
+전까지 미설정 상태다.
+
+네이티브 updater는 새 체크아웃의 Rust 도구 체인으로 incoming payload를 준비하고
+검사한 뒤 반영한다. 누락된 locked 의존성은 받을 수 있고 오프라인 실행은 호출자가
+명시적으로 선택한다. 자동 업데이트는 체크아웃의 로컬 수정을 보존하며 해당 실행을
+blocked/skipped로 보고한다. 개인 정책은 추적되는 설치 트리 밖의 사용자 스킬에 둔다.
+
+Incoming 설치는 도구를 다시 설치하거나 capability 선택을 덮어쓰지 않고 OMS 구성만
+맞춘다. 업데이트를 소유한 부모가 core commit 뒤 선택된 도구를 갱신하며,
+`--no-tools`와 rollback에서는 그 갱신도 생략한다.
+Incoming revision의 설치기를 실행하므로, 이 분리 이전의 오래된 revision으로
+rollback하면 그 revision의 기존 설치 동작이 적용된다.
+
+생성된 cron·systemd 작업은 설치 시의 HOME·XDG 위치·receipt 경로·Rust 홈을 유지하고,
+관리 bin과 Cargo 디렉터리를 PATH에 넣는다. 대화형 shell profile이 없어도 실행할 수
+있다. 임시 `RUSTUP_TOOLCHAIN` 값은 저장하지 않으므로 새 체크아웃이 자신의 도구
+체인을 선택한다. 기존 check-only 예약은 계속 확인만 한다.
+명시적 tool-lock과 provider 설정 경로도 유지한다.
+
+systemd 설치는 로그아웃 뒤에도 유지되는지 보고한다. 트리거를 설치할 때
 `OH_MY_SETTING_AUTO_UPDATE_LINGER=1`을 명시하면 켜지고(호스트 권한이 필요할 수
 있다), 아니면 cron을 쓴다. linger는 이 계정의 모든 사용자 서비스에 적용되므로
 OMS가 기본으로 켜지 않는다.
@@ -219,11 +216,12 @@ OMS가 기본으로 켜지 않는다.
 바뀌는 것은 마이그레이션 노트(현재 [MIGRATION.md](MIGRATION.md#07))에
 있다.
 
-provider 도구 갱신 뒤에는 시간 제한이 있는 연동 점검으로 Claude hooks,
-Codex plugin, 활성 MCP/Antigravity 인터페이스를 확인한다. 실패하면 core
-업데이트 성공과 연동 상태 실패를 따로 보고하고 실패로 종료한다. provider
-바이너리는 core 롤백 대상이 아니다. `--no-doctor`나 예약 실행의 doctor
-생략 설정을 쓰면 이 검증 근거도 생략한다.
+업데이트는 `--no-doctor`를 선택하지 않으면 core receipt를 확정하기 전에 incoming
+설치의 doctor를 실행한다. 이 검사가 실패하면 core 변경은 롤백 대상이다.
+선택한 provider 도구는 core 반영 뒤 갱신하며 도구별 버전과 capability를 확인한다.
+현재는 이 갱신 뒤에 전체 연동 점검을 다시 실행하지 않는다. 도구 갱신이 실패하면
+core 업데이트는 성공했다고 구분해 보고하며 provider 바이너리는 core 롤백 대상이
+아니다.
 
 ### 설치·업데이트 미리 보기
 
@@ -233,11 +231,15 @@ clone·fetch, lifecycle lock, link, 백업 이동, 설정 편집, 등록이 모�
 
 쓰기 없는 모드가 있는 단계(link와 백업, capability profile, Claude hook 행, Antigravity 권한 규칙,
 auto-update trigger)는 그 단계 자신의 코드로 미리 본다. 나머지는 로직을 따로 흉내 내지 않고
-`not-previewed`로 이름만 적는다: clone·fetch, Python runtime, tool installer와 그것이 추가하는 PATH 줄,
+`not-previewed`로 이름만 적는다: clone·fetch, 네이티브 payload 빌드, tool installer와 그것이 추가하는 PATH 줄,
 서비스 로그인, Codex plugin과 `config.toml` 블록, MCP·Antigravity plugin 등록, Claude의 `statusLine`·
 `modelSettings`·`attribution` key. plan은 디스크에 있는 checkout을 읽으므로, update plan은 fetch가 가져올
 commit이 아니라 현재 commit을 다시 link하는 경우를 설명한다. checkout이 아직 없으면(첫 설치 전 curl 형태)
 그렇게 말하고 멈춘다.
+
+기존 checkout의 상세 설치 계획을 출력하려면 검증된 네이티브 payload가 준비되어 있어야 한다.
+payload가 없으면 `install.sh --plan`은 준비가 필요하다고 알리고, 바이너리 빌드나 의존성
+다운로드를 실행하지 않는다.
 
 ## 서비스와 화면
 

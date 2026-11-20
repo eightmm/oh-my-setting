@@ -29,6 +29,12 @@ CC-02/04는 바로 수정할 consumer/callable 계약이다. 기존 #259의 LC-0
 native assignment의 우선순위는 유지한다. CC-06의 단계들은 별도 코드 PR로
 나누고, 같은 `providers.rs`/`services_collab.rs`/supervisor를 여러 worker가 동시에 편집하지 않는다.
 
+2026-11-19의 [native assignment·Main evidence·skill 평가 인계](ORCHESTRATOR-COMPLETION-AUDIT.md)는
+기존 P0-B/REL/LC/TM owner의 구현 범위를 구체화한 명세다. 새 CC 번호나 별도 상태 저장소는 없다.
+CC-04는 원문 evidence의 callable read, CC-10은 실제 변경한 front door의 owner/입력 정합성만
+맡는다. 전송·소비·결과·수락, owned cleanup/recovery는 해당 기존 producer에 남긴다.
+모델 launch 선택의 #258과 catalog consumer의 #276은 시작 전에 최신 상태를 대조해 재구현하지 않는다.
+
 ## CC-01 — Provider identity와 discovery
 
 **Owner:** `oms-command-peer` provider identity를 기준으로 `oms-command-providers-skills`,
@@ -139,6 +145,13 @@ withheld reference 제거·exact cap과 oversize typed error를 포함한다.
 앞단 capture limit/completeness와 reader availability는 구별한다.
 `retrieval_unavailable`는 현재 production caller가 없지만 일반 큰 command의 오류 재현 근거는
 아니다. 기존 executor의 64 MiB cap과 `--file`의 별도 경로를 유지한다. 원격 수집 #263과 별개다.
+
+**Native Main consumer:** P0-B의 짧은 event 카드가 이 reader의 capture reference를 가리키면
+카드 → 같은 저장본 SHA → bounded 원문 조회를 기존 round-trip에 포함한다. Task/attempt/Room
+binding과 결과 acceptance는 각 canonical owner가 검사하고 reader는 새 권한을 부여하지 않는다.
+Long log를 줄여도 source event·failed/unknown·생략 범위는 카드에 남긴다. 원문 읽기나 cursor
+이동이 Room ack·native task resend·model wakeup을 만들지 않아야 한다. `oms_peer_result`의
+기존 answer reader로 충분한 결과는 그 경로를 유지하고 서로 다른 reference를 억지로 합치지 않는다.
 
 ## CC-05 — Hook ownership/convergence의 production owner 정리
 
@@ -284,6 +297,13 @@ MCP `tests/native.rs::{discovery_protocols,fixed_argv,executor_injection}`와
 inventory의 중복/누락 검사는 재사용하고 매 기능 PR에 별도 83-command 실행 suite를 만들지 않는다.
 CC-04의 새 reader가 추가되면 변경된 수·discovery·callability를 동시에 갱신한다. 코드에서 fixture를
 자동 재생성해 자기 자신과 비교하는 검증은 하지 않는다. 실제 host unavailable은 별도 표시한다.
+
+P0-B consumer의 caller 계약은 Main host(`codex|agy|claude|pi`), 추론 model, owner/participant,
+task/lease/attempt와 실행 surface를 구분한다. 같은 provider의 Main과 Lead도 허용하되 서로 다른
+participant/attempt를 합치지 않는다. Existing `task.assignment`는 model route validation이므로
+native 전송 상태를 끼워 넣지 않는다. 새 public 동의어를 추가하기 전에 기존 panel/plan/room/result
+front door를 재사용하며, typed 입력/권한 검사는 그 owner가 담당한다. 이는 future caller의
+acceptance이며 현재 unmanaged native 경로에 durable assignment가 구현됐다는 뜻이 아니다.
 
 ## 구현 에이전트 전달문과 검증
 

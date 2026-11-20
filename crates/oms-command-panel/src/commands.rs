@@ -6,6 +6,7 @@ use oms_panel_core::{
     state, terminals,
 };
 use serde_json::json;
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -97,14 +98,130 @@ fn policy(source: &Path) -> Result<routing::Policy> {
 /// stamp or digest and nothing is persisted.
 pub(crate) struct Session {
     cache: oms_panel_core::cache::Cache,
-    metrics: std::sync::Mutex<Option<(std::time::Instant, String, Value)>>,
+    attempts: state::AttemptCache,
+    metrics: std::sync::Mutex<Option<(std::time::Instant, String, ProviderStatus)>>,
     main_model: std::sync::Mutex<Option<MainModel>>,
 }
+type ProviderStatus = (Value, metrics::CodexQuotaSources);
+
+struct CodexQuotaReceipt {
+    repo: PathBuf,
+    room: String,
+    main: Option<String>,
+    generated_at: String,
+    status: Value,
+    sources: metrics::CodexQuotaSources,
+}
+
+thread_local! {
+    // One accepted snapshot is passed by Watch directly to pane observation.
+    // The comparison guards consistency; generated_at is not a unique ticket.
+    static CODEX_QUOTA: RefCell<Option<CodexQuotaReceipt>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn clear_codex_quota_receipt() {
+    CODEX_QUOTA.with_borrow_mut(|slot| *slot = None);
+}
+
+pub(crate) fn publish_codex_quota_receipt(
+    repo: &Path,
+    main: Option<&str>,
+    snapshot: &state::Snapshot,
+    sources: metrics::CodexQuotaSources,
+) {
+    let report = &snapshot.report;
+    let receipt = (|| {
+        if snapshot.status != 0 || report["collection"]["ok"] != true {
+            return None;
+        }
+        Some(CodexQuotaReceipt {
+            repo: repo.to_path_buf(),
+            room: report["room"]["id"].as_str()?.to_owned(),
+            main: main.map(str::to_owned),
+            generated_at: report["generated_at"].as_str()?.to_owned(),
+            status: report["provider_status"].get("codex")?.clone(),
+            sources,
+        })
+    })();
+    CODEX_QUOTA.with_borrow_mut(|slot| *slot = receipt);
+}
+
+pub(crate) fn take_codex_quota_receipt(
+    repo: &Path,
+    room: &str,
+    main: &str,
+    report: &Value,
+) -> Option<metrics::CodexQuotaSources> {
+    let receipt = CODEX_QUOTA.with_borrow_mut(Option::take)?;
+    (receipt.repo == repo
+        && receipt.room == room
+        && report["room"]["id"] == room
+        && receipt
+            .main
+            .as_deref()
+            .is_none_or(|expected| expected == main)
+        && report["collection"]["ok"] == true
+        && report["collection"]["pending"] != true
+        && report["generated_at"] == receipt.generated_at
+        && report["provider_status"]["codex"] == receipt.status)
+        .then_some(receipt.sources)
+}
+
+/// Last verified model for one repository, Room Main and native rollout.
 struct MainModel {
+    repo: PathBuf,
+    room: String,
+    attempt: String,
+    participant: String,
     consumer: String,
     rollout: PathBuf,
+    ident: (u64, u64),
     stamp: String,
     model: Option<String>,
+    retained: bool,
+    header: Option<String>,
+    read_size: u64,
+    tokens: Option<u64>,
+    tokens_retained: bool,
+}
+
+struct MainObservation {
+    model: Option<Value>,
+    tokens: Option<Value>,
+}
+
+fn rollout_ident(meta: &std::fs::Metadata) -> Option<((u64, u64), u64)> {
+    use std::os::unix::fs::MetadataExt;
+    (meta.is_file() && meta.nlink() == 1).then(|| ((meta.dev(), meta.ino()), meta.size()))
+}
+
+fn rollout_header(path: &Path, identity: ((u64, u64), u64), consumer: &str) -> Option<String> {
+    use rustix::fs::{self, Mode, OFlags};
+    use std::io::{BufRead, BufReader, Read};
+
+    const MAX_HEADER: usize = 256 * 1024;
+    let fd = fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let file = std::fs::File::from(fd);
+    if rollout_ident(&file.metadata().ok()?) != Some(identity) {
+        return None;
+    }
+    let mut line = Vec::new();
+    BufReader::new(file.take(MAX_HEADER as u64))
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    if line.last() != Some(&b'\n') {
+        return None;
+    }
+    let header = oms_panel_core::decode(&line, MAX_HEADER).ok()?;
+    let session = header["payload"]["id"].as_str()?;
+    (header["type"] == "session_meta"
+        && &oms_panel_core::digest(session.as_bytes())[..32] == consumer)
+        .then(|| oms_panel_core::digest(&line))
 }
 const METRICS_TTL: Duration = Duration::from_secs(15);
 impl Session {
@@ -112,22 +229,15 @@ impl Session {
         Self {
             cache: oms_panel_core::cache::Cache::new(256, Duration::from_secs(3600))
                 .expect("static cache limits"),
+            attempts: Default::default(),
             metrics: Default::default(),
             main_model: Default::default(),
         }
     }
-    fn plan(&self, repo: &Path, store: &Store) -> Result<Value> {
-        let path = Path::new(".oms/plan/tasks.json");
-        let print = oms_panel_core::cache::stamp(&repo.join(path));
-        if let Some(v) = self.cache.read("plan", &print) {
-            return Ok(v);
-        }
-        let v = store
-            .json(path, 4 * 1024 * 1024, true)?
-            .unwrap_or(Value::Null);
-        let _ = self.cache.insert("plan".into(), print, v.clone());
-        Ok(v)
+    pub(crate) fn attempt_cache(&self) -> &state::AttemptCache {
+        &self.attempts
     }
+
     fn index(&self, repo: &Path) -> Result<Vec<Value>> {
         let print = oms_panel_core::cache::stamp(&repo.join(".oms/artifacts/index.jsonl"));
         if let Some(Value::Array(rows)) = self.cache.read("index", &print) {
@@ -139,8 +249,125 @@ impl Session {
             .insert("index".into(), print, Value::Array(rows.clone()));
         Ok(rows)
     }
-    fn observe_main_model(&self, report: &Value) -> Option<Value> {
+    #[cfg(test)]
+    fn observe_main_model_with(
+        &self,
+        repo: &Path,
+        report: &Value,
+        locate: impl Fn(&str) -> Option<PathBuf>,
+    ) -> Option<Value> {
+        self.observe_main_with(repo, report, locate)?.model
+    }
+
+    fn observe_main_with(
+        &self,
+        repo: &Path,
+        report: &Value,
+        locate: impl Fn(&str) -> Option<PathBuf>,
+    ) -> Option<MainObservation> {
+        let mut saved = self.main_model.lock().ok()?;
+        let target = Self::main_target(report);
+        let Some((room, attempt, participant, consumer)) = target else {
+            *saved = None;
+            return None;
+        };
+        let current = saved.as_ref().filter(|v| {
+            v.repo == repo
+                && v.room == room
+                && v.attempt == attempt
+                && v.participant == participant
+                && v.consumer == consumer
+                && std::fs::symlink_metadata(&v.rollout)
+                    .ok()
+                    .and_then(|meta| rollout_ident(&meta))
+                    .is_some_and(|(id, _)| id == v.ident)
+        });
+        if current.is_none() {
+            let located = locate(&consumer).and_then(|rollout| {
+                let (ident, _) = rollout_ident(&std::fs::symlink_metadata(&rollout).ok()?)?;
+                Some((rollout, ident))
+            });
+            let Some((rollout, ident)) = located else {
+                *saved = None;
+                return None;
+            };
+            *saved = Some(MainModel {
+                repo: repo.into(),
+                room,
+                attempt,
+                participant,
+                consumer: consumer.clone(),
+                rollout,
+                ident,
+                stamp: String::new(),
+                model: None,
+                retained: false,
+                header: None,
+                read_size: 0,
+                tokens: None,
+                tokens_retained: false,
+            });
+        }
+        let entry = saved.as_mut()?;
+        let stamp = oms_panel_core::cache::stamp(&entry.rollout);
+        if entry.stamp != stamp {
+            let checked = (|| {
+                let (ident, size) =
+                    rollout_ident(&std::fs::symlink_metadata(&entry.rollout).ok()?)?;
+                if ident != entry.ident {
+                    return None;
+                }
+                let header = rollout_header(&entry.rollout, (ident, size), &consumer)?;
+                let (model, tokens) = metrics::codex_turn_observations(&entry.rollout, &consumer)?;
+                (stamp == oms_panel_core::cache::stamp(&entry.rollout))
+                    .then_some((header, size, model, tokens))
+            })();
+            let Some((header, size, model, tokens)) = checked else {
+                *saved = None;
+                return None;
+            };
+            if let Some(model) = model {
+                entry.model = Some(model);
+                entry.retained = false;
+            } else if entry.header.as_ref() == Some(&header) && size > entry.read_size {
+                // Same header and named generation with growth. Without a
+                // complete turn in the bounded tail, it is only last known.
+                entry.retained = entry.model.is_some();
+            } else {
+                entry.model = None;
+                entry.retained = false;
+            }
+            if let Some(tokens) = tokens {
+                entry.tokens = Some(tokens);
+                entry.tokens_retained = false;
+            } else if entry.header.as_ref() == Some(&header) && size > entry.read_size {
+                entry.tokens_retained = entry.tokens.is_some();
+            } else {
+                entry.tokens = None;
+                entry.tokens_retained = false;
+            }
+            entry.header = Some(header);
+            entry.read_size = size;
+            entry.stamp = stamp;
+        }
+        let source = |retained| if retained { "rollout-last" } else { "rollout" };
+        Some(MainObservation {
+            model: entry.model.as_ref().map(|model| {
+                json!({"attempt":entry.attempt,"model":model,"source":source(entry.retained)})
+            }),
+            tokens: entry.tokens.map(|tokens| {
+                json!({
+                    "room":entry.room,"participant":entry.participant,"attempt":entry.attempt,
+                    "total":tokens,"source":source(entry.tokens_retained)
+                })
+            }),
+        })
+    }
+    fn main_target(report: &Value) -> Option<(String, String, String, String)> {
         let room = &report["room"];
+        if text(room, "id").is_empty() || room["closed"] != false || !room["successor"].is_null() {
+            return None;
+        }
         let mains = state::active_mains(
             rows(&report["attempts"]["active"]),
             text(room, "id"),
@@ -149,33 +376,30 @@ impl Session {
         let [main] = mains.as_slice() else {
             return None;
         };
+        if !state::LIVE_STATES.contains(&text(main, "state")) {
+            return None;
+        }
         let participant = state::main_participant(main);
-        let member = rows(&room["participants"]).iter().find(|member| {
-            member["participant"] == participant
-                && member["role"] == "main"
-                && member["provider"] == "codex"
-                && member["joined"] == true
-        })?;
-        let consumer = member["consumer"].as_str()?;
-        let mut saved = self.main_model.lock().ok()?;
-        if saved
-            .as_ref()
-            .is_none_or(|v| v.consumer != consumer || !v.rollout.is_file())
+        let mut joined = rows(&room["participants"])
+            .iter()
+            .filter(|member| member["role"] == "main" && member["joined"] == true);
+        let member = joined.next()?;
+        if joined.next().is_some()
+            || member["participant"] != participant
+            || member["provider"] != "codex"
+            || !member["parent"].is_null() && member["parent"] != ""
+            || room["owner"]
+                .as_str()
+                .is_some_and(|owner| !owner.is_empty() && owner != participant)
         {
-            *saved = Some(MainModel {
-                consumer: consumer.into(),
-                rollout: metrics::codex_rollout(consumer)?,
-                stamp: String::new(),
-                model: None,
-            });
+            return None;
         }
-        let entry = saved.as_mut()?;
-        let stamp = oms_panel_core::cache::stamp(&entry.rollout);
-        if entry.stamp != stamp {
-            entry.model = metrics::codex_turn_model(&entry.rollout, consumer);
-            entry.stamp = stamp;
-        }
-        Some(json!({"attempt":main["attempt_id"], "model":entry.model.as_ref()?}))
+        Some((
+            text(room, "id").into(),
+            main["attempt_id"].as_str()?.into(),
+            participant.into(),
+            member["consumer"].as_str()?.into(),
+        ))
     }
     fn provider_status(
         &self,
@@ -183,14 +407,15 @@ impl Session {
         report: &Value,
         main: Option<&str>,
         rows: &[Value],
-    ) -> Value {
+    ) -> ProviderStatus {
         let print = oms_panel_core::digest(
             format!(
-                "{}|{:?}|{}|{}",
+                "{}|{:?}|{}|{}|{}",
                 report["room"]["participants"],
                 main,
                 oms_panel_core::cache::stamp(&repo.join(".oms/artifacts/index.jsonl")),
-                sessions_stamp()
+                sessions_stamp(),
+                codex_registry_stamp()
             )
             .as_bytes(),
         );
@@ -201,7 +426,7 @@ impl Session {
         {
             return value.clone();
         }
-        let value = metrics::collect_local_with(report, main, unix_now(), Some(rows));
+        let value = metrics::collect_local_with_sources(report, main, unix_now(), Some(rows));
         if let Ok(mut guard) = self.metrics.lock() {
             *guard = Some((std::time::Instant::now(), print, value.clone()));
         }
@@ -222,13 +447,34 @@ fn sessions_stamp() -> String {
         claude.map_or("-".into(), |p| oms_panel_core::cache::stamp(&p))
     )
 }
+
+fn codex_registry_stamp() -> String {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map_or_else(
+            || "-".into(),
+            |path| oms_panel_core::cache::stamp(&path.join("oh-my-setting/provider-accounts.json")),
+        )
+}
+
 pub(crate) fn snapshot(
     repo: &Path,
     options: &Options,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<state::Snapshot> {
-    snapshot_with(&Session::new(), repo, options, services, stop)
+    clear_codex_quota_receipt();
+    snapshot_for(
+        &Session::new(),
+        repo,
+        room(options).as_deref(),
+        options.get("owner-attempt"),
+        services,
+        stop,
+    )
+    .map(|(snapshot, _)| snapshot)
 }
 pub(crate) fn snapshot_with(
     session: &Session,
@@ -237,7 +483,32 @@ pub(crate) fn snapshot_with(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<state::Snapshot> {
-    let mut snapshot = state::snapshot(repo, room(options).as_deref(), services, stop)?;
+    clear_codex_quota_receipt();
+    let main = options.get("owner-attempt");
+    let (snapshot, sources) = snapshot_for(
+        session,
+        repo,
+        room(options).as_deref(),
+        main,
+        services,
+        stop,
+    )?;
+    if options.has("watch") && !options.has("log") {
+        publish_codex_quota_receipt(repo, main, &snapshot, sources);
+    }
+    Ok(snapshot)
+}
+
+pub(crate) fn snapshot_for(
+    session: &Session,
+    repo: &Path,
+    room_id: Option<&str>,
+    main_attempt: Option<&str>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<(state::Snapshot, metrics::CodexQuotaSources)> {
+    let mut snapshot =
+        state::snapshot_with_cache(repo, room_id, services, stop, Some(session.attempt_cache()))?;
     let calls = crate::render::calls(&snapshot.report);
     let tasks: Vec<_> = calls
         .iter()
@@ -255,10 +526,15 @@ pub(crate) fn snapshot_with(
         .filter(|attempt| !attempt.is_empty())
         .collect();
     let store = Store::open(repo)?;
-    let plan = session.plan(repo, &store)?;
     let index = session.index(repo)?;
-    let decisions =
-        results::outcomes_cached(&store, &plan, &index, &tasks, Some((&session.cache, repo)))?;
+    // Bind outcomes to the plan this refresh displays, never a second read.
+    let decisions = results::outcomes_cached(
+        &store,
+        &snapshot.report["plan"],
+        &index,
+        &tasks,
+        Some((&session.cache, repo)),
+    )?;
     let mut finalized = serde_json::Map::new();
     for decision in decisions {
         if let Some(task) = decision["task_id"].as_str() {
@@ -284,16 +560,21 @@ pub(crate) fn snapshot_with(
             })
             .collect(),
     );
-    let main_attempt = options
-        .get("owner-attempt")
-        .map(str::to_owned)
-        .or_else(|| snapshot.report["room"]["main"].as_str().map(str::to_owned));
-    snapshot.report["provider_status"] =
-        session.provider_status(repo, &snapshot.report, main_attempt.as_deref(), &index);
-    if let Some(observation) = session.observe_main_model(&snapshot.report) {
-        snapshot.report["main_model_observation"] = observation;
+    let main_attempt = main_attempt.or_else(|| snapshot.report["room"]["main"].as_str());
+    let (provider_status, quota_sources) =
+        session.provider_status(repo, &snapshot.report, main_attempt, &index);
+    snapshot.report["provider_status"] = provider_status;
+    if let Some(observation) =
+        session.observe_main_with(repo, &snapshot.report, metrics::codex_rollout)
+    {
+        if let Some(model) = observation.model {
+            snapshot.report["main_model_observation"] = model;
+        }
+        if let Some(tokens) = observation.tokens {
+            snapshot.report["main_token_observation"] = tokens;
+        }
     }
-    Ok(snapshot)
+    Ok((snapshot, quota_sources))
 }
 
 fn unix_now() -> f64 {
@@ -533,7 +814,15 @@ pub(crate) fn run_mode(
         };
     }
     if options.has("routes") {
-        return routes_output(repo.as_deref(), cwd, source, options, services, stop);
+        return routes_output(
+            repo.as_deref(),
+            execution.is_some(),
+            cwd,
+            source,
+            options,
+            services,
+            stop,
+        );
     }
     let repo = repo_req()?;
     let execution = execution_req()?;
@@ -796,7 +1085,11 @@ pub(crate) fn run_mode(
         return sessions(&state.report, options);
     }
     if options.has("usage") {
-        let snap = crate::usage::snapshot(&state.report, unix_now());
+        let snap = crate::usage::explicit_snapshot(
+            &state.report,
+            unix_now(),
+            &crate::orchestrator::account_binding::SystemAccountHost,
+        );
         if options.has("json") {
             return Ok((state.status, json(&snap)?, vec![]));
         }
@@ -845,6 +1138,7 @@ pub(crate) fn results_report(
 }
 fn routes_output(
     repo: Option<&Path>,
+    has_git_repo: bool,
     cwd: &Path,
     source: &Path,
     options: &Options,
@@ -853,14 +1147,25 @@ fn routes_output(
 ) -> Result<Output> {
     let policy = policy(source)?;
     let owner = owner(options);
-    let inputs = routing_inputs(
+    let selected_room = room(options);
+    let (inputs, events_observed) = routing_inputs(
         repo,
         Some(cwd),
-        room(options).as_deref(),
+        selected_room.as_deref(),
         Some(&owner),
         services,
         stop,
     )?;
+    // The resolver may use a non-Git directory for the existing preview. That
+    // fallback does not establish repository-wide count evidence.
+    let events_observed = has_git_repo && events_observed;
+    let events_source = if !has_git_repo {
+        "no_repository"
+    } else if events_observed {
+        "repository_events"
+    } else {
+        "unavailable"
+    };
     let mut base = serde_json::to_value(&policy).map_err(Error::new)?;
     let mut kinds: Vec<String> = policy.roles.keys().cloned().collect();
     kinds.sort();
@@ -873,13 +1178,25 @@ fn routes_output(
         } else {
             "read"
         };
-        let mut role_inputs = inputs.clone();
-        if let Some(target) = route_target(options)?.0 {
-            role_inputs.preferred = Some(target);
-            role_inputs.explicit_target = true;
-        }
-        match routing::allocate(&policy, &owner, role, None, access, None, &role_inputs) {
-            Ok(alloc) => {
+        match routing::allocate_with_account_rank(
+            &policy, &owner, role, None, access, None, &inputs,
+        ) {
+            Ok((alloc, rank)) => {
+                let provider = &alloc.candidate.provider;
+                let launch_account = if routing::ACCOUNT_PROVIDERS.contains(&provider.as_str()) {
+                    "headless_may_reselect"
+                } else {
+                    "no_account_transport"
+                };
+                let account_rank = rank.map(|rank| json!({
+                    "policy": rank.policy,
+                    "eligible_accounts": rank.eligible_accounts,
+                    "decided_by": rank.decided_by,
+                    "weekly_used_bucket": rank.weekly_bucket,
+                    "next_weekly_used_bucket": rank.next_weekly_bucket,
+                    "repo_working_attempts": rank.working_attempts.filter(|_| events_observed),
+                    "next_repo_working_attempts": rank.next_working_attempts.filter(|_| events_observed),
+                }));
                 chosen.insert(
                     role.clone(),
                     json!({
@@ -887,6 +1204,21 @@ fn routes_output(
                         "model": alloc.candidate.model,
                         "effort": alloc.candidate.effort,
                         "snapshot": alloc.snapshot,
+                        "evidence": {
+                            "provider_disposition": "provisional",
+                            "role": alloc.role,
+                            "tier": alloc.workload,
+                            "events_source": events_source,
+                            "recent": {
+                                "scope": if selected_room.is_some() { "room" } else { "repository" },
+                                "non_main_attempts": events_observed.then(|| inputs.recent.get(provider).copied().unwrap_or(0)),
+                                "window_seconds": ROUTE_RECENT_SECONDS,
+                                "in_flight": events_observed.then(|| inputs.in_flight.get(provider).copied().unwrap_or(0)),
+                            },
+                            "account_reason": alloc.account_reason,
+                            "launch_account": launch_account,
+                            "account_rank": account_rank,
+                        },
                     }),
                 );
             }
@@ -947,6 +1279,9 @@ fn route_target(options: &Options) -> Result<(Option<String>, Option<String>)> {
     Ok((provider, account))
 }
 
+const ROUTE_RECENT_SECONDS: u64 = 6 * 60 * 60;
+const ROUTE_IN_FLIGHT_STATES: &[&str] = &["starting", "working", "running", "verifying"];
+
 fn routing_inputs(
     repo: Option<&Path>,
     cwd: Option<&Path>,
@@ -954,7 +1289,7 @@ fn routing_inputs(
     owner_hint: Option<&str>,
     services: &dyn Services,
     stop: &AtomicBool,
-) -> Result<routing::RoutingInputs> {
+) -> Result<(routing::RoutingInputs, bool)> {
     let query_dir = repo.or(cwd).unwrap_or_else(|| Path::new("."));
     let raw = query(
         services,
@@ -985,10 +1320,11 @@ fn routing_inputs(
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect()
         };
-        let mut models = strings("models");
-        if models.is_empty() {
-            models = strings("catalog_models");
-        }
+        let models = if provider.get("catalog_models").is_some() {
+            strings("catalog_models")
+        } else {
+            strings("models")
+        };
         inputs.provider_evidence.insert(
             name.into(),
             routing::ProviderEvidence::from_catalog_row(provider)?,
@@ -1012,8 +1348,10 @@ fn routing_inputs(
         .flatten()
         .filter(|v| !v.is_empty());
 
+    let now = unix_now();
     let mut report_stub = Value::Null;
     let mut ambiguous_active_main = false;
+    let mut events_observed = false;
     if let Some(repo_path) = repo {
         let attempts = query(
             services,
@@ -1023,6 +1361,7 @@ fn routing_inputs(
             stop,
         )
         .unwrap_or(Value::Null);
+        events_observed = attempts.is_array();
         let room_rows = room_id.and_then(|id| {
             query(
                 services,
@@ -1039,6 +1378,7 @@ fn routing_inputs(
 
         let mut terminal_main_ids = std::collections::BTreeSet::new();
         let mut active_mains: Vec<(String, String, String)> = Vec::new();
+        let mut account_attempts = std::collections::BTreeMap::new();
         for row in rows(&attempts) {
             let room_match = room_id.is_none_or(|id| {
                 row["refs"]["panel_room_id"].as_str() == Some(id)
@@ -1046,19 +1386,35 @@ fn routing_inputs(
                     || row["panel"]["room_id"].as_str() == Some(id)
             });
             let prov = text(row, "provider");
-            if room_match
-                && !prov.is_empty()
-                && row["refs"]["panel_role"]
-                    .as_str()
-                    .is_some_and(|r| r != "main")
-            {
-                *inputs.recent.entry(prov.to_owned()).or_insert(0) += 1;
-            }
             let state = text(row, "state");
-            let is_main =
-                text(&row["refs"], "panel_role") == "main" || text(row, "tool") == "panel-main";
-            let is_terminal = row["terminal"] == true
-                || (!state.is_empty() && oms_panel_core::state::TERMINAL_STATES.contains(&state));
+            let refs = &row["refs"];
+            let attempt_id = text(row, "attempt_id");
+            let well_formed = !attempt_id.is_empty()
+                && !prov.is_empty()
+                && !state.is_empty()
+                && refs.is_object()
+                && ["panel_role", "panel_account", "panel_room_id", "panel_room"]
+                    .iter()
+                    .all(|key| refs.get(*key).is_none_or(Value::is_string))
+                && row["panel"].get("room_id").is_none_or(Value::is_string);
+            events_observed &= well_formed;
+            let is_main = refs["panel_role"] == "main" || row["tool"] == "panel-main";
+            let is_terminal =
+                row["terminal"] == true || oms_panel_core::state::TERMINAL_STATES.contains(&state);
+            if well_formed
+                && room_match
+                && !is_main
+                && !text(refs, "panel_role").is_empty()
+                && let Some(started) = metrics::stamp(&row["created_at"])
+                    .filter(|started| *started > 0.0 && *started <= now)
+            {
+                if now - started <= ROUTE_RECENT_SECONDS as f64 {
+                    *inputs.recent.entry(prov.to_owned()).or_insert(0) += 1;
+                }
+                if !is_terminal && ROUTE_IN_FLIGHT_STATES.contains(&state) {
+                    *inputs.in_flight.entry(prov.to_owned()).or_insert(0) += 1;
+                }
+            }
             if is_main && is_terminal {
                 for id in [
                     text(row, "attempt_id"),
@@ -1080,16 +1436,27 @@ fn routing_inputs(
                     text(&row["refs"], "panel_model").to_owned(),
                 ));
             }
-            if state == "working" || state == "running" {
-                let acc = text(&row["refs"], "panel_account");
-                if !acc.is_empty() {
-                    let key = if acc.contains(':') || prov.is_empty() {
-                        acc.to_owned()
-                    } else {
-                        format!("{prov}:{acc}")
+            if !attempt_id.is_empty() {
+                let seat = (well_formed
+                    && !is_main
+                    && !is_terminal
+                    && matches!(state, "working" | "running")
+                    && routing::ACCOUNT_PROVIDERS.contains(&prov)
+                    && refs.get("panel_provider").is_none_or(|label| label == prov))
+                .then(|| {
+                    let recorded = text(refs, "panel_account");
+                    let candidate = match recorded.split_once(':') {
+                        Some((provider, alias)) if provider == prov => alias,
+                        Some(_) => return None,
+                        None => recorded,
                     };
-                    *inputs.running_accounts.entry(key).or_insert(0) += 1;
-                }
+                    crate::cli::valid_account_id(candidate).then_some((prov, candidate))
+                })
+                .flatten();
+                account_attempts
+                    .entry(attempt_id)
+                    .and_modify(|entry| *entry = None)
+                    .or_insert(seat);
             }
             if (prov == "pi" || text(&row["refs"], "panel_harness") == "pi")
                 && (row["refs"]["daily_cap"] == true || text(row, "error").contains("daily"))
@@ -1099,6 +1466,12 @@ fn routing_inputs(
             }
         }
 
+        for (provider, alias) in account_attempts.into_values().flatten() {
+            *inputs
+                .running_accounts
+                .entry(format!("{provider}:{alias}"))
+                .or_insert(0) += 1;
+        }
         let selected_active = env_main_attempt
             .as_deref()
             .and_then(|target| active_mains.iter().find(|(aid, _, _)| aid == target))
@@ -1211,8 +1584,8 @@ fn routing_inputs(
         }
     }
 
-    inputs.status = metrics::collect_local(repo, &report_stub, None, unix_now());
-    Ok(inputs)
+    inputs.status = metrics::collect_local(repo, &report_stub, None, now);
+    Ok((inputs, events_observed))
 }
 
 fn dispatch_command(
@@ -1293,7 +1666,9 @@ fn dispatch_command(
         if !options.has("access") {
             access = "write".into();
         }
-        purpose = purpose.or(defaults.purpose);
+        if role == "worker" {
+            purpose = purpose.or(defaults.purpose);
+        }
         workload = workload.or(defaults.workload);
         verifier = verifier.or(defaults.verify);
         if !options.has("scope") {
@@ -1302,7 +1677,7 @@ fn dispatch_command(
         continued_account = defaults.account;
         continued_provider = defaults.provider;
     }
-    let mut inputs = routing_inputs(
+    let (mut inputs, _) = routing_inputs(
         Some(repo),
         Some(execution),
         room(options).as_deref(),
@@ -2524,5 +2899,495 @@ fn next_attention(
         Ok((0, format!("{line}\n").into_bytes(), stderr))
     } else {
         plain("nothing waiting\n".into())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::{Session, snapshot_with};
+    use crate::{Result, Services, cli::Options};
+    use oms_panel_core::{
+        NativeCommand, Store,
+        services::{CommandOutput, ExecutionRequest, PeerExecutor},
+    };
+    use serde_json::json;
+    use std::ffi::OsString;
+    use std::os::unix::fs::DirBuilderExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    struct Attempts;
+    impl PeerExecutor for Attempts {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            Err(oms_panel_core::Error::new("unexpected execution"))
+        }
+    }
+    impl Services for Attempts {
+        fn command(
+            &self,
+            command: NativeCommand,
+            _: &Path,
+            _: &[OsString],
+            _: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            // A room selected by the ambient environment is answered as empty.
+            let body = match command {
+                NativeCommand::Events => json!([{"attempt_id":"worker-1","tool":"peer-delegate",
+                    "provider":"codex","state":"done","terminal":true,"task_id":"task-1","refs":{}}]),
+                NativeCommand::Room => json!({}),
+                _ => return Err(oms_panel_core::Error::new("unexpected native command")),
+            };
+            Ok(CommandOutput {
+                stdout: serde_json::to_vec(&body).unwrap(),
+                cleanup_complete: true,
+                output_complete: true,
+                ..Default::default()
+            })
+        }
+    }
+    struct TempRepo(PathBuf);
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn store_file(repo: &Path, path: &str, bytes: &[u8]) {
+        Store::open(repo)
+            .unwrap()
+            .lock_at(Path::new("lock"), Duration::from_secs(3))
+            .unwrap()
+            .write(Path::new(path), bytes, false, 1024 * 1024)
+            .unwrap();
+    }
+
+    #[test]
+    fn attempt_cache_tracks_ledger_generation_and_failures() {
+        use std::cell::RefCell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counting {
+            calls: AtomicUsize,
+            fail: AtomicBool,
+            rows: RefCell<Option<serde_json::Value>>,
+        }
+        impl PeerExecutor for Counting {
+            fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                Err(oms_panel_core::Error::new("unexpected execution"))
+            }
+        }
+        impl Services for Counting {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                _: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                if command != NativeCommand::Events {
+                    return Err(oms_panel_core::Error::new("unexpected command"));
+                }
+                let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(oms_panel_core::Error::new("query failed"));
+                }
+                let rows = self
+                    .rows
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| json!([{"attempt_id": format!("attempt-{n}")}]));
+                Ok(CommandOutput {
+                    stdout: serde_json::to_vec(&rows).unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                })
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("oms-panel-cache-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let repo = TempRepo(dir);
+        let ledger = repo.0.join(".oms/lifecycle/events.jsonl");
+        std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        std::fs::write(&ledger, "first").unwrap();
+        let service = Counting {
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+            rows: RefCell::new(None),
+        };
+        let cache = oms_panel_core::state::AttemptCache::default();
+        let stop = AtomicBool::new(false);
+        let refresh = || {
+            oms_panel_core::state::snapshot_with_cache(&repo.0, None, &service, &stop, Some(&cache))
+        };
+        refresh().unwrap();
+        refresh().unwrap();
+        assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+        let alias = repo.0.join("alias");
+        std::os::unix::fs::symlink(&repo.0, &alias).unwrap();
+        assert_eq!(
+            cache.current_attempt(&alias, "attempt-1", &stop),
+            Some(json!({"attempt_id":"attempt-1"}))
+        );
+        let foreign = repo.0.join("foreign");
+        std::fs::create_dir_all(foreign.join(".oms/lifecycle")).unwrap();
+        std::fs::write(foreign.join(".oms/lifecycle/events.jsonl"), "first").unwrap();
+        assert!(
+            cache
+                .current_attempt(&foreign, "attempt-1", &stop)
+                .is_none()
+        );
+        assert!(cache.current_attempt(&repo.0, "attempt", &stop).is_none());
+        assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&ledger)
+            .unwrap()
+            .write_all(b"more")
+            .unwrap();
+        assert!(cache.current_attempt(&repo.0, "attempt-1", &stop).is_none());
+        refresh().unwrap();
+        assert_eq!(service.calls.load(Ordering::SeqCst), 2);
+        let replacement = ledger.with_extension("new");
+        std::fs::write(&replacement, "replacement").unwrap();
+        std::fs::rename(replacement, &ledger).unwrap();
+        service.fail.store(true, Ordering::SeqCst);
+        assert!(refresh().is_err());
+        service.fail.store(false, Ordering::SeqCst);
+        refresh().unwrap();
+        refresh().unwrap();
+        assert_eq!(service.calls.load(Ordering::SeqCst), 4);
+        // A later snapshot stage failure must discard an otherwise valid cache hit.
+        assert!(
+            oms_panel_core::state::snapshot_with_cache(
+                &repo.0,
+                Some("room"),
+                &service,
+                &stop,
+                Some(&cache)
+            )
+            .is_err()
+        );
+        refresh().unwrap();
+        assert_eq!(service.calls.load(Ordering::SeqCst), 5);
+        std::fs::remove_file(&ledger).unwrap();
+        std::os::unix::fs::symlink("missing", &ledger).unwrap();
+        refresh().unwrap();
+        refresh().unwrap();
+        assert_eq!(service.calls.load(Ordering::SeqCst), 7);
+
+        std::fs::remove_file(&ledger).unwrap();
+        let target = json!({"attempt_id":"attempt-unique"});
+        for (index, invalid) in [target.clone(), json!({"attempt_id":7})]
+            .into_iter()
+            .enumerate()
+        {
+            *service.rows.borrow_mut() = Some(json!([target, invalid]));
+            std::fs::write(&ledger, "x".repeat(index + 1)).unwrap();
+            refresh().unwrap();
+            assert!(
+                cache
+                    .current_attempt(&repo.0, "attempt-unique", &stop)
+                    .is_none()
+            );
+        }
+        assert_eq!(service.calls.load(Ordering::SeqCst), 9);
+    }
+
+    #[test]
+    fn finalized_outcomes_bind_to_the_displayed_plan_across_refreshes() {
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("oms-panel-plan-bound-{}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let repo = TempRepo(dir);
+        let repo = repo.0.as_path();
+        let summary = "Reviewed fixture result";
+        let result = serde_json::to_vec(&json!({"schema":1,"kind":"oms-panel-result",
+            "task_id":"task-1","outcome":"completed","revision":"0a".repeat(12),
+            "summary":summary,"summary_sha256":oms_panel_core::digest(summary.as_bytes()),
+            "plan_binding":{"plan_id":"plan-1","task_sha256":"0b".repeat(32)}}))
+        .unwrap();
+        let artifact = ".oms/artifacts/panel-results/task-1.json";
+        store_file(repo, artifact, &result);
+        let row = json!({"kind":"panel-result","task_id":"task-1","artifact":artifact,
+            "artifact_sha256":oms_panel_core::digest(&result)});
+        store_file(
+            repo,
+            ".oms/artifacts/index.jsonl",
+            format!("{row}\n").as_bytes(),
+        );
+        let unbound = json!({"plan_id":"plan-1","tasks":{}});
+        let bound =
+            json!({"plan_id":"plan-1","tasks":{"task-1":{"id":"task-1","state":"running"}}});
+        let tasks = ".oms/plan/tasks.json";
+        store_file(repo, tasks, &serde_json::to_vec(&unbound).unwrap());
+        let session = Session::new();
+        let refresh = || {
+            snapshot_with(
+                &session,
+                repo,
+                &Options::default(),
+                &Attempts,
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+            .report
+        };
+        let first = refresh();
+        assert_eq!(first["plan"], unbound);
+        assert_eq!(first["finalized"]["task-1"], "completed");
+        // A changed plan whose stamp a cache still trusts (coarse timestamps)
+        // must not leave `finalized` bound to the superseded plan.
+        store_file(repo, tasks, &serde_json::to_vec(&bound).unwrap());
+        let print = oms_panel_core::cache::stamp(&repo.join(tasks));
+        session.cache.insert("plan".into(), print, unbound).unwrap();
+        let second = refresh();
+        assert_eq!(second["plan"], bound);
+        assert!(second["finalized"].get("task-1").is_none());
+    }
+
+    fn main_report(room: &str, attempt: &str, consumer: &str) -> serde_json::Value {
+        json!({"room":{"id":room,"owner":attempt,"closed":false,"participants":[
+            {"participant":attempt,"role":"main","provider":"codex","joined":true,"consumer":consumer}]},
+            "attempts":{"active":[{"attempt_id":attempt,"tool":"panel-main","provider":"codex",
+            "terminal":false,"state":"working","refs":{"panel_room_id":room}}]}})
+    }
+    fn turn(model: &str) -> String {
+        format!("{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"{model}\"}}}}\n")
+    }
+    fn rollout_fixture(dir: &Path) -> (PathBuf, String) {
+        let id = "019e0000-0000-7000-8000-000000000001";
+        let consumer = oms_panel_core::digest(id.as_bytes())[..32].to_owned();
+        let path = dir.join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\"}}}}\n{}",
+                turn("gpt-6.1")
+            ),
+        )
+        .unwrap();
+        (path, consumer)
+    }
+    fn append(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    #[test]
+    fn main_model_observation_retains_until_identity_changes() {
+        let dir = TempRepo(std::env::temp_dir().join(format!("oms-r43c-{}", std::process::id())));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let (path, consumer) = rollout_fixture(&dir.0);
+        let session = Session::new();
+        let locate = |c: &str| (c == consumer).then(|| path.clone());
+        let observe =
+            |report: &serde_json::Value| session.observe_main_model_with(&dir.0, report, locate);
+        let report = main_report("room-1", "main-1", &consumer);
+        let fresh = observe(&report).unwrap();
+        assert_eq!(
+            fresh,
+            json!({"attempt":"main-1","model":"gpt-6.1","source":"rollout"})
+        );
+
+        // A large tail with no turn_context pushes the last one out of the read window.
+        let big = format!(
+            "{{\"type\":\"event_msg\",\"x\":\"{}\"}}\n",
+            "a".repeat(2 * 1024 * 1024)
+        );
+        append(&path, big.as_bytes());
+        let kept = observe(&report).unwrap();
+        assert_eq!(kept["model"], "gpt-6.1");
+        assert_eq!(kept["source"], "rollout-last");
+        assert_eq!(observe(&report).unwrap()["source"], "rollout-last");
+
+        // A partial last line does not disturb it either.
+        append(&path, b"{\"type\":\"turn_con");
+        assert_eq!(observe(&report).unwrap()["source"], "rollout-last");
+
+        // A newer turn_context replaces it and is fresh again.
+        append(&path, b"\n");
+        append(&path, turn("gpt-6.2-sol").as_bytes());
+        let newer = observe(&report).unwrap();
+        assert_eq!(newer["model"], "gpt-6.2-sol");
+        assert_eq!(newer["source"], "rollout");
+
+        // Retained value survives only for the same room, attempt and consumer.
+        append(&path, big.as_bytes());
+        assert_eq!(observe(&report).unwrap()["source"], "rollout-last");
+        assert!(observe(&main_report("room-2", "main-1", &consumer)).is_none());
+        // The mismatch dropped it: the next read has no turn_context to show.
+        assert!(observe(&report).is_none());
+    }
+
+    #[test]
+    fn main_rollout_tokens_follow_the_exact_session_and_survive_a_bounded_tail() {
+        use serde_json::Value;
+
+        let dir =
+            TempRepo(std::env::temp_dir().join(format!("oms-main-tokens-{}", std::process::id())));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let (path, consumer) = rollout_fixture(&dir.0);
+        let id = "019e0000-0000-7000-8000-000000000001";
+        let session = Session::new();
+        let report = main_report("room-1", "main-1", &consumer);
+        let observe = |report: &Value| {
+            session
+                .observe_main_with(&dir.0, report, |c| (c == consumer).then(|| path.clone()))
+                .and_then(|entry| entry.tokens)
+        };
+        let usage = |thread: &str, root: &str, total: Value| {
+            json!({"type":"token_usage_record","payload":{
+                "thread_id":thread,"session_id":root,"thread_token_usage":{"total_tokens":total}
+            }})
+        };
+        let write_usage = |record: Value| append(&path, format!("{record}\n").as_bytes());
+        assert!(observe(&report).is_none());
+        write_usage(usage(id, id, json!(0)));
+        assert_eq!(observe(&report).unwrap()["total"], 0);
+        write_usage(usage(id, id, json!(1_025_123_456u64)));
+        for record in [
+            usage("other", id, json!(900)),
+            usage(id, "other", json!(901)),
+            usage(id, id, json!(-1)),
+            usage(id, id, json!(120.5)),
+            json!({"type":"event_msg","payload":usage(id, id, json!(92))}),
+        ] {
+            write_usage(record);
+        }
+        append(&path, usage(id, id, json!(99)).to_string().as_bytes());
+        assert_eq!(
+            observe(&report).unwrap(),
+            json!({"room":"room-1","participant":"main-1","attempt":"main-1",
+                "total":1_025_123_456u64,"source":"rollout"})
+        );
+        append(
+            &path,
+            format!(
+                "\n{{\"type\":\"event_msg\",\"x\":\"{}\"}}\n",
+                "a".repeat(1024 * 1024)
+            )
+            .as_bytes(),
+        );
+        let retained = observe(&report).unwrap();
+        assert_eq!(retained["source"], "rollout-last");
+        assert_eq!(retained["total"], 1_025_123_456u64);
+        assert!(observe(&main_report("room-2", "main-1", &consumer)).is_none());
+        assert!(observe(&report).is_none());
+    }
+
+    #[test]
+    fn main_model_observation_drops_on_mismatch() {
+        let dir =
+            TempRepo(std::env::temp_dir().join(format!("oms-r43c-drop-{}", std::process::id())));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let (path, consumer) = rollout_fixture(&dir.0);
+        let big = format!("{{\"x\":\"{}\"}}\n", "a".repeat(2 * 1024 * 1024));
+        let locate = |c: &str| (c == consumer).then(|| path.clone());
+        let report = main_report("room-1", "main-1", &consumer);
+        let primed = || {
+            rollout_fixture(&dir.0);
+            let session = Session::new();
+            assert_eq!(
+                session
+                    .observe_main_model_with(&dir.0, &report, locate)
+                    .unwrap()["source"],
+                "rollout"
+            );
+            append(&path, big.as_bytes());
+            session
+        };
+        // A different attempt, room or consumer finds nothing fresh to show.
+        let session = primed();
+        assert!(
+            session
+                .observe_main_model_with(
+                    &dir.0,
+                    &main_report("room-1", "main-2", &consumer),
+                    locate
+                )
+                .is_none()
+        );
+        let session = primed();
+        assert!(
+            session
+                .observe_main_model_with(
+                    &dir.0,
+                    &main_report("room-9", "main-1", &consumer),
+                    locate
+                )
+                .is_none()
+        );
+        let session = primed();
+        let other = "0".repeat(32);
+        assert!(
+            session
+                .observe_main_model_with(&dir.0, &main_report("room-1", "main-1", &other), locate)
+                .is_none()
+        );
+
+        // Two active Codex Mains are ambiguous.
+        let session = primed();
+        let mut two = report.clone();
+        two["attempts"]["active"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+            "attempt_id":"main-2","tool":"panel-main","provider":"codex",
+            "terminal":false,"refs":{"panel_room_id":"room-1"}}));
+        assert!(
+            session
+                .observe_main_model_with(&dir.0, &two, locate)
+                .is_none()
+        );
+        // ... and the retained value did not outlive the ambiguity.
+        assert!(
+            session
+                .observe_main_model_with(&dir.0, &report, locate)
+                .is_none()
+        );
+
+        // In-place truncate and rewrite with another session_meta, shorter than before.
+        let session = primed();
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\"}}\n",
+        )
+        .unwrap();
+        assert!(
+            session
+                .observe_main_model_with(&dir.0, &report, locate)
+                .is_none()
+        );
+
+        // A second hard link makes the file unfit to read or retain.
+        let session = primed();
+        std::fs::hard_link(&path, dir.0.join("alias.jsonl")).unwrap();
+        assert!(
+            session
+                .observe_main_model_with(&dir.0, &report, locate)
+                .is_none()
+        );
+        std::fs::remove_file(dir.0.join("alias.jsonl")).unwrap();
+
+        // A replaced rollout file (new inode, same path, no turn_context) drops it.
+        let session = primed();
+        let first = std::fs::read(&path).unwrap();
+        let first = &first[..=first.iter().position(|&b| b == b'\n').unwrap()];
+        let staged = dir.0.join("staged.jsonl");
+        std::fs::write(&staged, first).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+        assert!(
+            session
+                .observe_main_model_with(&dir.0, &report, locate)
+                .is_none()
+        );
     }
 }

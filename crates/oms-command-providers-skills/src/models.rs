@@ -171,6 +171,22 @@ fn age(path: &std::path::Path) -> Option<u64> {
         .ok()
         .map(|d| d.as_secs())
 }
+fn agy_catalog_selector(row: &str) -> Option<&str> {
+    let id = if let Some((id, label)) = row.split_once('\t') {
+        if label.trim().is_empty() || label.chars().any(char::is_control) {
+            return None;
+        }
+        id
+    } else {
+        row
+    };
+    (!id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._/:".contains(&byte)))
+    .then_some(id)
+}
+
 fn generations(models: &[String], provider: &str) -> Vec<String> {
     let role = Regex::new(r"^gpt-([0-9]+)(?:\.([0-9]+))?-(astra|sol|terra|luna)$")
         .expect("static Codex family pattern");
@@ -434,19 +450,27 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
         } else if refresh || doctor {
             usable = Some(false);
         }
-        let catalog = String::from_utf8_lossy(&optional(&models_file)?)
+        let catalog_rows = String::from_utf8_lossy(&optional(&models_file)?)
             .lines()
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let models = catalog.iter().take(20).cloned().collect::<Vec<_>>();
-        let all_routable = generations(&catalog, &provider);
-        let routable = models
-            .iter()
-            .filter(|m| all_routable.contains(m))
-            .cloned()
-            .collect::<Vec<_>>();
-        let not_routed = models
+        let models = catalog_rows.iter().take(20).cloned().collect::<Vec<_>>();
+        // AGY's cache includes human labels. Only the exact selector is
+        // a model ID for automatic allocation and catalog matching.
+        let catalog = if provider == "antigravity" {
+            let mut seen = BTreeSet::new();
+            catalog_rows
+                .iter()
+                .filter_map(|row| agy_catalog_selector(row))
+                .filter(|id| seen.insert(*id))
+                .map(str::to_owned)
+                .collect()
+        } else {
+            catalog_rows.clone()
+        };
+        let routable = generations(&catalog, &provider);
+        let not_routed = catalog
             .iter()
             .filter(|m| !routable.contains(m))
             .cloned()
@@ -500,12 +524,12 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
         let configured_standing = configured
             .as_ref()
             .filter(|_| !catalog.is_empty())
-            .map(|m| all_routable.contains(m));
+            .map(|m| routable.contains(m));
         if configured_standing == Some(false) {
             warnings.push(format!(
                 "{provider}: configured default model {} is not routable; routable: {}",
                 configured.as_deref().unwrap_or(""),
-                all_routable.join(", ")
+                routable.join(", ")
             ));
         }
         if doctor {
@@ -537,7 +561,22 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             if routable.is_empty() {
                 "unknown".into()
             } else {
-                routable.join(", ")
+                routable
+                    .iter()
+                    .take(20)
+                    .map(|id| {
+                        if provider == "antigravity" {
+                            catalog_rows
+                                .iter()
+                                .find(|row| agy_catalog_selector(row) == Some(id.as_str()))
+                                .unwrap_or(id)
+                        } else {
+                            id
+                        }
+                    })
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             },
             fields
                 .get("effort_mechanism")

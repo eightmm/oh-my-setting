@@ -6,6 +6,7 @@ mod cli;
 mod diagnostic;
 mod events;
 mod help;
+mod incremental;
 pub mod lock;
 pub mod projection;
 pub mod storage;
@@ -20,6 +21,7 @@ pub use events::{
     attempt_spec_path, create_attempt, effective_run_id, existing_idempotent, lifecycle_semantics,
     load_projection, new_event, project_attempts, validate_event_row,
 };
+pub use incremental::EventsProjectionCache;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

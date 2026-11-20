@@ -32,6 +32,13 @@ pub use services::{IncomingPhase, IncomingSourceLease, Services, UnavailableServ
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 pub type Output = (i32, Vec<u8>, Vec<u8>);
 
+/// Tracking policy for an already resolved release commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReleaseChannel {
+    Stable,
+    Edge,
+}
+
 /// Pure routing, including malformed arguments for commands owned here.
 pub fn owns(tool: &str, _args: &[OsString]) -> bool {
     matches!(
@@ -83,7 +90,40 @@ pub fn run_with_services(
     interrupted: &AtomicBool,
     services: &dyn Services,
 ) -> Output {
-    match cli::execute(tool, args, cwd, source, interrupted, services) {
+    output(cli::execute(tool, args, cwd, source, interrupted, services))
+}
+
+/// Apply exactly the reviewed release commit with the normal update transaction.
+/// Edge must still match its fetched ref and remains subscribed to that ref;
+/// stable retains an explicit commit pin. The reviewed target is bound without
+/// changing process-global state or adding a public CLI override.
+pub fn apply_release_with_services(
+    channel: ReleaseChannel,
+    target: &str,
+    selected_ref: &str,
+    source: &Path,
+    no_tools: bool,
+    interrupted: &AtomicBool,
+    services: &dyn Services,
+) -> Output {
+    output((|| {
+        runtime::check(interrupted)?;
+        runtime::native_host()?;
+        let paths = receipt::Paths::new(source, source)?;
+        update::release(
+            &paths,
+            channel,
+            target,
+            selected_ref,
+            no_tools,
+            interrupted,
+            services,
+        )
+    })())
+}
+
+fn output(result: runtime::Result<Output>) -> Output {
+    match result {
         Ok(output) => output,
         Err(runtime::Error(code, message)) => {
             (code, Vec::new(), format!("error: {message}\n").into_bytes())

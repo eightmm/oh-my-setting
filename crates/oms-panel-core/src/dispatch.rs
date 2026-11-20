@@ -1,6 +1,6 @@
 //! Admission-safe dispatch previews, WIP accounting and durable call reservations.
 use crate::routing::{Route, WRITERS};
-use crate::services::{ExecutionRequest, NativeCommand, query};
+use crate::services::{DispatchLaunch, DispatchProof, ExecutionRequest, NativeCommand, query};
 use crate::storage::reservation_error;
 use crate::value::{array, text};
 use crate::{Error, Result, Services, Store, Value, require};
@@ -404,6 +404,334 @@ pub fn command(request: &DispatchRequest, store: &Store) -> Result<(NativeComman
     }
     Ok((native, argv))
 }
+const PROOF_RECORD: usize = 65536;
+
+fn file_generation(meta: &std::fs::Metadata) -> [i128; 5] {
+    use std::os::unix::fs::MetadataExt;
+    [
+        meta.dev().into(),
+        meta.ino().into(),
+        meta.size().into(),
+        i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+        i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+    ]
+}
+
+fn bound_artifact(store: &Store, name: &Path, expected: &[u8]) -> Result<[i128; 5]> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    crate::storage::path(name)?;
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let read = || -> Result<std::fs::File> {
+        let mut dir = open(store.repo(), dir_flags, Mode::empty()).map_err(Error::new)?;
+        for component in name.parent().into_iter().flat_map(Path::components) {
+            dir = openat(&dir, component.as_os_str(), dir_flags, Mode::empty())
+                .map_err(Error::new)?;
+        }
+        openat(
+            &dir,
+            name.file_name()
+                .ok_or_else(|| Error::new("missing dispatch anchor name"))?,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(std::fs::File::from)
+        .map_err(Error::new)
+    };
+    let valid = |m: &std::fs::Metadata| {
+        m.is_file()
+            && m.uid() == rustix::process::getuid().as_raw()
+            && m.nlink() == 1
+            && m.mode() & 0o077 == 0
+            && m.len() == expected.len() as u64
+    };
+    let file = read()?;
+    let before = file.metadata().map_err(Error::new)?;
+    require(valid(&before), "unsafe dispatch anchor")?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(PROOF_RECORD as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(Error::new)?;
+    let after = file.metadata().map_err(Error::new)?;
+    let named = read()?.metadata().map_err(Error::new)?;
+    let identity = file_generation(&before);
+    require(
+        bytes == expected
+            && valid(&after)
+            && valid(&named)
+            && file_generation(&after) == identity
+            && file_generation(&named) == identity,
+        "dispatch anchor changed",
+    )?;
+    Ok(identity)
+}
+
+fn membership(
+    launch: &DispatchLaunch,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<String> {
+    let room = query(
+        service,
+        NativeCommand::Room,
+        &launch.repo,
+        &["show", "--id", &launch.room, "--exact", "--json"],
+        stop,
+    )?;
+    require(
+        room["id"] == launch.room && room["closed"] == false && room["successor"].is_null(),
+        "dispatch Room changed",
+    )?;
+    let joined = array(&room["participants"]);
+    let mut mains = joined
+        .iter()
+        .filter(|v| v["joined"] == true && v["role"] == "main");
+    let main = mains
+        .next()
+        .ok_or_else(|| Error::new("dispatch Main unavailable"))?;
+    let mut members = joined.iter().filter(|v| v["participant"] == launch.member);
+    let member = members
+        .next()
+        .ok_or_else(|| Error::new("dispatch member unavailable"))?;
+    require(
+        mains.next().is_none()
+            && main["participant"] == launch.main
+            && main["provider"] == launch.main_provider
+            && (main["parent"].is_null() || main["parent"] == "")
+            && members.next().is_none()
+            && member["joined"] == true
+            && member["provider"] == launch.provider
+            && member["role"] == "worker"
+            && member["parent"] == launch.main
+            // Native joins can omit the task on their roster row. The
+            // immutable reservation and exact worker Events row bind it.
+            && (member["task_id"].is_null() || member["task_id"] == launch.task),
+        "dispatch membership changed",
+    )?;
+    Ok(crate::digest(&crate::value::encoded(&serde_json::json!(
+        [main, member]
+    ))?))
+}
+
+fn main_row_matches(row: &Value, launch: &DispatchLaunch) -> bool {
+    row["tool"] == "panel-main"
+        && row["provider"] == launch.main_provider
+        && row["attempt_id"] == launch.main_attempt
+        && row["created_at"] == launch.main_created
+        && row["terminal"] == false
+        && crate::state::LIVE_STATES.contains(&text(row, "state").as_str())
+        && row["refs"]["panel_room_id"] == launch.room
+        && row["refs"]["panel_role"] == "main"
+        && crate::state::main_participant(row) == launch.main
+}
+
+fn create_proof_file(root: &oms_safe_fs::Root, name: &Path, body: Vec<u8>) -> Result<()> {
+    root.atomic_mutate(
+        name,
+        oms_safe_fs::MutationOptions {
+            read: oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: PROOF_RECORD,
+            },
+            expected_exists: Some(false),
+            max_output: PROOF_RECORD,
+            ..Default::default()
+        },
+        |_| Ok::<_, Error>(body),
+    )
+    .map_err(|_| Error::new("private dispatch proof write unavailable"))?;
+    Ok(())
+}
+
+fn check_proof_membership(
+    launch: &DispatchLaunch,
+    proof: &DispatchProof,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let attempts = query(
+        service,
+        NativeCommand::Events,
+        &launch.repo,
+        &["list", "--json"],
+        stop,
+    )?;
+    let mut mains = array(&attempts)
+        .iter()
+        .filter(|v| v["attempt_id"] == launch.main_attempt);
+    let mut workers = array(&attempts)
+        .iter()
+        .filter(|v| v["refs"]["panel_room_participant"] == launch.member);
+    require(
+        mains
+            .next()
+            .is_some_and(|row| main_row_matches(row, launch))
+            && mains.next().is_none()
+            && workers.next().is_some_and(|row| {
+                row["attempt_id"] == proof.attempt
+                    && row["parent_attempt_id"] == launch.main_attempt
+                    && row["task_id"] == launch.task
+                    && row["provider"] == launch.provider
+                    && row["tool"] == "peer-delegate"
+                    && row["refs"]["panel_room_id"] == launch.room
+                    && row["refs"]["panel_role"] == "worker"
+                    && row["refs"]["panel_access"] == "write"
+                    && row["terminal"] == false
+                    && row["state"] == "review"
+            })
+            && workers.next().is_none()
+            && membership(launch, service, stop)? == launch.membership_sha256,
+        "dispatch ownership changed",
+    )
+}
+
+/// All historical files are optional compatibility evidence. The supervisor
+/// record commits the proof last so partial publication cannot admit cleanup.
+fn publish_stop_proof(
+    store: &Store,
+    launch: &DispatchLaunch,
+    proof: &DispatchProof,
+    reservation: &[u8],
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    use rustix::fs::{Mode, OFlags, fsync, mkdirat, open};
+    require(
+        cfg!(target_os = "linux")
+            && proof.launch == *launch
+            && proof.provider.pid > 0
+            && proof.provider.pid != proof.stage.pid
+            && !proof.provider.birth.is_empty()
+            && !proof.stage.birth.is_empty()
+            && oms_supervisor::process::PhysicalCall::new(&proof.call).is_ok(),
+        "dispatch custody unavailable",
+    )?;
+    crate::checkpoint(stop)?;
+    let owner = crate::terminals::process(std::process::id())?;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(Error::new)?;
+    let boot = boot.trim();
+    require(
+        [&owner.birth, &proof.stage.birth, &proof.provider.birth]
+            .into_iter()
+            .all(|birth| birth.strip_prefix(boot).is_some_and(|b| b.starts_with(':')))
+            && owner.pid != proof.stage.pid
+            && owner.pid != proof.provider.pid,
+        "dispatch process generation changed",
+    )?;
+    check_proof_membership(launch, proof, service, stop)?;
+
+    let modern = format!(
+        ".oms/artifacts/panel-dispatch/{}-launch.json",
+        launch.member
+    );
+    let recheck = || -> Result<()> {
+        require(
+            bound_artifact(store, Path::new(&modern), reservation)?
+                == launch.reservation_generation
+                && launch.reservation_sha256 == crate::digest(reservation),
+            "dispatch reservation generation changed",
+        )?;
+        crate::checkpoint(stop)
+    };
+    recheck()?;
+    let private_store = crate::terminals::controller_store(store.repo(), true)?;
+    let directory = private_store.repo().join(&launch.member);
+    let private = oms_safe_fs::Root::open(private_store.repo())
+        .map_err(|_| Error::new("private dispatch root unavailable"))?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let parent = open(private_store.repo(), flags, Mode::empty()).map_err(Error::new)?;
+    let parent_before = rustix::fs::fstat(&parent).map_err(Error::new)?;
+    mkdirat(&parent, launch.member.as_str(), Mode::from_raw_mode(0o700)).map_err(Error::new)?;
+    fsync(&parent).map_err(Error::new)?;
+    let member_stat = |fd: &rustix::fd::OwnedFd| {
+        rustix::fs::statat(
+            fd,
+            launch.member.as_str(),
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(Error::new)
+    };
+    let private_dir = |info: &rustix::fs::Stat| {
+        rustix::fs::FileType::from_raw_mode(info.st_mode) == rustix::fs::FileType::Directory
+            && info.st_uid == rustix::process::getuid().as_raw()
+            && info.st_mode & 0o077 == 0
+    };
+    let member_before = member_stat(&parent)?;
+    require(
+        private_dir(&member_before),
+        "unsafe private dispatch member",
+    )?;
+
+    let controller = serde_json::json!({"pid":owner.pid, "identity":owner.birth});
+    let stage = serde_json::json!({"pid":proof.stage.pid, "identity":proof.stage.birth});
+    let identity = serde_json::json!({
+        "schema":1, "repo":launch.repo, "room":launch.room, "participant":launch.member,
+        "parent":launch.main, "task_id":launch.task, "nonce":launch.nonce,
+        "boot_id":boot, "controller":controller, "root":directory
+    });
+    let make_envelope = |record| {
+        serde_json::json!({
+            "schema":1, "repo": launch.repo, "participant": launch.member, "launch": identity,
+            "boot_id":boot, "writer": controller, "supervisor": stage, "record":record
+        })
+    };
+    let call = serde_json::json!({
+        "schema":2, "kind":"oms-panel-call", "room":launch.room, "participant":launch.member,
+        "parent":launch.main, "task_id":launch.task, "nonce":launch.nonce, "backend":"subreaper"
+    });
+    let body = crate::control::python_bytes(&call)?;
+    let public = format!(".oms/artifacts/panel-{}.json", launch.member);
+    let repo_root = oms_safe_fs::Root::open(store.repo())
+        .map_err(|_| Error::new("dispatch repository unavailable"))?;
+    create_proof_file(&repo_root, Path::new(&public), body.clone())?;
+    let generation = bound_artifact(store, Path::new(&public), &body)?;
+    let file = |suffix| Path::new(&launch.member).join(format!("{}-{suffix}.json", launch.member));
+    create_proof_file(
+        &private,
+        &Path::new(&launch.member).join("identity.json"),
+        crate::value::encoded(&identity)?,
+    )?;
+    create_proof_file(
+        &private,
+        &file("launch"),
+        crate::value::encoded(&make_envelope(serde_json::json!({
+            "call":call,"generation":generation
+        })))?,
+    )?;
+    create_proof_file(
+        &private,
+        &file("process"),
+        crate::value::encoded(&make_envelope(serde_json::json!({
+            "pid":proof.provider.pid, "identity":proof.provider.birth, "group":proof.provider.pid
+        })))?,
+    )?;
+    check_proof_membership(launch, proof, service, stop)?;
+    recheck()?;
+    let named = open(private_store.repo(), flags, Mode::empty()).map_err(Error::new)?;
+    let parent_after = rustix::fs::fstat(&named).map_err(Error::new)?;
+    let member_after = member_stat(&named)?;
+    require(
+        bound_artifact(store, Path::new(&public), &body)? == generation
+            && (parent_before.st_dev, parent_before.st_ino)
+                == (parent_after.st_dev, parent_after.st_ino)
+            && (member_before.st_dev, member_before.st_ino)
+                == (member_after.st_dev, member_after.st_ino)
+            && private_dir(&member_after),
+        "dispatch anchor changed before supervisor publication",
+    )?;
+    crate::checkpoint(stop)?;
+    create_proof_file(
+        &private,
+        &file("supervisor"),
+        crate::value::encoded(&make_envelope(serde_json::json!({
+            "launch_sha256":crate::digest(&body), "pid":proof.provider.pid,
+            "all_reaped":true,"exit":proof.exit
+        })))?,
+    )
+}
+
 pub fn dispatch(
     repo: &Path,
     request: &DispatchRequest,
@@ -599,10 +927,36 @@ pub fn dispatch(
     if request.dry_run {
         return Ok(preview);
     }
+    let room_caller = if let Some(room) = &request.room {
+        let caller = request
+            .main
+            .as_deref()
+            .ok_or_else(|| Error::new("room dispatch needs an active main"))?;
+        let mains = crate::state::active_mains(array(&attempts), room, &request.route.owner);
+        let selected = mains
+            .iter()
+            .find(|v| {
+                (v["refs"]["panel_room_participant"] == caller
+                    || (v["refs"].get("panel_room_participant").is_none()
+                        && crate::state::main_participant(v) == caller))
+                    && request
+                        .main_attempt
+                        .as_ref()
+                        .is_some_and(|a| v["attempt_id"] == *a)
+            })
+            .ok_or_else(|| Error::new("room caller is not the selected owner main"))?;
+        if selected["refs"].get("panel_room_participant").is_none() {
+            crate::control::lineage(repo, array(&attempts), caller, service, stop, false)?;
+        }
+        Some((room, caller))
+    } else {
+        None
+    };
     let member = format!("call-{}", crate::value::unique()?);
     let launch = serde_json::json!({"schema":2,"member":member,"task_id":request.task_id,"main":request.main,"main_attempt":request.main_attempt,
         "room":request.room,"route":request.route,"route_snapshot_sha256":route_snapshot_sha256,"scopes":scopes,"verify":request.verify,"state":"reserved","execution_repo":execution.repo(),"created_at":crate::now()});
-    {
+    let reservation = crate::value::encoded(&launch)?;
+    let reservation_generation = {
         let tx = store.dispatch_transaction(stop)?;
         let snapshot = tx.snapshot().map_err(reservation_error)?;
         let mut registry = snapshot
@@ -619,28 +973,25 @@ pub fn dispatch(
         if request.route.access == "write" {
             check_wip(running, awaiting, request.continue_task.is_some())?;
         }
-        tx.artifact(&member, "launch", &crate::value::encoded(&launch)?)
+        tx.artifact(&member, "launch", &reservation)
             .map_err(reservation_error)?;
         registry["calls"][&member] = launch.clone();
         tx.replace(snapshot.as_deref(), &crate::value::encoded(&registry)?)
             .map_err(reservation_error)?;
-    }
-    if let Some(room) = &request.room {
-        let caller = request
-            .main
-            .as_deref()
-            .ok_or_else(|| Error::new("room dispatch needs an active main"))?;
-        let mains = crate::state::active_mains(array(&attempts), room, &request.route.owner);
-        require(
-            mains.iter().any(|v| {
-                v["refs"]["panel_room_participant"] == caller
-                    && request
-                        .main_attempt
-                        .as_ref()
-                        .is_some_and(|a| v["attempt_id"] == *a)
-            }),
-            "room caller is not the selected owner main",
-        )?;
+        (cfg!(target_os = "linux")
+            && native == NativeCommand::Delegate
+            && request.route.access == "write"
+            && matches!(
+                request.route.candidate.provider.as_str(),
+                "codex" | "claude" | "antigravity"
+            ))
+        .then(|| {
+            let name = format!(".oms/artifacts/panel-dispatch/{member}-launch.json");
+            bound_artifact(&store, Path::new(&name), &reservation).ok()
+        })
+        .flatten()
+    };
+    if let Some((room, caller)) = room_caller {
         let mut join = crate::services::args(&[
             "join",
             "--id",
@@ -783,7 +1134,38 @@ pub fn dispatch(
             .environment
             .push(("OMS_PANEL_NO_WEB".into(), "1".into()));
     }
-    let output = service.command_context(native, &execution_request, stop).map_err(|e| Error {
+    let protected = reservation_generation.and_then(|generation| {
+        let (room, main) = room_caller?;
+        let main_attempt = request.main_attempt.as_ref()?;
+        let mut mains = array(&attempts)
+            .iter()
+            .filter(|row| row["attempt_id"] == *main_attempt);
+        let row = mains.next()?;
+        let mut binding = DispatchLaunch {
+            nonce: crate::value::unique().ok()?,
+            repo: store.repo().to_owned(),
+            execution: execution.repo().to_owned(),
+            room: room.to_owned(),
+            main: main.to_owned(),
+            main_attempt: main_attempt.to_owned(),
+            main_created: row["created_at"].as_str()?.to_owned(),
+            main_provider: request.route.owner.clone(),
+            member: member.clone(),
+            task: request.task_id.clone(),
+            provider: request.route.candidate.provider.clone(),
+            membership_sha256: String::new(),
+            reservation_sha256: crate::digest(&reservation),
+            reservation_generation: generation,
+        };
+        if mains.next().is_some() || !main_row_matches(row, &binding) {
+            return None;
+        }
+        binding.membership_sha256 = membership(&binding, service, stop).ok()?;
+        let path = format!(".oms/artifacts/panel-dispatch/{member}-launch.json");
+        (bound_artifact(&store, Path::new(&path), &reservation).ok()? == generation)
+            .then_some(binding)
+    });
+    let (output, proof) = service.dispatch_context(native, &execution_request, protected.as_ref(), stop).map_err(|e| Error {
         publication_uncertain:true,
         code:e.code,
         ..Error::new(format!("dispatch {member} execution unconfirmed; preserve reservation and inspect before retry: {}",e.message))
@@ -829,12 +1211,45 @@ pub fn dispatch(
         let receipt = serde_json::json!({"schema":1,"member":member,"task_id":request.task_id,"exit":output.code,"cleanup_complete":output.cleanup_complete,"output_complete":output.output_complete,"state":state,"route_snapshot":request.route.snapshot,"route_snapshot_sha256":route_snapshot_sha256});
         tx.artifact(&member, "process", &crate::value::encoded(&receipt)?)
             .map_err(reservation_error)?;
+        if state == "awaiting"
+            && output.code == 0
+            && let Some((launch, proof)) = protected.as_ref().zip(proof.as_ref())
+        {
+            let _ = publish_stop_proof(&store, launch, proof, &reservation, service, stop);
+        }
         Ok(receipt)
     };
     settlement().map_err(|error| Error {
         publication_uncertain: true,
         ..error
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continuation_lineage<'a>(
+    repo: &Path,
+    attempts: &'a [Value],
+    owner: &str,
+    main: Option<&str>,
+    main_attempt: &str,
+    room: Option<&str>,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<(&'a Value, std::collections::BTreeSet<String>)> {
+    let parents = crate::control::lineage(repo, attempts, main_attempt, service, stop, false)?;
+    let selected = attempts
+        .iter()
+        .find(|v| v["attempt_id"] == main_attempt)
+        .ok_or_else(|| Error::new("owning main absent"))?;
+    if selected["refs"].get("panel_room_participant").is_none() {
+        require(
+            selected["provider"] == owner
+                && room.is_none_or(|r| selected["refs"]["panel_room_id"] == r)
+                && main.is_none_or(|m| crate::state::main_participant(selected) == m),
+            "native continuation main does not match the dispatch owner, room or participant",
+        )?;
+    }
+    Ok((selected, parents))
 }
 
 /// Resolve only the newest terminal worker owned by this main. Unpaired salvage
@@ -850,7 +1265,17 @@ pub fn continuation(
         .main_attempt
         .as_deref()
         .ok_or_else(|| Error::new("continue requires the owning main attempt"))?;
-    let parents = crate::control::lineage(repo, array(attempts), main, service, stop, false)?;
+    let (selected_main, parents) = continuation_lineage(
+        repo,
+        array(attempts),
+        &request.route.owner,
+        request.main.as_deref(),
+        main,
+        request.room.as_deref(),
+        service,
+        stop,
+    )?;
+    let proof_attempts = crate::results::attempts_with_main_binding(array(attempts), selected_main);
     let mut earlier = array(attempts)
         .iter()
         .filter(|v| {
@@ -865,7 +1290,7 @@ pub fn continuation(
             && earlier.iter().all(|v| {
                 v["terminal"] == true
                     || (v["state"] == "review"
-                        && crate::control::stopped(repo, v, array(attempts)).is_ok())
+                        && crate::control::stopped(repo, v, &proof_attempts).is_ok())
             }),
         "prior worker absent or termination unconfirmed",
     )?;
@@ -893,7 +1318,7 @@ pub fn continuation(
             Some(meta)
         } else {
             require(
-                crate::salvage::verified_empty(repo, last, array(attempts), service, stop)?,
+                crate::salvage::verified_empty(repo, last, &proof_attempts, service, stop)?,
                 "stopped write work is not transferred by --continue; salvage and inspect the stopped attempt first",
             )?;
             None
@@ -1041,19 +1466,22 @@ pub fn continuation_defaults(
                         .as_str()
                         .or_else(|| v["provider"].as_str())
                         == Some(owner)
-                    && main.is_none_or(|m| v["refs"]["panel_room_participant"] == m)
+                    && main.is_none_or(|m| crate::state::main_participant(v) == m)
                     && room_id.is_none_or(|r| v["refs"]["panel_room_id"] == r)
             })
             .max_by_key(|v| (text(v, "created_at"), text(v, "attempt_id")))
             .and_then(|v| v["attempt_id"].as_str().map(str::to_owned))
     });
     let parents: std::collections::BTreeSet<String> = if let Some(att) = main_id.as_deref() {
-        crate::control::lineage(repo, attempt_rows, att, service, stop, false)?
-    } else {
+        continuation_lineage(repo, attempt_rows, owner, main, att, room_id, service, stop)?.1
+    } else if main.is_none() && room_id.is_none() {
         attempt_rows
             .iter()
             .filter(|v| {
                 (v["tool"] == "panel-main" || v["refs"]["panel_role"] == "main")
+                    && v["refs"]["panel_room_participant"]
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty())
                     && v["refs"]["panel_owner"]
                         .as_str()
                         .or_else(|| v["provider"].as_str())
@@ -1061,6 +1489,8 @@ pub fn continuation_defaults(
             })
             .filter_map(|v| v["attempt_id"].as_str().map(str::to_owned))
             .collect()
+    } else {
+        return Ok(None);
     };
 
     let mut owned = attempt_rows
@@ -1548,6 +1978,135 @@ mod tests {
                 assert_eq!(std::fs::read(path).unwrap(), *host.published.borrow());
             }
         }
+    }
+
+    #[test]
+    fn continuation_defaults_require_exact_native_main_binding() {
+        use crate::services::{CommandOutput, PeerExecutor};
+
+        struct Host {
+            room: Value,
+        }
+        impl PeerExecutor for Host {
+            fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                panic!("continuation defaults must not execute a command");
+            }
+        }
+        impl Services for Host {
+            fn command(
+                &self,
+                command: NativeCommand,
+                _: &Path,
+                args: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                let value = match command {
+                    NativeCommand::Events => {
+                        assert_eq!(args, &["list", "--json"]);
+                        json!([
+                            {
+                                "attempt_id": "att-native-main",
+                                "tool": "panel-main", "provider": "codex",
+                                "state": "working", "terminal": false,
+                                "refs": {"panel_role": "main", "panel_room_id": "room-1"}
+                            },
+                            {
+                                "attempt_id": "att-owned-worker", "parent_attempt_id": "att-native-main",
+                                "task_id": "native-continuation", "tool": "peer-delegate",
+                                "state": "done", "terminal": true,
+                                "refs": {
+                                    "panel_role": "worker", "panel_access": "write",
+                                    "panel_room_participant": "call-native-continuation"
+                                }
+                            },
+                            {
+                                "attempt_id": "att-legacy-main",
+                                "tool": "panel-main", "provider": "codex",
+                                "state": "done", "terminal": true,
+                                "refs": {
+                                    "panel_role": "main", "panel_room_id": "room-other",
+                                    "panel_room_participant": "legacy-main"
+                                }
+                            },
+                            {
+                                "attempt_id": "att-legacy-worker", "parent_attempt_id": "att-legacy-main",
+                                "task_id": "native-continuation", "state": "done", "terminal": true,
+                                "refs": {
+                                    "panel_role": "worker", "panel_access": "write",
+                                    "panel_room_participant": "call-legacy-continuation"
+                                }
+                            }
+                        ])
+                    }
+                    NativeCommand::Room => {
+                        assert!(
+                            args == ["show", "--id", "room-1", "--exact", "--json"]
+                                || args == ["show", "--id", "room-1", "--json"]
+                        );
+                        self.room.clone()
+                    }
+                    _ => panic!("unexpected continuation service {command:?}"),
+                };
+                Ok(CommandOutput {
+                    stdout: serde_json::to_vec(&value).unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..CommandOutput::default()
+                })
+            }
+        }
+
+        let mut host = Host {
+            room: json!({
+                "id": "room-1", "closed": false,
+                "participants": [
+                    {"participant": "att-native-main", "provider": "codex", "role": "main", "joined": true},
+                    {"participant": "call-native-continuation", "role": "worker", "owns": ["src/"]}
+                ]
+            }),
+        };
+        let stop = AtomicBool::new(false);
+        let read = |host: &Host, owner, main, attempt, room| {
+            continuation_defaults(
+                Path::new("."),
+                owner,
+                main,
+                attempt,
+                "native-continuation",
+                room,
+                host,
+                &stop,
+            )
+        };
+        let exact = Some("att-native-main");
+        let room = Some("room-1");
+        let defaults = read(&host, "codex", exact, None, room).unwrap().unwrap();
+        assert_eq!(defaults.attempt_id, "att-owned-worker");
+        assert_eq!(defaults.member, "call-native-continuation");
+        assert!(
+            read(&host, "codex", Some("other-main"), None, room)
+                .unwrap()
+                .is_none()
+        );
+        for (owner, main, room) in [
+            ("claude", exact, room),
+            ("codex", Some("other-main"), room),
+            ("codex", exact, Some("room-other")),
+        ] {
+            assert!(
+                read(&host, owner, main, exact, room)
+                    .unwrap_err()
+                    .message
+                    .contains("native continuation main does not match")
+            );
+        }
+        host.room["participants"][0]["joined"] = false.into();
+        assert!(
+            read(&host, "codex", exact, None, room)
+                .unwrap_err()
+                .message
+                .contains("native main Room membership is unconfirmed")
+        );
     }
 
     #[test]

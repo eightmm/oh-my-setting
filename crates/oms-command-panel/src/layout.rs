@@ -41,12 +41,8 @@ impl View {
     }
     pub fn next(self) -> Self {
         match self {
-            Self::Auto => Self::Summary,
-            Self::Summary => Self::Compact,
-            Self::Compact => Self::Detail,
-            Self::Detail => Self::Graph,
-            Self::Graph => Self::Tree,
-            Self::Tree => Self::Auto,
+            Self::Auto => Self::Compact,
+            _ => Self::Auto,
         }
     }
 }
@@ -179,21 +175,15 @@ fn board_below(width: usize, height: usize) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tab_returns_to_auto_after_the_explicit_views() {
+    fn tab_switches_between_overview_and_all_tasks() {
         use super::View;
-        let expected = [
-            View::Summary,
-            View::Compact,
-            View::Detail,
-            View::Graph,
-            View::Tree,
-            View::Auto,
-        ];
-        let mut view = View::Auto;
-        for next in expected {
-            view = view.next();
-            assert_eq!(view, next);
+        assert_eq!(View::Auto.next(), View::Compact);
+        assert_eq!(View::Compact.next(), View::Auto);
+        for view in [View::Summary, View::Detail, View::Graph, View::Tree] {
+            assert_eq!(view.next(), View::Auto);
         }
+        assert_eq!(View::parse("graph").unwrap(), View::Graph);
+        assert_eq!(View::parse("detail").unwrap(), View::Detail);
     }
     #[test]
     fn orientation_leaves_room_for_main_and_board() {

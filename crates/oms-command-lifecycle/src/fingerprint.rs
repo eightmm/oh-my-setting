@@ -83,6 +83,30 @@ fn scalar(v: &Value) -> Value {
         Value::Null
     }
 }
+fn release_digest(path: &Path) -> Result<String> {
+    if !r::exists(path) {
+        return Ok("missing".into());
+    }
+    fn without_observation_times(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                fields.remove("resolved_at");
+                for value in fields.values_mut() {
+                    without_observation_times(value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    without_observation_times(value);
+                }
+            }
+            _ => (),
+        }
+    }
+    let mut value = r::value(path)?;
+    without_observation_times(&mut value);
+    Ok(r::hash(&r::bytes(&value)?))
+}
 pub(crate) fn build(paths: &Paths) -> Result<Value> {
     let (state, row) = if !r::exists(&paths.receipt) {
         ("missing", json!({}))
@@ -126,7 +150,6 @@ pub(crate) fn build(paths: &Paths) -> Result<Value> {
     for (key, file) in [
         ("rules_global_agents", "rules/global-AGENTS.md"),
         ("skills_manifest", "skills.manifest.json"),
-        ("tools_lock", "tools.lock.json"),
     ] {
         let path = paths.source.join(file);
         digests.insert(
@@ -138,6 +161,19 @@ pub(crate) fn build(paths: &Paths) -> Result<Value> {
             }),
         );
     }
+    digests.insert(
+        "tools_lock".into(),
+        json!(match std::env::var_os("OH_MY_SETTING_TOOL_LOCK") {
+            Some(path) => release_digest(&paths.cwd.join(path))?,
+            None => "not configured".into(),
+        }),
+    );
+    digests.insert(
+        "tool_releases".into(),
+        json!(release_digest(
+            &paths.data.join(crate::supply::RELEASE_RECEIPT)
+        )?),
+    );
     digests.insert(
         "custom_skills".into(),
         json!(tree(&paths.source.join("custom-skills"), true)?),

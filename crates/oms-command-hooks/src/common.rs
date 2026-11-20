@@ -17,12 +17,22 @@ use std::{
 
 pub const INPUT_MAX: usize = 8 * 1024 * 1024;
 pub const STATE_MAX: usize = 1024 * 1024;
+
+pub(crate) fn random<const N: usize>() -> Result<[u8; N], String> {
+    let mut bytes = [0; N];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(|_| "native random source unavailable")?;
+    Ok(bytes)
+}
+
 #[derive(Default)]
 pub struct Snapshot {
     time: OnceLock<SystemTime>,
     stamp: OnceLock<String>,
     repository: OnceLock<(PathBuf, Option<PathBuf>)>,
     pub activity: OnceLock<()>,
+    pub dispatch_failure: OnceLock<AtomicBool>,
 }
 impl Snapshot {
     pub fn time(&self) -> SystemTime {
@@ -592,13 +602,39 @@ fn open_parent(path: &Path) -> Result<std::os::fd::OwnedFd, String> {
     Ok(parent)
 }
 pub fn append(path: &Path, row: &Value, max: usize) -> Result<(), String> {
+    append_record(path, row, max, false)
+}
+
+pub(crate) fn append_private_diagnostic(path: &Path, row: &Value) -> Result<(), String> {
+    append_record(path, row, STATE_MAX, true)
+}
+
+fn append_record(path: &Path, row: &Value, max: usize, diagnostic: bool) -> Result<(), String> {
     use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
     if !path.is_absolute() {
         return Err("append path must be absolute".into());
     }
-    let _guard = lock(path, Path::new("/"))?;
+    let _guard = if diagnostic {
+        None
+    } else {
+        Some(lock(path, Path::new("/"))?)
+    };
     let parent_path = path.parent().ok_or("append parent missing")?;
     let parent = open_parent(path)?;
+    let owner = diagnostic.then(rustix::process::geteuid);
+    let safe_parent = |stat: &rfs::Stat| {
+        owner.is_none_or(|uid| {
+            rfs::FileType::from_raw_mode(stat.st_mode) == rfs::FileType::Directory
+                && stat.st_uid == uid.as_raw()
+                && stat.st_mode & 0o022 == 0
+        })
+    };
+    if diagnostic {
+        let info = rfs::fstat(&parent).map_err(|_| "append parent unavailable")?;
+        if !safe_parent(&info) {
+            return Err("diagnostic parent unsafe".into());
+        }
+    }
     let name = path.file_name().ok_or("append name missing")?;
     let fd = rfs::openat(
         &parent,
@@ -612,12 +648,26 @@ pub fn append(path: &Path, row: &Value, max: usize) -> Result<(), String> {
         Mode::from_raw_mode(0o600),
     )
     .map_err(|_| "append file unavailable")?;
-    let before = rfs::fstat(&fd).map_err(|_| "append file unavailable")?;
-    if rfs::FileType::from_raw_mode(before.st_mode) != rfs::FileType::RegularFile
-        || before.st_nlink != 1
-        || before.st_size < 0
-    {
+    let mut before = rfs::fstat(&fd).map_err(|_| "append file unavailable")?;
+    let private = |stat: &rfs::Stat| {
+        owner.is_none_or(|uid| stat.st_uid == uid.as_raw() && stat.st_mode & 0o077 == 0)
+    };
+    let safe = |stat: &rfs::Stat| {
+        rfs::FileType::from_raw_mode(stat.st_mode) == rfs::FileType::RegularFile
+            && stat.st_nlink == 1
+            && stat.st_size >= 0
+            && (!diagnostic || private(stat))
+    };
+    if !safe(&before) {
         return Err("append file unsafe".into());
+    }
+    if diagnostic {
+        rfs::flock(&fd, rfs::FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_| "diagnostic append unavailable")?;
+        before = rfs::fstat(&fd).map_err(|_| "append file unavailable")?;
+        if !safe(&before) {
+            return Err("append file unsafe".into());
+        }
     }
     let mut encoded = json_line(row);
     let mut file = fs::File::from(fd);
@@ -637,13 +687,20 @@ pub fn append(path: &Path, row: &Value, max: usize) -> Result<(), String> {
     let check = || -> Result<(), String> {
         let named = rfs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|_| "append name changed")?;
-        let parent_now = rfs::stat(parent_path).map_err(|_| "append parent changed")?;
+        let parent_now = if diagnostic {
+            rfs::statat(rfs::CWD, parent_path, AtFlags::SYMLINK_NOFOLLOW)
+        } else {
+            rfs::stat(parent_path)
+        }
+        .map_err(|_| "append parent changed")?;
         let opened = rfs::fstat(&parent).map_err(|_| "append parent changed")?;
         if named.st_dev != before.st_dev
             || named.st_ino != before.st_ino
             || named.st_nlink != 1
+            || (diagnostic && !private(&named))
             || parent_now.st_dev != opened.st_dev
             || parent_now.st_ino != opened.st_ino
+            || !safe_parent(&parent_now)
         {
             return Err("append path changed".into());
         }
@@ -651,10 +708,15 @@ pub fn append(path: &Path, row: &Value, max: usize) -> Result<(), String> {
     };
     check()?;
     file.write_all(&encoded)
-        .and_then(|_| file.sync_all())
         .map_err(|_| "append incomplete; reconcile before retrying")?;
+    if !diagnostic {
+        file.sync_all()
+            .map_err(|_| "append incomplete; reconcile before retrying")?;
+    }
     check()?;
-    rfs::fsync(&parent).map_err(|_| "append published; directory sync failed")?;
+    if !diagnostic {
+        rfs::fsync(&parent).map_err(|_| "append published; directory sync failed")?;
+    }
     Ok(())
 }
 pub fn safe_text(raw: &str, limit: usize) -> String {

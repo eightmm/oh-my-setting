@@ -121,7 +121,7 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
         let finalized = report["finalized"][task]
             .as_str()
             .is_some_and(|v| ["completed", "accepted", "failed", "rejected"].contains(&v));
-        if state == "cancelled" || finalized {
+        if state == "cancelled" || finalized || call["returned_at"].is_string() {
             continue;
         }
         let class = if CLASSES[2..7].contains(&ending) {

@@ -443,6 +443,7 @@ pub struct RoutingInputs {
     pub provider_evidence: BTreeMap<String, ProviderEvidence>,
     pub status: Value,
     pub recent: BTreeMap<String, usize>,
+    pub in_flight: BTreeMap<String, usize>,
     pub writer: Option<(String, String)>,
     pub owner_model: Option<String>,
     pub public_repository: bool,
@@ -797,6 +798,21 @@ pub fn allocate(
     purpose: Option<&str>,
     inputs: &RoutingInputs,
 ) -> Result<Route> {
+    allocate_with_account_rank(policy, owner, role, tier, access, purpose, inputs)
+        .map(|(route, _)| route)
+}
+
+/// The preview rank comes from the same comparison that selects the proposed
+/// account. It stays outside the persisted route and selection snapshot.
+pub fn allocate_with_account_rank(
+    policy: &Policy,
+    owner: &str,
+    role: &str,
+    tier: Option<&str>,
+    access: &str,
+    purpose: Option<&str>,
+    inputs: &RoutingInputs,
+) -> Result<(Route, Option<AccountRank>)> {
     crate::identifier(owner)?;
     let board_kind = kind(role)?;
     let workload = tier.unwrap_or(
@@ -894,7 +910,10 @@ pub fn allocate(
         candidates.retain(|c| valid_route(c).is_ok());
     }
     candidates.retain(|c| {
-        (inputs.explicit_target || role == "security-auditor" || c.model != "claude-fable-5-1")
+        (!inputs.explicit_target || inputs.preferred.as_ref().is_none_or(|p| &c.provider == p))
+            && (inputs.explicit_target
+                || role == "security-auditor"
+                || c.model != "claude-fable-5-1")
             && (access != "write" || c.access.as_deref() != Some("read"))
             && (!(independent || board_kind == "advisor")
                 || ["codex", "claude", "antigravity"].contains(&c.provider.as_str()))
@@ -915,6 +934,7 @@ pub fn allocate(
     });
     let alternatives = candidates.len() > 1 || judged_family.is_some();
     let mut eligible = Vec::new();
+    let now = crate::timestamp();
     for mut c in candidates {
         if inputs.requested_model.is_none() {
             let catalog = inputs
@@ -949,7 +969,8 @@ pub fn allocate(
         }
         let mut account = None;
         let mut account_reason = None;
-        let mut used = weekly_used(&inputs.status, &c.provider);
+        let mut account_rank = None;
+        let mut used = weekly_used_at(&inputs.status, &c.provider, now);
         if inputs.requested_account.is_some()
             && !inputs
                 .accounts
@@ -961,19 +982,21 @@ pub fn allocate(
         if let Some(accounts) = &inputs.accounts
             && accounts.provider(&c.provider).is_some()
         {
-            let readings = &inputs.status[c.provider.as_str()]["accounts"];
-            match accounts.select(
+            let readings = account_readings(&inputs.status, &c.provider, accounts, now);
+            match accounts.select_ranked(
                 &c.provider,
                 &c.model,
-                readings,
+                &readings,
                 &inputs.running_accounts,
                 inputs.explicit_target,
                 inputs.requested_account.as_deref(),
+                now,
             ) {
-                Ok((entry, reason)) => {
-                    used = account_weekly_used(&readings[&entry.id], crate::timestamp());
+                Ok((entry, reason, rank)) => {
+                    used = account_weekly_used(&readings[&entry.id], now);
                     account = Some(entry.id);
                     account_reason = Some(reason);
+                    account_rank = rank;
                 }
                 Err(_) => continue,
             }
@@ -992,7 +1015,7 @@ pub fn allocate(
         {
             continue;
         }
-        eligible.push((c, used, account, account_reason));
+        eligible.push((c, used, account, account_reason, account_rank));
     }
     require(
         !eligible.is_empty(),
@@ -1004,7 +1027,7 @@ pub fn allocate(
     )?;
     let kept: Vec<_> = eligible
         .iter()
-        .filter(|(c, _, _, _)| {
+        .filter(|(c, _, _, _, _)| {
             c.provider != "pi" || inputs.status["pi"]["cooldown"].get(&c.model).is_none()
         })
         .cloned()
@@ -1014,7 +1037,7 @@ pub fn allocate(
     }
     let readings: Vec<_> = eligible
         .iter()
-        .filter(|(c, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
+        .filter(|(c, _, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
         .map(|v| v.1)
         .collect();
     let all_known = readings.iter().all(Option::is_some);
@@ -1028,14 +1051,15 @@ pub fn allocate(
     let tied = spread < policy.tie_band.gap;
     let mut native: Vec<_> = eligible
         .iter()
-        .filter(|(c, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
+        .filter(|(c, _, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
         .cloned()
         .collect();
-    native.sort_by_key(|(c, used, _, _)| {
+    native.sort_by_key(|(c, used, _, _, _)| {
         if all_known && !tied {
-            (usize::from(used.unwrap_or(100)), false)
+            (usize::from(used.unwrap_or(100)), 0, false)
         } else {
             (
+                *inputs.in_flight.get(&c.provider).unwrap_or(&0),
                 *inputs.recent.get(&c.provider).unwrap_or(&0),
                 c.provider == owner,
             )
@@ -1051,7 +1075,7 @@ pub fn allocate(
         let entry = eligible.remove(index);
         let after_known = eligible
             .iter()
-            .rposition(|(c, u, _, _)| {
+            .rposition(|(c, u, _, _, _)| {
                 ["codex", "claude"].contains(&c.provider.as_str()) && u.is_some()
             })
             .map(|v| v + 1)
@@ -1078,7 +1102,7 @@ pub fn allocate(
     if !independent && let Some(preferred) = &inputs.preferred {
         eligible.sort_by_key(|v| &v.0.provider != preferred);
     }
-    let (mut candidate, _, account, account_reason) = eligible.remove(0);
+    let (mut candidate, _, account, account_reason, account_rank) = eligible.remove(0);
     if role == "researcher" {
         candidate.effort = "low".into();
     }
@@ -1112,10 +1136,60 @@ pub fn allocate(
     };
     route.snapshot = Some(route.selection_snapshot(Some(policy), configured, Some(inputs))?);
     route.freeze_snapshot()?;
-    Ok(route)
+    Ok((route, account_rank))
+}
+/// Providers whose provider-level reading comes from the active account home.
+/// Claude's row comes from the room main's HUD session, whose home is unproven.
+const ACTIVE_HOME_READINGS: &[&str] = &["codex"];
+/// Per-account readings, with a fresh provider-level reading lent only to the
+/// configured account labelled as the active home when its own is unusable.
+fn account_readings(status: &Value, provider: &str, accounts: &Accounts, now: u64) -> Value {
+    let row = &status[provider];
+    let mut readings = row["accounts"].clone();
+    let Some(label) = row["account_label"].as_str().filter(|label| {
+        ACTIVE_HOME_READINGS.contains(&provider)
+            && accounts
+                .provider(provider)
+                .is_some_and(|c| c.accounts.iter().any(|e| e.id == *label))
+            && account_weekly_used(&readings[*label], now).is_none()
+            && row.get("observed_at").is_some_and(|v| !v.is_null())
+            && weekly_used_at(status, provider, now).is_some()
+            && (readings.is_null() || readings.is_object())
+    }) else {
+        return readings;
+    };
+    let mut lent = serde_json::json!({
+        "weekly_used": row["weekly_used"],
+        "observed_at": row["observed_at"],
+    });
+    if let Some(reset) = weekly_reset(row) {
+        lent["resets_at"] = reset.clone();
+    }
+    if account_weekly_used(&lent, now).is_some() {
+        readings[label] = lent;
+    }
+    readings
 }
 pub fn weekly_used(status: &Value, provider: &str) -> Option<u8> {
-    crate::metrics::percent(&status[provider]["weekly_used"])
+    weekly_used_at(status, provider, crate::timestamp())
+}
+
+fn weekly_used_at(status: &Value, provider: &str, now: u64) -> Option<u8> {
+    let row = &status[provider];
+    let max_age = if matches!(provider, "claude" | "antigravity") {
+        crate::metrics::READING_FRESH_SECONDS
+    } else {
+        ACCOUNT_QUOTA_MAX_AGE
+    };
+    let observed = [
+        "weekly_lead_observed_at",
+        "weekly_native_observed_at",
+        "observed_at",
+        "timestamp",
+    ]
+    .into_iter()
+    .find_map(|key| row.get(key).filter(|value| !value.is_null()));
+    checked_weekly_used(row, now, max_age, observed)
 }
 fn daily_capped(status: &Value, c: &Candidate) -> bool {
     status[&c.provider]["daily_cap"][&c.model]
@@ -1135,6 +1209,17 @@ pub struct ProviderAccounts {
     #[serde(default = "ordered")]
     pub policy: String,
     pub accounts: Vec<Account>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AccountRank {
+    pub policy: &'static str,
+    pub eligible_accounts: usize,
+    pub weekly_bucket: Option<u8>,
+    pub next_weekly_bucket: Option<u8>,
+    pub working_attempts: Option<usize>,
+    pub next_working_attempts: Option<usize>,
+    pub decided_by: &'static str,
 }
 fn ordered() -> String {
     "ordered".into()
@@ -1349,12 +1434,35 @@ impl Accounts {
         explicit: bool,
         requested: Option<&str>,
     ) -> Result<(Account, String)> {
+        self.select_ranked(
+            provider,
+            model,
+            readings,
+            running,
+            explicit,
+            requested,
+            crate::timestamp(),
+        )
+        .map(|(account, reason, _)| (account, reason))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_ranked(
+        &self,
+        provider: &str,
+        model: &str,
+        readings: &Value,
+        running: &BTreeMap<String, usize>,
+        explicit: bool,
+        requested: Option<&str>,
+        now: u64,
+    ) -> Result<(Account, String, Option<AccountRank>)> {
         let config = self
             .providers
             .get(provider)
             .ok_or_else(|| Error::new("no accounts configured for provider"))?;
-        let now = crate::timestamp();
         let mut eligible = Vec::new();
+        let spread = config.policy == "spread" && requested.is_none();
         for (index, entry) in config.accounts.iter().enumerate() {
             if requested.is_some_and(|r| r != entry.id) || !private_home(&entry.home) {
                 continue;
@@ -1366,21 +1474,30 @@ impl Accounts {
             if provider == "codex" && !Self::codex_serves_model(&entry.home, model)? {
                 continue;
             }
-            let spread = config.policy == "spread" && requested.is_none();
+            let bucket = used.map(|v| v / 10 * 10);
             let load = running
                 .get(&format!("{provider}:{}", entry.id))
                 .or_else(|| running.get(&entry.id))
                 .copied()
                 .unwrap_or(0);
             eligible.push((
-                used.map_or(100, |v| usize::from(v) / 10 * 10),
+                bucket.unwrap_or(100),
                 if spread { load } else { 0 },
                 index,
                 entry,
+                bucket,
             ));
         }
         eligible.sort_by_key(|v| (v.0, v.1, v.2));
-        if let Some((_, _, _, entry)) = eligible.first() {
+        if let Some((quota, load, _, entry, bucket)) = eligible.first() {
+            let next = eligible.get(1);
+            let decided_by = match next {
+                _ if requested.is_some() => "requested_account",
+                None => "only_eligible",
+                Some(next) if next.0 != *quota => "weekly_bucket",
+                Some(next) if next.1 != *load => "working_attempts",
+                _ => "registry_order",
+            };
             return Ok((
                 (*entry).clone(),
                 if requested.is_some() {
@@ -1390,6 +1507,19 @@ impl Accounts {
                 } else {
                     config.policy.clone()
                 },
+                Some(AccountRank {
+                    policy: if config.policy == "spread" {
+                        "spread"
+                    } else {
+                        "ordered"
+                    },
+                    eligible_accounts: eligible.len(),
+                    weekly_bucket: *bucket,
+                    next_weekly_bucket: next.and_then(|next| next.4),
+                    working_attempts: spread.then_some(*load),
+                    next_working_attempts: next.filter(|_| spread).map(|next| next.1),
+                    decided_by,
+                }),
             ));
         }
         let has_default = config.accounts.iter().any(|e| e.id == "default");
@@ -1438,6 +1568,7 @@ impl Accounts {
             } else {
                 "explicit target; default current home".into()
             },
+            None,
         ))
     }
     pub fn home_claimed_by_other(&self, provider: &str, candidate_home: &Path) -> bool {
@@ -1459,20 +1590,43 @@ impl Accounts {
             .ok_or_else(|| Error::new("unknown provider account"))
     }
 }
-pub fn account_weekly_used(row: &Value, now: u64) -> Option<u8> {
-    if row
-        .get("resets_at")
-        .is_some_and(|v| !v.is_null() && v.as_f64().is_none_or(|n| n <= now as f64))
+const ACCOUNT_QUOTA_MAX_AGE: f64 = 7.0 * 24.0 * 60.0 * 60.0;
+
+fn weekly_reset(row: &Value) -> Option<&Value> {
+    ["weekly_resets_at", "resets_at"]
+        .into_iter()
+        .find_map(|key| row.get(key).filter(|value| !value.is_null()))
+}
+
+fn checked_weekly_used(
+    row: &Value,
+    now: u64,
+    max_age: f64,
+    observed: Option<&Value>,
+) -> Option<u8> {
+    let now = now as f64;
+    if row["source"] == "cache stale"
+        || weekly_reset(row)
+            .is_some_and(|reset| crate::metrics::stamp(reset).is_none_or(|reset| reset <= now))
     {
         return None;
     }
-    if let Some(v) = row.get("observed_at").or_else(|| row.get("timestamp")) {
-        let observed = crate::metrics::stamp(v)?;
-        if observed > now as f64 || now as f64 - observed > 10080.0 * 60.0 {
+    if let Some(observed) = observed {
+        let stamp = crate::metrics::stamp(observed)?;
+        if stamp < 0.0 || stamp > now || now - stamp > max_age {
             return None;
         }
     }
     crate::metrics::percent(&row["weekly_used"])
+}
+
+pub fn account_weekly_used(row: &Value, now: u64) -> Option<u8> {
+    checked_weekly_used(
+        row,
+        now,
+        ACCOUNT_QUOTA_MAX_AGE,
+        row.get("observed_at").or_else(|| row.get("timestamp")),
+    )
 }
 
 #[cfg(test)]
@@ -1480,12 +1634,134 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn weekly_ranking_excludes_expired_and_unfresh_observations() {
+        let now = 1_700_000_000;
+        let base = json!({
+            "weekly_used": 0, "weekly_resets_at": now + 300,
+            "observed_at": now - 600, "source": "HUD cache"
+        });
+        let claude = |row: &Value| weekly_used_at(&json!({"claude":row}), "claude", now);
+        assert_eq!(claude(&base), Some(0));
+        for (key, value) in [
+            ("weekly_resets_at", json!(now)),
+            ("weekly_resets_at", json!("")),
+            ("observed_at", json!(now - 601)),
+            ("observed_at", json!(now + 1)),
+            ("source", json!("cache stale")),
+        ] {
+            let mut row = base.clone();
+            row[key] = value;
+            assert_eq!(claude(&row), None, "{row}");
+        }
+        let mut agy = base;
+        agy["weekly_native_observed_at"] = json!(now - 601);
+        assert_eq!(
+            weekly_used_at(&json!({"antigravity":agy}), "antigravity", now),
+            None
+        );
+        let expires = chrono::DateTime::from_timestamp(i64::try_from(now + 120).unwrap(), 0)
+            .unwrap()
+            .to_rfc3339();
+        assert_eq!(
+            account_weekly_used(
+                &json!({
+                    "weekly_used":0,"observed_at":now - 60,"resets_at":expires
+                }),
+                now
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            account_weekly_used(
+                &json!({
+                    "weekly_used":0,"observed_at":now - 60,"weekly_resets_at":null,"resets_at":now
+                }),
+                now
+            ),
+            None
+        );
+    }
+
     fn claude_inputs() -> RoutingInputs {
         RoutingInputs {
             installed: Some(["claude".into()].into()),
             catalogs: BTreeMap::from([("claude".into(), vec!["claude-sonnet-5-6".into()])]),
             ..Default::default()
         }
+    }
+    #[test]
+    fn explicit_reviewer_provider_is_required_and_unpinned_routing_stays_independent() {
+        let policy = Policy::bundled().unwrap();
+        let mut inputs = RoutingInputs {
+            installed: Some(["claude".into(), "codex".into()].into()),
+            catalogs: BTreeMap::from([
+                ("claude".into(), vec!["claude-opus-5-5".into()]),
+                ("codex".into(), vec!["gpt-6.1-sol".into()]),
+            ]),
+            preferred: Some("codex".into()),
+            explicit_target: true,
+            ..Default::default()
+        };
+        let allocate_reviewer = |inputs: &RoutingInputs| {
+            allocate(&policy, "codex", "reviewer", None, "read", None, inputs)
+        };
+        assert_eq!(
+            allocate_reviewer(&inputs).unwrap().candidate.provider,
+            "codex"
+        );
+
+        let home = std::env::temp_dir().join(format!("oms-routing-account-{}", std::process::id()));
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
+        inputs.accounts = Some(Accounts {
+            providers: BTreeMap::from([(
+                "codex".into(),
+                ProviderAccounts {
+                    policy: "ordered".into(),
+                    accounts: vec![Account {
+                        id: "snu".into(),
+                        home: home.clone(),
+                    }],
+                },
+            )]),
+        });
+        inputs.requested_account = Some("snu".into());
+        let route = allocate_reviewer(&inputs).unwrap();
+        assert_eq!(route.candidate.provider, "codex");
+        assert_eq!(route.account.as_deref(), Some("snu"));
+        assert!(route.account_pinned);
+        inputs.requested_account = None;
+        inputs.accounts = None;
+        std::fs::remove_dir(&home).unwrap();
+
+        inputs.installed = Some(["claude".into()].into());
+        assert!(allocate_reviewer(&inputs).is_err());
+        inputs.installed = Some(["claude".into(), "codex".into()].into());
+        inputs.provider_evidence.insert(
+            "codex".into(),
+            ProviderEvidence::from_catalog_row(&json!({
+                "model_effort_scales": {"gpt-6.1-sol": ["low"]}
+            }))
+            .unwrap(),
+        );
+        assert!(allocate_reviewer(&inputs).is_err());
+        inputs.provider_evidence.clear();
+        inputs.explicit_target = false;
+        inputs.preferred = None;
+        assert_eq!(
+            allocate_reviewer(&inputs).unwrap().candidate.provider,
+            "claude"
+        );
+        inputs.preferred = Some("codex".into());
+        assert_eq!(
+            allocate_reviewer(&inputs).unwrap().candidate.provider,
+            "claude"
+        );
+        assert!(allocate(&policy, "codex", "reviewer", None, "write", None, &inputs).is_err());
     }
     #[test]
     fn schema_two_remains_strict_and_snapshots_separate_model_identities() {

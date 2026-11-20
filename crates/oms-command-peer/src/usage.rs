@@ -605,7 +605,51 @@ fn count(row: &V, key: &str) -> Option<u64> {
         _ => None,
     }
 }
+fn antigravity_usage(raw: &[u8]) -> Option<Usage> {
+    // JSON print mode emits one terminal envelope. Usage in a continued
+    // conversation can be cumulative.
+    // https://antigravity.google/docs/cli/headless/#json
+    let row = oms_json::parse_strict(raw).ok()?;
+    let count = |row: &oms_json::Value, key: &str| row.get(key)?.as_integer()?.as_u64();
+    let conversation_id = row.get("conversation_id")?.as_string()?.to_str_checked()?;
+    row.get("response")?.as_string()?;
+    if row.get("status")?.as_string()?.to_str_checked()? != "SUCCESS"
+        || row
+            .get("error")
+            .is_some_and(|error| !matches!(error, oms_json::Value::Null))
+        || count(&row, "num_turns")? != 1
+        || conversation_id.is_empty()
+        || conversation_id
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let usage = row.get("usage")?;
+    let input = count(usage, "input_tokens")?;
+    let output = count(usage, "output_tokens")?;
+    let cache_read = count(usage, "cache_read_tokens")?;
+    let total = count(usage, "total_tokens")?;
+    count(usage, "thinking_tokens")?;
+    // The receipt store requires at least input + output. The provider's
+    // explicit total needs no adjustment for cache reads or thinking.
+    if total < input.checked_add(output)? {
+        return None;
+    }
+    Some(Usage {
+        input_tokens: Some(input),
+        output_tokens: Some(output),
+        cache_read_tokens: Some(cache_read),
+        total_tokens: Some(total),
+        ..Usage::default()
+    })
+}
 fn observation(provider: &str, raw: &[u8]) -> (Usage, Cost, Option<String>, bool) {
+    if provider == "antigravity" {
+        let usage = antigravity_usage(raw);
+        let reported = usage.is_some();
+        return (usage.unwrap_or_default(), Cost::Unknown, None, reported);
+    }
     let mut usage = Usage::default();
     let mut cost = Cost::Unknown;
     let mut session = None;
@@ -672,7 +716,13 @@ pub(crate) fn finish(
     complete: bool,
     cleanup_complete: Option<bool>,
 ) -> Result<()> {
-    let (usage, cost, session, reported) = observation(&receipt.identity.provider, raw);
+    let (usage, cost, session, reported) = if receipt.identity.provider == "antigravity"
+        && (!complete || receipt.cumulative.is_some())
+    {
+        (Usage::default(), Cost::Unknown, None, false)
+    } else {
+        observation(&receipt.identity.provider, raw)
+    };
     receipt.revision = 1;
     receipt.phase = if complete && reported {
         Phase::Final
@@ -736,6 +786,230 @@ fn persist(repo: &Path, receipt: &Receipt) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const AGY_SUCCESS: &str = r#"{
+        "conversation_id": "ae91bb20-7313-446e-a21d-eff7bbfe3461",
+        "status": "SUCCESS",
+        "response": "fixture answer",
+        "duration_seconds": 7.16,
+        "num_turns": 1,
+        "usage": {
+            "input_tokens": 10415,
+            "output_tokens": 657,
+            "thinking_tokens": 616,
+            "cache_read_tokens": 8113,
+            "total_tokens": 11072
+        }
+    }"#;
+
+    const AGY_ZERO: &str = r#"{
+        "conversation_id": "zero-fixture",
+        "status": "SUCCESS",
+        "response": "",
+        "num_turns": 1,
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "cache_read_tokens": 0,
+            "total_tokens": 0
+        }
+    }"#;
+
+    #[test]
+    fn antigravity_single_turn_reports_explicit_token_total() {
+        let (usage, cost, _, reported) = observation("antigravity", AGY_SUCCESS.as_bytes());
+        assert!(reported);
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: Some(10415),
+                output_tokens: Some(657),
+                cache_read_tokens: Some(8113),
+                total_tokens: Some(11072),
+                ..Usage::default()
+            }
+        );
+        assert_eq!(usage.tokens(), Some(11072));
+        assert_eq!(cost, Cost::Unknown);
+    }
+
+    #[test]
+    fn antigravity_accepts_zero_and_exact_large_integers() {
+        let usage = antigravity_usage(AGY_ZERO.as_bytes()).unwrap();
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                cache_read_tokens: Some(0),
+                total_tokens: Some(0),
+                ..Usage::default()
+            }
+        );
+
+        let max = u64::MAX.to_string();
+        let maximum = AGY_ZERO
+            .replace(r#""input_tokens": 0"#, &format!(r#""input_tokens": {max}"#))
+            .replace(r#""total_tokens": 0"#, &format!(r#""total_tokens": {max}"#));
+        let usage = antigravity_usage(maximum.as_bytes()).unwrap();
+        assert_eq!(usage.input_tokens, Some(u64::MAX));
+        assert_eq!(usage.tokens(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn antigravity_rejects_ambiguous_or_invalid_envelopes() {
+        for (field, replacement) in [
+            (r#""status": "SUCCESS","#, r#""status": "ERROR","#),
+            (r#""status": "SUCCESS","#, r#""status": "TIMEOUT","#),
+            (
+                r#""status": "SUCCESS","#,
+                r#""status": "SUCCESS", "error": "failed","#,
+            ),
+            (
+                r#""status": "SUCCESS","#,
+                r#""status": "ERROR", "status": "SUCCESS","#,
+            ),
+            (r#""status": "SUCCESS","#, ""),
+            (
+                r#""conversation_id": "ae91bb20-7313-446e-a21d-eff7bbfe3461","#,
+                "",
+            ),
+            (
+                r#""conversation_id": "ae91bb20-7313-446e-a21d-eff7bbfe3461","#,
+                r#""conversation_id": "","#,
+            ),
+            ("ae91bb20-7313-446e-a21d-eff7bbfe3461", " "),
+            (
+                r#""status":"#,
+                r#""conversation_id": "other-id", "status":"#,
+            ),
+            (r#""response": "fixture answer","#, r#""response": null,"#),
+            (r#""response": "fixture answer","#, ""),
+            (r#""num_turns": 1,"#, r#""num_turns": 0,"#),
+            (r#""num_turns": 1,"#, r#""num_turns": 2,"#),
+            (r#""num_turns": 1,"#, r#""num_turns": 1.0,"#),
+            (r#""num_turns": 1,"#, r#""num_turns": 2, "num_turns": 1,"#),
+            (r#""num_turns": 1,"#, ""),
+            (r#""usage": {"#, r#""usage": {}, "usage": {"#),
+            (
+                r#""input_tokens": 10415,"#,
+                r#""input_tokens": 999, "input_tokens": 10415,"#,
+            ),
+            (
+                r#""input_tokens": 10415,"#,
+                r#""input_tokens": 18446744073709551616,"#,
+            ),
+            (r#""output_tokens": 657,"#, r#""output_tokens": -1,"#),
+            (r#""output_tokens": 657,"#, r#""output_tokens": 6.57e2,"#),
+            (r#""thinking_tokens": 616,"#, r#""thinking_tokens": "616","#),
+            (r#""thinking_tokens": 616,"#, ""),
+            (
+                r#""cache_read_tokens": 8113,"#,
+                r#""cache_read_tokens": false,"#,
+            ),
+            (r#""cache_read_tokens": 8113,"#, ""),
+            (r#""total_tokens": 11072"#, r#""total_tokens": null"#),
+            (",\n            \"total_tokens\": 11072", ""),
+        ] {
+            let raw = AGY_SUCCESS.replacen(field, replacement, 1);
+            assert_ne!(raw, AGY_SUCCESS);
+            assert_eq!(
+                observation("antigravity", raw.as_bytes()),
+                (Usage::default(), Cost::Unknown, None, false),
+                "accepted altered field {field:?} as {replacement:?}"
+            );
+        }
+        for raw in [
+            AGY_SUCCESS[..AGY_SUCCESS.len() - 1].to_owned(),
+            format!("{AGY_SUCCESS}\n{AGY_SUCCESS}"),
+            format!("{AGY_SUCCESS}diagnostic"),
+            format!("[{AGY_SUCCESS}]"),
+        ] {
+            assert_eq!(antigravity_usage(raw.as_bytes()), None);
+        }
+    }
+
+    #[test]
+    fn antigravity_settlement_keeps_unsupported_totals_unknown() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let path = std::env::temp_dir().join(crate::id("oms-antigravity-usage-").unwrap());
+        std::fs::create_dir(&path).unwrap();
+        let repo = Fixture(path);
+        let stop = AtomicBool::new(false);
+
+        // The documented second-turn step reports these counts. A fresh result
+        // with this counter relationship must also satisfy store validation.
+        let high_cache = AGY_SUCCESS
+            .replace("10415", "278")
+            .replace("657", "4")
+            .replace("616", "0")
+            .replace("8113", "30214")
+            .replace("11072", "282");
+        let below_sum = high_cache.replace("282", "281");
+        let overflow = high_cache.replace("278", &u64::MAX.to_string());
+        let resumed = high_cache.replace(r#""num_turns": 1"#, r#""num_turns": 2"#);
+        let cases = [
+            (high_cache.as_str(), true, None, Some((282, 30214))),
+            (AGY_ZERO, true, None, Some((0, 0))),
+            (high_cache.as_str(), false, None, None),
+            (below_sum.as_str(), true, None, None),
+            (overflow.as_str(), true, None, None),
+            (resumed.as_str(), true, None, None),
+            (high_cache.as_str(), true, Some("fixture-resumed"), None),
+        ];
+        for (index, &(raw, complete, session_id, _)) in cases.iter().enumerate() {
+            let pending = usage::begin(
+                &repo.0,
+                Identity {
+                    call_id: format!("call_{index}"),
+                    operation_id: format!("op_{index}"),
+                    provider: "antigravity".into(),
+                    ..Identity::default()
+                },
+                session_id.map(|id| Cumulative {
+                    session_id: id.into(),
+                    baseline_unknown: true,
+                }),
+                &stop,
+            )
+            .unwrap();
+            finish(&repo.0, pending, raw.as_bytes(), complete, Some(true)).unwrap();
+        }
+        let calls = usage::load(&repo.0).unwrap().calls;
+        assert_eq!(calls.len(), cases.len());
+        for (call, (raw, _, session_id, expected)) in calls.iter().zip(cases) {
+            assert_eq!(call.tokens, expected.map(|(tokens, _)| tokens));
+            assert_eq!(
+                call.receipt
+                    .cumulative
+                    .as_ref()
+                    .map(|s| s.session_id.as_str()),
+                session_id
+            );
+            assert_eq!(call.cost_microusd, None);
+            assert_eq!(call.receipt.revision, 1);
+            assert_eq!(call.receipt.cleanup_complete, Some(true));
+            assert_eq!(
+                call.receipt.source_sha256,
+                Some(format!("{:x}", Sha256::digest(raw.as_bytes())))
+            );
+            if let Some((_, cache_read)) = expected {
+                assert_eq!(call.receipt.phase, Phase::Final);
+                assert_eq!(call.receipt.usage.cache_read_tokens, Some(cache_read));
+                assert_eq!(call.receipt.usage.cache_in_input, None);
+            } else {
+                assert_eq!(call.receipt.phase, Phase::Unknown);
+                assert_eq!(call.receipt.usage, Usage::default());
+            }
+        }
+    }
+
     #[test]
     fn provider_envelopes_keep_cumulative_and_estimated_cost_semantics() {
         let (u,c,s,seen) = observation("codex",concat!(

@@ -9,6 +9,7 @@ pub struct Navigation {
     pub view: View,
     pub attention_only: bool,
     pub filter: String,
+    pub filter_before_edit: Option<String>,
     pub editing: bool,
     pub detail: bool,
     pub health: bool,
@@ -36,10 +37,13 @@ impl Navigation {
         if self.editing {
             match key {
                 Key::Escape => {
-                    self.filter.clear();
+                    self.filter = self.filter_before_edit.take().unwrap_or_default();
                     self.editing = false;
                 }
-                Key::Enter => self.editing = false,
+                Key::Enter => {
+                    self.filter_before_edit = None;
+                    self.editing = false;
+                }
                 Key::Backspace => {
                     self.filter.pop();
                 }
@@ -59,7 +63,10 @@ impl Navigation {
             Key::Char('u' | '9') | Key::Repaint => return Action::Refresh,
             Key::Char('U') => return Action::Quota,
             Key::Char('c') => return Action::Council,
-            Key::Char('/') if !self.detail => self.editing = true,
+            Key::Char('/') if !self.detail => {
+                self.filter_before_edit = Some(self.filter.clone());
+                self.editing = true;
+            }
             Key::Escape => {
                 if self.detail || self.help || self.health {
                     self.detail = false;
@@ -69,8 +76,7 @@ impl Navigation {
                     self.filter.clear();
                 }
             }
-            Key::Char('g') => self.view = View::Graph,
-            Key::Char('t') => self.view = View::Tree,
+            Key::Char('g' | 't') => self.view = View::Tree,
             Key::Tab => self.view = self.view.next(),
             Key::Char('b') => {
                 self.attention_only = !self.attention_only;
@@ -145,7 +151,6 @@ pub fn matches_words(call: &serde_json::Value, words: &[String]) -> bool {
     words.iter().all(|word| haystack.contains(word.as_str()))
 }
 
-pub const BOARD_HINT: &str = "Up/Down Move  Enter Open  Tab View  / Filter  b Attention  g Graph  t Tree  u Refresh  ? Keys  q Quit";
 pub const READER_HINT: &str = "Tab View  r Raw  e Events  d Diff  i Info  x Transcript  f Files  / Search  n/N Match  Space Page  q/Esc close";
 pub const CONTROL_HINT: &str = "1 Claude  2 Pi  0 Codex  s Swap main  o Rooms  k Capacity  9 Refresh  h Chats  r Results  j Terminals and jobs  5 Explain  6 Implement  e Researcher  a Advisor  7 Review  c Council  f Finalize  n Retry delivery  q Quit";
 
@@ -180,12 +185,15 @@ mod tests {
         nav.apply(&Key::Home, 5, 2);
         assert_eq!(nav.selected, 0);
         nav.apply(&Key::Char('g'), 5, 2);
-        assert_eq!(nav.view, View::Graph);
+        assert_eq!(nav.view, View::Tree);
         nav.apply(&Key::Char('t'), 5, 2);
         assert_eq!(nav.view, View::Tree);
-        let before = nav.view;
         nav.apply(&Key::Tab, 5, 2);
-        assert_ne!(nav.view, before);
+        assert_eq!(nav.view, View::Auto);
+        nav.apply(&Key::Tab, 5, 2);
+        assert_eq!(nav.view, View::Compact);
+        nav.apply(&Key::Tab, 5, 2);
+        assert_eq!(nav.view, View::Auto);
         nav.apply(&Key::Char('b'), 5, 2);
         assert!(nav.attention_only);
         nav.apply(&Key::Char('k'), 5, 2);
@@ -202,5 +210,39 @@ mod tests {
         assert_eq!(nav.filter, "x");
         nav.apply(&Key::Escape, 5, 2);
         assert!(!nav.editing && nav.filter.is_empty());
+    }
+
+    #[test]
+    fn filter_edit_escape_restores_committed_filter_and_enter_commits() {
+        let mut nav = Navigation::default();
+        nav.apply(&Key::Char('/'), 5, 2);
+        nav.apply(&Key::Char('é'), 5, 2);
+        nav.apply(&Key::Char('x'), 5, 2);
+        nav.apply(&Key::Enter, 5, 2);
+        assert_eq!(nav.filter, "éx");
+        assert!(!nav.editing);
+
+        nav.selected = 3;
+        nav.offset = 2;
+        nav.apply(&Key::Char('/'), 5, 2);
+        nav.apply(&Key::Backspace, 5, 2);
+        nav.apply(&Key::Backspace, 5, 2);
+        nav.apply(&Key::Char('z'), 5, 2);
+        nav.apply(&Key::Escape, 5, 2);
+        assert_eq!(nav.filter, "éx");
+        assert!(!nav.editing);
+        assert_eq!((nav.selected, nav.offset), (0, 0));
+
+        nav.apply(&Key::Char('/'), 5, 2);
+        nav.apply(&Key::Backspace, 5, 2);
+        nav.apply(&Key::Enter, 5, 2);
+        assert_eq!(nav.filter, "é");
+
+        nav.apply(&Key::Escape, 5, 2);
+        assert!(nav.filter.is_empty());
+        nav.apply(&Key::Char('/'), 5, 2);
+        nav.apply(&Key::Char('z'), 5, 2);
+        nav.apply(&Key::Escape, 5, 2);
+        assert!(nav.filter.is_empty());
     }
 }

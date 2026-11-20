@@ -30,7 +30,7 @@ fn warn_threshold() -> Option<u8> {
         .filter(|&pct| pct <= 100)
 }
 
-fn format_duration(seconds: f64) -> String {
+pub(crate) fn format_duration(seconds: f64) -> String {
     let secs = seconds.max(0.0).floor() as u64;
     if secs >= 86400 {
         let d = secs / 86400;
@@ -46,7 +46,7 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-fn format_age(seconds: f64) -> String {
+pub(crate) fn format_age(seconds: f64) -> String {
     let secs = seconds.max(0.0).floor() as u64;
     if secs >= 86400 {
         format!("{}d", secs / 86400)
@@ -227,7 +227,10 @@ fn provider_snapshot(
     warn_pct: Option<u8>,
 ) -> Value {
     let native_weekly = metrics::stamp(&ps["weekly_native_observed_at"]);
-    let observed_at = native_weekly.or_else(|| metrics::stamp(&ps["observed_at"]));
+    let lead_weekly = metrics::stamp(&ps["weekly_lead_observed_at"]);
+    let observed_at = native_weekly
+        .or(lead_weekly)
+        .or_else(|| metrics::stamp(&ps["observed_at"]));
     let age_seconds = observed_at.map(|ts| (now - ts).max(0.0));
     let raw_source = if native_weekly.is_some() {
         if provider == "antigravity" {
@@ -235,6 +238,8 @@ fn provider_snapshot(
         } else {
             "Claude native usage"
         }
+    } else if lead_weekly.is_some() {
+        "Claude lead HUD"
     } else {
         ps["source"].as_str().unwrap_or("unavailable")
     };
@@ -501,6 +506,37 @@ pub fn snapshot(report: &Value, now: f64) -> Value {
     })
 }
 
+/// The explicit usage command may inspect private account receipts. Board snapshots remain pure.
+pub(crate) fn explicit_snapshot(
+    report: &Value,
+    now: f64,
+    host: &dyn crate::orchestrator::account_binding::AccountHost,
+) -> Value {
+    let mut snap = snapshot(report, now);
+    let observations: Map<_, _> =
+        crate::orchestrator::account_binding::inspect_claude_accounts(host, now)
+            .into_iter()
+            .map(|(alias, reading)| {
+                (
+                    alias,
+                    json!({
+                        "used_percentage": reading.used_percentage,
+                        "callback_age_seconds": reading.callback_age_seconds,
+                        "resets_at": reading.resets_at,
+                        "source": "local Claude statusline receipt",
+                        "acquired_at": Value::Null,
+                        "ranking_eligible": false,
+                    }),
+                )
+            })
+            .collect();
+    if !observations.is_empty() {
+        snap["providers"]["claude"]["account"]["local_weekly_observations"] =
+            Value::Object(observations);
+    }
+    snap
+}
+
 fn provider_title(name: &str) -> &str {
     match name {
         "claude" => "Claude",
@@ -538,6 +574,22 @@ pub fn text(snap: &Value) -> String {
             header.push_str(&format!(" · accounts {}", names.join(", ")));
         }
         lines.push(header);
+        if name == "claude"
+            && let Some(observations) = p["account"]["local_weekly_observations"].as_object()
+        {
+            for (alias, reading) in observations {
+                let (Some(used), Some(age), Some(reset), Some(now)) = (
+                    reading["used_percentage"].as_f64(),
+                    reading["callback_age_seconds"].as_f64(),
+                    reading["resets_at"].as_f64(),
+                    snap["now"].as_f64(),
+                ) else {
+                    continue;
+                };
+                lines.push(format!("  {alias} · local weekly observation · {used}% used · callback age {} · resets in {} · ranking unavailable",
+                    format_age(age), format_duration(reset - now)));
+            }
+        }
         for w in array(&p["windows"]) {
             let wname = w["name"].as_str().unwrap_or("window");
             let used = w["used"].as_u64().unwrap_or(0);
@@ -603,4 +655,217 @@ pub fn text(snap: &Value) -> String {
         lines.push(format!("exhaustion projection: unreported ({reason})"));
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_snapshot;
+    use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_claude_receipts_follow_current_alias_and_keep_ranking_separate() {
+        use super::{explicit_snapshot, snapshot, text};
+        use crate::claude_lead_usage::claude_observation_identity;
+        use crate::orchestrator::account_binding::test_support::{
+            FakeHost, TempDir, private_dir, sample_accounts,
+        };
+        use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+
+        const SLOT: &str = ".oms-claude-weekly-receipt.json";
+        const NOW: f64 = 1_900_000_000.0;
+        let tmp = TempDir::new("explicit-claude-usage");
+        let backup = private_dir(&tmp.0.join("first-private"));
+        let primary = private_dir(&tmp.0.join("second-private"));
+        let idle = private_dir(&tmp.0.join("idle-private"));
+        let mut host = FakeHost::new(tmp.0.join("state"));
+        let registry = |a: &Path, b: &Path| {
+            Some(sample_accounts(vec![(
+                "claude",
+                "manual",
+                vec![
+                    ("backup", a.into()),
+                    ("primary", b.into()),
+                    ("idle", idle.clone()),
+                ],
+            )]))
+        };
+        host.accounts = registry(&backup, &primary);
+        let make_receipt = |alias: &str, home: &Path, used: f64| {
+            let identity = claude_observation_identity(home, host.uid)?;
+            let mut scope = format!("claude-weekly-account\0{alias}\0").into_bytes();
+            scope.extend(home.as_os_str().as_encoded_bytes());
+            Some(json!({
+                "observation":{"schema":1,"home":identity,"process":"a".repeat(64),"session":"b".repeat(64),
+                    "weekly_used":used,"callback_observed_at":NOW-65.0,"resets_at":NOW+1800.0},
+                "evidence":"local_statusline","acquired_at":null,"ranking_eligible":false,
+                "account_scope": oms_panel_core::digest(&scope),
+            }))
+        };
+        let Some(pinned) = make_receipt("backup", &backup, 14.0) else {
+            return;
+        };
+        let other = make_receipt("primary", &primary, 33.0).unwrap();
+        let write = |home: &Path, row: &serde_json::Value| {
+            fs::write(home.join(SLOT), serde_json::to_vec(row).unwrap()).unwrap();
+            fs::set_permissions(home.join(SLOT), fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let report = json!({"provider_status":{"claude":{"source":"HUD cache","weekly_used":70,
+            "account_label":"backup","accounts":{"backup":{"weekly_used":null},"primary":{"weekly_used":null},"idle":{"weekly_used":null}}}}});
+        let old = snapshot(&report, NOW);
+        let inspect = |host: &FakeHost| explicit_snapshot(&report, NOW, host);
+        let measurements = |snap: &serde_json::Value| {
+            snap["providers"]["claude"]["account"]["local_weekly_observations"].clone()
+        };
+        assert_eq!(
+            inspect(&host),
+            old,
+            "absent receipts keep prior usage shape"
+        );
+
+        write(&backup, &pinned);
+        write(&primary, &other);
+        write(&idle, &pinned);
+        let observed = inspect(&host);
+        let projected = measurements(&observed);
+        assert_eq!(
+            projected["backup"],
+            json!({"used_percentage":14.0,"callback_age_seconds":65.0,
+            "resets_at":NOW+1800.0,"source":"local Claude statusline receipt","acquired_at":null,"ranking_eligible":false})
+        );
+        assert_eq!(projected["primary"]["used_percentage"], 33.0);
+        assert!(projected.get("idle").is_none());
+        assert_eq!(
+            observed["providers"]["claude"]["account"]["accounts"],
+            old["providers"]["claude"]["account"]["accounts"]
+        );
+        assert_eq!(
+            observed["providers"]["claude"]["windows"],
+            old["providers"]["claude"]["windows"]
+        );
+        let plain = text(&observed);
+        assert!(plain.contains("backup · local weekly observation · 14% used · callback age 1m · resets in 30m · ranking unavailable"));
+        for private in [
+            backup.to_str().unwrap(),
+            pinned["observation"]["home"].as_str().unwrap(),
+            pinned["observation"]["process"].as_str().unwrap(),
+            pinned["observation"]["session"].as_str().unwrap(),
+            pinned["account_scope"].as_str().unwrap(),
+        ] {
+            assert!(!observed.to_string().contains(private) && !plain.contains(private));
+        }
+
+        // A remap cannot relabel another already valid home's receipt.
+        host.accounts = registry(&primary, &backup);
+        assert!(measurements(&inspect(&host)).is_null());
+        host.accounts = registry(&backup, &primary);
+        for (key, value) in [
+            ("callback_observed_at", json!(NOW - 601.0)),
+            ("callback_observed_at", json!(NOW + 1.0)),
+            ("resets_at", json!(NOW)),
+            ("resets_at", json!(NOW + 8.0 * 86400.0)),
+            ("weekly_used", json!(101)),
+            ("process", json!("not-a-digest")),
+            ("session", json!("not-a-digest")),
+        ] {
+            let mut malformed = pinned.clone();
+            malformed["observation"][key] = value;
+            write(&backup, &malformed);
+            assert!(
+                measurements(&inspect(&host)).get("backup").is_none(),
+                "rejected {key}"
+            );
+        }
+        for removed in [
+            "account_scope",
+            "acquired_at",
+            "ranking_eligible",
+            "evidence",
+        ] {
+            let mut malformed = pinned.clone();
+            malformed.as_object_mut().unwrap().remove(removed);
+            write(&backup, &malformed);
+            assert!(measurements(&inspect(&host)).get("backup").is_none());
+        }
+        for (key, value) in [
+            ("ranking_eligible", json!(true)),
+            ("acquired_at", json!(NOW - 66.0)),
+            ("evidence", json!("legacy HUD")),
+            ("evidence", json!("x".repeat(1100))),
+        ] {
+            let mut malformed = pinned.clone();
+            malformed[key] = value;
+            write(&backup, &malformed);
+            assert!(measurements(&inspect(&host)).get("backup").is_none());
+        }
+        write(&backup, &pinned);
+        fs::set_permissions(backup.join(SLOT), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(measurements(&inspect(&host)).get("backup").is_none());
+        write(&backup, &pinned);
+        let moved = tmp.0.join("moved-private");
+        fs::rename(&backup, &moved).unwrap();
+        assert_eq!(
+            claude_observation_identity(&moved, host.uid).as_deref(),
+            pinned["observation"]["home"].as_str()
+        );
+        host.accounts = registry(&moved, &primary);
+        assert!(measurements(&inspect(&host)).get("backup").is_none());
+        private_dir(&backup);
+        write(&backup, &pinned);
+        host.accounts = registry(&backup, &primary);
+        assert!(measurements(&inspect(&host)).get("backup").is_none());
+    }
+
+    #[test]
+    fn lead_hud_weekly_is_labelled_without_new_keys() {
+        let now = 10_000.0;
+        let keys = |snap: &serde_json::Value| {
+            let mut keys: Vec<_> = snap.as_object().unwrap().keys().cloned().collect();
+            keys.push(format!(
+                "{:?}",
+                snap["reading"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .collect::<Vec<_>>()
+            ));
+            keys
+        };
+        let native = provider_snapshot(
+            "claude",
+            &json!({"source": "unavailable", "weekly_used": 40, "weekly_native_observed_at": now - 30.0}),
+            (0, 0),
+            now,
+            None,
+        );
+        let lead = |at: f64| {
+            provider_snapshot(
+                "claude",
+                &json!({"source": "cache stale", "observed_at": now - 900.0, "weekly_used": 21,
+                        "weekly_lead_observed_at": at, "weekly_resets_at": now + 3600.0}),
+                (0, 0),
+                now,
+                None,
+            )
+        };
+        let fresh = lead(now - 30.0);
+        assert_eq!(keys(&fresh), keys(&native));
+        assert_eq!(fresh["reading"]["source"], "Claude lead HUD");
+        assert_eq!(fresh["reading"]["stale"], false);
+        assert_eq!(fresh["windows"][0]["name"], "weekly");
+        assert_eq!(fresh["windows"][0]["used"], 21);
+        assert_eq!(fresh["windows"][0]["source"], "Claude lead HUD");
+        let aged = lead(now - 700.0);
+        assert_eq!(aged["reading"]["stale"], true);
+        assert_eq!(aged["windows"][0]["level"], serde_json::Value::Null);
+        let stale = provider_snapshot(
+            "claude",
+            &json!({"source": "cache stale", "observed_at": now - 700.0}),
+            (0, 0),
+            now,
+            None,
+        );
+        assert_eq!(stale["windows"], json!([]));
+        assert_eq!(stale["reading"]["stale"], true);
+    }
 }

@@ -39,7 +39,7 @@ oms_install_link_mode() {
   esac
 }
 
-# The locked tool archive for this host, e.g. linux-amd64.
+# The managed tool artifact platform for this host, e.g. linux-amd64.
 oms_tool_platform() {
   local os arch
   case "$OMS_PLATFORM_KERNEL" in
@@ -209,6 +209,7 @@ oms_native_quarantine() {  # oms_native_quarantine ROOT
 oms_native_stage() {  # oms_native_stage ROOT
   local root="$1" cache revision target_dir release_dir stage_dir entry
   local artifacts="" oms_digest="" name digest
+  root="$(cd "$root" && pwd -P)" || return 1
   [ -f "$root/crates/oms/Cargo.toml" ] && [ -f "$root/Cargo.toml" ] || return 1
   command -v cargo >/dev/null 2>&1 || return 1
   revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || return 1
@@ -228,14 +229,20 @@ oms_native_stage() {  # oms_native_stage ROOT
   chmod go-w "$root/target" "$cache" 2>/dev/null || true
   target_dir="$root/target/lifecycle-build"
   release_dir="$target_dir/release"
-  cargo +1.99.1 build --manifest-path "$root/Cargo.toml" \
-    --locked --offline --release \
-    --bin oms \
-    --bin oms-mcp-peer-owner \
-    --bin oms-run-bounded-helper \
-    --bin oms-state-queue-worker \
-    --bin oms-graph-python-helper \
-    --target-dir "$target_dir" >&2 || return 1
+  # rustup selects the incoming checkout's toolchain from this working directory.
+  # Fetch missing locked dependencies unless the caller explicitly requests offline.
+  (
+    cd "$root" || exit 1
+    unset RUSTUP_TOOLCHAIN
+    cargo build --manifest-path "$root/Cargo.toml" \
+      --locked --release \
+      --bin oms \
+      --bin oms-mcp-peer-owner \
+      --bin oms-run-bounded-helper \
+      --bin oms-state-queue-worker \
+      --bin oms-graph-python-helper \
+      --target-dir "$target_dir"
+  ) >&2 || return 1
   stage_dir="$(mktemp -d "$cache/.stage-$revision.XXXXXX")" || return 1
   chmod 0755 "$stage_dir"
   for name in oms oms-mcp-peer-owner oms-run-bounded-helper oms-state-queue-worker oms-graph-python-helper; do

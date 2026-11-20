@@ -35,6 +35,7 @@ const FLAGS: &[&str] = &[
     "allow-stale-base",
     "no-web",
     "dry-run",
+    "spread-accounts",
     "archived",
 ];
 const VALUES: &[&str] = &[
@@ -46,6 +47,7 @@ const VALUES: &[&str] = &[
     "spawn-main",
     "orchestrator",
     "focus-orchestrator",
+    "lead",
     "swap-main",
     "resume",
     "model",
@@ -237,6 +239,12 @@ impl Options {
                         }
                     };
                     let values = out.values.entry(key.into()).or_default();
+                    if matches!(key, "launch" | "spawn-main") {
+                        require(values.is_empty(), "choose one Main provider")?;
+                    }
+                    if key == "lead" {
+                        require(values.is_empty(), "choose one provider lead")?;
+                    }
                     if !REPEATED.contains(&key) {
                         values.clear();
                     }
@@ -344,7 +352,6 @@ impl Options {
                 "view",
                 &["auto", "summary", "compact", "detail", "graph", "tree"][..],
             ),
-            ("reasoning-effort", &["low", "medium", "high"][..]),
             ("access", &["read", "write"][..]),
             ("purpose", &["explain", "investigate", "implement"][..]),
             (
@@ -361,6 +368,25 @@ impl Options {
         self.choice("workload", oms_panel_core::routing::TIERS)?;
         for key in ["orchestrator", "focus-orchestrator"] {
             self.choice(key, &crate::orchestrator::PROVIDERS)?;
+        }
+        if self.has("orchestrator") {
+            require(
+                !self.has("task") || !(self.has("model") || self.has("reasoning-effort")),
+                "orchestrator model and effort apply only when opening a new session",
+            )?;
+            if let Some(effort) = self.get("reasoning-effort") {
+                require(
+                    !effort.is_empty()
+                        && effort.len() <= 32
+                        && effort.as_bytes()[0].is_ascii_lowercase()
+                        && effort.bytes().all(|c| {
+                            c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-".contains(&c)
+                        }),
+                    "invalid native reasoning effort token",
+                )?;
+            }
+        } else {
+            self.choice("reasoning-effort", &["low", "medium", "high"])?;
         }
         let modes = [
             "watch",
@@ -463,14 +489,13 @@ impl Options {
         self.needs(&["follow"], &["log"])?;
         self.needs(
             &["reasoning-effort"],
-            &["dispatch", "continue", "recommend"],
+            &["dispatch", "continue", "recommend", "orchestrator"],
         )?;
         self.needs(
             &[
                 "alias",
                 "main",
                 "to",
-                "account",
                 "brief-file",
                 "from-task",
                 "purpose",
@@ -479,6 +504,40 @@ impl Options {
             ],
             &["dispatch", "continue"],
         )?;
+        if self.has("lead") {
+            self.choice("lead", &["alternate"])?;
+            require(
+                (self.get("orchestrator") == Some("codex") && self.has("account"))
+                    || self.get("focus-orchestrator") == Some("codex"),
+                "--lead alternate requires --orchestrator codex --account ID or --focus-orchestrator codex",
+            )?;
+        }
+        self.needs(
+            &["account"],
+            &["dispatch", "continue", "orchestrator", "launch"],
+        )?;
+        require(
+            !self.has("spread-accounts")
+                || (self.get("orchestrator") == Some("claude") && !self.has("account")),
+            "--spread-accounts requires --orchestrator claude without --account",
+        )?;
+        require(
+            !(self.get("orchestrator") == Some("antigravity") && self.has("account")),
+            "provider account isolation is unproved for antigravity",
+        )?;
+        if let Some(v) = self.get("account") {
+            require(valid_account_id(v), "invalid account id")?;
+            if let Some(harness) = self.get("launch") {
+                require(
+                    matches!(harness, "codex" | "claude"),
+                    "--launch --account requires codex or claude",
+                )?;
+                require(
+                    !self.has("resume"),
+                    "--launch --account cannot resume without a verified native session account binding",
+                )?;
+            }
+        }
         self.needs(&["prompt", "label"], &["dispatch", "continue", "council"])?;
         self.needs(
             &["workload"],
@@ -528,6 +587,7 @@ impl Options {
                 "dispatch",
                 "continue",
                 "recommend",
+                "orchestrator",
             ],
         )?;
         self.needs(&["compare"], &["compare"])?;
@@ -691,11 +751,10 @@ impl Options {
         }
         if let Some(v) = self.get("model") {
             require(
-                !v.is_empty()
-                    && v.len() <= 160
-                    && !v.starts_with('-')
-                    && v.bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || b"_./:-".contains(&c)),
+                valid_model_id(v)
+                    || (v.len() <= 160
+                        && self.get("orchestrator") == Some("antigravity")
+                        && crate::orchestrator::agy_fixed_effort_model(v).is_some()),
                 "invalid model ID",
             )?;
         }
@@ -714,11 +773,32 @@ impl Options {
     }
 }
 
+pub(crate) fn valid_model_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+}
+
+pub(crate) fn valid_account_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && (value.as_bytes()[0].is_ascii_lowercase() || value.as_bytes()[0].is_ascii_digit())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+}
+
 pub fn usage() -> String {
     let mut text = String::from(
-        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nBare interactive panel opens or reuses the native Codex Main on tmux. Use --watch for the board alone.\n\n",
+        "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nBare interactive panel opens or reuses a native Main on tmux. Use --watch for the board alone.\n\n",
     );
-    text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--task TEXT]\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
+    text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--account ID] [--model MODEL] [--reasoning-effort EFFORT]\nModel and effort apply to new sessions only. The native CLI validates availability.\nAssign an existing provider: --orchestrator PROVIDER [--account ID] --task TEXT\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
+    text.push_str("Codex alternate: --orchestrator codex --lead alternate --account ID [--task TEXT] | --focus-orchestrator codex --lead alternate\n\n");
+    text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
+    text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
     for key in FLAGS {
         text.push_str(&format!("  --{key}\n"));
@@ -732,7 +812,58 @@ pub fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Options;
+    use super::{Options, usage};
+
+    #[test]
+    fn alternate_lead_is_only_for_explicit_codex_launch_task_and_focus() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        let launch = [
+            "--orchestrator",
+            "codex",
+            "--lead",
+            "alternate",
+            "--account",
+            "work",
+        ];
+        let focus = ["--focus-orchestrator", "codex", "--lead", "alternate"];
+        assert!(parse(&launch).is_ok());
+        assert!(parse(&[launch.as_slice(), &["--task", "do work"]].concat()).is_ok());
+        assert!(parse(&focus).is_ok());
+        for args in [
+            &["--lead", "alternate"][..],
+            &["--orchestrator", "codex", "--lead", "alternate"],
+            &[
+                "--orchestrator",
+                "claude",
+                "--lead",
+                "alternate",
+                "--account",
+                "work",
+            ],
+            &["--focus-orchestrator", "claude", "--lead", "alternate"],
+            &["--focus-orchestrator", "codex", "--lead", "primary"],
+            &[
+                "--launch",
+                "codex",
+                "--lead",
+                "alternate",
+                "--account",
+                "work",
+            ],
+            &["--dispatch", "builder", "--lead", "alternate"],
+        ] {
+            assert!(parse(args).is_err(), "accepted {args:?}");
+        }
+        for extra in [
+            &["--spread-accounts"][..],
+            &["--lead", "alternate"],
+            &["--resume", "00112233-4455-4677-8899-aabbccddeeff"],
+        ] {
+            assert!(parse(&[launch.as_slice(), extra].concat()).is_err());
+        }
+        assert!(parse(&[focus.as_slice(), &["--account", "work"]].concat()).is_err());
+        assert!(usage().contains("--focus-orchestrator codex --lead alternate"));
+    }
 
     #[test]
     fn orchestrator_actions_cannot_resume_unbound_vendor_sessions() {
@@ -743,5 +874,163 @@ mod tests {
             assert!(parse(&["--focus-orchestrator", provider, "--resume", uuid]).is_err());
         }
         assert!(parse(&["--launch", "codex", "--resume", "legacy-session"]).is_ok());
+    }
+
+    #[test]
+    fn explicit_main_account_is_only_for_fresh_codex_and_claude_launches() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        for provider in ["codex", "claude"] {
+            assert!(parse(&["--launch", provider, "--account", "work"]).is_ok());
+            assert!(parse(&["--launch", provider, "--account", "work", "--dry-run"]).is_ok());
+            assert!(parse(&["--launch", provider, "--account", "Work"]).is_err());
+            assert!(
+                parse(&[
+                    "--launch",
+                    provider,
+                    "--account",
+                    "work",
+                    "--resume",
+                    "native-session"
+                ])
+                .is_err()
+            );
+            assert!(parse(&["--launch", provider, "--resume", "native-session"]).is_ok());
+        }
+        for provider in ["pi", "agy", "antigravity"] {
+            assert!(parse(&["--launch", provider, "--account", "work"]).is_err());
+            assert!(parse(&["--launch", provider]).is_ok());
+        }
+        assert!(parse(&["--spawn-main", "codex", "--account", "work"]).is_err());
+        assert!(parse(&["--launch", "gemini", "--launch=codex"]).is_err());
+        assert!(parse(&["--spawn-main=claude", "--spawn-main", "claude"]).is_err());
+        assert!(usage().contains("--launch codex|claude [--account ID]"));
+    }
+
+    #[test]
+    fn native_claude_spread_has_only_the_unpinned_orchestrator_mode() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        assert!(parse(&["--orchestrator", "claude", "--spread-accounts"]).is_ok());
+        for args in [
+            &["--spread-accounts"][..],
+            &["--orchestrator", "codex", "--spread-accounts"],
+            &["--orchestrator", "antigravity", "--spread-accounts"],
+            &["--launch", "claude", "--spread-accounts"],
+            &["--focus-orchestrator", "claude", "--spread-accounts"],
+            &[
+                "--orchestrator",
+                "claude",
+                "--account",
+                "work",
+                "--spread-accounts",
+            ],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+        assert!(usage().contains("--orchestrator claude --spread-accounts"));
+    }
+
+    #[test]
+    fn orchestrator_account_cli_validation_and_usage() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        for provider in ["codex", "claude"] {
+            assert!(parse(&["--orchestrator", provider, "--account", "work"]).is_ok());
+            assert!(parse(&["--orchestrator", provider, "--account", "0_acct-1"]).is_ok());
+            assert!(
+                parse(&[
+                    "--orchestrator",
+                    provider,
+                    "--account",
+                    "work",
+                    "--task",
+                    "check"
+                ])
+                .is_ok()
+            );
+            assert!(parse(&["--focus-orchestrator", provider, "--account", "work"]).is_err());
+        }
+        let agy_err = parse(&["--orchestrator", "antigravity", "--account", "work"]).unwrap_err();
+        assert_eq!(
+            agy_err.message,
+            "provider account isolation is unproved for antigravity"
+        );
+        assert!(parse(&["--focus-orchestrator", "antigravity", "--account", "work"]).is_err());
+
+        let too_long = "a".repeat(65);
+        for bad in [
+            "",
+            "-work",
+            "_work",
+            "Work",
+            "bad.id",
+            "bad/id",
+            too_long.as_str(),
+        ] {
+            assert!(
+                parse(&["--orchestrator", "codex", "--account", bad]).is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                parse(&[
+                    "--dispatch",
+                    "worker",
+                    "--prompt",
+                    "x",
+                    "--to",
+                    "codex",
+                    "--account",
+                    bad
+                ])
+                .is_err(),
+                "{bad:?}"
+            );
+        }
+        let help = usage();
+        assert!(help.contains(
+            "Provider sessions: --orchestrator codex|claude|antigravity [--account ID] [--model MODEL] [--reasoning-effort EFFORT]"
+        ));
+    }
+
+    #[test]
+    fn orchestrator_selection_is_start_only() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+        for provider in crate::orchestrator::PROVIDERS {
+            assert!(
+                parse(&[
+                    "--orchestrator",
+                    provider,
+                    "--model",
+                    "fixture/model-v2",
+                    "--reasoning-effort",
+                    "xhigh",
+                ])
+                .is_ok()
+            );
+            for option in ["--model", "--reasoning-effort"] {
+                assert!(parse(&["--focus-orchestrator", provider, option, "high"]).is_err());
+                assert!(
+                    parse(&[
+                        "--orchestrator",
+                        provider,
+                        "--task",
+                        "inspect",
+                        option,
+                        "high"
+                    ])
+                    .is_err()
+                );
+            }
+            for effort in ["", "x high", "HIGH", "high\"", "high\\", "-high", "high\n"] {
+                assert!(
+                    parse(&[
+                        "--orchestrator",
+                        provider,
+                        &format!("--reasoning-effort={effort}"),
+                    ])
+                    .is_err()
+                );
+            }
+        }
+        assert!(parse(&["--dispatch", "worker", "--reasoning-effort", "high"]).is_ok());
+        assert!(parse(&["--dispatch", "worker", "--reasoning-effort", "xhigh"]).is_err());
     }
 }

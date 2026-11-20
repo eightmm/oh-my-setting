@@ -29,6 +29,8 @@ mod review;
 mod review_red;
 pub mod safety;
 mod session;
+#[doc(hidden)]
+pub use session::CodexHookTranscript;
 pub mod storage;
 mod thread;
 mod usage;
@@ -125,6 +127,26 @@ pub fn run_with_source(
     run_with_executor(tool, args, cwd, source_root, interrupted, &process::Native)
 }
 
+/// Bound adapter for a Codex callback carrying an explicit transcript hint.
+#[doc(hidden)]
+pub fn run_codex_hook_handoff(
+    args: &[OsString],
+    repo: &Path,
+    source_root: &Path,
+    interrupted: &AtomicBool,
+    transcript: CodexHookTranscript<'_>,
+) -> Output {
+    let context = Context {
+        cwd: repo,
+        source: source_root,
+        interrupted,
+        executor: &process::Native,
+    };
+    check(interrupted)
+        .and_then(|()| session::handoff(args, &context, Some(transcript)))
+        .unwrap_or_else(output_error)
+}
+
 /// Injectable execution boundary for transport integration. Executor results
 /// must distinguish completed output from timeout/cancellation/truncation.
 pub fn run_with_executor(
@@ -158,13 +180,15 @@ pub fn run_with_executor(
             _ => peer::run(tool, args, &context),
         }
     })();
-    result.unwrap_or_else(|e: Error| {
-        (
-            e.code,
-            Vec::new(),
-            format!("error: {}\n", e.message).into_bytes(),
-        )
-    })
+    result.unwrap_or_else(output_error)
+}
+
+fn output_error(e: Error) -> Output {
+    (
+        e.code,
+        Vec::new(),
+        format!("error: {}\n", e.message).into_bytes(),
+    )
 }
 
 pub(crate) struct Context<'a> {

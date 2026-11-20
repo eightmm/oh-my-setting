@@ -1310,14 +1310,35 @@ impl oms_runtime::Services for RuntimeServices<'_> {
             return Err(plan_error("cannot fetch channel without origin remote"));
         }
         let out = self.git(root, &["fetch", "--prune", "--tags", "origin"], FETCH_WALL)?;
-        if out.code == 0 {
-            Ok(())
-        } else {
-            Err(oms_command_plan::Error {
+        if out.code != 0 {
+            return Err(oms_command_plan::Error {
                 code: if out.cancelled { 130 } else { 1 },
                 message: "failed to fetch origin while resolving channel".into(),
-            })
+            });
         }
+        let head = self.git(root, &["remote", "set-head", "origin", "-a"], GIT_WALL)?;
+        if head.cancelled {
+            return Err(oms_command_plan::Error {
+                code: 130,
+                message: "default branch resolution interrupted".into(),
+            });
+        }
+        if head.code != 0 {
+            // Explicit tags/branches still resolve without a remote HEAD.
+            // Remove a stale alias so default-edge status cannot invent one.
+            let removed = self.git(
+                root,
+                &["remote", "set-head", "origin", "--delete"],
+                GIT_WALL,
+            )?;
+            if removed.code != 0 {
+                return Err(oms_command_plan::Error {
+                    code: if removed.cancelled { 130 } else { 1 },
+                    message: "failed to clear unavailable origin default branch".into(),
+                });
+            }
+        }
+        Ok(())
     }
     /// A numeric PID is never enough across hosts: only this host's process
     /// table can prove absence, and any other host is never "gone".
@@ -1783,8 +1804,8 @@ impl oms_runtime::Services for RuntimeServices<'_> {
             stderr,
         })
     }
-    /// The lifecycle crate's transactional `update --ref`, only for a commit
-    /// that is already present locally.
+    /// Bind the reviewed commit to the lifecycle transaction while retaining
+    /// edge tracking or an explicit stable pin.
     fn apply_release(
         &self,
         root: &Path,
@@ -1800,12 +1821,22 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         {
             return Err(plan_error("release target is not available locally"));
         }
-        let mut args: Vec<OsString> = vec!["--ref".into(), request.target.clone().into()];
-        if request.no_tools {
-            args.push("--no-tools".into());
-        }
-        let (exit, stdout, stderr) =
-            oms_command_lifecycle::run_with_source("update", &args, root, root, self.cancel());
+        let channel = if request.channel == "edge" {
+            oms_command_lifecycle::ReleaseChannel::Edge
+        } else {
+            oms_command_lifecycle::ReleaseChannel::Stable
+        };
+        let lifecycle = crate::services_collab::CollabServices::new(self.interrupted, root)
+            .map_err(plan_error)?;
+        let (exit, stdout, stderr) = oms_command_lifecycle::apply_release_with_services(
+            channel,
+            &request.target,
+            &request.selected_ref,
+            root,
+            request.no_tools,
+            self.cancel(),
+            &lifecycle,
+        );
         Ok(ExternalOutput {
             exit,
             stdout,
@@ -4571,6 +4602,34 @@ exit 92
         assert_eq!(rt.repository_view(repo.path()).unwrap().branch, "");
         // No origin: a channel fetch refuses instead of reporting success.
         assert!(rt.fetch_release(repo.path()).is_err());
+        let remote = Dir::new();
+        remote.git(&["init", "--bare", "-q", "--initial-branch=main"]);
+        repo.git(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        repo.git(&["push", "-q", "origin", "main"]);
+        rt.fetch_release(repo.path()).unwrap();
+        assert_eq!(
+            rt.resolve_revision(repo.path(), "origin/HEAD").unwrap(),
+            Some(view.head.clone())
+        );
+        repo.git(&["push", "-q", "origin", "main:trunk"]);
+        remote.git(&["symbolic-ref", "HEAD", "refs/heads/trunk"]);
+        rt.fetch_release(repo.path()).unwrap();
+        assert_eq!(
+            rt.git_text(repo.path(), &["symbolic-ref", "refs/remotes/origin/HEAD"])
+                .unwrap()
+                .as_deref(),
+            Some("refs/remotes/origin/trunk")
+        );
+        remote.git(&["symbolic-ref", "HEAD", "refs/heads/unavailable"]);
+        rt.fetch_release(repo.path()).unwrap();
+        assert_eq!(
+            rt.resolve_revision(repo.path(), "origin/HEAD").unwrap(),
+            None
+        );
+        assert_eq!(
+            rt.resolve_revision(repo.path(), "origin/main").unwrap(),
+            Some(view.head)
+        );
     }
 
     #[test]
@@ -4679,6 +4738,12 @@ exit 92
         let release = |channel: &str, target: &str| ReleaseRequest {
             channel: channel.into(),
             target: target.into(),
+            selected_ref: if channel == "edge" {
+                "origin/HEAD"
+            } else {
+                target
+            }
+            .into(),
             no_tools: true,
         };
         assert!(

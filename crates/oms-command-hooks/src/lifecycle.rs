@@ -16,7 +16,7 @@ pub fn run(name: &str, args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Outp
         }
         "fail-ledger-hook" => failure(&v, ctx),
         "precompact-handoff" => {
-            precompact(&v, args, ctx);
+            precompact(&v, args, raw, ctx);
             empty()
         }
         "resume-hook" => resume(&v, ctx),
@@ -455,10 +455,22 @@ pub(crate) fn capture(
     skip: bool,
     ctx: &Context<'_>,
 ) -> bool {
+    capture_with_callback(v, repo, agent, note, skip, ctx, None)
+}
+
+fn capture_with_callback(
+    v: &Value,
+    repo: &Path,
+    agent: &str,
+    note: &str,
+    skip: bool,
+    ctx: &Context<'_>,
+    codex_callback: Option<&[u8]>,
+) -> bool {
     if interrupted(ctx) || !adopted(repo) {
         return false;
     }
-    match crate::handoff::capture(v, repo, agent, note, skip, ctx) {
+    match crate::handoff::capture(v, repo, agent, note, skip, ctx, codex_callback) {
         Ok(captured) => captured,
         Err(summary) => {
             let summary = safe_text(&summary, 160);
@@ -487,7 +499,7 @@ pub(crate) fn capture(
     }
 }
 
-fn precompact(v: &Value, args: &[OsString], ctx: &Context<'_>) {
+fn precompact(v: &Value, args: &[OsString], raw: &[u8], ctx: &Context<'_>) {
     if !on("OMS_PRECOMPACT_HANDOFF") || event(v) == "SessionEnd" && !on("OMS_SESSIONEND_HANDOFF") {
         return;
     }
@@ -536,7 +548,8 @@ fn precompact(v: &Value, args: &[OsString], ctx: &Context<'_>) {
     } else {
         "auto: pre-compact snapshot"
     };
-    let _ = capture(v, &repo, agent, note, true, ctx);
+    let codex_callback = (ctx.provider == Some("codex") && agent == "codex").then_some(raw);
+    let _ = capture_with_callback(v, &repo, agent, note, true, ctx, codex_callback);
 }
 pub(crate) fn journal(repo: &Path, prompt: bool, ctx: &Context<'_>) -> Vec<u8> {
     if off("OMS_WORK_JOURNAL") || env("OMS_WORK_JOURNAL_ACTIVE") == "1" || !adopted(repo) {
@@ -635,6 +648,9 @@ pub(crate) fn stop(v: &Value, ctx: &Context<'_>) -> Output {
                 return out(raw);
             }
             Err(_) => {
+                if let Some(failure) = ctx.snapshot.dispatch_failure.get() {
+                    failure.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 finish_stop(v, &repo, ctx);
                 return out(json_line(
                     &json!({"systemMessage":"oh-my-setting turn guard: unavailable (helper error); this turn was not checked."}),

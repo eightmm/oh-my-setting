@@ -390,6 +390,17 @@ pub trait Executor: Sync {
     ) -> Result<Completed> {
         Err(Error::new(75, "native Team request channel unavailable"))
     }
+    /// Actual provider launch boundary. Observers may bind this typed identity
+    /// to the native process they supervise. Generic executors are unchanged.
+    fn execute_provider(
+        &self,
+        request: Invocation,
+        _identity: &oms_command_telemetry::store::usage::Identity,
+        _direct: bool,
+        interrupted: &AtomicBool,
+    ) -> Result<Completed> {
+        self.execute(request, interrupted)
+    }
     fn execute(&self, request: Invocation, interrupted: &AtomicBool) -> Result<Completed>;
 }
 pub struct Native;

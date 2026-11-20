@@ -2,6 +2,7 @@
 use crate::services::{ExecutionRequest, NativeCommand, query};
 use crate::value::{array, text};
 use crate::{Error, Result, Services, Store, Value, require};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -64,6 +65,23 @@ pub fn evidence_reference(store: &Store, path: &Path) -> Result<Value> {
     let bytes = store.read(path, MAX_RESULT, false)?;
     Ok(serde_json::json!({"path":path,"sha256":crate::digest(&bytes),"bytes":bytes.len()}))
 }
+/// Use only for private launch evidence after proving the Main's lineage.
+pub(crate) fn attempts_with_main_binding<'a>(
+    attempts: &'a [Value],
+    main: &Value,
+) -> Cow<'a, [Value]> {
+    if main["tool"] != "panel-main" || main["refs"].get("panel_room_participant").is_some() {
+        return Cow::Borrowed(attempts);
+    }
+    let Some(index) = attempts.iter().position(|row| row == main) else {
+        return Cow::Borrowed(attempts);
+    };
+    let mut projected = attempts.to_vec();
+    projected[index]["refs"]["panel_room_participant"] =
+        crate::state::main_participant(main).into();
+    Cow::Owned(projected)
+}
+
 pub fn finalize_snapshot<S: Services + ?Sized>(
     repo: &Path,
     request: &FinalizeRequest,
@@ -112,14 +130,40 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
             .all(|v| descends(v, array(&attempts), &parents)),
         "task includes attempts owned by another main",
     )?;
-    require(
-        related.iter().all(|v| {
-            v["terminal"] == true
-                || (v["state"] == "review"
-                    && crate::control::stopped(repo, v, array(&attempts)).is_ok())
-        }),
-        "task has live or unconfirmed attempts",
-    )?;
+    let mut launch_attempts = None;
+    for attempt in &related {
+        if attempt["terminal"] == true
+            || (attempt["state"] == "review"
+                && crate::control::stopped(
+                    repo,
+                    attempt,
+                    launch_attempts
+                        .get_or_insert_with(|| attempts_with_main_binding(array(&attempts), main)),
+                )
+                .is_ok())
+        {
+            continue;
+        }
+        let id = attempt["attempt_id"]
+            .as_str()
+            .filter(|id| crate::native::operations::projection::id(id))
+            .unwrap_or("unreported");
+        let scope = if attempt["task_id"] == request.task_id {
+            "task"
+        } else {
+            "inherited taskless descendant"
+        };
+        let reason = match attempt["state"].as_str() {
+            Some("review") => Cow::Borrowed("missing verified whole-tree cleanup"),
+            Some(state) if crate::state::LIVE_STATES.contains(&state) => {
+                Cow::Owned(format!("lifecycle state {state}"))
+            }
+            _ => Cow::Borrowed("lifecycle state unknown"),
+        };
+        return Err(Error::new(format!(
+            "task has live or unconfirmed attempts ({scope} attempt {id}, {reason})"
+        )));
+    }
     let store = Store::open(repo)?;
     let plan = store
         .json(Path::new(".oms/plan/tasks.json"), 4 * 1024 * 1024, true)?
@@ -136,32 +180,35 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
             .as_str()
             .is_some_and(|v| !v.is_empty())
         {
-            let participant = text(&main["refs"], "panel_room_participant");
+            let participant = crate::state::main_participant(main);
             require(
                 task["claimed_by_participant"] == participant,
                 "plan claimant differs from current main",
             )?;
-            let room = query(
-                service,
-                NativeCommand::Room,
-                repo,
-                &[
-                    "show",
-                    "--id",
-                    &text(&main["refs"], "panel_room_id"),
-                    "--json",
-                ],
-                stop,
-            )?;
-            require(
-                room["closed"] == false
-                    && array(&room["participants"]).iter().any(|v| {
-                        v["participant"] == participant
-                            && v["joined"] == true
-                            && v["role"] == "main"
-                    }),
-                "current main is not joined to the task room",
-            )?;
+            // Lineage proves exact current Room membership for an implicit participant.
+            if main["refs"].get("panel_room_participant").is_some() {
+                let room = query(
+                    service,
+                    NativeCommand::Room,
+                    repo,
+                    &[
+                        "show",
+                        "--id",
+                        &text(&main["refs"], "panel_room_id"),
+                        "--json",
+                    ],
+                    stop,
+                )?;
+                require(
+                    room["closed"] == false
+                        && array(&room["participants"]).iter().any(|v| {
+                            v["participant"] == participant
+                                && v["joined"] == true
+                                && v["role"] == "main"
+                        }),
+                    "current main is not joined to the task room",
+                )?;
+            }
         }
     }
     if request.outcome == "accepted" && request.landed_commit.is_none() {
@@ -197,6 +244,7 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
             .cloned()
             .collect(),
         array(&attempts),
+        launch_attempts.get_or_insert_with(|| attempts_with_main_binding(array(&attempts), main)),
         &result_rows,
         Some(&request.main_attempt_id),
         service,
@@ -1879,4 +1927,219 @@ pub fn retry_delivery(
         publication_uncertain: true,
         ..e
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CommandOutput, PeerExecutor};
+    use serde_json::json;
+    use std::ffi::OsString;
+
+    const MAIN: &str = "att_11111111111111111111111111111111";
+    const ROOM: &str = "room-finalization";
+    const TASK: &str = "task-finalization";
+    const WORKER: &str = "call-finalization";
+
+    struct ClaimedTask(Vec<Value>);
+
+    impl PeerExecutor for ClaimedTask {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            panic!("authority snapshot must not execute a command")
+        }
+    }
+
+    impl Services for ClaimedTask {
+        fn command(
+            &self,
+            command: NativeCommand,
+            _: &Path,
+            args: &[OsString],
+            _: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            let value = match command {
+                NativeCommand::Events => {
+                    assert_eq!(args, &["list", "--json"]);
+                    let mut attempts = vec![json!({
+                        "attempt_id": MAIN, "tool": "panel-main", "provider": "codex",
+                        "state": "working", "terminal": false, "refs": {
+                            "panel_role": "main", "panel_owner": "codex", "panel_room_id": ROOM
+                        }
+                    })];
+                    attempts.extend_from_slice(&self.0);
+                    Value::Array(attempts)
+                }
+                NativeCommand::Room => {
+                    assert_eq!(args, &["show", "--id", ROOM, "--exact", "--json"]);
+                    json!({
+                        "id": ROOM, "closed": false, "participants": [
+                            {"participant": MAIN, "provider": "codex", "role": "main", "joined": true},
+                            {"participant": WORKER, "provider": "codex", "role": "worker", "joined": true}
+                        ]
+                    })
+                }
+                _ => panic!("unexpected authority query {command:?}"),
+            };
+            Ok(CommandOutput {
+                stdout: serde_json::to_vec(&value).unwrap(),
+                cleanup_complete: true,
+                output_complete: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    fn finalization_request(repo: &Path) -> FinalizeRequest {
+        FinalizeRequest {
+            owner: "codex".into(),
+            task_id: TASK.into(),
+            main_attempt_id: MAIN.into(),
+            summary_file: "summary.md".into(),
+            outcome: "completed".into(),
+            verify: None,
+            evidence: vec![],
+            verify_timeout: Duration::from_secs(1),
+            execution_repo: repo.to_owned(),
+            notify: false,
+            landed_commit: None,
+        }
+    }
+
+    fn worker(attempt: &str, access: &str, state: &str) -> Value {
+        json!({
+            "attempt_id": attempt, "tool": "peer-delegate", "parent_attempt_id": MAIN,
+            "task_id": TASK, "state": state, "terminal": state == "done",
+            "refs": {"panel_role": "worker", "panel_access": access,
+                "panel_room_id": ROOM, "panel_room_participant": attempt}
+        })
+    }
+
+    #[test]
+    fn claimed_plan_finalization_uses_proven_native_main_participant() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let plan_file = repo.0.join(".oms/plan/tasks.json");
+        std::fs::create_dir_all(plan_file.parent().unwrap()).unwrap();
+        let mut plan = json!({
+            "plan_id": format!("plan_{}", "1".repeat(32)),
+            "tasks": {(TASK): {
+                "id": TASK, "state": "running", "provider": "codex", "owner": MAIN,
+                "claimed_by_participant": MAIN, "lease_id": format!("lease_{}", "2".repeat(32))
+            }}
+        });
+        let save = |plan: &Value| {
+            std::fs::write(&plan_file, serde_json::to_vec(plan).unwrap()).unwrap();
+        };
+        save(&plan);
+        let request = finalization_request(&repo.0);
+        let service = ClaimedTask(vec![worker(WORKER, "read", "done")]);
+        let snapshot = || finalize_snapshot(&repo.0, &request, &service, &AtomicBool::new(false));
+        let result = snapshot().unwrap();
+        assert_eq!(result["binding"]["plan_id"], plan["plan_id"]);
+        assert_eq!(result["main"]["attempt_id"], MAIN);
+        assert_eq!(result["related_attempts"][0]["attempt_id"], WORKER);
+        let raw = [
+            result["main"].clone(),
+            result["related_attempts"][0].clone(),
+        ];
+        let projected = attempts_with_main_binding(&raw, &raw[0]);
+        assert_eq!(projected[0]["refs"]["panel_room_participant"], MAIN);
+        assert_eq!(projected[1], raw[1]);
+        assert!(raw[0]["refs"].get("panel_room_participant").is_none());
+        assert_eq!(
+            std::fs::read(&plan_file).unwrap(),
+            serde_json::to_vec(&plan).unwrap()
+        );
+        assert!(!repo.0.join(".oms/artifacts").exists());
+
+        plan["tasks"][TASK]["claimed_by_participant"] = WORKER.into();
+        save(&plan);
+        assert_eq!(
+            snapshot().unwrap_err().message,
+            "plan claimant differs from current main"
+        );
+    }
+
+    #[test]
+    fn finalization_names_only_the_first_proven_blocker_without_writing() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let request = finalization_request(&repo.0);
+        let ack_path = repo.0.join(format!(
+            ".oms/artifacts/panel-dispatch/{WORKER}-process.json"
+        ));
+        std::fs::create_dir_all(ack_path.parent().unwrap()).unwrap();
+        let route = json!({"owner":"codex", "role":"worker", "access":"write"});
+        let ack = crate::value::encoded(&json!({
+            "schema":1, "member":WORKER, "task_id":TASK, "exit":0,
+            "cleanup_complete":true, "output_complete":true, "state":"awaiting",
+            "route_snapshot_sha256":crate::digest(&crate::value::encoded(&route).unwrap()),
+            "route_snapshot":route
+        }))
+        .unwrap();
+        std::fs::write(&ack_path, &ack).unwrap();
+        let refusal = |attempts, expected| {
+            assert_eq!(
+                finalize_snapshot(
+                    &repo.0,
+                    &request,
+                    &ClaimedTask(attempts),
+                    &AtomicBool::new(false)
+                )
+                .unwrap_err(),
+                Error::new(expected)
+            );
+        };
+        let read = worker(WORKER, "read", "working");
+        let review_id = "call-finalization:review";
+        let mut review = worker(review_id, "write", "review");
+        review["refs"]["panel_room_participant"] = WORKER.into();
+        let later = worker("call-later", "write", "running");
+        let done = worker("call-done", "write", "done");
+        refusal(
+            vec![done, read.clone(), later],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {WORKER}, lifecycle state working)"
+            ),
+        );
+        // A zero exit with complete output and cleanup in the public process
+        // acknowledgement cannot substitute for protected whole-tree evidence.
+        refusal(
+            vec![review],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup)"
+            ),
+        );
+        let mut taskless = worker(WORKER, "write", "waiting_approval");
+        taskless["task_id"] = Value::Null;
+        refusal(
+            vec![taskless],
+            format!(
+                "task has live or unconfirmed attempts (inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
+            ),
+        );
+        let mut foreign = worker("call-foreign", "write", "working");
+        foreign["parent_attempt_id"] = "foreign-main".into();
+        refusal(
+            vec![read, foreign],
+            "task includes attempts owned by another main".to_owned(),
+        );
+        refusal(
+            vec![worker("/untrusted/attempt", "read", "/untrusted/state")],
+            "task has live or unconfirmed attempts (task attempt unreported, lifecycle state unknown)".to_owned(),
+        );
+        assert_eq!(std::fs::read(&ack_path).unwrap(), ack);
+        assert_eq!(std::fs::read_dir(&repo.0).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(repo.0.join(".oms")).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(repo.0.join(".oms/artifacts"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_dir(ack_path.parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+    }
 }

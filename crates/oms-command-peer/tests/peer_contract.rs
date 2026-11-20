@@ -125,6 +125,9 @@ fn executable_fixture(repo: &Repo, name: &str) {
     fs::set_permissions(repo.0.join(name), fs::Permissions::from_mode(0o755)).unwrap();
 }
 fn provider_isolated(name: &str, layout: &str, body: impl FnOnce()) {
+    provider_isolated_with_env(name, layout, &[], body);
+}
+fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], body: impl FnOnce()) {
     if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
         if std::env::var("PROVIDER_LAYOUT").as_deref() == Ok(layout) {
             body();
@@ -203,6 +206,7 @@ fn provider_isolated(name: &str, layout: &str, body: impl FnOnce()) {
             },
         )
         .env("OMS_PROVIDER_WRITE_ADAPTERS", "other, fixture ,")
+        .envs(env.iter().copied())
         .output()
         .unwrap();
     assert!(
@@ -362,6 +366,110 @@ fn provider_call(
         &STOP,
         probe,
     )
+}
+
+#[test]
+fn council_seat_publication_stops_after_thread_append_failure() {
+    provider_isolated_with_env(
+        "council_seat_publication_stops_after_thread_append_failure",
+        "override",
+        &[("OMS_PANEL_DISPATCH", "1")],
+        || {
+            struct CouncilProbe<'a> {
+                provider: ProviderProbe,
+                repo: &'a Repo,
+                close_thread: bool,
+                incomplete: bool,
+            }
+            impl Executor for CouncilProbe<'_> {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let git = request.argv[0] == "git";
+                    let mut result = self.provider.execute(request, stop)?;
+                    if !git && self.provider.calls.lock().unwrap().len() == 1 {
+                        if self.close_thread {
+                            success(run(
+                                self.repo,
+                                self.repo.0.as_path(),
+                                "thread",
+                                &["close", "--id", "fixture-council"],
+                            ));
+                        }
+                        if self.incomplete {
+                            result.code = 7;
+                        }
+                    }
+                    Ok(result)
+                }
+            }
+            for (close_thread, incomplete, expected_code, expected_calls) in [
+                (true, false, 2, 1),
+                (false, false, 0, 4),
+                (false, true, 1, 2),
+            ] {
+                let repo = provider_repo();
+                let probe = CouncilProbe {
+                    provider: ProviderProbe::default(),
+                    repo: &repo,
+                    close_thread,
+                    incomplete,
+                };
+                let output = oms_command_peer::run_with_executor(
+                    "peer-ask",
+                    &args(&[
+                        "--providers",
+                        "agy,codex",
+                        "--debate",
+                        "1",
+                        "--deliberation",
+                        "--require-complete",
+                        "--thread",
+                        "fixture-council",
+                        "--prompt",
+                        "Inspect the fixture",
+                        "--no-task",
+                        "--no-memory",
+                    ]),
+                    &repo.0,
+                    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                    &STOP,
+                    &probe,
+                );
+                assert_eq!(output.0, expected_code, "{}", message(&output));
+                assert_eq!(probe.provider.calls.lock().unwrap().len(), expected_calls);
+                let rows = oms_command_peer::storage::load(
+                    &repo.0,
+                    Path::new(".oms/artifacts/index.jsonl"),
+                )
+                .unwrap();
+                assert_eq!(rows.len(), expected_calls);
+                if close_thread {
+                    assert!(output.1.is_empty());
+                    assert_eq!(rows[0].get("provider").text(), Some("antigravity"));
+                    let artifact = repo.0.join(rows[0].get("artifact").text().unwrap());
+                    let body = fs::read_to_string(artifact).unwrap();
+                    assert!(body.contains("## Output\n\nfixture answer"));
+                    let turns = oms_command_peer::storage::load(
+                        &repo.0,
+                        Path::new(".oms/threads/fixture-council.jsonl"),
+                    )
+                    .unwrap();
+                    let roles = turns.iter().map(|turn| turn.get("role").text().unwrap());
+                    assert!(roles.eq(["question", "closed"]));
+                    assert_eq!(
+                        output.2,
+                        b"error: council seat antigravity round 0: thread append failed; reconcile before retrying\n",
+                    );
+                } else {
+                    let usable = if incomplete { "1/2" } else { "2/2" };
+                    assert!(message(&output).contains(&format!("{usable} target(s) answered")));
+                }
+            }
+        },
+    );
 }
 
 #[test]

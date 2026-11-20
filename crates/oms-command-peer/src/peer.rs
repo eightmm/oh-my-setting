@@ -649,13 +649,34 @@ pub(crate) fn call(
         "# OMS {tool}\n\n- provider: {}\n- model: {}\n- run: {run}\n- round: {round}\n{seat_line}\n## Prompt\n\n{body}\n",
         target.provider, route.model
     );
+    let panel_council = tool == "peer-ask"
+        && args.has("deliberation")
+        && args.has("require-complete")
+        && args.has("thread")
+        && std::env::var_os("OMS_PANEL_DISPATCH").as_deref() == Some(OsStr::new("1"));
+    let publication_error = |stage| {
+        move |error: Error| {
+            if panel_council {
+                Error {
+                    message: format!(
+                        "council seat {} round {round}: {stage} failed; reconcile before retrying",
+                        target.provider
+                    ),
+                    ..error
+                }
+            } else {
+                error
+            }
+        }
+    };
     storage::write(
         repo,
         &artifact,
         header.as_bytes().to_vec(),
         false,
         context.interrupted,
-    )?;
+    )
+    .map_err(publication_error("artifact write"))?;
     if dry(args, tool) || args.has("export-only") {
         return Ok(Seat {
             target: target.clone(),
@@ -932,7 +953,8 @@ pub(crate) fn call(
             seat_resolve(repo, &cmd_key, context.interrupted)?;
         }
     }
-    storage::write(repo, &artifact, bytes, true, context.interrupted)?;
+    storage::write(repo, &artifact, bytes, true, context.interrupted)
+        .map_err(publication_error("artifact write"))?;
     index(
         repo,
         &obj([
@@ -954,7 +976,8 @@ pub(crate) fn call(
             ("quality", quality.clone().into()),
         ]),
         context,
-    )?;
+    )
+    .map_err(publication_error("artifact index write"))?;
     if args.has("thread") {
         let role = if quality == "ok" { "answer" } else { "note" };
         let quoted = if quality == "ok" {
@@ -978,7 +1001,8 @@ pub(crate) fn call(
                 ("quality", quality.clone().into()),
             ],
             context,
-        )?;
+        )
+        .map_err(publication_error("thread append"))?;
     }
     Ok(Seat {
         target: target.clone(),

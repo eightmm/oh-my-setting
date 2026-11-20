@@ -46,6 +46,9 @@ An OMS worker remains a worker even if its native CLI can spawn agents: return
 a requested split or missing decision to the existing parent. Use shared OMS
 task/lease/artifact references, not a Codex-only conversation identifier, for
 cross-provider coordination. Native app threads remain an optional local UI.
+An explicitly assigned native provider orchestrator may coordinate native
+children within its task scope and effective permissions. Requests to add
+OMS-managed workers go back to Overall Main for the existing dispatch checks.
 
 For each worker, supply the outcome, relevant source paths, constraints/authority,
 verified facts versus uncertainty, a verifier, and a concise return contract.

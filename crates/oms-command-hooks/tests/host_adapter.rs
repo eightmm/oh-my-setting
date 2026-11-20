@@ -58,6 +58,7 @@ fn strip_group_world_write(root: &Path) {
 #[derive(Default)]
 struct RecordingHost {
     detached: Mutex<Vec<(String, Vec<String>, PathBuf)>>,
+    failures: Mutex<Vec<(i32, String)>>,
 }
 
 impl RecordingHost {
@@ -80,6 +81,10 @@ impl HostServices for RecordingHost {
             cwd.to_path_buf(),
         ));
         Ok(())
+    }
+
+    fn record_hook_failure(&self, _repo: &Path, _cmd: &str, exit: i32, summary: &str, _next: &str) {
+        self.failures.lock().unwrap().push((exit, summary.into()));
     }
 }
 
@@ -243,29 +248,56 @@ fn skill_router_detaches_context_pressure_handoff_capture_via_host_services() {
     });
     let host = RecordingHost::default();
     let cancel = AtomicBool::new(false);
-    let (code, stdout, stderr) = run_with_services(
-        "skill-router",
-        &[],
-        payload.to_string().as_bytes(),
-        &repo,
-        tmp.path(),
-        &cancel,
-        &host,
-    );
-    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
-    assert!(
-        String::from_utf8_lossy(&stdout).contains("context"),
-        "stdout: {}",
-        String::from_utf8_lossy(&stdout)
-    );
+    for (used, severity, captures) in [
+        (88000, Some("context low"), 1),
+        (88000, None, 1),
+        (94000, Some("context nearly exhausted"), 2),
+        (94000, None, 2),
+        (20000, None, 2),
+        (88000, Some("context low"), 3),
+    ] {
+        let usage = serde_json::json!({
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {"total_tokens": used},
+                "model_context_window": 100000,
+            },
+        });
+        fs::write(&transcript, format!("{usage}\n")).expect("update rollout");
+        let (code, stdout, stderr) = run_with_services(
+            "skill-router",
+            &[],
+            payload.to_string().as_bytes(),
+            &repo,
+            tmp.path(),
+            &cancel,
+            &host,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let out = String::from_utf8_lossy(&stdout);
+        if let Some(severity) = severity {
+            assert!(out.contains(severity), "stdout: {out}");
+            assert!(out.contains("native in-session compaction"), "{out}");
+            assert!(out.contains("unavailable or fails"), "{out}");
+            assert!(out.contains("oms session-handoff list"), "{out}");
+            assert!(!out.contains("migrate to a fresh session"), "{out}");
+            assert!(!out.contains("continue in a fresh session"), "{out}");
+            assert!(!out.contains("wrap up now"), "{out}");
+        } else {
+            assert!(!out.contains("native in-session compaction"), "{out}");
+        }
+        assert_eq!(host.detached().len(), captures);
+    }
 
     let calls = host.detached();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "session-handoff");
-    assert_eq!(calls[0].1[0], "capture");
-    assert!(calls[0].1.contains(&"--agent".to_owned()));
-    assert!(calls[0].1.contains(&"codex".to_owned()));
-    assert!(calls[0].1.contains(&"sess-router-1".to_owned()));
+    for (tool, args, cwd) in calls {
+        assert_eq!(tool, "session-handoff");
+        assert_eq!(args[0], "capture");
+        assert!(args.contains(&"--agent".to_owned()));
+        assert!(args.contains(&"codex".to_owned()));
+        assert!(args.contains(&"sess-router-1".to_owned()));
+        assert_eq!(cwd, repo);
+    }
 }
 
 fn hook(tmp: &TempDir, name: &str, args: &[&str], stdin: &[u8]) -> (i32, String, String) {
@@ -400,6 +432,504 @@ fn syntax_guard_reports_json_errors_without_an_interpreter() {
 fn harness(tmp: &TempDir, tool: &str, payload: &serde_json::Value) -> (i32, String) {
     let (code, out, _) = hook(tmp, "harness-hook", &[tool], payload.to_string().as_bytes());
     (code, out)
+}
+
+fn codex_handoff_rollout(path: &Path, repo: &Path, sid: &str) {
+    use serde_json::json;
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rows = [
+        json!({"type":"session_meta","payload":{"id":sid,"cwd":repo}}),
+        json!({"type":"event_msg","payload":{"type":"user_message","message":"first exact user turn"}}),
+        json!({"type":"event_msg","payload":{"type":"user_message","message":"second exact user turn"}}),
+    ];
+    let body = rows
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{body}\n")).unwrap();
+}
+
+#[test]
+fn codex_precompact_captures_exact_transcript_beyond_discovery_limit() {
+    use serde_json::json;
+
+    let tmp = TempDir::new("precompact");
+    let home = tmp.path().join("home");
+    let active = home.join("active-codex");
+    if !clean_env_child(
+        "codex_precompact_captures_exact_transcript_beyond_discovery_limit",
+        &[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", ""),
+            ("CODEX_HOME", active.to_str().unwrap()),
+            ("OMS_WORK_JOURNAL", "0"),
+        ],
+    ) {
+        return;
+    }
+    let repo = git_repo(&tmp);
+    fs::create_dir(repo.join(".oms")).unwrap();
+    let active = PathBuf::from(std::env::var_os("CODEX_HOME").unwrap());
+    let sessions = active.join("sessions");
+    let sid = "precompact-exact-session";
+    let transcript = sessions.join("2026/11/18/rollout-exact.jsonl");
+    codex_handoff_rollout(&transcript, &repo, sid);
+    for i in 0..8192 {
+        fs::write(sessions.join(format!("sibling-{i}.txt")), b"").unwrap();
+    }
+    let standalone = oms_command_peer::run_with_source(
+        "session-handoff",
+        &argv(&["capture", "--agent", "codex", "--session", sid]),
+        &repo,
+        tmp.path(),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(
+        standalone,
+        (
+            2,
+            Vec::new(),
+            b"error: session discovery incomplete\n".to_vec()
+        )
+    );
+    assert!(!repo.join(".oms/handoffs").exists());
+
+    let registry = active
+        .parent()
+        .unwrap()
+        .join(".config/oh-my-setting/provider-accounts.json");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, b"invalid account registry").unwrap();
+    let input = json!({
+        "hook_event_name": "PreCompact", "cwd": repo, "session_id": sid,
+        "transcript_path": transcript
+    });
+    let (code, stdout, stderr) = hook(
+        &tmp,
+        "harness-hook",
+        &["precompact-handoff", "codex"],
+        input.to_string().as_bytes(),
+    );
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
+    let captures: Vec<_> = fs::read_dir(repo.join(".oms/handoffs"))
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(
+        captures.len(),
+        1,
+        "exact callback should capture in a large account"
+    );
+    let capture = fs::read_to_string(&captures[0]).unwrap();
+    assert!(capture.contains(&format!("- session: {sid}")));
+    assert!(capture.contains("second exact user turn"));
+}
+
+#[test]
+fn codex_precompact_rejects_explicit_unsafe_hints_without_fallback() {
+    use serde_json::{Value, json};
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new("precompact-reject");
+    let home = tmp.path().join("home");
+    let active = home.join("active-codex");
+    let discovery_only = home.join("discovery-only-codex");
+    if !clean_env_child(
+        "codex_precompact_rejects_explicit_unsafe_hints_without_fallback",
+        &[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", ""),
+            ("CODEX_HOME", active.to_str().unwrap()),
+            ("OMS_CODEX_HOME", discovery_only.to_str().unwrap()),
+            ("OMS_WORK_JOURNAL", "0"),
+        ],
+    ) {
+        return;
+    }
+    let repo = git_repo(&tmp);
+    fs::create_dir(repo.join(".oms")).unwrap();
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let active = PathBuf::from(std::env::var_os("CODEX_HOME").unwrap());
+    let sessions = active.join("sessions");
+    let sid = "precompact-exact-session";
+    let fallback = sessions.join("day/rollout-exact.jsonl");
+    codex_handoff_rollout(&fallback, &repo, sid);
+    let wrong_repo = sessions.join("foreign-repo.jsonl");
+    codex_handoff_rollout(&wrong_repo, tmp.path(), sid);
+    let wrong_session = sessions.join("foreign-session.jsonl");
+    codex_handoff_rollout(&wrong_session, &repo, "another-session");
+    let other_account = home.join("discovery-only-codex/sessions/other-account.jsonl");
+    codex_handoff_rollout(&other_account, &repo, sid);
+    let default_account = home.join(".codex/sessions/default-account.jsonl");
+    codex_handoff_rollout(&default_account, &repo, sid);
+    let registry = home.join(".config/oh-my-setting/provider-accounts.json");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(
+        &registry,
+        json!({"schema":1,"providers":{"codex":{"accounts":[{
+            "id":"other-account","home":home.join("discovery-only-codex")
+        }]}}})
+        .to_string(),
+    )
+    .unwrap();
+    let archive = active.join("archived_sessions/old.jsonl");
+    codex_handoff_rollout(&archive, &repo, sid);
+    let symlink_leaf = sessions.join("symlink-leaf.jsonl");
+    symlink(&fallback, &symlink_leaf).unwrap();
+    let symlink_dir = sessions.join("symlink-dir");
+    symlink(fallback.parent().unwrap(), &symlink_dir).unwrap();
+    let hardlink = sessions.join("hardlink.jsonl");
+    let hardlink_source = sessions.join("hardlink-source.jsonl");
+    codex_handoff_rollout(&hardlink_source, &repo, sid);
+    fs::hard_link(&hardlink_source, &hardlink).unwrap();
+    let oversized = sessions.join("oversized.jsonl");
+    codex_handoff_rollout(&oversized, &repo, sid);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&oversized)
+        .unwrap()
+        .set_len(32 * 1024 * 1024 + 1)
+        .unwrap();
+    let conflicting_header = sessions.join("conflicting-header.jsonl");
+    fs::write(
+        &conflicting_header,
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"another-session\",\"id\":{},\"cwd\":{}}}}}\n",
+            json!(sid), json!(repo)
+        ),
+    ).unwrap();
+    strip_group_world_write(tmp.path());
+    let host = RecordingHost::default();
+    let cancel = AtomicBool::new(false);
+    let invoke = |input: &str| {
+        assert_eq!(
+            run_with_services(
+                "harness-hook",
+                &argv(&["precompact-handoff", "codex"]),
+                input.as_bytes(),
+                &repo,
+                tmp.path(),
+                &cancel,
+                &host,
+            ),
+            (0, Vec::new(), Vec::new())
+        );
+    };
+    let mut base = json!({"hook_event_name":"PreCompact","cwd":repo,"session_id":sid});
+    let reject = |input: &str| {
+        invoke(input);
+        let (exit, summary) = host
+            .failures
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("recorded rejection");
+        assert_eq!(exit, 1);
+        assert!(
+            summary == "invalid Codex hook transcript hint"
+                || summary == "error: unsafe or unavailable Codex hook transcript",
+            "{summary}"
+        );
+        assert!(!repo.join(".oms/handoffs").exists());
+    };
+    for hint in [
+        Value::Null,
+        json!(false),
+        json!(""),
+        json!("relative.jsonl"),
+        json!(sessions.join("day/../day/rollout-exact.jsonl")),
+        json!(sessions.join("missing.jsonl")),
+        json!(wrong_repo),
+        json!(wrong_session),
+        json!(other_account),
+        json!(default_account),
+        json!(archive),
+        json!(symlink_leaf),
+        json!(symlink_dir.join("rollout-exact.jsonl")),
+        json!(hardlink),
+        json!(oversized),
+        json!(conflicting_header),
+    ] {
+        base["transcript_path"] = hint;
+        reject(&base.to_string());
+    }
+
+    base["transcript_path"] = json!(fallback);
+    let valid = base.to_string();
+    reject(&format!(r#"{{"transcript_path":null,{}"#, &valid[1..]));
+    reject(&format!(
+        r#"{{"session_id":"another-session",{}"#,
+        &valid[1..]
+    ));
+    base["transcriptPath"] = json!(wrong_session);
+    reject(&base.to_string());
+    base.as_object_mut().unwrap().remove("transcriptPath");
+    base["sessionId"] = json!("another-session");
+    reject(&base.to_string());
+    base.as_object_mut().unwrap().remove("sessionId");
+    base.as_object_mut().unwrap().remove("session_id");
+    reject(&base.to_string());
+    base["session_id"] = json!(sid);
+
+    // The same account and session can be captured through compatibility
+    // discovery when the field is truly absent.
+    fs::remove_file(conflicting_header).unwrap();
+    base.as_object_mut().unwrap().remove("transcript_path");
+    invoke(&base.to_string());
+    assert!(host.failures.lock().unwrap().is_empty());
+    assert_eq!(fs::read_dir(repo.join(".oms/handoffs")).unwrap().count(), 1);
+}
+
+const CODEX_TRACE: &str = ".oms/hooks/codex-trace.jsonl";
+
+#[test]
+fn codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output() {
+    if !clean_env_child(
+        "codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output",
+        &[
+            ("OMS_CODEX_HOOK_TRACE", "1"),
+            ("OMS_SESSION_BUDGET_TURNS", "2"),
+            ("OMS_WORK_JOURNAL", "0"),
+            ("OMS_TEST_TRACE_PRIVATE_FIXTURE", "private-env-marker"),
+        ],
+    ) {
+        return;
+    }
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+
+    let tmp = TempDir::new("trace");
+    let repo = git_repo(&tmp);
+    let foreign = tmp.path().join("payload-repo");
+    fs::create_dir_all(foreign.join(".oms")).unwrap();
+    fs::create_dir_all(repo.join(".oms/hooks/sessions")).unwrap();
+    let session = "private-session-marker";
+    let session_hash = format!("{:x}", Sha256::digest(session.as_bytes()));
+    fs::write(
+        repo.join(format!(".oms/hooks/sessions/{}.json", &session_hash[..32])),
+        b"{",
+    )
+    .unwrap();
+    strip_group_world_write(tmp.path());
+    let cancel = AtomicBool::new(false);
+    let raw = json!({
+        "hook_event_name": "Stop", "cwd": repo, "session_id": session,
+        "turn_id": "private-turn-marker", "prompt": "private-prompt-marker",
+        "tool_input": {"command": "private-command-marker"},
+    })
+    .to_string();
+    let invoke = |args: &[&str], input: &[u8]| {
+        run_hook(
+            "harness-hook",
+            &argv(args),
+            input,
+            &repo,
+            tmp.path(),
+            &cancel,
+        )
+    };
+    let ordinary = run_hook(
+        "turn-guard",
+        &[],
+        raw.as_bytes(),
+        &repo,
+        tmp.path(),
+        &cancel,
+    );
+    assert_eq!(ordinary.0, 0);
+    assert!(
+        std::str::from_utf8(&ordinary.1)
+            .unwrap()
+            .contains("unavailable (helper error)")
+    );
+    assert!(!repo.join(CODEX_TRACE).exists());
+    assert_eq!(invoke(&["turn-guard"], raw.as_bytes()), ordinary);
+
+    for input in [
+        json!({"hook_event_name":"SessionStart", "cwd":foreign, "session_id":session}),
+        json!({"hookEventName":"SessionEnd", "cwd":foreign, "session_id":session}),
+        json!({"hook_event_name":"SessionStart", "hookEventName":"private-conflict-marker"}),
+        json!({"hook_event_name":"private-event-marker", "cwd":foreign}),
+    ] {
+        assert_eq!(
+            invoke(&["telemetry-hook"], input.to_string().as_bytes()),
+            (0, vec![], vec![]),
+        );
+    }
+    assert_eq!(
+        invoke(
+            &["telemetry-hook", "private-argv-marker"],
+            br#"{"hook_event_name":"SessionStart"}"#
+        ),
+        (0, vec![], vec![]),
+    );
+    assert_eq!(
+        invoke(&["telemetry-hook"], &vec![b'x'; 8 * 1024 * 1024 + 1]),
+        (0, vec![], vec![])
+    );
+    assert!(!foreign.join(CODEX_TRACE).exists());
+
+    let path = repo.join(CODEX_TRACE);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let trace = fs::read_to_string(&path).unwrap();
+    for private in [
+        session,
+        "private-turn-marker",
+        "private-prompt-marker",
+        "private-command-marker",
+        "private-event-marker",
+        "private-conflict-marker",
+        "private-argv-marker",
+        "private-env-marker",
+        repo.to_str().unwrap(),
+        &session_hash[..32],
+    ] {
+        assert!(!trace.contains(private));
+    }
+    let rows: Vec<Value> = trace
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let expected = [
+        ("turn-guard", "Stop", "internal_failure"),
+        ("telemetry-hook", "SessionStart", "returned"),
+        ("telemetry-hook", "SessionEnd", "returned"),
+        ("telemetry-hook", "unknown", "returned"),
+        ("telemetry-hook", "unknown", "returned"),
+        ("telemetry-hook", "unknown", "returned"),
+        ("telemetry-hook", "unknown", "input_oversize"),
+    ];
+    assert_eq!(rows.len(), expected.len() * 2);
+    let mut nonces = std::collections::BTreeSet::new();
+    for ([entry, exit], (handler, event, outcome)) in rows.as_chunks::<2>().0.iter().zip(expected) {
+        let nonce = entry["nonce"].as_str().unwrap();
+        assert!(nonces.insert(nonce));
+        assert!(nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(
+            entry,
+            &json!({"schema":1,"phase":"entry","handler":handler,"event":event,"nonce":nonce})
+        );
+        let elapsed = exit["elapsed_us"].as_u64().unwrap();
+        let mut expected_exit = json!({"schema":1,"phase":"exit","handler":handler,"event":event,
+            "nonce":nonce,"elapsed_us":elapsed,"outcome":outcome});
+        if outcome != "input_oversize" {
+            expected_exit["inner_exit"] = json!(0);
+        }
+        assert_eq!(exit, &expected_exit);
+    }
+}
+
+#[test]
+fn codex_hook_trace_is_opt_in() {
+    if !clean_env_child(
+        "codex_hook_trace_is_opt_in",
+        &[("OMS_CODEX_HOOK_TRACE", "0")],
+    ) {
+        return;
+    }
+    let tmp = TempDir::new("trace-disabled");
+    let repo = git_repo(&tmp);
+    fs::create_dir_all(repo.join(".oms")).unwrap();
+    assert_eq!(
+        run_hook(
+            "harness-hook",
+            &argv(&["telemetry-hook"]),
+            b"{}",
+            &repo,
+            tmp.path(),
+            &AtomicBool::new(false)
+        ),
+        (0, vec![], vec![]),
+    );
+    assert!(!repo.join(CODEX_TRACE).exists());
+}
+
+#[test]
+fn codex_hook_trace_fails_open_for_busy_broad_and_linked_ledgers() {
+    if !clean_env_child(
+        "codex_hook_trace_fails_open_for_busy_broad_and_linked_ledgers",
+        &[("OMS_CODEX_HOOK_TRACE", "1")],
+    ) {
+        return;
+    }
+    let tmp = TempDir::new("trace-unsafe");
+    let repo = git_repo(&tmp);
+    let path = repo.join(CODEX_TRACE);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    strip_group_world_write(tmp.path());
+    let bad = repo.join("broken.json");
+    fs::write(&bad, b"{").unwrap();
+    let input = serde_json::json!({"hook_event_name":"PostToolUse","tool_name":"Write","cwd":repo,
+        "tool_input":{"file_path":bad}})
+    .to_string();
+    let stop = AtomicBool::new(false);
+    let expected = run_hook(
+        "syntax-guard-hook",
+        &[],
+        input.as_bytes(),
+        &repo,
+        tmp.path(),
+        &stop,
+    );
+    assert!(!expected.1.is_empty());
+    let verify = || {
+        assert_eq!(
+            run_hook(
+                "harness-hook",
+                &argv(&["syntax-guard-hook"]),
+                input.as_bytes(),
+                &repo,
+                tmp.path(),
+                &stop
+            ),
+            expected,
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"untouched\n");
+    };
+    fs::write(&path, b"untouched\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    verify();
+    drop(held);
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    verify();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let limit = 1024 * 1024;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(limit)
+        .unwrap();
+    assert_eq!(
+        run_hook(
+            "harness-hook",
+            &argv(&["syntax-guard-hook"]),
+            input.as_bytes(),
+            &repo,
+            tmp.path(),
+            &stop
+        ),
+        expected,
+    );
+    assert_eq!(fs::metadata(&path).unwrap().len(), limit);
+    fs::write(&path, b"untouched\n").unwrap();
+    let outside = tmp.path().join("trace-target");
+    fs::rename(&path, &outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(outside, &path).unwrap();
+    verify();
 }
 
 #[test]
@@ -1041,16 +1571,142 @@ fn fake_repo(tmp: &TempDir, head: &str) -> PathBuf {
 
 #[test]
 fn agy_statusline_reads_head_and_live_state_without_spawning_git() {
+    use chrono::{DateTime, FixedOffset, SecondsFormat, TimeDelta, Utc};
+    use serde_json::{Value, json};
+
     let tmp = TempDir::new("agy-hud");
     let repo = fake_repo(&tmp, "ref: refs/heads/feat-x\n");
-    let input = serde_json::json!({"model":"Gemini 3","state":"idle","plan_tier":"pro",
+    let input = json!({"model":"Gemini 3","state":"idle","plan_tier":"pro",
         "context_window":{"used_percentage":42.4},"vim":{"mode":"NORMAL"},"cwd":repo});
-    let (code, out, err) = hook(&tmp, "agy-statusline", &[], input.to_string().as_bytes());
-    assert_eq!(code, 0, "{err}");
+    let render = |input: &Value| {
+        let (code, out, err) = hook(&tmp, "agy-statusline", &[], input.to_string().as_bytes());
+        assert_eq!(code, 0, "{err}");
+        assert!(err.is_empty(), "{err}");
+        out
+    };
+    let legacy =
+        "Gemini 3 (pro) | ctx 42% | feat-x | NORMAL/idle | oms T1 Fix #(x) 100% | F1 | A1\n";
+    assert_eq!(render(&input), legacy);
+    let now = DateTime::<Utc>::from(std::time::SystemTime::now());
+    let future = now + TimeDelta::hours(2);
+    let rfc3339 = |time: DateTime<Utc>| time.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut official = input.clone();
+    official["agent_state"] = json!("tool_use");
+    official["email"] = json!("private-fixture@example.test");
+    official["conversation_id"] = json!("private-conversation-fixture");
+    official["transcript_path"] = json!("private-transcript-fixture.jsonl");
+    official["quota"] = json!({
+        "gemini-weekly": {
+            "remaining_fraction": 0.9378,
+            "reset_time": rfc3339(future),
+            "reset_in_seconds": 7200
+        },
+        "private-other-bucket": {"remaining_fraction":0.25, "reset_time":rfc3339(future)}
+    });
+    let expected = "Gemini 3 (pro) | ctx 42% | Gemini weekly 94% left | feat-x | NORMAL/tool_use | oms T1 Fix #(x) 100% | F1 | A1\n";
+    assert_eq!(render(&official), expected);
+    official["quota"]["gemini-weekly"]["disabled"] = json!(false);
+    official["quota"]["gemini-weekly"]["reset_in_seconds"] = json!(0);
+    assert_eq!(render(&official), expected);
     assert_eq!(
-        out,
-        "Gemini 3 (pro) | ctx 42% | feat-x | NORMAL/idle | oms T1 Fix #(x) 100% | F1 | A1\n"
+        render(&json!({"modelName":"m","state":" old\nlabel\u{1b}[31m "})),
+        "m | old label\n"
     );
+    for state in [
+        "idle",
+        "working",
+        "tool_use",
+        "reviewing",
+        "authenticating",
+        "initializing",
+        "error",
+    ] {
+        assert_eq!(
+            render(&json!({"modelName":"m","agent_state":state,"state":"fallback"})),
+            format!("m | {state}\n")
+        );
+    }
+    for state in [
+        Value::Null,
+        json!(false),
+        json!(17),
+        json!({}),
+        json!(""),
+        json!("unknown"),
+        json!(" idle"),
+    ] {
+        assert_eq!(
+            render(&json!({"modelName":"m","agent_state":state,"state":"fallback"})),
+            "m\n"
+        );
+    }
+    let bucket = official["quota"]["gemini-weekly"].clone();
+    let show_quota =
+        |bucket: &Value| render(&json!({"modelName":"m","quota":{"gemini-weekly":bucket}}));
+    let mut offset_reset = bucket.clone();
+    offset_reset["reset_time"] = json!(
+        (now + TimeDelta::days(7) - TimeDelta::seconds(30))
+            .with_timezone(&FixedOffset::east_opt(2 * 3600).unwrap())
+            .to_rfc3339_opts(SecondsFormat::Millis, false)
+    );
+    assert_eq!(show_quota(&offset_reset), "m | Gemini weekly 94% left\n");
+    for (fraction, percentage) in [
+        (0.0, "0%"),
+        (0.0001, "<1%"),
+        (0.0099, "<1%"),
+        (0.01, "1%"),
+        (0.99, "99%"),
+        (0.9901, ">99%"),
+        (0.9999, ">99%"),
+        (1.0, "100%"),
+    ] {
+        let mut record = bucket.clone();
+        record["remaining_fraction"] = json!(fraction);
+        assert_eq!(
+            show_quota(&record),
+            format!("m | Gemini weekly {percentage} left\n")
+        );
+    }
+    for (field, bad) in [
+        ("disabled", json!(true)),
+        ("disabled", json!("false")),
+        ("disabled", Value::Null),
+        ("remaining_fraction", json!("0.9378")),
+        ("remaining_fraction", json!(false)),
+        ("remaining_fraction", json!(-0.01)),
+        ("remaining_fraction", json!(1.01)),
+        ("reset_time", json!("in two hours")),
+        ("reset_time", json!(future.timestamp())),
+        (
+            "reset_time",
+            json!(future.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        ),
+        ("reset_time", json!(rfc3339(future).replace('T', " "))),
+        ("reset_time", json!(rfc3339(now - TimeDelta::seconds(10)))),
+        ("reset_time", json!(rfc3339(now + TimeDelta::days(8)))),
+    ] {
+        let mut record = bucket.clone();
+        record[field] = bad;
+        assert_eq!(show_quota(&record), "m\n", "{field}");
+    }
+    let mut relative = bucket.clone();
+    relative.as_object_mut().unwrap().remove("reset_time");
+    assert_eq!(show_quota(&relative), "m\n");
+    assert_eq!(
+        render(&json!({"modelName":"m","quota":{"gemini_weekly":bucket,"claude-weekly":bucket}})),
+        "m\n"
+    );
+    let ambiguous = format!(
+        r#"{{"modelName":"m","state":"idle","quota":{{"gemini-weekly":{{"disabled":true,"disabled":false,"remaining_fraction":0.9378,"reset_time":"{}"}}}}}}"#,
+        rfc3339(future)
+    );
+    assert_eq!(
+        hook(&tmp, "agy-statusline", &[], ambiguous.as_bytes()).1,
+        "m | idle\n"
+    );
+    let duplicate_state =
+        br#"{"modelName":"m","state":"fallback","agent_state":"idle","agent_state":"working"}"#;
+    assert_eq!(hook(&tmp, "agy-statusline", &[], duplicate_state).1, "m\n");
     fs::write(
         repo.join(".git/HEAD"),
         "0123456789abcdef0123456789abcdef01234567\n",

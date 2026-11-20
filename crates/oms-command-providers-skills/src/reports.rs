@@ -1,7 +1,11 @@
 use crate::common::*;
+use rustix::fs::{self, AtFlags, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::Path;
+use std::ffi::OsStr;
+use std::os::{fd::OwnedFd, unix::ffi::OsStrExt};
+use std::path::{Path, PathBuf};
 
 pub(crate) fn project(args: &Args, root: &Path, ctx: &Context<'_>) -> Result<Output> {
     if args.has("--budget") {
@@ -268,8 +272,74 @@ fn budget(args: &Args, root: &Path, ctx: &Context<'_>) -> Result<Output> {
     }
     Ok(output)
 }
+const AUDIT_DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+fn audit_directory(parent: &OwnedFd, name: &OsStr) -> Result<Option<OwnedFd>> {
+    match fs::openat(parent, name, AUDIT_DIRECTORY_FLAGS, Mode::empty()) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => Ok(None),
+        Err(e) => Err(std::io::Error::from(e).into()),
+    }
+}
+
+fn audit_source(root: &OwnedFd, path: &Path) -> Result<Option<OwnedFd>> {
+    let mut directory = None;
+    // Treat each component as an entry, including "templates" in the nested source.
+    for component in path {
+        let Some(open) = audit_directory(directory.as_ref().unwrap_or(root), component)? else {
+            return Ok(None);
+        };
+        directory = Some(open);
+    }
+    Ok(directory)
+}
+
+fn audit_walk(
+    directory: &OwnedFd,
+    depth: usize,
+    prefix: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let mut entries = Vec::new();
+    for entry in fs::Dir::read_from(directory).map_err(std::io::Error::from)? {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let name = OsStr::from_bytes(entry.file_name().to_bytes());
+        if name != "." && name != ".." {
+            entries.push((name.to_owned(), entry.file_type()));
+        }
+    }
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    for (name, kind) in entries {
+        if files.len() >= 10000 {
+            return Err(error("directory scan exceeded the entry budget"));
+        }
+        let kind = if kind == FileType::Unknown {
+            let stat = fs::statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(std::io::Error::from)?;
+            FileType::from_raw_mode(stat.st_mode)
+        } else {
+            kind
+        };
+        if kind == FileType::RegularFile {
+            files.push(prefix.join(name));
+        } else if kind == FileType::Directory
+            && depth > 1
+            && let Some(child) = audit_directory(directory, &name)?
+        {
+            audit_walk(&child, depth - 1, &prefix.join(name), files)?;
+        }
+    }
+    Ok(())
+}
+
 fn prompts(args: &Args, root: &Path) -> Result<Output> {
     let raw = optional(&root.join("config/prompt-audit-patterns.txt"))?;
+    let directory =
+        fs::open(root, AUDIT_DIRECTORY_FLAGS, Mode::empty()).map_err(std::io::Error::from)?;
+    let store = Store::open(root)?;
     let patterns = String::from_utf8_lossy(&raw)
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
@@ -281,6 +351,7 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
         })
         .collect::<Vec<_>>();
     let mut files = vec![];
+    let mut sources = vec![];
     let mut findings = 0usize;
     let mut global_words = 0usize;
     for (base, kind, depth) in [
@@ -288,22 +359,32 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
         ("roles", "on-demand", 1),
         ("templates", "always", 1),
         ("prompts", "unknown", 1),
-        ("custom-skills", "on-demand", 2),
-        ("templates/project-skills", "on-demand", 2),
+        ("output-styles", "on-demand", 1),
+        ("custom-skills", "on-demand", 6),
+        ("templates/project-skills", "on-demand", 6),
     ] {
-        let directory = root.join(base);
-        if !directory.is_dir() {
+        let source = audit_source(&directory, Path::new(base))?;
+        sources.push(json!({"path":base,"max_depth":depth,"present":source.is_some()}));
+        let Some(source) = source else {
             continue;
-        }
-        for path in walk(&directory, depth, &[])? {
-            let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        };
+        let mut paths = Vec::new();
+        audit_walk(&source, depth, Path::new(""), &mut paths)?;
+        for relative in paths {
+            let filename = relative.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let skill_source = relative.components().count() == 2 && filename == "SKILL.md"
+                || relative
+                    .components()
+                    .nth(1)
+                    .is_some_and(|part| part.as_os_str() == "references");
             if !filename.ends_with(".md")
                 || (base == "templates" && !filename.contains("AGENTS"))
-                || (depth == 2 && filename != "SKILL.md")
+                || (matches!(base, "custom-skills" | "templates/project-skills") && !skill_source)
             {
                 continue;
             }
-            let raw = read(&path, 1024 * 1024)?;
+            let path = Path::new(base).join(relative);
+            let raw = store.read(&path, 1024 * 1024)?;
             let body = String::from_utf8_lossy(&raw);
             let words = body.split_whitespace().count();
             let mut emphasis = BTreeMap::new();
@@ -317,16 +398,29 @@ fn prompts(args: &Args, root: &Path) -> Result<Output> {
             if base == "rules" {
                 global_words += words;
             }
-            files.push(json!({"path":path.strip_prefix(root).map_err(|_|error("prompt outside root"))?,"injection":kind,"words":words,"bytes":raw.len(),"emphasis":emphasis}));
+            files.push(json!({"path":path,"injection":kind,"words":words,"bytes":raw.len(),"emphasis":emphasis}));
         }
     }
     let providers=["claude","codex","antigravity"].iter().map(|s|json!({"provider":s,"delivery":"link.sh","global_words":global_words,"with_largest_project_templates_words":null})).collect::<Vec<_>>();
-    let row = json!({"schema":1,"kind":"oms-prompt-audit","root":root.file_name().map(|s|s.to_string_lossy()),"files":files,"duplicates":[],"providers":providers,"findings":findings});
+    let coverage = json!({
+        "basis":"source-file-inventory",
+        "sources":sources,
+        "skill_markdown":"SKILL.md and references/**/*.md",
+        "max_file_bytes":1048576,
+        "symlink_entries":"not_followed",
+        "runtime_generated_prompts":"not_scanned",
+        "runtime_delivery":"not_verified",
+        "duplicate_analysis":"not_run",
+        "semantic_conflict_analysis":"not_run"
+    });
+    let row = json!({"schema":1,"kind":"oms-prompt-audit","root":root.file_name().map(|s|s.to_string_lossy()),"files":files,"duplicates":[],"providers":providers,"findings":findings,"coverage":coverage});
     let mut output = if args.has("--json") {
         Output::json(row)
     } else {
         Output::text(format!(
-            "prompt audit: {} files, {findings} findings\n",
+            "prompt audit: {} files, {findings} findings\n\
+             coverage: source Markdown, including skill references and output styles; \
+             runtime-generated prompts, live delivery, duplicates and semantic conflicts not checked\n",
             files.len()
         ))
     };

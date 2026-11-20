@@ -2,13 +2,22 @@ use crate::{
     Context, Error, Output, Result, V, cli::Args, fail, json, now, obj, out, process, providers,
     safety, storage, text,
 };
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     time::Duration,
 };
+
+const SESSION_BYTES: usize = 32 * 1024 * 1024;
+const SESSION_HEADER_BYTES: usize = 65536;
+const HOOK_TRANSCRIPT_ERROR: &str = "unsafe or unavailable Codex hook transcript";
+
+pub struct CodexHookTranscript<'a> {
+    pub session: &'a str,
+    pub path: &'a Path,
+}
 
 #[derive(Clone)]
 struct Source {
@@ -134,7 +143,7 @@ fn roots(args: &Args) -> Result<Vec<Root>> {
 }
 fn metadata(raw: &[u8], provider: &str) -> Option<(String, PathBuf)> {
     for line in raw.split(|b| *b == b'\n').take(32) {
-        if line.len() > 65536 {
+        if line.len() > SESSION_HEADER_BYTES {
             break;
         }
         let Ok(row) = V::parse(line) else { continue };
@@ -197,12 +206,12 @@ fn discover(repo: &Path, args: &Args, context: &Context<'_>) -> Result<(Vec<Sour
                         continue;
                     }
                     let meta = entry.metadata()?;
-                    if meta.len() > 32 * 1024 * 1024 {
+                    if meta.len() > SESSION_BYTES as u64 {
                         continue;
                     }
                     let bytes = storage::file(&path)?;
                     if let Some((ident, owner)) =
-                        metadata(&bytes[..bytes.len().min(65536)], &provider)
+                        metadata(&bytes[..bytes.len().min(SESSION_HEADER_BYTES)], &provider)
                         && owner == repo
                     {
                         let modified = meta
@@ -238,23 +247,73 @@ fn read(source: &Source) -> Result<Vec<u8>> {
         return fail("transcript escaped its recorded root");
     }
     let bytes = storage::file(&source.path)?;
-    if bytes.len() > 32 * 1024 * 1024
-        || metadata(&bytes[..bytes.len().min(65536)], &source.provider)
-            != Some((source.ident.clone(), source.repo.clone()))
+    if bytes.len() > SESSION_BYTES
+        || metadata(
+            &bytes[..bytes.len().min(SESSION_HEADER_BYTES)],
+            &source.provider,
+        ) != Some((source.ident.clone(), source.repo.clone()))
     {
         return fail("transcript identity or repository binding changed");
     }
     Ok(bytes)
 }
+
+fn absolute_label(path: &Path) -> Option<&OsStr> {
+    let raw = path.as_os_str().as_bytes();
+    let label = raw.strip_prefix(b"/")?;
+    if raw.len() > 4096
+        || raw.iter().any(u8::is_ascii_control)
+        || label
+            .split(|&byte| byte == b'/')
+            .any(|part| part.is_empty() || part == b"." || part == b"..")
+    {
+        return None;
+    }
+    Some(OsStr::from_bytes(label))
+}
+
+fn read_hook_transcript(hint: CodexHookTranscript<'_>, repo: &Path) -> Option<Vec<u8>> {
+    let codex_home = match std::env::var_os("CODEX_HOME") {
+        Some(value) => PathBuf::from(value),
+        None => {
+            let home = PathBuf::from(std::env::var_os("HOME")?);
+            absolute_label(&home)?;
+            home.join(".codex")
+        }
+    };
+    absolute_label(&codex_home)?;
+    let root = codex_home.join("sessions");
+    let label = absolute_label(hint.path)?;
+    if !hint.path.starts_with(&root) || hint.path.extension() != Some(OsStr::new("jsonl")) {
+        return None;
+    }
+    // The filesystem root keeps every component of the account path in the
+    // descriptor-relative no-follow chain, including the sessions directory.
+    let bytes = oms_safe_fs::Root::open("/")
+        .ok()?
+        .read_os(label, SESSION_BYTES, oms_safe_fs::Policy::manifest())
+        .ok()?;
+    let header = &bytes[..bytes.len().min(SESSION_HEADER_BYTES + 1)];
+    let end = header.iter().position(|&byte| byte == b'\n')?;
+    let header = &header[..end];
+    oms_json::parse_strict(header).ok()?;
+    let (id, cwd) = metadata(header, "codex")?;
+    (id == hint.session && cwd == repo).then_some(bytes)
+}
+
 fn messages(source: &Source, raw: &[u8]) -> Vec<Message> {
+    parse_messages(&source.provider, &source.ident, &source.repo, raw)
+}
+
+fn parse_messages(provider: &str, ident: &str, repo: &Path, raw: &[u8]) -> Vec<Message> {
     let mut result = Vec::new();
-    let mut cwd = source.repo.clone();
+    let mut cwd = repo.to_owned();
     for (line, bytes) in raw.split(|b| *b == b'\n').enumerate() {
         if bytes.len() > 1024 * 1024 {
             continue;
         }
         let Ok(row) = V::parse(bytes) else { continue };
-        if source.provider == "codex"
+        if provider == "codex"
             && text(&row, "type") == "turn_context"
             && row.get("payload").has("cwd")
         {
@@ -265,10 +324,10 @@ fn messages(source: &Source, raw: &[u8]) -> Vec<Message> {
             .text()
             .map(PathBuf::from)
             .unwrap_or_else(|| cwd.clone());
-        if path.canonicalize().ok().as_deref() != Some(source.repo.as_path()) {
+        if path.canonicalize().ok().as_deref() != Some(repo) {
             continue;
         }
-        let (message, prefix) = if source.provider == "codex" {
+        let (message, prefix) = if provider == "codex" {
             if text(&row, "type") == "event_msg"
                 && text(row.get("payload"), "type") == "user_message"
                 && let Some(text) = row.get("payload").get("message").text()
@@ -299,12 +358,7 @@ fn messages(source: &Source, raw: &[u8]) -> Vec<Message> {
         if !["user", "assistant"].contains(&role) {
             continue;
         }
-        if source.provider == "claude"
-            && row
-                .get("sessionId")
-                .text()
-                .is_some_and(|id| id != source.ident)
-        {
+        if provider == "claude" && row.get("sessionId").text().is_some_and(|id| id != ident) {
             continue;
         }
         let content = message.get("content");
@@ -439,7 +493,7 @@ fn select(repo: &Path, args: &Args, context: &Context<'_>) -> Result<Source> {
 }
 pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     if tool == "session-handoff" {
-        return handoff(argv, context);
+        return handoff(argv, context, None);
     }
     let mut args = Args::parse(
         argv,
@@ -884,7 +938,11 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
     }
     Ok(out(json(&report)?))
 }
-fn handoff(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
+pub(crate) fn handoff(
+    argv: &[OsString],
+    context: &Context<'_>,
+    transcript: Option<CodexHookTranscript<'_>>,
+) -> Result<Output> {
     let args = Args::parse(
         argv,
         &[
@@ -904,7 +962,21 @@ fn handoff(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     if args.has("help") {
         return Ok(out(include_bytes!("help/session-handoff.txt").to_vec()));
     }
-    let repo = storage::repository(context, &args.path("cwd", context.cwd))?;
+    let repo = storage::repository(context, &args.path("cwd", context.cwd));
+    let repo = if let Some(hint) = &transcript {
+        let repo = repo.map_err(|_| Error::new(2, HOOK_TRANSCRIPT_ERROR))?;
+        if args.action() != "capture"
+            || args.get("agent") != "codex"
+            || args.get("session") != hint.session
+            || !storage::identifier(hint.session)
+            || repo != context.cwd
+        {
+            return fail(HOOK_TRANSCRIPT_ERROR);
+        }
+        repo
+    } else {
+        repo?
+    };
     let directory = Path::new(".oms/handoffs");
     match args.action() {
         "show" => {
@@ -1040,28 +1112,36 @@ fn handoff(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             if !["claude", "codex"].contains(&provider) {
                 return fail("unknown handoff agent; use claude, codex or antigravity");
             }
-            let roots_args = Args::parse(
-                &[OsString::from("--provider"), provider.into()],
-                &["provider"],
-                &[],
-            )?;
-            let (sources, truncated, _) = discover(&repo, &roots_args, context)?;
-            if truncated {
-                return fail("session discovery incomplete");
-            }
-            let source = sources.into_iter().find(|s| {
-                !args.has("session")
-                    || s.ident == args.get("session")
-                    || s.path == context.cwd.join(args.get("session"))
-            });
-            let Some(source) = source else {
-                if args.value("missing-session-policy", "fail") == "skip" {
-                    return Ok(out(Vec::new()));
+            let (ident, raw) = if let Some(hint) = transcript {
+                let ident = hint.session.to_owned();
+                let raw = read_hook_transcript(hint, &repo)
+                    .ok_or_else(|| Error::new(2, HOOK_TRANSCRIPT_ERROR))?;
+                (ident, raw)
+            } else {
+                let roots_args = Args::parse(
+                    &[OsString::from("--provider"), provider.into()],
+                    &["provider"],
+                    &[],
+                )?;
+                let (sources, truncated, _) = discover(&repo, &roots_args, context)?;
+                if truncated {
+                    return fail("session discovery incomplete");
                 }
-                return fail("native session transcript is absent");
+                let source = sources.into_iter().find(|s| {
+                    !args.has("session")
+                        || s.ident == args.get("session")
+                        || s.path == context.cwd.join(args.get("session"))
+                });
+                let Some(source) = source else {
+                    if args.value("missing-session-policy", "fail") == "skip" {
+                        return Ok(out(Vec::new()));
+                    }
+                    return fail("native session transcript is absent");
+                };
+                let raw = read(&source)?;
+                (source.ident, raw)
             };
-            let raw = read(&source)?;
-            let messages = messages(&source, &raw);
+            let messages = parse_messages(provider, &ident, &repo, &raw);
             let users = messages
                 .iter()
                 .filter(|m| m.role == "user")
@@ -1079,8 +1159,7 @@ fn handoff(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
                 .unwrap_or(6)
                 .min(50);
             let mut body = format!(
-                "# Session handoff\n\n- agent: {provider}\n- session: {}\n- captured: {}\n\n{}\n\n## Goal\n{}\n\n## Recent user turns\n",
-                source.ident,
+                "# Session handoff\n\n- agent: {provider}\n- session: {ident}\n- captured: {}\n\n{}\n\n## Goal\n{}\n\n## Recent user turns\n",
                 now(),
                 args.get("note"),
                 users.first().map_or("", |m| m.text.as_str())

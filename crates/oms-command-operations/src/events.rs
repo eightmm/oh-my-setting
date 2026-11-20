@@ -39,15 +39,13 @@ impl Default for StartRequest {
 /// Insertion order follows first creation in the ledger, including equal-time
 /// list/reconcile ordering. Validation includes unrelated attempts.
 pub fn project_attempts(rows: &[V]) -> Result<Vec<V>> {
-    let mut values = projection::project_values(rows)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let key = projection::identity(row.get("attempt_id"));
-        if let Some(value) = values.remove(&key) {
-            out.push(value);
-        }
-    }
-    Ok(out)
+    let mut projection = projection::Projection::default();
+    projection.extend(rows)?;
+    Ok(projection.into_ordered_attempts())
+}
+
+pub(crate) fn sort_list_attempts(values: &mut [V]) {
+    values.sort_by_key(|v| v.get("updated_at").py());
 }
 pub fn lifecycle_semantics(row: &V) -> V {
     let mut value = row.clone();
@@ -642,7 +640,7 @@ pub(crate) fn execute(
         }
         "list" => {
             let mut values = project_attempts(&read_rows(&event_path(repo))?)?;
-            values.sort_by_key(|v| v.get("updated_at").py());
+            sort_list_attempts(&mut values);
             values.retain(|v| {
                 (!args.flag("active") || !v.get("terminal").truth())
                     && (!args.flag("state") || v.get("state").text() == Some(&args.string("state")))

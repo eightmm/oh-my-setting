@@ -59,6 +59,8 @@ pub struct ExternalOutput {
 pub struct ReleaseRequest {
     pub channel: String,
     pub target: String,
+    /// Preserve the resolved ref's namespace alongside its exact target.
+    pub selected_ref: String,
     pub no_tools: bool,
 }
 #[derive(Debug, Clone)]

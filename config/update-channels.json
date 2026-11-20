@@ -2,8 +2,8 @@
   "channels": {
     "edge": {
       "auto_apply": false,
-      "policy": "clean fast-forward development channel",
-      "ref": "main",
+      "policy": "follow the origin default branch",
+      "ref": "origin/HEAD",
       "version": "edge"
     },
     "stable": {

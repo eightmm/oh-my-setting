@@ -21,6 +21,14 @@
 | [#263](https://github.com/eightmm/oh-my-setting/pull/263) | [AR-01~04](REMOTE-ARTIFACT-WORK-PACKETS.md) | 병합된 명세. 선택형 원격 수집·bundle 재개·cache 공간 관리 |
 | [#264](https://github.com/eightmm/oh-my-setting/pull/264) | [Graph retrieval 비교](GRAPH-RETRIEVAL-COMPARISON.md)와 [GR-01~13](GRAPH-RETRIEVAL-WORK-PACKETS.md), native README 교정 | 병합된 비교·명세. Rust/Python/shell/notebook 정확성, worker 전달, 평가, 조건부 semantic/hybrid 실험 |
 | [#265](https://github.com/eightmm/oh-my-setting/pull/265) | [호출 경로·중복 감사](CALLABLE-CONSOLIDATION-AUDIT.md), [CC-01~10](CALLABLE-CONSOLIDATION-WORK-PACKETS.md), MCP/Main swap 문서 교정 | 병합된 명세. 실제 caller, 재사용 대상과 제거 조건 |
+| [#281](https://github.com/eightmm/oh-my-setting/pull/281) | Native Claude xhigh·subagent effort·Fable 관측 호환성 | Draft 구현. 전체 capability 통합은 기존 MR-A/TM owner의 후속 |
+| [#282](https://github.com/eightmm/oh-my-setting/pull/282) | Native compaction 우선 안내, Main/Lead/leaf와 source 읽기 범위 명료화 | Draft 구현·지침. 자동 compaction·runtime lead 승격은 포함하지 않음 |
+
+2026-11-19 [모델 업그레이드 후속](MODEL-UPGRADE-ADAPTATION.md)은 공식 지침과 현재 caller를
+대조해 capability, native 관측, 공개 웹 조사 권한, Responses bridge의 완료 조건을
+기존 MR/TM/REL owner에 연결한다. #258 launch와 #276 full catalog 수정, 병합된 #280
+Dreaming 명세를 복제하지 않는다. Prompt audit는 스킬 참조·출력 스타일까지 점검하되
+runtime prompt·실제 주입·중복·의미 충돌 미검사를 명시한다.
 
 기존 40개 ID는 근거를 추적하기 위해 보존한다. **유지 16개, 기존 owner 작업에 흡수 9개,
 조건부 15개**로 재분류했으며 40개 독립 프로젝트나 모두 완료해야 할 출시 조건이 아니다.
@@ -41,6 +49,14 @@ LC-01~04는 별도 핵심 연결 작업이다. “흡수”는 동등한 기능�
   Native pane이 열린 것을 managed Team 완료·hard budget·격리의 증거로 사용하지 않는다.
 - **Reviewed proposal:** 기존 `apply-proposal`로 task graph에 반영한 뒤 기존 dispatch를 사용한다.
 - **Composite acceptance:** member별 결과를 합친 정확한 tree에서 기존 review/verifier를 실행한다.
+- **Task 결과의 현재 경계:** 일반 native 대화에는 task binding이 필수가 아니다.
+  Durable assignment가 필요한 작업은 현재 Plan claim과 Room participant/attempt를 확인하고,
+  전송 intent, 실제 결과 artifact와 verifier evidence를 연결해야 한다. Room 수신 ack나
+  native 대화의 완료 보고만으로 task를 수락하지 않는다. 전송 결과가 불명확하면 기존
+  evidence를 확인하기 전 자동 재전송하지 않는다.
+  현재 panel acceptance는 `--panel-accept` fence를 landing에 전달하지만,
+  `patch-land` parser는 이 인자를 받지 않는다. 따라서 이 경로의 end-to-end 수락은
+  미완료이며, 기존 acceptance 연결이 이미 동작한다고 가정하지 않는다.
 - **Managed built-in adapter:** lifecycle과 요청 계약을 먼저 갖추고 provider 하나의 지원 경로부터 연결한다.
 - **Catalog와 task 중심 board:** 기존 model/effort catalog·route evidence·Reader를 사용한다.
   #258의 launch 옵션 이후에도 account별 capability 최신성, 실제 적용 설정, task→Team→member 증거 연결은 남는다.

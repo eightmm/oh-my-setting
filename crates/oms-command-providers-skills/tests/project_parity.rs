@@ -322,6 +322,101 @@ fn isolated_child() {
     );
 }
 
+#[test]
+fn models_preview_preserves_full_catalog_routability() {
+    let tmp = TempDir::new("models-catalog");
+    let home = tmp.path().join("home");
+    let cache = home.join("capabilities");
+    fs::create_dir_all(&cache).expect("cache");
+    let preview = (0..19)
+        .map(|minor| format!("gpt-5.{minor}-sol"))
+        .chain(std::iter::once("gpt-6.1-sol".into()))
+        .collect::<Vec<_>>();
+    let mut catalog = preview.clone();
+    catalog.extend(["gpt-6.2-sol".into(), "claude-sonnet-5-5".into()]);
+    fs::write(
+        cache.join("codex.models"),
+        format!("{}\n", catalog.join("\n")),
+    )
+    .expect("catalog");
+    let (code, out, err) = isolated(
+        "models",
+        &["--providers", "codex", "--json"],
+        tmp.path(),
+        &oms_source(),
+        &[
+            ("HOME", utf8(&home)),
+            ("OMS_CAPABILITY_DIR", utf8(&cache)),
+            ("PATH", ""),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("report");
+    let row = &report["providers"][0];
+    assert_eq!(row["models"], serde_json::json!(preview));
+    assert_eq!(row["catalog_models"], serde_json::json!(catalog));
+    assert_eq!(row["routable"], serde_json::json!(["gpt-6.2-sol"]));
+    let mut not_routed = preview;
+    not_routed.push("claude-sonnet-5-5".into());
+    assert_eq!(row["not_routed"], serde_json::json!(not_routed));
+    assert_eq!(row["usable"], serde_json::Value::Null);
+    assert!(!cache.join("codex.env").exists());
+
+    let mut rows = (0..21)
+        .map(|minor| format!("gemini-3.{minor}-flash-low\tGemini 3 Flash"))
+        .collect::<Vec<_>>();
+    let preview = rows[..20].to_vec();
+    rows.extend([
+        "gemini-4-carbon-high\tCarbon High".into(),
+        "gemini-4-neon-high\tNeon High".into(),
+        "gemini-4-neon-high\tAlternate label".into(),
+        "gemini-4-oxygen-low".into(),
+        "gemini-4-bogus-high\twrong\tlabel".into(),
+        "gemini-4-malformed-high\t".into(),
+    ]);
+    let contents = format!("{}\n", rows.join("\n"));
+    fs::write(cache.join("antigravity.models"), &contents).unwrap();
+    let (code, out, err) = isolated(
+        "models",
+        &["--providers", "antigravity", "--json"],
+        tmp.path(),
+        &oms_source(),
+        &[
+            ("HOME", utf8(&home)),
+            ("OMS_CAPABILITY_DIR", utf8(&cache)),
+            ("PATH", ""),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let row = &report["providers"][0];
+    assert_eq!(row["models"], serde_json::json!(preview));
+    let selectors = (0..21)
+        .map(|minor| format!("gemini-3.{minor}-flash-low"))
+        .chain(
+            [
+                "gemini-4-carbon-high",
+                "gemini-4-neon-high",
+                "gemini-4-oxygen-low",
+            ]
+            .map(str::to_owned),
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(row["catalog_models"], serde_json::json!(selectors));
+    assert_eq!(
+        row["routable"],
+        serde_json::json!([
+            "gemini-4-carbon-high",
+            "gemini-4-neon-high",
+            "gemini-4-oxygen-low"
+        ])
+    );
+    assert_eq!(
+        fs::read_to_string(cache.join("antigravity.models")).unwrap(),
+        contents
+    );
+}
+
 fn utf8(path: &Path) -> &str {
     path.to_str().expect("utf8")
 }
@@ -332,6 +427,137 @@ fn write_all(base: &Path, files: &[(&str, &str)]) {
         fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         fs::write(path, body).expect("write");
     }
+}
+
+#[test]
+fn prompt_audit_includes_references_and_reports_unchecked_surfaces() {
+    let tmp = TempDir::new("prompt-audit");
+    let source = tmp.path();
+    write_all(
+        source,
+        &[
+            ("config/prompt-audit-patterns.txt", "double[- ]check\n"),
+            ("rules/global-AGENTS.md", "Use scoped evidence.\n"),
+            ("templates/project-general-AGENTS.md", "Project rules.\n"),
+            (
+                "custom-skills/demo/SKILL.md",
+                "Load references on demand.\n",
+            ),
+            (
+                "custom-skills/demo/references/routing.md",
+                "Double-check.\n",
+            ),
+            (
+                "custom-skills/demo/references/nested/source.md",
+                "Double-check.\n",
+            ),
+            ("output-styles/oms-demo.md", "Double-check.\n"),
+            (
+                "templates/project-skills/demo/references/workflow.md",
+                "Double-check.\n",
+            ),
+            ("custom-skills/demo/assets/example.md", "Double-check.\n"),
+            ("custom-skills/demo/notes.md", "Double-check.\n"),
+            ("templates/README.md", "Double-check.\n"),
+            ("crates/example/src/prompt.rs", "Double-check.\n"),
+        ],
+    );
+    std::os::unix::fs::symlink(
+        source.join("custom-skills/demo/notes.md"),
+        source.join("custom-skills/demo/references/linked.md"),
+    )
+    .expect("link");
+    let outside = TempDir::new("outside-audit");
+    write_all(
+        outside.path(),
+        &[
+            ("outside.md", "Double-check. Outside fixture marker.\n"),
+            ("project-foreign-AGENTS.md", "Outside fixture marker.\n"),
+            (
+                "project-skills/demo/references/outside.md",
+                "Outside fixture marker.\n",
+            ),
+        ],
+    );
+    std::os::unix::fs::symlink(outside.path(), source.join("prompts"))
+        .expect("link source directory");
+
+    let (code, out, err) = call("project-doctor", &["--prompts", "--json", "."], source);
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("report");
+    let files = report["files"].as_array().expect("files");
+    let paths: std::collections::BTreeSet<_> = files
+        .iter()
+        .map(|file| file["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(
+        paths,
+        std::collections::BTreeSet::from([
+            "rules/global-AGENTS.md",
+            "templates/project-general-AGENTS.md",
+            "custom-skills/demo/SKILL.md",
+            "custom-skills/demo/references/routing.md",
+            "custom-skills/demo/references/nested/source.md",
+            "output-styles/oms-demo.md",
+            "templates/project-skills/demo/references/workflow.md",
+        ])
+    );
+    assert_eq!(report["findings"], 4);
+    assert_eq!(report["schema"], 1);
+    let source_present = |report: &serde_json::Value, path: &str| {
+        report["coverage"]["sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .find(|source| source["path"] == path)
+            .expect("source coverage")["present"]
+            .as_bool()
+            .expect("present flag")
+    };
+    assert!(!source_present(&report, "prompts"));
+    assert!(source_present(&report, "templates/project-skills"));
+    assert_eq!(report["coverage"]["symlink_entries"], "not_followed");
+    assert_eq!(report["coverage"]["duplicate_analysis"], "not_run");
+    assert_eq!(report["coverage"]["semantic_conflict_analysis"], "not_run");
+    assert_eq!(
+        report["coverage"]["runtime_generated_prompts"],
+        "not_scanned"
+    );
+    assert_eq!(report["coverage"]["runtime_delivery"], "not_verified");
+    assert!(
+        files
+            .iter()
+            .filter(|file| {
+                file["path"].as_str().is_some_and(|path| {
+                    path.contains("references/") || path.starts_with("output-styles/")
+                })
+            })
+            .all(|file| file["injection"] == "on-demand")
+    );
+
+    let (code, out, err) = call("project-doctor", &["--prompts", "--strict", "."], source);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.contains("7 files, 4 findings"), "{out}");
+    assert!(out.contains("not checked"), "{out}");
+    fs::write(
+        source.join("config/prompt-audit-patterns.txt"),
+        "Outside fixture marker\n",
+    )
+    .expect("patterns");
+    fs::rename(source.join("templates"), source.join("saved-templates")).expect("move templates");
+    std::os::unix::fs::symlink(outside.path(), source.join("templates"))
+        .expect("link intermediate source directory");
+    let (code, out, err) = call(
+        "project-doctor",
+        &["--prompts", "--strict", "--json", "."],
+        source,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("report");
+    assert_eq!(report["findings"], 0);
+    assert_eq!(report["files"].as_array().expect("files").len(), 5);
+    assert!(!source_present(&report, "templates"));
+    assert!(!source_present(&report, "templates/project-skills"));
 }
 
 fn doctor(src: &Path) -> (i32, String) {

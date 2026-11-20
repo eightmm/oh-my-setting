@@ -121,6 +121,190 @@ pub struct Projection {
     pub calls: Vec<AccountedCall>,
 }
 
+/// Provider-native token counts attributable to one physical call. Components
+/// may overlap. The total uses a reported value when available and otherwise
+/// requires enough compatible components to calculate it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AttributedUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttributedCall<'a> {
+    pub call_id: &'a str,
+    pub attempt_id: &'a str,
+    pub provider: &'a str,
+    pub usage: AttributedUsage,
+}
+
+#[derive(Default)]
+struct AttributionSession<'a> {
+    saw_unknown_account: bool,
+    accounts: BTreeMap<&'a str, Option<&'a Usage>>,
+}
+
+impl<'a> AttributionSession<'a> {
+    fn observe(
+        &mut self,
+        account: Option<&'a str>,
+        observed: Option<&'a Usage>,
+        baseline_unknown: bool,
+    ) -> Option<AttributedUsage> {
+        let Some(account) = account else {
+            let fresh = !baseline_unknown && !self.saw_unknown_account && self.accounts.is_empty();
+            // Any named account in this family could own the observation.
+            self.saw_unknown_account = true;
+            for snapshot in self.accounts.values_mut() {
+                *snapshot = None;
+            }
+            return observed.filter(|_| fresh).map(AttributedUsage::standalone);
+        };
+        let previous = self.accounts.insert(account, observed);
+        match (observed, previous) {
+            (Some(usage), None) if !self.saw_unknown_account && !baseline_unknown => {
+                Some(AttributedUsage::standalone(usage))
+            }
+            (_, Some(_)) if !baseline_unknown => {
+                // The same exact session cannot start fresh twice.
+                self.accounts.insert(account, None);
+                None
+            }
+            (Some(usage), Some(Some(previous))) => {
+                match AttributedUsage::between(usage, previous) {
+                    Ok(delta) => Some(delta),
+                    Err(()) => {
+                        // A reset or contradictory delta cannot anchor the following call.
+                        self.accounts.insert(account, None);
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Projection {
+    /// Display usage in physical admission order for calls bound to exact
+    /// attempts. Unknown counts remain absent. A known fresh session can start
+    /// at zero. Resumed attribution requires a named account and the immediately
+    /// preceding final observation in that scope for each field.
+    /// Comparing input snapshots also requires a shared, known cache basis.
+    pub fn attributed_calls(&self) -> Vec<AttributedCall<'_>> {
+        let mut sessions = BTreeMap::<_, AttributionSession<'_>>::new();
+        let mut attributed = Vec::new();
+        for call in &self.calls {
+            let receipt = &call.receipt;
+            let identity = &receipt.identity;
+            let observed = (receipt.phase == Phase::Final).then_some(&receipt.usage);
+            let usage = match &receipt.cumulative {
+                Some(cumulative) => sessions
+                    .entry((identity.provider.as_str(), cumulative.session_id.as_str()))
+                    .or_default()
+                    .observe(
+                        identity.account.as_deref(),
+                        observed,
+                        cumulative.baseline_unknown,
+                    ),
+                None => observed.map(AttributedUsage::standalone),
+            };
+            // An unbound call can still advance or break a known session's
+            // baseline. Only the exact attempt receives the derived usage.
+            if let Some(attempt_id) = identity.attempt_id.as_deref() {
+                attributed.push(AttributedCall {
+                    call_id: &identity.call_id,
+                    attempt_id,
+                    provider: &identity.provider,
+                    usage: usage.unwrap_or_default(),
+                });
+            }
+        }
+        attributed
+    }
+}
+
+impl AttributedUsage {
+    fn standalone(usage: &Usage) -> Self {
+        Self::with_total(usage, usage.tokens())
+    }
+
+    fn with_total(usage: &Usage, total_tokens: Option<u64>) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            total_tokens,
+        }
+    }
+    fn between(usage: &Usage, previous: &Usage) -> Result<Self, ()> {
+        fn subtract(current: Option<u64>, baseline: Option<u64>) -> Result<Option<u64>, ()> {
+            current
+                .zip(baseline)
+                .map(|(current, baseline)| current.checked_sub(baseline).ok_or(()))
+                .transpose()
+        }
+        fn agrees_with_components(usage: &Usage) -> bool {
+            Usage {
+                total_tokens: None,
+                ..usage.clone()
+            }
+            .tokens()
+            .is_some_and(|computed| {
+                usage
+                    .total_tokens
+                    .is_none_or(|reported| reported == computed)
+            })
+        }
+        let cache_in_input = usage
+            .cache_in_input
+            .filter(|_| usage.cache_in_input == previous.cache_in_input);
+        let delta = Usage {
+            input_tokens: if cache_in_input.is_some() {
+                subtract(usage.input_tokens, previous.input_tokens)?
+            } else {
+                None
+            },
+            output_tokens: subtract(usage.output_tokens, previous.output_tokens)?,
+            cache_read_tokens: subtract(usage.cache_read_tokens, previous.cache_read_tokens)?,
+            cache_write_tokens: subtract(usage.cache_write_tokens, previous.cache_write_tokens)?,
+            cache_in_input,
+            total_tokens: subtract(usage.total_tokens, previous.total_tokens)?,
+        };
+        // Even valid absolute observations can imply impossible per-call counts.
+        let excessive_cache = usage.cache_in_input == Some(true)
+            && delta
+                .input_tokens
+                .zip(delta.cache_read_tokens)
+                .is_some_and(|(input, cache)| cache > input);
+        let short_total = delta
+            .input_tokens
+            .zip(delta.output_tokens)
+            .zip(delta.total_tokens)
+            .is_some_and(|((input, output), total)| {
+                input.checked_add(output).is_none_or(|sum| total < sum)
+            });
+        if excessive_cache || short_total {
+            return Err(());
+        }
+        let total_tokens = delta.total_tokens.or_else(|| {
+            // Both snapshots need a checked total on the same basis. A lone
+            // reported total must agree with that basis before mixing sources.
+            cache_in_input?;
+            if agrees_with_components(usage) && agrees_with_components(previous) {
+                delta.tokens()
+            } else {
+                None
+            }
+        });
+        Ok(Self::with_total(&delta, total_tokens))
+    }
+}
+
 fn invalid(message: &'static str) -> StoreError {
     StoreError::Invalid(message)
 }

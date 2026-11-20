@@ -1,7 +1,13 @@
 //! Native terminal panel consuming the OMS panel control plane.
 #![forbid(unsafe_code)]
 
+mod agy_child_chat;
+mod agy_child_records;
+mod agy_lead_custody;
 pub mod attention;
+mod board_refresh;
+mod claude_child_chat;
+mod claude_lead_usage;
 pub mod cli;
 pub mod commands;
 mod executable;
@@ -12,6 +18,7 @@ mod native_children;
 pub mod native_panel;
 pub mod navigation;
 mod orchestrator;
+mod provider_activity;
 pub mod reader;
 pub mod recommend;
 pub mod render;

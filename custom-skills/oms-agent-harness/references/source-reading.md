@@ -3,10 +3,17 @@
 Use for long documents, source investigations and summaries where missing text
 could change the answer. Short, known lookups can stay local.
 
-## Delegate the reading
+## Choose coverage and delegation
 
-Use one available native read-only subagent, or the existing OMS `researcher`
-route within authorized provider, spending and source-access limits. If no
+For a whole-artifact review or summary, cover the entire requested artifact.
+For a targeted question, read relevant definitions, callers, constraints and
+exceptions, and name the scope inspected; a narrow lookup need not read every
+line of a large source. Read applicable instructions and skills fully.
+
+An authorized main or Provider Lead can use a scoped read-only subagent when
+parallel or noisy reading justifies it. Leaf Workers read locally. Use an
+available native route or the existing OMS `researcher` route within authorized
+provider, spending and source-access limits. If no
 permitted route is available, read locally; do not install, log in, switch
 providers or start another worker to recover. The parent reads its own governing
 instructions and applicable skills; a summary does not replace them.
@@ -26,10 +33,11 @@ Read-only is a scope constraint, not a claim of OS sandboxing.
   aggregator. Larger `max_output_tokens` values and successful downloads do not
   establish completeness. Never use an unnoticed `slice`, head/tail, search
   snippet or summary in place of the requested document.
-- Read oversized text in contiguous bounded ranges through EOF, recording which
-  ranges returned. A line cap alone cannot bound a giant line; split it safely
-  with UTF-8 decoding intact. Parallel reads are useful only while their combined
-  returned output fits the receiving tool's budget; otherwise return separately.
+- For required whole-artifact coverage, read oversized text in contiguous bounded
+  ranges through EOF. For scoped investigations, record the ranges inspected and
+  recover gaps relevant to the question. A line cap alone cannot bound a giant
+  line; split it safely with UTF-8 decoding intact. Parallel reads are useful only
+  while their combined output fits the receiving tool's budget.
 - For web pages, read the rendered main content or an equivalent full-text
   representation, following pagination. A loading shell is not the document.
   Identify relevant tables, figures, attachments or collapsed sections that the

@@ -97,24 +97,50 @@ so known fresh/stale examples cover injected catalog ingestion and rendering onl
 Tree and graph folding is currently library-only state; the interactive board
 does not yet provide fold or unfold keys.
 
-The Auto overview keeps Main and Goal above one weekly-usage row and groups
-recorded work by provider. Provider headers are display rows, never participants
-or control targets. Only an explicit live lead role identifies an orchestrator;
-missing lead and quota evidence remain unreported. Terminal calls collapse into
-history; Tab opens the existing all-calls views, and explicit search or Attention
-also includes matching history. Narrow boards retain the flat summary fallback.
+The Auto overview groups recorded work by provider. The title uses the Room
+name or ID, followed by weekly quota left. Plan progress appears only for work
+linked to the current Room. Click the weekly line or press `w` for each provider's
+reading, source and reset time (scrollable with the existing overlay scroll).
+Current Codex quota stays unlabelled unless positively verified for the live
+Main or Codex lead and its per-home quota receipt; registered Codex accounts
+appear separately with their session-log reading, log age and reset, withholding
+percentages for stale, expired or missing entries. The details show refresh
+progress until a fresh snapshot arrives. Press `U` to refresh quota from idle
+Claude or AGY sessions. `Esc` returns to the Board. Missing readings show `—`.
+Aged or reset readings carry their own status.
+
+Only a connected provider header opens a native pane. Terminal calls collapse
+into history. Tab opens the existing all-calls views, and explicit search or
+Attention includes matching history. Narrow boards use the flat summary view.
 
 
 On a foreground terminal with tmux available, bare `oms panel` opens a split
-board and a native Codex Main for the current repository. If its managed Main
-already exists, it reopens that pane and restores its board if needed. Use
-`oms panel --watch` for a standalone board. Non-terminal invocations keep the
+board and offers installed Codex, Claude, AGY, and Pi Main harnesses for the
+current repository. Pi requires the Codex CLI and uses the Codex gateway.
+If its managed Main already exists, it reopens that pane
+and restores its board if needed without asking again. After a fresh Main starts,
+available provider orchestrators open or reconnect in background after the Main
+and room are verified. Missing or failing providers do not prevent use of Main.
+Codex and AGY orchestrators start idle; role guidance accompanies assignments.
+Use `oms panel --watch` for a standalone board. Non-terminal invocations keep the
 watcher output path.
+
+A fresh managed Codex or Claude Main can select a configured account with
+`oms panel --launch codex --account ID` or
+`oms panel --launch claude --account ID`. When a Main is already open, the
+requested account must match its verified launch binding.
 
 The managed Main can open provider orchestrators with
 `oms panel --orchestrator PROVIDER --room ROOM`. Use that command with
 `--task TEXT` to submit a one-line assignment to an idle, connected provider.
-The board can dock that provider's existing native input pane without restarting
+The assignments give the Main and provider orchestrators responsibility for
+review and verification, with substantive implementation delegated to scoped
+workers. Native provider permission controls determine which restrictions
+are enforced. The board can dock that provider's existing native input pane without restarting
 the conversation. Only live panes from the selected repository and Room can
 receive board usage refreshes. Native provider scheduling is outside OMS campaign
 accounting and requires an Overall Main recorded outside a managed campaign.
+
+Click a Codex native child row or select it and press Enter to open its recent
+replies. The board verifies the exact Room, Main, provider pane, assignment
+turn, and child identity before showing text. Esc closes the replies.

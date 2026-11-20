@@ -2507,18 +2507,7 @@ const UNAVAILABLE: &str = "service unavailable; parent CLI integration is requir
 fn native_delegate_context_manifest_reaches_the_physical_provider_boundary() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Landing::new();
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    std::fs::create_dir(fixture.f.0.join("config")).unwrap();
-    for entry in std::fs::read_dir(source.join("config")).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            std::fs::copy(
-                &path,
-                fixture.f.0.join("config").join(path.file_name().unwrap()),
-            )
-            .unwrap();
-        }
-    }
+    fixture.provider_config();
     std::fs::write(
         fixture.repo.join("PROJECT.md"),
         "# Project\nnative snapshot contract\n",
@@ -2603,6 +2592,289 @@ fn native_delegate_context_manifest_reaches_the_physical_provider_boundary() {
     assert!(row["provider_delivery"].is_null());
 }
 
+// Observe the live process boundary in the synthetic provider. Production
+// never uses this fixture's process observations as settlement authority.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_panel_dispatch_requires_exact_staged_provider_cleanup() {
+    for case in ["native", "script", "replaced-reservation", "interrupted"] {
+        staged_panel_dispatch(case);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn staged_panel_dispatch(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Landing::new();
+    fixture.provider_config();
+    let roles = fixture.f.0.join("roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(
+        roles.join("implementation-worker.md"),
+        b"# Implementation worker\nFollow the declared scope.\n",
+    )
+    .unwrap();
+    let provider = fixture.tools.join("claude");
+    if case == "script" {
+        std::fs::write(
+            &provider,
+            r#"#!/bin/sh
+set -eCu
+sample() {
+        IFS= read -r stat < "/proc/$1/stat"
+        set -- ${stat##*) }
+        printf '%s %s' "$2" "${20}"
+}
+set -- $(sample "$$")
+stage=$1
+birth=$2
+set -- $(sample "$stage")
+controller=$1
+test "$stage" != "$$" && test "$controller" != "$$" && test "$controller" != "$stage"
+test "/proc/$stage/exe" -ef "$CUSTODY_STAGE"
+test "/proc/$controller/exe" -ef "$CUSTODY_STAGE"
+printf '%s %s %s %s %s\n' "$$" "$birth" "$stage" "$2" "$controller" > "$CUSTODY_PROBE"
+cat >/dev/null
+printf 'changed\n' >> a.txt
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done"}\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    } else {
+        let source = fixture.f.0.join("fixture-provider.rs");
+        std::fs::write(&source, r##"
+use std::{env, fs, io::{self, Read, Write}, os::unix::fs::OpenOptionsExt, path::PathBuf};
+fn sample(pid: u32) -> (u32, String) {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let fields: Vec<_> = stat.rsplit_once(") ").unwrap().1.split_whitespace().collect();
+    (fields[1].parse().unwrap(), fields[19].into())
+}
+fn main() -> io::Result<()> {
+    assert!(!env::args_os().any(|v| v == "--panel-custody"));
+    assert!(!fs::read_dir("/proc/self/fd")?.flatten().any(|fd| {
+        fs::read_link(fd.path()).ok().is_some_and(|path| path.to_string_lossy().starts_with("socket:"))
+    }));
+    let pid = std::process::id();
+    let (stage, birth) = sample(pid);
+    let (controller, stage_birth) = sample(stage);
+    let mut marker = fs::OpenOptions::new().write(true).create_new(true).open(env::var_os("CUSTODY_PROBE").unwrap())?;
+    writeln!(marker, "{pid} {birth} {stage} {stage_birth} {controller}")?;
+    io::stdin().read_to_end(&mut Vec::new())?;
+    let case = env::var("CUSTODY_CASE").unwrap();
+    if case == "interrupted" {
+        assert!(std::process::Command::new("/bin/sh")
+            .args(["-c", r#"kill -INT "$1""#, "sh", &stage.to_string()])
+            .status()?.success());
+        loop { std::thread::park(); }
+    }
+    if case == "replaced-reservation" {
+        let dir = PathBuf::from(env::var_os("OMS_PANEL_REPO").unwrap()).join(".oms/artifacts/panel-dispatch");
+        let member = env::var("OMS_ROOM_PARTICIPANT").unwrap();
+        let launch = dir.join(format!("{member}-launch.json"));
+        let replacement = launch.with_extension("replacement");
+        let mut new = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&replacement)?;
+        new.write_all(&fs::read(&launch)?)?;
+        fs::rename(replacement, launch)?;
+    }
+    writeln!(fs::OpenOptions::new().append(true).open("a.txt")?, "changed")?;
+    println!(r#"{{"type":"result","subtype":"success","is_error":false,"result":"done"}}"#);
+    Ok(())
+}
+"##).unwrap();
+        let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let build = Command::new(compiler)
+            .args(["--edition", "2024"])
+            .arg(source)
+            .arg("-o")
+            .arg(&provider)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+    let room_report: serde_json::Value =
+        serde_json::from_str(&fixture.ok(&["room", "new", "--topic", "Custody fixture", "--json"]))
+            .unwrap();
+    let room = room_report["id"].as_str().unwrap();
+    let main = fixture.ok(&[
+        "agent-events",
+        "start",
+        "--provider",
+        "codex",
+        "--tool",
+        "panel-main",
+        "--ref",
+        "panel_role=main",
+        "--ref",
+        &format!("panel_room_id={room}"),
+        "--then",
+        "starting",
+        "--then",
+        "working",
+    ]);
+    let main = main.trim();
+    fixture.ok(&[
+        "room",
+        "join",
+        "--id",
+        room,
+        "--participant",
+        main,
+        "--provider",
+        "codex",
+        "--role",
+        "main",
+        "--json",
+    ]);
+    std::fs::write(fixture.repo.join("brief.md"), b"Append a line to a.txt.\n").unwrap();
+    let marker = fixture.f.0.join("provider-custody");
+    let binary = fixture.f.binary();
+    let (code, out, err) = fixture.oms_env(
+        &[
+            "panel",
+            "--dispatch",
+            "worker",
+            "--access",
+            "write",
+            "--purpose",
+            "implement",
+            "--owner",
+            "codex",
+            "--room",
+            room,
+            "--main",
+            main,
+            "--to",
+            "claude",
+            "--task-id",
+            "custody-fixture",
+            "--brief-file",
+            "brief.md",
+            "--scope",
+            "a.txt",
+            "--verify",
+            "true",
+            "--json",
+        ],
+        &[
+            ("CUSTODY_PROBE", marker.to_str().unwrap()),
+            ("CUSTODY_STAGE", binary.to_str().unwrap()),
+            ("CUSTODY_CASE", case),
+        ],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let ack: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let member = ack["member"].as_str().unwrap();
+    let public = fixture
+        .repo
+        .join(format!(".oms/artifacts/panel-{member}.json"));
+    let private = fixture
+        .f
+        .0
+        .join("home/.local/state/oh-my-setting/panel-control")
+        .join(oms_panel_core::digest(
+            fixture.repo.as_os_str().as_encoded_bytes(),
+        ))
+        .join("dispatch")
+        .join(member);
+    if case == "interrupted" {
+        assert_ne!(ack["exit"], 0, "{ack}");
+        assert!(marker.is_file());
+        assert!(!public.exists());
+        assert!(!private.join(format!("{member}-supervisor.json")).exists());
+        return;
+    }
+    assert_eq!(ack["exit"], 0, "{ack}");
+    assert_eq!(ack["cleanup_complete"], true);
+    assert_eq!(ack["output_complete"], true);
+    assert_eq!(ack["state"], "awaiting");
+    let observed = std::fs::read_to_string(marker).unwrap();
+    let [
+        provider_pid,
+        provider_birth,
+        stage_pid,
+        stage_birth,
+        controller_pid,
+    ]: [u64; 5] = observed
+        .split_whitespace()
+        .map(|n| n.parse().unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    assert!(provider_birth > 0 && stage_birth > 0);
+    assert_ne!(provider_pid, stage_pid);
+    assert_ne!(provider_pid, controller_pid);
+    assert_ne!(stage_pid, controller_pid);
+
+    std::fs::write(
+        fixture.repo.join("summary.md"),
+        b"Completed the custody fixture.\n",
+    )
+    .unwrap();
+    let event_path = oms_command_operations::event_path(&fixture.repo);
+    let before = std::fs::read(&event_path).unwrap();
+    let (code, out, err) = fixture.oms(&[
+        "panel",
+        "--finalize",
+        "--owner",
+        "codex",
+        "--room",
+        room,
+        "--task-id",
+        "custody-fixture",
+        "--summary-file",
+        "summary.md",
+        "--outcome",
+        "completed",
+    ]);
+    if case == "native" {
+        assert_eq!(code, 0, "{out}{err}");
+        let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(result["settlement"]["applied"].as_array().unwrap().len(), 1);
+        assert_ne!(std::fs::read(event_path).unwrap(), before);
+        let read = |suffix| -> serde_json::Value {
+            serde_json::from_slice(
+                &std::fs::read(private.join(format!("{member}-{suffix}.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let process = read("process");
+        let receipt = read("supervisor");
+        assert_eq!(process["record"]["pid"], provider_pid);
+        assert_eq!(process["record"]["group"], provider_pid);
+        assert_eq!(process["supervisor"]["pid"], stage_pid);
+        assert_eq!(process["writer"]["pid"], controller_pid);
+        assert!(
+            process["record"]["identity"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!(":{provider_birth}"))
+        );
+        assert!(
+            process["supervisor"]["identity"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!(":{stage_birth}"))
+        );
+        assert_eq!(receipt["record"]["pid"], provider_pid);
+        assert_eq!(receipt["record"]["all_reaped"], true);
+        assert_eq!(receipt["record"]["exit"], 0);
+        assert!(public.is_file());
+    } else {
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(out.is_empty());
+        assert!(err.contains("missing verified whole-tree cleanup"), "{err}");
+        assert_eq!(std::fs::read(event_path).unwrap(), before);
+        assert!(!fixture.repo.join(".oms/artifacts/panel-results").exists());
+        assert!(!public.exists());
+        assert!(!private.join(format!("{member}-supervisor.json")).exists());
+    }
+}
+
 /// A dispatch root plus an isolated host: private HOME, TMPDIR, delegate
 /// worktree root and Git identity, a PATH without `gh` or Python, and a
 /// committed work repository whose `.oms/` is ignored.
@@ -2646,6 +2918,20 @@ impl Landing {
         landing.git(&["add", "a.txt"]);
         landing.git(&["commit", "-qm", "init"]);
         landing
+    }
+    fn provider_config(&self) {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        std::fs::create_dir(self.f.0.join("config")).unwrap();
+        for entry in std::fs::read_dir(source.join("config")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                std::fs::copy(
+                    &path,
+                    self.f.0.join("config").join(path.file_name().unwrap()),
+                )
+                .unwrap();
+            }
+        }
     }
     fn env(&self, command: &mut Command) {
         command

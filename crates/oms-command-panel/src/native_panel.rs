@@ -1,6 +1,12 @@
 //! Native interactive main panel launch, reopen, split construction and window spawning.
 use crate::{
-    Error, Output, Result, Services, cli::Options, json, parent_only, require, rows, text,
+    Error, Output, Result, Services,
+    cli::Options,
+    json,
+    orchestrator::account_binding::{
+        self, AccountHost, AccountSelectionReceipt, BindingAnchor, SystemAccountHost,
+    },
+    parent_only, require, rows, text,
 };
 use oms_panel_core::{
     NativeCommand, Store, Value, host, release, routing, services::ExecutionRequest, state,
@@ -9,15 +15,140 @@ use oms_panel_core::{
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MAX_LIVE_MAINS: usize = 1;
-const LAUNCH_HARNESSES: &[&str] = &["claude", "codex", "pi", "agy"];
+const MAIN_ACCOUNT_START_TIMEOUT: Duration = Duration::from_secs(3);
+const MAIN_ACCOUNT_READY: &str = "@oms_panel_main_account_ready";
+const MAIN_ACCOUNT_HOMES: &[&str] = &["CODEX_HOME", "CLAUDE_CONFIG_DIR"];
+#[derive(Clone, Copy, Debug)]
+enum NativePrompt {
+    Positional,
+    AppendSystem,
+    AntigravityInteractive,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MainTransport {
+    Native(NativePrompt),
+    CodexGateway,
+}
+
+#[derive(Debug)]
+struct MainCapability {
+    harness: &'static str,
+    owner: &'static str,
+    program: &'static str,
+    transport: MainTransport,
+    requires: &'static [&'static str],
+    full_permissions: Option<&'static str>,
+    resume_refusal: Option<&'static str>,
+}
+
+const MAIN_CAPABILITIES: &[MainCapability] = &[
+    MainCapability {
+        harness: "codex",
+        owner: "codex",
+        program: "codex",
+        transport: MainTransport::Native(NativePrompt::Positional),
+        requires: &["codex"],
+        full_permissions: Some("--dangerously-bypass-approvals-and-sandbox"),
+        resume_refusal: None,
+    },
+    MainCapability {
+        harness: "claude",
+        owner: "claude",
+        program: "claude",
+        transport: MainTransport::Native(NativePrompt::AppendSystem),
+        requires: &["claude"],
+        full_permissions: Some("--dangerously-skip-permissions"),
+        resume_refusal: None,
+    },
+    MainCapability {
+        harness: "agy",
+        owner: "antigravity",
+        program: "agy",
+        transport: MainTransport::Native(NativePrompt::AntigravityInteractive),
+        requires: &["agy"],
+        full_permissions: Some("--dangerously-skip-permissions"),
+        resume_refusal: Some(
+            "Agy resume needs a verified native session binding; start a fresh Agy main",
+        ),
+    },
+    MainCapability {
+        harness: "pi",
+        owner: "codex",
+        program: "oms",
+        transport: MainTransport::CodexGateway,
+        requires: &["pi", "codex", "oms"],
+        full_permissions: None,
+        resume_refusal: Some("Pi resume needs a verified Pi session binding; start a new Pi main"),
+    },
+];
+
+impl MainCapability {
+    fn installed(&self) -> bool {
+        self.requires.iter().all(|program| which_exists(program))
+    }
+
+    fn uses_agy_settings(&self) -> bool {
+        matches!(
+            self.transport,
+            MainTransport::Native(NativePrompt::AntigravityInteractive)
+        )
+    }
+
+    fn require_installed(&self) -> Result<()> {
+        if self.installed() {
+            return Ok(());
+        }
+        if matches!(self.transport, MainTransport::CodexGateway) {
+            return Err(Error::new(
+                "Pi main needs the Pi CLI and Codex CLI on PATH, and the OMS launcher (Pi uses Codex inference)",
+            ));
+        }
+        let harness = self.harness;
+        Err(Error::new(format!(
+            "{} main needs the {harness} CLI on PATH",
+            capitalize(harness)
+        )))
+    }
+
+    fn require_resume(&self, resume: bool) -> Result<()> {
+        if resume && let Some(reason) = self.resume_refusal {
+            return Err(Error::new(reason));
+        }
+        Ok(())
+    }
+
+    fn supports_account(&self) -> bool {
+        matches!(
+            self.transport,
+            MainTransport::Native(NativePrompt::Positional | NativePrompt::AppendSystem)
+        )
+    }
+}
+
+fn main_capability(harness: &str) -> Option<&'static MainCapability> {
+    let harness = if harness == "antigravity" {
+        "agy"
+    } else {
+        harness
+    };
+    MAIN_CAPABILITIES
+        .iter()
+        .find(|entry| entry.harness == harness)
+}
+
+fn required_main_capability(raw: &str) -> Result<&'static MainCapability> {
+    main_capability(raw).ok_or_else(|| Error::new("unsupported launch provider"))
+}
 const NATIVE_CONTEXT_ENV: &[&str] = &[
     "OMS_CAMPAIGN_MANIFEST_SHA256",
     "OMS_OPERATION_ID",
@@ -36,17 +167,7 @@ fn admission_error(error: oms_command_peer::Error) -> Error {
         ..Error::new(error.message)
     }
 }
-const MAIN_STARTUP_PROMPT: &str = "As Overall Main, turn the user's goals into bounded \
-assignments with completion checks. Choose a role for each assignment. Use researcher for \
-read-only investigation, builder for scoped implementation, reviewer for independent review, \
-and verifier for read-only checks. In the Main pane of a managed OMS tmux panel, choose a \
-provider separately from the role. Open or reuse it with oms panel --orchestrator <provider>, \
-then use the same command with --task to send the role, scope, and checks on one line. When \
-provider orchestrators are unavailable, including in standalone inline or Herdr sessions, use \
-oms panel --dispatch <role> --prompt <assignment> where authorized. Coordinate dependencies \
-and avoid overlapping writes. Review the returned evidence, verify the integrated result, and \
-report completion and blockers to the user. Keep your own implementation to necessary integration \
-and unblocking. Preserve project rules and approval requirements. Wait for a user task before assigning work.";
+const MAIN_STARTUP_PROMPT: &str = include_str!("main-coordination.txt");
 const ENV_KEYS: &[&str] = &[
     "OMS_AGENT",
     "OMS_PANEL_REPO",
@@ -86,7 +207,59 @@ struct MainResolution {
     owner: String,
     model: Option<String>,
     effort: String,
-    transport: String,
+}
+
+struct MainAdmission<'a> {
+    capability: &'static MainCapability,
+    resolution: MainResolution,
+    options: &'a Options,
+    full_permissions: bool,
+}
+
+fn full_main_permissions() -> Result<bool> {
+    match std::env::var("OMS_PANEL_MAIN_PERMISSIONS").as_deref() {
+        Ok("full") | Err(std::env::VarError::NotPresent) => Ok(true),
+        Ok("native") => Ok(false),
+        _ => Err(Error::new(
+            "OMS_PANEL_MAIN_PERMISSIONS must be full or native",
+        )),
+    }
+}
+
+impl<'a> MainAdmission<'a> {
+    fn plan(
+        capability: &'static MainCapability,
+        policy: &routing::Policy,
+        options: &'a Options,
+    ) -> Result<Self> {
+        capability.require_resume(options.has("resume"))?;
+        if options.has("account") {
+            require(
+                capability.supports_account(),
+                "--launch --account requires codex or claude",
+            )?;
+            require(
+                !options.has("resume"),
+                "--launch --account cannot resume without a verified native session account binding",
+            )?;
+        }
+        Ok(Self {
+            capability,
+            resolution: resolve_main(policy, capability, options.get("model")),
+            options,
+            full_permissions: full_main_permissions()?,
+        })
+    }
+
+    fn admit(
+        capability: &'static MainCapability,
+        policy: &routing::Policy,
+        options: &'a Options,
+    ) -> Result<Self> {
+        let main = Self::plan(capability, policy, options)?;
+        capability.require_installed()?;
+        Ok(main)
+    }
 }
 
 /// Produce `--dry-run` launch plan JSON without spawning processes or opening panels.
@@ -94,46 +267,21 @@ pub fn dry_run_plan(
     repo: &Path,
     source: &Path,
     options: &Options,
-    services: &dyn Services,
-    stop: &AtomicBool,
+    _services: &dyn Services,
+    _stop: &AtomicBool,
 ) -> Result<Output> {
-    let harness = match options.get("launch") {
-        Some(raw) => Some(normalize_harness(raw, repo, services, stop)?),
-        None => None,
-    };
-    if harness.as_deref() == Some("pi") && options.has("resume") {
-        return Err(Error::new(
-            "Pi resume needs a verified Pi session binding; start a new Pi main",
-        ));
-    }
-    if harness.as_deref() == Some("agy") && options.has("resume") {
-        return Err(Error::new(
-            "Agy resume needs a verified native session binding; start a fresh Agy main",
-        ));
-    }
+    let capability = options
+        .get("launch")
+        .map(required_main_capability)
+        .transpose()?;
     let split = wants_split(options);
     let policy = load_policy(source)?;
-    let resolution = harness
-        .as_deref()
-        .map(|h| resolve_main(&policy, h, options.get("model")));
-    let launchable = resolution
+    let main = capability
+        .map(|entry| MainAdmission::plan(entry, &policy, options))
+        .transpose()?;
+    let argv = main
         .as_ref()
-        .is_some_and(|r| !(harness.as_deref() == Some("pi") && r.transport == "direct"));
-    let argv = if let (Some(h), true) = (harness.as_deref(), launchable) {
-        Some(native_command(
-            &policy,
-            h,
-            repo,
-            options.get("resume"),
-            options.get("model"),
-            options.get("task"),
-            None,
-            None,
-            None,
-        )?)
-    } else {
-        None
-    };
+        .map(|main| native_command(main, repo, None, None, None));
     let host = if split {
         "tmux"
     } else if options.get("host") == Some("herdr") || host::herdr_active() {
@@ -142,21 +290,27 @@ pub fn dry_run_plan(
         "inline"
     };
     let room = crate::commands::room(options).unwrap_or_else(|| "new on launch".into());
-    let plan = json!({
+    let mut plan = json!({
         "schema": 1,
         "kind": "oms-panel-launch",
         "repo": repo,
         "layout": if split { "split" } else { "inline" },
         "host": host,
-        "provider": resolution.as_ref().map(|r| r.owner.as_str()),
-        "harness": harness,
+        "provider": capability.map(|entry| entry.owner),
+        "harness": capability.map(|entry| entry.harness),
         "max_live_mains": MAX_LIVE_MAINS,
         "argv": argv,
-        "model": resolution.as_ref().and_then(|r| r.model.as_deref()),
+        "model": main.as_ref().and_then(|main| main.resolution.model.as_deref()),
         "room": room,
         "environment_keys": ENV_KEYS,
         "executes": false,
     });
+    if let Some(alias) = options.get("account") {
+        plan["account_request"] = json!({
+            "id": alias,
+            "requires_managed_tmux": true,
+        });
+    }
     Ok((0, json(&plan)?, vec![]))
 }
 
@@ -211,7 +365,7 @@ pub(crate) fn default_main(
         repo,
         &prefix,
         &policy,
-        SplitRequest::ReuseOrStartCodex,
+        SplitRequest::ReuseOrPick,
         options,
         services,
         stop,
@@ -239,13 +393,14 @@ fn reopen(
         candidates.len() == 1,
         "no unique existing OMS input pane; reopen from the intended OMS window",
     )?;
-    reopen_pane(repo, &prefix, candidates[0], services, stop)
+    reopen_pane(repo, &prefix, candidates[0], false, services, stop)
 }
 
 fn reopen_pane(
     repo: &Path,
     prefix: &[String],
     base: &PanelPane,
+    exclude_account_homes: bool,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
@@ -308,7 +463,14 @@ fn reopen_pane(
         } else {
             None
         };
-        let cmd = watch_shell(repo, prefix, None, Some(&base.session), room.as_deref());
+        let cmd = watch_shell(
+            repo,
+            prefix,
+            None,
+            Some(&base.session),
+            room.as_deref(),
+            exclude_account_homes,
+        );
         board_split(
             &base.pane,
             repo,
@@ -342,16 +504,16 @@ fn spawn_main(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    let capability = required_main_capability(raw_provider)?;
     let prefix = entry_prefix(source)?;
-    let harness = normalize_harness(raw_provider, repo, services, stop)?;
     let policy = load_policy(source)?;
-    let model = options.get("model");
-    let resolution = resolve_main(&policy, &harness, model);
-    ensure_main_installed(&harness, model, &policy)?;
+    let main = MainAdmission::admit(capability, &policy, options)?;
+    let harness = capability.harness;
     require(
         which_exists("tmux"),
         &format!("starting a main needs tmux and the {harness} CLI on PATH"),
     )?;
+    let relay = MainRelay::admit(repo, &prefix, &main)?;
 
     let store = Store::open(repo)?;
     let start_lock = store.transaction("panel-main-start", Duration::from_secs(3))?;
@@ -376,19 +538,7 @@ fn spawn_main(
 
     start_lock.check()?;
     let pane = add_main_window(
-        repo,
-        &prefix,
-        &policy,
-        &session,
-        &harness,
-        "graph",
-        false,
-        options.get("resume"),
-        model,
-        options.get("task"),
-        &ident,
-        services,
-        stop,
+        repo, &prefix, &session, &main, &relay, "graph", false, &ident, false, services, stop,
     )?;
     let idx_raw = tmux_quiet(
         services,
@@ -401,13 +551,13 @@ fn spawn_main(
     let report = json!({
         "window": window_idx,
         "provider": harness,
-        "owner": resolution.owner,
+        "owner": capability.owner,
         "room": ident,
     });
     if options.has("json") {
         Ok((0, json(&report)?, vec![]))
     } else {
-        let cap = capitalize(&harness);
+        let cap = capitalize(harness);
         let win_s = window_idx.map_or_else(|| "?".into(), |n| n.to_string());
         Ok((
             0,
@@ -425,42 +575,32 @@ fn launch(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    let capability = required_main_capability(raw_provider)?;
     let prefix = entry_prefix(source)?;
-    let harness = normalize_harness(raw_provider, repo, services, stop)?;
-    if harness == "pi" && options.has("resume") {
-        return Err(Error::new(
-            "Pi resume needs a verified Pi session binding; start a new Pi main",
-        ));
-    }
-    if harness == "agy" && options.has("resume") {
-        return Err(Error::new(
-            "Agy resume needs a verified native session binding; start a fresh Agy main",
-        ));
-    }
+    let policy = load_policy(source)?;
+    let main = MainAdmission::admit(capability, &policy, options)?;
     require(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "interactive panel needs a terminal; use --json or --dry-run",
     )?;
-    let policy = load_policy(source)?;
-    ensure_main_installed(&harness, options.get("model"), &policy)?;
-
     if wants_split(options) {
         require(
             which_exists("tmux"),
             "native chat board requires tmux on PATH",
         )?;
+        let relay = MainRelay::admit(repo, &prefix, &main)?;
         split_panel(
             repo,
             &prefix,
             &policy,
-            SplitRequest::StartNew(&harness),
+            SplitRequest::StartNew(main, relay),
             options,
             services,
             stop,
         )?;
         return Ok((0, vec![], vec![]));
     }
-    let code = run_native(repo, &policy, &harness, options, services, stop)?;
+    let code = run_native(repo, &main, services, stop, &prefix)?;
     Ok((code, vec![], vec![]))
 }
 
@@ -475,72 +615,103 @@ fn wants_split(options: &Options) -> bool {
 }
 
 enum SplitRequest<'a> {
-    ReuseOrStartCodex,
-    StartNew(&'a str),
+    ReuseOrPick,
+    StartNew(MainAdmission<'a>, MainRelay),
 }
 
-fn split_panel(
+fn split_panel<'a>(
     repo: &Path,
     prefix: &[String],
     policy: &routing::Policy,
-    request: SplitRequest<'_>,
-    options: &Options,
+    request: SplitRequest<'a>,
+    options: &'a Options,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<()> {
+    let auto_providers = matches!(&request, SplitRequest::ReuseOrPick);
     let store = Store::open(repo)?;
-    let start_lock = store.transaction("panel-main-start", Duration::from_secs(3))?;
-    let (session, owner) = resolve_or_legacy_session(repo, services, stop)?;
     let repo_str = repo.to_string_lossy().into_owned();
-    if let Some(o) = &owner {
-        require(
-            o == &repo_str,
-            &format!(
-                "tmux session {session} is not this checkout's OMS panel; close it or use --layout inline"
-            ),
-        )?;
-    }
+    let take_start_lock = || store.transaction("panel-main-start", Duration::from_secs(3));
+    let (mut session, mut owner);
 
-    let harness = match request {
-        SplitRequest::StartNew(harness) => harness,
-        SplitRequest::ReuseOrStartCodex => {
-            if owner.is_some() {
-                let panes = discover_panel_panes(repo, services, stop)?;
-                let candidates: Vec<_> = panes
-                    .iter()
-                    .filter(|pane| pane.session == session && pane.mode == PaneMode::Native)
-                    .collect();
-                require(
-                    candidates.len() <= 1,
-                    "multiple native Main panes found; reopen from the intended OMS window",
-                )?;
-                if let Some(base) = candidates.first() {
-                    start_lock.check()?;
-                    reopen_pane(repo, prefix, base, services, stop)?;
-                    start_lock.check()?;
-                    terminals::tmux(
-                        services,
-                        repo,
-                        &crate::commands::strings(&["select-window", "-t", &base.pane]),
-                        stop,
-                    )?;
+    let (main, relay, start_lock) = match request {
+        SplitRequest::StartNew(main, relay) => {
+            let start_lock = take_start_lock()?;
+            (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
+            (main, relay, start_lock)
+        }
+        SplitRequest::ReuseOrPick => {
+            (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
+            let lock = if owner.is_some() {
+                let start_lock = take_start_lock()?;
+                (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
+                if owner.is_some()
+                    && try_reuse_native_main(repo, prefix, &session, &start_lock, services, stop)?
+                {
                     drop(start_lock);
                     return attach_session(&session);
                 }
+                Some(start_lock)
+            } else {
+                None
+            };
+            full_main_permissions()?;
+            ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
+            drop(lock);
+            let chosen = pick_main(stop)?;
+            if stop.load(Ordering::Acquire) {
+                return Err(main_selection_cancelled());
             }
-            ensure_main_installed("codex", None, policy)?;
-            "codex"
+            let start_lock = take_start_lock()?;
+            (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
+            if owner.is_some()
+                && try_reuse_native_main(repo, prefix, &session, &start_lock, services, stop)?
+            {
+                drop(start_lock);
+                return attach_session(&session);
+            }
+            ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
+            let main = MainAdmission::admit(chosen, policy, options)?;
+            let relay = MainRelay::admit(repo, prefix, &main)?;
+            (main, relay, start_lock)
         }
     };
+    let harness = main.capability.harness;
     let chosen_room = crate::commands::room(options);
-    if let Some(resume) = options.get("resume") {
-        let bound_rooms = native_resume_binding(
-            &resolve_main(policy, harness, options.get("model")).owner,
+    let requested_account = options.get("account");
+    if let Some(alias) = requested_account {
+        let receipt = resolve_requested_main_account(
+            &SystemAccountHost,
             repo,
-            resume,
+            &session,
+            owner.is_some(),
+            &main.resolution,
+            alias,
             services,
             stop,
         )?;
+        if owner.is_some()
+            && try_reuse_native_main_account(
+                repo,
+                prefix,
+                &session,
+                harness,
+                &receipt,
+                options,
+                &start_lock,
+                &SystemAccountHost,
+                services,
+                stop,
+            )?
+        {
+            drop(start_lock);
+            return attach_session(&session);
+        }
+        ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
+    }
+    if let Some(resume) = options.get("resume") {
+        let bound_rooms =
+            native_resume_binding(main.capability.owner, repo, resume, services, stop)?;
         require(
             bound_rooms.len() <= 1,
             "native session is bound to multiple rooms; resume refused",
@@ -576,15 +747,13 @@ fn split_panel(
         let pane = add_main_window(
             repo,
             prefix,
-            policy,
             &session,
-            harness,
+            &main,
+            &relay,
             options.get("view").unwrap_or("auto"),
             options.has("attention-only"),
-            options.get("resume"),
-            options.get("model"),
-            options.get("task"),
             &ident,
+            auto_providers,
             services,
             stop,
         )?;
@@ -600,6 +769,9 @@ fn split_panel(
             &crate::commands::strings(&["select-pane", "-t", &pane]),
             stop,
         )?;
+        if requested_account.is_some() {
+            mark_main_account_ready(repo, &pane, &start_lock, services, stop)?;
+        }
     } else {
         {
             let sess_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
@@ -607,13 +779,7 @@ fn split_panel(
             sess_lock.check()?;
         }
         let ident = if let Some(resume) = options.get("resume") {
-            let bound = native_resume_binding(
-                &resolve_main(policy, harness, options.get("model")).owner,
-                repo,
-                resume,
-                services,
-                stop,
-            )?;
+            let bound = native_resume_binding(main.capability.owner, repo, resume, services, stop)?;
             let candidate = chosen_room.or_else(|| bound.into_keys().next());
             start_lock.check()?;
             ensure_room(repo, candidate.as_deref(), services, stop)?
@@ -621,17 +787,10 @@ fn split_panel(
             start_lock.check()?;
             ensure_room(repo, chosen_room.as_deref(), services, stop)?
         };
-        let execution = state::native_repository(repo, None)?;
-        let cmd = launch_command(
-            repo,
-            prefix,
-            &session,
-            harness,
-            options.get("resume"),
-            options.get("model"),
-            options.get("task"),
-            Some(&ident),
-        )?;
+        let mut cmd = relay.command(&session, Some(&ident));
+        if auto_providers {
+            cmd = enable_auto_providers(&cmd);
+        }
         let mut argv = crate::commands::strings(&[
             "new-session",
             "-d",
@@ -644,7 +803,7 @@ fn split_panel(
             harness,
             "-c",
         ]);
-        argv.push(execution.into());
+        argv.push(relay.execution.as_os_str().into());
         argv.push(cmd.into());
         start_lock.check()?;
         let pane = terminals::tmux(services, repo, &argv, stop)?;
@@ -696,18 +855,22 @@ fn split_panel(
         )?;
         bind_window(
             &pane,
-            policy,
-            harness,
+            main.capability,
             options.get("view").unwrap_or("auto"),
             options.has("attention-only"),
-            options.get("model"),
             &ident,
             services,
             repo,
             stop,
         )?;
-        let owner = resolve_main(policy, harness, options.get("model")).owner;
-        let watch = watch_shell(repo, prefix, Some(&owner), None, Some(&ident));
+        let watch = watch_shell(
+            repo,
+            prefix,
+            Some(main.capability.owner),
+            None,
+            Some(&ident),
+            requested_account.is_some(),
+        );
         board_split(&pane, repo, &watch, true, services, stop)?;
         terminals::tmux(
             services,
@@ -715,10 +878,476 @@ fn split_panel(
             &crate::commands::strings(&["select-pane", "-t", &pane]),
             stop,
         )?;
+        if requested_account.is_some() {
+            mark_main_account_ready(repo, &pane, &start_lock, services, stop)?;
+        }
     }
 
     drop(start_lock);
     attach_session(&session)
+}
+
+fn mark_main_account_ready(
+    repo: &Path,
+    pane: &str,
+    start_lock: &oms_panel_core::Transaction<'_>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    start_lock.check()?;
+    require(
+        crate::commands::valid_target(pane, '%'),
+        "invalid native Main pane",
+    )?;
+    terminals::tmux(
+        services,
+        repo,
+        &crate::commands::strings(&["set-option", "-w", "-t", pane, MAIN_ACCOUNT_READY, "1"]),
+        stop,
+    )?;
+    Ok(())
+}
+
+fn resolve_checked_session(
+    repo: &Path,
+    repo_str: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<(String, Option<String>)> {
+    let (session, owner) = resolve_or_legacy_session(repo, services, stop)?;
+    if let Some(o) = &owner {
+        require(
+            o == repo_str,
+            &format!(
+                "tmux session {session} is not this checkout's OMS panel; close it or use --layout inline"
+            ),
+        )?;
+    }
+    Ok((session, owner))
+}
+
+fn try_reuse_native_main(
+    repo: &Path,
+    prefix: &[String],
+    session: &str,
+    start_lock: &oms_panel_core::Transaction<'_>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    let panes = discover_panel_panes(repo, services, stop)?;
+    let candidates: Vec<_> = panes
+        .iter()
+        .filter(|pane| pane.session == session && pane.mode == PaneMode::Native)
+        .collect();
+    require(
+        candidates.len() <= 1,
+        "multiple native Main panes found; reopen from the intended OMS window",
+    )?;
+    let Some(base) = candidates.first() else {
+        return Ok(false);
+    };
+    start_lock.check()?;
+    reopen_pane(repo, prefix, base, false, services, stop)?;
+    start_lock.check()?;
+    terminals::tmux(
+        services,
+        repo,
+        &crate::commands::strings(&["select-window", "-t", &base.pane]),
+        stop,
+    )?;
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_requested_main_account(
+    host: &dyn AccountHost,
+    repo: &Path,
+    session: &str,
+    existing_session: bool,
+    resolution: &MainResolution,
+    alias: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<AccountSelectionReceipt> {
+    let global = ["show-environment", "-g"];
+    let env = if existing_session {
+        let global = terminals::tmux(services, repo, &crate::commands::strings(&global), stop)?;
+        let local = terminals::tmux(
+            services,
+            repo,
+            &crate::commands::strings(&["show-environment", "-t", &format!("={session}")]),
+            stop,
+        )?;
+        format!("{global}\n{local}")
+    } else {
+        // A fresh tmux server might not exist yet. Inline admission checks the
+        // actual inherited environment after the window has been created.
+        tmux_quiet(services, repo, &global, stop).unwrap_or_default()
+    };
+    account_binding::resolve_main_selection(
+        host,
+        &resolution.owner,
+        resolution.model.as_deref(),
+        alias,
+        &env,
+    )
+}
+
+#[derive(PartialEq, Eq)]
+struct MainAccountPane {
+    session: terminals::SessionProof,
+    window: String,
+    pane: String,
+    pid: u32,
+    birth: String,
+    room: String,
+    attempt: String,
+}
+
+impl MainAccountPane {
+    fn anchor<'a>(&'a self, repo: &'a Path, provider: &'a str) -> BindingAnchor<'a> {
+        BindingAnchor {
+            repo,
+            room: &self.room,
+            main_attempt: &self.attempt,
+            main_owner: provider,
+            session: &self.session,
+            provider,
+            pane_id: &self.pane,
+            pid: self.pid,
+            birth: &self.birth,
+        }
+    }
+
+    fn same_generation(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.window == other.window
+            && self.pane == other.pane
+            && self.pid == other.pid
+            && self.birth == other.birth
+            && self.room == other.room
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn main_account_pane(
+    repo: &Path,
+    session: &str,
+    pane: &str,
+    provider: &str,
+    host: &dyn AccountHost,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<MainAccountPane> {
+    const FORMAT: &str = "#{session_name}\t#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@oms_panel_owner}\t#{@oms_panel_harness}\t#{@oms_panel_room}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t#{@oms_panel_native_pane}\t#{@oms_panel_main_account_ready}\t.";
+    const UNAVAILABLE: &str = "managed Main pane identity is unavailable";
+    require(
+        valid_panel_session(session) && crate::commands::valid_target(pane, '%'),
+        UNAVAILABLE,
+    )?;
+    let captured = terminals::tmux(
+        services,
+        repo,
+        &crate::commands::strings(&["display-message", "-p", "-t", pane, FORMAT]),
+        stop,
+    )?;
+    let fields: Vec<_> = captured.split('\t').collect();
+    let [
+        name,
+        id,
+        window,
+        actual_pane,
+        pid,
+        "0",
+        owner,
+        harness,
+        room,
+        attempt,
+        member,
+        native,
+        "1",
+        ".",
+    ] = fields.as_slice()
+    else {
+        return Err(Error::new(UNAVAILABLE));
+    };
+    require(
+        *name == session
+            && *actual_pane == pane
+            && crate::commands::valid_target(window, '@')
+            && *owner == provider
+            && *harness == provider
+            && crate::identifier(room).is_ok()
+            && ((attempt.is_empty() && member.is_empty() && native.is_empty())
+                || (crate::identifier(attempt).is_ok() && member == attempt && *native == pane)),
+        UNAVAILABLE,
+    )?;
+    let session = terminals::session_proof(services, repo, id, stop)?;
+    let server = terminals::process(session.server_pid)?;
+    let pid = pid.parse::<u32>().map_err(|_| Error::new(UNAVAILABLE))?;
+    let owner = host.process_owner(pid)?;
+    require(
+        server.uid == host.uid()
+            && server.birth == session.server_birth
+            && pid != 0
+            && owner.pid == pid
+            && owner.uid == host.uid()
+            && !owner.birth.is_empty(),
+        UNAVAILABLE,
+    )?;
+    Ok(MainAccountPane {
+        session,
+        window: (*window).into(),
+        pane: pane.into(),
+        pid,
+        birth: owner.birth,
+        room: (*room).into(),
+        attempt: (*attempt).into(),
+    })
+}
+
+fn prove_joined_main(
+    repo: &Path,
+    pane: &MainAccountPane,
+    provider: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let events = crate::commands::query(
+        services,
+        NativeCommand::Events,
+        repo,
+        &["list", "--json"],
+        stop,
+    )?;
+    let mut relevant = rows(&events).iter().filter(|event| {
+        event["attempt_id"] == pane.attempt
+            || (event["tool"] == "panel-main"
+                && event["refs"]["panel_room_id"] == pane.room
+                && event["terminal"] != true)
+    });
+    require(
+        relevant.next().is_some_and(|event| {
+            event["attempt_id"] == pane.attempt
+                && event["provider"] == provider
+                && event["tool"] == "panel-main"
+                && event["terminal"] == false
+                && event["refs"]["panel_role"] == "main"
+                && event["refs"]["panel_owner"] == provider
+                && event["refs"]["panel_harness"] == provider
+                && event["refs"]["panel_room_id"] == pane.room
+                && event["refs"]
+                    .get("panel_room_participant")
+                    .is_none_or(|member| member == &pane.attempt)
+        }) && relevant.next().is_none()
+            && current_auto_orchestrator_room(
+                repo,
+                &pane.room,
+                &pane.attempt,
+                provider,
+                services,
+                stop,
+            ),
+        "exact live Room Main could not be verified",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_reuse_native_main_account(
+    repo: &Path,
+    prefix: &[String],
+    session: &str,
+    provider: &str,
+    receipt: &AccountSelectionReceipt,
+    options: &Options,
+    start_lock: &oms_panel_core::Transaction<'_>,
+    host: &dyn AccountHost,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    let panes = discover_panel_panes(repo, services, stop)?;
+    let mut native = panes
+        .iter()
+        .filter(|pane| pane.session == session && pane.mode == PaneMode::Native);
+    let Some(base) = native.next() else {
+        return Ok(false);
+    };
+    require(native.next().is_none(), "multiple native Main panes found")?;
+    require(!options.has("task"), "a task requires a fresh Main launch")?;
+    require(
+        !options.has("model"),
+        "a model override requires a fresh Main launch",
+    )?;
+    let room =
+        crate::commands::room(options).or_else(|| recorded_room(services, repo, session, stop));
+    let generation = main_account_pane(repo, session, &base.pane, provider, host, services, stop)?;
+    require(
+        generation.window == base.window
+            && !generation.attempt.is_empty()
+            && room.as_deref() == Some(&generation.room),
+        "requested Room does not match the live native Main",
+    )?;
+    prove_joined_main(repo, &generation, provider, services, stop)?;
+    require(
+        account_binding::load_verified_binding(host, "main", &generation.anchor(repo, provider))
+            .is_some_and(|binding| {
+                binding.verification == account_binding::AccountVerification::Verified
+                    && binding.account_pinned
+                    && binding.account_id == receipt.account_id
+                    && binding.home_digest.is_some()
+                    && binding.home_digest == receipt.home_digest
+            }),
+        "requested account does not match a verified live native Main binding",
+    )?;
+    start_lock.check()?;
+    require(
+        main_account_pane(repo, session, &base.pane, provider, host, services, stop)? == generation,
+        "managed Main pane changed; retry after refreshing",
+    )?;
+    reopen_pane(repo, prefix, base, true, services, stop)?;
+    start_lock.check()?;
+    terminals::tmux(
+        services,
+        repo,
+        &crate::commands::strings(&["select-window", "-t", &base.pane]),
+        stop,
+    )?;
+    Ok(true)
+}
+
+fn ensure_no_active_main(
+    repo: &Path,
+    session: &str,
+    owner_exists: bool,
+    options: &Options,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let raw = crate::commands::query(
+        services,
+        NativeCommand::Events,
+        repo,
+        &["list", "--json"],
+        stop,
+    )?;
+    let attempts = rows(&raw);
+    let non_terminal = attempts
+        .iter()
+        .filter(|row| row["tool"] == "panel-main" && row["terminal"] != true)
+        .count();
+    if non_terminal > 0 {
+        let classified = release::classify(repo, attempts, services);
+        require(
+            rows(&classified["releasable"]).len() == non_terminal,
+            "another main is live or unverified; finish it before starting another",
+        )?;
+    }
+    if owner_exists {
+        let existing_room = if non_terminal == 0 {
+            crate::commands::room(options).or_else(|| recorded_room(services, repo, session, stop))
+        } else {
+            None
+        };
+        require(
+            live_mains(
+                repo,
+                session,
+                existing_room.as_deref(),
+                None,
+                services,
+                stop,
+            )? < MAX_LIVE_MAINS,
+            "another main is live or unverified; finish it before starting another",
+        )?;
+    }
+    Ok(())
+}
+
+fn pick_main(stop: &AtomicBool) -> Result<&'static MainCapability> {
+    let choices: Vec<_> = MAIN_CAPABILITIES
+        .iter()
+        .filter(|entry| entry.installed())
+        .collect();
+    require(
+        !choices.is_empty(),
+        "no installed Main provider is available",
+    )?;
+    let stdin = std::io::stdin();
+    pick_from(&choices, stdin.as_fd(), stop, &mut std::io::stderr())
+}
+
+fn pick_from<'a>(
+    choices: &[&'a MainCapability],
+    input: BorrowedFd<'_>,
+    stop: &AtomicBool,
+    out: &mut dyn Write,
+) -> Result<&'a MainCapability> {
+    writeln!(out, "Choose a Main provider:").map_err(Error::new)?;
+    for (index, provider) in choices.iter().enumerate() {
+        writeln!(out, "  {}. {}", index + 1, provider.harness).map_err(Error::new)?;
+    }
+    let mut pending = Vec::new();
+    loop {
+        write!(out, "Selection [1]: ").map_err(Error::new)?;
+        out.flush().map_err(Error::new)?;
+        let line = read_selection(input, &mut pending, stop)?;
+        let selection = line.trim();
+        if selection.is_empty() {
+            return Ok(choices[0]);
+        }
+        if let Ok(index) = selection.parse::<usize>()
+            && let Some(provider) = index.checked_sub(1).and_then(|i| choices.get(i))
+        {
+            return Ok(provider);
+        }
+        writeln!(out, "Choose one of the listed numbers.").map_err(Error::new)?;
+    }
+}
+
+fn main_selection_cancelled() -> Error {
+    Error {
+        code: 130,
+        ..Error::new("Main selection cancelled")
+    }
+}
+
+/// Returns the next line, keeping bytes after it in `pending`. The oms signal
+/// handlers only set `stop` and restart syscalls, so a blocking read would
+/// never observe SIGINT/SIGTERM; poll in short slices instead. EOF, including
+/// one after an unterminated line, cancels.
+fn read_selection(
+    input: BorrowedFd<'_>,
+    pending: &mut Vec<u8>,
+    stop: &AtomicBool,
+) -> Result<String> {
+    use rustix::event::{PollFd, PollFlags, poll};
+    use rustix::io::Errno;
+    let timeout = crate::wakeup::timespec(Duration::from_millis(100));
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Err(main_selection_cancelled());
+        }
+        if let Some(end) = pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            return Ok(String::from_utf8_lossy(&line).into_owned());
+        }
+        let mut fds = [PollFd::from_borrowed_fd(input, PollFlags::IN)];
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(0) | Err(Errno::INTR) => continue,
+            Ok(_) => {}
+            Err(e) => return Err(Error::new(e)),
+        }
+        if stop.load(Ordering::Acquire) {
+            return Err(main_selection_cancelled());
+        }
+        let mut chunk = [0u8; 256];
+        match rustix::io::read(input, &mut chunk) {
+            Ok(0) => return Err(main_selection_cancelled()),
+            Ok(n) => pending.extend_from_slice(&chunk[..n]),
+            Err(Errno::INTR | Errno::AGAIN) => {}
+            Err(e) => return Err(Error::new(e)),
+        }
+    }
 }
 
 fn attach_session(session: &str) -> Result<()> {
@@ -737,31 +1366,89 @@ fn attach_session(session: &str) -> Result<()> {
 
 fn run_native(
     repo: &Path,
-    policy: &routing::Policy,
-    harness: &str,
-    options: &Options,
+    main: &MainAdmission<'_>,
     services: &dyn Services,
     stop: &AtomicBool,
+    prefix: &[String],
 ) -> Result<i32> {
     oms_command_peer::admission::interactive_state(repo).map_err(admission_error)?;
-    let resolution = resolve_main(policy, harness, options.get("model"));
-    require(
-        !(harness == "pi" && resolution.transport == "direct"),
-        "selected main transport launch is not available yet",
-    )?;
+    let capability = main.capability;
+    let harness = capability.harness;
+    let options = main.options;
+    let resolution = &main.resolution;
+    let account_host = SystemAccountHost;
+    let requested_account = options.get("account");
+    if requested_account.is_some() {
+        require(
+            managed_session(),
+            "--launch --account requires a managed tmux panel",
+        )?;
+    }
+    let execution = state::native_repository(repo, None)?;
     let store = Store::open(repo)?;
+    // The outer launcher owns this lock until the new pane and its metadata
+    // exist. Keep the same lock through binding so reuse cannot see a partial launch.
+    let account_lock = requested_account
+        .map(|_| store.transaction("panel-main-start", MAIN_ACCOUNT_START_TIMEOUT))
+        .transpose()?;
+    let receipt = requested_account
+        .map(|alias| {
+            account_binding::resolve_main_selection(
+                &account_host,
+                harness,
+                resolution.model.as_deref(),
+                alias,
+                "",
+            )
+        })
+        .transpose()?;
     let session_lock = store.transaction("panel-main-session", Duration::from_millis(100))?;
     let session = std::env::var("OMS_PANEL_SESSION").unwrap_or_default();
+    let resume = options.get("resume");
+    let chosen_room = crate::commands::room(options);
+    let mut pending_account = None;
+    if account_lock.is_some() {
+        let pane = std::env::var("TMUX_PANE").unwrap_or_default();
+        let identity = main_account_pane(
+            repo,
+            &session,
+            &pane,
+            harness,
+            &account_host,
+            services,
+            stop,
+        )?;
+        require(
+            identity.pid == std::process::id()
+                && identity.attempt.is_empty()
+                && chosen_room.as_deref() == Some(&identity.room),
+            "launch is not the pending managed Main for the selected Room",
+        )?;
+        let room = crate::commands::query(
+            services,
+            NativeCommand::Room,
+            repo,
+            &["show", "--id", &identity.room, "--exact", "--json"],
+            stop,
+        )?;
+        require(
+            room["id"] == identity.room && room["closed"] == false && room["successor"].is_null(),
+            "selected Room is closed, replaced, or unavailable",
+        )?;
+        pending_account = Some(identity);
+    }
     if !session.is_empty() {
-        let pending = pending_window_id(repo, services, stop);
+        let pending = pending_account
+            .as_ref()
+            .map(|pane| pane.window.clone())
+            .or_else(|| pending_window_id(repo, services, stop));
         check_legacy_main(repo, &session, pending.as_deref(), services, stop)?;
         session_lock.check()?;
     }
 
-    let execution = state::native_repository(repo, None)?;
-    let resume = options.get("resume");
-    let chosen_room = crate::commands::room(options);
-    let (room_id, replaces) = if let Some(res) = resume {
+    let (room_id, replaces) = if let Some(pending) = &pending_account {
+        (pending.room.clone(), None)
+    } else if let Some(res) = resume {
         let bound_rooms = native_resume_binding(&resolution.owner, repo, res, services, stop)?;
         require(
             bound_rooms.len() <= 1,
@@ -792,9 +1479,13 @@ fn run_native(
         )
     };
 
-    let native_session = resume
-        .map(str::to_owned)
-        .or_else(|| (harness == "claude").then(new_uuid));
+    let native_session = resume.map(str::to_owned).or_else(|| {
+        matches!(
+            capability.transport,
+            MainTransport::Native(NativePrompt::AppendSystem)
+        )
+        .then(new_uuid)
+    });
     let label = safe_label(options.get("task"));
     let mut start_args = vec![
         "start".into(),
@@ -914,21 +1605,14 @@ fn run_native(
     }
 
     let argv = native_command(
-        policy,
-        harness,
+        main,
         repo,
-        resume,
-        options.get("model"),
-        options.get("task"),
         Some(&room_id),
         Some(&member),
         native_session.as_deref(),
-    )?;
-    let (program, rest) = argv
-        .split_first()
-        .ok_or_else(|| Error::new("empty native command"))?;
-    let mut cmd = Command::new(program);
-    cmd.args(rest)
+    );
+    let mut cmd = Command::new(capability.program);
+    cmd.args(&argv[1..])
         .current_dir(&execution)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -940,8 +1624,9 @@ fn run_native(
         .env("OMS_ROOM_REPO", repo)
         .env("OMS_PANEL_MAIN_ATTEMPT", &attempt)
         .env("OMS_PANEL_RESULTS", "1");
+    cmd.env_remove("OMS_PANEL_AUTO_ORCHESTRATORS");
     apply_main_model_env(&mut cmd, harness, resolution.model.as_deref());
-    if harness != "pi" && ["codex", "claude", "antigravity"].contains(&resolution.owner.as_str()) {
+    if matches!(capability.transport, MainTransport::Native(_)) {
         cmd.env("OMS_HOOK_AGENT", &resolution.owner);
     } else {
         cmd.env_remove("OMS_HOOK_AGENT");
@@ -958,14 +1643,50 @@ fn run_native(
     ] {
         cmd.env_remove(key);
     }
+    if let Some(receipt) = &receipt {
+        for key in receipt.scrub_env {
+            cmd.env_remove(key);
+        }
+        if let Some((key, home)) = &receipt.home_env {
+            cmd.env(key, home);
+        }
+    }
 
-    let admission = (|| -> Result<oms_command_peer::admission::InteractiveCall> {
+    let admission = (|| -> Result<_> {
+        let bound = if let (Some(receipt), Some(pending), Some(lock)) =
+            (&receipt, &pending_account, &account_lock)
+        {
+            lock.check()?;
+            let current = main_account_pane(
+                repo,
+                &session,
+                &pending.pane,
+                harness,
+                &account_host,
+                services,
+                stop,
+            )?;
+            require(
+                pending.same_generation(&current) && current.attempt == attempt,
+                "managed Main pane changed before native launch",
+            )?;
+            account_binding::save_binding(
+                &account_host,
+                "main",
+                &current.anchor(repo, harness),
+                receipt,
+            )
+            .map_err(|_| Error::new("private Main account binding could not be saved"))?;
+            Some(current)
+        } else {
+            None
+        };
         let call = oms_command_peer::admission::begin_interactive_with_executor(
             oms_command_peer::admission::InteractiveRequest {
                 state_root: repo,
                 provider: &resolution.owner,
                 selected_model: resolution.model.as_deref(),
-                account: None,
+                account: receipt.as_ref().and_then(|r| r.account_id.as_deref()),
                 attempt: Some(&attempt),
                 resume_session: resume,
             },
@@ -993,10 +1714,10 @@ fn run_native(
             stop,
         )
         .map_err(admission_error)?;
-        Ok(call)
+        Ok((call, bound))
     })();
-    let call = match admission {
-        Ok(call) => call,
+    let (call, bound) = match admission {
+        Ok(v) => v,
         Err(error) => {
             let settling = AtomicBool::new(false);
             let states: &[&str] = if stop.load(Ordering::Acquire) || error.code == 130 {
@@ -1019,7 +1740,26 @@ fn run_native(
         .env("OMS_PROVIDER_CALL_ID", call.call_id())
         .env("OMS_OPERATION_ID", call.operation_id())
         .env_remove("OMS_RESUME_SESSION");
-    let mut child = match cmd.spawn() {
+    let mut child = match (|| -> Result<Child> {
+        if let Some(expected) = &bound {
+            require(
+                main_account_pane(
+                    repo,
+                    &session,
+                    &expected.pane,
+                    harness,
+                    &account_host,
+                    services,
+                    stop,
+                )? == *expected,
+                "managed Main pane changed before native launch",
+            )?;
+            prove_joined_main(repo, expected, harness, services, stop)?;
+            require(!stop.load(Ordering::Acquire), "native launch cancelled")?;
+        }
+        cmd.spawn()
+            .map_err(|err| Error::new(format!("native launch failed: {err}")))
+    })() {
         Ok(c) => c,
         Err(err) => {
             let accounting = call.finish(None, None).map_err(admission_error);
@@ -1033,11 +1773,125 @@ fn run_native(
                 &settling,
             );
             accounting?;
-            return Err(Error::new(format!("native launch failed: {err}")));
+            return Err(err);
         }
     };
+    if let Some(expected) = &bound
+        && let Err(error) = (|| {
+            require(
+                main_account_pane(
+                    repo,
+                    &session,
+                    &expected.pane,
+                    harness,
+                    &account_host,
+                    services,
+                    stop,
+                )? == *expected,
+                "managed Main pane changed during native launch",
+            )?;
+            Ok(())
+        })()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        let accounting = call.finish(None, None).map_err(admission_error);
+        let settling = AtomicBool::new(false);
+        let _ = transition_attempt(
+            repo,
+            &attempt,
+            &["failed"],
+            Some("native_account_custody_lost"),
+            services,
+            &settling,
+        );
+        accounting?;
+        return Err(error);
+    }
+    if harness == "claude"
+        && !stop.load(Ordering::Acquire)
+        && let (Some(expected), Some(receipt)) = (&bound, &receipt)
+    {
+        account_binding::record_claude_main_child(
+            &account_host,
+            &expected.anchor(repo, harness),
+            receipt,
+            child.id(),
+        );
+    }
+    drop(account_lock);
 
+    let finished = std::sync::Arc::new(AtomicBool::new(false));
+    let background = if managed_session()
+        && std::env::var_os("OMS_PANEL_AUTO_ORCHESTRATORS").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        && std::env::var_os("OMS_CAMPAIGN_MANIFEST_SHA256").is_none()
+        && !prefix.is_empty()
+        && current_auto_orchestrator_room(
+            repo,
+            &room_id,
+            &attempt,
+            &resolution.owner,
+            services,
+            stop,
+        ) {
+        let done = finished.clone();
+        let prefix = prefix.to_vec();
+        let repo = repo.to_path_buf();
+        let room = room_id.clone();
+        let attempt = attempt.clone();
+        let owner = resolution.owner.clone();
+        Some(std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut pending: Vec<_> = [
+                ("codex", "codex"),
+                ("claude", "claude"),
+                ("antigravity", "agy"),
+            ]
+            .into_iter()
+            .filter(|(_, binary)| which_exists(binary))
+            .collect();
+            while !pending.is_empty() && !done.load(Ordering::Acquire) && Instant::now() < deadline
+            {
+                pending.retain(|(provider, _)| {
+                    if done.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    // Reenter the existing orchestrator command so ownership is proved there.
+                    let result = Command::new(&prefix[0])
+                        .args(&prefix[1..])
+                        .args(["panel", "--repo"])
+                        .arg(&repo)
+                        .args([
+                            "--room",
+                            &room,
+                            "--orchestrator",
+                            provider,
+                            "--owner",
+                            &owner,
+                        ])
+                        .env("OMS_PANEL_MAIN_ATTEMPT", &attempt)
+                        .env("OMS_ROOM_PARTICIPANT", &attempt)
+                        .env_remove("OMS_PANEL_AUTO_ORCHESTRATORS")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    !result.is_ok_and(|status| status.success())
+                });
+                if !pending.is_empty() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }))
+    } else {
+        None
+    };
     let status_code = wait_with_heartbeat(&mut child, repo, &attempt, services, stop);
+    finished.store(true, Ordering::Release);
+    if let Some(background) = background {
+        let _ = background.join();
+    }
     let accounting = call.finish(None, None).map_err(admission_error);
     let final_states: &[&str] = match status_code {
         0 => &["verifying", "review", "done"],
@@ -1055,6 +1909,40 @@ fn run_native(
     );
     accounting?;
     Ok(status_code)
+}
+
+fn current_auto_orchestrator_room(
+    repo: &Path,
+    room_id: &str,
+    attempt: &str,
+    owner: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> bool {
+    crate::commands::query(
+        services,
+        NativeCommand::Room,
+        repo,
+        &["show", "--id", room_id, "--exact", "--json"],
+        stop,
+    )
+    .is_ok_and(|room| {
+        let mut mains = rows(&room["participants"]).iter().filter(|row| {
+            row["participant"] == attempt || (row["role"] == "main" && row["joined"] == true)
+        });
+        room["id"] == room_id
+            && room["closed"] == false
+            && room["successor"].is_null()
+            && mains.next().is_some_and(|row| {
+                row["participant"] == attempt
+                    && row["provider"] == owner
+                    && row["role"] == "main"
+                    && row["joined"] == true
+                    && (row["parent"].is_null() || row["parent"] == "")
+            })
+            && mains.next().is_none()
+            && !stop.load(Ordering::Acquire)
+    })
 }
 
 fn wait_with_heartbeat(
@@ -1297,11 +2185,24 @@ fn match_panel_entry(command: &str, canon_repo: &Path) -> Option<PaneMode> {
         return None;
     };
 
-    let mut mode = PaneMode::Control;
+    let mut watch = false;
     let mut pane_repo: Option<String> = None;
+    let mut launch = None;
+    let mut account = false;
+    let mut resume = false;
     let value_flags = [
-        "--repo", "--room", "--host", "--layout", "--view", "--owner", "--launch", "--resume",
-        "--model", "--task", "--count",
+        "--repo",
+        "--room",
+        "--host",
+        "--layout",
+        "--view",
+        "--owner",
+        "--launch",
+        "--resume",
+        "--model",
+        "--task",
+        "--count",
+        "--account",
     ];
     while idx < words.len() {
         let word = words[idx].as_str();
@@ -1310,7 +2211,7 @@ fn match_panel_entry(command: &str, canon_repo: &Path) -> Option<PaneMode> {
             .map_or((word, None), |(key, value)| (key, Some(value)));
         idx += 1;
         if key == "--watch" && inline.is_none() {
-            mode = PaneMode::Watch;
+            watch = true;
         } else if matches!(key, "--no-animation" | "--attention-only") && inline.is_none() {
             continue;
         } else if value_flags.contains(&key) {
@@ -1326,13 +2227,34 @@ fn match_panel_entry(command: &str, canon_repo: &Path) -> Option<PaneMode> {
             };
             if key == "--repo" {
                 pane_repo = Some(val.to_owned());
-            } else if key == "--launch" && mode == PaneMode::Control {
-                mode = PaneMode::Native;
+            } else if key == "--launch" {
+                if launch.replace(main_capability(val)?).is_some() {
+                    return None;
+                }
+            } else if key == "--account" {
+                if account || !crate::cli::valid_account_id(val) {
+                    return None;
+                }
+                account = true;
+            } else if key == "--resume" {
+                resume = true;
             }
         } else {
             return None;
         }
     }
+    let mode = match (launch, watch) {
+        (Some(main), false) => {
+            main.require_resume(resume).ok()?;
+            if account && (!main.supports_account() || resume) {
+                return None;
+            }
+            PaneMode::Native
+        }
+        (None, true) if !account => PaneMode::Watch,
+        (None, false) if !account => PaneMode::Control,
+        _ => return None,
+    };
     let resolved = std::fs::canonicalize(pane_repo?).ok()?;
     if resolved == canon_repo {
         Some(mode)
@@ -1456,29 +2378,20 @@ fn board_split(
 fn add_main_window(
     repo: &Path,
     prefix: &[String],
-    policy: &routing::Policy,
     session: &str,
-    harness: &str,
+    main: &MainAdmission<'_>,
+    relay: &MainRelay,
     view: &str,
     attention_only: bool,
-    resume: Option<&str>,
-    model: Option<&str>,
-    task: Option<&str>,
     room_id: &str,
+    auto_providers: bool,
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<String> {
-    let execution = state::native_repository(repo, None)?;
-    let cmd = launch_command(
-        repo,
-        prefix,
-        session,
-        harness,
-        resume,
-        model,
-        task,
-        Some(room_id),
-    )?;
+    let mut cmd = relay.command(session, Some(room_id));
+    if auto_providers {
+        cmd = enable_auto_providers(&cmd);
+    }
     let mut argv = crate::commands::strings(&[
         "new-window",
         "-d",
@@ -1488,26 +2401,30 @@ fn add_main_window(
         "-t",
         &format!("={session}:"),
         "-n",
-        harness,
+        main.capability.harness,
         "-c",
     ]);
-    argv.push(execution.into());
+    argv.push(relay.execution.as_os_str().into());
     argv.push(cmd.into());
     let pane = terminals::tmux(services, repo, &argv, stop)?;
     bind_window(
         &pane,
-        policy,
-        harness,
+        main.capability,
         view,
         attention_only,
-        model,
         room_id,
         services,
         repo,
         stop,
     )?;
-    let owner = resolve_main(policy, harness, model).owner;
-    let watch = watch_shell(repo, prefix, Some(&owner), None, Some(room_id));
+    let watch = watch_shell(
+        repo,
+        prefix,
+        Some(main.capability.owner),
+        None,
+        Some(room_id),
+        main.options.has("account"),
+    );
     board_split(&pane, repo, &watch, true, services, stop)?;
     let _ = tmux_quiet(
         services,
@@ -1524,25 +2441,30 @@ fn add_main_window(
     Ok(pane)
 }
 
+fn enable_auto_providers(command: &str) -> String {
+    command.replacen(
+        "'OMS_STATE_REPO=",
+        "'OMS_PANEL_AUTO_ORCHESTRATORS=1' 'OMS_STATE_REPO=",
+        1,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bind_window(
     pane: &str,
-    policy: &routing::Policy,
-    harness: &str,
+    capability: &MainCapability,
     view: &str,
     attention_only: bool,
-    model: Option<&str>,
     room_id: &str,
     services: &dyn Services,
     repo: &Path,
     stop: &AtomicBool,
 ) -> Result<()> {
-    let owner = resolve_main(policy, harness, model).owner;
     let board_view = if view == "auto" { "graph" } else { view };
     let att = if attention_only { "1" } else { "0" };
     for (k, v) in [
-        ("@oms_panel_owner", owner.as_str()),
-        ("@oms_panel_harness", harness),
+        ("@oms_panel_owner", capability.owner),
+        ("@oms_panel_harness", capability.harness),
         ("@oms_panel_view", board_view),
         ("@oms_panel_room", room_id),
         ("@oms_panel_attention", att),
@@ -1557,71 +2479,103 @@ fn bind_window(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn launch_command(
-    repo: &Path,
-    prefix: &[String],
-    session: &str,
-    launch: &str,
-    resume: Option<&str>,
-    model: Option<&str>,
-    task: Option<&str>,
-    room_id: Option<&str>,
-) -> Result<String> {
-    let state = repo
-        .to_str()
-        .ok_or_else(|| Error::new("tmux launch requires a UTF-8 state path"))?;
-    let mut parts = vec!["env".into()];
-    for name in ["OMS_STATE_REPO", "OMS_ROOM_REPO", "OMS_ROOM_ID"]
+struct MainRelay {
+    execution: PathBuf,
+    environment: Vec<String>,
+    argv: Vec<String>,
+}
+
+impl MainRelay {
+    fn admit(repo: &Path, prefix: &[String], main: &MainAdmission<'_>) -> Result<Self> {
+        let (environment, argv) = Self::parts(repo, prefix, main)?;
+        Ok(Self {
+            execution: state::native_repository(repo, None)?,
+            environment,
+            argv,
+        })
+    }
+
+    fn parts(
+        repo: &Path,
+        prefix: &[String],
+        main: &MainAdmission<'_>,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let state = repo
+            .to_str()
+            .ok_or_else(|| Error::new("tmux launch requires a UTF-8 state path"))?;
+        let mut parts = vec!["env".into()];
+        for name in [
+            "OMS_STATE_REPO",
+            "OMS_ROOM_REPO",
+            "OMS_ROOM_ID",
+            "OMS_PANEL_AUTO_ORCHESTRATORS",
+        ]
         .iter()
         .chain(NATIVE_CONTEXT_ENV)
-    {
-        parts.extend(["-u".into(), (*name).into()]);
-    }
-    parts.extend(panel_env_prefix_for(launch == "agy").into_iter().skip(1));
-    parts.push(format!("OMS_STATE_REPO={state}"));
-    parts.push(format!("OMS_ROOM_REPO={state}"));
-    for name in NATIVE_CONTEXT_ENV {
-        if let Some(value) = std::env::var_os(name) {
-            let value = value.into_string().map_err(|_| {
-                Error::new(format!(
-                    "{name} is not UTF-8; native launch context cannot be relayed"
-                ))
-            })?;
-            parts.push(format!("{name}={value}"));
+        {
+            parts.extend(["-u".into(), (*name).into()]);
         }
-    }
-    parts.push(format!("OMS_PANEL_SESSION={session}"));
-    if let Some(id) = room_id {
-        parts.push(format!("OMS_ROOM_ID={id}"));
-    }
-    parts.extend_from_slice(prefix);
-    parts.extend([
-        "panel".into(),
-        "--repo".into(),
-        repo.to_string_lossy().into_owned(),
-        "--host".into(),
-        "inline".into(),
-        "--launch".into(),
-        launch.into(),
-    ]);
-    for (flag, val) in [("--resume", resume), ("--model", model), ("--task", task)] {
-        if let Some(v) = val {
-            if v.starts_with("--") {
-                parts.push(format!("{flag}={v}"));
-            } else {
-                parts.extend([flag.into(), v.into()]);
+        let keep_agy = main.capability.uses_agy_settings();
+        let exclude_account_homes = main.options.has("account");
+        parts.extend(
+            panel_env_prefix_for(keep_agy, exclude_account_homes)
+                .into_iter()
+                .skip(1),
+        );
+        parts.push(format!("OMS_STATE_REPO={state}"));
+        parts.push(format!("OMS_ROOM_REPO={state}"));
+        for name in NATIVE_CONTEXT_ENV {
+            if exclude_account_homes && MAIN_ACCOUNT_HOMES.contains(name) {
+                continue;
+            }
+            if let Some(value) = std::env::var_os(name) {
+                let value = value.into_string().map_err(|_| {
+                    Error::new(format!(
+                        "{name} is not UTF-8; native launch context cannot be relayed"
+                    ))
+                })?;
+                parts.push(format!("{name}={value}"));
             }
         }
+        let mut argv = prefix.to_vec();
+        argv.extend([
+            "panel".into(),
+            "--repo".into(),
+            repo.to_string_lossy().into_owned(),
+            "--host".into(),
+            "inline".into(),
+            "--launch".into(),
+            main.capability.harness.into(),
+        ]);
+        for key in ["resume", "model", "task", "account"] {
+            if let Some(v) = main.options.get(key) {
+                let flag = format!("--{key}");
+                if v.starts_with("--") {
+                    argv.push(format!("{flag}={v}"));
+                } else {
+                    argv.extend([flag, v.into()]);
+                }
+            }
+        }
+        Ok((parts, argv))
     }
-    Ok(format!(
-        "exec {}",
-        parts
-            .iter()
-            .map(|p| crate::commands::shell_quote(p))
-            .collect::<Vec<_>>()
-            .join(" ")
-    ))
+
+    fn command(&self, session: &str, room: Option<&str>) -> String {
+        let mut parts = self.environment.clone();
+        parts.push(format!("OMS_PANEL_SESSION={session}"));
+        if let Some(room) = room {
+            parts.push(format!("OMS_ROOM_ID={room}"));
+        }
+        parts.extend_from_slice(&self.argv);
+        format!(
+            "exec {}",
+            parts
+                .iter()
+                .map(|p| crate::commands::shell_quote(p))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    }
 }
 
 fn watch_shell(
@@ -1630,8 +2584,22 @@ fn watch_shell(
     owner: Option<&str>,
     session: Option<&str>,
     room: Option<&str>,
+    exclude_account_homes: bool,
 ) -> String {
-    let mut parts = panel_env_prefix_for(owner.is_none_or(|o| o == "antigravity" || o == "agy"));
+    let mut parts = vec!["env".into()];
+    if exclude_account_homes {
+        for key in MAIN_ACCOUNT_HOMES {
+            parts.extend(["-u".into(), (*key).into()]);
+        }
+    }
+    parts.extend(
+        panel_env_prefix_for(
+            owner.is_none_or(|o| o == "antigravity" || o == "agy"),
+            exclude_account_homes,
+        )
+        .into_iter()
+        .skip(1),
+    );
     if let Some(s) = session {
         parts.push(format!("OMS_PANEL_SESSION={s}"));
     }
@@ -1708,7 +2676,7 @@ fn entry_prefix(source: &Path) -> Result<Vec<String>> {
 
 /// Apply or scrub `OMS_MODEL` and `OMS_ANTIGRAVITY_SETTINGS` for a spawned main process.
 pub fn apply_main_model_env(cmd: &mut Command, harness: &str, resolved_model: Option<&str>) {
-    if harness == "agy" {
+    if main_capability(harness).is_some_and(MainCapability::uses_agy_settings) {
         if let Some(m) = resolved_model {
             cmd.env("OMS_MODEL", m);
         } else {
@@ -1720,10 +2688,12 @@ pub fn apply_main_model_env(cmd: &mut Command, harness: &str, resolved_model: Op
     }
 }
 
-fn panel_env_prefix_for(keep_agy_model: bool) -> Vec<String> {
+fn panel_env_prefix_for(keep_agy_model: bool, exclude_account_homes: bool) -> Vec<String> {
     let mut out = vec!["env".into()];
     for name in PANEL_ENV_PASSTHROUGH {
-        if !keep_agy_model && (*name == "OMS_MODEL" || *name == "OMS_ANTIGRAVITY_SETTINGS") {
+        if exclude_account_homes && MAIN_ACCOUNT_HOMES.contains(name)
+            || (!keep_agy_model && (*name == "OMS_MODEL" || *name == "OMS_ANTIGRAVITY_SETTINGS"))
+        {
             continue;
         }
         if let Ok(val) = std::env::var(name) {
@@ -1733,28 +2703,21 @@ fn panel_env_prefix_for(keep_agy_model: bool) -> Vec<String> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn native_command(
-    policy: &routing::Policy,
-    provider: &str,
+    main: &MainAdmission<'_>,
     repo: &Path,
-    resume: Option<&str>,
-    model: Option<&str>,
-    task: Option<&str>,
     room_id: Option<&str>,
     member: Option<&str>,
     session_id: Option<&str>,
-) -> Result<Vec<String>> {
-    let permissions = match std::env::var("OMS_PANEL_MAIN_PERMISSIONS") {
-        Ok(val) if val == "full" || val == "native" => val,
-        Ok(_) => {
-            return Err(Error::new(
-                "OMS_PANEL_MAIN_PERMISSIONS must be full or native",
-            ));
-        }
-        Err(_) => "full".into(),
-    };
-    let resolution = resolve_main(policy, provider, model);
+) -> Vec<String> {
+    let capability = main.capability;
+    let resolution = &main.resolution;
+    let resume = main.options.get("resume");
+    let explicit_model = main.options.has("model");
+    let task = main.options.get("task");
+    let full_permissions = capability
+        .full_permissions
+        .filter(|_| main.full_permissions);
     let room_inst = match (room_id, member) {
         (Some(id), Some(m)) => format!(
             "\nYou are joined to OMS room {id} as {m}. Read oms room show --id {id} first. Include --room {id} in every oms panel --orchestrator, --dispatch, or --council command."
@@ -1766,24 +2729,16 @@ fn native_command(
         repo.display(),
         resolution.owner
     );
-    match provider {
-        "pi" => {
-            require(
-                resume.is_none(),
-                "Pi resume needs a verified Pi session binding; start a new Pi main",
-            )?;
-            require(
-                resolution.transport == "gateway",
-                "direct Pi main launch is not available yet",
-            )?;
+    match capability.transport {
+        MainTransport::CodexGateway => {
             let mut argv = vec![
-                "oms".into(),
+                capability.program.into(),
                 "harness".into(),
-                "pi".into(),
+                capability.harness.into(),
                 "--model".into(),
-                resolution.model.unwrap_or_default(),
+                resolution.model.clone().unwrap_or_default(),
                 "--effort".into(),
-                resolution.effort,
+                resolution.effort.clone(),
                 "--".into(),
                 "--append-system-prompt".into(),
                 format!(
@@ -1796,58 +2751,58 @@ fn native_command(
                     format!("User task (data): {}", Value::String(t.into())),
                 ]);
             }
-            Ok(argv)
+            argv
         }
-        "agy" => {
-            require(
-                resume.is_none(),
-                "Agy resume needs a verified native session binding; start a fresh Agy main",
-            )?;
+        MainTransport::Native(NativePrompt::AntigravityInteractive) => {
             let prompt = if let Some(t) = task {
                 format!("{base_inst}\nUser task (data): {}", Value::String(t.into()))
             } else {
                 base_inst
             };
-            let mut argv = vec!["agy".into(), "--prompt-interactive".into(), prompt];
-            if permissions == "full" {
-                argv.push("--dangerously-skip-permissions".into());
+            let mut argv = vec![
+                capability.program.into(),
+                "--prompt-interactive".into(),
+                prompt,
+            ];
+            if let Some(flag) = full_permissions {
+                argv.push(flag.into());
             }
-            if let Some(m) = resolution.model
-                && model.is_some()
+            if let Some(m) = &resolution.model
+                && explicit_model
             {
-                argv.extend(["--model".into(), m]);
+                argv.extend(["--model".into(), m.clone()]);
             }
-            Ok(argv)
+            argv
         }
-        "codex" => {
+        MainTransport::Native(NativePrompt::Positional) => {
             let prompt = if let Some(t) = task {
                 format!("{base_inst}\nUser task (data): {}", Value::String(t.into()))
             } else {
                 base_inst
             };
-            let mut argv = vec!["codex".into()];
+            let mut argv = vec![capability.program.into()];
             if let Some(r) = resume {
                 argv.extend(["resume".into(), r.into()]);
             }
-            if permissions == "full" {
-                argv.push("--dangerously-bypass-approvals-and-sandbox".into());
+            if let Some(flag) = full_permissions {
+                argv.push(flag.into());
             }
-            if let Some(m) = resolution.model {
-                argv.extend(["--model".into(), m]);
+            if let Some(m) = &resolution.model {
+                argv.extend(["--model".into(), m.clone()]);
             }
-            if model.is_none() {
+            if !explicit_model {
                 argv.extend([
                     "--config".into(),
                     format!("model_reasoning_effort=\"{}\"", resolution.effort),
                 ]);
             }
             argv.push(prompt);
-            Ok(argv)
+            argv
         }
-        "claude" => {
-            let mut argv = vec!["claude".into()];
-            if permissions == "full" {
-                argv.push("--dangerously-skip-permissions".into());
+        MainTransport::Native(NativePrompt::AppendSystem) => {
+            let mut argv = vec![capability.program.into()];
+            if let Some(flag) = full_permissions {
+                argv.push(flag.into());
             }
             if let Some(r) = resume {
                 argv.extend([
@@ -1862,19 +2817,18 @@ fn native_command(
                     session_id.map(str::to_owned).unwrap_or_else(new_uuid),
                 ]);
             }
-            if let Some(m) = resolution.model {
-                argv.extend(["--model".into(), m]);
+            if let Some(m) = &resolution.model {
+                argv.extend(["--model".into(), m.clone()]);
             }
-            if model.is_none() {
-                argv.extend(["--effort".into(), resolution.effort]);
+            if !explicit_model {
+                argv.extend(["--effort".into(), resolution.effort.clone()]);
             }
             argv.extend(["--append-system-prompt".into(), base_inst]);
             if let Some(t) = task {
                 argv.extend(["--".into(), t.into()]);
             }
-            Ok(argv)
+            argv
         }
-        other => Err(Error::new(format!("unsupported launch provider: {other}"))),
     }
 }
 
@@ -1950,21 +2904,15 @@ pub fn detect_antigravity_model() -> Option<String> {
     normalize_antigravity_model(doc.as_object()?.get("model")?.as_str()?)
 }
 
-fn resolve_main(policy: &routing::Policy, harness: &str, model: Option<&str>) -> MainResolution {
-    if harness == "pi" {
-        let preset = policy.main.get("codex");
+fn resolve_main(
+    policy: &routing::Policy,
+    capability: &MainCapability,
+    model: Option<&str>,
+) -> MainResolution {
+    let owner = capability.owner;
+    if capability.uses_agy_settings() {
         return MainResolution {
-            owner: "codex".into(),
-            model: model
-                .map(str::to_owned)
-                .or_else(|| preset.map(|p| p.model.clone())),
-            effort: preset.map_or_else(|| "medium".into(), |p| p.effort.clone()),
-            transport: "gateway".into(),
-        };
-    }
-    if harness == "agy" {
-        return MainResolution {
-            owner: "antigravity".into(),
+            owner: owner.into(),
             model: match model {
                 Some(m) => normalize_antigravity_model(m).or_else(|| {
                     Some(m.trim().to_owned())
@@ -1973,67 +2921,16 @@ fn resolve_main(policy: &routing::Policy, harness: &str, model: Option<&str>) ->
                 None => detect_antigravity_model(),
             },
             effort: "native-settings".into(),
-            transport: "native".into(),
         };
     }
-    let preset = policy.main.get(harness);
+    let preset = policy.main.get(owner);
     MainResolution {
-        owner: harness.into(),
+        owner: owner.into(),
         model: model
             .map(str::to_owned)
             .or_else(|| preset.map(|p| p.model.clone())),
         effort: preset.map_or_else(|| "medium".into(), |p| p.effort.clone()),
-        transport: "native".into(),
     }
-}
-
-fn ensure_main_installed(
-    harness: &str,
-    model: Option<&str>,
-    policy: &routing::Policy,
-) -> Result<()> {
-    let ok = which_exists(harness)
-        && (harness != "pi"
-            || resolve_main(policy, harness, model).transport != "gateway"
-            || which_exists("codex"));
-    if ok {
-        return Ok(());
-    }
-    if harness == "pi" {
-        Err(Error::new(
-            "Pi main needs the Pi CLI and Codex CLI on PATH (Pi uses Codex inference)",
-        ))
-    } else {
-        Err(Error::new(format!(
-            "{} main needs the {harness} CLI on PATH",
-            capitalize(harness)
-        )))
-    }
-}
-
-fn normalize_harness(
-    raw: &str,
-    repo: &Path,
-    services: &dyn Services,
-    stop: &AtomicBool,
-) -> Result<String> {
-    if LAUNCH_HARNESSES.contains(&raw) {
-        return Ok(raw.into());
-    }
-    let report = crate::commands::query(
-        services,
-        NativeCommand::ProviderCatalog,
-        repo,
-        &["--providers", raw, "--json"],
-        stop,
-    )?;
-    let list = report.get("providers").unwrap_or(&report);
-    let provider = rows(list)
-        .first()
-        .map(|row| text(row, "provider"))
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::new(format!("unsupported launch provider: {raw}")))?;
-    Ok(provider.to_owned())
 }
 
 fn load_policy(source: &Path) -> Result<routing::Policy> {
@@ -2330,8 +3227,7 @@ fn live_mains(
         let native = !member.is_empty()
             || !harness.is_empty()
             || (!owner.is_empty() && *name != "control")
-            || LAUNCH_HARNESSES.contains(name)
-            || *name == "antigravity";
+            || main_capability(name).is_some();
         if !native {
             if *name != "control" {
                 return Err(Error::new(
@@ -2755,6 +3651,1205 @@ mod native_lifecycle_contract {
         }
     }
 
+    struct AccountMainTmux<'a> {
+        room: &'a str,
+        provider: &'a str,
+        mutation: std::cell::RefCell<Vec<String>>,
+        tags: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+        samples: std::cell::Cell<usize>,
+        change_sample: usize,
+    }
+
+    impl PeerExecutor for AccountMainTmux<'_> {
+        fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            let args: Vec<_> = request
+                .argv
+                .iter()
+                .map(|word| word.to_str().unwrap())
+                .collect();
+            let tags = self.tags.borrow();
+            let tag = |key| tags.get(key).map(String::as_str).unwrap_or("");
+            let pid = std::process::id();
+            let stdout = match args.as_slice() {
+                ["tmux", "display-message", "-p", "-t", "%1", format]
+                    if format.contains("pane_pid") =>
+                {
+                    let sample = self.samples.get() + 1;
+                    self.samples.set(sample);
+                    let window = if sample == self.change_sample {
+                        let start = std::time::Instant::now();
+                        while !request.cwd.join(".oms/main-account-child").exists() {
+                            if start.elapsed() >= std::time::Duration::from_secs(2) {
+                                return Err(oms_panel_core::Error::new(
+                                    "fixture child did not start",
+                                ));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        "@9"
+                    } else {
+                        "@1"
+                    };
+                    format!(
+                        "oms-fixture\t$1\t{window}\t%1\t{pid}\t0\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t.",
+                        self.provider,
+                        self.provider,
+                        self.room,
+                        tag("@oms_panel_main_attempt"),
+                        tag("@oms_panel_room_participant"),
+                        tag("@oms_panel_native_pane"),
+                        tag(super::MAIN_ACCOUNT_READY),
+                    )
+                }
+                [
+                    "tmux",
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "$1",
+                    "#{session_id}\t#{pid}\t#{socket_path}",
+                ] => format!("$1\t{pid}\tfixture-socket"),
+                [
+                    "tmux",
+                    "show-options",
+                    "-v",
+                    "-t",
+                    "$1" | "=oms-fixture:",
+                    "@oms_panel_repo",
+                ] => request.cwd.to_str().unwrap().into(),
+                ["tmux", "has-session", "-t", "=oms-fixture"] => String::new(),
+                ["tmux", "list-windows", "-t", "=oms-fixture", "-F", _] => format!(
+                    "@1\t{}\t{}\t{}\t{}\t{}\t\t.",
+                    self.provider,
+                    self.room,
+                    tag("@oms_panel_room_participant"),
+                    self.provider,
+                    self.provider,
+                ),
+                ["tmux", "set-option", "-w", "-t", "%1", key, value] => {
+                    drop(tags);
+                    self.tags
+                        .borrow_mut()
+                        .insert((*key).into(), (*value).into());
+                    String::new()
+                }
+                ["tmux", "list-panes", "-a", "-F", _] => {
+                    let repo = crate::commands::shell_quote(request.cwd.to_str().unwrap());
+                    format!(
+                        "oms-fixture\t@1\t%1\t0\t\toms panel --repo {repo} --launch {} --account first\noms-fixture\t@1\t%2\t0\t\toms panel --repo {repo} --watch",
+                        self.provider,
+                    )
+                }
+                [
+                    "tmux",
+                    action @ ("select-window" | "select-pane"),
+                    "-t",
+                    "%1",
+                ] => {
+                    self.mutation.borrow_mut().push((*action).into());
+                    String::new()
+                }
+                _ => {
+                    return Err(oms_panel_core::Error::new(
+                        "unexpected fixture pane request",
+                    ));
+                }
+            };
+            Ok(CommandOutput {
+                stdout: stdout.into_bytes(),
+                cleanup_complete: true,
+                output_complete: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    impl Services for AccountMainTmux<'_> {
+        fn command(
+            &self,
+            command: NativeCommand,
+            repo: &Path,
+            args: &[OsString],
+            stop: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            RealCliParsers.command(command, repo, args, stop)
+        }
+    }
+
+    #[test]
+    fn explicit_main_account_managed_launch_and_reuse() {
+        use super::{AccountHost, SystemAccountHost, account_binding};
+        use account_binding::test_support::{FakeHost, private_dir};
+        const NAME: &str = "native_panel::native_lifecycle_contract::explicit_main_account_managed_launch_and_reuse";
+        const CASE: &str = "OMS_MAIN_ACCOUNT_TEST_CASE";
+        let Ok(case) = std::env::var(CASE) else {
+            for case in [
+                "codex-first",
+                "codex-second",
+                "claude-first",
+                "claude-second",
+                "missing",
+                "wrong-room",
+                "unfinished",
+                "lost-pane",
+                "reuse",
+            ] {
+                let home = TempRepo::new();
+                let repo = TempRepo::new();
+                let bin = private_dir(&home.0.join("bin"));
+                let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                    .map(|dir| dir.join("git"))
+                    .find(|path| path.is_file())
+                    .unwrap();
+                std::os::unix::fs::symlink(git.canonicalize().unwrap(), bin.join("git")).unwrap();
+                let mut providers = serde_json::Map::new();
+                for (provider, key) in [("codex", "CODEX_HOME"), ("claude", "CLAUDE_CONFIG_DIR")] {
+                    let accounts: Vec<_> = ["first", "second"]
+                        .into_iter()
+                        .map(|id| {
+                            let path =
+                                private_dir(&home.0.join(format!("private-{provider}-{id}")));
+                            serde_json::json!({"id": id, "home": path})
+                        })
+                        .collect();
+                    providers.insert(provider.into(), serde_json::json!({"accounts": accounts}));
+                    let program = bin.join(provider);
+                    let mut script = format!(
+                        "#!/bin/sh\nif [ \"${key}\" != \"$HOME/private-{provider}-$OMS_MAIN_ACCOUNT_TEST_ALIAS\" ]; then\n  exit 99\nfi\nprintf '%s\\0' \"$@\" > \"$OMS_STATE_REPO/.oms/main-account-argv\"\nif [ \"$OMS_MAIN_ACCOUNT_TEST_CASE\" = lost-pane ]; then\n  printf '%s\\n' \"$$\" > \"$OMS_STATE_REPO/.oms/main-account-child\"\n  exec /bin/sleep 5\nfi\n",
+                    );
+                    if provider == "claude" {
+                        // Hold the synthetic process until the wrapper records this exact Child.
+                        script.push_str(
+                            r#"
+printf '%s\n' "$$" > "$OMS_STATE_REPO/.oms/main-account-child"
+i=0
+while [ "$i" -lt 500 ]; do
+  for file in "$XDG_STATE_HOME"/oh-my-setting/panel-control/*/account-bindings/*.json; do
+    [ -f "$file" ] || continue
+    IFS= read -r line < "$file"
+    case "$line" in *'"claude_main_child"'*) exit 0;; esac
+  done
+  i=$((i + 1))
+  /bin/sleep 0.01
+done
+exit 98
+"#,
+                        );
+                    }
+                    fs::write(&program, script).unwrap();
+                    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                if case != "missing" {
+                    let registry = private_dir(&home.0.join(".config/oh-my-setting"));
+                    fs::write(
+                        registry.join("provider-accounts.json"),
+                        serde_json::to_vec(
+                            &serde_json::json!({"schema": 1, "providers": providers}),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+                let alias = if case.ends_with("-second") {
+                    "second"
+                } else {
+                    "first"
+                };
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", NAME, "--nocapture"])
+                    .env_clear()
+                    .env("HOME", &home.0)
+                    .env("XDG_STATE_HOME", private_dir(&home.0.join("state")))
+                    .env("PATH", &bin)
+                    .env("CODEX_HOME", home.0.join("ambient-codex"))
+                    .env("CLAUDE_CONFIG_DIR", home.0.join("ambient-claude"))
+                    .env("OMS_PANEL_SESSION", "oms-fixture")
+                    .env("TMUX", "fixture")
+                    .env("TMUX_PANE", "%1")
+                    .env(CASE, case)
+                    .env("OMS_MAIN_ACCOUNT_TEST_ALIAS", alias)
+                    .env("OMS_MAIN_ACCOUNT_TEST_REPO", &repo.0)
+                    .output()
+                    .unwrap();
+                let combine = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    output.status.success() && combine.contains("1 passed;"),
+                    "{case}: {combine}",
+                );
+                assert!(
+                    !combine.contains("private-codex-") && !combine.contains("private-claude-")
+                );
+            }
+            return;
+        };
+        let repo = PathBuf::from(std::env::var_os("OMS_MAIN_ACCOUNT_TEST_REPO").unwrap());
+        let alias = std::env::var("OMS_MAIN_ACCOUNT_TEST_ALIAS").unwrap();
+        let provider = if case.starts_with("claude") {
+            "claude"
+        } else {
+            "codex"
+        };
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let policy = super::load_policy(source).unwrap();
+        let stop = AtomicBool::new(false);
+        let room = super::ensure_room(&repo, None, &RealCliParsers, &stop).unwrap();
+        let svc = AccountMainTmux {
+            room: &room,
+            provider,
+            mutation: Default::default(),
+            tags: Default::default(),
+            samples: Default::default(),
+            change_sample: if case == "lost-pane" { 4 } else { 0 },
+        };
+        let requested_room = if case == "wrong-room" {
+            "different-room"
+        } else {
+            &room
+        };
+        let parse = |account, room| {
+            crate::cli::Options::parse(&crate::commands::strings(&[
+                "--launch",
+                provider,
+                "--host",
+                "inline",
+                "--account",
+                account,
+                "--room",
+                room,
+            ]))
+            .unwrap()
+        };
+        let options = parse(&alias, requested_room);
+        let host = SystemAccountHost;
+        let prefix = ["oms".into()];
+        let store = super::Store::open(&repo).unwrap();
+        if case != "unfinished" {
+            let lock = store
+                .transaction("panel-main-start", std::time::Duration::from_secs(1))
+                .unwrap();
+            super::mark_main_account_ready(&repo, "%1", &lock, &svc, &stop).unwrap();
+        }
+
+        if case == "reuse" {
+            let attempt = event_id(
+                &repo,
+                &[
+                    "start",
+                    "--provider",
+                    provider,
+                    "--tool",
+                    "panel-main",
+                    "--ref",
+                    "panel_role=main",
+                    "--ref",
+                    &format!("panel_owner={provider}"),
+                    "--ref",
+                    &format!("panel_harness={provider}"),
+                    "--ref",
+                    &format!("panel_room_id={room}"),
+                    "--then",
+                    "starting",
+                    "--then",
+                    "working",
+                ]
+                .map(str::to_owned),
+                &svc,
+                &stop,
+            )
+            .unwrap();
+            svc.command(
+                NativeCommand::Room,
+                &repo,
+                &crate::commands::strings(&[
+                    "join",
+                    "--id",
+                    &room,
+                    "--participant",
+                    &attempt,
+                    "--provider",
+                    provider,
+                    "--role",
+                    "main",
+                    "--json",
+                ]),
+                &stop,
+            )
+            .unwrap();
+            svc.tags.borrow_mut().extend([
+                ("@oms_panel_main_attempt".into(), attempt.clone()),
+                ("@oms_panel_room_participant".into(), attempt),
+                ("@oms_panel_native_pane".into(), "%1".into()),
+            ]);
+            let pane =
+                super::main_account_pane(&repo, "oms-fixture", "%1", provider, &host, &svc, &stop)
+                    .unwrap();
+            let receipt =
+                account_binding::resolve_main_selection(&host, provider, None, "first", "")
+                    .unwrap();
+            let other =
+                account_binding::resolve_main_selection(&host, provider, None, "second", "")
+                    .unwrap();
+            let lock = store
+                .transaction("panel-main-start", std::time::Duration::from_secs(1))
+                .unwrap();
+            let reuse = |receipt: &super::AccountSelectionReceipt,
+                         options: &crate::cli::Options| {
+                super::try_reuse_native_main_account(
+                    &repo,
+                    &prefix,
+                    "oms-fixture",
+                    provider,
+                    receipt,
+                    options,
+                    &lock,
+                    &host,
+                    &svc,
+                    &stop,
+                )
+            };
+            assert!(reuse(&receipt, &options).is_err());
+            account_binding::save_binding(&host, "main", &pane.anchor(&repo, provider), &receipt)
+                .unwrap();
+            assert!(reuse(&other, &parse("second", &room)).is_err());
+            let mut remapped = receipt.clone();
+            remapped.home_digest = other.home_digest;
+            assert!(reuse(&remapped, &options).is_err());
+            assert!(reuse(&receipt, &parse("first", "foreign-room")).is_err());
+            let task = crate::cli::Options::parse(&crate::commands::strings(&[
+                "--launch",
+                provider,
+                "--account",
+                "first",
+                "--room",
+                &room,
+                "--task",
+                "new work",
+            ]))
+            .unwrap();
+            assert!(reuse(&receipt, &task).is_err());
+            let mut replacement = FakeHost::new(host.state_home().unwrap());
+            let mut same_pid = host.process_owner(pane.pid).unwrap();
+            same_pid.birth.push('x');
+            replacement.owners.insert(pane.pid, same_pid);
+            assert!(
+                super::try_reuse_native_main_account(
+                    &repo,
+                    &prefix,
+                    "oms-fixture",
+                    provider,
+                    &receipt,
+                    &options,
+                    &lock,
+                    &replacement,
+                    &svc,
+                    &stop,
+                )
+                .is_err()
+            );
+            assert!(svc.mutation.borrow().is_empty());
+            assert!(reuse(&receipt, &options).unwrap());
+            assert_eq!(*svc.mutation.borrow(), ["select-pane", "select-window"]);
+            return;
+        }
+
+        let (code, dry, _) = super::dry_run_plan(&repo, source, &options, &svc, &stop).unwrap();
+        let plan: Value = serde_json::from_slice(&dry).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(plan["account_request"]["id"], alias);
+        assert_eq!(plan["executes"], false);
+        assert!(!plan.to_string().contains("private-"));
+        let capability = super::required_main_capability(provider).unwrap();
+        let admitted = super::MainAdmission::admit(capability, &policy, &options).unwrap();
+        let shell = super::MainRelay::admit(&repo, &prefix, &admitted)
+            .unwrap()
+            .command("oms-fixture", Some(&room));
+        let words = super::split_shell_words(&shell).unwrap();
+        let panel = words.iter().position(|word| word == "panel").unwrap();
+        let relayed = crate::cli::Options::parse(
+            &words[panel + 1..]
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(relayed.get("account"), Some(alias.as_str()));
+        assert_eq!(super::match_panel_command(&shell, &repo), Some(false));
+        let watch = super::watch_shell(&repo, &prefix, Some(provider), None, Some(&room), true);
+        for command in [&shell, &watch] {
+            assert!(!command.contains("ambient-codex"));
+            assert!(!command.contains("ambient-claude"));
+            assert!(!command.contains("private-"));
+        }
+        let result = run_fixture_main(&repo, &policy, provider, &options, &svc, &stop, &[]);
+        if ["missing", "wrong-room", "unfinished", "lost-pane"].contains(&case.as_str()) {
+            let error = result.unwrap_err().message;
+            assert!(!error.contains("private-"));
+            if case == "lost-pane" {
+                let row = last_main(&repo, &RealCliParsers);
+                assert_eq!(row["terminal"], true);
+                assert_eq!(row["state"], "failed");
+                let child: u32 = fs::read_to_string(repo.join(".oms/main-account-child"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                assert!(super::terminals::process(child).is_err());
+            } else {
+                assert!(!svc.tags.borrow().contains_key("@oms_panel_main_attempt"));
+                assert!(usage_rows(&repo).is_empty());
+            }
+            return;
+        }
+        assert_eq!(result.unwrap(), 0);
+        let bytes = fs::read(repo.join(".oms/main-account-argv")).unwrap();
+        let argv: Vec<_> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .split_terminator('\0')
+            .collect();
+        let main = last_main(&repo, &RealCliParsers);
+        let native = super::native_command(
+            &admitted,
+            &repo,
+            Some(&room),
+            main["attempt_id"].as_str(),
+            main["refs"]["native_session"].as_str(),
+        );
+        assert_eq!(argv, native[1..]);
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| *arg == "--account" || arg.contains("private-"))
+        );
+        let pane =
+            super::main_account_pane(&repo, "oms-fixture", "%1", provider, &host, &svc, &stop)
+                .unwrap();
+        let record =
+            account_binding::load_verified_binding(&host, "main", &pane.anchor(&repo, provider))
+                .unwrap();
+        assert_eq!(record.account_id.as_deref(), Some(alias.as_str()));
+        assert!(record.account_pinned);
+        let persisted = serde_json::to_value(&record).unwrap();
+        assert!(!persisted.to_string().contains("private-"));
+        if provider == "claude" {
+            let pid: u32 = fs::read_to_string(repo.join(".oms/main-account-child"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_ne!(pid, pane.pid);
+            assert_eq!(persisted["claude_main_child"]["pid"], pid);
+            assert!(
+                persisted["claude_main_child"]["birth"]
+                    .as_str()
+                    .is_some_and(|birth| !birth.is_empty())
+            );
+            assert!(record.claude_main_child_owner(&host).is_none());
+            assert!(!main.to_string().contains("claude_main_child"));
+        } else {
+            assert!(persisted.get("claude_main_child").is_none());
+        }
+        assert_eq!(main["terminal"], true);
+    }
+
+    #[derive(Default)]
+    struct PickerServices(Option<Value>);
+
+    impl PeerExecutor for PickerServices {
+        fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            assert_eq!(request.argv.first().unwrap(), "tmux");
+            let output = std::process::Command::new("tmux")
+                .args(&request.argv[1..])
+                .output()
+                .unwrap();
+            Ok(CommandOutput {
+                code: output.status.code().unwrap_or(1),
+                stdout: output.stdout,
+                stderr: output.stderr,
+                cleanup_complete: true,
+                output_complete: true,
+                limited: false,
+            })
+        }
+    }
+
+    impl Services for PickerServices {
+        fn command(
+            &self,
+            command: NativeCommand,
+            repo: &Path,
+            args: &[OsString],
+            stop: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            if let Some(view) = &self.0 {
+                assert_eq!(command, NativeCommand::Room);
+                assert_eq!(args, &["show", "--id", "room-auto", "--exact", "--json"]);
+                return Ok(CommandOutput {
+                    stdout: serde_json::to_vec(view).unwrap(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                });
+            }
+            if command == NativeCommand::ProviderCatalog {
+                assert_eq!(args, &["--providers", "gemini", "--json"]);
+                return Ok(CommandOutput {
+                    stdout: br#"{"providers":[{"provider":"gemini"}]}"#.to_vec(),
+                    cleanup_complete: true,
+                    output_complete: true,
+                    ..Default::default()
+                });
+            }
+            let output = RealCliParsers.command(command, repo, args, stop)?;
+            if command == NativeCommand::Room
+                && matches!(args, [verb, id, _, exact, json]
+                    if verb == "show" && id == "--id" && exact == "--exact" && json == "--json")
+                && std::env::var("OMS_PI_FIXTURE_STAGE").as_deref() == Ok("main")
+            {
+                fs::write(repo.join("auto-room-proof"), &output.stdout).unwrap();
+            }
+            Ok(output)
+        }
+    }
+
+    struct PickerSocket<'a> {
+        binary: &'a Path,
+        name: String,
+    }
+
+    impl PickerSocket<'_> {
+        fn command(&self) -> std::process::Command {
+            let mut command = std::process::Command::new(self.binary);
+            command
+                .env_clear()
+                .env("TMUX_TMPDIR", "/tmp")
+                .arg("-L")
+                .arg(&self.name);
+            command
+        }
+    }
+
+    impl Drop for PickerSocket<'_> {
+        fn drop(&mut self) {
+            let _ = self.command().arg("kill-server").output();
+        }
+    }
+
+    fn fixture_argv(path: &Path) -> Vec<String> {
+        fs::read(path)
+            .unwrap()
+            .split(|byte| *byte == 0)
+            .filter(|word| !word.is_empty())
+            .map(|word| std::str::from_utf8(word).unwrap().into())
+            .collect()
+    }
+
+    #[test]
+    fn automatic_orchestrators_require_an_exact_unique_joined_main() {
+        let joined = serde_json::json!({
+            "participant": "attempt-auto", "provider": "codex", "role": "main", "joined": true
+        });
+        let open = serde_json::json!({
+            "id": "room-auto", "closed": false, "participants": [joined]
+        });
+        let check = |view| {
+            super::current_auto_orchestrator_room(
+                Path::new("."),
+                "room-auto",
+                "attempt-auto",
+                "codex",
+                &PickerServices(Some(view)),
+                &AtomicBool::new(false),
+            )
+        };
+        assert!(check(open.clone()));
+        for (field, value) in [
+            ("closed", serde_json::json!(true)),
+            ("successor", serde_json::json!("room-successor")),
+            ("id", serde_json::json!("room-foreign")),
+            ("participants", serde_json::json!([joined, joined])),
+        ] {
+            let mut invalid = open.clone();
+            invalid[field] = value;
+            assert!(!check(invalid), "accepted room with mismatched {field}");
+        }
+        for (field, value) in [
+            ("participant", serde_json::json!("attempt-foreign")),
+            ("provider", serde_json::json!("claude")),
+            ("role", serde_json::json!("worker")),
+            ("joined", serde_json::json!(false)),
+            ("parent", serde_json::json!("foreign-parent")),
+        ] {
+            let mut invalid = open.clone();
+            invalid["participants"][0][field] = value;
+            assert!(!check(invalid), "accepted Main with mismatched {field}");
+        }
+    }
+
+    #[test]
+    fn main_reentry_recognizes_only_one_supported_main() {
+        let repo = TempRepo::new();
+        let entry = format!("bash /old/oms panel --repo '{}'", repo.0.display());
+        let recognized = |args: &str| super::match_panel_entry(&format!("{entry} {args}"), &repo.0);
+        for harness in ["codex", "claude", "pi", "agy", "antigravity"] {
+            assert_eq!(
+                recognized(&format!("--launch {harness}")),
+                Some(super::PaneMode::Native)
+            );
+        }
+        for args in [
+            "--launch gemini",
+            "--launch codex,claude",
+            "--launch all",
+            "--launch ''",
+            "--launch gemini --launch=codex",
+            "--launch pi --resume fixture-session",
+            "--watch --launch claude",
+        ] {
+            assert!(recognized(args).is_none(), "recognized {args}");
+        }
+        assert_eq!(recognized("--watch"), Some(super::PaneMode::Watch));
+    }
+
+    #[test]
+    fn installed_pi_picker_runs_the_gateway_and_opens_the_owned_codex_lead() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const NAME: &str = "native_panel::native_lifecycle_contract::installed_pi_picker_runs_the_gateway_and_opens_the_owned_codex_lead";
+        const STAGE: &str = "OMS_PI_FIXTURE_STAGE";
+        const TASK: &str = "--model \"$(printf stays-literal)\"; 'quoted'\nnext";
+        if let Ok(stage) = std::env::var(STAGE) {
+            let repo = PathBuf::from(std::env::var_os("OMS_PI_FIXTURE_REPO").unwrap());
+            let source = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let policy = oms_panel_core::routing::Policy::bundled().unwrap();
+            let stop = AtomicBool::new(false);
+            let service = PickerServices::default();
+            let prefix = vec!["oms".into()];
+            match stage.as_str() {
+                "picker" => {
+                    let options = crate::cli::Options::parse(&[]).unwrap();
+                    let bin = PathBuf::from(std::env::var_os("PATH").unwrap());
+                    let codex = bin.join("codex");
+                    let unavailable = bin.join("codex-off");
+                    fs::rename(&codex, &unavailable).unwrap();
+                    assert_eq!(
+                        super::pick_main(&stop).unwrap_err().message,
+                        "no installed Main provider is available"
+                    );
+                    assert!(
+                        super::main_capability("pi")
+                            .unwrap()
+                            .require_installed()
+                            .unwrap_err()
+                            .message
+                            .contains("Pi CLI and Codex CLI")
+                    );
+                    fs::rename(unavailable, codex).unwrap();
+                    let oms = bin.join("oms");
+                    let unavailable = bin.join("oms-off");
+                    fs::rename(&oms, &unavailable).unwrap();
+                    assert!(!super::main_capability("pi").unwrap().installed());
+                    fs::rename(unavailable, oms).unwrap();
+
+                    let pi = super::main_capability("pi").unwrap();
+                    let resume = crate::cli::Options::parse(&crate::commands::strings(&[
+                        "--launch",
+                        "pi",
+                        "--resume",
+                        "fixture-resume",
+                    ]))
+                    .unwrap();
+                    let err = super::MainAdmission::plan(pi, &policy, &resume)
+                        .err()
+                        .unwrap();
+                    assert!(err.message.contains("verified Pi session binding"));
+                    let opts = crate::cli::Options::parse(&crate::commands::strings(&[
+                        "--launch",
+                        "pi",
+                        &format!("--task={TASK}"),
+                    ]))
+                    .unwrap();
+                    let main = super::MainAdmission::plan(pi, &policy, &opts).unwrap();
+                    let explicit = super::native_command(&main, &repo, None, None, None);
+                    assert_eq!(
+                        &explicit[explicit.len() - 2..],
+                        &[
+                            "--".to_owned(),
+                            format!(
+                                "User task (data): {}",
+                                serde_json::Value::String(TASK.into())
+                            ),
+                        ]
+                    );
+                    super::split_panel(
+                        &repo,
+                        &prefix,
+                        &policy,
+                        super::SplitRequest::ReuseOrPick,
+                        &options,
+                        &service,
+                        &stop,
+                    )
+                    .unwrap();
+                }
+                "main" => {
+                    let argv = fixture_argv(&repo.join("relay-argv"));
+                    let args: Vec<_> = argv[1..].iter().map(OsString::from).collect();
+                    let options = crate::cli::Options::parse(&args).unwrap();
+                    if options.get("task").is_some() {
+                        assert_eq!(options.get("launch"), Some("agy"));
+                        assert_eq!(options.get("task"), Some(TASK));
+                    } else {
+                        assert_eq!(options.get("launch"), Some("pi"));
+                    }
+                    assert_eq!(
+                        super::run(&repo, &source, &options, &service, &stop)
+                            .unwrap()
+                            .0,
+                        0
+                    );
+                }
+                "alias" => {
+                    let options = crate::cli::Options::parse(&crate::commands::strings(&[
+                        "--host",
+                        "tmux",
+                        "--launch",
+                        "antigravity",
+                        &format!("--task={TASK}"),
+                        "--model",
+                        "fixture-model",
+                    ]))
+                    .unwrap();
+                    let plan =
+                        super::dry_run_plan(&repo, &source, &options, &service, &stop).unwrap();
+                    let plan: Value = serde_json::from_slice(&plan.1).unwrap();
+                    assert_eq!(plan["harness"], "agy");
+                    assert_eq!(plan["provider"], "antigravity");
+                    let done = super::run(&repo, &source, &options, &service, &stop);
+                    let diagnostic = done.as_ref().err().map_or("ok", |err| err.message.as_str());
+                    fs::write(repo.join("alias-entry-status"), diagnostic).unwrap();
+                    assert_eq!(done.unwrap().0, 0);
+                }
+                "refuse" => {
+                    assert!(super::managed_session());
+                    for (action, value) in [
+                        ("--launch", "gemini"),
+                        ("--spawn-main", "gemini"),
+                        ("--launch", "codex,claude"),
+                        ("--spawn-main", "all"),
+                    ] {
+                        let options = crate::cli::Options::parse(&crate::commands::strings(&[
+                            "--host", "tmux", action, value,
+                        ]))
+                        .unwrap();
+                        let error =
+                            super::run(&repo, &source, &options, &service, &stop).unwrap_err();
+                        assert!(error.message.contains("unsupported launch provider"));
+                        if action == "--launch" {
+                            assert!(
+                                super::dry_run_plan(&repo, &source, &options, &service, &stop)
+                                    .is_err()
+                            );
+                        }
+                    }
+                    assert!(!repo.join(".oms").exists());
+                    assert!(!repo.join("gemini-invoked").exists());
+                    for action in ["--launch", "--spawn-main"] {
+                        let options = crate::cli::Options::parse(&crate::commands::strings(&[
+                            "--host", "inline", action, "claude",
+                        ]))
+                        .unwrap();
+                        let error =
+                            super::run(&repo, &source, &options, &service, &stop).unwrap_err();
+                        assert!(
+                            error
+                                .message
+                                .contains("Claude main needs the claude CLI on PATH")
+                        );
+                    }
+                    assert!(!repo.join(".oms").exists());
+                    fs::write(repo.join("refused"), "ok").unwrap();
+                }
+                "bad-permissions" => {
+                    assert!(super::managed_session());
+                    for (host, action) in [
+                        ("tmux", "--launch"),
+                        ("inline", "--launch"),
+                        ("tmux", "--spawn-main"),
+                    ] {
+                        let options = crate::cli::Options::parse(&crate::commands::strings(&[
+                            "--host", host, action, "codex",
+                        ]))
+                        .unwrap();
+                        let error =
+                            super::run(&repo, &source, &options, &service, &stop).unwrap_err();
+                        assert_eq!(
+                            error.message,
+                            "OMS_PANEL_MAIN_PERMISSIONS must be full or native"
+                        );
+                    }
+                    assert!(!repo.join(".oms").exists());
+                    fs::write(repo.join("bad-permissions"), "ok").unwrap();
+                }
+                "orchestrator" => {
+                    let room = std::env::var("OMS_PI_FIXTURE_ROOM").unwrap();
+                    let provider = std::env::var("OMS_PI_FIXTURE_PROVIDER").unwrap();
+                    let args =
+                        crate::commands::strings(&["--room", &room, "--orchestrator", &provider]);
+                    let options = crate::cli::Options::parse(&args).unwrap();
+                    crate::orchestrator::run(&repo, &provider, &options, &service, &stop).unwrap();
+                }
+                _ => panic!("unexpected fixture stage"),
+            }
+            return;
+        }
+
+        let locate = |tool| {
+            std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|dir| dir.join(tool))
+                .find(|path| path.is_file())
+        };
+        let Some(tmux) = locate("tmux") else {
+            eprintln!("skipped isolated tmux fixture (tmux unavailable)");
+            return;
+        };
+        let home = TempRepo::new();
+        let repo = TempRepo::new();
+        let socket = PickerSocket {
+            binary: &tmux,
+            name: format!(
+                "oms-pi-picker-{}",
+                oms_command_plan::storage::random_hex(8).unwrap()
+            ),
+        };
+        let bin = home.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        for tool in ["git", "env"] {
+            std::os::unix::fs::symlink(locate(tool).unwrap(), bin.join(tool)).unwrap();
+        }
+        for (name, body) in [
+            (
+                "tmux",
+                r#"case "$1" in attach-session|switch-client) exit 0;; esac
+exec "$OMS_PI_FIXTURE_TMUX" -L "$OMS_PI_FIXTURE_SOCKET" -f /dev/null "$@""#,
+            ),
+            (
+                "oms",
+                r#"case "$1" in
+  panel)
+    case "$4" in
+      --host) export OMS_PI_FIXTURE_REPO="$3"
+              printf '%s\000' "$@" > "$OMS_PI_FIXTURE_REPO/relay-argv"
+              OMS_PI_FIXTURE_STAGE=main exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
+      --room) OMS_PI_FIXTURE_STAGE=orchestrator OMS_PI_FIXTURE_ROOM="$5" OMS_PI_FIXTURE_PROVIDER="$7" exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
+      --watch) exec /bin/sleep 30;;
+    esac;;
+  harness)
+    printf '%s\000' "$@" > "$OMS_PI_FIXTURE_REPO/bridge-argv"
+    while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+    [ "$#" -gt 0 ] || exit 2
+    shift
+    exec pi "$@";;
+esac
+exit 2"#,
+            ),
+            (
+                "pi",
+                r#"printf '%s\000' "$@" > "$OMS_PI_FIXTURE_REPO/pi-argv"
+printf '%s\n' "$OMS_PANEL_OWNER" "$OMS_PANEL_HARNESS" "$OMS_ROOM_ID" "$OMS_PANEL_MAIN_ATTEMPT" > "$OMS_PI_FIXTURE_REPO/pi-custody"
+exec /bin/sleep 30"#,
+            ),
+            (
+                "codex",
+                r#"printf '%s\000' "$@" > "$PWD/codex-argv"
+exec /bin/sleep 30"#,
+            ),
+            ("gemini", r#": > "$PWD/gemini-invoked"; exit 98"#),
+        ] {
+            let path = bin.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let fixture_exe = std::env::current_exe().unwrap();
+        let mut child = Command::new(&fixture_exe)
+            .env_clear()
+            .env("PATH", &bin)
+            .env("HOME", &home.0)
+            .env("XDG_CACHE_HOME", home.0.join(".cache"))
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "xterm")
+            .env("TMUX_TMPDIR", "/tmp")
+            .env("OMS_PI_FIXTURE_TMUX", fs::canonicalize(&tmux).unwrap())
+            .env("OMS_PI_FIXTURE_SOCKET", &socket.name)
+            .env("OMS_PI_FIXTURE_REPO", &repo.0)
+            .env("OMS_PI_FIXTURE_EXE", &fixture_exe)
+            .env("OMS_PI_FIXTURE_NAME", NAME)
+            .env(STAGE, "picker")
+            .args(["--exact", NAME, "--nocapture"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"2\n").unwrap();
+        let result = child.wait_with_output().unwrap();
+        let log = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{log}");
+        let (_, menu) = log
+            .split_once("Choose a Main provider:\n")
+            .expect("Main chooser heading");
+        let (choices, _) = menu
+            .split_once("Selection [1]: ")
+            .expect("Main chooser prompt");
+        assert_eq!(
+            choices.lines().collect::<Vec<_>>(),
+            ["  1. codex", "  2. pi"],
+            "{log}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let panes = socket.command().args([
+                "list-panes", "-a", "-F",
+                "#{@oms_panel_harness}|#{@oms_panel_owner}|#{@oms_panel_room}|#{@oms_panel_main_attempt}|#{@oms_provider_session}|#{@oms_provider_parent}|#{pane_dead}|#{pane_id}|#{@oms_panel_native_pane}",
+            ]).output().unwrap();
+            let listing = String::from_utf8_lossy(&panes.stdout);
+            if let Ok(custody) = fs::read_to_string(repo.0.join("pi-custody"))
+                && let ["codex", "pi", room, main] = custody.lines().collect::<Vec<_>>().as_slice()
+                && listing.lines().any(|line| {
+                    line.strip_prefix(&format!("pi|codex|{room}|{main}|||0|"))
+                        .and_then(|tail| tail.split_once('|'))
+                        .is_some_and(|(pane, native)| pane.starts_with('%') && pane == native)
+                })
+                && listing
+                    .lines()
+                    .any(|line| line.starts_with(&format!("||{room}||codex|{main}|0|%")))
+                && repo.0.join("codex-argv").is_file()
+            {
+                let attempt = last_main(&repo.0, &RealCliParsers);
+                assert_eq!(attempt["attempt_id"], *main);
+                assert_eq!(attempt["provider"], "codex");
+                assert_eq!(attempt["refs"]["panel_harness"], "pi");
+                assert_eq!(attempt["refs"]["panel_room_id"], *room);
+                assert_eq!(attempt["refs"]["panel_native_scheduling"], "unmanaged");
+                assert_eq!(attempt["terminal"], false);
+                let room_state = crate::commands::query(
+                    &RealCliParsers,
+                    NativeCommand::Room,
+                    &repo.0,
+                    &[
+                        "show",
+                        "--repo",
+                        repo.0.to_str().unwrap(),
+                        "--id",
+                        room,
+                        "--exact",
+                        "--json",
+                    ],
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+                assert!(crate::rows(&room_state["participants"]).iter().any(|row| {
+                    row["participant"] == *main
+                        && row["provider"] == "codex"
+                        && row["role"] == "main"
+                        && row["joined"] == true
+                }));
+                let auto_proof: Value = serde_json::from_slice(
+                    &fs::read(repo.0.join("auto-room-proof")).expect("exact auto-start Room query"),
+                )
+                .unwrap();
+                assert_eq!(auto_proof["id"], *room);
+                assert_eq!(auto_proof["closed"], false);
+                assert!(auto_proof["successor"].is_null());
+                assert!(crate::rows(&auto_proof["participants"]).iter().any(|row| {
+                    row["participant"] == *main
+                        && row["provider"] == "codex"
+                        && row["joined"] == true
+                }));
+                let bridge = fixture_argv(&repo.0.join("bridge-argv"));
+                assert_eq!(&bridge[..3], &["harness", "pi", "--model"]);
+                assert!(bridge[3].starts_with("gpt-"));
+                assert_eq!(bridge[4], "--effort");
+                let pi = fixture_argv(&repo.0.join("pi-argv"));
+                assert_eq!(pi.len(), 2);
+                assert_eq!(pi[0], "--append-system-prompt");
+                assert!(pi[1].contains("Use --owner codex"));
+                assert!(pi[1].contains(super::MAIN_STARTUP_PROMPT.trim()));
+                assert!(pi[1].contains(&format!("room {room} as {main}")));
+                let codex = fixture_argv(&repo.0.join("codex-argv"));
+                assert_eq!(codex[0], "--model");
+                assert!(
+                    codex
+                        .iter()
+                        .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owned Main and Codex lead not ready: {listing}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let session = super::session_candidates(&repo.0)[0].clone();
+        let trigger = |stage: &str, repo: &Path, session: &str| {
+            let argv = [
+                fixture_exe.to_str().unwrap(),
+                "--exact",
+                NAME,
+                "--nocapture",
+            ];
+            let command = format!(
+                "exec env -u OMS_ROOM_ID -u OMS_ROOM_REPO -u OMS_STATE_REPO {}",
+                argv.map(crate::commands::shell_quote).join(" ")
+            );
+            let mut run = socket.command();
+            run.args([
+                "new-window",
+                "-d",
+                "-t",
+                &format!("={session}:"),
+                "-c",
+                repo.to_str().unwrap(),
+                "-e",
+                &format!("{STAGE}={stage}"),
+                "-e",
+                &format!("OMS_PI_FIXTURE_REPO={}", repo.display()),
+            ]);
+            if stage == "bad-permissions" {
+                run.args(["-e", "OMS_PANEL_MAIN_PERMISSIONS=invalid"]);
+            }
+            let output = run.arg(command).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let wait_for = |condition: &mut dyn FnMut() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !condition() {
+                assert!(
+                    Instant::now() < deadline,
+                    "private tmux fixture did not reach expected state"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        };
+        let rejected = TempRepo::new();
+        let managed = super::session_candidates(&rejected.0)[0].clone();
+        let control = socket
+            .command()
+            .args([
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{window_id}",
+                "-s",
+                &managed,
+                "-n",
+                "control",
+                "exec /bin/sleep 30",
+            ])
+            .output()
+            .unwrap();
+        assert!(control.status.success());
+        for argv in [
+            [
+                "set-option",
+                "-t",
+                &format!("={managed}:"),
+                "@oms_panel_repo",
+                rejected.0.to_str().unwrap(),
+            ],
+            [
+                "set-environment",
+                "-t",
+                &format!("={managed}"),
+                "OMS_PANEL_SESSION",
+                &managed,
+            ],
+        ] {
+            assert!(
+                socket
+                    .command()
+                    .args(argv)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        trigger("refuse", &rejected.0, &managed);
+        wait_for(&mut || rejected.0.join("refused").is_file());
+        trigger("bad-permissions", &rejected.0, &managed);
+        wait_for(&mut || rejected.0.join("bad-permissions").is_file());
+        wait_for(&mut || {
+            let windows = socket
+                .command()
+                .args([
+                    "list-windows",
+                    "-t",
+                    &format!("={managed}:"),
+                    "-F",
+                    "#{window_id}",
+                ])
+                .output()
+                .unwrap();
+            windows.status.success() && windows.stdout == control.stdout
+        });
+        assert!(!rejected.0.join(".oms").exists() && !rejected.0.join("gemini-invoked").exists());
+
+        let agy = bin.join("agy");
+        fs::write(&agy, r#"#!/bin/sh
+printf '%s\000' "$@" > "$PWD/agy-argv"
+printf '%s\n' "$OMS_PANEL_OWNER" "$OMS_PANEL_HARNESS" "$OMS_ROOM_ID" "$OMS_PANEL_MAIN_ATTEMPT" > "$PWD/agy-custody"
+exec /bin/sleep 30
+"#).unwrap();
+        fs::set_permissions(agy, fs::Permissions::from_mode(0o755)).unwrap();
+        let alias = TempRepo::new();
+        trigger("alias", &alias.0, &session);
+        wait_for(&mut || {
+            if let Ok(status) = fs::read_to_string(alias.0.join("alias-entry-status"))
+                && !status.is_empty()
+            {
+                assert_eq!(status, "ok");
+                return fs::read_to_string(alias.0.join("agy-custody"))
+                    .is_ok_and(|text| text.lines().count() == 4);
+            }
+            false
+        });
+        let agy = fixture_argv(&alias.0.join("agy-argv"));
+        let custody = fs::read_to_string(alias.0.join("agy-custody")).unwrap();
+        let custody_lines = custody.lines().collect::<Vec<_>>();
+        let ["antigravity", "agy", room, attempt] = custody_lines.as_slice() else {
+            panic!("unexpected alias Main custody: {custody}");
+        };
+        assert_eq!(agy[0], "--prompt-interactive");
+        let task = format!(
+            "User task (data): {}",
+            serde_json::Value::String(TASK.into())
+        );
+        assert_eq!(agy[1].matches(&task).count(), 1);
+        assert!(agy[1].contains(&format!("room {room} as {attempt}")));
+        assert_eq!(
+            agy[2..],
+            ["--dangerously-skip-permissions", "--model", "fixture-model"]
+        );
+        let main = last_main(&alias.0, &RealCliParsers);
+        assert_eq!(main["attempt_id"], *attempt);
+        assert_eq!(main["refs"]["panel_harness"], "agy");
+        assert_eq!(main["provider"], "antigravity");
+    }
+
     fn usage_rows(repo: &Path) -> Vec<serde_json::Value> {
         fs::read(repo.join(".oms/usage/receipts.jsonl"))
             .unwrap_or_default()
@@ -2784,6 +4879,23 @@ mod native_lifecycle_contract {
             &AtomicBool::new(false),
         )
         .unwrap()
+    }
+
+    fn run_fixture_main(
+        repo: &Path,
+        policy: &oms_panel_core::routing::Policy,
+        harness: &str,
+        options: &crate::cli::Options,
+        services: &dyn Services,
+        stop: &AtomicBool,
+        prefix: &[String],
+    ) -> Result<i32> {
+        let main = super::MainAdmission::admit(
+            super::required_main_capability(harness)?,
+            policy,
+            options,
+        )?;
+        super::run_native(repo, &main, services, stop, prefix)
     }
 
     #[test]
@@ -3039,7 +5151,7 @@ mod native_lifecycle_contract {
         let mut expected_room = None;
         if ["resume-bound", "resume-descendants"].contains(&case.as_str()) {
             assert_eq!(
-                super::run_native(&repo, &policy, harness, &options, &svc, &stop).unwrap(),
+                run_fixture_main(&repo, &policy, harness, &options, &svc, &stop, &[]).unwrap(),
                 0
             );
             expected_room = last_main(&repo, &svc)["refs"]["panel_room_id"]
@@ -3178,7 +5290,7 @@ mod native_lifecycle_contract {
         let before_room = expected_room
             .as_ref()
             .map(|id| fs::read(repo.join(format!(".oms/threads/{id}.jsonl"))).unwrap());
-        let result = super::run_native(&repo, &policy, harness, &options, &svc, &stop);
+        let result = run_fixture_main(&repo, &policy, harness, &options, &svc, &stop, &[]);
         if case == "resume-ambiguous" {
             assert!(result.unwrap_err().message.contains("multiple rooms"));
             assert!(usage_rows(&repo).is_empty());
@@ -3368,7 +5480,7 @@ mod native_lifecycle_contract {
             let before =
                 fs::read(repo.join(".oms/artifacts/panel-dispatch/reservations.json")).unwrap();
             assert_eq!(
-                super::run_native(&repo, &policy, harness, &options, &svc, &stop)
+                run_fixture_main(&repo, &policy, harness, &options, &svc, &stop, &[])
                     .unwrap_err()
                     .code,
                 3
@@ -3390,7 +5502,7 @@ mod native_lifecycle_contract {
         let before = fs::read(&registry).unwrap();
         let receipts = fs::read(repo.join(".oms/usage/receipts.jsonl")).unwrap();
         fs::write(&registry, b"{corrupt").unwrap();
-        assert!(super::run_native(&repo, &policy, harness, &options, &svc, &stop).is_err());
+        assert!(run_fixture_main(&repo, &policy, harness, &options, &svc, &stop, &[]).is_err());
         assert_eq!(fs::read(&registry).unwrap(), b"{corrupt");
         assert_eq!(
             fs::read(repo.join(".oms/usage/receipts.jsonl")).unwrap(),
@@ -3404,8 +5516,8 @@ mod native_lifecycle_contract {
         fs::write(registry, before).unwrap();
         fs::write(repo.join(".oms/native-main-wait"), b"wait").unwrap();
         std::thread::scope(|scope| {
-            let running =
-                scope.spawn(|| super::run_native(&repo, &policy, harness, &options, &svc, &stop));
+            let running = scope
+                .spawn(|| run_fixture_main(&repo, &policy, harness, &options, &svc, &stop, &[]));
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             while std::time::Instant::now() < deadline {
                 if fs::read_to_string(repo.join(".oms/native-entry-count"))
@@ -3532,9 +5644,14 @@ mod native_lifecycle_contract {
         const NAME: &str = "native_panel::native_lifecycle_contract::staged_entry_prefix_carries_oms_dispatch_and_matches_panes";
         const CASE: &str = "OMS_NATIVE_RELAY_CASE";
         if std::env::var_os("OMS_NATIVE_RELAY_ENTRY").is_some() {
-            let names = ["OMS_STATE_REPO", "OMS_ROOM_REPO", "OMS_ROOM_ID"]
-                .iter()
-                .chain(super::NATIVE_CONTEXT_ENV);
+            let names = [
+                "OMS_STATE_REPO",
+                "OMS_ROOM_REPO",
+                "OMS_ROOM_ID",
+                "OMS_PANEL_AUTO_ORCHESTRATORS",
+            ]
+            .iter()
+            .chain(super::NATIVE_CONTEXT_ENV);
             let snapshot = names
                 .map(|name| ((*name).to_owned(), std::env::var(name).ok()))
                 .collect::<std::collections::BTreeMap<_, _>>();
@@ -3605,16 +5722,27 @@ mod native_lifecycle_contract {
         );
         assert!(super::test_entry_matches(&dir.0, &prefix));
 
-        let launched = super::launch_command(
-            &dir.0,
-            &prefix,
-            "oms-test",
-            "codex",
-            None,
-            None,
-            None,
-            Some("room-1234"),
-        );
+        let launch = |task: Option<&str>| -> Result<String> {
+            let mut args = crate::commands::strings(&["--launch", "codex"]);
+            if let Some(task) = task {
+                args.push(format!("--task={task}").into());
+            }
+            let options = crate::cli::Options::parse(&args)?;
+            let policy = oms_panel_core::routing::Policy::bundled().unwrap();
+            let admitted = super::MainAdmission::plan(
+                super::main_capability("codex").unwrap(),
+                &policy,
+                &options,
+            )?;
+            let (environment, argv) = super::MainRelay::parts(&dir.0, &prefix, &admitted)?;
+            Ok(super::MainRelay {
+                execution: dir.0.clone(),
+                environment,
+                argv,
+            }
+            .command("oms-test", Some("room-1234")))
+        };
+        let launched = launch(None);
         if case == "non-utf8" {
             assert!(
                 launched
@@ -3631,6 +5759,7 @@ mod native_lifecycle_contract {
         shell
             .env_clear()
             .args(["-c", &launch_cmd])
+            .env("OMS_PANEL_AUTO_ORCHESTRATORS", "stale")
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("OMS_NATIVE_RELAY_EXE", std::env::current_exe().unwrap())
             .env("OMS_NATIVE_RELAY_OUT", &snapshot)
@@ -3648,10 +5777,27 @@ mod native_lifecycle_contract {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let seen: serde_json::Value = serde_json::from_slice(&fs::read(snapshot).unwrap()).unwrap();
+        let seen: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
         assert_eq!(seen["OMS_STATE_REPO"], dir.0.to_str().unwrap());
         assert_eq!(seen["OMS_ROOM_REPO"], dir.0.to_str().unwrap());
         assert_eq!(seen["OMS_ROOM_ID"], "room-1234");
+        assert!(seen["OMS_PANEL_AUTO_ORCHESTRATORS"].is_null());
+        let auto_cmd = super::enable_auto_providers(&launch_cmd);
+        assert_eq!(super::match_panel_command(&auto_cmd, &dir.0), Some(false));
+        let output = std::process::Command::new("sh")
+            .env_clear()
+            .args(["-c", &auto_cmd])
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("OMS_NATIVE_RELAY_EXE", std::env::current_exe().unwrap())
+            .env("OMS_NATIVE_RELAY_OUT", &snapshot)
+            .env("OMS_NATIVE_RELAY_ARGS", &recorded_args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let auto_seen: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+        assert_eq!(auto_seen["OMS_PANEL_AUTO_ORCHESTRATORS"], "1");
         for name in super::NATIVE_CONTEXT_ENV {
             assert_eq!(
                 seen[name],
@@ -3679,17 +5825,7 @@ mod native_lifecycle_contract {
             "ordinary task",
             "",
         ] {
-            let command = super::launch_command(
-                &dir.0,
-                &prefix,
-                "oms-test",
-                "codex",
-                None,
-                None,
-                Some(task),
-                Some("room-1234"),
-            )
-            .unwrap();
+            let command = launch(Some(task)).unwrap();
             let words = super::split_shell_words(&command).unwrap();
             let panel = words.iter().position(|word| word == "panel").unwrap();
             let args: Vec<OsString> = words[panel + 1..].iter().map(OsString::from).collect();
@@ -3704,6 +5840,7 @@ mod native_lifecycle_contract {
             Some("codex"),
             Some("oms-test"),
             Some("room-fixture"),
+            false,
         );
         assert_eq!(super::match_panel_command(&watch_cmd, &dir.0), Some(true));
 
@@ -3812,6 +5949,7 @@ mod native_lifecycle_contract {
         };
         assert!(super::check_legacy_main(&dir.0, "oms-test", None, &pending, &stop).is_err());
         super::check_legacy_main(&dir.0, "oms-test", Some("@1"), &pending, &stop).unwrap();
+        let empty = crate::cli::Options::parse(&[]).unwrap();
         for terminal in [false, true] {
             for reference in [None, Some(Value::from("")), Some(Value::from("foreign"))] {
                 let svc = PendingWindowMock {
@@ -3825,6 +5963,12 @@ mod native_lifecycle_contract {
                     super::live_mains(&dir.0, "oms-test", Some("room-1"), None, &svc, &stop)
                         .unwrap(),
                     expected,
+                    "terminal={terminal} reference={reference:?}"
+                );
+                assert_eq!(
+                    super::ensure_no_active_main(&dir.0, "oms-test", true, &empty, &svc, &stop)
+                        .is_err(),
+                    expected == 1,
                     "terminal={terminal} reference={reference:?}"
                 );
                 if !terminal {
@@ -3841,6 +5985,74 @@ mod native_lifecycle_contract {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod main_selection_tests {
+    use super::{MAIN_CAPABILITIES, pick_from};
+    use std::io::{PipeReader, PipeWriter, Write};
+    use std::os::fd::AsFd;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    fn input(bytes: &[u8]) -> (PipeReader, PipeWriter) {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(bytes).unwrap();
+        (reader, writer)
+    }
+
+    fn pick(bytes: &[u8], stop: &AtomicBool) -> (oms_panel_core::Result<&'static str>, String) {
+        let (reader, writer) = input(bytes);
+        drop(writer);
+        let mut out = Vec::new();
+        let choices: Vec<_> = MAIN_CAPABILITIES.iter().collect();
+        let picked = pick_from(&choices, reader.as_fd(), stop, &mut out).map(|main| main.harness);
+        (picked, String::from_utf8(out).unwrap())
+    }
+
+    fn assert_cancelled(picked: oms_panel_core::Result<&str>) {
+        let error = picked.unwrap_err();
+        assert_eq!(
+            (error.code, error.message.as_str()),
+            (130, "Main selection cancelled")
+        );
+    }
+
+    #[test]
+    fn main_selection_reads_lines_and_reprompts() {
+        let stop = AtomicBool::new(false);
+        assert_eq!(pick(b"2\n", &stop).0.unwrap(), "claude");
+        assert_eq!(pick(b"\n", &stop).0.unwrap(), "codex");
+        for bytes in [&b"9\nx\n1\n"[..], b"\xff\n0\n1\n"] {
+            let (picked, out) = pick(bytes, &stop);
+            assert_eq!(picked.unwrap(), "codex");
+            assert_eq!(out.matches("Choose one of the listed numbers.").count(), 2);
+            assert_eq!(out.matches("Selection [1]: ").count(), 3);
+        }
+        assert_cancelled(pick(b"", &stop).0);
+        assert_cancelled(pick(b"2", &stop).0);
+        stop.store(true, Ordering::Release);
+        assert_cancelled(pick(b"2\n", &stop).0);
+    }
+
+    #[test]
+    fn main_selection_cancels_when_stop_is_set_while_waiting() {
+        for bytes in [&b""[..], b"2"] {
+            let stop = AtomicBool::new(false);
+            let (reader, _writer) = input(bytes);
+            let started = Instant::now();
+            let picked = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    std::thread::sleep(Duration::from_millis(150));
+                    stop.store(true, Ordering::Release);
+                });
+                let choices: Vec<_> = MAIN_CAPABILITIES.iter().collect();
+                pick_from(&choices, reader.as_fd(), &stop, &mut Vec::new()).map(|main| main.harness)
+            });
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_cancelled(picked);
         }
     }
 }

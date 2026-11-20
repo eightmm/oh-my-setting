@@ -273,15 +273,15 @@ fn build(paths: &Paths, revision: &str, flag: &AtomicBool) -> Result<PathBuf> {
     }
     let cargo = r::find("cargo", &paths.cwd)
         .ok_or_else(|| r::Error(2, "native payload missing and cargo unavailable".into()))?;
-    let result = r::command(
+    // A caller's temporary override must not mask the incoming checkout's
+    // toolchain. Keep Cargo homes and an explicit offline choice intact.
+    let result = r::command_without_env(
         cargo,
         &[
-            "+1.99.1".into(),
             "build".into(),
             "--manifest-path".into(),
             paths.source.join("Cargo.toml").into_os_string(),
             "--locked".into(),
-            "--offline".into(),
             "--release".into(),
             "--bin".into(),
             "oms".into(),
@@ -300,6 +300,7 @@ fn build(paths: &Paths, revision: &str, flag: &AtomicBool) -> Result<PathBuf> {
         None,
         flag,
         std::time::Duration::from_secs(1800),
+        &["RUSTUP_TOOLCHAIN"],
     )?;
     if result.0 != 0 {
         return Err(r::Error(

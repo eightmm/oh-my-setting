@@ -168,6 +168,33 @@ fn observe(repo: &Path, path: &Path, provider: &str, sid: &str, ctx: &Context<'_
     ];
     let _ = oms_command_journal::run_with_source(&args, repo, ctx.source, ctx.interrupted);
 }
+
+fn callback_field<'a>(v: &'a Value, key: &str, alias: &str) -> Option<&'a str> {
+    match (v.get(key), v.get(alias)) {
+        (Some(a), Some(b)) if a == b => a.as_str(),
+        (Some(value), None) | (None, Some(value)) => value.as_str(),
+        _ => None,
+    }
+    .filter(|text| !text.is_empty())
+}
+
+fn callback_transcript<'a>(
+    v: &'a Value,
+    raw: &[u8],
+) -> Result<Option<oms_command_peer::CodexHookTranscript<'a>>, String> {
+    if v.get("transcript_path").is_none() && v.get("transcriptPath").is_none() {
+        return Ok(None);
+    }
+    const INVALID: &str = "invalid Codex hook transcript hint";
+    strict_document(raw).map_err(|_| INVALID)?;
+    let path = callback_field(v, "transcript_path", "transcriptPath").ok_or(INVALID)?;
+    let session = callback_field(v, "session_id", "sessionId").ok_or(INVALID)?;
+    Ok(Some(oms_command_peer::CodexHookTranscript {
+        session,
+        path: Path::new(path),
+    }))
+}
+
 pub(crate) fn capture(
     v: &Value,
     repo: &Path,
@@ -175,10 +202,15 @@ pub(crate) fn capture(
     note: &str,
     skip: bool,
     ctx: &Context<'_>,
+    codex_callback: Option<&[u8]>,
 ) -> Result<bool, String> {
     if ["antigravity", "agy"].contains(&provider) {
         return antigravity(v, repo, note, skip, ctx);
     }
+    let transcript = match codex_callback {
+        Some(raw) => callback_transcript(v, raw)?,
+        None => None,
+    };
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -204,9 +236,18 @@ pub(crate) fn capture(
     if skip {
         args.extend(["--missing-session-policy".into(), "skip".into()]);
     }
-    let (r, timeout) = budgeted(ctx, std::time::Duration::from_secs(20), |flag| {
-        oms_command_peer::run_with_source("session-handoff", &args, repo, ctx.source, flag)
-    });
+    let (r, timeout) = budgeted(
+        ctx,
+        std::time::Duration::from_secs(20),
+        |flag| match transcript {
+            Some(hint) => {
+                oms_command_peer::run_codex_hook_handoff(&args, repo, ctx.source, flag, hint)
+            }
+            None => {
+                oms_command_peer::run_with_source("session-handoff", &args, repo, ctx.source, flag)
+            }
+        },
+    );
     if timeout {
         return Err("handoff capture did not finish in time".into());
     }

@@ -273,22 +273,25 @@ update process that already started.
 
 ### Profiles and ownership
 
-The default `core` profile installs the harness, Bash, Git, Python and one
+The default `core` profile installs the harness, Bash, Git, the native OMS runtime and one
 coding-agent provider. Selected required CLIs must be present; optional
 capabilities add tools without making them core dependencies. See
 [profiles and integrations](INSTALL.md#profiles-and-integrations) for selection
-and receipts, and [provider installation and updates](INSTALL.md#provider-installation-and-updates)
-for vendor refresh, pins, digest checks, Claude migration and inventory rules.
+and receipts, and [tool installation and updates](INSTALL.md#tool-installation-and-updates)
+for current releases, vendor refresh, explicit pins and payload verification.
 
 > **Pi:** Pi refresh runs only through `install-tools.sh --providers`.
 > Full-tool installs and profile reapply leave Pi unchanged.
 
-Default-channel agy is vendor-managed after a lock-verified bootstrap; refresh
-retires a valid legacy sidecar and doctor warns on a stale one. Explicit locks
-retain strict checks for existing OMS-owned digests.
+Default-channel agy is vendor-managed after a checksum-verified bootstrap;
+refresh validates its ownership sidecar before the version probe, then revalidates
+and retires it immediately before vendor handoff. A failed probe preserves it;
+a stale sidecar remains a refusal. An unrelated tool rollback cannot restore the
+old digest over vendor-updated bytes. Explicit locks retain strict checks for
+existing OMS-owned digests.
 
-Direct platform payloads and npm wrapper/native packages are verified before use; npm
-installation runs offline with a fresh cache. Install, update, repair, and uninstall
+Direct platform payloads and npm wrapper/native archives are verified before managed
+publication. Install, update, repair, and uninstall
 share one user-wide lifecycle lock. Lock ownership survives installer `exec` handoff. A
 checkout-selected foreground child may borrow the live parent's critical section only
 after matching its owner, PID, start token, and canonical path; ownership and release
@@ -485,8 +488,12 @@ plugin-cache freshness or verification.
 `oms status --fingerprint` prints a content-free JSON fingerprint of the
 installation: OMS version, receipt scalars (commit, channel, ref, profile,
 link mode, dirty), component flags and modes, plugin hash, and sha256 digests of
-`rules/global-AGENTS.md`, `skills.manifest.json`, `tools.lock.json` and
-`custom-skills/`. It omits paths, user names, timestamps and file contents,
+`rules/global-AGENTS.md`, `skills.manifest.json`, and `custom-skills/`.
+`digests.tools_lock` describes an explicit `OH_MY_SETTING_TOOL_LOCK` override or
+`not configured`; `digests.tool_releases` describes the local release observations
+with `resolved_at` removed, or `missing` before any resolution. Neither digest
+proves that recorded versions are installed. It omits paths, user names,
+observation timestamps and file contents,
 never runs a provider CLI and never writes. Save it and move it yourself
 (git, scp); OMS runs no sync and moves no credentials. `oms status --compare
 FILE [--json]` diffs the local fingerprint against such a file: exit 0 when
@@ -553,15 +560,23 @@ only under `--strict`. Files are read as text: nothing runs, no model is called,
 on-demand skills, hooks and path-scoped rules are not counted.
 
 `oms project-doctor --prompts [--json] [--strict] [SOURCE_DIR]` audits the prompt text OMS
-ships (`rules/`, `roles/`, `templates/*AGENTS.md`, `prompts/`, skill `SKILL.md`; the
-installation by default). Per file it prints words, bytes and whether the file is injected
-every session, on demand or `unknown`; a class is only named when the script that delivers
-it (`link.sh`, `apply-project-template.sh`, `agent-role.sh`, `skill-doctor.sh`) still holds
-its marker text. Findings are lines matching `config/prompt-audit-patterns.txt` (an
-editable list of over-emphasis phrases written for older models), sentences of eight or
-more words repeated across always-injected files after lowercasing, and the
-always-injected word total per provider. Advisory: exit 0 unless `--strict` and a finding
-exists. Nothing runs and no model is called.
+ships (`rules/`, `roles/`, `templates/*AGENTS.md`, `prompts/`, `output-styles/`, and
+`SKILL.md` plus `references/**/*.md` in custom and project-template skills; the
+installation by default). Skill trees are scanned up to six directory levels; other
+listed directories are scanned at their top level. Symlink entries inside these
+directories are skipped and each file is limited to 1 MiB. Skill assets and unrelated
+Markdown are excluded.
+The JSON report lists words, bytes, declared injection class and pattern matches per
+file. Injection classes describe source conventions; they do not verify live provider
+delivery or mean every on-demand reference is loaded together. Findings count each
+file/pattern pair with a match from `config/prompt-audit-patterns.txt`; per-file hit
+counts retain the number of matching lines. `coverage` records the searched directories
+and limits, and explicitly marks runtime-generated prompts, live delivery, duplicate
+analysis and semantic conflicts as unchecked. The legacy `duplicates: []` field is
+retained for compatibility and is not evidence that no duplicates exist. Use `--budget`
+for its separate loaded-instruction duplicate report. The text summary also states the
+coverage limits. Advisory: exit 0 unless `--strict` and a pattern finding exists.
+Nothing runs and no model is called.
 
 Provider prompt caches match a byte-exact prefix, so text OMS loads ahead of the task
 must not change per render. `scripts/check.sh invariants` (`test_global_rules_stay_compact_and_route_workflows`,

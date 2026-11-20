@@ -5,6 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
+#[cfg(not(test))]
+use crate::salvage::verified_empty;
+#[cfg(test)]
+use tests::verified_empty;
+
 pub(crate) fn scopes<S: Services + ?Sized>(
     repo: &Path,
     worker: &Value,
@@ -50,7 +55,63 @@ pub(crate) fn lineage<S: Services + ?Sized>(
         .iter()
         .find(|v| v["attempt_id"] == main_id)
         .ok_or_else(|| Error::new("owning main absent"))?;
-    let member = text(&main["refs"], "panel_room_participant");
+    let refs = &main["refs"];
+    if refs.get("panel_room_participant").is_none() {
+        // Native Main startup records the room on the attempt and joins as
+        // the attempt ID. Only current Room membership proves that binding.
+        let room_id = text(refs, "panel_room_id");
+        let provider = text(main, "provider");
+        crate::identifier(main_id)?;
+        crate::identifier(&room_id)?;
+        crate::identifier(&provider)?;
+        require(
+            !dead
+                && main["tool"] == "panel-main"
+                && main["terminal"] == false
+                && crate::state::LIVE_STATES.contains(&text(main, "state").as_str())
+                && refs["panel_role"] == "main"
+                && refs
+                    .get("panel_owner")
+                    .is_none_or(|owner| owner == &provider)
+                && attempts
+                    .iter()
+                    .filter(|v| {
+                        v["attempt_id"] == main_id
+                            || ((v["tool"] == "panel-main" || v["refs"]["panel_role"] == "main")
+                                && v["terminal"] != true
+                                && v["refs"]["panel_room_participant"] == main_id)
+                    })
+                    .count()
+                    == 1,
+            "native main lineage is unconfirmed",
+        )?;
+        let room = crate::services::query(
+            service,
+            crate::NativeCommand::Room,
+            repo,
+            &["show", "--id", &room_id, "--exact", "--json"],
+            stop,
+        )?;
+        let mut mains = array(&room["participants"]).iter().filter(|v| {
+            v["participant"] == main_id || (v["joined"] == true && v["role"] == "main")
+        });
+        require(
+            room["id"] == room_id
+                && room["closed"] == false
+                && room["successor"].is_null()
+                && mains.next().is_some_and(|v| {
+                    v["participant"] == main_id
+                        && v["joined"] == true
+                        && v["role"] == "main"
+                        && v["provider"] == provider
+                        && (v["parent"].is_null() || v["parent"] == "")
+                })
+                && mains.next().is_none(),
+            "native main Room membership is unconfirmed",
+        )?;
+        return Ok(BTreeSet::from([main_id.to_owned()]));
+    }
+    let member = text(refs, "panel_room_participant");
     crate::identifier(&member)?;
     let history = attempts
         .iter()
@@ -212,10 +273,15 @@ pub(crate) struct Selection {
     pub workers: Vec<Value>,
     pub superseded: Vec<Value>,
 }
+/// `lineage_attempts` are the raw rows supersession ownership is proven from;
+/// `launch_attempts` may carry the proven native Main's projected participant
+/// binding, which only the stopped-launch proof may see.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn select<S: Services + ?Sized>(
     repo: &Path,
     mut workers: Vec<Value>,
-    attempts: &[Value],
+    lineage_attempts: &[Value],
+    launch_attempts: &[Value],
     rows: &[Value],
     main: Option<&str>,
     service: &S,
@@ -272,7 +338,7 @@ pub(crate) fn select<S: Services + ?Sized>(
                 if parent != old_parent || main.is_some_and(|v| v != parent) {
                     let Ok(parents) = lineage(
                         repo,
-                        attempts,
+                        lineage_attempts,
                         main.unwrap_or(&parent),
                         service,
                         stop,
@@ -298,9 +364,7 @@ pub(crate) fn select<S: Services + ?Sized>(
         if let Some((end, reason)) = replacement {
             superseded.push(serde_json::json!({"attempt_id":worker["attempt_id"],
                 "superseded_by":workers[end]["attempt_id"],"reason":if reason.is_empty() { text(worker,"state") } else { reason }}));
-        } else if !crate::salvage::verified_empty(repo, worker, attempts, service, stop)
-            .unwrap_or(false)
-        {
+        } else if !verified_empty(repo, worker, launch_attempts, service, stop).unwrap_or(false) {
             selected.push(worker.clone());
         }
     }
@@ -711,4 +775,244 @@ pub(crate) fn review_readers(repo: &Path, execution: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::results::{FinalizeRequest, finalize_snapshot};
+    use crate::services::ExecutionRequest;
+    use crate::{CommandOutput, NativeCommand, PeerExecutor};
+    use serde_json::json;
+    use std::cell::RefCell;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    const MAIN: &str = "att_11111111111111111111111111111111";
+    const ROOM: &str = "room-native-main";
+    const TASK: &str = "task-native-main";
+
+    thread_local! {
+        static LAUNCH_BINDINGS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Records the parent binding the stopped-launch proof would bind, then
+    /// runs the real check.
+    pub(super) fn verified_empty<S: Services + ?Sized>(
+        repo: &Path,
+        worker: &Value,
+        attempts: &[Value],
+        service: &S,
+        stop: &AtomicBool,
+    ) -> Result<bool> {
+        let parent = attempts
+            .iter()
+            .find(|v| v["attempt_id"] == worker["parent_attempt_id"]);
+        LAUNCH_BINDINGS.with_borrow_mut(|v| {
+            v.push(parent.map_or(Value::Null, |v| v["refs"]["panel_room_participant"].clone()))
+        });
+        crate::salvage::verified_empty(repo, worker, attempts, service, stop)
+    }
+
+    pub(crate) fn launch_bindings() -> Vec<Value> {
+        LAUNCH_BINDINGS.take()
+    }
+
+    struct TempRepo(PathBuf);
+    impl TempRepo {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("oms-{name}-{}", std::process::id()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            std::fs::remove_dir(&self.0).unwrap();
+        }
+    }
+
+    struct NativeMain {
+        attempts: Vec<Value>,
+        room: Value,
+        room_calls: AtomicUsize,
+    }
+
+    impl NativeMain {
+        fn new() -> Self {
+            Self {
+                attempts: vec![
+                    json!({
+                        "attempt_id": MAIN, "tool": "panel-main", "provider": "codex",
+                        "state": "working", "terminal": false,
+                        "refs": {"panel_role": "main", "panel_owner": "codex", "panel_room_id": ROOM}
+                    }),
+                    json!({
+                        "attempt_id": "worker", "tool": "peer-delegate",
+                        "parent_attempt_id": MAIN, "task_id": TASK, "state": "done", "terminal": true,
+                        "refs": {"panel_role": "worker", "panel_access": "write"}
+                    }),
+                ],
+                room: json!({
+                    "id": ROOM, "closed": false,
+                    "participants": [{"participant": MAIN, "provider": "codex", "role": "main", "joined": true}]
+                }),
+                room_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl PeerExecutor for NativeMain {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            panic!("authority snapshot must not execute a command")
+        }
+    }
+
+    impl Services for NativeMain {
+        fn command(
+            &self,
+            command: NativeCommand,
+            _: &Path,
+            args: &[OsString],
+            _: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            let stdout = match command {
+                NativeCommand::Events => {
+                    assert_eq!(args, &["list", "--json"]);
+                    serde_json::to_vec(&self.attempts).unwrap()
+                }
+                NativeCommand::Room => {
+                    assert_eq!(args, &["show", "--id", ROOM, "--exact", "--json"]);
+                    self.room_calls.fetch_add(1, Ordering::Relaxed);
+                    serde_json::to_vec(&self.room).unwrap()
+                }
+                _ => panic!("unexpected authority service {command:?}"),
+            };
+            Ok(CommandOutput {
+                stdout,
+                cleanup_complete: true,
+                output_complete: true,
+                ..CommandOutput::default()
+            })
+        }
+    }
+
+    #[test]
+    fn finalization_resolves_live_native_main_without_participant_ref() {
+        let repo = TempRepo::new("native-finalize");
+        let service = NativeMain::new();
+        launch_bindings();
+        let request = FinalizeRequest {
+            owner: "codex".to_owned(),
+            task_id: TASK.to_owned(),
+            main_attempt_id: MAIN.to_owned(),
+            summary_file: "summary.md".into(),
+            outcome: "completed".to_owned(),
+            verify: None,
+            evidence: vec![],
+            verify_timeout: Duration::from_secs(1),
+            execution_repo: repo.0.clone(),
+            notify: false,
+            landed_commit: None,
+        };
+        let snapshot =
+            finalize_snapshot(&repo.0, &request, &service, &AtomicBool::new(false)).unwrap();
+        assert_eq!(snapshot["main"]["attempt_id"], MAIN);
+        assert_eq!(snapshot["related_attempts"], json!([service.attempts[1]]));
+        assert_eq!(launch_bindings(), [json!(MAIN)]);
+    }
+
+    #[test]
+    fn selection_proves_lineage_raw_and_launch_with_projected_main() {
+        let repo = TempRepo::new("native-select");
+        let service = NativeMain::new();
+        let raw = &service.attempts;
+        let scoped = crate::results::attempts_with_main_binding(raw, &raw[0]);
+        let worker = |id: &str, parent: &str, state: &str, created: &str| {
+            json!({"attempt_id": id, "parent_attempt_id": parent, "task_id": TASK,
+                   "state": state, "terminal": true, "created_at": created,
+                   "refs": {"panel_role": "worker", "panel_access": "write"}})
+        };
+        let rows = [
+            json!({"kind": "delegate", "task_id": TASK, "attempt_id": "att_later",
+                           "exit": 0, "patch": "later.patch", "patch_sha256": "a".repeat(64)}),
+        ];
+        launch_bindings();
+        let selection = select(
+            &repo.0,
+            vec![
+                worker("att_failed", "att_previous", "failed", "1"),
+                worker("att_later", MAIN, "done", "2"),
+            ],
+            raw,
+            &scoped,
+            &rows,
+            Some(MAIN),
+            &service,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        // Supersession across parents ran the native (exact Room) lineage branch.
+        assert_eq!(service.room_calls.load(Ordering::Relaxed), 1);
+        assert!(selection.superseded.is_empty());
+        assert_eq!(selection.workers.len(), 2);
+        assert_eq!(launch_bindings(), [Value::Null, json!(MAIN)]);
+    }
+
+    #[test]
+    fn implicit_native_main_ref_requires_confined_unique_live_membership() {
+        let mut service = NativeMain::new();
+        let open = service.room.clone();
+        let participant = open["participants"][0].clone();
+        let stop = AtomicBool::new(false);
+        let check = |service: &NativeMain, dead| {
+            lineage(
+                Path::new("."),
+                &service.attempts,
+                MAIN,
+                service,
+                &stop,
+                dead,
+            )
+        };
+        for (field, value) in [
+            ("participant", json!("foreign-main")),
+            ("provider", json!("claude")),
+            ("joined", json!(false)),
+            ("role", json!("worker")),
+            ("parent", json!("another-main")),
+        ] {
+            service.room = open.clone();
+            service.room["participants"][0][field] = value;
+            assert!(check(&service, false).is_err(), "accepted foreign {field}");
+        }
+        for (field, value) in [
+            ("id", json!("room-foreign")),
+            ("closed", json!(true)),
+            ("successor", json!("room-new")),
+            ("participants", json!([])),
+            ("participants", json!([participant, participant])),
+        ] {
+            service.room = open.clone();
+            service.room[field] = value;
+            assert!(check(&service, false).is_err(), "accepted invalid {field}");
+        }
+
+        service.room = open;
+        service.attempts.push(service.attempts[0].clone());
+        assert!(check(&service, false).is_err());
+        service.attempts.pop();
+
+        service.attempts[0]["terminal"] = json!(true);
+        service.attempts[0]["state"] = json!("done");
+        assert!(check(&service, true).is_err());
+        service.attempts[0]["terminal"] = json!(false);
+        service.attempts[0]["state"] = json!("working");
+        for value in [json!(""), Value::Null] {
+            service.attempts[0]["refs"]["panel_room_participant"] = value;
+            assert!(check(&service, false).is_err());
+        }
+    }
 }

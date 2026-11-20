@@ -1,7 +1,219 @@
 //! Recorded evidence only. Missing samples never become zero-valued measurements.
 use crate::value::text;
 use crate::{Error, Result, Value, require};
+use oms_command_telemetry::store::{
+    MAX_INPUT_BYTES, StoreError,
+    usage::{self, Projection},
+};
+use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// One strict receipt projection, reused only at the same repository generation.
+#[derive(Default)]
+pub struct ReceiptTokensCache {
+    entry: Option<(ReceiptGeneration, BTreeMap<String, ReceiptAttempt>)>,
+}
+
+struct ReceiptGeneration {
+    repo: PathBuf,
+    chain: Vec<Stat>,
+}
+
+impl ReceiptGeneration {
+    fn read(repo: &Path) -> Option<Self> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut fd = fs::open(repo, flags, Mode::empty()).ok()?;
+        let mut chain = vec![fs::fstat(&fd).ok()?];
+        let receipt = Path::new(usage::RECEIPTS);
+        for component in receipt.parent()?.components() {
+            let std::path::Component::Normal(name) = component else {
+                return None;
+            };
+            fd = fs::openat(&fd, name, flags, Mode::empty()).ok()?;
+            chain.push(fs::fstat(&fd).ok()?);
+        }
+        let leaf = fs::statat(&fd, receipt.file_name()?, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        if FileType::from_raw_mode(leaf.st_mode) != FileType::RegularFile
+            || leaf.st_nlink != 1
+            || leaf.st_uid != rustix::process::getuid().as_raw()
+            || usize::try_from(leaf.st_size).ok()? > MAX_INPUT_BYTES
+        {
+            return None;
+        }
+        chain.push(leaf);
+        Some(Self {
+            repo: repo.to_owned(),
+            chain,
+        })
+    }
+}
+
+impl PartialEq for ReceiptGeneration {
+    fn eq(&self, other: &Self) -> bool {
+        self.repo == other.repo
+            && self.chain.len() == other.chain.len()
+            && self.chain.iter().zip(&other.chain).all(|(before, after)| {
+                before.st_dev == after.st_dev
+                    && before.st_ino == after.st_ino
+                    && before.st_size == after.st_size
+                    && before.st_mtime == after.st_mtime
+                    && before.st_mtime_nsec == after.st_mtime_nsec
+                    && before.st_ctime == after.st_ctime
+                    && before.st_ctime_nsec == after.st_ctime_nsec
+                    && before.st_nlink == after.st_nlink
+                    && before.st_mode == after.st_mode
+                    && before.st_uid == after.st_uid
+            })
+    }
+}
+
+struct ReceiptSum {
+    reported: usize,
+    sum: Option<u64>,
+}
+
+impl Default for ReceiptSum {
+    fn default() -> Self {
+        Self {
+            reported: 0,
+            sum: Some(0),
+        }
+    }
+}
+
+impl ReceiptSum {
+    fn observe(&mut self, next: Option<u64>) {
+        if let Some(next) = next {
+            self.reported += 1;
+            self.sum = self.sum.and_then(|sum| sum.checked_add(next));
+        }
+    }
+
+    fn complete(&self, calls: usize) -> Option<u64> {
+        (self.reported == calls).then_some(self.sum).flatten()
+    }
+}
+
+#[derive(Default)]
+struct ReceiptProvider {
+    calls: usize,
+    input_basis: Option<bool>,
+    components: [ReceiptSum; 4],
+}
+
+#[derive(Default)]
+struct ReceiptAttempt {
+    calls: usize,
+    total: ReceiptSum,
+    providers: BTreeMap<String, ReceiptProvider>,
+}
+
+impl ReceiptAttempt {
+    fn snapshot(&self) -> Value {
+        let providers: serde_json::Map<_, _> = self
+            .providers
+            .iter()
+            .map(|(name, provider)| {
+                let [input, output, read, write] = &provider.components;
+                let complete = |sum: &ReceiptSum| sum.complete(provider.calls);
+                let input = (provider.calls == 1 || provider.input_basis.is_some())
+                    .then(|| complete(input))
+                    .flatten();
+                (
+                    name.clone(),
+                    json!({"input":input,"output":complete(output),
+                        "cache_read":complete(read),"cache_write":complete(write)}),
+                )
+            })
+            .collect();
+        json!({"total":self.total.complete(self.calls),"reported":self.total.reported,
+            "calls":self.calls,"providers":providers})
+    }
+}
+
+impl ReceiptTokensCache {
+    /// Select only requested attempt IDs for a private Board snapshot. The
+    /// repository must be the collector's canonical state root.
+    pub fn for_attempts<'a>(
+        &mut self,
+        repo: &Path,
+        attempts: impl IntoIterator<Item = &'a str>,
+        stop: &AtomicBool,
+    ) -> Option<serde_json::Map<String, Value>> {
+        let by_attempt = self.refresh(repo, stop, usage::load)?;
+        Some(
+            attempts
+                .into_iter()
+                .filter_map(|id| Some((id.to_owned(), by_attempt.get(id)?.snapshot())))
+                .collect(),
+        )
+    }
+
+    fn refresh(
+        &mut self,
+        repo: &Path,
+        stop: &AtomicBool,
+        load: impl FnOnce(&Path) -> std::result::Result<Projection, StoreError>,
+    ) -> Option<&BTreeMap<String, ReceiptAttempt>> {
+        let prior = self.entry.take();
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let before = ReceiptGeneration::read(repo)?;
+        let by_attempt = match prior {
+            Some((stamp, by_attempt)) if stamp == before => by_attempt,
+            _ => {
+                let mut by_attempt = BTreeMap::<String, ReceiptAttempt>::new();
+                let projection = load(repo).ok()?;
+                let mut bound = projection
+                    .calls
+                    .iter()
+                    .map(|call| &call.receipt)
+                    .filter(|receipt| receipt.identity.attempt_id.is_some());
+                for call in projection.attributed_calls() {
+                    let receipt = bound.next()?;
+                    if receipt.identity.call_id != call.call_id {
+                        return None;
+                    }
+                    let attempt = by_attempt.entry(call.attempt_id.to_owned()).or_default();
+                    attempt.calls += 1;
+                    attempt.total.observe(call.usage.total_tokens);
+                    let provider = attempt
+                        .providers
+                        .entry(call.provider.to_owned())
+                        .or_default();
+                    let basis = receipt.usage.cache_in_input;
+                    provider.input_basis = if provider.calls == 0 || provider.input_basis == basis {
+                        basis
+                    } else {
+                        None
+                    };
+                    provider.calls += 1;
+                    for (sum, tokens) in provider.components.iter_mut().zip([
+                        call.usage.input_tokens,
+                        call.usage.output_tokens,
+                        call.usage.cache_read_tokens,
+                        call.usage.cache_write_tokens,
+                    ]) {
+                        sum.observe(tokens);
+                    }
+                }
+                if bound.next().is_some() {
+                    return None;
+                }
+                by_attempt
+            }
+        };
+        if stop.load(Ordering::Relaxed) || ReceiptGeneration::read(repo)? != before {
+            return None;
+        }
+        Some(&self.entry.insert((before, by_attempt)).1)
+    }
+}
+
 pub fn number(value: &Value) -> Option<f64> {
     value.as_f64().filter(|v| v.is_finite() && *v >= 0.0)
 }
@@ -208,8 +420,36 @@ pub fn collect_local_with(
     now: f64,
     index: Option<&[Value]>,
 ) -> Value {
+    collect_local_with_sources(report, main_attempt, now, index).0
+}
+
+/// In-memory evidence for the home that supplied each Codex quota reading.
+#[derive(Clone, Default)]
+pub struct CodexQuotaSources {
+    ambient: Option<String>,
+    accounts: BTreeMap<String, String>,
+}
+
+impl CodexQuotaSources {
+    pub fn ambient_matches(&self, digest: &str) -> bool {
+        self.ambient.as_deref() == Some(digest)
+    }
+
+    pub fn account_matches(&self, alias: &str, digest: &str) -> bool {
+        self.accounts.get(alias).is_some_and(|home| home == digest)
+    }
+}
+
+/// Collect telemetry and its non-serializable Codex source evidence together.
+pub fn collect_local_with_sources(
+    report: &Value,
+    main_attempt: Option<&str>,
+    now: f64,
+    index: Option<&[Value]>,
+) -> (Value, CodexQuotaSources) {
     let participants = crate::value::array(&report["room"]["participants"]);
     let mut output = serde_json::Map::new();
+    let mut sources = CodexQuotaSources::default();
 
     for provider in ["codex", "claude"] {
         let mut mains: Vec<&Value> = participants
@@ -234,10 +474,14 @@ pub fn collect_local_with(
                 .unwrap_or_else(|| "no active consumer".into()),
         );
 
-        type CodexLog = (Option<f64>, Option<f64>, Option<u8>, Vec<Value>);
-        let mut codex_log: Option<CodexLog> = None;
         if provider == "codex" {
-            let (weekly_used, resets_at, observed_at, shorts) = codex_readings(None, now, true);
+            let CodexReadings {
+                weekly_used,
+                resets_at,
+                observed_at,
+                shorts,
+                home,
+            } = codex_readings(None, now, true);
             if let Some(u) = weekly_used {
                 row.insert("weekly_used".into(), u.into());
                 row.insert("source".into(), "session log".into());
@@ -246,7 +490,6 @@ pub fn collect_local_with(
                 if row.get("weekly_used").is_none() {
                     row.insert("source".into(), "session log".into());
                 }
-                row.insert("short_windows".into(), Value::Array(shorts.clone()));
                 if let Some(first) = shorts.first() {
                     if let Some(obs) = first.get("observed_at").cloned() {
                         row.entry("observed_at").or_insert(obs);
@@ -260,6 +503,7 @@ pub fn collect_local_with(
                         }
                     }
                 }
+                row.insert("short_windows".into(), Value::Array(shorts));
             }
             if let Some(r) = resets_at {
                 row.insert("weekly_resets_at".into(), r.into());
@@ -267,9 +511,9 @@ pub fn collect_local_with(
             if let Some(o) = observed_at {
                 row.insert("observed_at".into(), o.into());
             }
-            codex_log = Some((resets_at, observed_at, weekly_used, shorts));
+            sources.ambient = home;
         }
-        account_status(provider, now, &mut row);
+        account_status(provider, now, &mut row, &mut sources);
 
         if let Some(main) = selected {
             row.insert("participant".into(), main["participant"].clone());
@@ -290,11 +534,10 @@ pub fn collect_local_with(
                 row.insert("context_left".into(), Value::Null);
             }
         }
-        let _ = codex_log;
         output.insert(provider.into(), Value::Object(row));
     }
     let mut pi = serde_json::Map::new();
-    account_status("pi", now, &mut pi);
+    account_status("pi", now, &mut pi, &mut sources);
     if !pi.is_empty() {
         output.insert("pi".into(), Value::Object(pi));
     }
@@ -340,13 +583,18 @@ pub fn collect_local_with(
         }
     }
     output.insert("antigravity".into(), Value::Object(agy));
-    Value::Object(output)
+    (Value::Object(output), sources)
 }
 
 /// Per-account readings and the active account label for an account-isolated
 /// provider. Only Codex session logs carry per-home usage; other providers
 /// report availability with `weekly_used: null`.
-fn account_status(provider: &str, now: f64, row: &mut serde_json::Map<String, Value>) {
+fn account_status(
+    provider: &str,
+    now: f64,
+    row: &mut serde_json::Map<String, Value>,
+    sources: &mut CodexQuotaSources,
+) {
     let config = match crate::routing::Accounts::configured() {
         Ok(Some(config)) => config,
         Ok(None) => return,
@@ -361,6 +609,14 @@ fn account_status(provider: &str, now: f64, row: &mut serde_json::Map<String, Va
     let mut accs = serde_json::Map::new();
     let active_home =
         crate::routing::active_account_home(provider).and_then(|p| std::fs::canonicalize(p).ok());
+    if provider == "codex"
+        && active_home
+            .as_deref()
+            .map(|path| crate::digest(path.as_os_str().as_encoded_bytes()))
+            != sources.ambient
+    {
+        sources.ambient = None;
+    }
     let mut errs = Vec::new();
     for entry in &config.accounts {
         let resolved = std::fs::canonicalize(&entry.home);
@@ -372,25 +628,33 @@ fn account_status(provider: &str, now: f64, row: &mut serde_json::Map<String, Va
         }
         match resolved {
             Ok(home_path) if crate::routing::private_home(&home_path) => {
-                let (w_used, r_at, o_at) = if provider == "codex" {
-                    let (w, r, o, _) = codex_readings(Some(&home_path), now, false);
-                    (w, r, o)
+                let CodexReadings {
+                    weekly_used,
+                    resets_at,
+                    observed_at,
+                    home,
+                    ..
+                } = if provider == "codex" {
+                    codex_readings(Some(&home_path), now, false)
                 } else {
-                    (None, None, None)
+                    CodexReadings::default()
                 };
                 let mut info = serde_json::Map::new();
                 info.insert(
                     "weekly_used".into(),
-                    w_used.map(Value::from).unwrap_or(Value::Null),
+                    weekly_used.map(Value::from).unwrap_or(Value::Null),
                 );
-                if let Some(u) = w_used {
+                if let Some(u) = weekly_used {
                     info.insert("used".into(), u.into());
                     info.insert("source".into(), "session log".into());
+                    if let Some(home) = home {
+                        sources.accounts.insert(entry.id.clone(), home);
+                    }
                 }
-                if let Some(r) = r_at {
+                if let Some(r) = resets_at {
                     info.insert("resets_at".into(), r.into());
                 }
-                if let Some(o) = o_at {
+                if let Some(o) = observed_at {
                     info.insert("observed_at".into(), o.into());
                 }
                 accs.insert(entry.id.clone(), Value::Object(info));
@@ -502,18 +766,27 @@ fn hud_cache_reading(consumer: &str, now: f64) -> Value {
     Value::Object(out)
 }
 
+#[derive(Default)]
+struct CodexReadings {
+    weekly_used: Option<u8>,
+    resets_at: Option<f64>,
+    observed_at: Option<f64>,
+    shorts: Vec<Value>,
+    home: Option<String>,
+}
+
 fn codex_readings(
     explicit_home: Option<&std::path::Path>,
     now: f64,
     fallback_older: bool,
-) -> (Option<u8>, Option<f64>, Option<f64>, Vec<Value>) {
+) -> CodexReadings {
     let default_home = explicit_home.is_none();
     let home = explicit_home
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".codex")));
     let Some(home) = home.and_then(|h| std::fs::canonicalize(h).ok()) else {
-        return (None, None, None, vec![]);
+        return CodexReadings::default();
     };
     let sessions_root = home.join("sessions");
     let mut remaining = MAX_SCAN_ENTRIES;
@@ -548,19 +821,23 @@ fn codex_readings(
         }
     }
     if files.is_empty() {
-        return (None, None, None, vec![]);
+        return CodexReadings::default();
     }
     files.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut best_weekly: Option<(u8, f64, Option<f64>)> = None;
     let mut newest_shorts: Vec<Value> = Vec::new();
+    let mut source_proven = crate::routing::private_home(&home);
     let limit = if fallback_older { 64 } else { 1 };
     for (idx, (mtime, ino, size, path)) in files.into_iter().take(limit).enumerate() {
         if default_home && idx == 0 && now - (mtime as f64 / 1e9) > CODEX_WEEK_SECONDS {
             break;
         }
+        let route_matches = || path.canonicalize().is_ok_and(|resolved| resolved == path);
+        let before = source_proven && route_matches();
         let Some((limits, observed)) = read_rate_limits(&path, ino, size, mtime) else {
             continue;
         };
+        source_proven = before && route_matches();
         if idx == 0 {
             let mut by_min = BTreeMap::new();
             for key in ["primary", "secondary"] {
@@ -605,9 +882,18 @@ fn codex_readings(
             break;
         }
     }
-    match best_weekly {
-        Some((u, r, o)) => (Some(u), Some(r), o, newest_shorts),
-        None => (None, None, None, newest_shorts),
+    let (weekly_used, resets_at, observed_at) = best_weekly
+        .map_or((None, None, None), |(used, reset, observed)| {
+            (Some(used), Some(reset), observed)
+        });
+    let home = (source_proven && (weekly_used.is_some() || !newest_shorts.is_empty()))
+        .then(|| crate::digest(home.as_os_str().as_encoded_bytes()));
+    CodexReadings {
+        weekly_used,
+        resets_at,
+        observed_at,
+        shorts: newest_shorts,
+        home,
     }
 }
 
@@ -709,6 +995,13 @@ pub fn codex_rollout(consumer: &str) -> Option<std::path::PathBuf> {
 
 /// Read only the latest complete turn model from a bound Codex rollout.
 pub fn codex_turn_model(path: &std::path::Path, consumer: &str) -> Option<String> {
+    codex_turn_observations(path, consumer)?.0
+}
+
+pub fn codex_turn_observations(
+    path: &std::path::Path,
+    consumer: &str,
+) -> Option<(Option<String>, Option<u64>)> {
     use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::fs::MetadataExt;
     const MODEL_TAIL: u64 = 1024 * 1024;
@@ -740,27 +1033,53 @@ pub fn codex_turn_model(path: &std::path::Path, consumer: &str) -> Option<String
     let mut tail = Vec::new();
     file.take(MODEL_TAIL).read_to_end(&mut tail).ok()?;
     let first = if start == 0 {
-        0
+        Some(0)
     } else {
-        tail.iter().position(|&b| b == b'\n')? + 1
+        tail.iter().position(|&b| b == b'\n').map(|at| at + 1)
     };
-    let last = tail.iter().rposition(|&b| b == b'\n')?;
-    tail.get(first..last)?
-        .rsplit(|&b| b == b'\n')
-        .find_map(|line| {
-            if !line.windows(14).any(|s| s == b"\"turn_context\"") {
-                return None;
-            }
-            let row = crate::decode(line, MODEL_TAIL as usize).ok()?;
-            let model = row["payload"]["model"].as_str()?;
-            (row["type"] == "turn_context"
-                && !model.is_empty()
-                && model.len() <= 120
-                && model
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
-            .then(|| model.to_owned())
-        })
+    let last = tail.iter().rposition(|&b| b == b'\n');
+    let Some(complete) = first
+        .zip(last)
+        .and_then(|(start, end)| tail.get(start..end))
+    else {
+        return Some((None, None));
+    };
+    let mut model = None;
+    let mut total_tokens = None;
+    for line in complete.rsplit(|&b| b == b'\n') {
+        let is_turn = model.is_none() && line.windows(14).any(|s| s == b"\"turn_context\"");
+        let is_usage =
+            total_tokens.is_none() && line.windows(20).any(|s| s == b"\"token_usage_record\"");
+        if !is_turn && !is_usage {
+            continue;
+        }
+        let Ok(row) = crate::decode(line, MODEL_TAIL as usize) else {
+            continue;
+        };
+        if is_turn
+            && row["type"] == "turn_context"
+            && let Some(value) = row["payload"]["model"].as_str().filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 120
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            })
+        {
+            model = Some(value.to_owned());
+        }
+        if is_usage
+            && row["type"] == "token_usage_record"
+            && row["payload"]["thread_id"].as_str() == Some(id)
+            && row["payload"]["session_id"].as_str() == Some(id)
+        {
+            total_tokens = row["payload"]["thread_token_usage"]["total_tokens"].as_u64();
+        }
+        if model.is_some() && total_tokens.is_some() {
+            break;
+        }
+    }
+    Some((model, total_tokens))
 }
 
 fn read_rate_limits(
@@ -817,4 +1136,258 @@ fn read_rate_limits(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod receipt_token_tests {
+    use super::*;
+    use oms_command_telemetry::store::usage::{Cumulative, Identity, Phase, Usage};
+
+    struct Repo(PathBuf);
+
+    impl Repo {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "oms-receipt-tokens-{}",
+                oms_command_plan::storage::random_hex(8).unwrap()
+            ));
+            fs::mkdir(&path, Mode::from_raw_mode(0o700)).unwrap();
+            Self(path.canonicalize().unwrap())
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write(
+        repo: &Path,
+        call: &str,
+        attempt: &str,
+        provider: &str,
+        session: Option<(&str, bool)>,
+        usage: Option<Usage>,
+    ) {
+        let stop = AtomicBool::new(false);
+        let mut receipt = usage::begin(
+            repo,
+            Identity {
+                call_id: call.into(),
+                operation_id: format!("op-{call}"),
+                provider: provider.into(),
+                account: Some("seat".into()),
+                attempt_id: Some(attempt.into()),
+                ..Identity::default()
+            },
+            session.map(|(id, baseline_unknown)| Cumulative {
+                session_id: id.into(),
+                baseline_unknown,
+            }),
+            &stop,
+        )
+        .unwrap();
+        receipt.revision = 1;
+        if let Some(usage) = usage {
+            receipt.phase = Phase::Final;
+            receipt.usage = usage;
+        } else {
+            receipt.phase = Phase::Unknown;
+        }
+        usage::record(repo, &receipt, &stop).unwrap();
+    }
+
+    #[test]
+    fn receipt_tokens_cover_exact_calls_without_mixing_provider_components() {
+        let repo = Repo::new();
+        let path = &repo.0;
+        let codex = |input, output, read| Usage {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            cache_read_tokens: Some(read),
+            cache_in_input: Some(true),
+            ..Usage::default()
+        };
+        let claude = Usage {
+            input_tokens: Some(6),
+            output_tokens: Some(2),
+            cache_read_tokens: Some(60),
+            cache_write_tokens: Some(3),
+            cache_in_input: Some(false),
+            ..Usage::default()
+        };
+        let explicit = |total| Usage {
+            total_tokens: Some(total),
+            ..Usage::default()
+        };
+        for (call, attempt, provider, session, usage) in [
+            (
+                "fresh",
+                "mixed",
+                "codex",
+                Some(("session", false)),
+                Some(codex(50, 10, 20)),
+            ),
+            (
+                "resume",
+                "mixed",
+                "codex",
+                Some(("session", true)),
+                Some(codex(70, 15, 28)),
+            ),
+            ("fallback", "mixed", "claude", None, Some(claude.clone())),
+            (
+                "agy",
+                "mixed",
+                "antigravity",
+                None,
+                Some(Usage {
+                    input_tokens: Some(4),
+                    output_tokens: Some(3),
+                    cache_read_tokens: Some(1),
+                    total_tokens: Some(10),
+                    ..Usage::default()
+                }),
+            ),
+            ("gap", "incomplete", "codex", Some(("session", true)), None),
+            (
+                "after-gap",
+                "incomplete",
+                "codex",
+                Some(("session", true)),
+                Some(codex(80, 20, 30)),
+            ),
+            (
+                "later",
+                "later",
+                "codex",
+                Some(("session", true)),
+                Some(codex(87, 22, 31)),
+            ),
+            (
+                "large",
+                "overflow",
+                "antigravity",
+                None,
+                Some(explicit(u64::MAX)),
+            ),
+            (
+                "addition",
+                "overflow",
+                "antigravity",
+                None,
+                Some(explicit(1)),
+            ),
+            ("zero", "zero", "antigravity", None, Some(explicit(0))),
+            ("inclusive", "basis", "codex", None, Some(codex(4, 2, 1))),
+            ("exclusive", "basis", "codex", None, Some(claude)),
+        ] {
+            write(path, call, attempt, provider, session, usage);
+        }
+        let attempts = [
+            "mixed",
+            "incomplete",
+            "later",
+            "overflow",
+            "zero",
+            "basis",
+            "foreign",
+        ];
+        let observed = ReceiptTokensCache::default()
+            .for_attempts(path, attempts, &AtomicBool::new(false))
+            .unwrap();
+        assert!(!observed.contains_key("foreign"));
+        assert_eq!(
+            observed["mixed"],
+            json!({
+                "total":166,"reported":4,"calls":4,
+                "providers": {
+                    "codex":{"input":70,"output":15,"cache_read":28,"cache_write":null},
+                    "claude":{"input":6,"output":2,"cache_read":60,"cache_write":3},
+                    "antigravity":{"input":4,"output":3,"cache_read":1,"cache_write":null}
+                }
+            })
+        );
+        assert_eq!(observed["incomplete"]["reported"], 0);
+        assert_eq!(observed["incomplete"]["calls"], 2);
+        assert!(observed["incomplete"]["total"].is_null());
+        assert_eq!(observed["later"]["total"], 9);
+        assert_eq!(observed["overflow"]["reported"], 2);
+        assert!(observed["overflow"]["total"].is_null());
+        assert_eq!(observed["zero"]["total"], 0);
+        assert_eq!(observed["basis"]["total"], 77);
+        assert!(observed["basis"]["providers"]["codex"]["input"].is_null());
+        assert_eq!(observed["basis"]["providers"]["codex"]["output"], 4);
+    }
+
+    #[test]
+    fn receipt_cache_reuses_only_the_proved_generation_and_drops_invalid_data() {
+        use std::os::unix::fs::symlink;
+        let repo = Repo::new();
+        let stop = AtomicBool::new(false);
+        let mut cache = ReceiptTokensCache::default();
+        let path = repo.0.join(usage::RECEIPTS);
+        let attempt = "attempt-one";
+        let load = |cache: &mut ReceiptTokensCache| cache.for_attempts(&repo.0, [attempt], &stop);
+        assert!(load(&mut cache).is_none());
+        let record = |call, total| {
+            write(
+                &repo.0,
+                call,
+                attempt,
+                "antigravity",
+                None,
+                Some(Usage {
+                    total_tokens: Some(total),
+                    ..Usage::default()
+                }),
+            );
+        };
+        record("one", 1);
+        assert_eq!(load(&mut cache).unwrap()[attempt]["total"], 1);
+        let warm = cache.refresh(&repo.0, &stop, |_| panic!("warm cache reparsed receipts"));
+        assert_eq!(warm.unwrap()[attempt].snapshot()["total"], 1);
+
+        record("two", 2); // Normal publication replaces the leaf.
+        assert_eq!(load(&mut cache).unwrap()[attempt]["total"], 3);
+        record("three", 3);
+        assert!(
+            cache
+                .refresh(&repo.0, &stop, |repo| {
+                    let snapshot = usage::load(repo);
+                    record("four", 4);
+                    snapshot
+                })
+                .is_none()
+        );
+        assert_eq!(load(&mut cache).unwrap()[attempt]["total"], 10);
+
+        let other = Repo::new();
+        assert!(cache.for_attempts(&other.0, [attempt], &stop).is_none());
+        assert_eq!(load(&mut cache).unwrap()[attempt]["total"], 10);
+        let displaced = path.with_file_name("saved-receipts");
+        std::fs::rename(&path, &displaced).unwrap();
+        assert!(load(&mut cache).is_none());
+        symlink(&displaced, &path).unwrap();
+        assert!(load(&mut cache).is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&displaced, &path).unwrap();
+        assert!(load(&mut cache).is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"{bad receipt}").unwrap();
+        assert!(load(&mut cache).is_none());
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(u64::try_from(MAX_INPUT_BYTES).unwrap() + 1)
+            .unwrap();
+        assert!(
+            cache
+                .refresh(&repo.0, &stop, |_| panic!("oversized ledger was parsed"))
+                .is_none()
+        );
+        assert!(cache.entry.is_none());
+    }
 }

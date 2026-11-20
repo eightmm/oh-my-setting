@@ -335,6 +335,20 @@ pub fn council_plan(
             seats.push(extra.clone());
         }
     }
+    // Council requests have no trusted public-repository authorization input.
+    let mut skipped: Vec<_> = seats
+        .iter()
+        .filter(|seat| seat.public_only)
+        .map(|seat| {
+            serde_json::json!({
+                "provider": seat.provider,
+                "model": seat.model,
+                "reason": "council requires private routes",
+            })
+        })
+        .collect();
+    seats.retain(|seat| !seat.public_only);
+    require(!seats.is_empty(), "council requires private routes")?;
     let providers = seats
         .iter()
         .map(|v| v.provider.as_str())
@@ -357,7 +371,6 @@ pub fn council_plan(
     let allow_partial = request.allow_partial
         || std::env::var_os("OMS_COUNCIL_ALLOW_PARTIAL").is_some_and(|v| v == "1");
     let mut kept = Vec::new();
-    let mut skipped = Vec::new();
     for mut seat in seats {
         let resolve = || -> Result<String> {
             let row = rows
@@ -368,21 +381,48 @@ pub fn council_plan(
                 row["installed"] == true || row["present"] == true,
                 "provider is not installed",
             )?;
-            let models = row
-                .get("routable")
-                .or_else(|| row.get("catalog_models"))
-                .or_else(|| row.get("models"))
+            let (field, models) = ["routable", "catalog_models", "models"]
+                .into_iter()
+                .find_map(|field| row.get(field).map(|models| (field, models)))
                 .ok_or_else(|| Error::new("model catalog unavailable"))?;
             let models = models
                 .as_array()
                 .ok_or_else(|| Error::new("malformed model catalog"))?
                 .iter()
                 .map(|v| {
-                    v.as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| Error::new("malformed model catalog"))
+                    let value = v
+                        .as_str()
+                        .ok_or_else(|| Error::new("malformed model catalog"))?;
+                    let id = if seat.provider == "antigravity" && field == "routable" {
+                        if let Some((id, label)) = value.split_once('\t') {
+                            require(
+                                !label.is_empty() && !label.chars().any(char::is_control),
+                                "malformed model catalog",
+                            )?;
+                            id
+                        } else {
+                            value
+                        }
+                    } else {
+                        value
+                    };
+                    require(
+                        !id.is_empty()
+                            && id
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b"-._/:".contains(&c)),
+                        "malformed model catalog",
+                    )?;
+                    Ok(id.to_owned())
                 })
                 .collect::<Result<Vec<_>>>()?;
+            if models.is_empty()
+                && seat.provider == "claude"
+                && row["catalog_probe"] == "unsupported"
+            {
+                crate::routing::valid_route(&seat)?;
+                return Ok(seat.model.clone());
+            }
             require(!models.is_empty(), "empty model catalog")?;
             crate::routing::routable_route_model(&seat.provider, &seat.model, &models)
         };
@@ -576,8 +616,7 @@ pub fn council_execute(
         if let Some(room) = &request.room {
             require(
                 row["refs"]["panel_room_id"] == *room
-                    && row["refs"]["panel_room_participant"].as_str()
-                        == request.participant.as_deref(),
+                    && request.participant.as_deref() == Some(crate::state::main_participant(&row)),
                 "council main room binding differs",
             )?;
         }
@@ -594,16 +633,21 @@ pub fn council_execute(
             service,
             crate::NativeCommand::Room,
             repo,
-            &["show", "--id", room_id, "--json"],
+            &["show", "--id", room_id, "--exact", "--json"],
             stop,
         )?;
+        let mut joined_mains = crate::value::array(&room["participants"])
+            .iter()
+            .filter(|v| v["role"] == "main" && v["joined"] == true);
         require(
-            room["closed"] == false
-                && crate::value::array(&room["participants"]).iter().any(|v| {
+            room["id"] == *room_id
+                && room["closed"] == false
+                && room["successor"].is_null()
+                && joined_mains.next().is_some_and(|v| {
                     v["participant"].as_str() == request.participant.as_deref()
-                        && v["role"] == "main"
-                        && v["joined"] == true
-                }),
+                        && v["provider"] == request.owner
+                })
+                && joined_mains.next().is_none(),
             "council owner is not joined to an open room",
         )?;
         let attempts = crate::services::query(
@@ -751,11 +795,74 @@ pub fn council_execute(
                 e.message
             ))
         })?;
-    output.success()?;
+    output
+        .success()
+        .map_err(|error| council_publication_error(&output, &plan).unwrap_or(error))?;
     plan["executes"] = true.into();
     plan["attempt_id"] = attempt.into();
     plan["exit"] = output.code.into();
     Ok(plan)
+}
+
+fn council_publication_error(
+    output: &crate::services::CommandOutput,
+    plan: &Value,
+) -> Option<Error> {
+    if output.code == 0
+        || !output.stdout.is_empty()
+        || !output.cleanup_complete
+        || !output.output_complete
+        || output.limited
+        || output.stderr.len() > 256
+    {
+        return None;
+    }
+    // PeerAsk runs in a subprocess for Council. Accept its complete, fixed
+    // diagnostic and rebuild it from the admitted seat and allowed stage.
+    let stderr = std::str::from_utf8(&output.stderr).ok()?;
+    // The public CLI adds a usage hint to exit status 2.
+    let stderr = if output.code == 2 {
+        stderr
+            .strip_suffix("hint: run `oms peer-ask --help` for usage\n")
+            .unwrap_or(stderr)
+    } else {
+        stderr
+    };
+    let diagnostic = stderr
+        .strip_prefix("error: council seat ")?
+        .strip_suffix(" failed; reconcile before retrying\n")?;
+    let (seat, detail) = diagnostic.split_once(" round ")?;
+    let (round, stage) = detail.split_once(": ")?;
+    let [digit @ b'0'..=b'5'] = round.as_bytes() else {
+        return None;
+    };
+    let round = usize::from(*digit - b'0');
+    let max_round = match plan["argv"].as_array()?.as_slice() {
+        [_, _, flag, count, ..] if flag == "--debate" => count.as_str()?.parse().ok()?,
+        [_, _, flag, limit, count, ..]
+            if flag == "--until-agreement" && limit == "--max-rounds" =>
+        {
+            count.as_str()?.parse::<usize>().ok()?.checked_sub(1)?
+        }
+        _ => return None,
+    };
+    if round > max_round {
+        return None;
+    }
+    let provider = plan["seat_routes"]
+        .as_array()?
+        .iter()
+        .filter_map(|route| route["provider"].as_str())
+        .find(|provider| *provider == seat)?;
+    let stage = ["artifact write", "artifact index write", "thread append"]
+        .into_iter()
+        .find(|allowed| *allowed == stage)?;
+    Some(Error {
+        publication_uncertain: true,
+        ..Error::new(format!(
+            "council seat {provider} round {round}: {stage} failed"
+        ))
+    })
 }
 
 pub fn stopped_worker_proof(repo: &Path, worker: &Value, attempts: &[Value]) -> Result<Value> {
@@ -955,6 +1062,11 @@ pub fn settle_review(
     }
 
     let explicit_set: BTreeSet<&str> = request.explicit.iter().map(String::as_str).collect();
+    let panel_caller = std::env::var_os("OMS_ROOM_REPO")
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path == store.repo())
+        .and_then(|_| std::env::var("OMS_ROOM_PARTICIPANT").ok())
+        .filter(|caller| !caller.is_empty());
     let eligible_states: &[&str] = if request.aged_days.is_some() {
         &["working", "verifying", "blocked", "review"]
     } else {
@@ -983,7 +1095,14 @@ pub fn settle_review(
             terminal_count += 1;
         }
         let explicit_chosen = explicit_set.contains(ident.as_str());
-        if !request.standalone && !parents.contains(&parent) && !explicit_chosen {
+        if !request.standalone
+            && (!parents.contains(&parent)
+                || (explicit_chosen
+                    && (parents.len() != 1
+                        || panel_caller
+                            .as_ref()
+                            .is_some_and(|caller| caller != &parent))))
+        {
             continue;
         }
         if !eligible_states.contains(&state.as_str()) && !explicit_chosen {
@@ -1115,7 +1234,10 @@ pub fn settle_review(
                         &key,
                     ]);
                     if let Some(reason_text) = &selection_reason {
-                        args.extend(["--reason".into(), reason_text.into()]);
+                        args.extend([
+                            "--ref".into(),
+                            format!("panel_review_reason={reason_text}").into(),
+                        ]);
                     }
                     service
                         .command(NativeCommand::Events, repo, &args, stop)?

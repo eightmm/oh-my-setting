@@ -1340,6 +1340,7 @@ fn dispatch_owned(
     local: &[OsString],
     source_root: Option<&Path>,
     interrupted: &Arc<AtomicBool>,
+    #[cfg(target_os = "linux")] dispatch_locator: Option<&std::ffi::OsStr>,
 ) -> ! {
     let cwd = caller_cwd(tool);
     if tool == "agent-events" {
@@ -1672,14 +1673,24 @@ fn dispatch_owned(
         },
         _ if oms_command_peer::owns(tool, local) => {
             match services_collab::CollabServices::new(interrupted, source) {
-                Ok(collab) => oms_command_peer::run_with_executor(
-                    tool,
-                    local,
-                    &cwd,
-                    source,
-                    interrupted,
-                    &collab,
-                ),
+                Ok(collab) => {
+                    #[cfg(target_os = "linux")]
+                    let mut collab = collab.with_dispatch_stage(
+                        dispatch_locator.filter(|_| tool == "peer-delegate"),
+                        &cwd,
+                    );
+                    let result = oms_command_peer::run_with_executor(
+                        tool,
+                        local,
+                        &cwd,
+                        source,
+                        interrupted,
+                        &collab,
+                    );
+                    #[cfg(target_os = "linux")]
+                    collab.close_dispatch_stage(result.0, interrupted);
+                    result
+                }
                 Err(e) => err_output(e),
             }
         }
@@ -1736,6 +1747,8 @@ fn main() {
     let mut select = false;
     let mut dispatch = false;
     let mut source_root = None;
+    #[cfg(target_os = "linux")]
+    let mut dispatch_locator = None;
     if argv.first().is_some_and(|v| v == "--oms-frontdoor") {
         let (frontdoor_args, frontdoor_source) = prepare_frontdoor(&argv);
         argv = frontdoor_args;
@@ -1744,7 +1757,20 @@ fn main() {
         select = argv.first().is_some_and(|v| v == "--oms-select");
         dispatch = select || argv.first().is_some_and(|v| v == "--oms-dispatch");
         if dispatch {
-            if argv.len() < 5 || argv[3] != "--" {
+            let delimiter = 3;
+            #[cfg(target_os = "linux")]
+            let delimiter = if !select
+                && argv
+                    .get(3)
+                    .is_some_and(|v| v == services_collab::protected_dispatch::FLAG)
+                && argv.len() >= 7
+            {
+                dispatch_locator = Some(argv[4].clone());
+                5
+            } else {
+                delimiter
+            };
+            if argv.len() < delimiter + 2 || argv[delimiter] != "--" {
                 eprintln!("runtime-core: invalid private dispatch invocation");
                 std::process::exit(2);
             }
@@ -1755,7 +1781,7 @@ fn main() {
                 std::process::exit(2);
             }
             source_root = Some(PathBuf::from(&argv[1]));
-            argv.drain(..4);
+            argv.drain(..=delimiter);
         }
     }
     if registry::owns(&argv) {
@@ -1785,7 +1811,14 @@ fn main() {
             if select {
                 return;
             }
-            dispatch_owned(&tool, &argv[1..], source_root.as_deref(), &interrupted);
+            dispatch_owned(
+                &tool,
+                &argv[1..],
+                source_root.as_deref(),
+                &interrupted,
+                #[cfg(target_os = "linux")]
+                dispatch_locator.as_deref(),
+            );
         }
     }
     if dispatch && argv.first().is_none_or(|v| v != "runtime") {

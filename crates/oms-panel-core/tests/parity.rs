@@ -25,6 +25,9 @@ fn output(value: Value) -> CommandOutput {
 }
 #[derive(Default)]
 struct Fake {
+    catalog: RefCell<Option<Value>>,
+    council_output: RefCell<Option<CommandOutput>>,
+    council_finish: RefCell<Vec<OsString>>,
     attempts: RefCell<Vec<Value>>,
     room: RefCell<Value>,
     panes: RefCell<String>,
@@ -123,6 +126,9 @@ impl Services for Fake {
     ) -> Result<CommandOutput> {
         match command {
             NativeCommand::ProviderCatalog => {
+                if let Some(catalog) = self.catalog.borrow().as_ref() {
+                    return Ok(output(catalog.clone()));
+                }
                 let policy = routing::Policy::bundled()?;
                 let mut rows = Vec::new();
                 for provider in ["codex", "claude", "antigravity"] {
@@ -139,7 +145,42 @@ impl Services for Fake {
                 Ok(output(rows.into()))
             }
             NativeCommand::Events => {
+                if args.first().is_some_and(|v| v == "show") {
+                    let id = args
+                        .iter()
+                        .position(|v| v == "--attempt")
+                        .map(|i| args[i + 1].to_string_lossy())
+                        .unwrap();
+                    return Ok(output(
+                        self.attempts
+                            .borrow()
+                            .iter()
+                            .find(|row| row["attempt_id"].as_str() == Some(id.as_ref()))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    ));
+                }
+                if args.first().is_some_and(|v| v == "start")
+                    && args
+                        .windows(2)
+                        .any(|v| v[0] == "--tool" && v[1] == "panel-council")
+                {
+                    if self.council_output.borrow().is_none() {
+                        return Err(Error::new("fixture stopped before starting council"));
+                    }
+                    return Ok(CommandOutput {
+                        stdout: b"att-council\n".to_vec(),
+                        ..output(Value::Null)
+                    });
+                }
                 if args.first().is_some_and(|v| v == "transition") {
+                    if args
+                        .windows(2)
+                        .any(|v| v[0] == "--attempt" && v[1] == "att-council")
+                    {
+                        self.council_finish.replace(args.to_vec());
+                        return Ok(output(Value::Null));
+                    }
                     let value = |name: &str| {
                         args.iter()
                             .position(|v| v == name)
@@ -159,6 +200,11 @@ impl Services for Fake {
                 }
                 Ok(output(self.attempts.borrow().clone().into()))
             }
+            NativeCommand::PeerAsk => self
+                .council_output
+                .borrow()
+                .clone()
+                .ok_or_else(|| Error::new("unexpected council execution")),
             NativeCommand::Room => Ok(output(self.room.borrow().clone())),
             NativeCommand::Land => {
                 let position = args.iter().position(|v| v == "--patch").unwrap();
@@ -399,6 +445,204 @@ fn uuid_vectors() {
     );
     request.thread = Some(String::new());
     assert!(review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).is_err());
+}
+
+fn council_catalog_shapes() {
+    let fake = Fake::default();
+    let policy = routing::Policy::bundled().unwrap();
+    let mut request = review::CouncilRequest {
+        owner: "codex".into(),
+        task_id: "task-1".into(),
+        label: "council".into(),
+        prompt: "Review private repository changes".into(),
+        thread: None,
+        rounds: Some(1),
+        workload: "routine".into(),
+        lenses: None,
+        until_agreement: false,
+        max_rounds: None,
+        allow_partial: false,
+        dry_run: true,
+        room: None,
+        main_attempt: None,
+        participant: None,
+    };
+    let catalog = json!({"providers":[
+        {"provider":"pi", "present":true, "catalog_probe":"ok", "routable":[]},
+        {"provider":"claude", "present":true, "catalog_probe":"unsupported", "catalog_models":[]},
+        {"provider":"codex", "present":true, "catalog_models":["gpt-6.1-terra", "gpt-6.2-terra"]},
+        {"provider":"antigravity", "present":true, "routable":["gemini-4-carbon-high\tGemini Carbon High"]}
+    ]});
+    *fake.catalog.borrow_mut() = Some(catalog.clone());
+    let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
+    assert_eq!(
+        plan["argv"][1],
+        "claude:model=claude-sonnet-5-5,codex:model=gpt-6.2-terra,antigravity:model=gemini-4-carbon-high"
+    );
+    assert_eq!(plan["families"], 3);
+    assert_eq!(plan["primary_calls"], 6);
+    assert_eq!(plan["max_calls"], 12);
+    assert_eq!(plan["executes"], false);
+    assert_eq!(plan["skipped"][0]["provider"], "pi");
+    assert_eq!(
+        plan["skipped"][0]["reason"],
+        "council requires private routes"
+    );
+    for bad in [
+        json!([]),
+        json!([42]),
+        json!(["gemini-4-carbon-high\tlabel\textra"]),
+    ] {
+        let mut changed = catalog.clone();
+        changed["providers"][3]["routable"] = bad;
+        *fake.catalog.borrow_mut() = Some(changed);
+        assert!(review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).is_err());
+    }
+    for (probe, models) in [("ok", json!([])), ("unsupported", json!([42]))] {
+        let mut changed = catalog.clone();
+        changed["providers"][1]["catalog_probe"] = probe.into();
+        changed["providers"][1]["catalog_models"] = models;
+        *fake.catalog.borrow_mut() = Some(changed);
+        assert!(review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).is_err());
+    }
+    *fake.catalog.borrow_mut() = Some(catalog);
+    request.workload = "deep".into();
+    let mut restricted = policy.clone();
+    for seat in restricted
+        .tiers
+        .values_mut()
+        .flatten()
+        .chain(restricted.council.extra.iter_mut())
+    {
+        seat.public_only = true;
+    }
+    assert!(review::council_plan(Path::new("."), &request, &restricted, &fake, &STOP).is_err());
+
+    request.workload = "routine".into();
+    request.dry_run = false;
+    request.room = Some("room-council".into());
+    request.main_attempt = Some("att-main".into());
+    request.participant = Some("att-main".into());
+    *fake.attempts.borrow_mut() = vec![json!({
+        "attempt_id":"att-main", "tool":"panel-main", "provider":"codex", "terminal":false,
+        "refs":{"panel_room_id":"room-council"}
+    })];
+    let room = json!({
+        "id":"room-council", "closed":false,
+        "participants":[{"participant":"att-main", "provider":"codex", "role":"main", "joined":true}]
+    });
+    *fake.room.borrow_mut() = room.clone();
+    let execute = |request: &review::CouncilRequest| {
+        review::council_execute(Path::new("."), request, &policy, &fake, &STOP)
+            .unwrap_err()
+            .message
+    };
+    assert_eq!(execute(&request), "fixture stopped before starting council");
+    request.participant = Some("att-foreign".into());
+    assert_eq!(execute(&request), "council main room binding differs");
+    request.participant = Some("att-main".into());
+    for (key, value) in [
+        ("id", json!("room-foreign")),
+        ("successor", json!("room-next")),
+        ("closed", json!(true)),
+        (
+            "participants",
+            json!([room["participants"][0], room["participants"][0]]),
+        ),
+    ] {
+        let mut invalid = room.clone();
+        invalid[key] = value;
+        *fake.room.borrow_mut() = invalid;
+        assert_eq!(
+            execute(&request),
+            "council owner is not joined to an open room"
+        );
+    }
+
+    *fake.room.borrow_mut() = room;
+    let diagnostic = |provider: &str, round: &str, stage: &str| {
+        format!("error: council seat {provider} round {round}: {stage} failed; reconcile before retrying\n").into_bytes()
+    };
+    let run = |result: CommandOutput| {
+        fake.council_finish.borrow_mut().clear();
+        fake.council_output.replace(Some(result));
+        review::council_execute(Path::new("."), &request, &policy, &fake, &STOP)
+    };
+    let response = |stderr| CommandOutput {
+        code: 2,
+        stderr,
+        cleanup_complete: true,
+        output_complete: true,
+        ..Default::default()
+    };
+    let finish = |state| {
+        let args = fake.council_finish.borrow();
+        assert!(args.windows(2).any(|v| v[0] == "--state" && v[1] == state));
+        assert!(
+            args.windows(2)
+                .any(|v| v[0] == "--reason-code" && v[1] == "council_incomplete")
+        );
+    };
+    for stage in ["artifact write", "artifact index write", "thread append"] {
+        let mut stderr = diagnostic("claude", "1", stage);
+        stderr.extend_from_slice(b"hint: run `oms peer-ask --help` for usage\n");
+        let error = run(response(stderr)).unwrap_err();
+        finish("failed");
+        assert_eq!(error.code, 2);
+        assert!(error.publication_uncertain);
+        assert_eq!(
+            error.message,
+            format!("council seat claude round 1: {stage} failed")
+        );
+    }
+    let exact = diagnostic("claude", "0", "thread append");
+    let extra = [exact.as_slice(), b"unexpected text\n"].concat();
+    for invalid in [
+        response(extra),
+        response(diagnostic("pi", "0", "thread append")),
+        response(diagnostic("claude", "2", "thread append")),
+        response(diagnostic("claude", "00", "thread append")),
+        response(diagnostic("claude", "0", "foreign stage")),
+        CommandOutput {
+            stdout: b"incomplete\n".to_vec(),
+            ..response(exact.clone())
+        },
+        CommandOutput {
+            output_complete: false,
+            ..response(exact.clone())
+        },
+        CommandOutput {
+            limited: true,
+            ..response(exact.clone())
+        },
+    ] {
+        let error = run(invalid).unwrap_err();
+        finish("failed");
+        assert!(!error.publication_uncertain);
+        assert_eq!(
+            error.message,
+            "native command failed or completion evidence is incomplete"
+        );
+    }
+    let error = run(CommandOutput {
+        code: 130,
+        ..response(exact.clone())
+    })
+    .unwrap_err();
+    finish("cancelled");
+    assert!(error.publication_uncertain);
+    assert_eq!(error.code, 2);
+    let error = run(CommandOutput {
+        cleanup_complete: false,
+        ..response(exact)
+    })
+    .unwrap_err();
+    assert!(fake.council_finish.borrow().is_empty());
+    assert!(error.publication_uncertain);
+    assert_eq!(
+        error.message,
+        "council cleanup unconfirmed; preserve live lifecycle and reconcile"
+    );
 }
 
 fn forget_hosts() {
@@ -1379,6 +1623,134 @@ fn multi_provider_accounts() {
         "claude"
     );
 
+    let pick = |input: &routing::RoutingInputs| {
+        routing::allocate(
+            &policy,
+            "antigravity",
+            "builder",
+            None,
+            "write",
+            None,
+            input,
+        )
+        .unwrap()
+        .candidate
+        .provider
+    };
+    s.recent.insert("codex".into(), 3);
+    s.in_flight.insert("claude".into(), 1);
+    assert_eq!(
+        pick(&s),
+        "codex",
+        "in-flight wins when quota evidence is incomplete"
+    );
+    s.status = json!({"codex":{"weekly_used":30}, "claude":{"weekly_used":40}});
+    assert_eq!(
+        pick(&s),
+        "codex",
+        "in-flight wins inside the weekly tie band"
+    );
+    s.status["claude"]["weekly_used"] = json!(5);
+    assert_eq!(
+        pick(&s),
+        "claude",
+        "a strong weekly gap wins over in-flight"
+    );
+    s.explicit_target = true;
+    s.preferred = Some("codex".into());
+    assert_eq!(pick(&s), "codex", "explicit target remains pinned");
+
+    // A fresh Codex provider row of the active home stands in for that one
+    // labelled account when its own newest log lacks a weekly window; a
+    // mismatched, absent or stale label, or Claude's HUD row, is never lent.
+    let lend_file = home("lend").join("provider-accounts.json");
+    let snu = home("snu");
+    let lend_config = |value: Value| {
+        std::fs::write(&lend_file, serde_json::to_vec(&value).unwrap()).unwrap();
+        routing::Accounts::load(&lend_file).unwrap().unwrap()
+    };
+    let lend = lend_config(json!({"schema":1,"providers":{
+        "codex":{"policy":"ordered","accounts":[entry("snu", &snu)]}}}));
+    assert!(lend.provider("claude").is_none());
+    let day = 86_400;
+    let codex_row = |used: u64, label: Option<&str>, observed: Option<u64>| {
+        let mut row = json!({"weekly_used": used, "weekly_resets_at": now + day,
+            "accounts": {"snu": {"weekly_used": null}}});
+        if let Some(label) = label {
+            row["account_label"] = label.into();
+        }
+        if let Some(observed) = observed {
+            row["observed_at"] = observed.into();
+        }
+        row
+    };
+    let lend_inputs = routing::RoutingInputs {
+        installed: Some(["claude".to_owned(), "codex".to_owned()].into()),
+        accounts: Some(lend),
+        ..Default::default()
+    };
+    let route_of = |owner: &str, codex: Value, inputs: &routing::RoutingInputs| {
+        let mut inputs = inputs.clone();
+        inputs.status = json!({"codex": codex, "claude": {"weekly_used": 85, "observed_at": now}});
+        let route =
+            routing::allocate(&policy, owner, "builder", None, "write", None, &inputs).unwrap();
+        (route.candidate.provider, route.account)
+    };
+    let codex_snu = ("codex".to_owned(), Some("snu".to_owned()));
+    let claude = ("claude".to_owned(), None);
+    // Owner "codex" breaks unknown ties toward Claude, so 10% must be credited
+    // to win; owner "claude" breaks them toward Codex, so 95% must be credited
+    // to exclude it.
+    let cases = [
+        ("codex", codex_row(10, Some("snu"), Some(now))),
+        ("codex", codex_row(10, None, Some(now))),
+        ("codex", codex_row(10, Some("default"), Some(now))),
+        ("codex", codex_row(10, Some("snu"), Some(now - 8 * day))),
+        ("codex", codex_row(10, Some("snu"), None)),
+        ("claude", codex_row(95, Some("snu"), Some(now))),
+        ("claude", codex_row(95, None, Some(now))),
+        ("claude", codex_row(95, Some("snu"), Some(now - 8 * day))),
+        ("claude", codex_row(95, Some("snu"), None)),
+    ];
+    let got: Vec<_> = cases
+        .iter()
+        .map(|(owner, row)| route_of(owner, row.clone(), &lend_inputs))
+        .collect();
+    let want = [
+        &codex_snu, &claude, &claude, &claude, &claude, &claude, &codex_snu, &codex_snu, &codex_snu,
+    ];
+    assert_eq!(got.iter().collect::<Vec<_>>(), want);
+    // A requested account still pins snu at a credited 95%.
+    let mut pinned = lend_inputs.clone();
+    pinned.requested_account = Some("snu".into());
+    assert_eq!(
+        route_of("claude", codex_row(95, Some("snu"), Some(now)), &pinned),
+        codex_snu
+    );
+    // Claude's provider row is never lent to a labelled Claude account.
+    let kw = home("kw");
+    let mut claude_lend = lend_inputs.clone();
+    claude_lend.accounts = Some(lend_config(json!({"schema":1,"providers":{
+        "claude":{"accounts":[entry("work", &kw)]}}})));
+    claude_lend.status = json!({
+        "codex": {"weekly_used": 50, "observed_at": now},
+        "claude": {"weekly_used": 95, "observed_at": now, "weekly_resets_at": now + day,
+            "account_label": "work", "accounts": {"work": {"weekly_used": null}}}});
+    let route = routing::allocate(
+        &policy,
+        "codex",
+        "builder",
+        None,
+        "write",
+        None,
+        &claude_lend,
+    )
+    .unwrap();
+    assert_eq!(
+        (route.candidate.provider.as_str(), route.account.as_deref()),
+        ("claude", Some("work"))
+    );
+
     // The default-home fallback needs a private directory; the child case sets
     // the home variable because this runner never mutates its own environment.
     let wide = home("wide");
@@ -1608,6 +1980,7 @@ fn main() {
         .unwrap_or_default();
     let cases: &[(&str, fn())] = &[
         ("uuid_vectors", uuid_vectors),
+        ("council_catalog_shapes", council_catalog_shapes),
         ("forget_hosts", forget_hosts),
         ("forget_generations", forget_generations),
         ("retry_projection", retry_projection),

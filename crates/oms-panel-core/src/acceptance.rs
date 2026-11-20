@@ -42,22 +42,36 @@ fn preflight<S: Services + ?Sized>(
         service,
         stop,
     )?;
-    let participant = text(&main["refs"], "panel_room_participant");
+    let participant = crate::state::main_participant(main);
+    let native = main["refs"].get("panel_room_participant").is_none();
     let room_id = text(&main["refs"], "panel_room_id");
-    crate::identifier(&participant)?;
+    crate::identifier(participant)?;
     crate::identifier(&room_id)?;
-    let room = query(
-        service,
-        NativeCommand::Room,
-        repo,
-        &["show", "--id", &room_id, "--json"],
-        stop,
-    )?;
+    let room_args: &[&str] = if native {
+        &["show", "--id", &room_id, "--exact", "--json"]
+    } else {
+        &["show", "--id", &room_id, "--json"]
+    };
+    let room = query(service, NativeCommand::Room, repo, room_args, stop)?;
+    let participants = array(&room["participants"]);
+    let joined_main = |v: &Value| v["joined"] == true && v["role"] == "main";
     require(
         room["closed"] == false
-            && array(&room["participants"]).iter().any(|v| {
-                v["participant"] == participant && v["joined"] == true && v["role"] == "main"
-            }),
+            && participants.iter().any(|v| {
+                v["participant"] == participant
+                    && joined_main(v)
+                    && (!native
+                        || (v["provider"] == main["provider"]
+                            && (v["parent"].is_null() || v["parent"] == "")))
+            })
+            && (!native
+                || (room["id"] == room_id
+                    && room["successor"].is_null()
+                    && participants
+                        .iter()
+                        .filter(|v| v["participant"] == participant || joined_main(v))
+                        .count()
+                        == 1)),
         "accept main is not joined to an open room",
     )?;
     let plan = store
@@ -92,6 +106,7 @@ fn preflight<S: Services + ?Sized>(
             && request.verify.replace('\r', "") == text(&task, "verify").replace('\r', ""),
         "--verify does not match the plan task verify contract",
     )?;
+    let scoped_attempts = crate::results::attempts_with_main_binding(array(&attempts), main);
     let related = array(&attempts)
         .iter()
         .filter(|v| v["task_id"] == request.task_id && v["tool"] != "panel-main")
@@ -101,7 +116,7 @@ fn preflight<S: Services + ?Sized>(
             && related.iter().all(|v| {
                 v["terminal"] == true
                     || (v["state"] == "review"
-                        && crate::control::stopped(repo, v, array(&attempts)).is_ok())
+                        && crate::control::stopped(repo, v, &scoped_attempts).is_ok())
             }),
         "task has live or unconfirmed attempts",
     )?;
@@ -114,6 +129,7 @@ fn preflight<S: Services + ?Sized>(
             .map(|v| (*v).clone())
             .collect(),
         array(&attempts),
+        &scoped_attempts,
         &rows,
         Some(&request.main_attempt_id),
         service,
@@ -220,7 +236,7 @@ fn preflight<S: Services + ?Sized>(
         })
         .collect::<Result<Vec<_>>>()?;
     require(!scopes.is_empty(), "worker scope declaration is empty")?;
-    let allowed = crate::control::effective_paths(repo, &task, array(&attempts))?;
+    let allowed = crate::control::effective_paths(repo, &task, &scoped_attempts)?;
     let forbidden = array(&task["forbidden_paths"])
         .iter()
         .map(|v| {
@@ -1280,4 +1296,140 @@ pub(crate) fn finish_landed<S: Services + ?Sized>(
             .success()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CommandOutput, PeerExecutor};
+    use serde_json::json;
+    use std::ffi::OsString;
+
+    const MAIN: &str = "att_11111111111111111111111111111111";
+    const ROOM: &str = "room-native-accept";
+    const TASK: &str = "task-native-accept";
+    const WORKER: &str = "call-native-worker";
+
+    struct Authority {
+        attempts: Value,
+        room: Value,
+    }
+
+    impl PeerExecutor for Authority {
+        fn execute(&self, _: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+            panic!("preflight must not execute commands")
+        }
+    }
+
+    impl Services for Authority {
+        fn command(
+            &self,
+            command: NativeCommand,
+            _: &Path,
+            args: &[OsString],
+            _: &AtomicBool,
+        ) -> Result<CommandOutput> {
+            let data = match command {
+                NativeCommand::Events => {
+                    assert_eq!(args, &["list", "--json"]);
+                    &self.attempts
+                }
+                NativeCommand::Room => {
+                    assert_eq!(args, &["show", "--id", ROOM, "--exact", "--json"]);
+                    &self.room
+                }
+                _ => panic!("unexpected preflight service {command:?}"),
+            };
+            Ok(CommandOutput {
+                stdout: serde_json::to_vec(data).unwrap(),
+                cleanup_complete: true,
+                output_complete: true,
+                ..CommandOutput::default()
+            })
+        }
+    }
+
+    #[test]
+    fn preflight_binds_native_main_to_its_room_and_worker_lease() {
+        let scratch = crate::git::Scratch::new().unwrap();
+        let repo = &scratch.0;
+        let plan = format!("plan_{}", "1".repeat(32));
+        let lease = format!("lease_{}", "2".repeat(32));
+        let patch = b"diff --git a/product b/product\n--- a/product\n+++ b/product\n@@ -1 +1 @@\n-before\n+after\n";
+        let artifact = b"Reviewed fixture result\n";
+        let patch_sha = crate::digest(patch);
+        let candidate = json!({
+            "kind": "delegate", "task_id": TASK, "attempt_id": WORKER,
+            "event_id": "candidate", "exit": 0, "plan_id": plan,
+            "patch": ".oms/artifacts/candidate.patch", "patch_sha256": patch_sha,
+            "artifact": ".oms/artifacts/candidate.md", "artifact_sha256": crate::digest(artifact)
+        });
+        let review = json!({
+            "kind": "review-outcome", "task_id": TASK, "event_id": "review", "exit": 0,
+            "review": {"candidate": {"patch_sha256": patch_sha}, "gate_verify_exit": 0,
+                       "seats": [{"verdict": "pass"}]}
+        });
+        let task = json!({"plan_id": plan, "tasks": {TASK: {
+            "id": TASK, "state": "running", "provider": "codex",
+            "claimed_by_participant": MAIN, "lease_id": lease, "verify": "true",
+            "allowed_paths": ["product"], "forbidden_paths": []
+        }}});
+        let write = |relative: &str, bytes: &[u8]| {
+            let path = repo.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        write(".oms/plan/tasks.json", task.to_string().as_bytes());
+        write(".oms/artifacts/candidate.patch", patch);
+        write(".oms/artifacts/candidate.md", artifact);
+        write(
+            ".oms/artifacts/index.jsonl",
+            format!("{candidate}\n{review}\n").as_bytes(),
+        );
+
+        let mut service = Authority {
+            attempts: json!([
+                {"attempt_id": MAIN, "tool": "panel-main", "provider": "codex",
+                 "state": "working", "terminal": false,
+                 "refs": {"panel_role": "main", "panel_owner": "codex", "panel_room_id": ROOM}},
+                {"attempt_id": WORKER, "tool": "peer-delegate", "parent_attempt_id": MAIN,
+                 "state": "done", "terminal": true, "task_id": TASK,
+                 "refs": {"panel_role": "worker", "panel_access": "write",
+                          "panel_room_id": ROOM, "panel_room_participant": WORKER,
+                          "panel_lease_id": lease}}
+            ]),
+            room: json!({
+                "id": ROOM, "closed": false,
+                "participants": [
+                    {"participant": MAIN, "role": "main", "provider": "codex", "joined": true},
+                    {"participant": WORKER, "role": "worker", "owns": ["product"]}
+                ]
+            }),
+        };
+        let request = AcceptRequest {
+            owner: "codex".into(),
+            task_id: TASK.into(),
+            main_attempt_id: MAIN.into(),
+            message: "feat: reviewed product".into(),
+            verify: "true".into(),
+            execution_repo: repo.clone(),
+            expected_patch_sha256: Some(patch_sha),
+            allow_verifier_change: false,
+            allow_floor_change: None,
+        };
+        let stop = AtomicBool::new(false);
+        let check = |service: &Authority| preflight(repo, &request, service, &stop, false);
+        crate::control::tests::launch_bindings();
+        let snapshot = check(&service).unwrap();
+        assert_eq!(crate::control::tests::launch_bindings(), [json!(MAIN)]);
+        assert_eq!(snapshot["worker"]["attempt_id"], WORKER);
+        assert_eq!(snapshot["candidate"], candidate);
+        assert_eq!(snapshot["task"]["lease_id"], lease);
+
+        service.attempts[1]["refs"]["panel_lease_id"] = format!("lease_{}", "3".repeat(32)).into();
+        assert_eq!(
+            check(&service).unwrap_err().message,
+            "candidate worker is not bound to this main/lease or is report-only",
+        );
+    }
 }

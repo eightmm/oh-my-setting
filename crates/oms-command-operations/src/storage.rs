@@ -2,10 +2,12 @@ use crate::value::V;
 use crate::{Result, digest, random_hex};
 use oms_safe_fs::{ByteReadOptions, MutationOptions, Root};
 use rustix::fs::{self as rfs, Mode, OFlags};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 pub(crate) fn expand(path: &Path) -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
@@ -62,6 +64,11 @@ pub fn repo_root(raw: &Path, cwd: &Path) -> Result<PathBuf> {
         }
     }
     fs::canonicalize(&path)
+        .map_err(|_| format!("repository path does not exist: {}", raw.display()))
+}
+
+pub(crate) fn resolve_read_repo(raw: &Path) -> Result<PathBuf> {
+    fs::canonicalize(expand(raw))
         .map_err(|_| format!("repository path does not exist: {}", raw.display()))
 }
 
@@ -373,34 +380,46 @@ pub(crate) fn normalized(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     }
 }
 
-pub fn parse_rows(path: &Path, bytes: &[u8]) -> Result<Vec<V>> {
+pub(crate) fn parse_rows_at(
+    path: &Path,
+    bytes: &[u8],
+    line_offset: usize,
+    interrupted: &AtomicBool,
+) -> Result<(Vec<V>, usize)> {
+    crate::checkpoint(interrupted)?;
     let text = normalized(bytes);
     let mut rows = Vec::new();
+    let mut phys_lines = 0usize;
     for (index, line) in text.split_inclusive('\n').enumerate() {
+        if index > 0 && index % 256 == 0 {
+            crate::checkpoint(interrupted)?;
+        }
+        phys_lines += 1;
         if line
             .chars()
             .all(|c| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
         {
             continue;
         }
+        let line_no = line_offset + index + 1;
         let row = V::parse(line.as_bytes()).map_err(|_| {
             format!(
-                "{}:{} is not valid JSON: {}",
+                "{}:{line_no} is not valid JSON: {}",
                 path.display(),
-                index + 1,
                 crate::diagnostic::json(line)
             )
         })?;
         if !matches!(row, V::Obj(_)) {
-            return Err(format!(
-                "{}:{} is not a JSON object",
-                path.display(),
-                index + 1
-            ));
+            return Err(format!("{}:{line_no} is not a JSON object", path.display()));
         }
         rows.push(row);
     }
-    Ok(rows)
+    crate::checkpoint(interrupted)?;
+    Ok((rows, phys_lines))
+}
+
+pub fn parse_rows(path: &Path, bytes: &[u8]) -> Result<Vec<V>> {
+    parse_rows_at(path, bytes, 0, &AtomicBool::new(false)).map(|(rows, _)| rows)
 }
 pub fn read_rows(path: &Path) -> Result<Vec<V>> {
     parse_rows(path, &read_bytes(path)?)
@@ -549,4 +568,399 @@ pub(crate) fn follow_bytes(path: &Path, bytes: &[u8]) -> Result<Vec<(V, oms_cont
             Ok((row, ordered))
         })
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LedgerPrefixMeta {
+    pub(crate) repo_id: (u64, u64),
+    pub(crate) oms_id: (u64, u64),
+    pub(crate) parent_id: (u64, u64),
+    pub(crate) file_id: (u64, u64),
+    pub(crate) offset: u64,
+    pub(crate) prefix_sha256: [u8; 32],
+    pub(crate) unterminated: bool,
+}
+
+pub(crate) enum EventsReadSnapshot {
+    Absent {
+        canonical_repo: PathBuf,
+    },
+    Incremental {
+        canonical_repo: PathBuf,
+        path: PathBuf,
+        meta: LedgerPrefixMeta,
+        delta: Vec<u8>,
+    },
+    Full {
+        canonical_repo: PathBuf,
+        path: PathBuf,
+        meta: LedgerPrefixMeta,
+        bytes: Vec<u8>,
+    },
+}
+
+struct AncestorIds {
+    repo: (u64, u64),
+    oms: (u64, u64),
+    lifecycle: (u64, u64),
+}
+
+fn file_stamp(m: &fs::Metadata) -> (i64, i64, i64, i64) {
+    (m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec())
+}
+
+fn map_dir_open_err(e: rustix::io::Errno) -> String {
+    match e {
+        rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => {
+            "ledger parent must be a real directory".into()
+        }
+        _ => e.to_string(),
+    }
+}
+
+fn verify_dir_identity(path: &Path, expected: (u64, u64)) -> Result<()> {
+    let m = fs::symlink_metadata(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            "ledger pathname disappeared during access".to_string()
+        } else {
+            err.to_string()
+        }
+    })?;
+    if !m.is_dir() {
+        return Err("ledger parent must be a real directory".into());
+    }
+    if (m.dev(), m.ino()) != expected {
+        return Err("ledger pathname changed during access".into());
+    }
+    Ok(())
+}
+
+fn verify_ancestors(
+    canonical_repo: &Path,
+    repo_id: (u64, u64),
+    oms_id: Option<(u64, u64)>,
+    lifecycle_id: Option<(u64, u64)>,
+) -> Result<()> {
+    verify_dir_identity(canonical_repo, repo_id)?;
+    if let Some(oms) = oms_id {
+        verify_dir_identity(&canonical_repo.join(".oms"), oms)?;
+    }
+    if let Some(lifecycle) = lifecycle_id {
+        verify_dir_identity(&canonical_repo.join(".oms/lifecycle"), lifecycle)?;
+    }
+    Ok(())
+}
+
+fn hash_prefix(
+    file: &mut File,
+    buf: &mut [u8],
+    prefix_len: u64,
+    hasher: &mut Sha256,
+    interrupted: &AtomicBool,
+) -> Result<bool> {
+    let mut remaining = prefix_len;
+    while remaining > 0 {
+        crate::checkpoint(interrupted)?;
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        match file.read(&mut buf[..to_read]) {
+            Ok(0) => return Ok(false),
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                remaining -= n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(true)
+}
+
+const INITIAL_READ_CAP: u64 = 65_536;
+
+pub(crate) fn new_read_vec(expected_remaining: u64) -> Result<Vec<u8>> {
+    isize::try_from(expected_remaining)
+        .map_err(|_| "ledger exceeds addressable memory".to_string())?;
+    let initial = expected_remaining.min(INITIAL_READ_CAP) as usize;
+    let mut out = Vec::new();
+    out.try_reserve(initial)
+        .map_err(|_| "ledger exceeds available memory".to_string())?;
+    Ok(out)
+}
+
+pub(crate) fn read_into(
+    file: &mut File,
+    buf: &mut [u8],
+    expected_remaining: u64,
+    hasher: &mut Sha256,
+    out: &mut Vec<u8>,
+    interrupted: &AtomicBool,
+) -> Result<bool> {
+    let mut remaining = expected_remaining;
+    while remaining > 0 {
+        crate::checkpoint(interrupted)?;
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        if to_read == 0 {
+            return Err("read buffer must not be empty".into());
+        }
+        match file.read(&mut buf[..to_read]) {
+            Ok(0) => return Ok(false),
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                out.try_reserve(n)
+                    .map_err(|_| "ledger exceeds available memory".to_string())?;
+                out.extend_from_slice(&buf[..n]);
+                remaining -= n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    loop {
+        crate::checkpoint(interrupted)?;
+        let mut probe = [0u8; 1];
+        match file.read(&mut probe) {
+            Ok(0) => return Ok(true),
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+fn verify_read_stable(
+    ledger: &Ledger,
+    canonical_repo: &Path,
+    ancestors: &AncestorIds,
+    expected_len: u64,
+    actual_len: u64,
+    stamp0: (i64, i64, i64, i64),
+) -> Result<bool> {
+    ledger.check()?;
+    verify_ancestors(
+        canonical_repo,
+        ancestors.repo,
+        Some(ancestors.oms),
+        Some(ancestors.lifecycle),
+    )?;
+    let m1 = ledger.file.metadata().map_err(|e| e.to_string())?;
+    Ok(actual_len == expected_len && m1.len() == expected_len && file_stamp(&m1) == stamp0)
+}
+
+fn open_verified_child_dir(
+    parent_fd: &File,
+    child_path: &Path,
+    name: &str,
+    dir_flags: OFlags,
+) -> Result<Option<(File, (u64, u64))>> {
+    let file: File = match rfs::openat(parent_fd, name, dir_flags, Mode::empty()) {
+        Ok(fd) => fd.into(),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(map_dir_open_err(e)),
+    };
+    let meta = fs::symlink_metadata(child_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "ledger pathname disappeared during access".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+    let opened = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_dir() {
+        return Err("ledger parent must be a real directory".into());
+    }
+    if !same(&meta, &opened) {
+        return Err("ledger pathname changed during access".into());
+    }
+    Ok(Some((file, (opened.dev(), opened.ino()))))
+}
+
+pub(crate) fn read_events_snapshot(
+    canonical_repo: PathBuf,
+    prev: Option<&LedgerPrefixMeta>,
+    interrupted: &AtomicBool,
+) -> Result<EventsReadSnapshot> {
+    const CHUNK_SIZE: usize = 65_536;
+
+    crate::checkpoint(interrupted)?;
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+
+    let repo_before = fs::symlink_metadata(&canonical_repo).map_err(|e| e.to_string())?;
+    if !repo_before.is_dir() {
+        return Err("ledger parent must be a real directory".into());
+    }
+    let repo_file: File = rfs::open(&canonical_repo, dir_flags, Mode::empty())
+        .map_err(map_dir_open_err)?
+        .into();
+    let repo_opened = repo_file.metadata().map_err(|e| e.to_string())?;
+    if !repo_opened.is_dir() || !same(&repo_before, &repo_opened) {
+        return Err("ledger pathname changed during access".into());
+    }
+    let repo_id = (repo_opened.dev(), repo_opened.ino());
+
+    let Some((oms_file, oms_id)) =
+        open_verified_child_dir(&repo_file, &canonical_repo.join(".oms"), ".oms", dir_flags)?
+    else {
+        verify_ancestors(&canonical_repo, repo_id, None, None)?;
+        return Ok(EventsReadSnapshot::Absent { canonical_repo });
+    };
+
+    let Some((_lifecycle_file, lifecycle_id)) = open_verified_child_dir(
+        &oms_file,
+        &canonical_repo.join(".oms/lifecycle"),
+        "lifecycle",
+        dir_flags,
+    )?
+    else {
+        verify_ancestors(&canonical_repo, repo_id, Some(oms_id), None)?;
+        return Ok(EventsReadSnapshot::Absent { canonical_repo });
+    };
+    verify_ancestors(&canonical_repo, repo_id, Some(oms_id), Some(lifecycle_id))?;
+
+    let path = event_path(&canonical_repo);
+    let mut ledger = match Ledger::open(&path, false, false) {
+        Ok(ledger) => ledger,
+        Err(e) => {
+            if fs::symlink_metadata(&path)
+                .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+            {
+                verify_ancestors(&canonical_repo, repo_id, Some(oms_id), Some(lifecycle_id))?;
+                return Ok(EventsReadSnapshot::Absent { canonical_repo });
+            }
+            return Err(e);
+        }
+    };
+    if (ledger.parent_before.dev(), ledger.parent_before.ino()) != lifecycle_id {
+        return Err("ledger pathname changed during access".into());
+    }
+    verify_ancestors(&canonical_repo, repo_id, Some(oms_id), Some(lifecycle_id))?;
+
+    let ancestors = AncestorIds {
+        repo: repo_id,
+        oms: oms_id,
+        lifecycle: lifecycle_id,
+    };
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut allow_incremental = prev.is_some();
+    let max_attempts = if allow_incremental { 4 } else { 3 };
+
+    for _ in 0..max_attempts {
+        crate::checkpoint(interrupted)?;
+        ledger
+            .file
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| e.to_string())?;
+        let m0 = ledger.file.metadata().map_err(|e| e.to_string())?;
+        if !regular(&m0) {
+            return Err("ledger must be a regular non-linked file".into());
+        }
+        let expected_len = m0.len();
+        let file_id = (m0.dev(), m0.ino());
+        let stamp0 = file_stamp(&m0);
+
+        if allow_incremental
+            && let Some(p) = prev.filter(|p| {
+                p.repo_id == ancestors.repo
+                    && p.oms_id == ancestors.oms
+                    && p.parent_id == ancestors.lifecycle
+                    && p.file_id == file_id
+                    && !p.unterminated
+                    && expected_len >= p.offset
+            })
+        {
+            let mut hasher = Sha256::new();
+            if !hash_prefix(
+                &mut ledger.file,
+                &mut buf,
+                p.offset,
+                &mut hasher,
+                interrupted,
+            )? {
+                continue;
+            }
+            let prefix_digest: [u8; 32] = hasher.clone().finalize().into();
+            if prefix_digest != p.prefix_sha256 {
+                allow_incremental = false;
+                continue;
+            }
+            let delta_len = expected_len - p.offset;
+            let mut delta = new_read_vec(delta_len)?;
+            if !read_into(
+                &mut ledger.file,
+                &mut buf,
+                delta_len,
+                &mut hasher,
+                &mut delta,
+                interrupted,
+            )? {
+                continue;
+            }
+            let actual_len = p.offset.saturating_add(delta.len() as u64);
+            if !verify_read_stable(
+                &ledger,
+                &canonical_repo,
+                &ancestors,
+                expected_len,
+                actual_len,
+                stamp0,
+            )? {
+                continue;
+            }
+            let unterminated = !delta.is_empty() && delta.last() != Some(&b'\n');
+            return Ok(EventsReadSnapshot::Incremental {
+                canonical_repo,
+                path,
+                meta: LedgerPrefixMeta {
+                    repo_id: ancestors.repo,
+                    oms_id: ancestors.oms,
+                    parent_id: ancestors.lifecycle,
+                    file_id,
+                    offset: expected_len,
+                    prefix_sha256: hasher.finalize().into(),
+                    unterminated,
+                },
+                delta,
+            });
+        }
+
+        // Cold Full Read: no prior entry, metadata/inode mismatch, shrunken, unterminated, or prefix mismatch.
+        let mut hasher = Sha256::new();
+        let mut bytes = new_read_vec(expected_len)?;
+        if !read_into(
+            &mut ledger.file,
+            &mut buf,
+            expected_len,
+            &mut hasher,
+            &mut bytes,
+            interrupted,
+        )? {
+            continue;
+        }
+        if !verify_read_stable(
+            &ledger,
+            &canonical_repo,
+            &ancestors,
+            expected_len,
+            bytes.len() as u64,
+            stamp0,
+        )? {
+            continue;
+        }
+        let unterminated = !bytes.is_empty() && bytes.last() != Some(&b'\n');
+        return Ok(EventsReadSnapshot::Full {
+            canonical_repo,
+            path,
+            meta: LedgerPrefixMeta {
+                repo_id: ancestors.repo,
+                oms_id: ancestors.oms,
+                parent_id: ancestors.lifecycle,
+                file_id,
+                offset: expected_len,
+                prefix_sha256: hasher.finalize().into(),
+                unterminated,
+            },
+            bytes,
+        });
+    }
+
+    Err("ledger changed during access".into())
 }

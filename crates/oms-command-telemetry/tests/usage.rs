@@ -3,7 +3,7 @@ use oms_command_telemetry::store::budget::{
     self, Limit, Operation, OperationState, PhysicalClaim, Policy,
 };
 use oms_command_telemetry::store::usage::{
-    self, Cost, Cumulative, Identity, Phase, Receipt, Usage,
+    self, AttributedCall, AttributedUsage, Cost, Cumulative, Identity, Phase, Receipt, Usage,
 };
 use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::AtomicBool;
@@ -17,6 +17,12 @@ fn identity(call: &str) -> Identity {
         account: Some("account_one".into()),
         goal_id: Some("goal_one".into()),
         ..Identity::default()
+    }
+}
+fn bound_identity(call: &str) -> Identity {
+    Identity {
+        attempt_id: Some(format!("att_{call}")),
+        ..identity(call)
     }
 }
 fn observe(mut receipt: Receipt, revision: u64, tokens: u64, cost: Cost) -> Receipt {
@@ -1784,7 +1790,11 @@ fn resource_partial_registration_and_reviewer_headroom_keep_liability() {
 fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let root = Temp::new();
     let stop = AtomicBool::new(false);
-    let initial = usage::begin(&root.0, identity("call_one"), None, &stop).unwrap();
+    let identity = Identity {
+        account: None,
+        ..bound_identity("call_one")
+    };
+    let initial = usage::begin(&root.0, identity, None, &stop).unwrap();
     let raw = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
     let row = oms_context::parse_json(&raw).unwrap();
     assert_eq!(
@@ -1818,7 +1828,19 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let mut partial = observe(initial.clone(), 2, 40, Cost::Unknown);
     partial.phase = Phase::Partial;
     usage::record(&root.0, &partial, &stop).unwrap();
-    let final_ = observe(initial.clone(), 4, 100, Cost::Reported(90));
+    assert_eq!(
+        usage::load(&root.0).unwrap().attributed_calls()[0].usage,
+        AttributedUsage::default()
+    );
+    let mut final_ = observe(initial.clone(), 4, 100, Cost::Reported(90));
+    final_.usage = Usage {
+        input_tokens: Some(70),
+        output_tokens: Some(30),
+        cache_read_tokens: Some(20),
+        cache_write_tokens: Some(0),
+        cache_in_input: Some(true),
+        total_tokens: None,
+    };
     assert!(usage::record(&root.0, &final_, &stop).unwrap());
     let before_duplicate = std::fs::metadata(root.0.join(usage::RECEIPTS)).unwrap();
     assert!(!usage::record(&root.0, &final_, &stop).unwrap());
@@ -1837,7 +1859,52 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let current = usage::load(&root.0).unwrap();
     assert_eq!(current.calls[0].tokens, Some(100));
     assert_eq!(current.calls[0].cost_microusd, Some(90));
+    assert_eq!(
+        current.attributed_calls(),
+        [AttributedCall {
+            call_id: "call_one",
+            attempt_id: "att_call_one",
+            provider: "codex",
+            usage: AttributedUsage {
+                input_tokens: Some(70),
+                output_tokens: Some(30),
+                cache_read_tokens: Some(20),
+                cache_write_tokens: Some(0),
+                total_tokens: Some(100),
+            }
+        }]
+    );
+    let spent = budget::project(
+        &Policy {
+            tokens: Some(Limit {
+                max: 1000,
+                per_call: 1000,
+            }),
+            cost_microusd: Some(Limit {
+                max: 1000,
+                per_call: 1000,
+            }),
+        },
+        &current,
+        &[Operation {
+            id: "op_call_one",
+            state: OperationState::Settled,
+        }],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(spent.tokens.committed, 100);
+    assert_eq!(spent.cost_microusd.committed, 90);
     let before = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let mut reassigned = final_.clone();
+    reassigned.revision = 5;
+    reassigned.identity.attempt_id = Some("att_other".into());
+    assert!(
+        usage::record(&root.0, &reassigned, &stop)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting usage call identity")
+    );
     let conflict = observe(initial.clone(), 4, 101, Cost::Reported(90));
     assert!(
         usage::record(&root.0, &conflict, &stop)
@@ -1850,6 +1917,13 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
     let corrected = usage::load(&root.0).unwrap();
     assert_eq!(corrected.calls[0].tokens, Some(75));
     assert_eq!(corrected.calls[0].cost_microusd, Some(0));
+    assert_eq!(
+        corrected.attributed_calls()[0].usage,
+        AttributedUsage {
+            total_tokens: Some(75),
+            ..AttributedUsage::default()
+        }
+    );
     // The existing read-only telemetry verb exposes the canonical lifetime
     // authority even when the artifact index has no retained rows.
     let report = root.call(&["--json"]);
@@ -1873,7 +1947,13 @@ fn cumulative_resume_has_a_baseline_and_separate_account_session_identity() {
         session_id: "session_one".into(),
         baseline_unknown: false,
     };
-    let a = usage::begin(&root.0, identity("call_one"), Some(session.clone()), &stop).unwrap();
+    let a = usage::begin(
+        &root.0,
+        bound_identity("call_one"),
+        Some(session.clone()),
+        &stop,
+    )
+    .unwrap();
     assert!(
         usage::begin(
             &root.0,
@@ -1891,7 +1971,7 @@ fn cumulative_resume_has_a_baseline_and_separate_account_session_identity() {
     .unwrap();
     let b = usage::begin(
         &root.0,
-        identity("call_two"),
+        bound_identity("call_two"),
         Some(Cumulative {
             baseline_unknown: true,
             ..session.clone()
@@ -1905,13 +1985,13 @@ fn cumulative_resume_has_a_baseline_and_separate_account_session_identity() {
         &stop,
     )
     .unwrap();
-    let mut other_account = identity("call_three");
+    let mut other_account = bound_identity("call_three");
     other_account.account = Some("account_two".into());
     let c = usage::begin(&root.0, other_account, Some(session), &stop).unwrap();
     usage::record(&root.0, &observe(c, 1, 25, Cost::Reported(250)), &stop).unwrap();
     let d = usage::begin(
         &root.0,
-        identity("call_four"),
+        bound_identity("call_four"),
         Some(Cumulative {
             session_id: "session_two".into(),
             baseline_unknown: true,
@@ -1929,15 +2009,488 @@ fn cumulative_resume_has_a_baseline_and_separate_account_session_identity() {
     // A late correction changes the old allocation and its following delta,
     // while the session's latest measured total still counts exactly once.
     usage::record(&root.0, &observe(a, 2, 90, Cost::Reported(800)), &stop).unwrap();
-    let calls = usage::load(&root.0).unwrap().calls;
+    let projection = usage::load(&root.0).unwrap();
+    let calls = &projection.calls;
     assert_eq!(calls[0].tokens, Some(90));
     assert_eq!(calls[1].tokens, Some(60));
     assert_eq!(calls[1].cost_microusd, Some(600));
+    assert_eq!(
+        projection
+            .attributed_calls()
+            .iter()
+            .map(|c| (c.call_id, c.usage.total_tokens))
+            .collect::<Vec<_>>(),
+        [
+            ("call_one", Some(90)),
+            ("call_two", Some(60)),
+            ("call_three", Some(25)),
+            ("call_four", None),
+        ]
+    );
     usage::record(&root.0, &observe(b, 2, 85, Cost::Reported(700)), &stop).unwrap();
     let calls = usage::load(&root.0).unwrap().calls;
     assert!(calls[1].conflict);
     assert_eq!(calls[1].tokens, None);
 }
+
+#[test]
+fn cumulative_attribution_does_not_bridge_unobserved_dimensions() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let record = |call: &str,
+                  phase,
+                  cache_in_input,
+                  [input, output, read, write, total]: [Option<u64>; 5]| {
+        let identity = if matches!(call, "unbound" | "unbound_gap") {
+            identity(call)
+        } else {
+            bound_identity(call)
+        };
+        let mut receipt = usage::begin(
+            &root.0,
+            identity,
+            Some(Cumulative {
+                session_id: "session_one".into(),
+                baseline_unknown: call != "fresh",
+            }),
+            &stop,
+        )
+        .unwrap();
+        if call == "unknown" {
+            let pending = usage::load(&root.0).unwrap();
+            assert_eq!(
+                pending.attributed_calls().last().unwrap().usage,
+                AttributedUsage::default()
+            );
+        }
+        receipt.revision = 1;
+        receipt.phase = phase;
+        receipt.usage = Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            cache_in_input: Some(cache_in_input),
+            total_tokens: total,
+        };
+        usage::record(&root.0, &receipt, &stop).unwrap();
+        receipt
+    };
+    let inclusive = |call, totals| record(call, Phase::Final, true, totals);
+    inclusive("fresh", [60, 20, 40, 5, 90].map(Some));
+    inclusive("unbound", [80, 25, 50, 7, 115].map(Some));
+    inclusive("no_cache", [Some(95), Some(25), None, Some(9), Some(130)]);
+    inclusive("no_total", [Some(105), Some(30), Some(55), Some(10), None]);
+    inclusive("complete", [115, 35, 58, 10, 160].map(Some));
+    let mut unknown = record(
+        "unknown",
+        Phase::Unknown,
+        true,
+        [125, 43, 62, 12, 180].map(Some),
+    );
+    inclusive("reanchor", [140, 48, 65, 15, 195].map(Some));
+    inclusive("resumed", [150, 53, 70, 15, 210].map(Some));
+    record(
+        "basis_changed",
+        Phase::Final,
+        false,
+        [40, 57, 73, 16, 250].map(Some),
+    );
+    record(
+        "same_basis",
+        Phase::Final,
+        false,
+        [45, 60, 75, 16, 260].map(Some),
+    );
+    record(
+        "unbound_gap",
+        Phase::Unknown,
+        false,
+        [50, 62, 75, 16, 270].map(Some),
+    );
+    record(
+        "after_unbound_gap",
+        Phase::Final,
+        false,
+        [55, 64, 76, 16, 280].map(Some),
+    );
+
+    let assert_attribution = || {
+        let projection = usage::load(&root.0).unwrap();
+        let calls = projection.attributed_calls();
+        let expected = [
+            ("fresh", [60, 20, 40, 5, 90].map(Some)),
+            ("no_cache", [Some(15), Some(0), None, Some(2), Some(15)]),
+            ("no_total", [Some(10), Some(5), None, Some(1), None]),
+            ("complete", [Some(10), Some(5), Some(3), Some(0), None]),
+            ("unknown", [None; 5]),
+            ("reanchor", [None; 5]),
+            ("resumed", [10, 5, 5, 0, 15].map(Some)),
+            ("basis_changed", [None, Some(4), Some(3), Some(1), Some(40)]),
+            ("same_basis", [5, 3, 2, 0, 10].map(Some)),
+            ("after_unbound_gap", [None; 5]),
+        ];
+        assert_eq!(calls.len(), expected.len());
+        for (call, (id, [input, output, read, write, total])) in calls.iter().zip(expected) {
+            assert_eq!(call.call_id, id);
+            assert_eq!(call.attempt_id, format!("att_{id}"));
+            assert_eq!(
+                call.usage,
+                AttributedUsage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_read_tokens: read,
+                    cache_write_tokens: write,
+                    total_tokens: total,
+                },
+                "{id}"
+            );
+        }
+    };
+    assert_attribution();
+    unknown.revision = 2;
+    unknown.phase = Phase::Partial;
+    usage::record(&root.0, &unknown, &stop).unwrap();
+    assert_attribution();
+    unknown.revision = 3;
+    unknown.phase = Phase::Pending;
+    unknown.usage = Usage::default();
+    usage::record(&root.0, &unknown, &stop).unwrap();
+    assert_attribution();
+}
+
+#[test]
+fn cumulative_attribution_withholds_resets_and_contradictory_deltas() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let cases = [
+        ("fresh", 50, 20, 10, 90, Some(90)),
+        ("cost_decrease", 55, 23, 12, 100, Some(10)),
+        ("input_decrease", 4, 25, 4, 110, None),
+        ("resume_after_decrease", 10, 30, 6, 120, None),
+        ("anchored_after_decrease", 13, 32, 7, 130, Some(10)),
+        ("cache_delta_exceeds_input", 14, 33, 11, 140, None),
+        ("resume_after_cache", 18, 36, 12, 147, None),
+        ("anchored_after_cache", 22, 39, 13, 155, Some(8)),
+        ("total_delta_too_small", 30, 45, 14, 165, None),
+        ("resume_after_total", 31, 47, 15, 170, None),
+        ("anchored_after_total", 32, 48, 16, 175, Some(5)),
+        ("repeated_fresh", 33, 49, 17, 180, None),
+        ("resume_after_fresh", 35, 50, 18, 190, None),
+        ("anchored_after_fresh", 37, 52, 19, 200, Some(10)),
+    ];
+    for (call, input, output, read, total, _) in cases {
+        let receipt = usage::begin(
+            &root.0,
+            bound_identity(call),
+            Some(Cumulative {
+                session_id: "session_one".into(),
+                baseline_unknown: !matches!(call, "fresh" | "repeated_fresh"),
+            }),
+            &stop,
+        )
+        .unwrap();
+        let cost = match call {
+            "fresh" => 100,
+            "cost_decrease" => 90,
+            _ => total,
+        };
+        let mut receipt = observe(receipt, 1, total, Cost::Reported(cost));
+        receipt.usage.input_tokens = Some(input);
+        receipt.usage.output_tokens = Some(output);
+        receipt.usage.cache_read_tokens = Some(read);
+        receipt.usage.cache_in_input = Some(true);
+        usage::record(&root.0, &receipt, &stop).unwrap();
+    }
+    let projection = usage::load(&root.0).unwrap();
+    assert!(projection.calls[1].conflict, "legacy cost decrease");
+    assert!(!projection.calls[2].conflict, "legacy sees growing totals");
+    let calls = projection.attributed_calls();
+    assert_eq!(calls.len(), cases.len());
+    for (call, (id, _, _, _, _, total)) in calls.iter().zip(cases) {
+        assert_eq!(call.call_id, id);
+        assert_eq!(call.usage.total_tokens, total, "{id}");
+        if total.is_none() {
+            assert_eq!(call.usage, AttributedUsage::default(), "{id}");
+        }
+    }
+}
+
+#[test]
+fn cumulative_attribution_fences_only_the_ambiguous_provider_session() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let account_one = ("codex", Some("one"), "one");
+    let account_two = ("codex", Some("two"), "one");
+    let account_three = ("codex", Some("three"), "one");
+    let other_provider = ("agy", Some("one"), "one");
+    let other_session = ("codex", Some("one"), "two");
+    let cases = [
+        ("fresh", account_one, true, 20, Some(20)),
+        ("other_account", account_two, true, 30, Some(30)),
+        ("other_provider", other_provider, true, 40, Some(40)),
+        ("other_session", other_session, true, 50, Some(50)),
+        ("late_unnamed_fresh", ("codex", None, "one"), true, 55, None),
+        ("repeated_fresh", account_one, true, 57, None),
+        ("resume_one", account_one, false, 60, None),
+        ("resume_two", account_two, false, 65, None),
+        ("unproven_fresh", account_three, true, 70, None),
+        ("next_one", account_one, false, 75, Some(15)),
+        ("next_two", account_two, false, 80, Some(15)),
+        ("next_three", account_three, false, 85, Some(15)),
+        ("next_provider", other_provider, false, 90, Some(50)),
+        ("next_session", other_session, false, 95, Some(45)),
+    ];
+    for (call, (provider, account, session), fresh, total, _) in cases {
+        let receipt = usage::begin(
+            &root.0,
+            Identity {
+                provider: provider.into(),
+                account: account.map(str::to_owned),
+                ..bound_identity(call)
+            },
+            Some(Cumulative {
+                session_id: session.into(),
+                baseline_unknown: !fresh,
+            }),
+            &stop,
+        )
+        .unwrap();
+        usage::record(&root.0, &observe(receipt, 1, total, Cost::Unknown), &stop).unwrap();
+    }
+    let projection = usage::load(&root.0).unwrap();
+    let calls = projection.attributed_calls();
+    assert_eq!(calls.len(), cases.len());
+    for (call, (id, _, _, _, total)) in calls.iter().zip(cases) {
+        assert_eq!(call.call_id, id);
+        assert_eq!(call.usage.total_tokens, total, "{id}");
+    }
+}
+
+#[test]
+fn attribution_uses_checked_standalone_totals() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let cases = [
+        (
+            "claude",
+            Usage {
+                input_tokens: Some(8),
+                output_tokens: Some(5),
+                cache_read_tokens: Some(700),
+                cache_write_tokens: Some(30),
+                cache_in_input: Some(false),
+                total_tokens: None,
+            },
+            Some(743),
+        ),
+        (
+            "agy",
+            Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(10),
+                cache_in_input: Some(true),
+                total_tokens: Some(42),
+                ..Usage::default()
+            },
+            Some(42),
+        ),
+        (
+            "codex",
+            Usage {
+                input_tokens: Some(u64::MAX),
+                output_tokens: Some(1),
+                cache_in_input: Some(true),
+                ..Usage::default()
+            },
+            None,
+        ),
+    ];
+    for (provider, usage, _) in &cases {
+        let receipt = usage::begin(
+            &root.0,
+            Identity {
+                provider: (*provider).into(),
+                ..bound_identity(provider)
+            },
+            None,
+            &stop,
+        )
+        .unwrap();
+        let mut receipt = observe(receipt, 1, 0, Cost::Unknown);
+        receipt.usage = usage.clone();
+        usage::record(&root.0, &receipt, &stop).unwrap();
+    }
+    let projection = usage::load(&root.0).unwrap();
+    let calls = projection.attributed_calls();
+    assert_eq!(calls.len(), cases.len());
+    for (call, (provider, _, total)) in calls.iter().zip(cases) {
+        assert_eq!(call.call_id, provider);
+        assert_eq!(call.provider, provider);
+        assert_eq!(call.usage.total_tokens, total, "{provider}");
+    }
+}
+
+#[test]
+fn cumulative_attribution_derives_only_comparable_totals() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let inclusive = |input, output, total| Usage {
+        input_tokens: Some(input),
+        output_tokens: Some(output),
+        cache_read_tokens: Some(input / 2),
+        cache_in_input: Some(true),
+        total_tokens: total,
+        ..Usage::default()
+    };
+    let baseline = inclusive(10, 5, None);
+    let current = inclusive(14, 7, None);
+    let explicit = |usage: &Usage, tokens| Usage {
+        total_tokens: Some(tokens),
+        ..usage.clone()
+    };
+    let exclusive = |usage: &Usage, read, write| Usage {
+        cache_read_tokens: read,
+        cache_write_tokens: write,
+        cache_in_input: Some(false),
+        ..usage.clone()
+    };
+    let old_exclusive = exclusive(&baseline, Some(30), Some(4));
+    let new_exclusive = exclusive(&current, Some(36), Some(5));
+    let cases = [
+        ("inclusive", baseline.clone(), current.clone(), Some(6)),
+        (
+            "exclusive",
+            old_exclusive.clone(),
+            new_exclusive.clone(),
+            Some(13),
+        ),
+        (
+            "matching_prior",
+            explicit(&baseline, 15),
+            current.clone(),
+            Some(6),
+        ),
+        (
+            "matching_current",
+            baseline.clone(),
+            explicit(&current, 21),
+            Some(6),
+        ),
+        (
+            "mismatched_prior",
+            explicit(&baseline, 16),
+            current.clone(),
+            None,
+        ),
+        (
+            "mismatched_current",
+            baseline.clone(),
+            explicit(&current, 22),
+            None,
+        ),
+        ("basis_switch", baseline, new_exclusive.clone(), None),
+        (
+            "missing_cache_write",
+            exclusive(&old_exclusive, Some(30), None),
+            new_exclusive,
+            None,
+        ),
+        (
+            "overflowing_snapshot",
+            inclusive(u64::MAX - 10, 20, None),
+            inclusive(u64::MAX - 9, 21, None),
+            None,
+        ),
+    ];
+    for (session, baseline, current, expected) in cases {
+        for (baseline_unknown, usage) in [(false, baseline), (true, current)] {
+            let call = format!("{session}_{baseline_unknown}");
+            let receipt = usage::begin(
+                &root.0,
+                bound_identity(&call),
+                Some(Cumulative {
+                    session_id: session.into(),
+                    baseline_unknown,
+                }),
+                &stop,
+            )
+            .unwrap();
+            let mut receipt = observe(receipt, 1, 0, Cost::Unknown);
+            receipt.usage = usage;
+            usage::record(&root.0, &receipt, &stop).unwrap();
+        }
+        let projection = usage::load(&root.0).unwrap();
+        let calls = projection.attributed_calls();
+        let resumed = calls.last().unwrap().usage;
+        assert_eq!(resumed.total_tokens, expected, "{session}");
+        assert!(resumed.output_tokens.is_some(), "{session}");
+    }
+}
+
+#[test]
+fn cumulative_attribution_uses_initial_fresh_unnamed_usage_once() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let cases = [
+        ("unnamed_fresh", None, false, 14, Some(14)),
+        ("unnamed_resume", None, true, 20, None),
+        ("named_resume", Some("one"), true, 30, None),
+        ("named_next", Some("one"), true, 35, Some(5)),
+        ("unbound_resume", None, true, 40, None),
+        ("named_reanchor", Some("one"), true, 45, None),
+        ("named_recovered", Some("one"), true, 55, Some(10)),
+        ("unnamed_zero", None, false, 0, Some(0)),
+    ];
+    for (call, account, baseline_unknown, tokens, _) in cases {
+        let identity = if call == "unbound_resume" {
+            identity(call)
+        } else {
+            bound_identity(call)
+        };
+        let receipt = usage::begin(
+            &root.0,
+            Identity {
+                account: account.map(str::to_owned),
+                ..identity
+            },
+            Some(Cumulative {
+                session_id: if call == "unnamed_zero" {
+                    "session_zero"
+                } else {
+                    "session_one"
+                }
+                .into(),
+                baseline_unknown,
+            }),
+            &stop,
+        )
+        .unwrap();
+        let mut receipt = observe(receipt, 1, tokens, Cost::Unknown);
+        if call == "unnamed_fresh" {
+            receipt.usage = Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(4),
+                cache_read_tokens: Some(3),
+                cache_in_input: Some(true),
+                ..Usage::default()
+            };
+        }
+        usage::record(&root.0, &receipt, &stop).unwrap();
+    }
+    let projection = usage::load(&root.0).unwrap();
+    let calls = projection.attributed_calls();
+    assert_eq!(calls.len(), cases.len() - 1);
+    for (call, (id, _, _, _, total)) in calls.iter().zip(
+        cases
+            .into_iter()
+            .filter(|(id, _, _, _, _)| *id != "unbound_resume"),
+    ) {
+        assert_eq!(call.call_id, id);
+        assert_eq!(call.usage.total_tokens, total, "{id}");
+    }
+}
+
 #[test]
 fn cumulative_scope_and_cost_basis_cannot_change_or_mix() {
     let root = Temp::new();

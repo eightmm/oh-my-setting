@@ -14,11 +14,104 @@ use std::{
     time::Duration,
 };
 const MAX: usize = 1024 * 1024 * 1024;
+pub(crate) const RELEASE_RECEIPT: &str = "tool-releases.json";
+
+fn catalog() -> Value {
+    json!({
+        "schema": 2,
+        "node": {"channel": "lts"},
+        "uv": {},
+        "gh": {},
+        "antigravity": {},
+        "npm": {
+            "claude": {"package": "@anthropic-ai/claude-code", "binary": "claude"},
+            "codex": {"package": "@openai/codex", "binary": "codex"},
+            "ntn": {"package": "ntn", "binary": "ntn"}
+        }
+    })
+}
+
+fn release_policy(cwd: &Path, custom: Option<&Path>) -> Result<Value> {
+    let table = match custom {
+        Some(path) => r::value(&cwd.join(path))?,
+        None => catalog(),
+    };
+    if table["schema"] != 2 {
+        return r::fail("unsupported tool lock schema");
+    }
+    Ok(table)
+}
+
+fn installed(paths: &Paths, name: &str) -> Option<PathBuf> {
+    r::find(name, &paths.cwd).or_else(|| {
+        let path = paths.home.join(".local/bin").join(name);
+        fs::metadata(&path)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .then_some(path)
+    })
+}
+
+fn npm_runtime(paths: &Paths, flag: &AtomicBool) -> Result<Option<(PathBuf, OsString)>> {
+    let node = installed(paths, "node");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        node.iter()
+            .map(|binary| binary.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&inherited)),
+    )
+    .map_err(|_| {
+        r::Error(
+            2,
+            "Node runtime directory cannot be represented in PATH".into(),
+        )
+    })?;
+    let local = paths.home.join(".local/bin/npm");
+    let mut candidates = r::find("npm", &paths.cwd).into_iter().collect::<Vec<_>>();
+    if !candidates.contains(&local) {
+        candidates.push(local);
+    }
+    for binary in candidates {
+        if !fs::metadata(&binary).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        {
+            continue;
+        }
+        let probe = r::command_env(
+            &binary,
+            &["--version".into()],
+            &paths.cwd,
+            None,
+            flag,
+            Duration::from_secs(10),
+            &[("PATH", path.as_os_str())],
+        );
+        r::check(flag)?;
+        if probe.is_ok_and(|out| out.0 == 0 && version_number(&out.1).is_some()) {
+            return Ok(Some((binary, path)));
+        }
+    }
+    Ok(None)
+}
+
+fn tool_row<'a>(table: &'a Value, name: &str) -> &'a Value {
+    match name {
+        "claude" | "codex" | "ntn" => &table["npm"][name],
+        "agy" => &table["antigravity"],
+        _ => &table[name],
+    }
+}
+
+fn set_tool(table: &mut Value, name: &str, row: Value) {
+    match name {
+        "claude" | "codex" | "ntn" => table["npm"][name] = row,
+        "agy" => table["antigravity"] = row,
+        _ => table[name] = row,
+    }
+}
 fn scalar<'a>(v: &'a Value, name: &str) -> Result<&'a str> {
     v[name]
         .as_str()
         .filter(|s| !s.is_empty() && !s.contains(['\0', '\n', '\r']))
-        .ok_or_else(|| r::Error(2, format!("invalid tool lock field: {name}")))
+        .ok_or_else(|| r::Error(2, format!("invalid tool release field: {name}")))
 }
 fn version(value: &str) -> Result<()> {
     if !regex::Regex::new(r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
@@ -32,7 +125,7 @@ fn version(value: &str) -> Result<()> {
 fn https(url: &str) -> Result<()> {
     let rest = url
         .strip_prefix("https://")
-        .ok_or_else(|| r::Error(2, "locked download must use HTTPS".into()))?;
+        .ok_or_else(|| r::Error(2, "tool download must use HTTPS".into()))?;
     let host = rest.split('/').next().unwrap_or("");
     if host.is_empty()
         || host.contains(['@', ':', '?', '#'])
@@ -40,7 +133,7 @@ fn https(url: &str) -> Result<()> {
         || url.contains("${")
         || url.contains("latest")
     {
-        return r::fail("locked download must be an exact HTTPS URL");
+        return r::fail("tool download must be an exact HTTPS URL");
     }
     Ok(())
 }
@@ -64,12 +157,25 @@ fn call(
     flag: &AtomicBool,
     large: bool,
 ) -> Result<Vec<u8>> {
-    let binary = r::find(name, &paths.cwd)
-        .or_else(|| {
-            let p = paths.home.join(".local/bin").join(name);
-            p.is_file().then_some(p)
-        })
-        .ok_or_else(|| r::Error(2, format!("{name} required for verified tool installation")))?;
+    let (binary, path) = if name == "npm" {
+        let (binary, path) = npm_runtime(paths, flag)?.ok_or_else(|| {
+            r::Error(
+                2,
+                "working npm required for verified tool installation".into(),
+            )
+        })?;
+        (binary, Some(path))
+    } else {
+        let binary = installed(paths, name).ok_or_else(|| {
+            r::Error(2, format!("{name} required for verified tool installation"))
+        })?;
+        (binary, None)
+    };
+    let environment = path
+        .as_deref()
+        .map(|value| ("PATH", value))
+        .into_iter()
+        .collect::<Vec<_>>();
     let out = r::command_env_limit(
         binary,
         args,
@@ -77,7 +183,7 @@ fn call(
         None,
         flag,
         Duration::from_secs(180),
-        &[],
+        &environment,
         if large { MAX } else { r::LIMIT },
     )?;
     if out.0 != 0 {
@@ -101,7 +207,7 @@ fn checksum(path: &Path, algorithm: &str, expected: &str) -> Result<()> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         || actual != expected
     {
-        return r::fail("locked tool checksum mismatch");
+        return r::fail("tool payload checksum mismatch");
     }
     Ok(())
 }
@@ -354,14 +460,17 @@ fn find_file(root: &Path, name: &str) -> Result<PathBuf> {
     }
     Ok(found.remove(0))
 }
+fn ownership_marker(target: &Path) -> PathBuf {
+    target.with_file_name(format!(
+        "{}.oh-my-setting-managed",
+        target.file_name().unwrap().to_string_lossy()
+    ))
+}
 fn owns(paths: &Paths, target: &Path) -> Result<()> {
     if !r::exists(target) {
         return Ok(());
     }
-    let marker = target.with_file_name(format!(
-        "{}.oh-my-setting-managed",
-        target.file_name().unwrap().to_string_lossy()
-    ));
+    let marker = ownership_marker(target);
     let raw = r::read(&marker, 65536)
         .map_err(|_| r::Error(2, "refusing to replace an unmanaged tool".into()))?;
     let actual = r::hash(&r::read(target, MAX)?);
@@ -403,10 +512,7 @@ fn publish(
     }
     let raw = r::read(source, MAX)?;
     tx.write(target, &raw, 0o755)?;
-    let marker = target.with_file_name(format!(
-        "{}.oh-my-setting-managed",
-        target.file_name().unwrap().to_string_lossy()
-    ));
+    let marker = ownership_marker(target);
     tx.write(
         &marker,
         format!("sha256={}\n", r::hash(&raw)).as_bytes(),
@@ -480,6 +586,327 @@ fn pack(paths: &Paths, row: &Value, dest: &Path, flag: &AtomicBool) -> Result<Pa
     sri(&r::read(&archive, MAX)?, scalar(row, "integrity")?)?;
     Ok(archive)
 }
+/// Stateful custody guard pinning an AGY vendor binary, its parent directory,
+/// and any initial OMS ownership marker across pre-handoff `--version` probes.
+struct AgyMarkerCustody {
+    binary_before: fs::Metadata,
+    directory: fs::File,
+    parent_dev: u64,
+    parent_ino: u64,
+    name: OsString,
+    initial: Option<(rustix::fs::Stat, Vec<u8>)>,
+}
+
+impl AgyMarkerCustody {
+    fn metadata_matches(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        a.dev() == b.dev()
+            && a.ino() == b.ino()
+            && a.size() == b.size()
+            && a.ctime() == b.ctime()
+            && a.ctime_nsec() == b.ctime_nsec()
+            && a.mtime() == b.mtime()
+            && a.mtime_nsec() == b.mtime_nsec()
+    }
+
+    fn stat_matches(a: &rustix::fs::Stat, b: &rustix::fs::Stat) -> bool {
+        a.st_dev == b.st_dev
+            && a.st_ino == b.st_ino
+            && a.st_mode == b.st_mode
+            && a.st_uid == b.st_uid
+            && a.st_gid == b.st_gid
+            && a.st_nlink == b.st_nlink
+            && a.st_size == b.st_size
+            && a.st_ctime == b.st_ctime
+            && a.st_ctime_nsec == b.st_ctime_nsec
+            && a.st_mtime == b.st_mtime
+            && a.st_mtime_nsec == b.st_mtime_nsec
+    }
+
+    fn verify_parent(directory: &fs::File, parent: &Path, dev: u64, ino: u64) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let dir_meta = directory.metadata()?;
+        let parent_meta = fs::symlink_metadata(parent)?;
+        if !dir_meta.is_dir()
+            || !parent_meta.is_dir()
+            || parent_meta.file_type().is_symlink()
+            || (dir_meta.dev(), dir_meta.ino()) != (dev, ino)
+            || (parent_meta.dev(), parent_meta.ino()) != (dev, ino)
+        {
+            return r::fail("AGY ownership marker changed before vendor handoff");
+        }
+        Ok(())
+    }
+
+    fn verify_binary(before: &fs::Metadata, binary: &Path) -> Result<()> {
+        let after = fs::symlink_metadata(binary)?;
+        if !after.is_file()
+            || after.file_type().is_symlink()
+            || !Self::metadata_matches(before, &after)
+        {
+            return r::fail("AGY ownership marker changed before vendor handoff");
+        }
+        Ok(())
+    }
+
+    fn read_verified_marker(
+        directory: &fs::File,
+        name: &OsString,
+        expected: &rustix::fs::Stat,
+    ) -> Result<Vec<u8>> {
+        use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
+        use std::io::Read;
+
+        let fd = openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        let opened = fstat(&fd).map_err(std::io::Error::from)?;
+        if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile
+            || opened.st_nlink != 1
+            || !Self::stat_matches(expected, &opened)
+        {
+            return r::fail("AGY ownership marker changed before vendor handoff");
+        }
+        let expected_len = usize::try_from(expected.st_size)
+            .map_err(|_| r::Error(2, "AGY ownership marker size out of range".into()))?;
+        let mut file = fs::File::from(fd);
+        let mut raw = Vec::with_capacity(expected_len);
+        file.by_ref().take(4097).read_to_end(&mut raw)?;
+        if raw.len() != expected_len {
+            return r::fail("AGY ownership marker changed before vendor handoff");
+        }
+        Ok(raw)
+    }
+
+    fn capture(paths: &Paths, binary: &Path) -> Result<Self> {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, statat};
+        use rustix::io::Errno;
+        use std::os::unix::fs::MetadataExt;
+
+        if !vendor(paths, "agy", binary) {
+            return r::fail("AGY ownership handoff requires its recognized vendor path");
+        }
+        let binary_before = fs::symlink_metadata(binary)?;
+        if !binary_before.is_file() || binary_before.file_type().is_symlink() {
+            return r::fail("AGY ownership handoff requires its recognized vendor path");
+        }
+        let raw_marker = ownership_marker(binary);
+        if let Some(raw_parent) = raw_marker.parent() {
+            let raw_meta = fs::symlink_metadata(raw_parent)?;
+            if !raw_meta.is_dir() || raw_meta.file_type().is_symlink() {
+                return r::fail("AGY ownership marker changed before vendor handoff");
+            }
+        }
+        let marker = r::leaf(&raw_marker)?;
+        let parent = marker
+            .parent()
+            .ok_or_else(|| r::Error(2, "missing AGY ownership marker parent".into()))?;
+        let name = marker
+            .file_name()
+            .ok_or_else(|| r::Error(2, "missing AGY ownership marker name".into()))?
+            .to_os_string();
+        let directory = fs::File::from(
+            open(
+                parent,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(std::io::Error::from)?,
+        );
+        let dir_meta = directory.metadata()?;
+        let (parent_dev, parent_ino) = (dir_meta.dev(), dir_meta.ino());
+        if let Some(raw_parent) = raw_marker.parent()
+            && raw_parent != parent
+        {
+            Self::verify_parent(&directory, raw_parent, parent_dev, parent_ino)?;
+        }
+        Self::verify_parent(&directory, parent, parent_dev, parent_ino)?;
+
+        let initial = match statat(&directory, &name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(Errno::NOENT) => {
+                Self::verify_parent(&directory, parent, parent_dev, parent_ino)?;
+                Self::verify_binary(&binary_before, binary)?;
+                None
+            }
+            Err(error) => return Err(std::io::Error::from(error).into()),
+            Ok(before) => {
+                if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
+                    || before.st_nlink != 1
+                    || before.st_size <= 0
+                    || before.st_size > 4096
+                {
+                    return r::fail("AGY ownership marker changed before vendor handoff");
+                }
+                let raw_bytes = Self::read_verified_marker(&directory, &name, &before)?;
+                owns(paths, binary)?;
+                let after = statat(&directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(std::io::Error::from)?;
+                if FileType::from_raw_mode(after.st_mode) != FileType::RegularFile
+                    || after.st_nlink != 1
+                    || !Self::stat_matches(&before, &after)
+                {
+                    return r::fail("AGY ownership marker changed before vendor handoff");
+                }
+                Self::verify_parent(&directory, parent, parent_dev, parent_ino)?;
+                Self::verify_binary(&binary_before, binary)?;
+                Some((before, raw_bytes))
+            }
+        };
+
+        Ok(Self {
+            binary_before,
+            directory,
+            parent_dev,
+            parent_ino,
+            name,
+            initial,
+        })
+    }
+
+    fn verify_continuity(&self, paths: &Paths, binary: &Path, retire: bool) -> Result<()> {
+        use rustix::fs::{AtFlags, FileType, statat, unlinkat};
+        use rustix::io::Errno;
+
+        if !vendor(paths, "agy", binary) {
+            return r::fail("AGY ownership handoff requires its recognized vendor path");
+        }
+        Self::verify_binary(&self.binary_before, binary)?;
+        let raw_marker = ownership_marker(binary);
+        let marker = r::leaf(&raw_marker)?;
+        let parent = marker
+            .parent()
+            .ok_or_else(|| r::Error(2, "missing AGY ownership marker parent".into()))?;
+        if marker.file_name() != Some(self.name.as_os_str()) {
+            return r::fail("AGY ownership marker changed before vendor handoff");
+        }
+        if let Some(raw_parent) = raw_marker.parent()
+            && raw_parent != parent
+        {
+            Self::verify_parent(
+                &self.directory,
+                raw_parent,
+                self.parent_dev,
+                self.parent_ino,
+            )?;
+        }
+        Self::verify_parent(&self.directory, parent, self.parent_dev, self.parent_ino)?;
+
+        match (
+            &self.initial,
+            statat(&self.directory, &self.name, AtFlags::SYMLINK_NOFOLLOW),
+        ) {
+            (None, Err(Errno::NOENT)) => {
+                Self::verify_parent(&self.directory, parent, self.parent_dev, self.parent_ino)?;
+                Self::verify_binary(&self.binary_before, binary)?;
+                Ok(())
+            }
+            (None, Ok(_)) | (Some(_), Err(Errno::NOENT)) => {
+                r::fail("AGY ownership marker changed before vendor handoff")
+            }
+            (Some((before_stat, before_bytes)), Ok(after_stat)) => {
+                if FileType::from_raw_mode(after_stat.st_mode) != FileType::RegularFile
+                    || after_stat.st_nlink != 1
+                    || !Self::stat_matches(before_stat, &after_stat)
+                {
+                    return r::fail("AGY ownership marker changed before vendor handoff");
+                }
+                let raw_bytes =
+                    Self::read_verified_marker(&self.directory, &self.name, before_stat)?;
+                if raw_bytes != *before_bytes {
+                    return r::fail("AGY ownership marker changed before vendor handoff");
+                }
+                owns(paths, binary)?;
+                let recheck = statat(&self.directory, &self.name, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(std::io::Error::from)?;
+                if FileType::from_raw_mode(recheck.st_mode) != FileType::RegularFile
+                    || recheck.st_nlink != 1
+                    || !Self::stat_matches(before_stat, &recheck)
+                {
+                    return r::fail("AGY ownership marker changed before vendor handoff");
+                }
+                Self::verify_parent(&self.directory, parent, self.parent_dev, self.parent_ino)?;
+                Self::verify_binary(&self.binary_before, binary)?;
+                if retire {
+                    // Vendor bytes are outside OMS rollback. Restoring this marker on a later
+                    // failure would attach an obsolete checksum, so retire it durably.
+                    unlinkat(&self.directory, &self.name, AtFlags::empty())
+                        .map_err(std::io::Error::from)?;
+                    self.directory.sync_all()?;
+                }
+                Ok(())
+            }
+            (_, Err(error)) => Err(std::io::Error::from(error).into()),
+        }
+    }
+}
+
+fn refresh_vendor(paths: &Paths, name: &str, binary: &Path, flag: &AtomicBool) -> Result<()> {
+    refresh_vendor_with_custody(paths, name, binary, None, flag)
+}
+
+fn refresh_vendor_with_custody(
+    paths: &Paths,
+    name: &str,
+    binary: &Path,
+    custody: Option<AgyMarkerCustody>,
+    flag: &AtomicBool,
+) -> Result<()> {
+    r::check(flag)?;
+    let custody = if name == "agy" {
+        Some(match custody {
+            Some(custody) => custody,
+            None => AgyMarkerCustody::capture(paths, binary)?,
+        })
+    } else {
+        None
+    };
+    let before = r::command(
+        binary,
+        &["--version".into()],
+        &paths.cwd,
+        None,
+        flag,
+        Duration::from_secs(10),
+    )?;
+    if before.0 != 0 || version_number(&before.1).is_none() {
+        return r::fail("vendor provider version unavailable; refresh refused");
+    }
+    r::check(flag)?;
+    if let Some(custody) = custody.as_ref() {
+        custody.verify_continuity(paths, binary, true)?;
+    }
+    let out = r::command(
+        binary,
+        &["update".into()],
+        &paths.cwd,
+        None,
+        flag,
+        Duration::from_secs(180),
+    )?;
+    if out.0 != 0 {
+        return r::fail("vendor provider refresh failed");
+    }
+    let after = r::command(
+        binary,
+        &["--version".into()],
+        &paths.cwd,
+        None,
+        flag,
+        Duration::from_secs(10),
+    )?;
+    if after.0 != 0
+        || version_number(&after.1)
+            .zip(version_number(&before.1))
+            .is_none_or(|(a, b)| a < b)
+    {
+        return r::fail("vendor refresh could not prove a non-downgraded version");
+    }
+    Ok(())
+}
 pub(crate) fn install(
     paths: &Paths,
     selected: &[String],
@@ -491,35 +918,42 @@ pub(crate) fn install(
     if selected.is_empty() {
         return Ok(());
     }
-    let lock_file = std::env::var_os("OH_MY_SETTING_TOOL_LOCK")
-        .map(PathBuf::from)
-        .unwrap_or(paths.source.join("tools.lock.json"));
-    let mut lock = r::value(&lock_file)?;
-    if lock["schema"] != 2 {
-        return r::fail("unsupported tool lock schema");
-    }
-    latest(paths, &mut lock, selected, tx, flag)?;
-    let host = platform()?;
-    let scratch = r::Scratch::new()?;
-    let bin = paths.home.join(".local/bin");
+    let explicit_lock = std::env::var_os("OH_MY_SETTING_TOOL_LOCK").map(PathBuf::from);
+    let mut lock = release_policy(&paths.cwd, explicit_lock.as_deref())?;
     for name in selected {
         if !["node", "uv", "gh", "agy", "claude", "codex", "ntn"].contains(&name.as_str()) {
             return r::fail("unknown managed tool");
         }
+    }
+    let node_ready =
+        !selected.iter().any(|name| name == "node") || npm_runtime(paths, flag)?.is_some();
+    let selected = selected
+        .iter()
+        .filter(|name| {
+            upgrade
+                || explicit_lock.is_some()
+                || installed(paths, name).is_none()
+                || name.as_str() == "node" && !node_ready
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let host = platform()?;
+    if explicit_lock.is_none() {
+        latest(paths, &mut lock, &selected, &host, tx, flag)?;
+    }
+    let scratch = r::Scratch::new()?;
+    let bin = paths.home.join(".local/bin");
+    for name in &selected {
         r::check(flag)?;
-        if let Some(binary) = r::find(name, &paths.cwd).or_else(|| {
-            let p = bin.join(name);
-            p.is_file().then_some(p)
-        }) {
-            if !upgrade && ["claude", "codex", "agy", "ntn"].contains(&name.as_str()) {
-                continue;
-            }
-            let catalog = if name == "agy" {
-                "antigravity"
-            } else {
-                name.as_str()
-            };
-            if !["claude", "codex", "agy", "ntn"].contains(&name.as_str()) {
+        let mut retain_node = false;
+        if let Some(binary) = installed(paths, name) {
+            let custody =
+                if name == "agy" && explicit_lock.is_none() && vendor(paths, "agy", &binary) {
+                    Some(AgyMarkerCustody::capture(paths, &binary)?)
+                } else {
+                    None
+                };
+            if let Some(expected) = tool_row(&lock, name)["version"].as_str() {
                 let out = r::command(
                     &binary,
                     &["--version".into()],
@@ -528,52 +962,33 @@ pub(crate) fn install(
                     flag,
                     Duration::from_secs(10),
                 )?;
-                if out.0 == 0
-                    && String::from_utf8_lossy(&out.1).split_whitespace().any(|s| {
-                        s.trim_start_matches('v') == lock[catalog]["version"].as_str().unwrap_or("")
-                    })
-                {
-                    continue;
+                r::check(flag)?;
+                if explicit_lock.is_none() && (out.0 != 0 || version_number(&out.1).is_none()) {
+                    return r::fail(format!("{name} version unavailable; refresh refused"));
+                }
+                if out.0 == 0 && satisfies_release(&out.1, expected, explicit_lock.is_none()) {
+                    if name == "node" && !node_ready {
+                        // Repair the bundled package tooling without replacing an
+                        // already suitable (including newer) installed Node.
+                        retain_node = true;
+                    } else {
+                        if let Some(custody) = custody.as_ref() {
+                            custody.verify_continuity(paths, &binary, false)?;
+                        }
+                        continue;
+                    }
                 }
             }
-            if ["claude", "codex", "agy"].contains(&name.as_str())
-                && std::env::var_os("OH_MY_SETTING_TOOL_LOCK").is_none()
-                && vendor(paths, name, &binary)
+            if custody.is_some()
+                || ["claude", "codex", "agy"].contains(&name.as_str())
+                    && explicit_lock.is_none()
+                    && vendor(paths, name, &binary)
             {
-                let before = r::command(
-                    &binary,
-                    &["--version".into()],
-                    &paths.cwd,
-                    None,
-                    flag,
-                    Duration::from_secs(10),
-                )?;
-                let out = r::command(
-                    &binary,
-                    &["update".into()],
-                    &paths.cwd,
-                    None,
-                    flag,
-                    Duration::from_secs(180),
-                )?;
-                if out.0 != 0 {
-                    return r::fail("vendor provider refresh failed");
-                }
-                let after = r::command(
-                    binary,
-                    &["--version".into()],
-                    &paths.cwd,
-                    None,
-                    flag,
-                    Duration::from_secs(10),
-                )?;
-                if before.0 != 0
-                    || after.0 != 0
-                    || version_number(&after.1)
-                        .zip(version_number(&before.1))
-                        .is_none_or(|(a, b)| a < b)
-                {
-                    return r::fail("vendor refresh could not prove a non-downgraded version");
+                match custody {
+                    Some(custody) => {
+                        refresh_vendor_with_custody(paths, name, &binary, Some(custody), flag)?;
+                    }
+                    None => refresh_vendor(paths, name, &binary, flag)?,
                 }
                 continue;
             }
@@ -798,6 +1213,9 @@ pub(crate) fn install(
                 }
 
                 for command in ["node", "npm", "npx", "corepack"] {
+                    if command == "node" && retain_node {
+                        continue;
+                    }
                     let source = target.join("bin").join(command);
                     if source.exists() {
                         owns(paths, &bin.join(command))?;
@@ -813,6 +1231,9 @@ pub(crate) fn install(
                             0o600,
                         )?;
                     }
+                }
+                if npm_runtime(paths, flag)?.is_none() {
+                    return r::fail("verified Node distribution did not provide working npm");
                 }
             } else {
                 for command in if name == "uv" {
@@ -865,6 +1286,16 @@ pub(crate) fn install(
     Ok(())
 }
 
+fn satisfies_release(raw: &[u8], expected: &str, follow_upstream: bool) -> bool {
+    String::from_utf8_lossy(raw)
+        .split_whitespace()
+        .any(|s| s.trim_start_matches('v') == expected.trim_start_matches('v'))
+        || follow_upstream
+            && version_number(raw)
+                .zip(release_number(expected))
+                .is_some_and(|(actual, desired)| actual > desired)
+}
+
 fn version_number(raw: &[u8]) -> Option<Vec<u64>> {
     String::from_utf8_lossy(raw)
         .split(|c: char| !c.is_ascii_digit() && c != '.')
@@ -902,7 +1333,7 @@ fn vendor(paths: &Paths, name: &str, binary: &Path) -> bool {
         _ => false,
     }
 }
-fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
+fn metadata_bytes(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Vec<u8>> {
     let host = url
         .strip_prefix("https://")
         .and_then(|s| s.split('/').next())
@@ -910,14 +1341,16 @@ fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
     if ![
         "registry.npmjs.org",
         "antigravity-cli-auto-updater-974169037036.us-central1.run.app",
+        "nodejs.org",
+        "api.github.com",
     ]
     .contains(&host)
         || url.contains(['?', '#', '\r', '\n'])
     {
-        return r::fail("unapproved provider metadata endpoint");
+        return r::fail("unapproved tool metadata endpoint");
     }
     let program = r::find("curl", &paths.cwd)
-        .ok_or_else(|| r::Error(2, "curl required for provider metadata".into()))?;
+        .ok_or_else(|| r::Error(2, "curl required for current tool metadata".into()))?;
     let out = r::command(
         program,
         &[
@@ -940,7 +1373,7 @@ fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
         Duration::from_secs(25),
     )?;
     if out.0 != 0 || out.1.len() > 2097152 + 4 {
-        return r::fail("provider metadata unavailable or oversized");
+        return r::fail("current tool metadata unavailable or oversized");
     }
     let split = out
         .1
@@ -948,25 +1381,26 @@ fn metadata(paths: &Paths, url: &str, flag: &AtomicBool) -> Result<Value> {
         .rposition(|b| *b == b'\n')
         .ok_or_else(|| r::Error(2, "invalid metadata response".into()))?;
     if &out.1[split + 1..] == b"404" {
-        return Err(r::Error(4, "provider release incomplete".into()));
+        return Err(r::Error(4, "current tool release is incomplete".into()));
     }
     if &out.1[split + 1..] != b"200" {
-        return r::fail("provider metadata redirects and non-success responses are refused");
+        return r::fail("tool metadata redirects and non-success responses are refused");
     }
-    r::parse(&out.1[..split])
+    Ok(out.1[..split].to_vec())
 }
-fn npm_release(
-    paths: &Paths,
-    package: &str,
-    release: &str,
-    flag: &AtomicBool,
-) -> Result<(String, String)> {
+type Fetch<'a> = dyn FnMut(&str) -> Result<Vec<u8>> + 'a;
+
+fn npm_metadata(package: &str, release: &str, fetch: &mut Fetch<'_>) -> Result<Value> {
+    if !regex::Regex::new(r"^(?:@[a-z0-9._-]+/)?[a-z0-9._-]+$")
+        .unwrap()
+        .is_match(package)
+    {
+        return r::fail("unsafe npm package name");
+    }
     let encoded = package.replace('/', "%2F");
-    let row = metadata(
-        paths,
-        &format!("https://registry.npmjs.org/{encoded}/{release}"),
-        flag,
-    )?;
+    let row = r::parse(&fetch(&format!(
+        "https://registry.npmjs.org/{encoded}/{release}"
+    ))?)?;
     let actual = scalar(&row, "version")?.to_owned();
     version(&actual)?;
     if row["name"] != package || release != "latest" && actual != release {
@@ -988,142 +1422,293 @@ fn npm_release(
     {
         return r::fail("invalid npm release SRI");
     }
-    Ok((actual, integrity))
+    Ok(row)
 }
-fn stable(actual: &str, previous: &str) -> Result<()> {
-    let parse = |s: &str| {
-        s.trim_start_matches('v')
-            .split('.')
-            .map(str::parse::<u64>)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .ok()
-            .filter(|v| v.len() == 3)
-    };
-    if parse(actual)
-        .zip(parse(previous))
-        .is_none_or(|(a, b)| a < b)
-    {
-        return r::fail("provider release is not a non-downgraded stable version");
-    }
-    Ok(())
+fn release_number(value: &str) -> Option<Vec<u64>> {
+    value
+        .strip_prefix('v')
+        .unwrap_or(value)
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()
+        .filter(|v| v.len() == 3)
 }
-fn latest(
-    paths: &Paths,
-    lock: &mut Value,
-    selected: &[String],
-    tx: &mut Transaction,
-    flag: &AtomicBool,
-) -> Result<()> {
-    if std::env::var_os("OH_MY_SETTING_TOOL_LOCK").is_some() {
-        return Ok(());
-    }
-    let file = paths.data.join("provider-tools.lock.json");
-    if r::exists(&file) {
-        let old = r::value(&file)?;
-        if old["schema"] != 2 {
-            return r::fail("invalid previous provider snapshot");
-        }
-        for name in ["claude", "codex"] {
-            lock["npm"][name] = old["npm"][name].clone();
-        }
-        lock["antigravity"] = old["antigravity"].clone();
-    }
-    let mut changed = false;
-    for name in selected
-        .iter()
-        .filter(|n| ["claude", "codex", "agy"].contains(&n.as_str()))
-    {
-        if r::find(name, &paths.cwd).is_some_and(|p| vendor(paths, name, &p)) {
-            continue;
-        }
-        let mut candidate = lock.clone();
-        let resolved = (|| -> Result<()> {
-            if name == "agy" {
-                let previous = scalar(&candidate["antigravity"], "version")?.to_owned();
-                let mut releases = std::collections::BTreeSet::new();
-                let platforms = candidate["antigravity"]["platforms"]
-                    .as_object()
-                    .ok_or_else(|| r::Error(2, "invalid provider platforms".into()))?
-                    .keys()
-                    .filter(|s| !s.starts_with("windows-"))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for host in platforms {
-                    let row = metadata(
-                        paths,
-                        &format!(
-                            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{}.json",
-                            host.replace('-', "_")
-                        ),
-                        flag,
-                    )?;
-                    let release = scalar(&row, "version")?;
-                    stable(release, &previous)?;
-                    releases.insert(release.to_owned());
-                    let url = scalar(&row, "url")?;
-                    https(url)?;
-                    if !url.starts_with(&format!("https://storage.googleapis.com/antigravity-public/antigravity-cli/{release}-")) || url.split('/').any(|p|p==".."||p=="."){return r::fail("provider release URL escaped its official bucket");}
-                    let digest = scalar(&row, "sha512")?;
-                    if digest.len() != 128 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        return r::fail("invalid provider release checksum");
-                    }
-                    candidate["antigravity"]["platforms"][&host]["url"] = json!(url);
-                    candidate["antigravity"]["platforms"][&host]["sha512"] = json!(digest);
-                }
-                if releases.len() != 1 {
-                    return Err(r::Error(
-                        4,
-                        "provider release incomplete across supported platforms".into(),
-                    ));
-                }
-                candidate["antigravity"]["version"] = json!(releases.into_iter().next().unwrap());
-            } else {
-                let row = &mut candidate["npm"][name];
-                let (release, integrity) =
-                    npm_release(paths, scalar(row, "package")?, "latest", flag)?;
-                stable(&release, scalar(row, "version")?)?;
-                row["version"] = json!(release);
-                row["integrity"] = json!(integrity);
-                for (host, native) in row["native"]
-                    .as_object_mut()
-                    .ok_or_else(|| r::Error(2, "invalid npm native platforms".into()))?
-                {
-                    if host.starts_with("windows-") {
-                        continue;
-                    }
-                    let suffix = host
-                        .replace("darwin-amd64", "darwin-x64")
-                        .replace("linux-amd64", "linux-x64");
-                    let expected = if name == "codex" {
-                        format!("{release}-{suffix}")
-                    } else {
-                        release.clone()
-                    };
-                    let (actual, integrity) =
-                        npm_release(paths, scalar(native, "package")?, &expected, flag)?;
-                    native["version"] = json!(actual);
-                    native["integrity"] = json!(integrity);
-                }
-            }
-            Ok(())
-        })();
-        match resolved {
-            Ok(()) => {
-                *lock = candidate;
-                changed = true;
-            }
-            Err(error) if error.0 == 4 => {
-                tx.warn("provider release incomplete; retaining the previous verified snapshot")
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if changed {
-        tx.write(&file, &r::bytes(lock)?, 0o600)?;
+fn stable_release(value: &str) -> Result<()> {
+    version(value)?;
+    if release_number(value).is_none() {
+        return r::fail("latest tool release must be a stable semantic version");
     }
     Ok(())
 }
 
+fn optional_upgrade(previous: &str, candidate: &str) -> Result<bool> {
+    version(previous)?;
+    stable_release(candidate)?;
+    let base = previous.split(['-', '+']).next().unwrap_or(previous);
+    let installed = release_number(base).ok_or_else(|| {
+        r::Error(
+            2,
+            "installed optional provider version is uncomparable".into(),
+        )
+    })?;
+    let desired = release_number(candidate).unwrap();
+    let prerelease = previous.split('+').next().unwrap_or(previous).contains('-');
+    Ok(desired > installed || desired == installed && prerelease)
+}
+fn digest(value: &str, length: usize) -> Result<String> {
+    if value.len() != length || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return r::fail("invalid current tool payload digest");
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn checksum_entry(raw: &[u8], name: &str) -> Result<String> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| r::Error(2, "invalid release checksum manifest".into()))?;
+    let mut found = None;
+    for line in text.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.get(1) != Some(&name) {
+            continue;
+        }
+        if fields.len() != 2 || found.is_some() {
+            return r::fail("ambiguous release checksum entry");
+        }
+        found = Some(digest(fields[0], 64)?);
+    }
+    found.ok_or_else(|| r::Error(4, "current host payload has no published checksum".into()))
+}
+
+fn archive_row(
+    release: &str,
+    host: &str,
+    url: &str,
+    algorithm: &str,
+    checksum: &str,
+    format: &str,
+) -> Value {
+    let mut result = json!({"version": release, "platforms": {}});
+    result["platforms"][host] = json!({"url": url, "archive": format});
+    result["platforms"][host][algorithm] = json!(checksum);
+    result
+}
+
+fn resolve_tool(name: &str, host: &str, fetch: &mut Fetch<'_>) -> Result<Value> {
+    let (node_host, node_file, uv_host) = match host {
+        "darwin-amd64" => ("darwin-x64", "osx-x64-tar", "x86_64-apple-darwin"),
+        "darwin-arm64" => ("darwin-arm64", "osx-arm64-tar", "aarch64-apple-darwin"),
+        "linux-amd64" => ("linux-x64", "linux-x64", "x86_64-unknown-linux-gnu"),
+        "linux-arm64" => ("linux-arm64", "linux-arm64", "aarch64-unknown-linux-gnu"),
+        _ => return r::fail("unsupported release host"),
+    };
+    if name == "node" {
+        let index = r::parse(&fetch("https://nodejs.org/dist/index.json")?)?;
+        let rows = index
+            .as_array()
+            .ok_or_else(|| r::Error(2, "invalid Node release index".into()))?;
+        let current = rows
+            .iter()
+            .filter(|row| row["lts"].as_str().is_some_and(|s| !s.is_empty()))
+            .filter_map(|row| Some((release_number(row["version"].as_str()?)?, row)))
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, row)| row)
+            .ok_or_else(|| r::Error(4, "no stable Node LTS release is published".into()))?;
+        let tag = scalar(current, "version")?;
+        stable_release(tag)?;
+        if !current["files"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|value| value == node_file))
+        {
+            return r::fail("current Node LTS release is unavailable for this host");
+        }
+        let release = tag.strip_prefix('v').unwrap_or(tag);
+        let filename = format!("node-v{release}-{node_host}.tar.gz");
+        let base = format!("https://nodejs.org/dist/v{release}");
+        let checksum = checksum_entry(&fetch(&format!("{base}/SHASUMS256.txt"))?, &filename)?;
+        let mut row = archive_row(
+            release,
+            host,
+            &format!("{base}/{filename}"),
+            "sha256",
+            &checksum,
+            "tar.gz",
+        );
+        row["channel"] = json!("lts");
+        return Ok(row);
+    }
+    if matches!(name, "uv" | "gh") {
+        let repo = if name == "uv" {
+            "astral-sh/uv"
+        } else {
+            "cli/cli"
+        };
+        let response = r::parse(&fetch(&format!(
+            "https://api.github.com/repos/{repo}/releases/latest"
+        ))?)?;
+        if response["draft"] != false || response["prerelease"] != false {
+            return r::fail("tool release must be published and stable");
+        }
+        let tag = scalar(&response, "tag_name")?;
+        stable_release(tag)?;
+        let release = tag.strip_prefix('v').unwrap_or(tag);
+        let (filename, format) = if name == "uv" {
+            (format!("uv-{uv_host}.tar.gz"), "tar.gz")
+        } else {
+            let platform = host
+                .replace("darwin-", "macOS_")
+                .replace("linux-", "linux_");
+            let format = if host.starts_with("darwin-") {
+                "zip"
+            } else {
+                "tar.gz"
+            };
+            (format!("gh_{release}_{platform}.{format}"), format)
+        };
+        let assets = response["assets"]
+            .as_array()
+            .ok_or_else(|| r::Error(2, "invalid release asset list".into()))?
+            .iter()
+            .filter(|asset| asset["name"] == filename)
+            .collect::<Vec<_>>();
+        if assets.len() != 1 {
+            return r::fail("current release must contain exactly one host payload");
+        }
+        let asset = assets[0];
+        if asset["state"] != "uploaded"
+            || asset["size"]
+                .as_u64()
+                .is_none_or(|size| size == 0 || size > MAX as u64)
+        {
+            return r::fail("current host payload is incomplete or oversized");
+        }
+        let url = scalar(asset, "browser_download_url")?;
+        https(url)?;
+        if url != format!("https://github.com/{repo}/releases/download/{tag}/{filename}") {
+            return r::fail("release payload URL is not bound to its repository and version");
+        }
+        let checksum = digest(
+            scalar(asset, "digest")?
+                .strip_prefix("sha256:")
+                .ok_or_else(|| r::Error(2, "release payload requires a SHA256 digest".into()))?,
+            64,
+        )?;
+        return Ok(archive_row(release, host, url, "sha256", &checksum, format));
+    }
+    if name == "agy" {
+        let response = r::parse(&fetch(&format!(
+            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{}.json",
+            host.replace('-', "_")
+        ))?)?;
+        let release = scalar(&response, "version")?;
+        stable_release(release)?;
+        let url = scalar(&response, "url")?;
+        https(url)?;
+        if !url.starts_with(&format!(
+            "https://storage.googleapis.com/antigravity-public/antigravity-cli/{release}-"
+        )) || url.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return r::fail("provider release URL escaped its official versioned bucket");
+        }
+        let checksum = digest(scalar(&response, "sha512")?, 128)?;
+        return Ok(archive_row(
+            release, host, url, "sha512", &checksum, "tar.gz",
+        ));
+    }
+    if matches!(name, "claude" | "codex" | "ntn") {
+        let mut row = tool_row(&catalog(), name).clone();
+        let main = npm_metadata(scalar(&row, "package")?, "latest", fetch)?;
+        let release = scalar(&main, "version")?;
+        stable_release(release)?;
+        row["version"] = json!(release);
+        row["integrity"] = main["dist"]["integrity"].clone();
+        if name != "ntn" {
+            let suffix = host
+                .replace("darwin-amd64", "darwin-x64")
+                .replace("linux-amd64", "linux-x64");
+            let alias = if name == "claude" {
+                format!("@anthropic-ai/claude-code-{suffix}")
+            } else {
+                format!("@openai/codex-{suffix}")
+            };
+            let package = if name == "codex" {
+                "@openai/codex"
+            } else {
+                &alias
+            };
+            let expected = if name == "codex" {
+                format!("{release}-{suffix}")
+            } else {
+                release.to_owned()
+            };
+            let native = npm_metadata(package, &expected, fetch)?;
+            row["native"] = json!({});
+            row["native"][host] = json!({
+                "alias": alias, "package": package,
+                "version": native["version"], "integrity": native["dist"]["integrity"]
+            });
+        }
+        return Ok(row);
+    }
+    r::fail("unknown managed tool")
+}
+
+fn latest(
+    paths: &Paths,
+    lock: &mut Value,
+    selected: &[String],
+    host: &str,
+    tx: &mut Transaction,
+    flag: &AtomicBool,
+) -> Result<()> {
+    let file = paths.data.join(RELEASE_RECEIPT);
+    let mut observed = json!({"schema": 2, "npm": {}});
+    let previous = if r::exists(&file) {
+        Some((file.clone(), false))
+    } else {
+        let legacy = paths.data.join("provider-tools.lock.json");
+        r::exists(&legacy).then_some((legacy, true))
+    };
+    if let Some((previous, legacy)) = previous {
+        match r::value(&previous) {
+            Ok(old) if old["schema"] == 2 => {
+                for name in ["node", "uv", "gh", "ntn", "claude", "codex", "agy"] {
+                    if legacy && !matches!(name, "claude" | "codex" | "agy") {
+                        continue;
+                    }
+                    let row = tool_row(&old, name);
+                    if row["version"].is_string() {
+                        set_tool(&mut observed, name, row.clone());
+                    }
+                }
+            }
+            _ => tx.warn("previous release observations unreadable; recording fresh resolutions"),
+        }
+    }
+    let mut changed = false;
+    for name in selected {
+        if installed(paths, name).is_some_and(|p| vendor(paths, name, &p)) {
+            continue;
+        }
+        // Receipts describe observations only. Neither an old observation nor a
+        // checked-in version may choose or restrict the next upstream resolution.
+        let mut row = resolve_tool(name, host, &mut |url| metadata_bytes(paths, url, flag))
+            .map_err(|error| {
+                r::Error(
+                    error.0,
+                    format!("cannot resolve current {name} release: {}", error.1),
+                )
+            })?;
+        row["resolved_at"] = json!(r::now());
+        set_tool(lock, name, row.clone());
+        set_tool(&mut observed, name, row);
+        changed = true;
+    }
+    if changed {
+        tx.write(&file, &r::bytes(&observed)?, 0o600)?;
+    }
+    Ok(())
+}
 pub(crate) fn refresh_optional(
     paths: &Paths,
     tx: &mut Transaction,
@@ -1200,9 +1785,6 @@ pub(crate) fn refresh_optional(
     );
     let root = fs::canonicalize(root)?;
     let bin = prefix.join("bin");
-    let now = chrono::DateTime::parse_from_rfc3339(&r::now())
-        .map_err(|_| r::Error(2, "clock unavailable".into()))?;
-    let cutoff = now - chrono::Duration::days(14);
     let scratch = r::Scratch::new()?;
     for binary in [
         "cursor-agent",
@@ -1272,53 +1854,11 @@ pub(crate) fn refresh_optional(
         if fs::canonicalize(directory.join(declared))? != resolved {
             continue;
         }
-        let history = match metadata(
-            paths,
-            &format!("https://registry.npmjs.org/{}", name.replace('/', "%2F")),
-            flag,
-        ) {
-            Ok(row) => row,
-            Err(_) => {
-                r::check(flag)?;
-                tx.warn("optional provider metadata unavailable; keeping the installed package");
-                continue;
-            }
-        };
-        let mut eligible = Vec::new();
-        let parse = |s: &str| {
-            s.split('+')
-                .next()
-                .unwrap_or(s)
-                .split('.')
-                .map(str::parse::<u64>)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .ok()
-                .filter(|p| p.len() == 3)
-        };
-        let base = previous.split('-').next().unwrap_or(previous);
-        let Some(installed) = parse(base) else {
+        let candidate = npm_metadata(name, "latest", &mut |url| metadata_bytes(paths, url, flag))?;
+        let release = scalar(&candidate, "version")?.to_owned();
+        if !optional_upgrade(previous, &release)? {
             continue;
-        };
-        for (release, data) in history["versions"]
-            .as_object()
-            .ok_or_else(|| r::Error(2, "invalid optional release catalog".into()))?
-        {
-            let Some(number) = parse(release) else {
-                continue;
-            };
-            let published = history["time"][release]
-                .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-            if published.is_some_and(|date| date <= cutoff)
-                && (number > installed || number == installed && previous.contains('-'))
-            {
-                eligible.push((number, release.clone(), data.clone()));
-            }
         }
-        eligible.sort_by(|a, b| a.0.cmp(&b.0));
-        let Some((_, release, candidate)) = eligible.pop() else {
-            continue;
-        };
         let new_bins = if let Some(path) = candidate["bin"].as_str() {
             json!({name.rsplit('/').next().unwrap():path})
         } else {
@@ -1342,10 +1882,9 @@ pub(crate) fn refresh_optional(
         }
         let work = scratch.0.join(binary);
         fs::create_dir(&work)?;
-        let (_, integrity) = npm_release(paths, name, &release, flag)?;
         let archive = pack(
             paths,
-            &json!({"package":name,"version":release,"integrity":integrity}),
+            &json!({"package":name,"version":release,"integrity":candidate["dist"]["integrity"]}),
             &work,
             flag,
         )?;
@@ -1358,7 +1897,6 @@ pub(crate) fn refresh_optional(
                 "-g".into(),
                 "--no-fund".into(),
                 "--no-audit".into(),
-                format!("--before={}", cutoff.format("%Y-%m-%dT%H:%M:%SZ")).into(),
                 "--".into(),
                 archive.into_os_string(),
             ],
@@ -1373,4 +1911,1098 @@ pub(crate) fn refresh_optional(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn fixture_paths(root: &Path) -> Paths {
+        Paths {
+            home: root.join("home"),
+            source: root.to_owned(),
+            receipt: root.join("receipt.json"),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
+            cwd: root.to_owned(),
+        }
+    }
+
+    fn response(url: &str, value: Value) -> (String, Vec<u8>) {
+        (url.into(), serde_json::to_vec(&value).unwrap())
+    }
+
+    fn resolve_fixture(name: &str, host: &str, responses: Vec<(String, Vec<u8>)>) -> Result<Value> {
+        let mut responses = VecDeque::from(responses);
+        let result = resolve_tool(name, host, &mut |url| {
+            let (expected, raw) = responses.pop_front().expect("unexpected metadata request");
+            assert_eq!(url, expected);
+            Ok(raw)
+        });
+        if result.is_ok() {
+            assert!(responses.is_empty(), "release resolution stopped early");
+        }
+        result
+    }
+
+    fn npm_fixture(package: &str, release: &str) -> Value {
+        json!({
+            "name": package,
+            "version": release,
+            "dist": {
+                "tarball": format!(
+                    "https://registry.npmjs.org/{package}/-/{}-{release}.tgz",
+                    package.rsplit('/').next().unwrap()
+                ),
+                "integrity": format!("sha512-{}==", "A".repeat(86))
+            }
+        })
+    }
+
+    fn github_fixture(repo: &str, tag: &str, filename: &str) -> Value {
+        json!({
+            "tag_name": tag,
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+                "name": filename,
+                "state": "uploaded",
+                "size": 1024,
+                "digest": format!("sha256:{}", "a".repeat(64)),
+                "browser_download_url": format!(
+                    "https://github.com/{repo}/releases/download/{tag}/{filename}"
+                )
+            }]
+        })
+    }
+
+    #[test]
+    fn default_catalog_has_no_pins_and_only_explicit_relative_override_is_loaded() {
+        let scratch = r::Scratch::new().unwrap();
+        let pinned = json!({"schema": 2, "node": {"version": "18.20.8"}});
+        r::new_file(
+            &scratch.0.join("tools.lock.json"),
+            b"not a default policy",
+            0o600,
+        )
+        .unwrap();
+        r::new_file(
+            &scratch.0.join("custom.json"),
+            &r::bytes(&pinned).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let current = release_policy(&scratch.0, None).unwrap();
+        for name in ["node", "uv", "gh", "ntn", "claude", "codex", "agy"] {
+            assert!(tool_row(&current, name).get("version").is_none());
+            assert!(tool_row(&current, name).get("platforms").is_none());
+        }
+        assert_eq!(current["node"]["channel"], "lts");
+        assert_eq!(
+            release_policy(&scratch.0, Some(Path::new("custom.json"))).unwrap(),
+            pinned
+        );
+        assert!(release_policy(&scratch.0, Some(Path::new("absent.json"))).is_err());
+        assert!(release_policy(&scratch.0, Some(Path::new("tools.lock.json"))).is_err());
+    }
+
+    #[test]
+    fn installed_node_requires_working_npm_and_preserves_newer_runtime() {
+        if let Some(root) = std::env::var_os("OMS_SUPPLY_NODE_FIXTURE") {
+            let paths = fixture_paths(Path::new(&root));
+            let kind = std::env::var("OMS_SUPPLY_NODE_CASE").unwrap();
+            if kind == "self-contained" {
+                assert!(installed(&paths, "node").is_none());
+                assert_eq!(
+                    call(
+                        &paths,
+                        "npm",
+                        &["--version".into()],
+                        &AtomicBool::new(false),
+                        false
+                    )
+                    .unwrap(),
+                    b"11.1.0\n"
+                );
+                return;
+            }
+            let original = installed(&paths, "node").unwrap();
+            let before = fs::read(&original).unwrap();
+            let bundled_npm = original.with_file_name("npm");
+            let npm_before = fs::read(&bundled_npm).ok();
+            let _guard = r::lock(&paths.receipt, &paths.cwd).unwrap();
+            let mut tx = Transaction::begin(&paths).unwrap();
+            let result = install(
+                &paths,
+                &["node".into()],
+                false,
+                false,
+                &mut tx,
+                &AtomicBool::new(false),
+            );
+            if kind.starts_with("existing-") {
+                assert_eq!(
+                    result.unwrap_err().1,
+                    "verified Node distribution did not provide working npm"
+                );
+                drop(tx);
+                assert_eq!(fs::read(&original).unwrap(), before);
+                assert_eq!(fs::read(&bundled_npm).ok(), npm_before);
+                for command in ["node", "npm", "npx", "corepack"] {
+                    let shim = paths.home.join(".local/bin").join(command);
+                    assert!(!r::exists(&shim), "{kind} left a {command} shim");
+                    assert!(!r::exists(&ownership_marker(&shim)));
+                }
+                return;
+            }
+            result.unwrap();
+            let reused = matches!(kind.as_str(), "working" | "separate");
+            assert_eq!(paths.cwd.join("requests").exists(), !reused, "{kind}");
+            assert_eq!(fs::read(&original).unwrap(), before, "{kind} replaced Node");
+            assert_eq!(installed(&paths, "node").unwrap(), original);
+            let npm = call(
+                &paths,
+                "npm",
+                &["--version".into()],
+                &AtomicBool::new(false),
+                false,
+            )
+            .unwrap();
+            assert_eq!(npm, if reused { b"11.1.0\n" } else { b"11.2.0\n" });
+            return;
+        }
+        let scratch = r::Scratch::new().unwrap();
+        let paths = fixture_paths(&scratch.0);
+        let name = "oms-supply-fixture-command";
+        let executable = paths.home.join(".local/bin").join(name);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        r::new_file(&executable, b"fixture only\n", 0o600).unwrap();
+        assert!(installed(&paths, name).is_none());
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(installed(&paths, name), Some(executable));
+
+        let distribution = scratch.0.join("distribution");
+        fs::create_dir_all(distribution.join("bin")).unwrap();
+        r::new_file(
+            &distribution.join("bin/node"),
+            b"#!/bin/sh\necho v26.1.0\n",
+            0o755,
+        )
+        .unwrap();
+        r::new_file(
+            &distribution.join("bin/npm"),
+            b"#!/bin/sh\nnode --version >/dev/null || exit 99\necho 11.2.0\n",
+            0o755,
+        )
+        .unwrap();
+        let archive = scratch.0.join("node.tar.gz");
+        assert!(
+            std::process::Command::new(r::find("tar", &scratch.0).unwrap())
+                .args(["--format=ustar", "-czf"])
+                .arg(&archive)
+                .arg("-C")
+                .arg(&scratch.0)
+                .arg("distribution")
+                .env("COPYFILE_DISABLE", "1")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let archive_digest = r::hash(&fs::read(&archive).unwrap());
+        let host = platform().unwrap().replace("amd64", "x64");
+        let archive_name = format!("node-v26.1.0-{host}.tar.gz");
+        for kind in [
+            "missing",
+            "broken",
+            "working",
+            "separate",
+            "newer",
+            "managed-newer",
+            "self-contained",
+            "existing-missing",
+            "existing-broken",
+        ] {
+            let root = scratch.0.join(kind);
+            let paths = fixture_paths(&root);
+            let bin = root.join("bin");
+            let elsewhere = root.join("elsewhere");
+            fs::create_dir_all(&bin).unwrap();
+            fs::create_dir_all(&elsewhere).unwrap();
+            fs::create_dir_all(paths.home.join(".local/bin")).unwrap();
+            let node = if kind == "managed-newer" {
+                paths.home.join(".local/bin/node")
+            } else if kind.starts_with("existing-") {
+                paths.home.join(".nvm/versions/node/v26.1.0/bin/node")
+            } else {
+                bin.join("node")
+            };
+            fs::create_dir_all(node.parent().unwrap()).unwrap();
+            let node_bytes = if kind.ends_with("newer") {
+                b"#!/bin/sh\necho v27.1.0\n".as_slice()
+            } else {
+                b"#!/bin/sh\necho v26.1.0\n".as_slice()
+            };
+            if kind != "self-contained" {
+                r::new_file(&node, node_bytes, 0o755).unwrap();
+            }
+            if kind == "managed-newer" {
+                r::new_file(
+                    &ownership_marker(&node),
+                    format!("sha256={}\n", r::hash(node_bytes)).as_bytes(),
+                    0o600,
+                )
+                .unwrap();
+            }
+            if kind == "existing-broken" {
+                r::new_file(&node.with_file_name("npm"), b"#!/bin/sh\nexit 7\n", 0o755).unwrap();
+            }
+            if !matches!(kind, "missing" | "existing-missing") {
+                let npm = if kind == "separate" { &elsewhere } else { &bin }.join("npm");
+                r::new_file(
+                    &npm,
+                    if kind == "self-contained" {
+                        b"#!/bin/sh\necho 11.1.0\n"
+                    } else if matches!(kind, "working" | "separate") {
+                        b"#!/bin/sh\nnode --version >/dev/null || exit 99\necho 11.1.0\n"
+                    } else {
+                        b"#!/bin/sh\nexit 7\n"
+                    },
+                    0o755,
+                )
+                .unwrap();
+            }
+            symlink(r::find("gzip", &scratch.0).unwrap(), bin.join("gzip")).unwrap();
+            let curl = format!(
+                "#!/bin/sh\ndestination=\nprevious=\nfor argument do\n  [ \"$previous\" != --output ] || destination=$argument\n  previous=$argument\ndone\nprintf '%s\\n' \"$argument\" >> {}\ncase \"$argument\" in\n  */index.json) printf '%s\\n200' '[{{\"version\":\"v26.1.0\",\"lts\":\"fixture\",\"files\":[\"linux-x64\",\"linux-arm64\",\"osx-x64-tar\",\"osx-arm64-tar\"]}}]' ;;\n  */SHASUMS256.txt) printf '{archive_digest}  {archive_name}\\n\\n200' ;;\n  */{archive_name}) /bin/cp {} \"$destination\" ;;\n  *) exit 99 ;;\nesac\n",
+                r::shell(root.join("requests").as_os_str()).unwrap(),
+                r::shell(archive.as_os_str()).unwrap(),
+            );
+            r::new_file(&bin.join("curl"), curl.as_bytes(), 0o755).unwrap();
+            let path = std::env::join_paths([
+                node.parent().unwrap().to_path_buf(),
+                paths.home.join(".local/bin"),
+                bin,
+                elsewhere,
+            ])
+            .unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "supply::tests::installed_node_requires_working_npm_and_preserves_newer_runtime", "--nocapture"])
+                .env("OMS_SUPPLY_NODE_FIXTURE", &root)
+                .env("OMS_SUPPLY_NODE_CASE", kind)
+                .env("PATH", path)
+                .env_remove("OH_MY_SETTING_TOOL_LOCK")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{kind}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn agy_vendor_handoff_survives_updater_failure_and_unrelated_rollback() {
+        let flag = AtomicBool::new(false);
+        for updater_exit in [0, 7] {
+            for kind in ["legacy", "native", "absent"] {
+                let scratch = r::Scratch::new().unwrap();
+                let paths = fixture_paths(&scratch.0);
+                let binary = paths.home.join(".local/bin/agy");
+                fs::create_dir_all(binary.parent().unwrap()).unwrap();
+                let marker = binary.with_file_name("agy.oh-my-setting-managed");
+                let replacement = scratch.0.join("replacement");
+                let updated = b"#!/bin/sh\necho 'antigravity 2.0.0'\n";
+                r::new_file(&replacement, updated, 0o755).unwrap();
+                let initial = format!(
+                    "#!/bin/sh\ncase \"${{1:-}}\" in\n--version) echo 'antigravity 1.0.0' ;;\nupdate) /bin/mv {} \"$0\"; exit {updater_exit} ;;\n*) exit 99 ;;\nesac\n",
+                    r::shell(replacement.as_os_str()).unwrap()
+                );
+                r::new_file(&binary, initial.as_bytes(), 0o755).unwrap();
+                let raw = match kind {
+                    "legacy" => format!("sha256={}\n", r::hash(initial.as_bytes())).into_bytes(),
+                    "native" => r::bytes(
+                        &json!({"owner":"oh-my-setting","sha256":r::hash(initial.as_bytes())}),
+                    )
+                    .unwrap(),
+                    _ => Vec::new(),
+                };
+                if !raw.is_empty() {
+                    r::new_file(&marker, &raw, 0o600).unwrap();
+                    owns(&paths, &binary).unwrap();
+                }
+                assert!(vendor(&paths, "agy", &binary));
+                let unrelated = scratch.0.join("unrelated");
+                r::new_file(&unrelated, b"before", 0o600).unwrap();
+                let _guard = r::lock(&paths.receipt, &paths.cwd).unwrap();
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.write(&unrelated, b"after", 0o600).unwrap();
+                let result = refresh_vendor(&paths, "agy", &binary, &flag);
+                assert_eq!(result.is_ok(), updater_exit == 0);
+                assert_eq!(r::read(&binary, MAX).unwrap(), updated);
+                assert!(!r::exists(&marker), "{kind} marker survived vendor handoff");
+                drop(tx);
+                assert_eq!(r::read(&unrelated, 64).unwrap(), b"before");
+                assert_eq!(r::read(&binary, MAX).unwrap(), updated);
+                assert!(
+                    !r::exists(&marker),
+                    "rollback restored a stale {kind} marker"
+                );
+                assert!(
+                    owns(&paths, &binary).is_err(),
+                    "explicit replacement must still require OMS ownership"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agy_vendor_handoff_rejects_changed_or_unsafe_markers_before_execution() {
+        use std::os::unix::fs::MetadataExt;
+
+        for kind in [
+            "stale",
+            "foreign",
+            "symlink",
+            "hardlink",
+            "unrecognized",
+            "cancelled",
+            "probe-fails",
+            "probe-unparseable",
+            "probe-mutates",
+            "probe-removes-owned-fixture-marker",
+            "probe-replaces-marker",
+            "probe-creates-marker",
+            "probe-replaces-parent",
+            "probe-symlinks-parent",
+            "probe-swaps-parent-back",
+            "probe-replaces-binary",
+            "probe-symlinks-binary",
+        ] {
+            let scratch = r::Scratch::new().unwrap();
+            let paths = fixture_paths(&scratch.0);
+            let binary = paths.home.join(if kind == "unrecognized" {
+                ".local/bin/other-agy"
+            } else {
+                ".local/bin/agy"
+            });
+            let parent = binary.parent().unwrap();
+            fs::create_dir_all(parent).unwrap();
+            let invoked = scratch.0.join("invoked");
+            let marker = ownership_marker(&binary);
+            let marker_name = marker.file_name().unwrap();
+            let updated = scratch.0.join("updated");
+            let staged = scratch.0.join("staged-marker");
+            let staged_binary = scratch.0.join("staged-binary");
+            let backup = scratch.0.join("bin.old");
+            let probe = match kind {
+                "probe-unparseable" => "echo unavailable".into(),
+                "probe-mutates" => format!(
+                    "printf foreign > {}; echo 'antigravity 1.0.0'",
+                    r::shell(marker.as_os_str()).unwrap()
+                ),
+                "probe-removes-owned-fixture-marker" => format!(
+                    "/bin/rm -f {}; echo 'antigravity 1.0.0'",
+                    r::shell(marker.as_os_str()).unwrap()
+                ),
+                "probe-replaces-marker" | "probe-creates-marker" => format!(
+                    "/bin/mv {} {}; echo 'antigravity 1.0.0'",
+                    r::shell(staged.as_os_str()).unwrap(),
+                    r::shell(marker.as_os_str()).unwrap()
+                ),
+                "probe-replaces-parent" => format!(
+                    "/bin/mv {} {} && /bin/mkdir -p {} && /bin/cp -p {} {} && /bin/cp -p {} {}; echo 'antigravity 1.0.0'",
+                    r::shell(parent.as_os_str()).unwrap(),
+                    r::shell(backup.as_os_str()).unwrap(),
+                    r::shell(parent.as_os_str()).unwrap(),
+                    r::shell(backup.join("agy").as_os_str()).unwrap(),
+                    r::shell(binary.as_os_str()).unwrap(),
+                    r::shell(backup.join(marker_name).as_os_str()).unwrap(),
+                    r::shell(marker.as_os_str()).unwrap(),
+                ),
+                "probe-symlinks-parent" => format!(
+                    "/bin/mv {} {} && /bin/ln -s {} {}; echo 'antigravity 1.0.0'",
+                    r::shell(parent.as_os_str()).unwrap(),
+                    r::shell(backup.as_os_str()).unwrap(),
+                    r::shell(backup.as_os_str()).unwrap(),
+                    r::shell(parent.as_os_str()).unwrap(),
+                ),
+                "probe-swaps-parent-back" => format!(
+                    "/bin/mv {} {} && /bin/mv {} {} && /bin/mv {} {}; echo 'antigravity 1.0.0'",
+                    r::shell(parent.as_os_str()).unwrap(),
+                    r::shell(backup.as_os_str()).unwrap(),
+                    r::shell(staged.as_os_str()).unwrap(),
+                    r::shell(backup.join(marker_name).as_os_str()).unwrap(),
+                    r::shell(backup.as_os_str()).unwrap(),
+                    r::shell(parent.as_os_str()).unwrap(),
+                ),
+                "probe-replaces-binary" => format!(
+                    "/bin/mv {} {}; echo 'antigravity 1.0.0'",
+                    r::shell(staged_binary.as_os_str()).unwrap(),
+                    r::shell(binary.as_os_str()).unwrap(),
+                ),
+                "probe-symlinks-binary" => format!(
+                    "/bin/rm -f {} && /bin/ln -s {} {}; echo 'antigravity 1.0.0'",
+                    r::shell(binary.as_os_str()).unwrap(),
+                    r::shell(staged_binary.as_os_str()).unwrap(),
+                    r::shell(binary.as_os_str()).unwrap(),
+                ),
+                _ => "exit 99".into(),
+            };
+            let raw = format!(
+                "#!/bin/sh\ncase \"${{1:-}}\" in\n--version) printf invoked > {}; {probe} ;;\nupdate) printf updated > {}; exit 99 ;;\nesac\n",
+                r::shell(invoked.as_os_str()).unwrap(),
+                r::shell(updated.as_os_str()).unwrap(),
+            );
+            r::new_file(&binary, raw.as_bytes(), 0o755).unwrap();
+            if matches!(kind, "probe-replaces-binary" | "probe-symlinks-binary") {
+                r::new_file(&staged_binary, raw.as_bytes(), 0o755).unwrap();
+            }
+            let good = format!("sha256={}\n", r::hash(raw.as_bytes()));
+            match kind {
+                "stale" => r::new_file(
+                    &marker,
+                    format!("sha256={}\n", "0".repeat(64)).as_bytes(),
+                    0o600,
+                )
+                .unwrap(),
+                "foreign" => r::new_file(
+                    &marker,
+                    &r::bytes(&json!({"owner":"other","sha256":r::hash(raw.as_bytes())})).unwrap(),
+                    0o600,
+                )
+                .unwrap(),
+                "symlink" | "hardlink" => {
+                    let source = scratch.0.join("shared-marker");
+                    r::new_file(&source, good.as_bytes(), 0o600).unwrap();
+                    if kind == "symlink" {
+                        symlink(&source, &marker).unwrap();
+                    } else {
+                        fs::hard_link(&source, &marker).unwrap();
+                    }
+                }
+                "probe-creates-marker" => {
+                    r::new_file(&staged, good.as_bytes(), 0o600).unwrap();
+                }
+                "probe-replaces-marker" | "probe-swaps-parent-back" => {
+                    r::new_file(&marker, good.as_bytes(), 0o600).unwrap();
+                    r::new_file(&staged, good.as_bytes(), 0o600).unwrap();
+                }
+                _ => r::new_file(&marker, good.as_bytes(), 0o600).unwrap(),
+            }
+            let parent_before = fs::symlink_metadata(parent).unwrap();
+            let binary_before = fs::symlink_metadata(&binary).unwrap();
+            let marker_before = fs::symlink_metadata(&marker).ok();
+            let before = fs::read(&marker).ok();
+            assert!(
+                refresh_vendor(
+                    &paths,
+                    "agy",
+                    &binary,
+                    &AtomicBool::new(kind == "cancelled")
+                )
+                .is_err(),
+                "{kind}"
+            );
+            assert_eq!(invoked.exists(), kind.starts_with("probe-"), "{kind}");
+            assert!(!updated.exists(), "{kind} reached the updater");
+            match kind {
+                "probe-removes-owned-fixture-marker" => {
+                    assert!(!r::exists(&marker), "{kind} restored marker");
+                }
+                "probe-mutates" => {
+                    assert_eq!(fs::read(&marker).unwrap(), b"foreign", "{kind}");
+                }
+                "probe-creates-marker" => {
+                    assert_eq!(fs::read(&marker).unwrap(), good.as_bytes(), "{kind}");
+                }
+                "probe-replaces-marker" | "probe-swaps-parent-back" => {
+                    assert_eq!(fs::read(&marker).unwrap(), good.as_bytes(), "{kind}");
+                    assert_ne!(
+                        fs::symlink_metadata(&marker).unwrap().ino(),
+                        marker_before.unwrap().ino(),
+                        "{kind}"
+                    );
+                }
+                "probe-replaces-parent" => {
+                    assert_eq!(fs::read(&marker).unwrap(), good.as_bytes(), "{kind}");
+                    assert_ne!(
+                        fs::symlink_metadata(parent).unwrap().ino(),
+                        parent_before.ino(),
+                        "{kind}"
+                    );
+                }
+                "probe-symlinks-parent" => {
+                    assert!(
+                        fs::symlink_metadata(parent)
+                            .unwrap()
+                            .file_type()
+                            .is_symlink(),
+                        "{kind}"
+                    );
+                    assert_eq!(fs::read(&marker).unwrap(), good.as_bytes(), "{kind}");
+                }
+                _ => {
+                    assert_eq!(fs::read(&marker).ok(), before, "{kind}");
+                    let marker_after = fs::symlink_metadata(&marker).unwrap();
+                    let marker_before = marker_before.unwrap();
+                    assert_eq!(
+                        (marker_after.dev(), marker_after.ino()),
+                        (marker_before.dev(), marker_before.ino()),
+                        "{kind}"
+                    );
+                }
+            }
+            match kind {
+                "probe-replaces-binary" => {
+                    assert_ne!(
+                        fs::symlink_metadata(&binary).unwrap().ino(),
+                        binary_before.ino(),
+                        "{kind}"
+                    );
+                    assert_eq!(r::read(&binary, MAX).unwrap(), raw.as_bytes(), "{kind}");
+                }
+                "probe-symlinks-binary" => {
+                    assert!(
+                        fs::symlink_metadata(&binary)
+                            .unwrap()
+                            .file_type()
+                            .is_symlink(),
+                        "{kind}"
+                    );
+                    assert_eq!(fs::read(&binary).unwrap(), raw.as_bytes(), "{kind}");
+                }
+                _ => assert_eq!(r::read(&binary, MAX).unwrap(), raw.as_bytes(), "{kind}"),
+            }
+        }
+    }
+
+    #[test]
+    fn agy_install_and_non_retiring_custody() {
+        use std::os::unix::fs::MetadataExt;
+
+        if let Some(root) = std::env::var_os("OMS_SUPPLY_AGY_FIXTURE") {
+            let paths = fixture_paths(Path::new(&root));
+            let kind = std::env::var("OMS_SUPPLY_AGY_CASE").unwrap();
+            let _guard = r::lock(&paths.receipt, &paths.cwd).unwrap();
+            let mut tx = Transaction::begin(&paths).unwrap();
+            let result = install(
+                &paths,
+                &["agy".into()],
+                true,
+                false,
+                &mut tx,
+                &AtomicBool::new(false),
+            );
+            assert_eq!(result.is_ok(), kind == "valid", "{kind}: {result:?}");
+            return;
+        }
+
+        for present in [true, false] {
+            let scratch = r::Scratch::new().unwrap();
+            let paths = fixture_paths(&scratch.0);
+            let binary = paths.home.join(".local/bin/agy");
+            fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            let raw = b"#!/bin/sh\necho 'antigravity 1.0.0'\n";
+            r::new_file(&binary, raw, 0o755).unwrap();
+            let marker = ownership_marker(&binary);
+            let good = format!("sha256={}\n", r::hash(raw));
+            if present {
+                r::new_file(&marker, good.as_bytes(), 0o600).unwrap();
+            }
+            let custody = AgyMarkerCustody::capture(&paths, &binary).unwrap();
+            custody.verify_continuity(&paths, &binary, false).unwrap();
+            assert_eq!(r::exists(&marker), present);
+            if present {
+                let staged = scratch.0.join("staged");
+                r::new_file(&staged, good.as_bytes(), 0o600).unwrap();
+                fs::rename(&staged, &marker).unwrap();
+                assert!(custody.verify_continuity(&paths, &binary, false).is_err());
+                assert_eq!(fs::read(&marker).unwrap(), good.as_bytes());
+            } else {
+                r::new_file(&marker, good.as_bytes(), 0o600).unwrap();
+                assert!(custody.verify_continuity(&paths, &binary, false).is_err());
+                assert_eq!(fs::read(&marker).unwrap(), good.as_bytes());
+            }
+        }
+
+        for kind in ["stale", "probe-removes-marker", "valid"] {
+            let scratch = r::Scratch::new().unwrap();
+            let paths = fixture_paths(&scratch.0);
+            let binary = paths.home.join(".local/bin/agy");
+            fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            let invoked = scratch.0.join("invoked");
+            let updated = scratch.0.join("updated");
+            let replacement = scratch.0.join("replacement");
+            let updated_bytes = b"#!/bin/sh\necho 'antigravity 2.0.0'\n";
+            r::new_file(&replacement, updated_bytes, 0o755).unwrap();
+            let marker = ownership_marker(&binary);
+            let probe = if kind == "probe-removes-marker" {
+                format!(
+                    "/bin/rm -f {}; echo 'antigravity 1.0.0'",
+                    r::shell(marker.as_os_str()).unwrap()
+                )
+            } else {
+                "echo 'antigravity 1.0.0'".into()
+            };
+            let raw = format!(
+                "#!/bin/sh\ncase \"${{1:-}}\" in\n--version) printf invoked > {}; {probe} ;;\nupdate) printf updated > {}; /bin/mv {} \"$0\" ;;\n*) exit 99 ;;\nesac\n",
+                r::shell(invoked.as_os_str()).unwrap(),
+                r::shell(updated.as_os_str()).unwrap(),
+                r::shell(replacement.as_os_str()).unwrap(),
+            );
+            r::new_file(&binary, raw.as_bytes(), 0o755).unwrap();
+            let marker_bytes = if kind == "stale" {
+                format!("sha256={}\n", "0".repeat(64))
+            } else {
+                format!("sha256={}\n", r::hash(raw.as_bytes()))
+            };
+            r::new_file(&marker, marker_bytes.as_bytes(), 0o600).unwrap();
+            let marker_before = fs::symlink_metadata(&marker).unwrap();
+
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "supply::tests::agy_install_and_non_retiring_custody",
+                    "--nocapture",
+                ])
+                .env("OMS_SUPPLY_AGY_FIXTURE", &scratch.0)
+                .env("OMS_SUPPLY_AGY_CASE", kind)
+                .env("PATH", "")
+                .env_remove("OH_MY_SETTING_TOOL_LOCK")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{kind}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            assert_eq!(invoked.exists(), kind != "stale", "{kind}");
+            assert_eq!(updated.exists(), kind == "valid", "{kind}");
+            match kind {
+                "stale" => {
+                    assert_eq!(fs::read(&marker).unwrap(), marker_bytes.as_bytes());
+                    assert_eq!(
+                        fs::symlink_metadata(&marker).unwrap().ino(),
+                        marker_before.ino()
+                    );
+                    assert_eq!(r::read(&binary, MAX).unwrap(), raw.as_bytes());
+                }
+                "probe-removes-marker" => {
+                    assert!(!r::exists(&marker));
+                    assert_eq!(r::read(&binary, MAX).unwrap(), raw.as_bytes());
+                }
+                _ => {
+                    assert!(!r::exists(&marker));
+                    assert_eq!(r::read(&binary, MAX).unwrap(), updated_bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn node_selects_highest_lts_by_version_and_ignores_order_and_major_parity() {
+        let row = resolve_fixture(
+            "node",
+            "linux-amd64",
+            vec![
+                response(
+                    "https://nodejs.org/dist/index.json",
+                    json!([
+                        {"version": "v26.0.0", "lts": false, "files": ["linux-x64"]},
+                        {"version": "v24.10.0", "lts": "Older", "files": ["linux-x64"]},
+                        {"version": "v27.0.0-alpha.1", "lts": "Preview", "files": ["linux-x64"]},
+                        {"version": "v25.3.1", "lts": "Current", "files": ["linux-x64"]},
+                        {"version": "v25.2.9", "lts": "Current", "files": ["linux-x64"]}
+                    ]),
+                ),
+                (
+                    "https://nodejs.org/dist/v25.3.1/SHASUMS256.txt".into(),
+                    format!("{}  node-v25.3.1-linux-x64.tar.gz\n", "b".repeat(64)).into_bytes(),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(row["version"], "25.3.1");
+        assert_eq!(row["channel"], "lts");
+        assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+        assert_eq!(row["platforms"]["linux-amd64"]["sha256"], "b".repeat(64));
+    }
+
+    #[test]
+    fn node_resolves_each_host_without_requiring_other_platforms() {
+        for (host, index_file, filename) in [
+            (
+                "darwin-amd64",
+                "osx-x64-tar",
+                "node-v26.1.0-darwin-x64.tar.gz",
+            ),
+            (
+                "darwin-arm64",
+                "osx-arm64-tar",
+                "node-v26.1.0-darwin-arm64.tar.gz",
+            ),
+            ("linux-amd64", "linux-x64", "node-v26.1.0-linux-x64.tar.gz"),
+            (
+                "linux-arm64",
+                "linux-arm64",
+                "node-v26.1.0-linux-arm64.tar.gz",
+            ),
+        ] {
+            let row = resolve_fixture(
+                "node",
+                host,
+                vec![
+                    response(
+                        "https://nodejs.org/dist/index.json",
+                        json!([{"version": "v26.1.0", "lts": "Fixture", "files": [index_file]}]),
+                    ),
+                    (
+                        "https://nodejs.org/dist/v26.1.0/SHASUMS256.txt".into(),
+                        format!("{}  {filename}\n", "a".repeat(64)).into_bytes(),
+                    ),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                row["platforms"][host]["url"],
+                format!("https://nodejs.org/dist/v26.1.0/{filename}")
+            );
+            assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn node_rejects_incomplete_current_release_and_missing_or_ambiguous_checksum() {
+        let result = resolve_fixture(
+            "node",
+            "linux-amd64",
+            vec![response(
+                "https://nodejs.org/dist/index.json",
+                json!([
+                    {"version": "v26.2.0", "lts": "Fixture", "files": ["linux-arm64"]},
+                    {"version": "v26.1.0", "lts": "Fixture", "files": ["linux-x64"]}
+                ]),
+            )],
+        );
+        assert!(result.is_err());
+        let line = format!("{}  host.tar.gz\n", "a".repeat(64));
+        assert!(checksum_entry(line.as_bytes(), "other.tar.gz").is_err());
+        assert!(checksum_entry(format!("{line}{line}").as_bytes(), "host.tar.gz").is_err());
+        assert!(checksum_entry(b"invalid  host.tar.gz\n", "host.tar.gz").is_err());
+        assert!(
+            checksum_entry(
+                format!("{}  host.tar.gz extra\n", "a".repeat(64)).as_bytes(),
+                "host.tar.gz"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn github_releases_resolve_exact_verified_host_assets() {
+        for (name, host, repo, tag, filename, format) in [
+            (
+                "uv",
+                "darwin-amd64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-x86_64-apple-darwin.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "uv",
+                "darwin-arm64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-aarch64-apple-darwin.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "uv",
+                "linux-amd64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-x86_64-unknown-linux-gnu.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "uv",
+                "linux-arm64",
+                "astral-sh/uv",
+                "0.13.9",
+                "uv-aarch64-unknown-linux-gnu.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "gh",
+                "darwin-amd64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_macOS_amd64.zip",
+                "zip",
+            ),
+            (
+                "gh",
+                "darwin-arm64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_macOS_arm64.zip",
+                "zip",
+            ),
+            (
+                "gh",
+                "linux-amd64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_linux_amd64.tar.gz",
+                "tar.gz",
+            ),
+            (
+                "gh",
+                "linux-arm64",
+                "cli/cli",
+                "v2.105.0",
+                "gh_2.105.0_linux_arm64.tar.gz",
+                "tar.gz",
+            ),
+        ] {
+            let row = resolve_fixture(
+                name,
+                host,
+                vec![response(
+                    &format!("https://api.github.com/repos/{repo}/releases/latest"),
+                    github_fixture(repo, tag, filename),
+                )],
+            )
+            .unwrap();
+            assert_eq!(row["version"], tag.trim_start_matches('v'));
+            assert_eq!(row["platforms"][host]["archive"], format);
+            assert_eq!(row["platforms"][host]["sha256"], "a".repeat(64));
+            assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn github_rejects_unpublished_misbound_and_unverified_assets() {
+        let base = github_fixture("cli/cli", "v2.105.0", "gh_2.105.0_linux_amd64.tar.gz");
+        for (pointer, bad) in [
+            ("/draft", json!(true)),
+            ("/prerelease", json!(true)),
+            ("/tag_name", json!("v2.106.0-rc.1")),
+            ("/assets/0/digest", Value::Null),
+            (
+                "/assets/0/digest",
+                json!(format!("sha512:{}", "a".repeat(128))),
+            ),
+            ("/assets/0/digest", json!("sha256:invalid")),
+            ("/assets/0/state", json!("new")),
+            ("/assets/0/size", json!(0)),
+            ("/assets/0/size", json!(MAX as u64 + 1)),
+            (
+                "/assets/0/browser_download_url",
+                json!(
+                    "https://github.com/other/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz"
+                ),
+            ),
+        ] {
+            let mut bad_release = base.clone();
+            *bad_release.pointer_mut(pointer).unwrap() = bad;
+            assert!(
+                resolve_fixture(
+                    "gh",
+                    "linux-amd64",
+                    vec![response(
+                        "https://api.github.com/repos/cli/cli/releases/latest",
+                        bad_release,
+                    )],
+                )
+                .is_err(),
+                "accepted {pointer}"
+            );
+        }
+        let mut duplicate = base.clone();
+        duplicate["assets"]
+            .as_array_mut()
+            .unwrap()
+            .push(base["assets"][0].clone());
+        assert!(
+            resolve_fixture(
+                "gh",
+                "linux-amd64",
+                vec![response(
+                    "https://api.github.com/repos/cli/cli/releases/latest",
+                    duplicate,
+                )],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn npm_latest_freezes_native_versions_for_only_the_current_host() {
+        for (host, suffix) in [
+            ("darwin-amd64", "darwin-x64"),
+            ("darwin-arm64", "darwin-arm64"),
+            ("linux-amd64", "linux-x64"),
+            ("linux-arm64", "linux-arm64"),
+        ] {
+            for (name, package, release) in [
+                ("claude", "@anthropic-ai/claude-code", "2.1.20"),
+                ("codex", "@openai/codex", "0.150.0"),
+            ] {
+                let alias = format!("{package}-{suffix}");
+                let native_package = if name == "codex" { package } else { &alias };
+                let native_version = if name == "codex" {
+                    format!("{release}-{suffix}")
+                } else {
+                    release.into()
+                };
+                let row = resolve_fixture(
+                    name,
+                    host,
+                    vec![
+                        response(
+                            &format!(
+                                "https://registry.npmjs.org/{}/latest",
+                                package.replace('/', "%2F")
+                            ),
+                            npm_fixture(package, release),
+                        ),
+                        response(
+                            &format!(
+                                "https://registry.npmjs.org/{}/{native_version}",
+                                native_package.replace('/', "%2F")
+                            ),
+                            npm_fixture(native_package, &native_version),
+                        ),
+                    ],
+                )
+                .unwrap();
+                assert_eq!(row["version"], release);
+                assert_eq!(row["native"].as_object().unwrap().len(), 1);
+                assert_eq!(row["native"][host]["version"], native_version);
+                assert_eq!(row["native"][host]["alias"], alias);
+            }
+        }
+        let ntn = resolve_fixture(
+            "ntn",
+            "linux-amd64",
+            vec![response(
+                "https://registry.npmjs.org/ntn/latest",
+                npm_fixture("ntn", "0.9.1"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(ntn["version"], "0.9.1");
+        assert!(ntn.get("native").is_none());
+    }
+
+    #[test]
+    fn npm_rejects_identity_tarball_and_integrity_mismatches() {
+        for (pointer, bad) in [
+            ("/name", json!("other-package")),
+            ("/version", json!("0.9.2")),
+            (
+                "/dist/tarball",
+                json!("https://registry.npmjs.org/ntn/-/ntn-0.9.0.tgz"),
+            ),
+            (
+                "/dist/tarball",
+                json!("https://example.invalid/ntn-0.9.1.tgz"),
+            ),
+            ("/dist/integrity", json!("sha1-invalid")),
+        ] {
+            let mut bad_release = npm_fixture("ntn", "0.9.1");
+            *bad_release.pointer_mut(pointer).unwrap() = bad;
+            assert!(
+                npm_metadata("ntn", "0.9.1", &mut |_| Ok(r::bytes(&bad_release).unwrap())).is_err()
+            );
+        }
+        assert!(
+            resolve_fixture(
+                "ntn",
+                "linux-amd64",
+                vec![response(
+                    "https://registry.npmjs.org/ntn/latest",
+                    npm_fixture("ntn", "1.0.0-beta.1"),
+                )],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn agy_uses_only_current_host_manifest_and_requires_versioned_bucket_and_digest() {
+        for host in ["darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64"] {
+            let url = format!(
+                "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{}.json",
+                host.replace('-', "_")
+            );
+            let manifest = json!({
+                "version": "1.5.0",
+                "url": format!("https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-build/{host}/payload.tar.gz"),
+                "sha512": "a".repeat(128)
+            });
+            let row = resolve_fixture("agy", host, vec![response(&url, manifest.clone())]).unwrap();
+            assert_eq!(row["version"], "1.5.0");
+            assert_eq!(row["platforms"].as_object().unwrap().len(), 1);
+            for (key, bad) in [
+                ("sha512", json!("invalid")),
+                (
+                    "url",
+                    json!("https://storage.googleapis.com/another-bucket/1.5.0/payload.tar.gz"),
+                ),
+                (
+                    "url",
+                    json!(
+                        "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.0-build/payload.tar.gz"
+                    ),
+                ),
+                (
+                    "url",
+                    json!(
+                        "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-build/../payload.tar.gz"
+                    ),
+                ),
+            ] {
+                let mut bad_manifest = manifest.clone();
+                bad_manifest[key] = bad;
+                assert!(resolve_fixture("agy", host, vec![response(&url, bad_manifest)]).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_upstream_never_resolves_to_an_observed_or_built_in_version() {
+        for name in ["node", "uv", "gh", "ntn", "claude", "codex", "agy"] {
+            let error = resolve_tool(name, "linux-amd64", &mut |_| {
+                Err(r::Error(4, "fixture upstream unavailable".into()))
+            })
+            .unwrap_err();
+            assert_eq!(error.0, 4);
+        }
+    }
+
+    #[test]
+    fn newer_installed_versions_are_retained_unless_the_user_explicitly_pins() {
+        assert!(satisfies_release(b"uv 0.14.0\n", "0.13.9", true));
+        assert!(!satisfies_release(b"uv 0.14.0\n", "0.13.9", false));
+        assert!(satisfies_release(b"v26.1.0\n", "26.1.0", false));
+        assert!(!satisfies_release(b"gh version 2.100.0\n", "2.105.0", true));
+        assert!(!satisfies_release(b"unrecognized version\n", "1.0.0", true));
+        assert!(optional_upgrade("1.9.9", "2.0.0").unwrap());
+        assert!(optional_upgrade("2.0.0-beta.1", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.0.0", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.1.0", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.0.0+build.1", "2.0.0").unwrap());
+        assert!(!optional_upgrade("2.0.0+build-1", "2.0.0").unwrap());
+        assert!(optional_upgrade("invalid", "2.0.0").is_err());
+        assert!(optional_upgrade("2.0.0", "2.1.0-beta.1").is_err());
+    }
 }

@@ -295,6 +295,15 @@ pub fn tmux(
     argv: &[OsString],
     stop: &AtomicBool,
 ) -> Result<String> {
+    Ok(tmux_text(&tmux_stdout(service, repo, argv, stop)?))
+}
+
+fn tmux_stdout(
+    service: &dyn Services,
+    repo: &Path,
+    argv: &[OsString],
+    stop: &AtomicBool,
+) -> Result<String> {
     let mut full = vec!["tmux".into()];
     full.extend_from_slice(argv);
     let mut request = ExecutionRequest::new(full, repo);
@@ -302,9 +311,11 @@ pub fn tmux(
     request.output_limit = 1024 * 1024;
     let output = service.execute(&request, stop)?;
     output.success()?;
-    String::from_utf8(output.stdout)
-        .map(|v| v.replace('\r', "").trim().into())
-        .map_err(Error::new)
+    String::from_utf8(output.stdout).map_err(Error::new)
+}
+
+fn tmux_text(value: &str) -> String {
+    value.replace('\r', "").trim().into()
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SessionProof {
@@ -414,12 +425,7 @@ pub fn session_proof(
     session: &str,
     stop: &AtomicBool,
 ) -> Result<SessionProof> {
-    require(
-        session
-            .strip_prefix('$')
-            .is_some_and(|v| !v.is_empty() && v.bytes().all(|v| v.is_ascii_digit())),
-        "explicit tmux session ID required",
-    )?;
+    require_session_id(session)?;
     let output = tmux(
         service,
         repo,
@@ -432,17 +438,92 @@ pub fn session_proof(
         ]),
         stop,
     )?;
-    let fields: Vec<_> = output.split('\t').collect();
-    require(
-        fields.len() == 3 && fields[0] == session,
-        "session identity unavailable",
-    )?;
+    let identity = session_identity(session, &output)?;
     let owner = tmux(
         service,
         repo,
         &crate::services::args(&["show-options", "-v", "-t", session, "@oms_panel_repo"]),
         stop,
     )?;
+    finish_session_proof(repo, session, identity, &owner)
+}
+
+pub const PROVIDER_SESSION_IDENTITY_FORMAT: &str = "#{session_id}\t#{pid}\t#{socket_path}\t.";
+const PROVIDER_SESSION_TRAILER: &str = "\t.\n";
+
+/// Provider Panel reads both session records through one supervised tmux client.
+pub fn provider_session_proof(
+    service: &dyn Services,
+    repo: &Path,
+    session: &str,
+    stop: &AtomicBool,
+) -> Result<SessionProof> {
+    require_session_id(session)?;
+    let canonical = std::fs::canonicalize(repo).map_err(Error::new)?;
+    let name = canonical.to_string_lossy();
+    // A repo value can include the frame itself or end in its prefix before tmux adds LF.
+    if name.contains(PROVIDER_SESSION_TRAILER) || name.ends_with("\t.") {
+        return session_proof(service, repo, session, stop);
+    }
+    let output = tmux_stdout(
+        service,
+        repo,
+        &crate::services::args(&[
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            PROVIDER_SESSION_IDENTITY_FORMAT,
+            ";",
+            "show-options",
+            "-v",
+            "-t",
+            session,
+            "@oms_panel_repo",
+        ]),
+        stop,
+    )?;
+    // The identity proof rejects extra tabs. Keep framing separate from legacy text normalization.
+    let (identity, owner) = output
+        .split_once(PROVIDER_SESSION_TRAILER)
+        .filter(|(_, owner)| !owner.contains(PROVIDER_SESSION_TRAILER))
+        .ok_or_else(|| Error::new("provider session proof framing unavailable"))?;
+    let owner = owner
+        .strip_suffix('\n')
+        .ok_or_else(|| Error::new("provider session proof framing unavailable"))?;
+    let identity = tmux_text(identity);
+    finish_session_proof(
+        repo,
+        session,
+        session_identity(session, &identity)?,
+        &tmux_text(owner),
+    )
+}
+
+fn require_session_id(session: &str) -> Result<()> {
+    require(
+        session
+            .strip_prefix('$')
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|v| v.is_ascii_digit())),
+        "explicit tmux session ID required",
+    )
+}
+
+fn session_identity<'a>(session: &str, output: &'a str) -> Result<(&'a str, &'a str)> {
+    let fields: Vec<_> = output.split('\t').collect();
+    let [id, pid, socket] = fields.as_slice() else {
+        return Err(Error::new("session identity unavailable"));
+    };
+    require(*id == session, "session identity unavailable")?;
+    Ok((pid, socket))
+}
+
+fn finish_session_proof(
+    repo: &Path,
+    session: &str,
+    (pid, socket): (&str, &str),
+    owner: &str,
+) -> Result<SessionProof> {
     require(
         owner
             == std::fs::canonicalize(repo)
@@ -450,13 +531,13 @@ pub fn session_proof(
                 .to_string_lossy(),
         "session is not owned by selected repository",
     )?;
-    let pid = fields[1].parse().map_err(Error::new)?;
+    let pid = pid.parse().map_err(Error::new)?;
     let process = process(pid)?;
     Ok(SessionProof {
         session: session.into(),
         server_pid: pid,
         server_birth: process.birth,
-        socket_digest: crate::digest(fields[2].as_bytes()),
+        socket_digest: crate::digest(socket.as_bytes()),
     })
 }
 pub fn open_terminal(

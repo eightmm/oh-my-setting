@@ -19,6 +19,9 @@
 mod incoming;
 #[path = "services_physical.rs"]
 mod physical;
+#[cfg(target_os = "linux")]
+#[path = "services_dispatch.rs"]
+pub(crate) mod protected_dispatch;
 #[path = "services_team_requests.rs"]
 mod team_requests;
 use crate::services_control::ControlServices;
@@ -28,8 +31,8 @@ use oms_command_lifecycle::IncomingPhase;
 use oms_command_peer::process::{Completed, Executor as PeerProcessExecutor, Invocation};
 use oms_mcp_server::{Captured, CommandExecutor, CommandRequest};
 use oms_panel_core::services::{
-    ActivityHeartbeat, CommandOutput, ExecutionRequest, NativeCommand, PeerExecutor,
-    Services as PanelServices,
+    ActivityHeartbeat, CommandOutput, DispatchLaunch, DispatchProof, ExecutionRequest,
+    NativeCommand, PeerExecutor, Services as PanelServices,
 };
 use oms_panel_core::tick::{ApprovedContract, AutopilotHost, ContractError};
 use oms_supervisor::capture::{CaptureOptions, LimitAction};
@@ -69,6 +72,8 @@ pub(crate) struct CollabServices<'a> {
     /// `[exe, --oms-dispatch, source, rev, --]`, or empty when no staged,
     /// manifest-backed native binary is executing.
     native: Vec<OsString>,
+    #[cfg(target_os = "linux")]
+    protected_stage: Option<std::sync::Mutex<protected_dispatch::Stage>>,
     /// Helper invocation prefix used by `spawn_detached` to start a detached
     /// process group with synchronous `exec` status verification.
     detach_worker: Vec<OsString>,
@@ -154,11 +159,35 @@ impl<'a> CollabServices<'a> {
             interrupted,
             source,
             native,
+            #[cfg(target_os = "linux")]
+            protected_stage: None,
             detach_worker,
             wake_once,
         })
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_dispatch_stage(
+        mut self,
+        locator: Option<&std::ffi::OsStr>,
+        cwd: &Path,
+    ) -> Self {
+        self.protected_stage = locator
+            .and_then(std::ffi::OsStr::to_str)
+            .and_then(|locator| protected_dispatch::Stage::connect(locator, cwd))
+            .map(std::sync::Mutex::new);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn close_dispatch_stage(&mut self, code: i32, stop: &AtomicBool) {
+        if !stop.load(Ordering::Acquire)
+            && let Some(stage) = self.protected_stage.take()
+            && let Ok(stage) = stage.into_inner()
+        {
+            stage.finish(code);
+        }
+    }
     /// Test override of the staged launcher (the test binary is never staged).
     #[cfg(test)]
     fn with_native(mut self, native: Vec<OsString>) -> Self {
@@ -241,6 +270,8 @@ struct Job<'a> {
     physical_call: Option<oms_supervisor::process::PhysicalCall>,
     channel: Option<&'a mut dyn OwnedDuplexConsumer>,
     launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
+    #[cfg(target_os = "linux")]
+    dispatch_observer: Option<protected_dispatch::Observer<'a>>,
 }
 
 impl<'a> Job<'a> {
@@ -259,6 +290,8 @@ impl<'a> Job<'a> {
             physical_call: None,
             channel: None,
             launch_fence: None,
+            #[cfg(target_os = "linux")]
+            dispatch_observer: None,
         }
     }
 }
@@ -342,6 +375,12 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
         channel.check().map_err(|e| e.message)?;
     }
     let id = reactor.start(request).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    let mut dispatch_observer = job.dispatch_observer;
+    #[cfg(target_os = "linux")]
+    if let Some(observer) = &mut dispatch_observer {
+        observer.started(&reactor, id);
+    }
     if let Some(channel) = &mut channel {
         channel
             .started(&mut reactor, id)
@@ -394,10 +433,18 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Some(observer) = &mut dispatch_observer {
+            observer.poll();
+        }
         if let Progress::Complete(mut done) = reactor
             .poll(id, Duration::from_millis(50))
             .map_err(|e| e.to_string())?
         {
+            #[cfg(target_os = "linux")]
+            if let Some(observer) = &mut dispatch_observer {
+                observer.poll();
+            }
             if let Some(channel) = &mut channel
                 && let Some(terminal) = &mut done.duplex
             {
@@ -443,15 +490,15 @@ fn stop_message(stop: StopReason, supervision: Option<&str>, limit: usize) -> St
 /// Run one staged native command to completion with the update-parent marker
 /// in its environment only. Child exit, deadline and cancellation map to
 /// shell-style codes; incomplete cleanup is never reported as success.
-fn run_staged(
+fn run_staged<T: AsRef<std::ffi::OsStr>>(
     launcher: &[OsString],
-    args: &[&str],
+    args: &[T],
     cwd: &Path,
     environment: Vec<(OsString, OsString)>,
     interrupted: &AtomicBool,
 ) -> Output {
     let mut argv = launcher.to_vec();
-    argv.extend(args.iter().map(OsString::from));
+    argv.extend(args.iter().map(|arg| arg.as_ref().to_owned()));
     let mut job = Job::new(argv, cwd, STAGED_WALL, STAGED_OUTPUT);
     job.environment = environment;
     let (done, _) = match supervise(job, interrupted) {
@@ -663,12 +710,13 @@ fn panel_error(message: impl ToString) -> oms_panel_core::Error {
     oms_panel_core::Error::new(message)
 }
 
-impl PeerExecutor for CollabServices<'_> {
-    fn execute(
+impl CollabServices<'_> {
+    fn execute_panel(
         &self,
         request: &ExecutionRequest,
         interrupted: &AtomicBool,
-    ) -> oms_panel_core::Result<CommandOutput> {
+        #[cfg(target_os = "linux")] mut controller: Option<&mut protected_dispatch::Controller>,
+    ) -> oms_panel_core::Result<(CommandOutput, Option<DispatchProof>)> {
         if interrupted.load(Ordering::Acquire) {
             return Err(oms_panel_core::Error {
                 code: 130,
@@ -685,25 +733,58 @@ impl PeerExecutor for CollabServices<'_> {
                 remove_environment: request.remove_environment.clone(),
                 heartbeat: request.heartbeat.as_ref(),
                 cancel: StopReason::Signal(2),
+                #[cfg(target_os = "linux")]
+                physical_call: controller
+                    .as_deref()
+                    .map(protected_dispatch::Controller::call),
+                #[cfg(target_os = "linux")]
+                dispatch_observer: controller
+                    .as_deref_mut()
+                    .map(protected_dispatch::Observer::Stage),
                 ..Job::new(argv, &request.cwd, request.timeout, request.output_limit)
             },
             interrupted,
         )
         .map_err(panel_error)?;
+        #[cfg(target_os = "linux")]
+        let proof = controller
+            .filter(|_| !interrupted.load(Ordering::Acquire))
+            .and_then(|controller| controller.proof(&done));
+        #[cfg(not(target_os = "linux"))]
+        let proof = None;
         let limited = done.stdout.limited || done.stderr.as_ref().is_some_and(|v| v.limited);
         let (cleanup_complete, output_complete) = (done.cleanup_complete(), done.output_complete());
         let mut stderr = done.stderr.map(|v| v.bytes).unwrap_or_default();
         if heartbeat_failed {
             stderr.extend_from_slice(b"\nOMS activity update unavailable\n");
         }
-        Ok(CommandOutput {
-            code: done.exit.map_or(75, |v| v.shell_code()),
-            stdout: done.stdout.bytes,
-            stderr,
-            cleanup_complete,
-            output_complete,
-            limited,
-        })
+        Ok((
+            CommandOutput {
+                code: done.exit.map_or(75, |v| v.shell_code()),
+                stdout: done.stdout.bytes,
+                stderr,
+                cleanup_complete,
+                output_complete,
+                limited,
+            },
+            proof,
+        ))
+    }
+}
+
+impl PeerExecutor for CollabServices<'_> {
+    fn execute(
+        &self,
+        request: &ExecutionRequest,
+        interrupted: &AtomicBool,
+    ) -> oms_panel_core::Result<CommandOutput> {
+        self.execute_panel(
+            request,
+            interrupted,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+        .map(|(output, _)| output)
     }
 }
 
@@ -728,6 +809,12 @@ impl PeerProcessExecutor for CollabServices<'_> {
         binding: oms_command_peer::process::TeamLaunchBinding<'_>,
         interrupted: &AtomicBool,
     ) -> oms_command_peer::Result<Completed> {
+        #[cfg(target_os = "linux")]
+        if let Some(stage) = &self.protected_stage
+            && let Ok(mut stage) = stage.lock()
+        {
+            stage.ineligible_call();
+        }
         self.team_requests(input, binding, interrupted)
     }
 
@@ -745,6 +832,45 @@ impl PeerProcessExecutor for CollabServices<'_> {
         input: Invocation,
         interrupted: &AtomicBool,
     ) -> oms_command_peer::Result<Completed> {
+        self.execute_peer(
+            input,
+            interrupted,
+            #[cfg(target_os = "linux")]
+            None,
+        )
+    }
+
+    fn execute_provider(
+        &self,
+        input: Invocation,
+        identity: &oms_command_telemetry::store::usage::Identity,
+        direct: bool,
+        interrupted: &AtomicBool,
+    ) -> oms_command_peer::Result<Completed> {
+        #[cfg(target_os = "linux")]
+        let observed = self
+            .protected_stage
+            .as_ref()
+            .and_then(|stage| stage.lock().ok())
+            .and_then(|mut stage| stage.begin(&input, identity, direct));
+        #[cfg(not(target_os = "linux"))]
+        let _ = (identity, direct);
+        self.execute_peer(
+            input,
+            interrupted,
+            #[cfg(target_os = "linux")]
+            observed,
+        )
+    }
+}
+
+impl CollabServices<'_> {
+    fn execute_peer(
+        &self,
+        input: Invocation,
+        interrupted: &AtomicBool,
+        #[cfg(target_os = "linux")] mut observer: Option<protected_dispatch::Provider>,
+    ) -> oms_command_peer::Result<Completed> {
         let fail = |code, e: String| oms_command_peer::Error::new(code, e);
         let argv = self.resolve_argv(input.argv).map_err(|e| fail(2, e))?;
         if let Some(fence) = &input.launch_fence {
@@ -758,11 +884,23 @@ impl PeerProcessExecutor for CollabServices<'_> {
                 merged: input.merge,
                 physical_call: input.physical_call,
                 launch_fence: input.launch_fence.as_ref(),
+                #[cfg(target_os = "linux")]
+                dispatch_observer: observer
+                    .as_mut()
+                    .map(protected_dispatch::Observer::Provider),
                 ..Job::new(argv, &input.cwd, input.timeout, input.max_bytes)
             },
             interrupted,
         )
         .map_err(|e| fail(if e == "interrupted" { 130 } else { 125 }, e))?;
+        #[cfg(target_os = "linux")]
+        if !interrupted.load(Ordering::Acquire)
+            && let Some(observer) = observer
+            && let Some(stage) = &self.protected_stage
+            && let Ok(mut stage) = stage.lock()
+        {
+            stage.complete(observer, &done);
+        }
         let complete = done.stop.is_none()
             && done.output_complete()
             && done.cleanup_complete()
@@ -1134,6 +1272,49 @@ impl PanelServices for CollabServices<'_> {
             }
         };
         Ok(output(out))
+    }
+
+    fn dispatch_context(
+        &self,
+        command: NativeCommand,
+        request: &ExecutionRequest,
+        launch: Option<&DispatchLaunch>,
+        interrupted: &AtomicBool,
+    ) -> oms_panel_core::Result<(CommandOutput, Option<DispatchProof>)> {
+        #[cfg(target_os = "linux")]
+        if command == NativeCommand::Delegate
+            && self.native.len() == 5
+            && self.native[1] == "--oms-dispatch"
+            && self.native[4] == "--"
+            && let Some(mut controller) = launch.and_then(|binding| {
+                protected_dispatch::Controller::new(binding, Path::new(&self.native[0]))
+            })
+        {
+            let mut argv: Vec<OsString> = self.native.clone();
+            argv.splice(
+                4..4,
+                [
+                    protected_dispatch::FLAG.into(),
+                    controller.locator.clone().into(),
+                ],
+            );
+            argv.extend(staged_prefix(command, &request.cwd));
+            argv.extend(request.argv.iter().cloned());
+            if argv.len() <= MAX_ARGV {
+                return self.execute_panel(
+                    &ExecutionRequest {
+                        argv,
+                        ..request.clone()
+                    },
+                    interrupted,
+                    Some(&mut controller),
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = launch;
+        self.command_context(command, request, interrupted)
+            .map(|output| (output, None))
     }
 
     /// Without environment deltas this is `command`; with them the verb runs in
@@ -1523,24 +1704,51 @@ fn on_path(tool: &str) -> bool {
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
 }
 
-fn capability_receipt() -> Option<PathBuf> {
-    env_text("OMS_CAPABILITY_RECEIPT")
+fn capability_receipt() -> Result<Option<PathBuf>, &'static str> {
+    let selected = std::env::var_os("OMS_CAPABILITY_RECEIPT").filter(|v| !v.is_empty());
+    let explicit = selected.is_some();
+    let path = selected
         .map(PathBuf::from)
         .or_else(|| {
-            let config = env_text("XDG_CONFIG_HOME")
+            let config = std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
-                .or_else(|| env_text("HOME").map(|h| Path::new(&h).join(".config")))?;
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .filter(|v| !v.is_empty())
+                        .map(|h| Path::new(&h).join(".config"))
+                })?;
             Some(config.join("oh-my-setting/capabilities.json"))
         })
+        .ok_or("cannot locate capability receipt")?;
+    let path =
+        std::path::absolute(path).map_err(|_| "cannot resolve capability receipt location")?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(Some(path)),
+        Ok(_) => Err("capability receipt must be a regular file, not a symlink or directory"),
+        // Only an absent default proves this is an older installation without
+        // a selected profile. Broken explicit intent cannot widen tool scope.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("explicit capability receipt is missing; tool refresh refused")
+        }
+        Err(_) => Err("cannot inspect capability receipt; tool refresh refused"),
+    }
 }
 
 /// Tool refresh verb: an install that chose its capabilities reapplies that
 /// choice; an older install keeps the full tool refresh.
-fn tools_refresh(profile_receipt: bool) -> &'static [&'static str] {
-    if profile_receipt {
-        &["install-profile", "--reapply", "--upgrade"]
+fn tools_refresh(profile_receipt: Option<&Path>) -> Vec<OsString> {
+    if let Some(receipt) = profile_receipt {
+        vec![
+            "install-profile".into(),
+            "--reapply".into(),
+            "--upgrade".into(),
+            "--receipt".into(),
+            receipt.as_os_str().to_owned(),
+        ]
     } else {
-        &["install-tools", "--upgrade"]
+        vec!["install-tools".into(), "--upgrade".into()]
     }
 }
 
@@ -1797,10 +2005,36 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
             Ok(l) => l,
             Err(e) => return refuse(2, e),
         };
-        let parent = vec![(
+        let mut parent = vec![(
             OsString::from("OMS_NATIVE_UPDATE_PARENT"),
             OsString::from(std::process::id().to_string()),
         )];
+        // Incoming children run from the source checkout. Preserve explicit
+        // installation paths relative to the original invocation, not that cwd.
+        for name in [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "OMS_INSTALL_RECEIPT",
+            "OMS_CAPABILITY_RECEIPT",
+            "CODEX_HOME",
+            "OMS_CODEX_CONFIG",
+            "OMS_CLAUDE_SETTINGS",
+            "PI_CODING_AGENT_DIR",
+            "OH_MY_SETTING_TOOL_LOCK",
+        ] {
+            if let Some(path) = std::env::var_os(name).filter(|v| !v.is_empty()) {
+                let path = match std::path::absolute(path) {
+                    Ok(path) => path,
+                    Err(_) => return refuse(2, format!("cannot resolve {name} path")),
+                };
+                parent.push((name.into(), path.into_os_string()));
+            }
+        }
         if phase == IncomingPhase::Preflight {
             use std::os::unix::fs::PermissionsExt;
             let Some(canonical_source) = std::fs::canonicalize(source).ok().filter(|p| p.is_dir())
@@ -1886,10 +2120,17 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
             }
             IncomingPhase::Verify => run_staged(&launcher, &["doctor"], cwd, parent, interrupted),
             IncomingPhase::RefreshTools => {
-                let profile = capability_receipt()
-                    .and_then(|p| std::fs::symlink_metadata(p).ok())
-                    .is_some_and(|m| m.file_type().is_file());
-                run_staged(&launcher, tools_refresh(profile), cwd, parent, interrupted)
+                let profile = match capability_receipt() {
+                    Ok(profile) => profile,
+                    Err(error) => return refuse(2, error),
+                };
+                run_staged(
+                    &launcher,
+                    &tools_refresh(profile.as_deref()),
+                    cwd,
+                    parent,
+                    interrupted,
+                )
             }
             IncomingPhase::Preflight => unreachable!("handled above"),
         }
@@ -3658,8 +3899,11 @@ mod tests {
         ));
         assert!(!plan_idle(b"{", 14));
         assert_eq!(env_days("OMS_TICK_COLLAB_TEST_UNSET", 7), Ok(7));
-        assert_eq!(tools_refresh(true)[0], "install-profile");
-        assert_eq!(tools_refresh(false), ["install-tools", "--upgrade"]);
+        assert_eq!(
+            tools_refresh(Some(Path::new("selected.json")))[0],
+            "install-profile"
+        );
+        assert_eq!(tools_refresh(None), ["install-tools", "--upgrade"]);
     }
 
     /// A staged revision directory whose `oms` echoes its argument vector and
@@ -3689,6 +3933,70 @@ mod tests {
     fn incoming_lifecycle_runs_the_staged_checkout_and_returns_its_receipt() {
         use oms_command_lifecycle::Services as Lifecycle;
         let stop = Arc::new(AtomicBool::new(false));
+        let path_overrides = [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "OMS_INSTALL_RECEIPT",
+            "OMS_CAPABILITY_RECEIPT",
+            "CODEX_HOME",
+            "OMS_CODEX_CONFIG",
+            "OMS_CLAUDE_SETTINGS",
+            "PI_CODING_AGENT_DIR",
+            "OH_MY_SETTING_TOOL_LOCK",
+        ];
+        if let Some(root) = std::env::var_os("OMS_REFRESH_RECEIPT_FIXTURE") {
+            let root = PathBuf::from(root);
+            let case = std::env::var("OMS_REFRESH_RECEIPT_CASE").unwrap();
+            let marker = root.join("refresh-child");
+            if marker.exists() {
+                std::fs::remove_file(&marker).unwrap();
+            }
+            let host = CollabServices::new(&stop, &root).expect("source is available");
+            let out = host.incoming_lifecycle(
+                IncomingPhase::RefreshTools,
+                &root,
+                "0123456789abcdef0123456789abcdef01234567",
+                b"{}",
+                &[],
+                &stop,
+            );
+            let expected = match case.as_str() {
+                "custom" | "paths" => Some(format!(
+                    "ran install-profile --reapply --upgrade --receipt {}",
+                    root.join("invocation/selected profiles.json").display()
+                )),
+                "default" | "empty" => Some("ran install-tools --upgrade".into()),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
+                assert_eq!(String::from_utf8_lossy(&out.1), expected);
+                assert!(marker.is_file());
+                if case == "paths" {
+                    let mut expected = vec![root.clone()];
+                    expected.extend(path_overrides.map(|name| {
+                        let path = PathBuf::from(std::env::var_os(name).unwrap());
+                        assert!(path.is_relative(), "parent {name} must stay relative");
+                        root.join("invocation").join(path)
+                    }));
+                    let observed = std::fs::read_to_string(root.join("child-paths")).unwrap();
+                    assert_eq!(
+                        observed.lines().map(PathBuf::from).collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            } else {
+                assert_eq!(out.0, 2, "{case}: {}", String::from_utf8_lossy(&out.2));
+                assert!(String::from_utf8_lossy(&out.2).contains("capability receipt"));
+                assert!(!marker.exists(), "{case} launched a tool refresh child");
+            }
+            return;
+        }
         let fixture = Fixture::new();
         let root = std::fs::canonicalize(fixture.path()).unwrap();
         let host = CollabServices::new(&stop, &root).expect("source is available");
@@ -3732,8 +4040,14 @@ mod tests {
             rev,
             &format!(
                 r#"shift 4
+[ -z "${{OMS_REFRESH_RECEIPT_FIXTURE:-}}" ] || : > "$OMS_REFRESH_RECEIPT_FIXTURE/refresh-child"
+if [ "${{OMS_REFRESH_RECEIPT_CASE:-}}" = paths ]; then
+  printf '%s\n' "$PWD" "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$CARGO_HOME" "$RUSTUP_HOME" "$OMS_INSTALL_RECEIPT" "$OMS_CAPABILITY_RECEIPT" "$CODEX_HOME" "$OMS_CODEX_CONFIG" "$OMS_CLAUDE_SETTINGS" "$PI_CODING_AGENT_DIR" "$OH_MY_SETTING_TOOL_LOCK" > "$OMS_REFRESH_RECEIPT_FIXTURE/child-paths"
+fi
 case "$1" in
 install) printf '{{"schema":2,"parent":"%s"}}' "$OMS_NATIVE_UPDATE_PARENT" > '{r}'; echo "installed native OMS 0123456789abcdef0123456789abcdef01234567; receipt: {r}" ;;
+install-profile) [ "$#" = 5 ] && [ "$4" = --receipt ] && [ -f "$5" ] || exit 9; printf 'ran %s' "$*" ;;
+install-tools) [ "$#" = 2 ] && [ "$2" = --upgrade ] || exit 9; printf 'ran %s' "$*" ;;
 *) printf 'ran %s' "$*"; test "$OMS_NATIVE_UPDATE_PARENT" = "$$PARENT" ;;
 esac"#,
                 r = receipt.display()
@@ -3758,6 +4072,53 @@ esac"#,
         let out = run(IncomingPhase::RefreshTools, rev);
         assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
         assert!(String::from_utf8_lossy(&out.1).starts_with("ran install-"));
+
+        let invocation = root.join("invocation");
+        std::fs::create_dir(&invocation).unwrap();
+        std::fs::write(invocation.join("selected profiles.json"), b"{}").unwrap();
+        std::fs::create_dir(invocation.join("receipt directory")).unwrap();
+        std::os::unix::fs::symlink(
+            "selected profiles.json",
+            invocation.join("linked profiles.json"),
+        )
+        .unwrap();
+        for (case, selected) in [
+            ("custom", Some("selected profiles.json")),
+            ("paths", Some("selected profiles.json")),
+            ("missing", Some("missing profiles.json")),
+            ("directory", Some("receipt directory")),
+            ("symlink", Some("linked profiles.json")),
+            ("metadata", Some("selected profiles.json/child")),
+            ("default", None),
+            ("empty", Some("")),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                    "--exact",
+                    "services_collab::tests::incoming_lifecycle_runs_the_staged_checkout_and_returns_its_receipt",
+                    "--nocapture",
+                ])
+                .env("OMS_REFRESH_RECEIPT_FIXTURE", &root)
+                .env("OMS_REFRESH_RECEIPT_CASE", case)
+                .env("XDG_CONFIG_HOME", root.join("absent config"))
+                .env_remove("OMS_CAPABILITY_RECEIPT")
+                .current_dir(&invocation);
+            if case == "paths" {
+                for name in path_overrides {
+                    child.env(name, format!("relative {name}"));
+                }
+            }
+            if let Some(selected) = selected {
+                child.env("OMS_CAPABILITY_RECEIPT", selected);
+            }
+            let out = child.output().unwrap();
+            assert!(
+                out.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
 
         // A receipt that is not schema 2 is refused rather than returned.
         std::fs::write(&receipt, br#"{"schema":1}"#).unwrap();

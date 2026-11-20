@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::{IsTerminal, Read, Write};
 use std::time::{Duration, Instant};
 
+const ESCAPE_GRACE: Duration = Duration::from_millis(100);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
     Char(char),
@@ -58,6 +60,7 @@ impl Decoder {
             }
             if self.pending.starts_with(b"\x1b[200~") {
                 self.pending.drain(..6);
+                self.escape_since = None;
                 self.paste = true;
                 keys.push(Key::Paste);
                 continue;
@@ -177,11 +180,16 @@ impl Decoder {
         }
         keys
     }
+    fn escape_remaining(&self, now: Instant) -> Option<Duration> {
+        self.escape_since
+            .map(|since| ESCAPE_GRACE.saturating_sub(now.saturating_duration_since(since)))
+    }
+    fn poll_duration(&self, duration: Duration, now: Instant) -> Duration {
+        let wait = duration.min(crate::wakeup::SLICE);
+        wait.min(self.escape_remaining(now).unwrap_or(wait))
+    }
     pub fn expire(&mut self) -> Option<Key> {
-        if self
-            .escape_since
-            .is_some_and(|t| t.elapsed() >= Duration::from_millis(100))
-        {
+        if self.escape_remaining(Instant::now()) == Some(Duration::ZERO) {
             let bare = self.pending == b"\x1b";
             self.pending.clear();
             self.escape_since = None;
@@ -267,7 +275,7 @@ impl TerminalInput {
                 == rustix::process::getpgrp(),
             "terminal foreground ownership changed",
         )?;
-        let duration = duration.min(Duration::from_millis(100));
+        let duration = self.decoder.poll_duration(duration, Instant::now());
         let timeout = crate::wakeup::timespec(duration);
         let wake_fd = wake.map(|w| w.fd());
         let mut descriptors = vec![PollFd::new(&self.file, PollFlags::IN)];
@@ -283,7 +291,16 @@ impl TerminalInput {
         let wake_ready = descriptors
             .get(1)
             .is_some_and(|d| d.revents().contains(PollFlags::IN));
-        let woken = wake_ready && wake.is_some_and(|w| w.drain_burst());
+        let woken = wake_ready
+            && wake.is_some_and(|w| {
+                let burst = crate::wakeup::COALESCE;
+                // A late wake must not extend the pending input deadline.
+                if self.decoder.poll_duration(burst, Instant::now()) < burst {
+                    w.drain()
+                } else {
+                    w.drain_burst()
+                }
+            });
         let mut output = Vec::new();
         if readable {
             let mut data = [0; 4096];
@@ -315,9 +332,63 @@ impl Drop for TerminalInput {
 
 #[cfg(test)]
 mod tests {
+    use super::{Decoder, Duration, Instant, Key};
+
+    #[test]
+    fn wake_repoll_uses_remaining_escape_grace() {
+        let mut decoder = Decoder::default();
+        let start = Instant::now();
+        let slice = Duration::from_millis(100);
+        assert_eq!(decoder.poll_duration(slice * 2, start), slice);
+        assert!(decoder.feed(b"\x1b").is_empty());
+        decoder.escape_since = Some(start);
+
+        // The first poll sees a wake 60 ms into the grace. The next poll
+        // must reach the original deadline even if the caller asks for 100 ms.
+        let woke = start + Duration::from_millis(60);
+        assert_eq!(
+            decoder.poll_duration(slice, woke),
+            Duration::from_millis(40)
+        );
+        assert_eq!(
+            decoder.poll_duration(Duration::from_millis(20), woke),
+            Duration::from_millis(20)
+        );
+        assert_eq!(decoder.poll_duration(slice, start + slice), Duration::ZERO);
+
+        let soon_due = start + Duration::from_millis(95);
+        let burst = crate::wakeup::COALESCE;
+        assert_eq!(
+            decoder.poll_duration(burst, soon_due),
+            Duration::from_millis(5)
+        );
+    }
+
+    #[test]
+    fn split_escape_continuations_keep_their_key_class() {
+        for (tail, key) in [
+            (b"[A".as_slice(), Key::Up),
+            (b"[<0;15;24M", Key::Click(15, 24)),
+            (b"q", Key::Unbound),
+        ] {
+            let mut decoder = Decoder::default();
+            assert!(decoder.feed(b"\x1b").is_empty());
+            assert_eq!(decoder.feed(tail), [key]);
+            assert!(decoder.escape_since.is_none());
+        }
+    }
+
+    #[test]
+    fn split_paste_start_clears_escape_deadline() {
+        let mut decoder = Decoder::default();
+        assert!(decoder.feed(b"\x1b").is_empty());
+        assert_eq!(decoder.feed(b"[200~q\x1b[20"), [Key::Paste]);
+        assert!(decoder.escape_since.is_none());
+        assert_eq!(decoder.feed(b"1~z"), [Key::Char('z')]);
+    }
+
     #[test]
     fn sgr_mouse_drag_and_release_keep_scroll_and_click() {
-        use super::{Decoder, Key};
         let mut decoder = Decoder::default();
         assert!(decoder.feed(b"\x1b[<0;15;").is_empty());
         assert_eq!(

@@ -1143,6 +1143,900 @@ fn incremental_follow_reads_only_new_rows_and_reloads_generations() {
     assert!(tail.read(&path).is_err());
 }
 
+fn synth_row(ev_num: usize, att: &str, seq: usize, kind: &str, extra: &str) -> String {
+    format!(
+        "{{\"schema\":1,\"event_id\":\"aevt_{ev_num:032x}\",\"ts\":\"2026-01-01T00:00:00Z\",\"attempt_id\":\"{att}\",\"seq\":{seq},\"event_type\":\"{kind}\"{extra}}}\n"
+    )
+}
+
+fn append_raw(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(bytes)
+        .unwrap();
+}
+
+fn assert_list_json_parity(cache: &EventsProjectionCache, repo: &std::path::Path) -> Vec<u8> {
+    let idle = AtomicBool::new(false);
+    let cached = cache.list_json(repo, &idle).unwrap();
+    let cold = run(
+        App::Events,
+        &[OsString::from("list"), OsString::from("--json")],
+        repo,
+        &idle,
+    );
+    assert_eq!(cold.0, 0, "{}", String::from_utf8_lossy(&cold.2));
+    assert_eq!(
+        cached,
+        cold.1,
+        "list_json mismatch: cached={} cold={}",
+        String::from_utf8_lossy(&cached),
+        String::from_utf8_lossy(&cold.1),
+    );
+    cached
+}
+
+#[test]
+fn incremental_list_json_parity_and_single_repo_slot() {
+    use crate::incremental::SyncDisposition;
+
+    let idle = AtomicBool::new(false);
+    let cache = EventsProjectionCache::new();
+    let repo_a = Fixture::new();
+
+    // Missing/empty ledger -> Empty, !is_cached(), exact list --json parity.
+    let (disp, rows) = cache.list_with_disposition(&repo_a.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Empty);
+    assert!(rows.is_empty());
+    assert!(!cache.is_cached());
+    assert_eq!(assert_list_json_parity(&cache, &repo_a.0), b"[]\n\n");
+    assert!(!cache.is_cached());
+
+    // Cold -> Unchanged -> Incremental +1 usage & +2 transitions -> equal-updated_at tie-breaking.
+    let id1 = create_attempt(
+        &repo_a.0,
+        &StartRequest {
+            tool: "alpha".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    for att in ["att_tie_a", "att_tie_b"] {
+        let mut created = new_event(
+            att,
+            1usize.into(),
+            "attempt.created",
+            obj([
+                ("from_state", V::Null),
+                ("to_state", "queued".into()),
+                ("provider", "local".into()),
+                ("tool", "tie".into()),
+            ]),
+        )
+        .unwrap();
+        created.set("ts", "2026-01-01T00:00:00Z");
+        append_lifecycle(&repo_a.0, created, &idle).unwrap();
+    }
+    for (seq, state, ts) in [
+        (2usize, "starting", "2026-01-02T00:00:00Z"),
+        (3usize, "working", "2026-01-02T00:00:01Z"),
+    ] {
+        let mut tr = new_event(
+            &id1,
+            seq.into(),
+            "attempt.state_changed",
+            obj([("to_state", state.into())]),
+        )
+        .unwrap();
+        tr.set("ts", ts);
+        append_lifecycle(&repo_a.0, tr, &idle).unwrap();
+    }
+
+    let (disp, listed) = cache.list_with_disposition(&repo_a.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(listed.len(), 3);
+    assert!(cache.is_cached());
+    assert_eq!(listed[0].get("attempt_id").text(), Some("att_tie_a"));
+    assert_eq!(listed[1].get("attempt_id").text(), Some("att_tie_b"));
+    assert_eq!(listed[2].get("attempt_id").text(), Some(id1.as_str()));
+    assert_eq!(
+        cache.list_with_disposition(&repo_a.0, &idle).unwrap().0,
+        SyncDisposition::Unchanged
+    );
+    assert_list_json_parity(&cache, &repo_a.0);
+
+    // +1 usage row -> Incremental { appended_rows: 1 }.
+    let mut usage1 = new_event(
+        &id1,
+        4usize.into(),
+        "attempt.usage",
+        obj([(
+            "usage",
+            obj([
+                ("tokens", 42usize.into()),
+                ("duration_ms", 7usize.into()),
+                ("cost_microusd", 3usize.into()),
+            ]),
+        )]),
+    )
+    .unwrap();
+    usage1.set("ts", "2026-01-02T00:00:02Z");
+    append_lifecycle(&repo_a.0, usage1, &idle).unwrap();
+    let (disp, listed) = cache.list_with_disposition(&repo_a.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Incremental { appended_rows: 1 });
+    assert_eq!(listed[2].get("usage").get("tokens").py(), "42");
+    assert_list_json_parity(&cache, &repo_a.0);
+
+    // +2 transition rows -> Incremental { appended_rows: 2 }.
+    for (seq, state, ts) in [
+        (5usize, "review", "2026-01-02T00:00:03Z"),
+        (6usize, "done", "2026-01-02T00:00:04Z"),
+    ] {
+        let mut tr = new_event(
+            &id1,
+            seq.into(),
+            "attempt.state_changed",
+            obj([("to_state", state.into())]),
+        )
+        .unwrap();
+        tr.set("ts", ts);
+        append_lifecycle(&repo_a.0, tr, &idle).unwrap();
+    }
+    let (disp, listed) = cache.list_with_disposition(&repo_a.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Incremental { appended_rows: 2 });
+    assert_eq!(listed[2].get("state").text(), Some("done"));
+    assert_list_json_parity(&cache, &repo_a.0);
+
+    // Canonical symlink & ./sub/.. alias hit Unchanged; switching repo replaces slot.
+    let sub_holder = Fixture::new();
+    std::fs::create_dir(repo_a.0.join("sub")).unwrap();
+    let alias_dir = sub_holder.0.join("repo_alias");
+    std::os::unix::fs::symlink(&repo_a.0, &alias_dir).unwrap();
+    assert_eq!(
+        cache.list_with_disposition(&alias_dir, &idle).unwrap().0,
+        SyncDisposition::Unchanged
+    );
+    assert_eq!(
+        cache
+            .list_with_disposition(&repo_a.0.join("./sub/.."), &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Unchanged
+    );
+    assert!(cache.is_cached());
+
+    let repo_b = Fixture::new();
+    let id_b = create_attempt(
+        &repo_b.0,
+        &StartRequest {
+            tool: "beta".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    let (disp_b, rows_b) = cache.list_with_disposition(&repo_b.0, &idle).unwrap();
+    assert_eq!(disp_b, SyncDisposition::Cold);
+    assert_eq!(rows_b.len(), 1);
+    assert_eq!(rows_b[0].get("attempt_id").text(), Some(id_b.as_str()));
+    assert_list_json_parity(&cache, &repo_b.0);
+    assert_eq!(
+        cache.list_with_disposition(&repo_a.0, &idle).unwrap().0,
+        SyncDisposition::Cold
+    );
+    assert_list_json_parity(&cache, &repo_a.0);
+}
+
+#[test]
+fn incremental_prefix_hash_read_fence_and_stale_negatives() {
+    use crate::incremental::SyncDisposition;
+    use sha2::{Digest, Sha256};
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, atomic::Ordering};
+
+    let idle = AtomicBool::new(false);
+    let f = Fixture::new();
+
+    // Capped fallible read allocation + sparse huge file cancellation without abort.
+    let huge_vec = storage::new_read_vec(1_u64 << 40).unwrap();
+    assert!(huge_vec.capacity() <= 131_072);
+    assert!(storage::new_read_vec((isize::MAX as u64) + 1).is_err());
+
+    let sparse_repo = Fixture::new();
+    let sparse_path = event_path(&sparse_repo.0);
+    std::fs::create_dir_all(sparse_path.parent().unwrap()).unwrap();
+    {
+        let sparse = std::fs::File::create(&sparse_path).unwrap();
+        sparse.set_len(1_u64 << 30).unwrap();
+    }
+    let mut sparse_file = std::fs::File::open(&sparse_path).unwrap();
+    let mut sparse_buf = vec![0u8; 4096];
+    let mut sparse_out = storage::new_read_vec(1_u64 << 30).unwrap();
+    assert!(sparse_out.capacity() <= 131_072);
+    let mut sparse_hasher = Sha256::new();
+    assert_eq!(
+        storage::read_into(
+            &mut sparse_file,
+            &mut sparse_buf,
+            1_u64 << 30,
+            &mut sparse_hasher,
+            &mut sparse_out,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err(),
+        "operation interrupted"
+    );
+    let sparse_cache = EventsProjectionCache::new();
+    assert_eq!(
+        sparse_cache
+            .list_json(&sparse_repo.0, &AtomicBool::new(true))
+            .unwrap_err(),
+        "operation interrupted"
+    );
+
+    // Direct storage::read_into byte-length + 1-byte probe fence.
+    let fence_path = f.0.join("fence.bin");
+    std::fs::write(&fence_path, vec![b'x'; 10_000]).unwrap();
+    let mut fence_file = std::fs::File::open(&fence_path).unwrap();
+    let mut fence_buf = vec![0u8; 4096];
+    let mut hasher = Sha256::new();
+    let mut out = Vec::new();
+    assert!(
+        !storage::read_into(
+            &mut fence_file,
+            &mut fence_buf,
+            1_000,
+            &mut hasher,
+            &mut out,
+            &idle
+        )
+        .unwrap()
+    );
+    assert_eq!(out.len(), 1_000);
+    assert_eq!(fence_file.stream_position().unwrap(), 1_001);
+
+    fence_file.seek(SeekFrom::Start(0)).unwrap();
+    out.clear();
+    hasher = Sha256::new();
+    assert!(
+        !storage::read_into(
+            &mut fence_file,
+            &mut fence_buf,
+            20_000,
+            &mut hasher,
+            &mut out,
+            &idle
+        )
+        .unwrap()
+    );
+
+    fence_file.seek(SeekFrom::Start(0)).unwrap();
+    out.clear();
+    hasher = Sha256::new();
+    assert!(
+        storage::read_into(
+            &mut fence_file,
+            &mut fence_buf,
+            10_000,
+            &mut hasher,
+            &mut out,
+            &idle
+        )
+        .unwrap()
+    );
+    assert_eq!(out.len(), 10_000);
+
+    // Bounded continuous-writer thread test + post-stop convergence parity.
+    let repo_race = Fixture::new();
+    let race_id = create_attempt(
+        &repo_race.0,
+        &StartRequest {
+            tool: "race".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    let race_path = event_path(&repo_race.0);
+    let race_cache = EventsProjectionCache::new();
+    let stop_writer = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop_writer);
+    let writer_path = race_path.clone();
+    let writer_id = race_id.clone();
+    let writer = std::thread::spawn(move || {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&writer_path)
+            .unwrap();
+        let mut seq = 2usize;
+        while !stop_flag.load(Ordering::Relaxed) && seq <= 10_000 {
+            let row = synth_row(seq, &writer_id, seq, "attempt.heartbeat", "");
+            f.write_all(row.as_bytes()).unwrap();
+            f.flush().unwrap();
+            seq += 1;
+            std::thread::yield_now();
+        }
+    });
+    for _ in 0..80 {
+        match race_cache.list_json(&repo_race.0, &idle) {
+            Ok(bytes) => assert!(bytes.starts_with(b"[") && bytes.ends_with(b"\n")),
+            Err(err) => assert_eq!(err, "ledger changed during access"),
+        }
+        std::thread::yield_now();
+    }
+    stop_writer.store(true, Ordering::Release);
+    writer.join().unwrap();
+    assert_list_json_parity(&race_cache, &repo_race.0);
+
+    // Same-inode middle-prefix rewrite (> 24 KiB, identical 8 KiB head & tail), same-size & grown.
+    let mid_cache = EventsProjectionCache::new();
+    let repo_mid = Fixture::new();
+    let mid_path = event_path(&repo_mid.0);
+    std::fs::create_dir_all(mid_path.parent().unwrap()).unwrap();
+    let mut mid_buf = synth_row(
+        1,
+        "att_mid",
+        1,
+        "attempt.created",
+        ",\"from_state\":null,\"to_state\":\"queued\",\"provider\":\"local\",\"tool\":\"mid\"",
+    );
+    let mut middle_offset = 0usize;
+    for seq in 2..=200 {
+        if seq == 100 {
+            let line = synth_row(
+                seq,
+                "att_mid",
+                seq,
+                "attempt.usage",
+                ",\"usage\":{\"tokens\":1000,\"duration_ms\":10,\"cost_microusd\":1}",
+            );
+            middle_offset = mid_buf.len() + line.find("1000").unwrap();
+            mid_buf.push_str(&line);
+        } else {
+            mid_buf.push_str(&synth_row(seq, "att_mid", seq, "attempt.heartbeat", ""));
+        }
+    }
+    assert!(mid_buf.len() > 24 * 1024);
+    assert!(middle_offset > 8192 && middle_offset + 4 < mid_buf.len() - 8192);
+    std::fs::write(&mid_path, mid_buf.as_bytes()).unwrap();
+    let mid_ino = std::fs::metadata(&mid_path).unwrap().ino();
+    let mid_len = std::fs::metadata(&mid_path).unwrap().len();
+    let orig_bytes = std::fs::read(&mid_path).unwrap();
+
+    let (disp, rows) = mid_cache.list_with_disposition(&repo_mid.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("usage").get("tokens").py(), "1000");
+
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&mid_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(middle_offset as u64)).unwrap();
+        file.write_all(b"2000").unwrap();
+        file.sync_all().unwrap();
+    }
+    let after_same = std::fs::read(&mid_path).unwrap();
+    assert_eq!(std::fs::metadata(&mid_path).unwrap().ino(), mid_ino);
+    assert_eq!(std::fs::metadata(&mid_path).unwrap().len(), mid_len);
+    assert_eq!(&after_same[..8192], &orig_bytes[..8192]);
+    assert_eq!(
+        &after_same[after_same.len() - 8192..],
+        &orig_bytes[orig_bytes.len() - 8192..]
+    );
+    let (disp, rows) = mid_cache.list_with_disposition(&repo_mid.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("usage").get("tokens").py(), "2000");
+    assert_list_json_parity(&mid_cache, &repo_mid.0);
+
+    let extra_row = synth_row(201, "att_mid", 201, "attempt.heartbeat", "");
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&mid_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(middle_offset as u64)).unwrap();
+        file.write_all(b"3000").unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(extra_row.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+    let after_grow = std::fs::read(&mid_path).unwrap();
+    assert_eq!(std::fs::metadata(&mid_path).unwrap().ino(), mid_ino);
+    assert!(after_grow.len() as u64 > mid_len);
+    assert_eq!(&after_grow[..8192], &orig_bytes[..8192]);
+    assert_eq!(
+        &after_grow[mid_len as usize - 8192..mid_len as usize],
+        &orig_bytes[orig_bytes.len() - 8192..]
+    );
+    let (disp, rows) = mid_cache.list_with_disposition(&repo_mid.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("usage").get("tokens").py(), "3000");
+    assert_list_json_parity(&mid_cache, &repo_mid.0);
+
+    // Valid unterminated EOF -> Cold on append_lifecycle.
+    let eof_cache = EventsProjectionCache::new();
+    let repo_eof = Fixture::new();
+    let eof_id = create_attempt(
+        &repo_eof.0,
+        &StartRequest {
+            tool: "eof".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    let eof_path = event_path(&repo_eof.0);
+    let row_unterm = format!(
+        "{{\"schema\":1,\"event_id\":\"aevt_{:032x}\",\"ts\":\"2026-01-01T00:00:05Z\",\"attempt_id\":\"{eof_id}\",\"seq\":2,\"event_type\":\"attempt.heartbeat\"}}",
+        9001usize
+    );
+    append_raw(&eof_path, row_unterm.as_bytes());
+    let (disp, rows) = eof_cache.list_with_disposition(&repo_eof.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "2");
+    let mut hb3 = new_event(&eof_id, 3usize.into(), "attempt.heartbeat", obj([])).unwrap();
+    hb3.set("ts", "2026-01-01T00:00:06Z");
+    append_lifecycle(&repo_eof.0, hb3, &idle).unwrap();
+    let (disp, rows) = eof_cache.list_with_disposition(&repo_eof.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "3");
+    assert_list_json_parity(&eof_cache, &repo_eof.0);
+
+    // Atomic new-inode rewrites, set_len truncation, deletion, hardlink/symlink swaps, repo wipe/recreate.
+    let neg_cache = EventsProjectionCache::new();
+    let repo_neg = Fixture::new();
+    let neg_id = create_attempt(
+        &repo_neg.0,
+        &StartRequest {
+            tool: "neg".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    let neg_path = event_path(&repo_neg.0);
+    assert_eq!(
+        neg_cache
+            .list_with_disposition(&repo_neg.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Cold
+    );
+    let orig_neg = std::fs::read(&neg_path).unwrap();
+    let orig_ino = std::fs::metadata(&neg_path).unwrap().ino();
+    let same_len_neg = String::from_utf8(orig_neg.clone())
+        .unwrap()
+        .replacen("\"tool\":\"neg\"", "\"tool\":\"new\"", 1)
+        .into_bytes();
+    assert_eq!(same_len_neg.len(), orig_neg.len());
+    storage::atomic(&neg_path, &same_len_neg, 0o644, false).unwrap();
+    assert_ne!(std::fs::metadata(&neg_path).unwrap().ino(), orig_ino);
+    let (disp, rows) = neg_cache.list_with_disposition(&repo_neg.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("tool").text(), Some("new"));
+
+    let mut grown_neg = orig_neg.clone();
+    grown_neg.extend_from_slice(synth_row(4001, &neg_id, 2, "attempt.heartbeat", "").as_bytes());
+    let before_grow_ino = std::fs::metadata(&neg_path).unwrap().ino();
+    storage::atomic(&neg_path, &grown_neg, 0o644, false).unwrap();
+    assert_ne!(std::fs::metadata(&neg_path).unwrap().ino(), before_grow_ino);
+    let (disp, rows) = neg_cache.list_with_disposition(&repo_neg.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "2");
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&neg_path)
+        .unwrap()
+        .set_len(orig_neg.len() as u64)
+        .unwrap();
+    let (disp, rows) = neg_cache.list_with_disposition(&repo_neg.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "1");
+
+    let hardlink_alias = neg_path.with_file_name("events.hardlink");
+    std::fs::hard_link(&neg_path, &hardlink_alias).unwrap();
+    assert!(neg_cache.list_with_disposition(&repo_neg.0, &idle).is_err());
+    assert!(!neg_cache.is_cached());
+    std::fs::remove_file(&hardlink_alias).unwrap();
+
+    assert_eq!(
+        neg_cache
+            .list_with_disposition(&repo_neg.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Cold
+    );
+    std::fs::remove_file(&neg_path).unwrap();
+    assert_eq!(
+        neg_cache
+            .list_with_disposition(&repo_neg.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Empty
+    );
+    assert!(!neg_cache.is_cached());
+
+    std::fs::write(&neg_path, &orig_neg).unwrap();
+    let swap_targets = [
+        (neg_path.clone(), repo_neg.0.join("real_events.jsonl")),
+        (
+            repo_neg.0.join(".oms/lifecycle"),
+            repo_neg.0.join(".oms/lifecycle_real"),
+        ),
+        (repo_neg.0.join(".oms"), repo_neg.0.join(".oms_real")),
+    ];
+    for (live_path, backup_path) in swap_targets {
+        assert_eq!(
+            neg_cache
+                .list_with_disposition(&repo_neg.0, &idle)
+                .unwrap()
+                .0,
+            SyncDisposition::Cold
+        );
+        std::fs::rename(&live_path, &backup_path).unwrap();
+        std::os::unix::fs::symlink(&backup_path, &live_path).unwrap();
+        assert!(neg_cache.list_with_disposition(&repo_neg.0, &idle).is_err());
+        assert!(!neg_cache.is_cached());
+        std::fs::remove_file(&live_path).unwrap();
+        std::fs::rename(&backup_path, &live_path).unwrap();
+    }
+
+    assert_eq!(
+        neg_cache
+            .list_with_disposition(&repo_neg.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Cold
+    );
+    std::fs::remove_dir_all(&repo_neg.0).unwrap();
+    assert!(neg_cache.list_with_disposition(&repo_neg.0, &idle).is_err());
+    assert!(!neg_cache.is_cached());
+    std::fs::create_dir(&repo_neg.0).unwrap();
+    assert_eq!(
+        neg_cache
+            .list_with_disposition(&repo_neg.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Empty
+    );
+
+    let _old_recreated = create_attempt(
+        &repo_neg.0,
+        &StartRequest {
+            tool: "before-wipe".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    assert_eq!(
+        neg_cache
+            .list_with_disposition(&repo_neg.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Cold
+    );
+    std::fs::remove_dir_all(&repo_neg.0).unwrap();
+    std::fs::create_dir(&repo_neg.0).unwrap();
+    let new_recreated = create_attempt(
+        &repo_neg.0,
+        &StartRequest {
+            tool: "after-wipe".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    let (disp, rows) = neg_cache.list_with_disposition(&repo_neg.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get("attempt_id").text(),
+        Some(new_recreated.as_str())
+    );
+}
+
+#[test]
+fn incremental_cache_drops_on_partial_replay_malformed_eof_and_cancellation() {
+    use crate::incremental::{SyncDisposition, apply_snapshot};
+    use std::sync::atomic::Ordering;
+
+    let idle = AtomicBool::new(false);
+    let repo_err = Fixture::new();
+    let err_id = create_attempt(
+        &repo_err.0,
+        &StartRequest {
+            tool: "err".into(),
+            ..Default::default()
+        },
+        &idle,
+    )
+    .unwrap();
+    let err_path = event_path(&repo_err.0);
+
+    // Direct apply_snapshot(Incremental, None) returns Err without panicking.
+    let orphan_inc = storage::EventsReadSnapshot::Incremental {
+        canonical_repo: repo_err.0.clone(),
+        path: err_path.clone(),
+        meta: storage::LedgerPrefixMeta {
+            repo_id: (0, 0),
+            oms_id: (0, 0),
+            parent_id: (0, 0),
+            file_id: (0, 0),
+            offset: 0,
+            prefix_sha256: [0; 32],
+            unterminated: false,
+        },
+        delta: Vec::new(),
+    };
+    assert!(apply_snapshot(orphan_inc, None, &idle).is_err());
+
+    // Torn partial JSON EOF -> exact cold diagnostic, !is_cached(), recovery after fix.
+    let mut hb2 = new_event(&err_id, 2usize.into(), "attempt.heartbeat", obj([])).unwrap();
+    hb2.set("ts", "2026-01-01T00:00:02Z");
+    append_lifecycle(&repo_err.0, hb2, &idle).unwrap();
+    let err_cache = EventsProjectionCache::new();
+    assert_eq!(
+        err_cache
+            .list_with_disposition(&repo_err.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Cold
+    );
+    let len_after_2 = std::fs::metadata(&err_path).unwrap().len();
+    append_raw(&err_path, b"{\"schema\":1");
+    let torn_err = err_cache.list_json(&repo_err.0, &idle).unwrap_err();
+    let torn_cold = run(
+        App::Events,
+        &[OsString::from("list"), OsString::from("--json")],
+        &repo_err.0,
+        &idle,
+    );
+    assert_eq!(torn_cold.0, 2);
+    assert!(torn_err.contains("is not valid JSON"), "{torn_err}");
+    assert_eq!(
+        format!("error: {torn_err}\n"),
+        String::from_utf8_lossy(&torn_cold.2)
+    );
+    assert!(!err_cache.is_cached());
+    let torn_tail = format!(
+        ",\"event_id\":\"aevt_{:032x}\",\"ts\":\"2026-01-01T00:00:03Z\",\"attempt_id\":\"{err_id}\",\"seq\":3,\"event_type\":\"attempt.heartbeat\"}}\n",
+        3003usize
+    );
+    append_raw(&err_path, torn_tail.as_bytes());
+    let (disp, rows) = err_cache.list_with_disposition(&repo_err.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "3");
+    assert!(len_after_2 < std::fs::metadata(&err_path).unwrap().len());
+
+    // Sequence gap after valid appended row -> drops cache, identical retry error, truncating recovers.
+    append_raw(
+        &err_path,
+        synth_row(3004, &err_id, 4, "attempt.heartbeat", "").as_bytes(),
+    );
+    let len_after_4 = std::fs::metadata(&err_path).unwrap().len();
+    append_raw(
+        &err_path,
+        synth_row(3005, &err_id, 99, "attempt.heartbeat", "").as_bytes(),
+    );
+    let err1 = err_cache
+        .list_with_disposition(&repo_err.0, &idle)
+        .unwrap_err();
+    assert!(err1.contains("sequence is 99, expected 5"), "{err1}");
+    assert!(!err_cache.is_cached());
+    let err2 = err_cache
+        .list_with_disposition(&repo_err.0, &idle)
+        .unwrap_err();
+    assert_eq!(err2, err1);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&err_path)
+        .unwrap()
+        .set_len(len_after_4)
+        .unwrap();
+    let (disp, rows) = err_cache.list_with_disposition(&repo_err.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "4");
+
+    // Duplicate event_id after valid appended row -> drops cache, identical retry error, truncating recovers.
+    append_raw(
+        &err_path,
+        synth_row(3006, &err_id, 5, "attempt.heartbeat", "").as_bytes(),
+    );
+    let len_after_5 = std::fs::metadata(&err_path).unwrap().len();
+    append_raw(
+        &err_path,
+        synth_row(3006, &err_id, 6, "attempt.heartbeat", "").as_bytes(),
+    );
+    let dup1 = err_cache
+        .list_with_disposition(&repo_err.0, &idle)
+        .unwrap_err();
+    assert!(dup1.contains("duplicate lifecycle event_id"), "{dup1}");
+    assert!(!err_cache.is_cached());
+    let dup2 = err_cache
+        .list_with_disposition(&repo_err.0, &idle)
+        .unwrap_err();
+    assert_eq!(dup2, dup1);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&err_path)
+        .unwrap()
+        .set_len(len_after_5)
+        .unwrap();
+    let (disp, rows) = err_cache.list_with_disposition(&repo_err.0, &idle).unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "5");
+
+    // Pre-call cancellation on warm cache drops entry and next uncancelled read reloads Cold.
+    let stopped = AtomicBool::new(true);
+    assert_eq!(
+        err_cache
+            .list_with_disposition(&repo_err.0, &stopped)
+            .unwrap_err(),
+        "operation interrupted"
+    );
+    assert!(!err_cache.is_cached());
+    assert_eq!(
+        err_cache
+            .list_with_disposition(&repo_err.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Cold
+    );
+    assert_eq!(
+        storage::parse_rows_at(&err_path, b"{}\n", 0, &stopped).unwrap_err(),
+        "operation interrupted"
+    );
+    let mut interrupted_proj = projection::Projection::default();
+    assert_eq!(
+        interrupted_proj
+            .extend_checked(&read_rows(&err_path).unwrap(), &stopped)
+            .unwrap_err(),
+        "operation interrupted"
+    );
+
+    // Post-projection / post-sort cancellation on Cold path drops entry before cache restore.
+    let cancel_cache = EventsProjectionCache::new();
+    let cancel_cold = AtomicBool::new(false);
+    let cold_cancel_err = cancel_cache
+        .sync_with(&repo_err.0, &cancel_cold, |_| {
+            cancel_cold.store(true, Ordering::Release);
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(cold_cancel_err, "operation interrupted");
+    assert!(!cancel_cache.is_cached());
+
+    // Warm Cold load, append valid row 6, then cancel post-projection/post-sort on Incremental path.
+    assert_eq!(
+        cancel_cache
+            .list_with_disposition(&repo_err.0, &idle)
+            .unwrap()
+            .0,
+        SyncDisposition::Cold
+    );
+    assert!(cancel_cache.is_cached());
+    append_raw(
+        &err_path,
+        synth_row(3007, &err_id, 6, "attempt.heartbeat", "").as_bytes(),
+    );
+    let cancel_inc = AtomicBool::new(false);
+    let inc_cancel_err = cancel_cache
+        .sync_with(&repo_err.0, &cancel_inc, |_| {
+            cancel_inc.store(true, Ordering::Release);
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(inc_cancel_err, "operation interrupted");
+    assert!(!cancel_cache.is_cached());
+    let (disp, rows) = cancel_cache
+        .list_with_disposition(&repo_err.0, &idle)
+        .unwrap();
+    assert_eq!(disp, SyncDisposition::Cold);
+    assert_eq!(rows[0].get("sequence").py(), "6");
+}
+
+#[test]
+#[ignore = "opt-in 107k-row local benchmark; run with --ignored --nocapture"]
+fn incremental_events_107k_append_vs_cold_measurement() {
+    use std::fmt::Write as _;
+    use std::time::Instant;
+
+    let f = Fixture::new();
+    let path = event_path(&f.0);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    let attempts = 200usize;
+    let events_per_attempt = 535usize;
+    let mut buf = String::with_capacity(attempts * events_per_attempt * 200);
+    let mut ev_num = 1usize;
+
+    for a in 0..attempts {
+        let att_id = format!("att_{a:04}");
+        writeln!(
+            buf,
+            "{{\"schema\":1,\"event_id\":\"aevt_{ev_num:032x}\",\"ts\":\"2026-01-01T00:00:00Z\",\"attempt_id\":\"{att_id}\",\"seq\":1,\"event_type\":\"attempt.created\",\"from_state\":null,\"to_state\":\"queued\",\"provider\":\"local\",\"tool\":\"bench\"}}"
+        )
+        .unwrap();
+        ev_num += 1;
+        writeln!(
+            buf,
+            "{{\"schema\":1,\"event_id\":\"aevt_{ev_num:032x}\",\"ts\":\"2026-01-01T00:00:00Z\",\"attempt_id\":\"{att_id}\",\"seq\":2,\"event_type\":\"attempt.state_changed\",\"from_state\":\"queued\",\"to_state\":\"starting\"}}"
+        )
+        .unwrap();
+        ev_num += 1;
+        writeln!(
+            buf,
+            "{{\"schema\":1,\"event_id\":\"aevt_{ev_num:032x}\",\"ts\":\"2026-01-01T00:00:00Z\",\"attempt_id\":\"{att_id}\",\"seq\":3,\"event_type\":\"attempt.state_changed\",\"from_state\":\"starting\",\"to_state\":\"working\"}}"
+        )
+        .unwrap();
+        ev_num += 1;
+        writeln!(
+            buf,
+            "{{\"schema\":1,\"event_id\":\"aevt_{ev_num:032x}\",\"ts\":\"2026-01-01T00:00:00Z\",\"attempt_id\":\"{att_id}\",\"seq\":4,\"event_type\":\"attempt.usage\",\"usage\":{{\"tokens\":10,\"duration_ms\":5,\"cost_microusd\":1}}}}"
+        )
+        .unwrap();
+        ev_num += 1;
+        for seq in 5..=events_per_attempt {
+            writeln!(
+                buf,
+                "{{\"schema\":1,\"event_id\":\"aevt_{ev_num:032x}\",\"ts\":\"2026-01-01T00:00:00Z\",\"attempt_id\":\"{att_id}\",\"seq\":{seq},\"event_type\":\"attempt.heartbeat\"}}"
+            )
+            .unwrap();
+            ev_num += 1;
+        }
+    }
+    assert_eq!(ev_num - 1, 107_000);
+    std::fs::write(&path, buf.as_bytes()).unwrap();
+    let total_bytes = std::fs::metadata(&path).unwrap().len();
+
+    let idle = AtomicBool::new(false);
+    let cache = EventsProjectionCache::new();
+    let t_cold = Instant::now();
+    let cold_json = cache.list_json(&f.0, &idle).unwrap();
+    let cold_elapsed = t_cold.elapsed();
+    assert!(!cold_json.is_empty());
+
+    let extra_row = format!(
+        "{{\"schema\":1,\"event_id\":\"aevt_{ev_num:032x}\",\"ts\":\"2026-01-01T00:00:01Z\",\"attempt_id\":\"att_0000\",\"seq\":536,\"event_type\":\"attempt.heartbeat\"}}\n"
+    );
+    append_raw(&path, extra_row.as_bytes());
+
+    let t_inc = Instant::now();
+    let inc_json = cache.list_json(&f.0, &idle).unwrap();
+    let inc_elapsed = t_inc.elapsed();
+
+    let fresh = EventsProjectionCache::new();
+    let t_fresh = Instant::now();
+    let fresh_json = fresh.list_json(&f.0, &idle).unwrap();
+    let fresh_cold_elapsed = t_fresh.elapsed();
+
+    let cli_cold = run(
+        App::Events,
+        &[OsString::from("list"), OsString::from("--json")],
+        &f.0,
+        &idle,
+    );
+    assert_eq!(cli_cold.0, 0, "{}", String::from_utf8_lossy(&cli_cold.2));
+    assert_eq!(inc_json, fresh_json);
+    assert_eq!(inc_json, cli_cold.1);
+
+    let cold_ms = cold_elapsed.as_secs_f64() * 1000.0;
+    let inc_ms = inc_elapsed.as_secs_f64() * 1000.0;
+    let fresh_ms = fresh_cold_elapsed.as_secs_f64() * 1000.0;
+    let speedup = fresh_cold_elapsed.as_secs_f64() / inc_elapsed.as_secs_f64();
+    eprintln!(
+        "[107k-bench] bytes={total_bytes} cold_ms={cold_ms:.2} inc_1_append_ms={inc_ms:.2} fresh_cold_ms={fresh_ms:.2} speedup={speedup:.2}x"
+    );
+}
+
 #[test]
 fn lf_parser_borrows_and_batch_uses_verified_snapshot() {
     use std::borrow::Cow;

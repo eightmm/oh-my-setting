@@ -248,6 +248,7 @@ fn json_out(value: Value) -> CommandOutput {
 #[derive(Default)]
 struct Fake {
     attempts: RefCell<Vec<Value>>,
+    events_list_unavailable: std::cell::Cell<bool>,
     telemetry: RefCell<Vec<Value>>,
     room: RefCell<Value>,
     plan: RefCell<Value>,
@@ -259,6 +260,7 @@ struct Fake {
     commands_seen: RefCell<Vec<(String, Vec<String>)>>,
     native_seen: RefCell<Vec<(NativeCommand, Vec<OsString>)>>,
     real_catalog: std::cell::Cell<bool>,
+    catalog_override: RefCell<Option<Value>>,
     capability_evidence: RefCell<Option<Value>>,
 }
 
@@ -383,6 +385,9 @@ impl Services for Fake {
                         );
                     }
                 }
+                if let Some(catalog) = self.catalog_override.borrow().as_ref() {
+                    rows = catalog.as_array().unwrap().clone();
+                }
                 if let Some(evidence) = self.capability_evidence.borrow().as_ref() {
                     for row in &mut rows {
                         row["capability_evidence"] = evidence.clone();
@@ -391,6 +396,9 @@ impl Services for Fake {
                 Ok(json_out(json!({"providers": rows})))
             }
             NativeCommand::Events => {
+                if args == ["list", "--json"] && self.events_list_unavailable.get() {
+                    return Err(Error::new("fixture Events unavailable"));
+                }
                 if args.first().is_some_and(|v| v == "transition") {
                     let arg = |flag: &str| {
                         args.iter()
@@ -830,6 +838,21 @@ fn empty_scope_preserved_on_continue_and_dry_run_launch() {
             &services,
         )
     };
+    let mut builder = services.attempts.borrow().last().unwrap().clone();
+    builder["attempt_id"] = json!("att-prev-builder");
+    builder["refs"]["panel_role"] = json!("builder");
+    builder["panel"]["role"] = json!("builder");
+    services.attempts.borrow_mut().push(builder);
+    let (code, stdout, stderr) = cont(&[]);
+    assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+    let plan: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(plan["route"]["role"], "builder");
+    assert_eq!(plan["route"]["purpose"], "builder");
+    assert_ne!(cont(&["--purpose", "implement"]).0, 0);
+    assert_eq!(plan["route"]["workload"], "routine");
+    assert!(!plan["argv"].to_string().contains("--scope"), "{plan}");
+    assert!(plan["argv"].to_string().contains("cargo test"), "{plan}");
+    services.attempts.borrow_mut().pop();
     let (code, stdout, stderr) = cont(&["--to", "claude"]);
     assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
     let plan: Value = serde_json::from_slice(&stdout).unwrap();
@@ -867,6 +890,9 @@ fn empty_scope_preserved_on_continue_and_dry_run_launch() {
         .unwrap();
     assert!(prompt.contains(&format!("Repository: {}", repo.path().display())));
     assert!(prompt.contains("As Overall Main"));
+    assert!(prompt.contains("oms list"));
+    assert!(prompt.contains("oms panel --routes --room ROOM --json"));
+    assert!(prompt.contains("oms panel --results --room ROOM --task-id ID --json"));
     assert!(prompt.contains("oms panel --orchestrator"));
     assert!(prompt.contains("verify the integrated result"));
 }
@@ -885,11 +911,20 @@ fn settle_review_and_recommend_parity() {
     std::fs::write(repo.path().join(art_rel), diff).unwrap();
 
     services.attempts.borrow_mut().push(json!({
+        "attempt_id": "att-main",
+        "tool": "panel-main",
+        "provider": "claude",
+        "state": "working",
+        "terminal": false
+    }));
+    services.attempts.borrow_mut().push(json!({
         "attempt_id": "att-rev",
         "task_id": "task-rev",
+        "parent_attempt_id": "att-main",
         "provider": "codex",
         "state": "review",
         "terminal": false,
+        "exit": 1,
         "sequence": 2,
         "created_at": "2020-01-01T00:00:00Z",
         "updated_at": "2020-01-01T00:01:00Z",
@@ -941,6 +976,43 @@ fn settle_review_and_recommend_parity() {
     assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
     let dry: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(dry["executes"], json!(false));
+    assert_eq!(dry["candidates"][0]["attempt_id"], "att-rev");
+
+    // Apply explicit settlement using the event CLI's supported reason ref.
+    let (explicit_code, explicit_out, explicit_err) = run_with_services(
+        "panel",
+        &os(&[
+            "--repo",
+            &repo.path().to_string_lossy(),
+            "--owner",
+            "claude",
+            "--settle-review",
+            "--attempt",
+            "att-rev",
+            "--reason",
+            "superseded attempt",
+            "--apply",
+        ]),
+        repo.path(),
+        repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(
+        explicit_code,
+        0,
+        "stderr={}",
+        String::from_utf8_lossy(&explicit_err)
+    );
+    let explicit: Value = serde_json::from_slice(&explicit_out).unwrap();
+    assert_eq!(explicit["applied"], json!(["att-rev"]));
+    assert!(services.native_seen.borrow().iter().any(|(command, args)| {
+        *command == NativeCommand::Events
+            && args.first().is_some_and(|arg| arg == "transition")
+            && args.windows(2).any(|pair| {
+                pair[0] == "--ref" && pair[1] == "panel_review_reason=superseded attempt"
+            })
+    }));
 
     // Apply standalone settlement with fractional aged-days.
     let (acode, aout, aerr) = run_with_services(
@@ -1031,6 +1103,94 @@ fn settle_review_and_recommend_parity() {
     let native_rec: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(native_rec["risk"], "high");
     assert_eq!(native_rec["diff"]["files"], 1);
+}
+
+fn catalog_full_models_are_used_for_routing() {
+    if std::env::var_os("OMS_CATALOG_CHILD").is_none() {
+        let home = TempDir::new("oms-panel-catalog-home");
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        clean_env_child(&mut child);
+        for key in [
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "PI_CODING_AGENT_DIR",
+            "OMS_MODEL",
+            "OMS_ANTIGRAVITY_SETTINGS",
+        ] {
+            child.env_remove(key);
+        }
+        let status = child
+            .arg("catalog_full_models_are_used_for_routing")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("XDG_STATE_HOME", home.path().join(".state"))
+            .env("XDG_CACHE_HOME", home.path().join(".cache"))
+            .env("OMS_PANEL_PARITY_ROOT", home.path())
+            .env("OMS_CATALOG_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "catalog routing child failed");
+        return;
+    }
+    let repo = TempDir::new("panel-catalog-full");
+    init_git_repo(repo.path());
+    let services = Fake::default();
+    services.real_catalog.set(true);
+    let run = |extra: &[&str]| {
+        let mut args = vec!["--repo", repo.path().to_str().unwrap()];
+        args.extend_from_slice(extra);
+        run_with_services(
+            "panel",
+            &os(&args),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        )
+    };
+    // The display list is capped at 20; a newer model can appear later.
+    let display: Vec<String> = (0..20).map(|i| format!("unrelated-{i}")).collect();
+    let mut full = display.clone();
+    full.push("gpt-6.2-terra".into());
+    let catalog_routes = |row: Value| {
+        *services.catalog_override.borrow_mut() = Some(json!([row]));
+        let (code, out, err) = run(&["--routes", "--json"]);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&err));
+        serde_json::from_slice::<Value>(&out).unwrap()
+    };
+    let row = |models: Value, full: Option<Value>| {
+        let mut row = json!({"provider":"codex", "present":true, "usable":null, "models":models});
+        if let Some(full) = full {
+            row["catalog_models"] = full;
+        }
+        row
+    };
+    let later = catalog_routes(row(json!(display), Some(json!(full))));
+    assert_eq!(
+        later["chosen"]["builder"]["model"], "gpt-6.2-terra",
+        "{}",
+        later["chosen"]["builder"]
+    );
+    assert_eq!(
+        later["chosen"]["builder"]["snapshot"]["catalog"]["count"],
+        21
+    );
+    let legacy = catalog_routes(row(json!(["gpt-6.2-terra"]), None));
+    assert_eq!(legacy["chosen"]["builder"]["model"], "gpt-6.2-terra");
+    assert_eq!(
+        legacy["chosen"]["builder"]["snapshot"]["catalog"]["count"],
+        1
+    );
+    let empty = catalog_routes(row(json!(["gpt-6.2-terra"]), Some(json!([]))));
+    assert_eq!(empty["chosen"]["builder"]["model"], "gpt-6.1-terra");
+    assert_eq!(
+        empty["chosen"]["builder"]["snapshot"]["catalog"]["count"],
+        0
+    );
+    assert!(
+        !repo.path().join(".oms").exists(),
+        "route preview wrote state"
+    );
 }
 
 fn routing_accepts_present_provider_catalog() {
@@ -1204,7 +1364,7 @@ fn routing_accepts_present_provider_catalog() {
         "selected medium",
         "applied/served unknown",
         "requested requested-seat",
-        "selected selected-seat",
+        "proposed selected-seat",
         "pinned true",
         "Exact effort support: reported_supported",
         "exact model values: low, medium",
@@ -1730,8 +1890,8 @@ fn spread_routes_by_panel_room_id() {
     let services = Fake::default();
     services.real_catalog.set(true);
     setup_fake_room(&services, "room-spread");
-    let dispatch = || {
-        let args = os(&[
+    let dispatch = |extra: &[&str]| {
+        let mut args = os(&[
             "--repo",
             repo.path().to_str().unwrap(),
             "--room",
@@ -1750,19 +1910,20 @@ fn spread_routes_by_panel_room_id() {
             "cargo test --locked",
             "--dry-run",
         ]);
+        args.extend(os(extra));
         let (code, stdout, stderr) =
             run_with_services("panel", &args, repo.path(), repo.path(), &STOP, &services);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let plan: Value = serde_json::from_slice(&stdout).unwrap();
-        plan["route"]["provider"].as_str().unwrap().to_owned()
+        serde_json::from_slice::<Value>(&stdout).unwrap()
     };
 
     // Room has only a `main` attempt (`panel_role: main`): excluded from `recent`, so `claude` starts first.
-    assert_eq!(dispatch(), "claude");
+    assert_eq!(dispatch(&[])["route"]["provider"], "claude");
 
     // Recording a non-main worker with ONLY `panel_room_id` spreads next dispatch onto `codex`.
     services.attempts.borrow_mut().push(json!({
         "attempt_id": "att-worker-1",
+        "created_at": oms_panel_core::timestamp().saturating_sub(60),
         "tool": "peer-delegate",
         "provider": "claude",
         "state": "completed",
@@ -1772,10 +1933,11 @@ fn spread_routes_by_panel_room_id() {
             "panel_role": "worker"
         }
     }));
-    assert_eq!(dispatch(), "codex");
+    assert_eq!(dispatch(&[])["route"]["provider"], "codex");
 
     services.attempts.borrow_mut().push(json!({
         "attempt_id": "att-worker-2",
+        "created_at": oms_panel_core::timestamp().saturating_sub(60),
         "tool": "peer-delegate",
         "provider": "codex",
         "state": "completed",
@@ -1785,7 +1947,303 @@ fn spread_routes_by_panel_room_id() {
             "panel_role": "worker"
         }
     }));
-    assert_eq!(dispatch(), "claude");
+    assert_eq!(dispatch(&[])["route"]["provider"], "claude");
+
+    let at = oms_panel_core::timestamp();
+    services.attempts.borrow_mut().truncate(2);
+    for (id, at, room) in [
+        ("att-expired", at - 6 * 3600 - 60, "room-spread"),
+        ("att-future", at + 60, "room-spread"),
+        ("att-other-room", at - 60, "room-other"),
+    ] {
+        services.attempts.borrow_mut().push(json!({
+            "attempt_id":id,"created_at":at,"provider":"codex",
+            "state":if id == "att-expired" {"done"} else {"working"},
+            "terminal":id == "att-expired",
+            "refs":{"panel_room_id":room,"panel_role":"worker"}
+        }));
+    }
+    assert_eq!(dispatch(&[])["route"]["provider"], "codex");
+    {
+        let mut attempts = services.attempts.borrow_mut();
+        attempts[2]["state"] = json!("verifying");
+        attempts[2]["terminal"] = json!(false);
+    }
+    // A still-running attempt matters even after it leaves the recent window.
+    assert_eq!(dispatch(&[])["route"]["provider"], "claude");
+
+    // The route inspector uses the same Events read as routing.
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let seat_a = home.join("private-seat-a");
+    let seat_b = home.join("private-seat-b");
+    ensure_private_dir(&seat_a);
+    ensure_private_dir(&seat_b);
+    write_private_file(
+        &home.join(".config/oh-my-setting/provider-accounts.json"),
+        &serde_json::to_vec(&json!({
+            "schema":1, "providers": {"claude":{"policy":"spread","accounts":[
+                {"id":"seat-a","home":seat_a}, {"id":"seat-b","home":seat_b}
+            ]}}
+        }))
+        .unwrap(),
+    );
+    let mut catalog = oms_panel_core::routing::Policy::bundled()
+        .unwrap()
+        .tiers
+        .into_values()
+        .flatten()
+        .filter(|candidate| candidate.provider == "claude")
+        .map(|candidate| candidate.model)
+        .collect::<Vec<_>>();
+    catalog.sort();
+    catalog.dedup();
+    services.catalog_override.replace(Some(json!([
+        {"provider":"claude","installed":true,"models":catalog}
+    ])));
+    services.attempts.borrow_mut().truncate(1);
+    for alias in ["seat-b", "unconfigured-seat"] {
+        for (flag, value, requires) in [
+            (
+                "--to",
+                format!("claude:account={alias}"),
+                "requires --dispatch or --continue",
+            ),
+            (
+                "--account",
+                alias.to_owned(),
+                "--account requires --dispatch or --continue or --orchestrator or --launch",
+            ),
+        ] {
+            let rejected = Fake::default();
+            let (code, stdout, stderr) = run_with_services(
+                "panel",
+                &os(&[
+                    "--repo",
+                    repo.path().to_str().unwrap(),
+                    "--room",
+                    "room-spread",
+                    "--routes",
+                    "--json",
+                    flag,
+                    &value,
+                ]),
+                repo.path(),
+                repo.path(),
+                &STOP,
+                &rejected,
+            );
+            assert_eq!(code, 2);
+            assert!(stdout.is_empty());
+            let error = String::from_utf8(stderr).unwrap();
+            assert!(error.contains(flag) && error.contains(requires), "{error}");
+            assert!(rejected.native_seen.borrow().is_empty());
+            assert!(rejected.commands_seen.borrow().is_empty());
+        }
+    }
+    let preview = |from_repo: bool| {
+        services.native_seen.borrow_mut().clear();
+        let (cwd, args) = if from_repo {
+            (
+                repo.path(),
+                os(&[
+                    "--repo",
+                    repo.path().to_str().unwrap(),
+                    "--room",
+                    "room-spread",
+                    "--routes",
+                    "--json",
+                ]),
+            )
+        } else {
+            (home.as_path(), os(&["--routes", "--json"]))
+        };
+        let (code, stdout, stderr) =
+            run_with_services("panel", &args, cwd, repo.path(), &STOP, &services);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let events_reads = services
+            .native_seen
+            .borrow()
+            .iter()
+            .filter(|(command, args)| {
+                *command == NativeCommand::Events && args == &["list", "--json"]
+            })
+            .count();
+        assert!(events_reads <= 1);
+        if from_repo {
+            assert_eq!(events_reads, 1);
+        }
+        let text = String::from_utf8(stdout).unwrap();
+        assert!(!text.contains("private-seat-"));
+        serde_json::from_str::<Value>(&text).unwrap()
+    };
+    let zero = preview(true);
+    let evidence = &zero["chosen"]["builder"]["evidence"];
+    assert_eq!(evidence["events_source"], "repository_events");
+    assert_eq!(
+        evidence["recent"],
+        json!({"scope":"room","non_main_attempts":0,"window_seconds":21600,"in_flight":0})
+    );
+    assert_eq!(evidence["account_rank"]["repo_working_attempts"], 0);
+
+    services.attempts.borrow_mut().push(json!({
+        "attempt_id":"att-queued-seat", "provider":"claude", "tool":"peer-delegate",
+        "created_at": oms_panel_core::timestamp().saturating_sub(60),
+        "state":"queued", "terminal":false,
+        "refs":{"panel_room_id":"room-spread","panel_role":"worker","panel_account":"claude:seat-a"}
+    }));
+    let queued = preview(true);
+    let chosen = &queued["chosen"]["builder"];
+    let snapshot = &chosen["snapshot"];
+    assert_eq!(chosen["provider"], "claude");
+    assert_eq!(snapshot["schema"], 1);
+    assert_eq!(snapshot["selected_account"], "seat-a");
+    assert_eq!(snapshot["account_pinned"], false);
+    assert!(snapshot["served_account"].is_null());
+    assert!(snapshot.get("evidence").is_none());
+    let evidence = &chosen["evidence"];
+    assert_eq!(evidence["provider_disposition"], "provisional");
+    assert_eq!(evidence["role"], "builder");
+    assert_eq!(evidence["tier"], "routine");
+    assert_eq!(evidence["account_reason"], "spread");
+    assert_eq!(evidence["launch_account"], "headless_may_reselect");
+    assert_eq!(
+        evidence["recent"],
+        json!({"scope":"room","non_main_attempts":1,"window_seconds":21600,"in_flight":0})
+    );
+    assert_eq!(
+        evidence["account_rank"],
+        json!({
+            "policy":"spread","eligible_accounts":2,"decided_by":"registry_order",
+            "weekly_used_bucket":null,"next_weekly_used_bucket":null,
+            "repo_working_attempts":0,"next_repo_working_attempts":0
+        })
+    );
+    let page = reader::Reader::default()
+        .render(
+            repo.path(),
+            &json!({"kind":"oms-panel-routes","routes":queued}),
+            150,
+        )
+        .unwrap()
+        .join("\n");
+    for phrase in [
+        "Harness/provider proposal: claude",
+        "Account: requested unknown · proposed seat-a · pinned false · served unknown",
+        "Account ranking: spread · eligible 2 · decided by registry order",
+        "Repo working/running attempts: proposed 0 · next 0",
+        "headless adapter may reselect",
+    ] {
+        assert!(page.contains(phrase), "{phrase}");
+    }
+    assert!(!page.contains("private-seat-"));
+
+    let unpinned = dispatch(&[]);
+    assert_eq!(unpinned["route"]["account"], "seat-a");
+    assert!(
+        !unpinned["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "--account")
+    );
+    let pinned = dispatch(&[
+        "--to",
+        "claude:account=seat-b",
+        "--model",
+        "claude-sonnet-5-5",
+    ]);
+    assert_eq!(pinned["route"]["account_pinned"], true);
+    assert_eq!(pinned["route"]["account"], "seat-b");
+    assert!(
+        pinned["argv"]
+            .as_array()
+            .unwrap()
+            .windows(2)
+            .any(|pair| pair == ["--account", "seat-b"])
+    );
+    // Under the headless loader's broader state filter the queued worker
+    // counts as active. Use the real comparator with equal health and quota.
+    let select_headless = |running_a| {
+        let accounts =
+            [("seat-a", &seat_a, running_a), ("seat-b", &seat_b, 0)].map(|(id, home, running)| {
+                oms_command_peer::providers::Account {
+                    provider: "claude".into(),
+                    id: id.into(),
+                    home: home.clone(),
+                    used: None,
+                    running,
+                    usable: true,
+                    models: None,
+                }
+            });
+        oms_command_peer::providers::select_account_adaptive(
+            &accounts,
+            true,
+            false,
+            "provider-default",
+            &Default::default(),
+            1,
+        )
+        .unwrap()
+        .id
+    };
+    assert_eq!(select_headless(0), "seat-a");
+    assert_eq!(select_headless(1), "seat-b");
+
+    services.attempts.borrow_mut()[1]["state"] = json!("working");
+    let working = preview(true);
+    let chosen = &working["chosen"]["builder"];
+    assert_eq!(chosen["snapshot"]["selected_account"], "seat-b");
+    let rank = &chosen["evidence"]["account_rank"];
+    assert_eq!(rank["decided_by"], "working_attempts");
+    assert_eq!(rank["repo_working_attempts"], 0);
+    assert_eq!(rank["next_repo_working_attempts"], 1);
+    assert_eq!(chosen["evidence"]["recent"]["in_flight"], 1);
+
+    services.attempts.borrow_mut().push(json!({
+        "attempt_id":"att-misbound-account","provider":"codex","tool":"peer-delegate",
+        "state":"working","terminal":false,
+        "refs":{"panel_room_id":"room-spread","panel_role":"worker","panel_account":"claude:seat-b"}
+    }));
+    let guarded = preview(true);
+    let chosen = &guarded["chosen"]["builder"];
+    assert_eq!(chosen["snapshot"]["selected_account"], "seat-b");
+    assert_eq!(
+        chosen["evidence"]["account_rank"]["repo_working_attempts"],
+        0
+    );
+
+    let duplicate = services.attempts.borrow()[1].clone();
+    services.attempts.borrow_mut().push(duplicate);
+    let guarded = preview(true);
+    let chosen = &guarded["chosen"]["builder"];
+    assert_eq!(chosen["snapshot"]["selected_account"], "seat-a");
+    assert_eq!(
+        chosen["evidence"]["account_rank"]["repo_working_attempts"],
+        0
+    );
+    services.attempts.borrow_mut().truncate(2);
+
+    services.events_list_unavailable.set(true);
+    let failed = preview(true);
+    services.events_list_unavailable.set(false);
+    services.attempts.borrow_mut().push(Value::Null);
+    let malformed = preview(true);
+    assert!(render::routes(&failed, 150).contains("registry order (workload unknown)"));
+    assert!(render::routes(&malformed, 150).contains("incomplete working/running inputs"));
+    for (report, source) in [
+        (&failed, "unavailable"),
+        (&malformed, "unavailable"),
+        (&preview(false), "no_repository"),
+    ] {
+        let evidence = &report["chosen"]["builder"]["evidence"];
+        assert_eq!(evidence["events_source"], source);
+        assert!(evidence["recent"]["non_main_attempts"].is_null());
+        assert!(evidence["account_rank"]["repo_working_attempts"].is_null());
+        assert!(evidence["account_rank"]["next_repo_working_attempts"].is_null());
+        let page = render::routes(report, 150);
+        assert!(page.contains("Repo working/running attempts: proposed unknown · next unknown"));
+    }
 }
 
 fn usage_sessions_compare_and_routes_parity() {
@@ -2501,7 +2959,7 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 11] = [
+    let cases: [(&str, fn()); 12] = [
         (
             "chats_native_identity_binding",
             chats_native_identity_binding,
@@ -2521,6 +2979,10 @@ fn main() {
         (
             "settle_review_and_recommend_parity",
             settle_review_and_recommend_parity,
+        ),
+        (
+            "catalog_full_models_are_used_for_routing",
+            catalog_full_models_are_used_for_routing,
         ),
         (
             "routing_accepts_present_provider_catalog",

@@ -308,7 +308,10 @@ fn route_with_source(
     }
     if target.provider == "claude"
         && !resolved.is_empty()
-        && !matches!(resolved.as_str(), "low" | "medium" | "high" | "max")
+        && !matches!(
+            resolved.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "max"
+        )
     {
         return fail("Claude does not support the requested effort");
     }
@@ -2150,6 +2153,8 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         );
         pending_usage.fence(context.interrupted)?;
         let started = std::time::Instant::now();
+        let direct = matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
+            && exec_argv == transport.argv;
         let invocation = Invocation {
             argv: exec_argv,
             cwd: cwd.to_owned(),
@@ -2177,7 +2182,12 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                 context.interrupted,
             )
         } else {
-            context.executor.execute(invocation, context.interrupted)
+            context.executor.execute_provider(
+                invocation,
+                &usage_receipt.identity,
+                direct,
+                context.interrupted,
+            )
         };
         let mut result = match result {
             Ok(result) => result,
@@ -2202,7 +2212,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             &usage_repo,
             usage_receipt,
             &result.stdout,
-            result.complete && terminal,
+            result.complete && terminal && (route.provider != "antigravity" || result.code == 0),
             result.cleanup_complete,
         )
         .map_err(|error| {
@@ -2942,6 +2952,96 @@ mod bridge_route_tests {
             },
         );
     }
+    #[test]
+    fn antigravity_receipt_requires_successful_process_exit() {
+        isolated_transport(
+            "antigravity_receipt_requires_successful_process_exit",
+            "normal",
+            |repo, cwd| {
+                use oms_command_telemetry::store::usage::{self, Phase, Usage};
+
+                struct Report(Completed);
+                impl Executor for Report {
+                    fn execute(&self, request: Invocation, stop: &AtomicBool) -> Result<Completed> {
+                        if request.argv[0] == "git" {
+                            return Capture::default().execute(request, stop);
+                        }
+                        assert_eq!(request.argv[0], "agy");
+                        Ok(self.0.clone())
+                    }
+                }
+
+                let success = concat!(
+                    r#"{"conversation_id":"fixture-one","status":"SUCCESS","response":" fixture answer\n","#,
+                    r#""duration_seconds":0.1,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":2,"#,
+                    r#""thinking_tokens":1,"cache_read_tokens":9,"total_tokens":12}}"#,
+                    "\n"
+                );
+                let answer = " fixture answer\n";
+                let failed = success.replace("SUCCESS", "ERROR");
+                let truncated = success.strip_suffix("}\n").unwrap();
+                let stopped = success.replacen('{', r#"{"stop_reason":"length","#, 1);
+                let cases = [
+                    (1, (true, true), success, answer, None),
+                    (0, (true, true), success, answer, Some(12)),
+                    (0, (false, false), success, answer, None),
+                    (0, (true, true), failed.as_str(), answer, None),
+                    (0, (true, true), truncated, truncated, None),
+                    (0, (true, false), stopped.as_str(), answer, None),
+                ];
+                let mut route = Route {
+                    provider: "antigravity".into(),
+                    model: "provider-default".into(),
+                    effort: String::new(),
+                    explicit: false,
+                    account: String::new(),
+                    account_pinned: false,
+                };
+                let stop = AtomicBool::new(false);
+                for (i, (code, (complete, decoded_complete), raw, stdout, tokens)) in
+                    cases.into_iter().enumerate()
+                {
+                    let report = Report(Completed {
+                        code,
+                        stdout: raw.as_bytes().to_vec(),
+                        stderr: vec![],
+                        complete,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: Duration::ZERO,
+                    });
+                    let context = Context {
+                        cwd,
+                        source: repo,
+                        interrupted: &stop,
+                        executor: &report,
+                    };
+                    let result =
+                        execute_env(&mut route, b"fixture", cwd, false, 12, repo, &[], &context)
+                            .unwrap();
+                    assert_eq!(result.code, code);
+                    assert_eq!(result.complete, decoded_complete);
+                    assert_eq!(result.stdout, stdout.as_bytes());
+                    assert_eq!(result.cleanup_complete, Some(true));
+
+                    let calls = usage::load(repo).unwrap().calls;
+                    assert_eq!(calls.len(), i + 1);
+                    let call = &calls[i];
+                    assert_eq!(
+                        call.receipt.phase,
+                        tokens.map_or(Phase::Unknown, |_| Phase::Final),
+                        "case {i}"
+                    );
+                    assert_eq!(call.tokens, tokens);
+                    assert_eq!(call.receipt.cleanup_complete, Some(true));
+                    if tokens.is_none() {
+                        assert_eq!(call.receipt.usage, Usage::default());
+                    }
+                }
+            },
+        );
+    }
+
     #[test]
     fn physical_provider_calls_record_fallback_and_timeout_usage() {
         isolated_transport(
@@ -3732,6 +3832,14 @@ mod bridge_route_tests {
         let automatic = resolve_route(source, "codex", "", "auto", "worker").unwrap();
         assert!(!automatic.model.is_empty());
         assert!(!automatic.explicit);
+        for effort in ["xhigh", "max"] {
+            let claude =
+                resolve_route(source, "claude", "claude-opus-5-5", effort, "worker").unwrap();
+            assert_eq!(claude.effort, effort);
+            assert_eq!(claude.model, "claude-opus-5-5");
+            assert!(claude.explicit);
+        }
+        assert!(resolve_route(source, "claude", "claude-opus-5-5", "ultra", "worker").is_err());
         assert!(resolve_route(source, "", "", "", "worker").is_err());
         assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());
     }

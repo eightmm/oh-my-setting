@@ -42,7 +42,12 @@
   },
   "providers": {
     "claude": {
-      "launch_main": {"status": "unknown", "verified": "fixture", "note": "Native panel launch code exists, but current native fixtures do not establish the Claude launch branch."},
+      "launch_main": {
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-panel/src/native_panel.rs::native_command", "crates/oms-command-panel/src/native_panel.rs::run_native"],
+        "test": ["crates/oms-command-panel/src/native_panel.rs::native_main_launch_preserves_physical_custody_and_unknown_evidence", "crates/oms-command-panel/src/native_panel.rs::explicit_main_account_managed_launch_and_reuse"],
+        "limit": "Stand-in Claude executables cover launch argv, Room and Main accounting, and managed account launch and binding. Live authentication, permission enforcement and provider compatibility remain unverified."
+      },
       "worker_call": {
         "status": "supported", "verified": "fixture",
         "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],
@@ -122,7 +127,12 @@
       "handoff": {"status": "unknown", "verified": "fixture", "note": "Native session-handoff capture is implemented; current native fixtures do not establish the Codex digest output."}
     },
     "antigravity": {
-      "launch_main": {"status": "unknown", "verified": "fixture", "note": "Native fresh-session panel launch code exists, but no current native launch fixture establishes this branch; resume remains refused."},
+      "launch_main": {
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-panel/src/native_panel.rs::main_capability", "crates/oms-command-panel/src/native_panel.rs::native_command"],
+        "test": ["crates/oms-command-panel/src/native_panel.rs::installed_pi_picker_runs_the_gateway_and_opens_the_owned_codex_lead"],
+        "limit": "A private tmux fixture covers the antigravity alias, canonical agy launch, literal task argv and Room and Main binding with a stand-in CLI. Live provider compatibility remains unverified. Managed resume is refused."
+      },
       "worker_call": {
         "status": "supported", "verified": "fixture",
         "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env", "crates/oms-command-peer/src/providers.rs::requires_read_isolation"],
@@ -143,7 +153,12 @@
       "handoff": {"status": "unknown", "verified": "fixture", "note": "Native prompts-only handoff capture is implemented, but current native fixtures do not establish its digest output; assistant output is unavailable from that source."}
     },
     "pi": {
-      "launch_main": {"status": "unknown", "verified": "fixture", "note": "Native gateway-only panel launch code exists, but no current native fixture establishes the Pi launch branch; direct launch is refused."},
+      "launch_main": {
+        "status": "partial", "verified": "fixture",
+        "impl": ["crates/oms-command-panel/src/native_panel.rs::pick_main", "crates/oms-command-panel/src/native_panel.rs::native_command"],
+        "test": ["crates/oms-command-panel/src/native_panel.rs::installed_pi_picker_runs_the_gateway_and_opens_the_owned_codex_lead"],
+        "limit": "A private tmux fixture covers picker membership and order, gateway argv, Codex ownership, Room and Main binding, and automatic Codex lead startup with stand-in CLIs. Live Pi and Codex gateway compatibility remain unverified. Managed resume is refused."
+      },
       "worker_call": {
         "status": "supported", "verified": "fixture",
         "impl": ["crates/oms-command-peer/src/providers.rs::transport", "crates/oms-command-peer/src/providers.rs::execute_env"],

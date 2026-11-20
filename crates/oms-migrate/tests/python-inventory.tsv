@@ -23,4 +23,4 @@ templates/python-ci.yml	python-reference	1
 templates/recipes/workspace.json	python-reference	4
 templates/slurm-job.sh	python-reference	1
 tests/lib/smoke-env.sh	python-reference	2
-tests/source-distribution-smoke.sh	python-reference	5
+tests/source-distribution-smoke.sh	python-reference	6
