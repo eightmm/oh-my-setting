@@ -3697,31 +3697,35 @@ fn receipt_token_details(
                 other => other,
             };
             let provider_calls = components["calls"].as_u64();
-            let count = |field: &str, partial: &str| {
+            let count = |field: &str, partial: Option<&str>| {
                 if let Some(n) = components[field].as_u64() {
                     return n.to_string();
                 }
-                match (components["reported"][field].as_u64(), provider_calls) {
-                    (Some(n), Some(m)) if n > 0 && n < m => format!("{partial}{n}/{m}"),
+                match (
+                    components["reported"][field].as_u64(),
+                    provider_calls,
+                    partial,
+                ) {
+                    (Some(n), Some(m), Some(prefix)) if n > 0 && n < m => {
+                        format!("{prefix}{n}/{m}")
+                    }
                     _ => "?".into(),
                 }
             };
-            let row = |partial: &str| {
-                format!(
-                    "In {} · Out {} · Cache read {} · Write {}",
-                    count("input", partial),
-                    count("output", partial),
-                    count("cache_read", partial),
-                    count("cache_write", partial)
-                )
+            let row = |partial, compact| {
+                let [input, output, read, write] = ["input", "output", "cache_read", "cache_write"]
+                    .map(|field| count(field, partial));
+                if compact {
+                    format!("In {input} Out {output} Read {read} Write {write}")
+                } else {
+                    format!("In {input} · Out {output} · Cache read {read} · Write {write}")
+                }
             };
-            let full = row("partial ");
-            let value = if width(&full) <= left_budget(inner_width, width(provider)) {
-                full
-            } else {
-                row("p")
-            };
-            line(provider, value)
+            line(provider, row(Some("partial "), false))
+                .or_else(|| line(provider, row(Some("p"), false)))
+                .or_else(|| line(provider, row(Some("p"), true)))
+                // Keep known components when the coverage fractions cannot fit.
+                .or_else(|| line(provider, row(None, true)))
         }))
         .collect()
 }
@@ -7309,6 +7313,16 @@ mod tests {
             detail.contains("In 0 · Out partial 1/2 · Cache read partial 1/2 · Write ?"),
             "{detail}"
         );
+        for columns in [43, 47] {
+            let detail = frame(&report, &nav, columns, 13, &read);
+            assert!(
+                detail
+                    .iter()
+                    .any(|row| row.contains("In 0 Out p1/2 Read p1/2 Write ?")),
+                "{columns}: {detail:?}"
+            );
+            assert!(detail.iter().all(|row| width(row) <= columns));
+        }
         let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
         codex["input"] = Value::Null;
         codex["reported"]["input"] = json!(1);
@@ -7319,6 +7333,15 @@ mod tests {
             detail.contains("In p1/2 · Out p1/2 · Cache read p1/2 · Write p1/2"),
             "{detail}"
         );
+        for columns in [43, 47] {
+            let detail = frame(&report, &nav, columns, 13, &read);
+            assert!(
+                detail
+                    .iter()
+                    .any(|row| row.contains("In p1/2 Out p1/2 Read p1/2 Write p1/2")),
+                "{columns}: {detail:?}"
+            );
+        }
         let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
         *codex = json!({"input":150,"output":20,"cache_read":40,"cache_write":null});
         report["board_receipt_tokens"]["cmp-1"]["total"] = Value::Null;

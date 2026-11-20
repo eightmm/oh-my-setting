@@ -188,12 +188,18 @@ impl ReceiptTokensCache {
                         .providers
                         .entry(call.provider.to_owned())
                         .or_default();
-                    let basis = receipt.usage.cache_in_input;
-                    provider.input_basis = if provider.calls == 0 || provider.input_basis == basis {
-                        basis
-                    } else {
-                        None
-                    };
+                    if call.usage.input_tokens.is_some() {
+                        let basis = receipt.usage.cache_in_input;
+                        // Calls with no attributable input affect coverage but
+                        // do not introduce a competing count basis.
+                        provider.input_basis = if provider.components[0].reported == 0
+                            || provider.input_basis == basis
+                        {
+                            basis
+                        } else {
+                            None
+                        };
+                    }
                     provider.calls += 1;
                     for (sum, tokens) in provider.components.iter_mut().zip([
                         call.usage.input_tokens,
@@ -1285,6 +1291,24 @@ mod receipt_token_tests {
             ("zero", "zero", "antigravity", None, Some(explicit(0))),
             ("inclusive", "basis", "codex", None, Some(codex(4, 2, 1))),
             ("exclusive", "basis", "codex", None, Some(claude)),
+            (
+                "known-input",
+                "unknown-basis",
+                "codex",
+                None,
+                Some(codex(4, 2, 1)),
+            ),
+            (
+                "unknown-input-basis",
+                "unknown-basis",
+                "codex",
+                None,
+                Some(Usage {
+                    input_tokens: Some(1),
+                    output_tokens: Some(2),
+                    ..Usage::default()
+                }),
+            ),
             ("whole", "partial", "codex", None, Some(codex(4, 2, 1))),
             (
                 "sparse",
@@ -1293,10 +1317,10 @@ mod receipt_token_tests {
                 None,
                 Some(Usage {
                     output_tokens: Some(5),
-                    cache_in_input: Some(true),
                     ..Usage::default()
                 }),
             ),
+            ("missing-input", "partial", "codex", None, None),
         ] {
             write(path, call, attempt, provider, session, usage);
         }
@@ -1307,6 +1331,7 @@ mod receipt_token_tests {
             "overflow",
             "zero",
             "basis",
+            "unknown-basis",
             "partial",
             "foreign",
         ];
@@ -1339,9 +1364,9 @@ mod receipt_token_tests {
         assert!(observed["basis"]["providers"]["codex"]["input"].is_null());
         assert_eq!(observed["basis"]["providers"]["codex"]["output"], 4);
         let sparse = &observed["partial"]["providers"]["codex"];
-        assert_eq!(sparse["calls"], 2);
-        assert_eq!(sparse["output"], 7);
-        assert!(sparse["input"].is_null() && sparse["cache_read"].is_null());
+        assert_eq!(sparse["calls"], 3);
+        assert!(sparse["input"].is_null() && sparse["output"].is_null());
+        assert!(sparse["cache_read"].is_null());
         assert_eq!(
             sparse["reported"],
             json!({"input":1,"output":2,"cache_read":1,"cache_write":0})
@@ -1350,6 +1375,10 @@ mod receipt_token_tests {
             observed["basis"]["providers"]["codex"]["reported"]["input"],
             0
         );
+        let unknown_basis = &observed["unknown-basis"]["providers"]["codex"];
+        assert!(unknown_basis["input"].is_null());
+        assert_eq!(unknown_basis["reported"]["input"], 0);
+        assert_eq!(unknown_basis["output"], 4);
     }
 
     #[test]
