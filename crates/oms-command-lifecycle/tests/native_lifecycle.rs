@@ -143,6 +143,53 @@ fn native_only(value: &Value) {
     }
 }
 
+fn bundled_skill_manifest_checks(root: &Path, host: &NativeServices) {
+    let source = root.join("bundled-skill-catalog");
+    let directory = source.join("custom-skills/oms-gated");
+    fs::create_dir_all(&directory).unwrap();
+    let mut manifest = json!({"skills":[{
+        "name":"oms-gated", "source":"custom-skills/oms-gated", "enabled":true,
+        "requires":[source.join("missing-host-tool")]
+    }]});
+    let manifest_path = source.join("skills.manifest.json");
+    write(&manifest_path, &manifest);
+    let valid = "---\nname: oms-gated\ndescription: Fixture skill for checking bundled validation before host selection.\n---\nplain body\n";
+    fs::write(directory.join("SKILL.md"), valid).unwrap();
+    assert_eq!(
+        String::from_utf8(success(call("install-skills", &[], &source, host)))
+            .unwrap()
+            .trim(),
+        "skills: 0 enabled sources validated"
+    );
+    // An unavailable host requirement must not hide malformed bundled content.
+    for (body, expected) in [
+        ("no frontmatter\n".to_owned(), "missing frontmatter"),
+        (
+            format!("{valid}[missing](references/missing.md)\n"),
+            "missing local reference",
+        ),
+    ] {
+        fs::write(directory.join("SKILL.md"), body).unwrap();
+        let out = call("install-skills", &[], &source, host);
+        assert_eq!(out.0, 2);
+        assert!(String::from_utf8_lossy(&out.2).contains(expected));
+    }
+    manifest["skills"][0]["enabled"] = json!(false);
+    write(&manifest_path, &manifest);
+    success(call("install-skills", &[], &source, host));
+    fs::write(directory.join("SKILL.md"), valid).unwrap();
+    manifest["skills"][0]["enabled"] = json!(true);
+    manifest["skills"][0]["name"] = json!("oms-other");
+    write(&manifest_path, &manifest);
+    let out = call("install-skills", &[], &source, host);
+    assert_eq!(out.0, 2);
+    assert!(
+        String::from_utf8_lossy(&out.2)
+            .contains("skill manifest name must match source directory")
+    );
+    assert!(!source.join(".oms").exists());
+}
+
 struct ColdUpdateHost {
     root: PathBuf,
     before: String,
@@ -1545,6 +1592,7 @@ esac
     let source = root.join("source");
     let home = root.join("home");
     let host = NativeServices::default();
+    bundled_skill_manifest_checks(&root, &host);
     doctor_provider_capability_evidence(&source, &root, &host);
     doctor_configuration_diagnostics(&source, &root, &host);
     assert!(

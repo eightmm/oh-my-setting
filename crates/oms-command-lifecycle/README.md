@@ -19,6 +19,14 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   account effects, retire owned interpreter trees, and optionally remove the
   checkout. Dirty purge needs `--purge-dirty`; unsafe root/ancestor paths and
   ambiguous ownership fail closed. Permission cleanup preserves unrelated grants.
+- `install-skills` (the existing `skill-manifest` check): statically validates
+  every enabled bundled skill before the host `requires` filter. Manifest and
+  frontmatter names must match the source directory; the existing native skill
+  validator checks portable frontmatter, body/bundle budgets, sensitive content
+  and the managed reference graph. Managed bundle/reference symlinks are refused.
+  No host command or model runs. The reported count retains its existing
+  meaning: enabled sources whose host requirements are available. Installation,
+  linking and doctor retain their existing host-based selection.
 - `install-codex-plugin`: inventory through the bounded Codex CLI, initial
   marketplace/plugin registration, moved-marketplace/version refresh, and full
   removal. Deleted previous checkouts do not prevent removal. Unmanaged TOML
@@ -227,4 +235,5 @@ retain minimal shell launchers that execute native commands directly.
 
 Provider CLI compatibility, real Linux/macOS installation, live surface/model
 probes, signal/crash recovery, and cross-process contention require host
-verification. No dependency, lockfile, or external dispatcher changes are made.
+verification. Bundled-skill validation reuses the existing providers-skills crate
+through a workspace path dependency; it introduces no external runtime.

@@ -148,6 +148,22 @@ pub(crate) fn validate(
     }
     Ok(meta)
 }
+pub(crate) fn validate_bundled(source: &Path, skill: &str) -> Result<()> {
+    name(skill, true)?;
+    let source = std::fs::canonicalize(source)?;
+    let label = format!("custom-skills/{skill}");
+    let relative = Path::new(&label);
+    no_links(&source, relative)?;
+    let directory = source.join(relative);
+    let files = entries(&directory)?;
+    let raw = &files
+        .iter()
+        .find(|(name, _, _)| name == "SKILL.md")
+        .ok_or_else(|| error("bundle is missing SKILL.md"))?
+        .1;
+    validate(raw, skill, true)?;
+    check_references(&directory, &label, Some(raw))
+}
 pub(crate) fn entries(root: &Path) -> Result<Vec<(String, Vec<u8>, bool)>> {
     use std::os::unix::fs::MetadataExt;
     let mut result = vec![];
