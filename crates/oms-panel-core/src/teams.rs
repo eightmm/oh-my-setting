@@ -353,6 +353,7 @@ mod tests {
     #[test]
     fn resource_claim_dimensions_and_unknown_native_scope_stay_separate() {
         let snapshot = resources::Snapshot {
+            sha256: "d".repeat(64),
             policy: resources::Policy {
                 domain: "domain-a".into(),
                 epoch: "epoch-a".into(),
@@ -370,6 +371,8 @@ mod tests {
                 open_processes: 5,
                 write_wip: 3,
             },
+            teams: Vec::new(),
+            writes: Vec::new(),
         };
         let view = resource_view(Some(&snapshot));
         assert_eq!(view["scope"], "host_local_accounting_domain");
