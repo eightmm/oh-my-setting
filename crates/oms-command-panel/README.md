@@ -152,6 +152,47 @@ the conversation. Only live panes from the selected repository and Room can
 receive board usage refreshes. Native provider scheduling is outside OMS campaign
 accounting and requires an Overall Main recorded outside a managed campaign.
 
+For a canonical Plan task, an existing ordinary Codex Lead also accepts:
+
+```sh
+oms panel --orchestrator codex --room ROOM --task-id TASK --task 'Inspect the assigned source'
+```
+
+This opt-in path claims a ready task through Plan once, or reuses the current
+Main's unexpired claim. Before any input, it creates an idempotent lifecycle
+attempt, writes a private immutable `native-assignment.json` under that attempt,
+and sends an addressed Room notice containing the evidence reference. The
+binding captures task criteria and scope, plan/lease identity, Main and Lead pane
+process generations, persisted account custody and its verification status,
+actual cwd/worktree and base SHA, and the exact payload digest. An ambient or
+untagged account remains explicitly unverified. A linked worktree must belong to the same Git
+repository. The task, lease, operation, checkout and native target are checked
+again before buffering, pasting and Enter. It uses the existing Plan, Room and
+lifecycle writers; it does not create another assignment database.
+
+An exact repeat reuses the attempt and Room message without claiming or sending
+again. Reusing that request with a changed body or binding is refused. Once the
+durable send boundary is recorded, interrupted or unconfirmed delivery returns
+`status: "unknown"` and exit 75; a retry reports the same attempt without more
+input. A prefix that stopped before that boundary can resume its remaining
+steps. Inspect `oms events show --attempt ATTEMPT --json`, the returned private
+binding and Room message, and the existing provider pane when reconciling an
+unknown send. Resolve the old attempt through the existing lifecycle recovery
+workflow before dispatching a new lease or Main; changing a lease alone does not
+authorize another send. The bridge does not infer that a native job stopped
+from a terminal lifecycle record.
+
+`submitted` means the exact Turn appeared in a submitted user message. Provider
+consumption and task completion remain `unconfirmed`; the canonical task is
+still claimed and the lifecycle transport attempt stays nonterminal until its
+owner settles it. There is no synthetic Room receipt, verifier result or task
+acceptance or automatic claim heartbeat. Result capture/review uses its existing
+owners and is not automated by this bridge. Native session IDs and native child cancellation/resume are not
+supported here. Cwd and base identity are evidence, not write isolation:
+`write_isolation` is `unmanaged` and `child_cleanup` is `unsupported`. This first
+bound path supports the ordinary Codex Lead; Claude, AGY and alternate Codex
+Leads continue to use the existing unbound conversation path.
+
 Click a Codex, Claude or AGY native child row, or select it and press Enter.
 The Board opens available recent replies after verifying the Room, Main,
 provider pane, assignment turn and child identity. A recorded parent summary

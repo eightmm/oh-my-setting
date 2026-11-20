@@ -1,0 +1,461 @@
+//! Opt-in native assignments use Plan, Room and lifecycle writers as owners.
+//! A transport receipt is not provider consumption, task completion or isolation.
+use super::*;
+use oms_command_operations as events;
+use oms_command_operations::value::{V, obj};
+use oms_panel_core::services::ExecutionRequest;
+
+const MAX_BINDING: usize = 64 * 1024;
+
+fn operation_value(value: &Value) -> Result<V> {
+    V::parse(&serde_json::to_vec(value).map_err(Error::new)?).map_err(Error::new)
+}
+
+fn task(panel: &Panel<'_>, id: &str) -> Result<Value> {
+    let status = commands::query(
+        panel.services,
+        NativeCommand::Plan,
+        panel.repo,
+        &["status", "--json"],
+        panel.stop,
+    )?;
+    require(
+        status["contract"]["satisfied"] == true,
+        "the current project contract blocks native assignment",
+    )?;
+    let mut task = commands::query(
+        panel.services,
+        NativeCommand::Plan,
+        panel.repo,
+        &["evidence-snapshot", "--id", id],
+        panel.stop,
+    )?;
+    require(
+        task["id"] == id && task["contract_stale"] == false,
+        "native assignment task is unavailable or its contract is stale",
+    )?;
+    // A heartbeat or elapsed age must not mint another assignment for this lease.
+    for field in [
+        "claim_age_s",
+        "task_sha256",
+        "created",
+        "updated",
+        "claimed_at",
+    ] {
+        task.as_object_mut()
+            .ok_or_else(|| Error::new("invalid canonical task"))?
+            .remove(field);
+    }
+    Ok(task)
+}
+
+fn claimed(panel: &Panel<'_>, task: &Value) -> Result<()> {
+    require(
+        ["claimed", "running"].contains(&text(task, "state"))
+            && task["claimed_by_participant"] == panel.attempt
+            && task["provider"] == panel.owner
+            && task["claim_expired"] == false
+            && text(task, "plan_id")
+                .strip_prefix("plan_")
+                .is_some_and(|v| v.len() == 32 && v.bytes().all(|c| c.is_ascii_hexdigit()))
+            && text(task, "lease_id")
+                .strip_prefix("lease_")
+                .is_some_and(|v| v.len() == 32 && v.bytes().all(|c| c.is_ascii_hexdigit()))
+            && task["lease_epoch"].as_u64().is_some_and(|n| n > 0),
+        "native assignment requires the current Main's unexpired canonical task claim",
+    )
+}
+
+fn git(panel: &Panel<'_>, cwd: &Path, argument: &str) -> Result<String> {
+    let mut request =
+        ExecutionRequest::new(commands::strings(&["git", "rev-parse", argument]), cwd);
+    request.timeout = Duration::from_secs(10);
+    request.output_limit = 4096;
+    let output = panel.services.execute(&request, panel.stop)?;
+    output.success()?;
+    let value = String::from_utf8(output.stdout).map_err(Error::new)?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    require(
+        !value.is_empty() && !value.chars().any(char::is_control),
+        "native checkout identity is unavailable",
+    )?;
+    Ok(value.to_owned())
+}
+
+fn checkout(panel: &Panel<'_>, lead: &Pane) -> Result<Value> {
+    let raw = panel.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &lead.id,
+        "#{pane_current_path}",
+    ])?;
+    require(
+        raw.len() <= 4096 && !raw.chars().any(char::is_control),
+        "native cwd is unavailable",
+    )?;
+    let cwd = Path::new(&raw).canonicalize().map_err(Error::new)?;
+    require(cwd.is_absolute(), "native cwd is unavailable")?;
+    let worktree = PathBuf::from(git(panel, &cwd, "--show-toplevel")?)
+        .canonicalize()
+        .map_err(Error::new)?;
+    let common = cwd
+        .join(git(panel, &cwd, "--git-common-dir")?)
+        .canonicalize()
+        .map_err(Error::new)?;
+    let expected = panel
+        .repo
+        .join(git(panel, panel.repo, "--git-common-dir")?)
+        .canonicalize()
+        .map_err(Error::new)?;
+    require(
+        common == expected,
+        "native lead cwd is not a worktree of the selected repository",
+    )?;
+    let base = git(panel, &cwd, "HEAD")?;
+    require(
+        (base.len() == 40 || base.len() == 64) && base.bytes().all(|b| b.is_ascii_hexdigit()),
+        "native checkout has no exact base SHA",
+    )?;
+    Ok(json!({"cwd": cwd, "worktree": worktree, "base_sha": base,
+        "write_isolation": "unmanaged", "native_session": null}))
+}
+
+pub(super) struct Binding {
+    task: Value,
+    checkout: Value,
+    attempt: String,
+    intent_digest: String,
+    digest: String,
+    transport: &'static str,
+}
+impl Binding {
+    pub(super) fn revalidate(&self, panel: &Panel<'_>) -> Result<()> {
+        let current = task(panel, text(&self.task, "id"))?;
+        claimed(panel, &current)?;
+        require(
+            current == self.task,
+            "native assignment task, lease or criteria changed before input",
+        )?;
+        let operation = current_operation(panel, &self.attempt)?;
+        require(
+            operation["terminal"] == false
+                && operation["refs"]["native_intent_sha256"] == self.intent_digest
+                && operation["refs"]["native_transport"] == self.transport
+                && (self.transport == "intent"
+                    || operation["refs"]["native_binding_sha256"] == self.digest),
+            "native assignment operation was cancelled or changed before input",
+        )?;
+        let lead = panel
+            .leads
+            .get("codex")
+            .ok_or_else(|| Error::new("native lead disappeared"))?;
+        require(
+            checkout(panel, lead)? == self.checkout,
+            "native assignment cwd or base changed before input",
+        )
+    }
+}
+
+fn annotate(panel: &Panel<'_>, binding: &Binding, key: &str, refs: Value) -> Result<()> {
+    let attempt = &binding.attempt;
+    let candidate = events::new_event(
+        attempt,
+        0usize.into(),
+        "attempt.usage",
+        obj([
+            (
+                "actor",
+                obj([
+                    ("kind", "owner".into()),
+                    ("name", "panel-native-assignment".into()),
+                ]),
+            ),
+            ("idempotency_key", key.into()),
+            ("refs", operation_value(&refs)?),
+        ]),
+    )
+    .map_err(Error::new)?;
+    events::append_lifecycle_checked(panel.repo, candidate, panel.stop, |_, current| {
+        let current =
+            current.ok_or_else(|| "native assignment operation disappeared".to_owned())?;
+        if current.get("terminal").truth()
+            || current.get("refs").get("native_intent_sha256").py() != binding.intent_digest
+            || current.get("refs").get("native_transport").py() != binding.transport
+            || (binding.transport != "intent"
+                && current.get("refs").get("native_binding_sha256").py() != binding.digest)
+        {
+            return Err("native assignment operation was cancelled or changed".into());
+        }
+        Ok(())
+    })
+    .map_err(Error::new)?;
+    Ok(())
+}
+
+fn current_operation(panel: &Panel<'_>, attempt: &str) -> Result<Value> {
+    commands::query(
+        panel.services,
+        NativeCommand::Events,
+        panel.repo,
+        &["show", "--attempt", attempt, "--json"],
+        panel.stop,
+    )
+}
+
+fn result(attempt: &str, binding: &str, message: &str, status: &str, repeated: bool) -> Value {
+    json!({"schema": 1, "status": status, "attempt_id": attempt,
+        "binding": binding, "room_message_id": message, "reused": repeated,
+        "consumption": "unconfirmed", "task_completion": "unconfirmed",
+        "write_isolation": "unmanaged", "child_cleanup": "unsupported"})
+}
+
+pub(super) fn run(
+    panel: &Panel<'_>,
+    options: &Options,
+    host: &dyn AccountHost,
+    attempts: &AttemptCache,
+    tx: &Transaction<'_>,
+) -> Result<Value> {
+    let id = options.required("task-id")?;
+    let text_task = options.required("task")?;
+    validate_task(&text_task)?;
+    require(
+        oms_scrub::scan_secret(text_task.as_bytes(), &[])
+            .map_err(|_| Error::new("native assignment sensitive-content check unavailable"))?
+            .is_empty(),
+        "native assignment contains sensitive content",
+    )?;
+    require(
+        panel.leads.contains_key("codex"),
+        "open the ordinary Codex lead before binding a task",
+    )?;
+    // This existing path checks an explicitly selected account without sending.
+    panel.execute_with_host_cached(
+        "codex",
+        options.get("account"),
+        None,
+        LeadLaunch::default(),
+        host,
+        attempts,
+    )?;
+    let custody = panel.codex_assignment_custody(host)?;
+    panel.require_codex_assignment_main(panel.repo, attempts)?;
+    let lead = &panel.leads["codex"];
+    let location = checkout(panel, lead)?;
+    let mut canonical = task(panel, &id)?;
+    let history = attempts.attempts(panel.repo, panel.services, panel.stop)?;
+    require(
+        !crate::rows(&history).iter().any(|attempt| {
+            attempt["tool"] == "panel-native-assignment"
+                && attempt["task_id"] == id
+                && attempt["refs"]["plan_id"] == canonical["plan_id"]
+                && attempt["terminal"] == false
+                && (attempt["refs"]["lease_id"] != canonical["lease_id"]
+                    || attempt["parent_attempt_id"] != panel.attempt)
+        }),
+        "an earlier native assignment for this task remains live or unconfirmed; reconcile its existing attempt before a new lease or Main can dispatch",
+    )?;
+    if canonical["state"] == "ready" {
+        let provider = canonical["assignment"]["provider"]
+            .as_str()
+            .unwrap_or(&panel.owner);
+        require(
+            provider == panel.owner,
+            "task route cannot be claimed by this Main; use the canonical task owner",
+        )?;
+        panel
+            .services
+            .command(
+                NativeCommand::Plan,
+                panel.repo,
+                &commands::strings(&["claim", "--id", &id, "--provider", &panel.owner]),
+                panel.stop,
+            )?
+            .success()?;
+        canonical = task(panel, &id)?;
+    }
+    claimed(panel, &canonical)?;
+    let mut binding = Binding {
+        task: canonical.clone(),
+        checkout: location,
+        attempt: String::new(),
+        intent_digest: String::new(),
+        digest: String::new(),
+        transport: "intent",
+    };
+    let key = oms_panel_core::digest(
+        &serde_json::to_vec(&json!({
+            "main": panel.attempt, "plan": canonical["plan_id"], "task": id,
+            "lease": canonical["lease_id"], "room": panel.room,
+        }))
+        .map_err(Error::new)?,
+    );
+    let turn = &key[..20];
+    let message = format!("msg-{}", &key[..32]);
+    let task_reader = format!(
+        "oms plan --repo {} evidence-snapshot --id {}",
+        commands::shell_quote(&panel.repo.to_string_lossy()),
+        commands::shell_quote(&id)
+    );
+    let prompt = format!(
+        "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {}{} Canonical task: {id}; plan: {}; lease: {}; Room message: {message}. Before working, read {task_reader}; match this plan and lease, and obey its allowed/forbidden paths, acceptance criteria and verifier contract. The addressed Room message identifies the operation attempt and immutable binding. Preserve this binding with your result; receipt is not acceptance. Task: {text_task}",
+        STARTUP_PROMPT.trim(),
+        assignment_locator(panel.repo, panel.room)?,
+        text(&canonical, "plan_id"),
+        text(&canonical, "lease_id"),
+    );
+    let payload_digest = oms_panel_core::digest(prompt.as_bytes());
+    let (_, _, account_verification) = binding_summary(custody.binding.as_ref());
+    let mut packet = json!({"schema": 1, "kind": "oms-native-assignment", "task": canonical,
+        "parent_attempt_id": panel.attempt, "room": panel.room, "provider": "codex",
+        "session": panel.session_proof, "main_pane": {"id": custody.main.id,
+            "window": custody.main.window, "pid": custody.main.pid, "birth": custody.main.birth},
+        "lead_pane": {"id": custody.lead.id, "window": custody.lead.window,
+            "pid": custody.lead.pid, "birth": custody.lead.birth},
+        "account": custody.binding, "account_verification": account_verification,
+        "checkout": binding.checkout, "room_message_id": message,
+        "payload_sha256": payload_digest, "payload": prompt,
+        "result_contract": "preserve task/lease/attempt binding; existing review and acceptance are separate"});
+    let raw = serde_json::to_vec(&packet).map_err(Error::new)?;
+    require(
+        raw.len() <= MAX_BINDING,
+        "native assignment binding exceeds 64 KiB",
+    )?;
+    let intent_digest = oms_panel_core::digest(&raw);
+    let attempt = events::create_attempt(
+        panel.repo,
+        &events::StartRequest {
+            provider: "codex".into(),
+            tool: "panel-native-assignment".into(),
+            task_id: id,
+            parent_attempt_id: panel.attempt.clone(),
+            idempotency_key: format!("native-{key}"),
+            refs: operation_value(&json!({"native_assignment_schema": "1",
+            "native_intent_sha256": intent_digest, "native_payload_sha256": payload_digest,
+            "plan_id": canonical["plan_id"], "lease_id": canonical["lease_id"],
+            "panel_room_id": panel.room, "panel_owner": panel.owner,
+            "panel_native_scheduling": "unmanaged", "native_transport": "intent"}))?,
+            ..Default::default()
+        },
+        panel.stop,
+    )
+    .map_err(Error::new)?;
+    packet["attempt_id"] = attempt.clone().into();
+    let raw = serde_json::to_vec(&packet).map_err(Error::new)?;
+    require(
+        raw.len() <= MAX_BINDING,
+        "native assignment binding exceeds 64 KiB",
+    )?;
+    let binding_digest = oms_panel_core::digest(&raw);
+    binding.attempt = attempt.clone();
+    binding.intent_digest = intent_digest;
+    binding.digest = binding_digest.clone();
+    let artifact = format!(".oms/lifecycle/attempts/{attempt}/native-assignment.json");
+    tx.write(Path::new(&artifact), &raw, true, MAX_BINDING)?;
+    let prior = current_operation(panel, &attempt)?;
+    match text(&prior["refs"], "native_transport") {
+        "submitted" => return Ok(result(&attempt, &artifact, &message, "submitted", true)),
+        "sending" | "unknown" => return Ok(result(&attempt, &artifact, &message, "unknown", true)),
+        "intent" => {}
+        _ => return Err(Error::new("invalid native assignment transport state")),
+    }
+    binding.revalidate(panel)?;
+    tx.check()?;
+    let mut join = commands::strings(&[
+        "join",
+        "--id",
+        panel.room,
+        "--participant",
+        &attempt,
+        "--provider",
+        "codex",
+        "--role",
+        "worker",
+        "--parent",
+        &panel.attempt,
+        "--label",
+        "Native task assignment",
+    ]);
+    for path in crate::rows(&canonical["allowed_paths"]) {
+        let path = path
+            .as_str()
+            .ok_or_else(|| Error::new("invalid task scope"))?;
+        join.extend(commands::strings(&["--owns", path]));
+    }
+    panel
+        .services
+        .command(NativeCommand::Room, panel.repo, &join, panel.stop)?
+        .success()?;
+    let notice = format!(
+        "Native assignment {attempt}; task {}; plan {}; lease {}; binding {binding_digest}; payload {payload_digest}. Evidence: {artifact}. Input submission and consumption are separate observations.",
+        text(&canonical, "id"),
+        text(&canonical, "plan_id"),
+        text(&canonical, "lease_id")
+    );
+    panel
+        .services
+        .command(
+            NativeCommand::Room,
+            panel.repo,
+            &commands::strings(&[
+                "send",
+                "--id",
+                panel.room,
+                "--participant",
+                &panel.attempt,
+                "--to",
+                &attempt,
+                "--kind",
+                "note",
+                "--message-id",
+                &message,
+                "--text",
+                &notice,
+            ]),
+            panel.stop,
+        )?
+        .success()?;
+    binding.revalidate(panel)?;
+    tx.check()?;
+    // A known busy input has no transport side effect. Keep the resumable
+    // intent; send_checked repeats this observation after the durable boundary.
+    panel.require_provider_input("codex")?;
+    // This durable boundary precedes set-buffer, paste and Enter. If the caller
+    // disappears here, the next call only reports unknown; it cannot resend.
+    annotate(
+        panel,
+        &binding,
+        "native-send-intent",
+        json!({
+            "native_transport": "sending", "native_binding": artifact,
+            "native_room_message": message, "native_binding_sha256": binding_digest,
+        }),
+    )?;
+    binding.transport = "sending";
+    let sent = panel.send_checked(
+        "codex",
+        &prompt,
+        Proof::Turn(turn),
+        Some((&custody, host, attempts)),
+        Some(&binding),
+    );
+    let state = if sent.is_ok() { "submitted" } else { "unknown" };
+    let annotation = annotate(
+        panel,
+        &binding,
+        "native-send-observed",
+        json!({"native_transport": state}),
+    );
+    let state = if annotation.is_ok() { state } else { "unknown" };
+    let mut output = result(&attempt, &artifact, &message, state, false);
+    if sent.is_err() || annotation.is_err() {
+        output["reconcile_required"] = true.into();
+        output["reason"] = if let Err(error) = sent {
+            error.message.into()
+        } else {
+            "input receipt could not be recorded".into()
+        };
+    }
+    Ok(output)
+}

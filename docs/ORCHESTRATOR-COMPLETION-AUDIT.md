@@ -160,6 +160,16 @@ held domain의 epoch 재개는 [lifecycle 구현 패킷](ORCHESTRATOR-LIFECYCLE-
 
 ### P0-B — Native assignment를 task·worktree·결과에 연결한다
 
+**구현된 첫 범위:** `oms panel --orchestrator codex --task-id ID --task TEXT`는
+기존 ordinary Codex Lead에 대해 아래 단계 1을 연결한다. 현재 Main의 canonical claim,
+idempotent lifecycle attempt/spec, private immutable binding, addressed Room message를
+입력 전에 보존하고 task/lease·operation·Main/Lead custody·실제 cwd/base를 입력 경계마다
+재확인한다. `sending` 이후의 불확실한 결과는 exit 75와 같은 attempt로 읽으며 재전송하지
+않는다. `submitted`는 transport 증거이며 소비·완료·acceptance가 아니다. 다른 provider와
+alternate Lead, native session ID, 자동 결과 캡처/acceptance, unmanaged child 취소·재개는
+아직 이 경로가 구현하지 않는다. [사용 계약](../crates/oms-command-panel/README.md)의
+제약을 유지하며 아래 단계 2–4 전체가 완료된 것으로 취급하지 않는다.
+
 사용자가 실제로 쓰는 경로는 이미 Overall Main → native provider pane이다.
 실행을 표시하는 것과 attempt identity, 결과 보존, 종료 확인, acceptance를 연결하는 것은 다르다.
 기존 managed Team 정산과 달리, 이 작업은 native 대화와 canonical 업무의 상관관계를 만든다.
