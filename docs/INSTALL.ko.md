@@ -225,23 +225,60 @@ OMS가 기본으로 켜지 않는다.
 core 업데이트는 성공했다고 구분해 보고하며 provider 바이너리는 core 롤백 대상이
 아니다.
 
+### 정확한 버전을 준비한 뒤 적용
+
+```bash
+oms update --prepare --ref edge
+oms update --status --json
+oms update --apply-prepared
+```
+
+`--prepare`는 대상 commit을 한 번 확정하고 별도 source checkout에서 native payload를
+준비한다. 실행 중인 worker가 있어도 준비할 수 있다. Git object나 빌드 의존성은 받을 수
+있지만 현재 checkout·설치 receipt·provider 설정·provider 버전은 변경하지 않는다.
+준비 receipt에는 설치 기준 commit, source identity, 추적 ref, 대상 commit과 payload
+manifest digest를 기록한다. 준비 복구 journal은 실제 설치 복구 journal과 분리된다.
+
+`--apply-prepared`는 fetch 없이 준비한 정확한 commit을 적용한다. 준비 뒤 remote ref가
+움직여도 다른 commit을 선택하지 않는다. 현재 설치와 payload identity를 확인하고,
+전환 직전에 기존 worker/call 검사를 다시 수행한 뒤 기존 transaction과 doctor로
+적용한다. 설치가 바뀌면 stale로 거부하고 다시 준비해야 한다. 작업 중 적용이 보류되면
+준비본은 유지된다. Worker를 종료하거나 자동 재시도를 등록하지 않는다. 기존 daily
+updater 정책은 유지하며 수동으로 준비한 후보를 임의로 소비하지 않는다.
+
+`--status`는 파일 복구나 fetch 없이 `none`, `incomplete`, `prepared`, `stale`,
+`missing_payload`, `invalid_payload` 상태를 보여준다. 안전하지 않거나 잘못된 준비
+receipt는 오류다. 준비 receipt는 core 반영과 함께 소비되므로 이후 provider refresh가
+실패해도 이미 성공한 core를 다시 적용하지 않는다.
+
+다른 머신에서 빌드한 묶음은 `--prepare --from FILE --sha256 HASH`로 가져온다.
+현재 host와 선택한 commit이 일치해야 하며 checksum은 별도로 신뢰한 값이어야 한다.
+수신 머신은 Git source checkout이 계속 필요하지만 bundle 준비에 Cargo는 필요하지
+않다. 생성 방법과 신뢰·호환성 범위는 [Native update distribution](UPDATE-DISTRIBUTION.md)에
+설명한다.
+
 ### 설치·업데이트 미리 보기
 
-`install.sh --plan`과 `oms update --plan`은 실행이 바꿀 내용을 출력하고 아무것도 바꾸지 않는다.
-clone·fetch, lifecycle lock, link, 백업 이동, 설정 편집, 등록이 모두 일어나지 않는다. 각 줄은
-`STEP: STATUS: detail`이고 status는 `change`, `current`, `skip`, `not-previewed`, `note` 중 하나다.
+`install.sh --plan`과 `oms update --plan`은 clone·fetch·빌드·lifecycle lock·설치
+파일 변경을 수행하지 않는다. Native install plan은 제안 receipt·capability 선택·action
+목록을 JSON으로 보고한다. Native update plan은 현재 commit·선택 ref·action 목록과
+fetch/provider refresh처럼 미리 보지 못한 항목을 보고한다. 아직 받지 않은 대상의
+파일별 변경 diff를 보여주는 기능은 아니다.
 
-쓰기 없는 모드가 있는 단계(link와 백업, capability profile, Claude hook 행, Antigravity 권한 규칙,
-auto-update trigger)는 그 단계 자신의 코드로 미리 본다. 나머지는 로직을 따로 흉내 내지 않고
-`not-previewed`로 이름만 적는다: clone·fetch, 네이티브 payload 빌드, tool installer와 그것이 추가하는 PATH 줄,
-서비스 로그인, Codex plugin과 `config.toml` 블록, MCP·Antigravity plugin 등록, Claude의 `statusLine`·
-`modelSettings`·`attribution` key. plan은 디스크에 있는 checkout을 읽으므로, update plan은 fetch가 가져올
-commit이 아니라 현재 commit을 다시 link하는 경우를 설명한다. checkout이 아직 없으면(첫 설치 전 curl 형태)
-그렇게 말하고 멈춘다.
+기존 checkout의 상세 설치 계획에는 검증된 native payload가 필요하다. Payload가
+없으면 `install.sh --plan`은 그 한계를 알리며 빌드나 다운로드를 시작하지 않는다.
+Checkout 자체가 없을 때도 현재 로컬 계획을 만들 수 없다고 보고한다.
 
-기존 checkout의 상세 설치 계획을 출력하려면 검증된 네이티브 payload가 준비되어 있어야 한다.
-payload가 없으면 `install.sh --plan`은 준비가 필요하다고 알리고, 바이너리 빌드나 의존성
-다운로드를 실행하지 않는다.
+### 검증 근거의 구분
+
+Native 수동·예약 업데이트는 payload 검증과 incoming doctor를 사용한다. 현재 예약
+`auto-update` 경로는 GitHub Actions 성공 여부를 조회하지 않으며, 과거 문서에 있던
+exact-SHA CI 조회나 20개 조상 commit 탐색도 수행하지 않는다. 이 정정은 scheduler의
+기본 동작을 바꾸는 것이 아니다.
+
+`oms land`의 CI·전체 검증 근거 요구는 별도 계약으로 유지한다. 빌드 성공, checksum
+일치, 준비 receipt, doctor 성공을 CI 통과라고 표시해서는 안 된다. Bundle의 사용자가
+제공한 SHA-256 역시 publisher 서명이나 CI attestation이 아니다.
 
 ## 서비스와 화면
 

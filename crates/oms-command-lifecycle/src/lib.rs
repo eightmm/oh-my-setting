@@ -15,6 +15,7 @@ mod lifecycle_lock;
 mod mcp_probe;
 mod payload;
 mod plugins;
+mod prepared;
 mod provider_check;
 mod receipt;
 mod runtime;

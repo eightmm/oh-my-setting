@@ -334,10 +334,34 @@ pub(crate) fn prepare_incoming(
     services: &dyn crate::Services,
     flag: &AtomicBool,
 ) -> Result<bool> {
+    prepare_incoming_with_bundle(paths, revision, tx, services, flag, None)
+}
+
+/// Explicit bundle imports are authenticated by the caller's trusted archive
+/// digest before any of their executable bytes run. This is not a signature or
+/// an automatic release trust policy. Incoming source validation stays the same
+/// as the source-build path.
+pub(crate) fn prepare_incoming_with_bundle(
+    paths: &Paths,
+    revision: &str,
+    tx: &mut Transaction,
+    services: &dyn crate::Services,
+    flag: &AtomicBool,
+    bundle: Option<(&Path, &str)>,
+) -> Result<bool> {
+    valid_revision(revision)?;
+    let imported = bundle
+        .map(|(archive, expected)| read_bundle(paths, archive, expected, revision, flag))
+        .transpose()?;
     let destination = paths.source.join("target/oms-native").join(revision);
     match fs::symlink_metadata(&destination) {
         // Existing caches, including invalid ones, belong to strict Preflight.
-        Ok(_) => return Ok(false),
+        Ok(_) => {
+            if let Some(imported) = &imported {
+                imported.recheck(&destination)?;
+            }
+            return Ok(false);
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
@@ -382,9 +406,14 @@ pub(crate) fn prepare_incoming(
         scratch.source = source.clone();
         scratch.cwd = source.clone();
         scratch.config = source.join("target/native-preparation");
-        let release = build(&scratch, revision, flag)?;
-        check()?;
-        let built = BuiltPayload::capture(&release, revision)?;
+        let built = match imported {
+            Some(built) => built,
+            None => {
+                let release = build(&scratch, revision, flag)?;
+                check()?;
+                BuiltPayload::capture(&release, revision)?
+            }
+        };
         secure_dir(&source.join("target"))?;
         secure_dir(&source.join("target/oms-native"))?;
         let staged = source.join("target/oms-native").join(revision);
@@ -450,6 +479,101 @@ pub(crate) fn prepare_incoming(
     }
 }
 
+fn valid_revision(revision: &str) -> Result<()> {
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return r::fail("invalid native source revision");
+    }
+    Ok(())
+}
+
+/// Bind a prepared receipt to the exact manifest after checking every declared
+/// artifact. A manifest hash alone never attests the binary bytes beside it.
+pub(crate) fn prepared_digest(paths: &Paths, revision: &str) -> Result<String> {
+    valid_revision(revision)?;
+    let dir = paths.source.join("target/oms-native").join(revision);
+    let mut ancestor = dir.as_path();
+    while ancestor.starts_with(&paths.source) {
+        let m = fs::symlink_metadata(ancestor)?;
+        if !m.is_dir()
+            || m.file_type().is_symlink()
+            || m.mode() & 0o022 != 0
+            || m.uid() != 0 && m.uid() != rustix::process::geteuid().as_raw()
+        {
+            return r::fail("unsafe prepared native payload directory");
+        }
+        if ancestor == paths.source {
+            break;
+        }
+        ancestor = ancestor.parent().unwrap();
+    }
+    let payload = BuiltPayload::read(&dir, revision)?;
+    Ok(r::hash(&payload.manifest))
+}
+
+fn read_bundle(
+    paths: &Paths,
+    archive: &Path,
+    expected: &str,
+    revision: &str,
+    flag: &AtomicBool,
+) -> Result<BuiltPayload> {
+    valid_revision(revision)?;
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return r::fail("native bundle requires a trusted lowercase SHA-256 digest");
+    }
+    protected(archive, false)?;
+    let raw = r::read(archive, 1024 * 1024 * 1024)?;
+    if r::hash(&raw) != expected {
+        return r::fail("native bundle SHA-256 mismatch; no payload executed");
+    }
+    r::check(flag)?;
+    let work = r::Scratch::new()?;
+    // Decompress a private byte snapshot, not a caller path that can change
+    // after hashing. The shared extractor bounds output and rejects traversal.
+    let snapshot = work.0.join("bundle.tar.gz");
+    r::new_file(&snapshot, &raw, 0o600)?;
+    let extracted = work.0.join("extracted");
+    crate::supply::extract(paths, &snapshot, "tar.gz", &extracted, flag)?;
+    let mut entries = fs::read_dir(&extracted)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    if entries != [std::ffi::OsString::from("bundle.json"), "payload".into()] {
+        return r::fail("foreign native bundle content");
+    }
+    let metadata = extracted.join("bundle.json");
+    protected(&metadata, false)?;
+    let row = r::parse(&r::read(&metadata, 4 * 1024 * 1024)?)?;
+    let platform = crate::supply::platform()?;
+    if row["schema"] != 1
+        || row["kind"] != "oms-native-payload"
+        || row["source_commit"].as_str() != Some(revision)
+        || row["platform"].as_str() != Some(platform.as_str())
+    {
+        return r::fail("native bundle schema, revision or host platform mismatch");
+    }
+    let dir = extracted.join("payload");
+    let metadata = fs::symlink_metadata(&dir)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return r::fail("invalid native bundle payload directory");
+    }
+    let payload = BuiltPayload::read(&dir, revision)?;
+    for required in BUILT {
+        if !payload.built.iter().any(|(name, _, _)| *name == required) {
+            return r::fail("native bundle is missing a required companion");
+        }
+    }
+    Ok(payload)
+}
+
 /// Cargo output: `release/<name>` is a hard link to `deps/<name>-<hash>` and
 /// is group-writable under umask 0002. Accept that until `publish` writes the
 /// strict single-link copy that `verify` demands; refuse symlinks, foreign
@@ -494,6 +618,51 @@ struct BuiltPayload {
     manifest: Vec<u8>,
 }
 impl BuiltPayload {
+    fn read(dir: &Path, revision: &str) -> Result<Self> {
+        protected(&dir.join("manifest.json"), false)?;
+        protected(&dir.join("oms.sha256"), false)?;
+        let manifest = r::read(&dir.join("manifest.json"), 4 * 1024 * 1024)?;
+        let row = r::parse(&manifest)?;
+        if row["schema"] != 1 || row["source_commit"].as_str() != Some(revision) {
+            return r::fail("native manifest revision mismatch");
+        }
+        let artifacts = row["artifacts"]
+            .as_object()
+            .ok_or_else(|| r::Error(2, "missing native artifacts".into()))?;
+        names_allowed(artifacts.keys().map(String::as_str))?;
+        let mut built = Vec::new();
+        for name in std::iter::once("oms").chain(COMPANIONS) {
+            let Some(expected) = artifacts.get(name) else {
+                continue;
+            };
+            let expected = expected.as_str().filter(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            });
+            let expected =
+                expected.ok_or_else(|| r::Error(2, "invalid native artifact digest".into()))?;
+            let file = dir.join(name);
+            protected(&file, true)?;
+            let raw = r::read(&file, 1024 * 1024 * 1024)?;
+            if r::hash(&raw) != expected {
+                return r::fail("native artifact digest mismatch");
+            }
+            built.push((name, expected.to_owned(), raw));
+        }
+        let checksum = format!("{}\n", built[0].1);
+        if r::read(&dir.join("oms.sha256"), 65)? != checksum.as_bytes() {
+            return r::fail("invalid native executable checksum");
+        }
+        let payload = Self {
+            built,
+            checksum,
+            manifest,
+        };
+        payload.check_names(dir)?;
+        Ok(payload)
+    }
+
     fn capture(release: &Path, revision: &str) -> Result<Self> {
         let mut built = Vec::new();
         for name in std::iter::once("oms").chain(BUILT) {
@@ -542,6 +711,10 @@ impl BuiltPayload {
                 return r::fail("incoming native payload changed during source validation");
             }
         }
+        self.check_names(dir)
+    }
+    fn check_names(&self, dir: &Path) -> Result<()> {
+        let files = self.files();
         for entry in fs::read_dir(dir)? {
             let name = entry?.file_name();
             if !files.iter().any(|(expected, _, _)| name == *expected) {
@@ -595,6 +768,89 @@ mod tests {
         for name in BUILT {
             assert!(COMPANIONS.contains(&name), "{name} must be verifiable");
         }
+    }
+
+    #[test]
+    fn imported_bundles_bind_archive_host_revision_and_every_companion() {
+        let root = r::Scratch::new().unwrap();
+        let paths = paths(&root.0);
+        let revision = "1".repeat(40);
+        let release = root.0.join("release");
+        for name in std::iter::once("oms").chain(BUILT) {
+            write(&release.join(name), name.as_bytes());
+        }
+        let directory = root.0.join("package");
+        let payload = directory.join("payload");
+        let mut tx = Transaction::begin(&paths).unwrap();
+        publish(&payload, &release, &revision, &mut tx).unwrap();
+        tx.commit().unwrap();
+        let metadata = serde_json::json!({
+            "schema": 1,
+            "kind": "oms-native-payload",
+            "source_commit": revision,
+            "platform": crate::supply::platform().unwrap(),
+        });
+        write(
+            &directory.join("bundle.json"),
+            &r::bytes(&metadata).unwrap(),
+        );
+        let archive = root.0.join("bundle.tar.gz");
+        let pack = || {
+            assert!(
+                std::process::Command::new(r::find("tar", &root.0).unwrap())
+                    .args(["--format=ustar", "-czf"])
+                    .arg(&archive)
+                    .arg("-C")
+                    .arg(&directory)
+                    .args(["bundle.json", "payload"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            r::hash(&fs::read(&archive).unwrap())
+        };
+        let flag = AtomicBool::new(false);
+        let digest = pack();
+        let imported = read_bundle(&paths, &archive, &digest, &revision, &flag).unwrap();
+        assert_eq!(imported.built.len(), BUILT.len() + 1);
+        assert!(read_bundle(&paths, &archive, &"0".repeat(64), &revision, &flag).is_err());
+        assert!(read_bundle(&paths, &archive, &digest, &"2".repeat(40), &flag).is_err());
+        let mut wrong_platform = metadata.clone();
+        wrong_platform["platform"] = "foreign-host".into();
+        write(
+            &directory.join("bundle.json"),
+            &r::bytes(&wrong_platform).unwrap(),
+        );
+        assert!(read_bundle(&paths, &archive, &pack(), &revision, &flag).is_err());
+        write(
+            &directory.join("bundle.json"),
+            &r::bytes(&metadata).unwrap(),
+        );
+        let companion = payload.join(BUILT[0]);
+        write(&companion, b"changed companion");
+        assert!(read_bundle(&paths, &archive, &pack(), &revision, &flag).is_err());
+        write(&companion, BUILT[0].as_bytes());
+        let saved = fs::read(&companion).unwrap();
+        fs::remove_file(&companion).unwrap();
+        symlink("oms", &companion).unwrap();
+        assert!(read_bundle(&paths, &archive, &pack(), &revision, &flag).is_err());
+        fs::remove_file(&companion).unwrap();
+        write(&companion, &saved);
+        write(&payload.join("foreign"), b"extra");
+        assert!(read_bundle(&paths, &archive, &pack(), &revision, &flag).is_err());
+        fs::remove_file(payload.join("foreign")).unwrap();
+
+        let cached = paths.source.join("target/oms-native").join(&revision);
+        let mut tx = Transaction::begin(&paths).unwrap();
+        imported.publish_new(&cached, &mut tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            prepared_digest(&paths, &revision).unwrap(),
+            r::hash(&imported.manifest)
+        );
+        write(&cached.join(BUILT[0]), b"post-prepare corruption");
+        assert!(prepared_digest(&paths, &revision).is_err());
+        assert!(prepared_digest(&paths, "../other").is_err());
     }
 
     #[test]

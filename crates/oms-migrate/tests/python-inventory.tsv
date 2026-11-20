@@ -16,6 +16,7 @@ crates/oms-mcp-server/tests/parser-reference.json	python-reference	3
 crates/oms-mcp-server/tests/value-reference.json	python-reference	1
 scripts/check.sh	python-reference	3
 scripts/lib/platform.sh	python-reference	2
+scripts/package-native-release.sh	python-reference	1
 templates/check.sh	python-reference	7
 templates/ml_resume_smoke.py	python-source	342
 templates/ml_smoke.py	python-source	32

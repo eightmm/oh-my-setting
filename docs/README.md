@@ -7,6 +7,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | Your task | Guide | What you will find |
 |---|---|---|
 | Install or update OMS | [Install](INSTALL.md) · [한국어](INSTALL.ko.md) | Host requirements, profiles and maintenance |
+| Prepare or distribute an update | [Native update distribution](UPDATE-DISTRIBUTION.md) | Exact prepared revisions, local bundles and recovery boundaries |
 | Find a command | [Components](COMPONENTS.md) | Command catalog, workflows and authority boundaries |
 | Choose the right feature scope | [Feature scope](FEATURE-SCOPE.md) | Current roles/authority, optional implementations, excluded expansion and adoption criteria |
 | Define a project | [Project context](PROJECT-CONTEXT.md) | Purpose, decisions and work evidence |
