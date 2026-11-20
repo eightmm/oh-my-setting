@@ -3721,21 +3721,36 @@ fn receipt_token_details(
                 "antigravity" | "agy" => "AGY",
                 other => other,
             };
-            let count = |field: &str| {
-                components[field]
-                    .as_u64()
-                    .map_or_else(|| "?".into(), |n| n.to_string())
+            let provider_calls = components["calls"].as_u64();
+            let count = |field: &str, partial: Option<&str>| {
+                if let Some(n) = components[field].as_u64() {
+                    return n.to_string();
+                }
+                match (
+                    components["reported"][field].as_u64(),
+                    provider_calls,
+                    partial,
+                ) {
+                    (Some(n), Some(m), Some(prefix)) if n > 0 && n < m => {
+                        format!("{prefix}{n}/{m}")
+                    }
+                    _ => "?".into(),
+                }
             };
-            line(
-                provider,
-                format!(
-                    "In {} · Out {} · Cache read {} · Write {}",
-                    count("input"),
-                    count("output"),
-                    count("cache_read"),
-                    count("cache_write")
-                ),
-            )
+            let row = |partial, compact| {
+                let [input, output, read, write] = ["input", "output", "cache_read", "cache_write"]
+                    .map(|field| count(field, partial));
+                if compact {
+                    format!("In {input} Out {output} Read {read} Write {write}")
+                } else {
+                    format!("In {input} · Out {output} · Cache read {read} · Write {write}")
+                }
+            };
+            line(provider, row(Some("partial "), false))
+                .or_else(|| line(provider, row(Some("p"), false)))
+                .or_else(|| line(provider, row(Some("p"), true)))
+                // Keep known components when the coverage fractions cannot fit.
+                .or_else(|| line(provider, row(None, true)))
         }))
         .collect()
 }
@@ -7404,8 +7419,10 @@ mod tests {
         report["board_receipt_tokens"]["cmp-1"] = json!({
             "total":300, "reported":2, "calls":2,
             "providers": {
-                "codex":{"input":150,"output":20,"cache_read":40,"cache_write":null},
-                "claude":{"input":50,"output":15,"cache_read":65,"cache_write":0}
+                "codex":{"input":150,"output":20,"cache_read":40,"cache_write":null,
+                    "calls":2,"reported":{"input":2,"output":2,"cache_read":2,"cache_write":0}},
+                "claude":{"input":50,"output":15,"cache_read":65,"cache_write":0,
+                    "calls":1,"reported":{"input":1,"output":1,"cache_read":1,"cache_write":1}}
             }
         });
         for height in [13, 9] {
@@ -7428,6 +7445,56 @@ mod tests {
             assert!(detail.contains(label), "{detail}");
         }
 
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        codex["cache_read"] = Value::Null;
+        codex["reported"]["cache_read"] = json!(1);
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(
+            detail.contains("In 150 · Out 20 · Cache read partial 1/2 · Write ?"),
+            "{detail}"
+        );
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        codex["input"] = json!(0);
+        codex["output"] = Value::Null;
+        codex["reported"]["output"] = json!(1);
+        codex["reported"]["cache_write"] = json!(2);
+        codex["reported"]["input"] = json!(0);
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(
+            detail.contains("In 0 · Out partial 1/2 · Cache read partial 1/2 · Write ?"),
+            "{detail}"
+        );
+        for columns in [43, 47] {
+            let detail = frame(&report, &nav, columns, 13, &read);
+            assert!(
+                detail
+                    .iter()
+                    .any(|row| row.contains("In 0 Out p1/2 Read p1/2 Write ?")),
+                "{columns}: {detail:?}"
+            );
+            assert!(detail.iter().all(|row| width(row) <= columns));
+        }
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        codex["input"] = Value::Null;
+        codex["reported"]["input"] = json!(1);
+        codex["reported"]["cache_write"] = json!(1);
+        codex["cache_write"] = Value::Null;
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(
+            detail.contains("In p1/2 · Out p1/2 · Cache read p1/2 · Write p1/2"),
+            "{detail}"
+        );
+        for columns in [43, 47] {
+            let detail = frame(&report, &nav, columns, 13, &read);
+            assert!(
+                detail
+                    .iter()
+                    .any(|row| row.contains("In p1/2 Out p1/2 Read p1/2 Write p1/2")),
+                "{columns}: {detail:?}"
+            );
+        }
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        *codex = json!({"input":150,"output":20,"cache_read":40,"cache_write":null});
         report["board_receipt_tokens"]["cmp-1"]["total"] = Value::Null;
         report["board_receipt_tokens"]["cmp-1"]["reported"] = json!(1);
         let detail = frame(&report, &nav, 80, 13, &read).join("\n");
