@@ -109,10 +109,10 @@ thread_local!(static LEGACY_CUSTODY_CALLS: std::cell::Cell<usize> = const { std:
 thread_local!(static LEGACY_PARENT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 #[cfg(test)]
 thread_local!(static LEGACY_CANDIDATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 thread_local!(static LEGACY_CHILD_BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn reset_agy_legacy_reads() {
     LEGACY_CUSTODY_CALLS.with(|n| n.set(0));
     LEGACY_PARENT_READS.with(|n| n.set(0));
@@ -120,12 +120,12 @@ pub(crate) fn reset_agy_legacy_reads() {
     LEGACY_CHILD_BODY_READS.with(|n| n.set(0));
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn agy_legacy_child_reads() -> usize {
     LEGACY_CHILD_BODY_READS.with(|n| n.get())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn legacy_agy_read_index() -> (usize, usize, usize, usize) {
     (
         LEGACY_CUSTODY_CALLS.with(|n| n.get()),

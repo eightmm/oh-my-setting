@@ -1891,6 +1891,7 @@ fn open_agy_chat_dock(
         return fallback();
     };
     match open(binding)? {
+        #[cfg(target_os = "linux")]
         crate::agy_child_chat::AgyChatOpen::OwnChat { history, locator } => Some(ChatDock {
             title: chat_title(call),
             history,

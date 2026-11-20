@@ -13,8 +13,6 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 #[cfg(not(target_os = "linux"))]
-use std::collections::BTreeSet;
-#[cfg(not(target_os = "linux"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -45,20 +43,13 @@ pub(crate) struct AgyChildChatLocator {
 /// Result of verifying and opening an explicit selected AGY child row. No `Debug` derive.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AgyChatOpen {
+    #[cfg(target_os = "linux")]
     OwnChat {
         history: String,
         locator: AgyChildChatLocator,
     },
     Unbound,
     Unavailable,
-}
-
-const fn unsupported_children() -> Option<(String, Vec<AgyChildChatLocator>)> {
-    None
-}
-
-const fn unsupported_chat() -> Option<String> {
-    None
 }
 
 fn unsupported_open_selected(post_fence: impl FnOnce() -> bool) -> AgyChatOpen {
@@ -75,38 +66,12 @@ fn unsupported_locator_current_fenced(post_fence: impl FnOnce() -> bool) -> bool
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn agy_current_children(
-    _pid: u32,
-    _birth: &str,
-    _repo: &Path,
-    _expected_turn: Option<&str>,
-    _painted: &BTreeSet<String>,
-) -> Option<(String, Vec<AgyChildChatLocator>)> {
-    unsupported_children()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn agy_child_chat_fenced(
-    _repo: &Path,
-    _turn: &str,
-    _expected: &AgyChildChatLocator,
-    _post_fence: impl FnOnce() -> bool,
-) -> Option<String> {
-    unsupported_chat()
-}
-
-#[cfg(not(target_os = "linux"))]
 pub(crate) fn agy_open_selected_child_fenced(
     _repo: &Path,
     _selected: &AgySelectedChild,
     post_fence: impl FnOnce() -> bool,
 ) -> AgyChatOpen {
     unsupported_open_selected(post_fence)
-}
-
-#[cfg(all(test, not(target_os = "linux")))]
-pub(crate) fn agy_locator_still_current(_repo: &Path, _expected: &AgyChildChatLocator) -> bool {
-    unsupported_locator_current_fenced(|| true)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -995,16 +960,14 @@ mod linux {
 #[cfg(test)]
 mod stub_tests {
     use super::{
-        AgyChatOpen, AgyChildChatLocator, AgySelectedChild, unsupported_chat, unsupported_children,
-        unsupported_locator_current_fenced, unsupported_open_selected,
+        AgyChatOpen, AgyChildChatLocator, AgySelectedChild, unsupported_locator_current_fenced,
+        unsupported_open_selected,
     };
     use crate::agy_child_records::AgyChildLocator;
     use std::path::PathBuf;
 
     #[test]
-    fn off_linux_stubs_return_none_and_locator_supports_clone_and_eq() {
-        assert!(unsupported_children().is_none());
-        assert!(unsupported_chat().is_none());
+    fn off_linux_chat_refuses_custody_and_locator_supports_clone_and_eq() {
         assert!(!unsupported_locator_current_fenced(|| true));
         assert!(!unsupported_locator_current_fenced(|| false));
         assert!(matches!(
@@ -1051,6 +1014,20 @@ mod stub_tests {
         let mut c = b;
         c.pid = 43;
         assert!(a != c);
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let repo = std::path::Path::new(".");
+            assert!(matches!(
+                super::agy_open_selected_child_fenced(repo, &sel, || true),
+                AgyChatOpen::Unbound
+            ));
+            assert!(matches!(
+                super::agy_open_selected_child_fenced(repo, &sel, || false),
+                AgyChatOpen::Unavailable
+            ));
+            assert!(!super::agy_locator_still_current_fenced(repo, &a, || true));
+        }
     }
 }
 

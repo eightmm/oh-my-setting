@@ -1769,6 +1769,7 @@ impl<'a> Panel<'a> {
     ) -> Option<String> {
         if matches!(binding.locator, NativeLocator::Antigravity(_)) {
             return match self.open_agy_chat(binding, owner, attempts) {
+                #[cfg(target_os = "linux")]
                 crate::agy_child_chat::AgyChatOpen::OwnChat { history, .. } => Some(history),
                 crate::agy_child_chat::AgyChatOpen::Unbound
                 | crate::agy_child_chat::AgyChatOpen::Unavailable => None,
