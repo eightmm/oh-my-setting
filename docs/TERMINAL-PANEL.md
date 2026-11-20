@@ -48,7 +48,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 ## Quick start
 
 1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. Choose an installed Main by number, or press Enter for the first choice. A new Main from this picker can open installed provider orchestrators in background windows. An existing Main is reused without another choice. Use `oms panel --watch` for the board by itself or `oms panel --launch pi` to select Pi explicitly.
-2. A wide or tall (portrait) tmux window puts the board across the top. Main and a docked provider sit below it, side by side when both fit. Other windows use a compact arrangement. See [Layout modes and resizing](#layout-modes-and-resizing).
+2. A landscape tmux window puts the board and its docked orchestrator on the left, with Overall Main on the right. A portrait window stacks the board, docked orchestrator and Overall Main in that order. See [Layout modes and resizing](#layout-modes-and-resizing).
 3. Weekly quota left sits directly below the Room title. Click the weekly line or press `w` for provider readings, sources and reset times. A dash means the Board has no verified reading. The header shows plan progress for work linked to the current Room.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
 5. On the Board, `Tab` switches between Overview and all tasks, `g` or `t` opens Relationships, and `D` inspects the selected call. In a reader, `Tab` switches reader views. Arrows move selection and Enter opens the selected item. Click a Codex native child row or select it and press Enter to read its verified recent replies. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
@@ -606,25 +606,28 @@ scope and unknown values. A socket error does not stop the native sibling.
 
 ### Layout modes and resizing
 
-In a managed tmux window, the board spans the top when the window is wide
-(100 columns or more and a width of at least twice the row count) or
-portrait (at least 40 columns and rows at least two thirds of the columns,
-about 4:3 tall with the usual 1:2 terminal cell) and has at least 30 rows.
-It uses about 28 percent
-of the height, reserving at least 17 rows for the board and 12 for the
-native chat; a 140x130 window gets a 36-row board. Main sits below. When the
-window has a single provider pane bound to the same Main and Room, Main and
-the provider share the lower row if the window is wider than 80 columns, so
-each keeps at least 40; otherwise the provider takes its own full-width row
-below Main, with at least 8 rows. After a resize, a board-above window keeps
-its existing split while every pane still meets these minimums; otherwise
-reflow restores them.
+In a managed landscape tmux window, Overall Main fills the right side. The
+board fills the left side, with the selected orchestrator below it when
+docked. A side-by-side dock needs at least 81 columns and 26 rows. The
+board and orchestrator share at least 40 columns with 17 and 8 rows
+respectively, and Main keeps at least 40 columns. Without a dock the
+board uses the entire left side and can be as narrow as 20 columns.
 
-Between those shapes, in a compact two-pane window, the board sits below Main
-when the window is narrow or tall and has at least 20 rows. In a shorter window it sits at the
-left. When a provider is docked in a compact window, the board and provider
-stack to the left of Main where the split fits. A very narrow window can
-stack all three panes vertically when it has enough rows.
+A portrait window has at least two rows for every three columns, about
+4:3 tall with the usual 1:2 terminal cell. It stacks the board, docked
+orchestrator and Overall Main in that order, each at full width.
+A 140x130 window starts with a 36-row board. The same stack is used if
+there is room vertically and the side-by-side split does not fit. The
+three-pane stack needs at least 40 columns and 39 rows, including 17
+for the board, 8 for the dock, 12 for Main and two dividers. The board
+starts with about 28 percent of the height when those floors fit.
+
+In a smaller window the board and Main can stack in two panes. The
+orchestrator remains available in its own window until there is space
+to dock it. If an already docked window shrinks below both layouts'
+minimums, the existing sessions and pane placement are kept until the
+window grows or the dock is closed. Reflow also preserves manual pane
+sizes that fit the current orientation and meet its minimums.
 
 Automatic reflow applies to unzoomed windows with a verified board and Main,
 optionally with one verified provider pane. It moves the existing panes and

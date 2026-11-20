@@ -342,17 +342,75 @@ impl<'a> Pane<'a> {
     }
 }
 
-/// Board rows above Main for a wide window (at least 100 columns and twice as
-/// many columns as rows) or a portrait one: rows at least two thirds of the
-/// columns, about 4:3 tall with the usual 1:2 cell shape. The board keeps about
-/// 28% of the height and at least 17 rows for its native chat dock; Main keeps
-/// 12, and a `stacked` provider below Main keeps 8 more.
-pub(crate) fn top_board_rows(width: usize, height: usize, stacked: bool) -> Option<usize> {
-    let wide = width >= 100 && width >= height.saturating_mul(2);
-    let portrait = width >= NATIVE_MIN && height.saturating_mul(3) >= width.saturating_mul(2);
-    let below = MAIN_MIN_ROWS + if stacked { MIN_DOCK_ROWS + 1 } else { 0 };
-    ((wide || portrait) && height > TOP_MIN_ROWS + below)
-        .then(|| ((height - 1) * BOARD_SHARE / 100).clamp(TOP_MIN_ROWS, height - below - 1))
+#[derive(Clone, Copy)]
+enum Arrangement {
+    Left {
+        columns: usize,
+        dock_rows: Option<usize>,
+    },
+    Top {
+        rows: usize,
+        dock_rows: Option<usize>,
+    },
+}
+
+fn arrangement(width: usize, height: usize, docked: bool) -> Option<Arrangement> {
+    let left_min = if docked { NATIVE_MIN } else { MIN_BOARD };
+    let left_fits =
+        width > left_min + NATIVE_MIN && (!docked || height > TOP_MIN_ROWS + MIN_DOCK_ROWS);
+    let below = MAIN_MIN_ROWS + if docked { MIN_DOCK_ROWS + 1 } else { 0 };
+    let top_fits = width >= NATIVE_MIN && height > TOP_MIN_ROWS + below;
+    // With typical 1:2 terminal cells this means the window is at least 4:3 tall.
+    let portrait = height.saturating_mul(3) >= width.saturating_mul(2);
+
+    if top_fits && (portrait || !left_fits) {
+        let rows = ((height - 1) * BOARD_SHARE / 100).clamp(TOP_MIN_ROWS, height - below - 1);
+        let dock_rows = docked
+            .then(|| ((height - 1) / 5).clamp(MIN_DOCK_ROWS, height - rows - MAIN_MIN_ROWS - 2));
+        Some(Arrangement::Top { rows, dock_rows })
+    } else if left_fits {
+        let columns = if docked {
+            ((width - 1) * 40 / 100).clamp(NATIVE_MIN, width - NATIVE_MIN - 1)
+        } else {
+            split_cells(None, width - 1)
+        };
+        let dock_rows = docked.then(|| {
+            ((height - 1) * BOARD_HEIGHT_SHARE / 100)
+                .clamp(MIN_DOCK_ROWS, height - TOP_MIN_ROWS - 1)
+        });
+        Some(Arrangement::Left { columns, dock_rows })
+    } else if !docked && height >= 3 {
+        let rows = ((height - 1) * BOARD_HEIGHT_SHARE / 100).clamp(1, height - 2);
+        Some(Arrangement::Top {
+            rows,
+            dock_rows: None,
+        })
+    } else {
+        None
+    }
+}
+
+pub(crate) fn initial_board_split(width: usize, height: usize) -> Option<(&'static str, usize)> {
+    match arrangement(width, height, false)? {
+        Arrangement::Left { columns, .. } => Some(("-h", columns)),
+        Arrangement::Top { rows, .. } => Some(("-v", rows)),
+    }
+}
+
+/// Select a safe temporary join size before the board reflows all three panes.
+pub(crate) fn dock_join_rows(
+    width: usize,
+    height: usize,
+    board_height: usize,
+    preferred: usize,
+) -> Option<usize> {
+    arrangement(width, height, true)?;
+    (board_height > MIN_DOCK_ROWS * 2)
+        .then(|| preferred.clamp(MIN_DOCK_ROWS, board_height - MIN_DOCK_ROWS - 1))
+}
+
+fn immediately_above(upper: Bounds, lower: Bounds) -> bool {
+    upper.x == lower.x && upper.width == lower.width && upper.y + upper.height + 1 == lower.y
 }
 
 fn plan_layout<'a>(
@@ -363,116 +421,76 @@ fn plan_layout<'a>(
     let canvas = board.canvas;
     let (w, h) = (canvas.width, canvas.height);
     let (board_actual, main_actual) = (board.bounds, main.bounds);
-    let board_left = if dock.is_some() {
-        w > MIN_BOARD + NATIVE_MIN && h > MIN_DOCK_ROWS * 2
-    } else {
-        !board_below(w, h)
-    };
     let mut slots = Vec::with_capacity(3);
     let mut leaf = |bounds: Bounds, pane: &Pane<'a>| {
         slots.push(pane.id);
         format!("{},{}", bounds.cell(), &pane.id[1..])
     };
-    // Main and a dock share the lower row only when each gets a usable width.
-    let stacked = dock.is_some() && w <= NATIVE_MIN * 2;
-    let body = if let Some(rows) = top_board_rows(w, h, stacked) {
-        // Keep a user's split only while every pane still meets its floor.
-        if board_actual.y == 0
-            && board_actual.width == w
-            && board_actual.height >= TOP_MIN_ROWS
-            && main_actual.x == 0
-            && board_actual.y < main_actual.y
-            && main_actual.height >= MAIN_MIN_ROWS
-            && dock.is_none_or(|pane| {
-                if stacked {
-                    pane.bounds.x == 0
-                        && pane.bounds.width == w
-                        && pane.bounds.y > main_actual.y
-                        && pane.bounds.height >= MIN_DOCK_ROWS
-                } else {
-                    pane.bounds.y == main_actual.y
-                        && pane.bounds.x > main_actual.x
-                        && main_actual.width >= NATIVE_MIN
-                        && pane.bounds.width >= NATIVE_MIN
-                }
-            })
-        {
-            return None;
-        }
-        let (top, work) = canvas.rows(rows)?;
-        let top = leaf(top, board);
-        let work = if let Some(dock) = dock {
-            let (first, second) = if stacked {
-                work.rows(((work.height - 1) / 2).max(MAIN_MIN_ROWS))?
+    let body = match arrangement(w, h, dock.is_some())? {
+        Arrangement::Left { columns, dock_rows } => {
+            let board_min = if dock.is_some() {
+                NATIVE_MIN
             } else {
-                work.columns((w - 1) / 2)?
+                MIN_BOARD
             };
-            let (open, close) = if stacked { ('[', ']') } else { ('{', '}') };
-            format!(
-                "{}{open}{},{}{close}",
-                work.cell(),
-                leaf(first, main),
-                leaf(second, dock)
-            )
-        } else {
-            leaf(work, main)
-        };
-        format!("{}[{top},{work}]", canvas.cell())
-    } else if board_left {
-        if board_actual.x == 0
-            && board_actual.y == 0
-            && main_actual.y == 0
-            && main_actual.x > 0
-            && dock.is_none_or(|pane| {
-                pane.bounds.x == board_actual.x
-                    && pane.bounds.width == board_actual.width
-                    && pane.bounds.y > board_actual.y
-            })
-        {
-            return None;
-        }
-        let (left, right) = canvas.columns(split_cells(None, w.checked_sub(1)?))?;
-        let left = if let Some(dock) = dock {
-            let (top, bottom) = left.rows((h - 1) / 2)?;
-            format!(
-                "{}[{},{}]",
-                left.cell(),
-                leaf(top, board),
-                leaf(bottom, dock)
-            )
-        } else {
-            leaf(left, board)
-        };
-        format!("{}{{{left},{}}}", canvas.cell(), leaf(right, main))
-    } else {
-        if board_actual.width == w
-            && main_actual.y == 0
-            && board_actual.y > 0
-            && dock.is_none_or(|pane| pane.bounds.width == w && pane.bounds.y > board_actual.y)
-        {
-            return None;
-        }
-        if let Some(dock) = dock {
-            if h < MIN_DOCK_ROWS * 3 + 2 {
+            if board_actual.x == 0
+                && board_actual.y == 0
+                && board_actual.width >= board_min
+                && main_actual.x == board_actual.width + 1
+                && main_actual.y == 0
+                && main_actual.width >= NATIVE_MIN
+                && main_actual.height == h
+                && dock.map_or(board_actual.height == h, |pane| {
+                    board_actual.height >= TOP_MIN_ROWS
+                        && immediately_above(board_actual, pane.bounds)
+                        && pane.bounds.height >= MIN_DOCK_ROWS
+                })
+            {
                 return None;
             }
-            let (top, bottom) = canvas.rows((h - 2) / 3)?;
-            let (middle, last) = bottom.rows((bottom.height - 1) / 2)?;
-            format!(
-                "{}[{},{},{}]",
-                canvas.cell(),
-                leaf(top, main),
-                leaf(middle, board),
-                leaf(last, dock)
-            )
-        } else {
-            let (top, bottom) = canvas.rows(h - h * BOARD_HEIGHT_SHARE / 100 - 1)?;
-            format!(
-                "{}[{},{}]",
-                canvas.cell(),
-                leaf(top, main),
-                leaf(bottom, board)
-            )
+            let (left, right) = canvas.columns(columns)?;
+            let left = if let Some((dock, dock_rows)) = dock.zip(dock_rows) {
+                let (top, bottom) = left.rows(h - dock_rows - 1)?;
+                format!(
+                    "{}[{},{}]",
+                    left.cell(),
+                    leaf(top, board),
+                    leaf(bottom, dock)
+                )
+            } else {
+                leaf(left, board)
+            };
+            format!("{}{{{left},{}}}", canvas.cell(), leaf(right, main))
+        }
+        Arrangement::Top { rows, dock_rows } => {
+            let above_main = dock.map_or(board_actual, |pane| pane.bounds);
+            let main_rows = h - rows - 1 - dock_rows.map_or(0, |rows| rows + 1);
+            if board_actual.x == 0
+                && board_actual.y == 0
+                && board_actual.width == w
+                && board_actual.height >= TOP_MIN_ROWS.min(rows)
+                && main_actual.height >= MAIN_MIN_ROWS.min(main_rows)
+                && immediately_above(above_main, main_actual)
+                && dock.is_none_or(|pane| {
+                    immediately_above(board_actual, pane.bounds)
+                        && pane.bounds.height >= MIN_DOCK_ROWS
+                })
+            {
+                return None;
+            }
+            let (top, bottom) = canvas.rows(rows)?;
+            let top = leaf(top, board);
+            if let Some((dock, dock_rows)) = dock.zip(dock_rows) {
+                let (middle, last) = bottom.rows(dock_rows)?;
+                format!(
+                    "{}[{top},{},{}]",
+                    canvas.cell(),
+                    leaf(middle, dock),
+                    leaf(last, main)
+                )
+            } else {
+                format!("{}[{top},{}]", canvas.cell(), leaf(bottom, main))
+            }
         }
     };
     let checksum = body.bytes().fold(0u16, |sum, byte| {
@@ -481,13 +499,9 @@ fn plan_layout<'a>(
     Some((format!("{checksum:04x},{body}"), slots))
 }
 
-fn board_below(width: usize, height: usize) -> bool {
-    height >= 20 && (width < 100 || width < height.saturating_mul(2))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{PANE_LAYOUT, Pane, reflow_with, top_board_rows};
+    use super::{PANE_LAYOUT, Pane, dock_join_rows, initial_board_split, reflow_with};
     use std::path::Path;
     use std::process::Command;
 
@@ -504,27 +518,19 @@ mod tests {
     }
     #[test]
     fn orientation_leaves_room_for_main_and_board() {
-        // Wide: unchanged ratio and floors.
-        assert_eq!(top_board_rows(316, 90, false), Some(24));
-        assert_eq!(top_board_rows(100, 30, false), Some(17));
-        assert_eq!(top_board_rows(100, 29, false), None);
-        // Portrait (rows >= 2/3 of columns): the same 28% board above Main.
-        assert_eq!(top_board_rows(140, 130, false), Some(36));
-        assert_eq!(top_board_rows(140, 130, true), Some(36));
-        assert_eq!(top_board_rows(70, 110, true), Some(30));
-        // A stacked dock also needs its own rows below Main.
-        assert_eq!(top_board_rows(50, 36, false), Some(17));
-        assert_eq!(top_board_rows(50, 36, true), None);
-        assert_eq!(top_board_rows(39, 120, false), None);
-        // Midrange keeps the compact arrangement.
-        for (w, h) in [(100, 60), (140, 80), (59, 32), (80, 30)] {
-            assert_eq!(top_board_rows(w, h, false), None, "{w}x{h}");
-        }
-        assert_eq!(top_board_rows(220, 70, false), Some(19));
-        assert!(!super::board_below(220, 70));
-        assert!(super::board_below(100, 60));
-        assert!(super::board_below(80, 30));
-        assert!(!super::board_below(80, 18));
+        assert_eq!(initial_board_split(316, 90), Some(("-h", 88)));
+        assert_eq!(initial_board_split(140, 130), Some(("-v", 36)));
+        assert_eq!(initial_board_split(70, 110), Some(("-v", 30)));
+        assert_eq!(initial_board_split(59, 32), Some(("-v", 17)));
+        assert_eq!(initial_board_split(80, 24), Some(("-h", 22)));
+        assert_eq!(initial_board_split(39, 15), Some(("-v", 6)));
+        // First dock and replacement obey the same canvas and temporary split floors.
+        assert_eq!(dock_join_rows(81, 26, 26, 100), Some(17));
+        assert_eq!(dock_join_rows(81, 25, 25, 8), None);
+        assert_eq!(dock_join_rows(80, 38, 17, 8), None);
+        assert_eq!(dock_join_rows(80, 39, 17, 100), Some(8));
+        assert_eq!(dock_join_rows(140, 130, 16, 8), None);
+        assert_eq!(dock_join_rows(39, 130, 36, 8), None);
     }
 
     #[test]
@@ -657,11 +663,11 @@ mod tests {
         assert!(geometry(&main).2);
         assert_eq!(reflow(), 0);
         resize("316", "90");
-        // tmux shrinks the board to 16 rows here, below its floor: repair it once.
+        // Landscape: the Board sits to the left of Main, without an empty dock.
         assert_eq!(reflow(), 1);
-        assert_eq!(geometry(&board).0.y, 0);
-        assert_eq!(geometry(&board).0.width, 316);
-        assert_eq!(geometry(&main).0.y, 25);
+        assert_eq!(geometry(&board).0.height, 90);
+        assert_eq!(geometry(&main).0.x, geometry(&board).0.width + 1);
+        assert_eq!(geometry(&main).0.y, 0);
         assert!(geometry(&main).2);
         assert_eq!(reflow(), 0);
 
@@ -669,6 +675,8 @@ mod tests {
             "split-window",
             "-d",
             "-v",
+            "-l",
+            "20",
             "-t",
             &board,
             "-P",
@@ -694,38 +702,37 @@ mod tests {
         ]);
         tmux(&["select-pane", "-t", &provider]);
         let provider_pid = geometry(&provider).1;
-        assert_eq!(reflow(), 1);
-        assert_eq!(geometry(&board).0.width, 316);
-        assert_eq!(geometry(&main).0.y, geometry(&provider).0.y);
-        assert_eq!(geometry(&main).0.x, 0);
-        assert!(geometry(&provider).0.x > 0);
+        // A correctly grouped manual split already meets the floors.
+        assert_eq!(reflow(), 0);
+        assert_eq!(geometry(&board).0.width, geometry(&provider).0.width);
+        assert_eq!(geometry(&provider).0.y, geometry(&board).0.height + 1);
+        assert_eq!(geometry(&main).0.x, geometry(&board).0.width + 1);
+        assert_eq!(geometry(&main).0.height, 90);
         assert!(geometry(&provider).2);
 
-        // Wide to portrait keeps the board above Main and the dock beside it.
+        // Portrait keeps the Board and its dock together above Main.
         resize("140", "130");
-        assert_eq!(reflow(), 0);
-        assert_eq!((geometry(&board).0.y, geometry(&board).0.width), (0, 140));
-        assert_eq!(geometry(&main).0.x, 0);
-        assert!(geometry(&main).0.y > geometry(&board).0.height);
-        assert_eq!(geometry(&provider).0.y, geometry(&main).0.y);
-        assert!(geometry(&provider).0.x > 0);
-        assert!(geometry(&provider).2);
-        // Too narrow for two provider panes: Main and the dock take full-width rows.
-        resize("70", "110");
         assert_eq!(reflow(), 1);
+        assert_eq!((geometry(&board).0.y, geometry(&board).0.width), (0, 140));
+        assert_eq!(geometry(&provider).0.x, 0);
+        assert_eq!(geometry(&provider).0.width, 140);
+        assert_eq!(geometry(&provider).0.y, geometry(&board).0.height + 1);
+        assert_eq!(geometry(&main).0.x, 0);
         assert_eq!(
-            geometry(&board).0,
-            super::Bounds {
-                width: 70,
-                height: 30,
-                ..top
-            }
+            geometry(&main).0.y,
+            geometry(&provider).0.y + geometry(&provider).0.height + 1
         );
-        assert_eq!((geometry(&main).0.x, geometry(&main).0.y), (0, 31));
+        assert!(geometry(&main).0.height > geometry(&board).0.height);
+        assert!(geometry(&main).0.height > geometry(&provider).0.height);
+        assert!(geometry(&provider).2);
+        // The same order stays viable even when a split across columns wouldn't fit.
+        resize("70", "110");
+        assert_eq!(reflow(), 0);
+        assert_eq!(geometry(&board).0.width, 70);
         assert_eq!(geometry(&main).0.width, 70);
         assert_eq!(geometry(&provider).0.x, 0);
         assert_eq!(geometry(&provider).0.width, 70);
-        assert!(geometry(&provider).0.y > geometry(&main).0.y);
+        assert!(geometry(&provider).0.y < geometry(&main).0.y);
         assert!(geometry(&main).0.height >= 12);
         assert!(geometry(&provider).0.height >= 8);
         assert!(geometry(&provider).2);
@@ -736,14 +743,13 @@ mod tests {
         assert_eq!(geometry(&board).0.height, 17);
         assert!(geometry(&main).0.height >= 12);
         assert!(geometry(&provider).0.height >= 8);
-        assert!(geometry(&provider).0.y > geometry(&main).0.y);
+        assert!(geometry(&provider).0.y < geometry(&main).0.y);
         assert!(geometry(&provider).2);
         assert_eq!(reflow(), 0);
         resize("59", "32");
-        assert_eq!(reflow(), 1);
-        assert_eq!(geometry(&main).0.y, 0);
-        assert!(geometry(&board).0.y > 0);
-        assert!(geometry(&provider).0.y > geometry(&board).0.y);
+        let compact = inventory();
+        assert_eq!(reflow(), 0);
+        assert_eq!(inventory(), compact);
         assert_eq!(geometry(&provider).0.width, 59);
         assert_eq!(geometry(&main).1, main_pid);
         assert_eq!(geometry(&board).1, board_pid);
@@ -751,6 +757,10 @@ mod tests {
         assert!(geometry(&provider).2);
 
         resize("316", "90");
+        assert_eq!(reflow(), 1);
+        assert_eq!(geometry(&board).0.width, geometry(&provider).0.width);
+        assert!(geometry(&provider).2);
+        resize("140", "130");
         tmux(&[
             "set-option",
             "-p",

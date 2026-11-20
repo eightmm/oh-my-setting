@@ -2387,7 +2387,7 @@ fn board_split(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<()> {
-    let top_rows = main_watch
+    let split = main_watch
         .then(|| {
             let geometry = tmux_quiet(
                 services,
@@ -2408,21 +2408,23 @@ fn board_split(
                 return None;
             };
             let (width, height) = size.split_once('\t')?;
-            crate::layout::top_board_rows(
+            crate::layout::initial_board_split(
                 usize::from(width.parse::<u16>().ok()?),
                 usize::from(height.parse::<u16>().ok()?),
-                false,
             )
         })
         .flatten()
-        .map(|rows| rows.to_string());
+        .map(|(direction, cells)| (direction, cells.to_string()));
+    let (direction, cells) = split.as_ref().map_or(("-h", "28%"), |(direction, cells)| {
+        (*direction, cells.as_str())
+    });
     let mut argv = crate::commands::strings(&[
         "split-window",
         "-f",
-        if top_rows.is_some() { "-v" } else { "-h" },
+        direction,
         "-b",
         "-l",
-        top_rows.as_deref().unwrap_or("28%"),
+        cells,
         "-t",
         pane,
         "-c",

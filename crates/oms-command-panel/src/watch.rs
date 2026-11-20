@@ -767,11 +767,10 @@ pub fn run_with_writer(
                     }
                 }
                 if dock_moved {
-                    let mut size = pane_size(repo, services, interrupted);
-                    if follow && size != last_size {
+                    if follow {
                         crate::layout::reflow(repo, &room, services, interrupted);
-                        size = pane_size(repo, services, interrupted);
                     }
+                    let size = pane_size(repo, services, interrupted);
                     let frame = frame(
                         &report,
                         &nav,

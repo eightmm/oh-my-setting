@@ -2046,19 +2046,44 @@ impl<'a> Panel<'a> {
             board_panes == if current.is_some() { "3" } else { "2" },
             "native chat needs the managed board and Main layout",
         )?;
-        if let Some(lead) = lead {
+        let size = if let Some(lead) = lead {
             require(
                 self.tmux(&["display-message", "-p", "-t", &lead.id, "#{window_panes}"])? == "1",
                 "provider window has additional panes",
             )?;
-        }
-        let mut rows = preferred_rows;
+            let geometry = self.tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &self.caller,
+                "#{window_width}\t#{window_height}\t#{pane_height}\t#{window_zoomed_flag}",
+            ])?;
+            let cells = |value: &str| value.parse::<u16>().map(usize::from).map_err(Error::new);
+            let parts: Vec<_> = geometry.split('\t').collect();
+            let [width, height, board_height, "0"] = parts.as_slice() else {
+                return Err(Error::new("native chat needs an unzoomed Main window"));
+            };
+            let rows = if let Some(current) = current {
+                let pane = &self.leads[current];
+                cells(&self.tmux(&["display-message", "-p", "-t", &pane.id, "#{pane_height}"])?)?
+            } else {
+                preferred_rows
+            };
+            Some(
+                crate::layout::dock_join_rows(
+                    cells(width)?,
+                    cells(height)?,
+                    cells(board_height)?,
+                    rows,
+                )
+                .ok_or_else(|| Error::new("make the panel larger to dock native chat"))?
+                .to_string(),
+            )
+        } else {
+            None
+        };
         if let Some(current) = current {
             let pane = &self.leads[current];
-            rows = self
-                .tmux(&["display-message", "-p", "-t", &pane.id, "#{pane_height}"])?
-                .parse()
-                .map_err(Error::new)?;
             tx.check()?;
             self.tmux(&[
                 "break-pane",
@@ -2070,19 +2095,7 @@ impl<'a> Panel<'a> {
             ])?;
             self.tag_provider(&pane.id, current, "-w")?;
         }
-        if let (Some(provider), Some(lead)) = (next, lead) {
-            let height: usize = self
-                .tmux(&[
-                    "display-message",
-                    "-p",
-                    "-t",
-                    &self.caller,
-                    "#{pane_height}",
-                ])?
-                .parse()
-                .map_err(Error::new)?;
-            require(height >= 17, "make the panel taller to open native chat")?;
-            let size = rows.clamp(8, height - 9).to_string();
+        if let (Some(provider), Some(lead), Some(size)) = (next, lead, size) {
             tx.check()?;
             self.tag_provider(&lead.id, provider, "-p")?;
             self.tmux(&[
@@ -6174,6 +6187,48 @@ mod tests {
                             self.repo.display()
                         )
                     }
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        "%2",
+                        "#{window_panes}",
+                    ] if self.allow_board_queries.get() => {
+                        format!(
+                            "{}",
+                            2 + self
+                                .leads
+                                .borrow()
+                                .iter()
+                                .filter(|lead| lead.window == "@1")
+                                .count()
+                        )
+                    }
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        "%4",
+                        "#{window_panes}",
+                    ] => "1".into(),
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        "%3",
+                        "#{pane_height}",
+                    ] => "8".into(),
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        "%2",
+                        "#{window_width}\t#{window_height}\t#{pane_height}\t#{window_zoomed_flag}",
+                    ] if self.allow_board_queries.get() => "59\t32\t17\t0".into(),
                     ["tmux", "display-message", "-p", "-t", "%2", _]
                         if self.allow_board_queries.get() =>
                     {
@@ -6862,6 +6917,25 @@ mod tests {
             assert_eq!(*spy.room_queries.borrow(), [true; 10]);
             assert!(spy.mutating_calls().is_empty());
             assert!(spy.calls_named("capture-pane").is_empty());
+
+            if caller == "%2" {
+                spy.room_query_fails.set(false);
+                spy.leads.borrow_mut().push(FakeLead {
+                    window: "@1".into(),
+                    pane_id: "%3".into(),
+                    pid: 2002,
+                    active: false,
+                    provider: "antigravity".into(),
+                });
+                let panel =
+                    Panel::load_for_caller(&spy.repo, ROOM, &caller, &spy, &spy.stop).unwrap();
+                assert_eq!(panel.docked(), Some("antigravity"));
+                let err = panel
+                    .toggle_dock(Some("claude"), 8, Some("codex"))
+                    .unwrap_err();
+                assert_eq!(err.message, "make the panel larger to dock native chat");
+                assert!(spy.mutating_calls().is_empty());
+            }
         }
 
         #[test]
