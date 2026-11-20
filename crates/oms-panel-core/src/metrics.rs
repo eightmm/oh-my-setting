@@ -1346,7 +1346,10 @@ mod receipt_token_tests {
             sparse["reported"],
             json!({"input":1,"output":2,"cache_read":1,"cache_write":0})
         );
-        assert_eq!(observed["basis"]["providers"]["codex"]["reported"]["input"], 0);
+        assert_eq!(
+            observed["basis"]["providers"]["codex"]["reported"]["input"],
+            0
+        );
     }
 
     #[test]
