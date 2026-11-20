@@ -1638,6 +1638,7 @@ fn review_depth_preserves_risk_globs() {
             .unwrap()
         };
         assert_eq!(advice().get("depth").text(), Some("none"));
+        assert!(matches!(advice().get("spec_stage"), V::Bool(false)));
         for (path, risk) in [
             ("hooks/pre-commit", true),
             ("plugins/fixture/hooks.json", true),
@@ -1653,7 +1654,20 @@ fn review_depth_preserves_risk_globs() {
                 "{path}"
             );
             assert_eq!(!value.get("risk_paths").array().is_empty(), risk, "{path}");
+            assert_eq!(value.get("spec_stage").truth(), risk, "{path}");
             repo.write(path, "baseline\n");
+        }
+        // The spec stage precedes only the expensive depths; sizes are counted
+        // as added plus removed lines against the thresholds above.
+        for (count, depth, spec) in [
+            (11, "single", false),
+            (200, "gate+security", true),
+            (800, "council", true),
+        ] {
+            repo.write("hooks.json", "changed\n".repeat(count));
+            let value = advice();
+            assert_eq!(value.get("depth").text(), Some(depth), "{count}");
+            assert_eq!(value.get("spec_stage").truth(), spec, "{count}");
         }
     });
 }

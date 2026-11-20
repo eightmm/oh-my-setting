@@ -2136,7 +2136,9 @@ tracked diff: `none`, `single` (one reviewer of another model family),
 `gate+security` or `council`, with the reasons. It reads the same risk paths as
 the security seat, the contract files and size limits in
 `config/review-depth.json`, and calls no model. It is advice only: it starts no
-review and never changes a gate verdict.
+review and never changes a gate verdict. `--json` adds `spec_stage`, true for
+`gate+security` and `council`: run one routine-tier spec/acceptance check
+before that deep review (the text output prints a line for it).
 
 `oms peer-review advise --red-check CMD` and `oms patch-admit --red-check CMD`
 add an opt-in, never automatic red check: do the tests the change adds fail on

@@ -27,7 +27,9 @@ always read as incomplete.
 advise: print how deep to review the tracked diff against --base (default
 HEAD): none, single, gate+security or council, with the reasons (risk paths,
 contract files, size; thresholds in config/review-depth.json). Advice only: it
-starts no review and never changes a gate verdict. --json for machines.
+starts no review and never changes a gate verdict. --json for machines
+(spec_stage: true for gate+security and council, where one routine spec check
+precedes the deep review).
 --red-check CMD (opt-in, never automatic) also runs CMD in a scratch worktree at
 --base with only the diff's test-file changes applied, per test file, and notes
 whether each fails on base (good) or passes on base (does not test the change);
