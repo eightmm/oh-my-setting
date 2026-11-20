@@ -530,9 +530,13 @@ pub fn run_with_writer(
                     }
                     let identity = calls.get(nav.selected).map(call_identity);
                     let old_view = nav.view;
-                    let board_height = last_size.1 - split.rows(last_size.1);
-                    let page =
-                        render::page_capacity(&report, &nav, last_size.0, board_height, &read);
+                    let page = key_page(
+                        &report,
+                        &nav,
+                        last_size,
+                        interactive.then(|| split.rows(last_size.1)),
+                        &read,
+                    );
                     let action = if let input::Key::Click(x, y) = key {
                         if crate::layout::dimensions() == last_size
                             && x > 0
@@ -2244,26 +2248,11 @@ fn frame(
             weekly_usage: None,
         };
     }
-    let message = if report["collection"]["pending"] == true {
-        None
-    } else {
-        report["collection"]["error"]
-            .as_str()
-            .map(|reason| format!("Refresh failed: {reason}"))
-    };
-    let refresh_nav = message.map(|message: String| {
-        let mut display = nav.clone();
-        display.notice = Some(match &nav.notice {
-            Some(notice) if notice != &message => format!("{message} · {notice}"),
-            _ => message,
-        });
-        display
-    });
-    let nav = refresh_nav.as_ref().unwrap_or(nav);
+    let (nav, board_height) = board_viewport(report, nav, height, dock_rows);
+    let nav = nav.as_ref();
     let chat = chat.filter(|dock| !private_chat_hidden(report, dock));
     let interactive = dock_rows.is_some();
     if interactive && let Some(provider) = report["native_dock"].as_str() {
-        let board_height = height.saturating_sub(1);
         let mut board = render::board_frame(
             report,
             nav,
@@ -2282,20 +2271,19 @@ fn frame(
         ));
         return board;
     }
-    let dock = dock_rows.unwrap_or(0);
-    if dock < 3 {
+    if board_height == height {
         return render::board_frame(report, nav, columns, height, read, colored, interactive);
     }
     let mut board = render::board_frame(
         report,
         nav,
         columns,
-        height - dock,
+        board_height,
         read,
         colored,
         interactive,
     );
-    let top = height - dock;
+    let top = board_height;
     board.lines.resize(top, String::new());
     for hit in &mut board.provider_rows {
         if hit.is_some_and(|row| row >= top) {
@@ -2304,8 +2292,55 @@ fn frame(
     }
     board.worker_rows.retain(|row, _| *row < top);
     board.weekly_usage = board.weekly_usage.filter(|hit| hit.row < top);
-    board.lines.extend(dock_lines(columns, dock, colored, chat));
     board
+        .lines
+        .extend(dock_lines(columns, height - top, colored, chat));
+    board
+}
+
+/// Board rows and navigation (with any refresh-failure notice) that `frame`
+/// paints, so key paging pages exactly the visible task rows.
+fn board_viewport<'a>(
+    report: &Value,
+    nav: &'a navigation::Navigation,
+    height: usize,
+    dock_rows: Option<usize>,
+) -> (std::borrow::Cow<'a, navigation::Navigation>, usize) {
+    let message = if report["collection"]["pending"] == true {
+        None
+    } else {
+        report["collection"]["error"]
+            .as_str()
+            .map(|reason| format!("Refresh failed: {reason}"))
+    };
+    let nav = match message {
+        Some(message) => {
+            let mut display = nav.clone();
+            display.notice = Some(match &nav.notice {
+                Some(notice) if notice != &message => format!("{message} · {notice}"),
+                _ => message,
+            });
+            std::borrow::Cow::Owned(display)
+        }
+        None => std::borrow::Cow::Borrowed(nav),
+    };
+    let rows = match dock_rows {
+        Some(_) if report["native_dock"].is_string() => height.saturating_sub(1),
+        Some(dock) if dock >= 3 => height.saturating_sub(dock),
+        _ => height,
+    };
+    (nav, rows)
+}
+
+fn key_page(
+    report: &Value,
+    nav: &navigation::Navigation,
+    size: (usize, usize),
+    dock_rows: Option<usize>,
+    read: &std::collections::BTreeMap<String, String>,
+) -> usize {
+    let (nav, rows) = board_viewport(report, nav, size.1, dock_rows);
+    render::page_capacity(report, &nav, size.0, rows, read)
 }
 
 fn dock_lines(
@@ -2676,6 +2711,71 @@ mod tests {
             (100, 36)
         ));
     }
+    #[test]
+    fn key_paging_uses_the_painted_board_viewport() {
+        use crate::navigation::Navigation;
+        let participants: Vec<_> = (0..60)
+            .map(|n| {
+                serde_json::json!({"participant":format!("P{n:02}"), "provider":"codex",
+                    "role":"worker", "state":"working", "title":format!("Work {n}")})
+            })
+            .collect();
+        let report = |dock: Option<&str>, error: Option<&str>| {
+            serde_json::json!({"collection":{"ok":error.is_none(), "error":error},
+                "native_dock":dock, "plan":{"goal":"Ship"},
+                "room":{"id":"room", "participants":participants}})
+        };
+        let detail = Navigation {
+            view: crate::layout::View::Detail,
+            ..Default::default()
+        };
+        let noticed = Navigation {
+            notice: Some("Saved".into()),
+            ..Default::default()
+        };
+        let read = Default::default();
+        for (report, nav, size, dock) in [
+            (
+                report(Some("claude"), None),
+                Navigation::default(),
+                (100, 36),
+                Some(12),
+            ),
+            (
+                report(Some("claude"), None),
+                detail.clone(),
+                (100, 40),
+                Some(12),
+            ),
+            (
+                report(Some("claude"), None),
+                Navigation::default(),
+                (100, 12),
+                Some(0),
+            ),
+            (report(None, None), detail, (100, 36), Some(12)),
+            (
+                report(None, None),
+                Navigation::default(),
+                (100, 12),
+                Some(0),
+            ),
+            (
+                report(None, Some("boom")),
+                Navigation::default(),
+                (100, 36),
+                Some(12),
+            ),
+            (report(None, Some("boom")), noticed, (100, 30), Some(0)),
+        ] {
+            let painted = super::frame(&report, &nav, size, &read, false, dock, None, None);
+            let page = super::key_page(&report, &nav, size, dock, &read);
+            assert_eq!(painted.lines.len(), size.1, "{size:?} {dock:?}");
+            assert!(page < 60, "{size:?} {dock:?}");
+            assert_eq!(page, painted.worker_rows.len(), "{size:?} {dock:?} {nav:?}");
+        }
+    }
+
     #[test]
     fn weekly_usage_click_and_key_require_the_current_board_paint() {
         use super::{
