@@ -770,13 +770,13 @@ fn execute_command(
             }
             if !report.skipped_refused.is_empty() {
                 out.push_str(&format!(
-                    "journal distill: {} lesson(s) refused by the memory writer and skipped\n",
+                    "journal distill: {} lesson(s) refused by the memory writer and retained for retry\n",
                     report.skipped_refused.len()
                 ));
             }
             if report.dropped > 0 {
                 out.push_str(&format!(
-                    "journal distill: {} candidate(s) beyond the per-run cap were not proposed\n",
+                    "journal distill: {} candidate(s) beyond the per-run cap were deferred for retry\n",
                     report.dropped
                 ));
             }

@@ -1382,40 +1382,58 @@ impl JournalStore {
         now: DateTime<Utc>,
     ) -> Result<DistillReport, String> {
         let state_path = self.root.join("distill.json");
-        let marker: Option<(String, String)> = read_regular_no_symlink_bytes(&state_path)?
-            .and_then(|b| crate::json::from_slice(&b).ok())
-            .and_then(|row| {
-                if row.get("schema_version").and_then(Value::as_i64) != Some(1) {
-                    return None;
+        let state = read_regular_no_symlink_bytes(&state_path)?
+            .map(|bytes| {
+                if bytes.len() > 512 * 1024 {
+                    return Err("distill receipt exceeds its bounded state limit".to_string());
                 }
-                let through = row.get("through")?.as_object()?;
-                let occ = through.get("occurred_at")?.as_str()?.to_string();
-                let eid = through.get("event_id")?.as_str()?.to_string();
-                Some((occ, eid))
-            });
+                crate::json::from_slice(&bytes).map_err(|e| format!("invalid distill receipt: {e}"))
+            })
+            .transpose()?;
+        let mut completed = BTreeSet::new();
+        if let Some(state) = &state {
+            if state.at("schema_version").as_u64() != Some(1) {
+                return Err("unsupported distill receipt schema".into());
+            }
+            if let Some(keys) = state.get("completed_candidates") {
+                let keys = keys
+                    .as_array()
+                    .ok_or("invalid distill candidate receipts")?;
+                if keys.len() > MAX_DISTILL_RECEIPTS {
+                    return Err(
+                        "distill candidate receipt limit exceeded; no input consumed".into(),
+                    );
+                }
+                for key in keys {
+                    let key = key.as_str().ok_or("invalid distill candidate identity")?;
+                    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err("invalid distill candidate identity".into());
+                    }
+                    completed.insert(key);
+                }
+            }
+        }
 
+        // Occurrence time is not ingestion order: late events and daily blocker
+        // observations remain eligible. Only annotation rows are revisited, with
+        // an explicit bound; completed fingerprints live in this existing receipt.
         let conn = self.ensure_index_current(false)?;
         let mut stmt = conn
             .prepare(
-                "SELECT event_id, occurred_at, payload FROM events WHERE active = 1 AND (?1 IS NULL OR (occurred_at, event_id) > (?1, ?2)) AND ((json_type(payload, '$.decision') = 'text' AND json_extract(payload, '$.decision') != '') OR (json_type(payload, '$.blocker') = 'text' AND json_extract(payload, '$.blocker') != '')) ORDER BY occurred_at ASC, event_id ASC",
+                "SELECT payload FROM events WHERE active = 1 AND ((json_type(payload, '$.decision') = 'text' AND json_extract(payload, '$.decision') != '') OR (json_type(payload, '$.blocker') = 'text' AND json_extract(payload, '$.blocker') != '')) ORDER BY occurred_at ASC, event_id ASC LIMIT ?1",
             )
             .map_err(|e| format!("sqlite distill query failed: {e}"))?;
         let rows = stmt
-            .query_map(
-                params![marker.as_ref().map(|m| &m.0), marker.as_ref().map(|m| &m.1)],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
+            .query_map([MAX_DISTILL_INPUTS as i64 + 1], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(|e| format!("sqlite distill map failed: {e}"))?;
-
         let mut pending = Vec::new();
-        for r in rows {
-            let (_, _, payload) = r.map_err(|e| format!("sqlite distill row failed: {e}"))?;
+        for row in rows {
+            if pending.len() == MAX_DISTILL_INPUTS {
+                return Err("distill annotation limit exceeded; no input consumed".into());
+            }
+            let payload = row.map_err(|e| format!("sqlite distill row failed: {e}"))?;
             pending.push(decode_indexed(&payload)?);
         }
         let latest: Option<(String, String)> = conn.query_row(
@@ -1425,37 +1443,55 @@ impl JournalStore {
 
         let shared_norm = read_regular_no_symlink_bytes(
             &self.repo_root.join(".oms").join("memory").join("shared.md"),
-        )
-        .ok()
-        .flatten()
+        )?
         .map(|b| distill_normalized_text(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
-
-        let (lessons, dropped, deduped) = distill_candidates(&pending, &shared_norm);
+        let mut fresh = Vec::new();
+        let mut deduped = 0;
+        for candidate in distill_candidates(&pending) {
+            if completed.contains(&candidate.key) {
+                continue;
+            }
+            if !shared_norm.is_empty()
+                && !candidate.needle.is_empty()
+                && shared_norm.contains(&candidate.needle)
+            {
+                completed.insert(candidate.key);
+                deduped += 1;
+            } else {
+                fresh.push(candidate);
+            }
+        }
+        let dropped = fresh.len().saturating_sub(5);
+        fresh.truncate(5);
+        if completed.len() + fresh.len() > MAX_DISTILL_RECEIPTS {
+            return Err("distill candidate receipt limit exceeded; no input consumed".into());
+        }
         if dry_run {
             return Ok(DistillReport {
-                promoted: lessons.len(),
+                promoted: fresh.len(),
                 dropped,
                 deduped,
                 skipped_refused: Vec::new(),
                 dry_run: true,
-                lessons,
+                lessons: fresh.into_iter().map(|c| c.lesson).collect(),
             });
         }
 
         let mut promoted_lessons = Vec::new();
         let mut skipped_refused = Vec::new();
-        if !lessons.is_empty() {
+        if !fresh.is_empty() {
             let append_fn = memory_append.ok_or_else(|| {
                 "native memory append adapter is not wired; parent CLI must supply MemoryAppendFn via run_with_services".to_string()
             })?;
-            for lesson in &lessons {
-                match append_fn(&self.repo_root, "journal", lesson) {
+            for candidate in fresh {
+                match append_fn(&self.repo_root, "journal", &candidate.lesson) {
                     Ok(MemoryAppendOutcome::Appended) => {
-                        promoted_lessons.push(lesson.clone());
+                        completed.insert(candidate.key);
+                        promoted_lessons.push(candidate.lesson);
                     }
                     Ok(MemoryAppendOutcome::Refused(_)) | Err(_) => {
-                        skipped_refused.push(lesson.clone());
+                        skipped_refused.push(candidate.lesson);
                     }
                 }
             }
@@ -1474,6 +1510,14 @@ impl JournalStore {
         let mut state_obj = Map::new();
         state_obj.insert("schema_version".into(), crate::json::json!(1));
         state_obj.insert("through".into(), through_val);
+        state_obj.insert(
+            "completed_candidates".into(),
+            crate::json::json!(completed.into_iter().collect::<Vec<_>>()),
+        );
+        state_obj.insert(
+            "pending_candidates".into(),
+            crate::json::json!(dropped + skipped_refused.len()),
+        );
         state_obj.insert(
             "last_run_date".into(),
             Value::String(today_str.as_str().into()),
@@ -1893,104 +1937,111 @@ fn distill_normalized_text(text: &str) -> String {
     crate::unicode::casefold(&text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
-fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, usize, usize) {
+const MAX_DISTILL_INPUTS: usize = 16_384;
+const MAX_DISTILL_RECEIPTS: usize = 4_096;
+
+struct DistillCandidate {
+    key: String,
+    lesson: String,
+    needle: String,
+}
+
+fn distill_candidate(
+    kind: &str,
+    claim: &str,
+    lesson: String,
+    events: &[&Value],
+) -> DistillCandidate {
+    let key = sha256_hex(
+        format!(
+            "journal-distill-v2\0{kind}\0{}",
+            distill_normalized_text(claim)
+        )
+        .as_bytes(),
+    );
+    let sources: Vec<_> = events
+        .iter()
+        .take(8)
+        .filter_map(|e| e.at("event_id").as_str())
+        .collect();
+    let omitted = events.len().saturating_sub(sources.len());
+    let suffix = if omitted == 0 {
+        String::new()
+    } else {
+        format!("; {omitted} more source events")
+    };
+    DistillCandidate {
+        key,
+        needle: distill_normalized_text(&sanitize_text(claim, 600)),
+        lesson: format!(
+            "{lesson}\nsource events: {}{suffix}; recorded evidence; not independently verified",
+            sources.join(", ")
+        ),
+    }
+}
+
+fn distill_candidates(events: &[Value]) -> Vec<DistillCandidate> {
     let mut blockers: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
-    let mut candidates: Vec<((String, String), String, String)> = Vec::new();
-    let mut seen_decisions: HashSet<String> = HashSet::new();
-
+    let mut candidates = Vec::new();
+    let mut seen_decisions = HashSet::new();
     for ev in events {
-        let occ = ev
-            .get("occurred_at")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let eid = ev
-            .get("event_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let ld = ev
-            .get("local_date")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-
-        if let Some(dec) = ev.get("decision").and_then(Value::as_str) {
-            let dkey = distill_normalized_text(&dec);
-            if !dkey.is_empty() && seen_decisions.insert(dkey) {
+        let occ = ev.at("occurred_at").as_str().unwrap_or_default();
+        let eid = ev.at("event_id").as_str().unwrap_or_default();
+        let ld = ev.at("local_date").as_str().unwrap_or_default();
+        if let Some(dec) = ev.at("decision").as_str() {
+            let key = distill_normalized_text(&dec);
+            if !key.is_empty() && seen_decisions.insert(key) {
                 let clean = sanitize_text(&dec, 600);
-                let needle = distill_normalized_text(&clean);
                 candidates.push((
                     (occ.clone(), eid.clone()),
-                    format!("journal-distill: decision {ld}: {clean}"),
-                    needle,
+                    distill_candidate(
+                        "decision",
+                        &dec,
+                        format!("journal-distill: decision {ld}: {clean}"),
+                        &[ev],
+                    ),
                 ));
             }
         }
-        if let Some(blk) = ev.get("blocker").and_then(Value::as_str) {
-            let bkey = distill_normalized_text(&blk);
-            if !bkey.is_empty() {
-                blockers.entry(bkey).or_default().push(ev);
+        if let Some(blocker) = ev.at("blocker").as_str() {
+            let key = distill_normalized_text(&blocker);
+            if !key.is_empty() {
+                blockers.entry(key).or_default().push(ev);
             }
         }
     }
-
     for group in blockers.into_values() {
-        let mut days: BTreeSet<String> = BTreeSet::new();
-        let mut latest: Option<(String, String)> = None;
-        for ev in &group {
-            if let Some(ld) = ev.get("local_date").and_then(Value::as_str)
-                && !ld.is_empty()
-            {
-                days.insert(ld);
-            }
-            let pos = (
-                ev.get("occurred_at")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                ev.get("event_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            );
-            if latest.as_ref().is_none_or(|cur| pos > *cur) {
-                latest = Some(pos);
-            }
-        }
+        let days: BTreeSet<_> = group
+            .iter()
+            .filter_map(|e| e.at("local_date").as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
         if days.len() < 2 {
             continue;
         }
-        let first_day = days.iter().next().map(String::as_str).unwrap_or("");
-        let last_day = days.iter().next_back().map(String::as_str).unwrap_or("");
-        let raw_blk = group[0]
-            .get("blocker")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let clean = sanitize_text(&raw_blk, 600);
-        let needle = distill_normalized_text(&clean);
+        let latest = group.last().expect("nonempty blocker observations");
+        let position = (
+            latest.at("occurred_at").as_str().unwrap_or_default(),
+            latest.at("event_id").as_str().unwrap_or_default(),
+        );
+        let blocker = group[0].at("blocker").as_str().unwrap_or_default();
+        let clean = sanitize_text(&blocker, 600);
+        let lesson = format!(
+            "journal-distill: blocker seen {}d {}..{}: {clean}",
+            days.len(),
+            days.first().unwrap(),
+            days.last().unwrap()
+        );
         candidates.push((
-            latest.unwrap_or_default(),
-            format!(
-                "journal-distill: blocker seen {}d {first_day}..{last_day}: {clean}",
-                days.len()
-            ),
-            needle,
+            position,
+            distill_candidate("blocker", &blocker, lesson, &group),
         ));
     }
-
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut fresh = Vec::new();
-    let mut deduped = 0usize;
-    for (_pos, lesson, needle) in candidates {
-        if !promoted_norm.is_empty() && !needle.is_empty() && promoted_norm.contains(&needle) {
-            deduped += 1;
-            continue;
-        }
-        fresh.push(lesson);
-    }
-    let dropped = fresh.len().saturating_sub(5);
-    fresh.truncate(5);
-    (fresh, dropped, deduped)
+    candidates
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect()
 }
 
 pub fn period_range_hint(kind: &str, period: &str) -> String {

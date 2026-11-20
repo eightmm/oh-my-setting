@@ -1,6 +1,17 @@
 # Memory consolidation: 증분 Dreaming과 검증된 경험 재사용
 
-**상태: DESIGN ONLY.** 이 문서는 구현 명세와 작업 분할이다. 병합 자체로 모델 호출,
+**상태: 일부 정확성 수정 구현, 나머지는 DESIGN ONLY.** DR-01의 후보 보존은 현재
+`journal distill`에 연결됐다. 기존 SQLite의 active decision/blocker 행에서 후보를
+다시 계산하고, 기존 `distill.json`의 완료 fingerprint로 중복을 막는다. 5개 cap의 초과분과
+append 실패는 다음 pass에 남고, 늦게 들어온 사건 및 날짜를 나눠 기록한 blocker도
+대상이 된다. Legacy cursor는 관측 정보로 유지하며 기존 memory 내용과 먼저 중복 검사한다.
+한 pass의 annotation 입력은 16,384개, 완료 receipt는 4,096개, receipt 파일은 512 KiB로
+제한한다. 한도를 초과하면 명시적으로 실패하며 원본·cursor를 소비하거나 일부 완료로
+표시하지 않는다. 이 제한의 확대·압축은 별도 측정 후 결정한다. 원문 전체 대신 indexed
+annotation을 다시 읽는 정확성 수정이며 I/O 절감이나 semantic 품질 개선을 주장하지 않는다.
+후보에 source event ID와 검증되지 않은 기록이라는 설명을 붙이지만 기존 memory review
+eligibility는 유지한다. 아래 DR-01의 batch 파생 갱신과 DR-02~06은 계속 구현 명세다.
+이 문서 병합 자체로 모델 호출,
 자동화, memory 승격, 새 CLI/schema/default가 활성화되지 않는다. 아래 필드 이름은
 설계상의 의미이며 공개 API가 아니다. 실제 착수 상태는
 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)가 소유한다.
