@@ -113,6 +113,17 @@ EOF
     > "$check_probe/execution.out" 2>&1 || status=$?
   [ "$status" -eq 97 ] || fail "actual affected verification bypassed the maintenance gate"
   grep -Fxq maintenance-begin "$check_probe/forbidden.log" || fail "execution omitted maintenance protection"
+
+  # Preflight readiness must match the lanes: lint runs Cargo (oms-migrate), so
+  # ShellCheck alone (blocked rustup/cargo stubs above) leaves no lane runnable.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$check_probe/bin/shellcheck"
+  chmod +x "$check_probe/bin/shellcheck"
+  cp "$ROOT/rust-toolchain.toml" "$repo/rust-toolchain.toml"
+  status=0
+  invoke_check --preflight > "$check_probe/preflight.out" 2>&1 || status=$?
+  [ "$status" -eq 1 ] || fail "preflight without the pinned toolchain must report missing prerequisites"
+  grep -Fxq 'ok       shellcheck (shellcheck)' "$check_probe/preflight.out" || fail "preflight missed the ShellCheck stub"
+  ! grep -q '^  yes ' "$check_probe/preflight.out" || fail "preflight claims a lane runnable without the pinned toolchain: $(cat "$check_probe/preflight.out")"
 )
 
 check_markdown_links() {
