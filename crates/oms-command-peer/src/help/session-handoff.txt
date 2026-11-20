@@ -19,9 +19,11 @@ prompt options:
 
   The five native read projections share a 40-second read budget and each
   permits at most 65536 output bytes; supervised cleanup can take longer.
-  Missing, failed or incomplete sources remain labelled gaps. Recorded claims
-  are not fresh verification or resume authority. Sensitive source content
-  is refused before trimming; --allow-sensitive applies only to capture.
+  Missing, failed or incomplete sources remain labelled gaps. Collections
+  contribute up to six complete bounded rows each. Sources that fail the
+  sensitive-content check are withheld before projection; the draft also
+  passes the outbound scan. --allow-sensitive applies only to capture.
+  Recorded claims require fresh verification before resuming work.
 
 list options:
   --json           Emit JSON.

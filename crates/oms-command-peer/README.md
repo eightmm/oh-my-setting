@@ -30,27 +30,29 @@ unavailable request remains unverified.
 Explicit `session-handoff prompt` calls the existing autonomy handoff renderer
 through `native::Services`. It reads the selected repository's plan and task
 records, then requests five typed native projections: task status, the runtime
-evidence matrix, explained next actions, journal decisions and review findings.
+evidence matrix, explained next actions, journal decisions and open review findings.
 `process::Executor::handoff_projection` defaults to unavailable; the root host
 uses its existing staged native launcher and supervised execution. Each request
 has a 65,536-byte combined output cap and uses the remaining shared 40-second
 read budget. Process cleanup may extend return time beyond that budget.
 
 The Markdown draft contains Goal, State, Decisions, Open findings, Verified /
-Not verified, Next step and Pointers with source labels. Failed, incomplete or
-unavailable reads remain labelled gaps. Complete JSON records over the
-2,048-byte line budget are omitted with a source pointer; the final UTF-8
-output respects `--max-bytes` and reports dropped rows. Recorded verification
-claims keep their original values and do not grant resume or landing authority.
-The public prompt refuses sensitive content in complete plan/task snapshots
-and successful bounded producer outputs before trimming, then scans the final
-draft. Refusal returns no draft and writes no `--output` file.
+Not verified, Next step and Pointers with source labels. Missing, failed,
+incomplete or oversized sources remain labelled gaps. The public prompt scans
+complete plan/task snapshots and bounded producer output before projection.
+A source that fails the sensitive-content check is withheld while other sources
+remain available. The completed draft is scanned again before printing or
+writing. Collection sources contribute up to six complete records under the
+2,048-byte per-row budget. The final UTF-8 output respects `--max-bytes` and
+counts omitted records reported by a producer, records dropped by the row
+budget and lines dropped by the draft budget. Recorded verification claims
+retain their scope as claims.
 
 These projections run only for an explicit `prompt` request. Session-start
 hooks, historical transcript capture, pickup receipts and native resume keep
 their existing paths. No provider or model call is requested. The existing
 `peer_contract` fixture exercises the public prompt, incomplete and unavailable
-reads, JSON refusal, output bounds, cancellation and sensitive-source refusal.
+reads, malformed JSON, output bounds, cancellation and withholding one source.
 
 ## Modules and implemented paths
 

@@ -51,7 +51,10 @@ impl HandoffProjection {
             Self::EvidenceMatrix => ("runtime", &["evidence", "matrix", "--limit", "100"]),
             Self::NextStep => ("runtime", &["next", "--explain", "--limit", "100"]),
             Self::JournalDecisions => ("journal", &["show", "--decisions", "--json"]),
-            Self::ReviewFindings => ("peer-review", &["findings", "list", "--json"]),
+            Self::ReviewFindings => (
+                "peer-review",
+                &["findings", "list", "--status", "open", "--json"],
+            ),
         };
         let mut argv = vec!["oms".into(), tool.into()];
         argv.extend(args.iter().map(|arg| OsString::from(*arg)));

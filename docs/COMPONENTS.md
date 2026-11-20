@@ -1615,21 +1615,21 @@ fresh session of any provider. Native provider compaction remains the ordinary
 same-session continuity path; this command is an explicit, mechanical export
 of recorded work state. The public command uses the existing autonomy renderer:
 Goal from the plan and task packet; State from `agent-task status`; Decisions
-from the task packet and journal; Open findings from the review ledger;
-Verified / Not verified from `runtime evidence matrix`; Next step from
-`runtime next --explain`; and Pointers to local source records.
+from the task packet and journal; Open findings from the review ledger filtered
+to open status; Verified / Not verified from `runtime evidence matrix`; Next step
+from `runtime next --explain`; and Pointers to local source records.
 
 Five fixed read-only projections share a 40-second read budget and each has a
 64 KiB output cap. They use the staged native launcher and its process
-supervision; no provider, verifier or arbitrary command is selected. Missing,
-failed, partial or oversized projections remain explicit gaps. Recorded text
-is a claim, never fresh verification, approval or resume authority. Output
-lines carry source tags, and the existing outbound checks can refuse unsafe
-source content before trimming. The renderer also withholds flagged lines.
-Output is held to `--max-bytes` (512-65536, default 4096), dropping whole lines
-with omitted and withheld counts. `--output` creates a new file and refuses to
-overwrite one. No pickup or approval receipt is created. Transcript-based
-`capture` and `oms runtime brief` retain their separate purposes.
+supervision. Missing, failed, partial or oversized projections remain explicit
+gaps. A large Open findings list can still exceed the cap. Each complete source
+is scanned before projection, and unsafe sources are withheld while independent
+sources remain available. Output lines carry source tags. Each collection can
+contribute up to six whole records within a 2,048-byte per-row budget. The
+renderer scans the final draft before printing or writing and respects
+`--max-bytes` (512-65536, default 4096), counting omitted records and draft lines.
+Recorded claims require fresh verification before action. `--output` creates a
+new file and refuses to overwrite one. The draft conveys advisory context.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.

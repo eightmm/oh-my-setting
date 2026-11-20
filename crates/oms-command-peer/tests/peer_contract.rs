@@ -3639,7 +3639,7 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
     isolated(
         "session_handoff_prompt_projects_bounded_native_reads",
         || {
-            use oms_command_peer::process::HandoffProjection;
+            use oms_command_peer::{obj, process::HandoffProjection};
 
             struct Reads {
                 mode: &'static str,
@@ -3685,10 +3685,10 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                         br#"{"schema":1,"status":"active","verification":"not_verified"}"#.to_vec()
                     }
                     HandoffProjection::EvidenceMatrix => {
-                        br#"{"rows":[{"criterion":"tests","status":"unknown","source":"receipt_missing"}]}"#.to_vec()
+                        br#"{"criteria":{"items":[{"criterion":"tests","status":"unknown","source":"receipt_missing"}],"omitted":0}}"#.to_vec()
                     }
                     HandoffProjection::NextStep => {
-                        br#"{"next_action":"run verification","reason":"receipt missing"}"#.to_vec()
+                        br#"{"actions":{"items":[{"next_action":"run verification","reason":"receipt missing"}],"omitted":0}}"#.to_vec()
                     }
                     HandoffProjection::JournalDecisions => {
                         br#"{"decisions":[{"event_id":"decision_1","text":"keep native context"}],"omitted":0}"#.to_vec()
@@ -3698,6 +3698,76 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                     }
                 };
                     let mut complete = true;
+                    if self.mode == "collections" && projection != HandoffProjection::TaskStatus {
+                        let (key, name, count, omitted, bounded) = match projection {
+                            HandoffProjection::EvidenceMatrix => {
+                                ("criteria", "criterion", 24, 2, true)
+                            }
+                            HandoffProjection::NextStep => ("actions", "action", 20, 3, true),
+                            HandoffProjection::JournalDecisions => {
+                                ("decisions", "decision", 32, 7, false)
+                            }
+                            HandoffProjection::ReviewFindings => ("", "finding", 17, 0, false),
+                            HandoffProjection::TaskStatus => unreachable!(),
+                        };
+                        let rows = V::Arr(
+                            (0..count)
+                                .map(|n| {
+                                    obj([
+                                        ("id", format!("{name}-{n:02}").into()),
+                                        (
+                                            "status",
+                                            if key.is_empty() { "open" } else { "unknown" }.into(),
+                                        ),
+                                        ("summary", "complete bounded row ".repeat(10).into()),
+                                    ])
+                                })
+                                .collect(),
+                        );
+                        let omitted = V::from(omitted as usize);
+                        let projection = if key.is_empty() {
+                            rows
+                        } else if bounded {
+                            obj([(key, obj([("items", rows), ("omitted", omitted)]))])
+                        } else {
+                            obj([(key, rows), ("omitted", omitted)])
+                        };
+                        stdout = projection.json(false).unwrap();
+                        assert!(stdout.len() > 2048 && stdout.len() < 65536);
+                    }
+                    if self.mode == "blocked_only" && projection == HandoffProjection::NextStep {
+                        let tasks = (0..10)
+                            .map(|n| {
+                                let (id, state, reason) = if n < 2 {
+                                    (format!("done-{n}"), "done", "recorded-done")
+                                } else {
+                                    (
+                                        format!("blocked-{:02}", n - 2),
+                                        "ready",
+                                        "dependencies-unfinished",
+                                    )
+                                };
+                                obj([
+                                    ("task_id", id.into()),
+                                    ("state", state.into()),
+                                    ("canonical_actionable", false.into()),
+                                    ("reasons", V::Arr(vec![obj([("code", reason.into())])])),
+                                ])
+                            })
+                            .collect();
+                        stdout = obj([
+                            (
+                                "actions",
+                                obj([("items", V::Arr(Vec::new())), ("omitted", 0usize.into())]),
+                            ),
+                            (
+                                "tasks",
+                                obj([("items", V::Arr(tasks)), ("omitted", 3usize.into())]),
+                            ),
+                        ])
+                        .json(false)
+                        .unwrap();
+                    }
                     if projection == HandoffProjection::EvidenceMatrix {
                         match self.mode {
                             "malformed" => {
@@ -3713,8 +3783,10 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                                 } else {
                                     65536
                                 };
-                                stdout = format!(r#"{{"oversize_probe":"{}"}}"#, "x".repeat(size))
-                                    .into_bytes();
+                                stdout = format!(
+                                    r#"{{"criteria":{{"items":[{{"oversize_probe":"{}"}}],"omitted":0}}}}"#,
+                                    "x".repeat(size)
+                                ).into_bytes();
                             }
                             "sensitive" => {
                                 let private = ["/ho", "me/private/handoff"].concat();
@@ -3770,7 +3842,7 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                 "[src: runtime evidence matrix --limit 100]",
                 "[src: runtime next --explain --limit 100]",
                 "[src: journal show --decisions --json]",
-                "[src: peer-review findings list --json]",
+                "[src: peer-review findings list --status open --json]",
                 "receipt_missing",
                 "not_verified",
                 "finding_1",
@@ -3834,23 +3906,92 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                     "{mode}: {body}"
                 );
             }
-            let sensitive = call(
-                &Reads::new("sensitive"),
-                &["prompt", "--output", ".oms/handoffs/refused.md"],
+            let collections = call(
+                &Reads::new("collections"),
+                &["prompt", "--max-bytes", "65536"],
             );
-            assert_eq!(sensitive.0, 3, "{}", message(&sensitive));
-            assert!(sensitive.1.is_empty());
-            assert!(!repo.0.join(".oms/handoffs/refused.md").exists());
+            assert_eq!(collections.0, 0, "{}", message(&collections));
+            let body = std::str::from_utf8(&collections.1).unwrap();
+            for name in ["criterion", "action", "decision", "finding"] {
+                for n in 0..6 {
+                    assert!(body.contains(&format!("\"{name}-{n:02}\"")), "{name}: {n}");
+                }
+                assert!(!body.contains(&format!("\"{name}-06\"")), "{name}");
+            }
+            assert!(body.contains("truncated: 81 line(s) omitted; withheld: 0 line(s)"));
+            let ordinary_budget = call(&Reads::new("collections"), &["prompt"]);
+            assert_eq!(ordinary_budget.0, 0, "{}", message(&ordinary_budget));
+            let body = std::str::from_utf8(&ordinary_budget.1).unwrap();
+            assert!(body.len() <= 4096);
+            for name in ["criterion-00", "action-00", "decision-00", "finding-00"] {
+                assert!(body.contains(name), "default budget hid {name}: {body}");
+            }
+            for row in body.lines().filter_map(|line| line.strip_prefix("- {")) {
+                let (record, _) = row.rsplit_once(" [src: ").unwrap();
+                V::parse(format!("{{{record}").as_bytes()).unwrap();
+            }
+
+            let blocked = call(&Reads::new("blocked_only"), &["prompt"]);
+            assert_eq!(blocked.0, 0, "{}", message(&blocked));
+            let body = std::str::from_utf8(&blocked.1).unwrap();
+            for n in 0..6 {
+                assert!(body.contains(&format!("blocked-{n:02}")), "{body}");
+            }
+            assert!(body.contains("dependencies-unfinished"));
+            assert!(!body.contains("blocked-06") && !body.contains("done-0"));
+            assert!(body.contains("truncated: 7 line(s) omitted; withheld: 0 line(s)"));
+
             let private = ["/ho", "me/private/handoff"].concat();
-            repo.write(
-                ".oms/task/current.md",
-                format!("{packet}\n## Notes\n{private}\n"),
+            let saved = call(
+                &Reads::new("sensitive"),
+                &["prompt", "--output", ".oms/handoffs/safe.md"],
             );
-            let reads = Reads::new("complete");
-            let sensitive = call(&reads, &["prompt", "--max-bytes", "512"]);
-            assert_eq!(sensitive.0, 3, "{}", message(&sensitive));
-            assert!(sensitive.1.is_empty() && reads.calls.lock().unwrap().is_empty());
-            assert!(!message(&sensitive).contains(&private));
+            assert_eq!(saved.0, 0, "{}", message(&saved));
+            let body = fs::read_to_string(repo.0.join(".oms/handoffs/safe.md")).unwrap();
+            assert!(body.contains("withheld: this source matched") && !body.contains(&private));
+            assert!(body.contains("finding_1") && body.contains("plan goal: Plan continuity"));
+
+            repo.write(
+                ".oms/plan/tasks.json",
+                obj([
+                    ("schema", 3usize.into()),
+                    ("goal", "Withheld plan".into()),
+                    ("accept", "".into()),
+                    ("tasks", obj([])),
+                    ("local_path", private.as_str().into()),
+                ])
+                .json(false)
+                .unwrap(),
+            );
+            let result = call(&Reads::new("complete"), &["prompt"]);
+            assert_eq!(result.0, 0, "{}", message(&result));
+            let body = std::str::from_utf8(&result.1).unwrap();
+            assert!(body.contains("withheld: this source matched"));
+            assert!(
+                body.contains("task goal: Resume the recorded λ goal.")
+                    && body.contains("decision_1")
+            );
+            assert!(!body.contains(&private) && !body.contains("Withheld plan"));
+            repo.write(
+                ".oms/plan/tasks.json",
+                br#"{"schema":3,"goal":"Plan continuity","accept":"","tasks":{}}"#,
+            );
+
+            let checks = [
+                (
+                    format!("{packet}\n## Notes\n{private}\n"),
+                    "withheld: this source matched",
+                ),
+                ("x".repeat(65537), "task source unavailable"),
+            ];
+            for (packet, gap) in checks {
+                repo.write(".oms/task/current.md", packet);
+                let result = call(&Reads::new("complete"), &["prompt"]);
+                assert_eq!(result.0, 0, "{}", message(&result));
+                let body = std::str::from_utf8(&result.1).unwrap();
+                assert!(body.contains(gap) && !body.contains(&private));
+                assert!(body.contains("plan goal: Plan continuity") && body.contains("decision_1"));
+            }
             repo.write(".oms/task/current.md", packet);
             let interrupted = call(&Reads::new("interrupted"), &["prompt"]);
             assert_eq!(interrupted.0, 130, "{}", message(&interrupted));

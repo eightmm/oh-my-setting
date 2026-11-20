@@ -3013,7 +3013,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&done.stdout),
             format!(
-                "{}\npeer-review findings list --json --repo {}",
+                "{}\npeer-review findings list --status open --json --repo {}",
                 state.display(),
                 dir.path().display()
             )
