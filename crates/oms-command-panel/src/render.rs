@@ -3696,21 +3696,32 @@ fn receipt_token_details(
                 "antigravity" | "agy" => "AGY",
                 other => other,
             };
-            let count = |field: &str| {
-                components[field]
-                    .as_u64()
-                    .map_or_else(|| "?".into(), |n| n.to_string())
+            let provider_calls = components["calls"].as_u64();
+            let count = |field: &str, partial: &str| {
+                if let Some(n) = components[field].as_u64() {
+                    return n.to_string();
+                }
+                match (components["reported"][field].as_u64(), provider_calls) {
+                    (Some(n), Some(m)) if n > 0 && n < m => format!("{partial}{n}/{m}"),
+                    _ => "?".into(),
+                }
             };
-            line(
-                provider,
+            let row = |partial: &str| {
                 format!(
                     "In {} · Out {} · Cache read {} · Write {}",
-                    count("input"),
-                    count("output"),
-                    count("cache_read"),
-                    count("cache_write")
-                ),
-            )
+                    count("input", partial),
+                    count("output", partial),
+                    count("cache_read", partial),
+                    count("cache_write", partial)
+                )
+            };
+            let full = row("partial ");
+            let value = if width(&full) <= left_budget(inner_width, width(provider)) {
+                full
+            } else {
+                row("p")
+            };
+            line(provider, value)
         }))
         .collect()
 }
@@ -7253,8 +7264,10 @@ mod tests {
         report["board_receipt_tokens"]["cmp-1"] = json!({
             "total":300, "reported":2, "calls":2,
             "providers": {
-                "codex":{"input":150,"output":20,"cache_read":40,"cache_write":null},
-                "claude":{"input":50,"output":15,"cache_read":65,"cache_write":0}
+                "codex":{"input":150,"output":20,"cache_read":40,"cache_write":null,
+                    "calls":2,"reported":{"input":2,"output":2,"cache_read":2,"cache_write":0}},
+                "claude":{"input":50,"output":15,"cache_read":65,"cache_write":0,
+                    "calls":1,"reported":{"input":1,"output":1,"cache_read":1,"cache_write":1}}
             }
         });
         for height in [13, 9] {
@@ -7277,6 +7290,37 @@ mod tests {
             assert!(detail.contains(label), "{detail}");
         }
 
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        codex["cache_read"] = Value::Null;
+        codex["reported"]["cache_read"] = json!(1);
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(
+            detail.contains("In 150 · Out 20 · Cache read partial 1/2 · Write ?"),
+            "{detail}"
+        );
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        codex["input"] = json!(0);
+        codex["output"] = Value::Null;
+        codex["reported"]["output"] = json!(1);
+        codex["reported"]["cache_write"] = json!(2);
+        codex["reported"]["input"] = json!(0);
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(
+            detail.contains("In 0 · Out partial 1/2 · Cache read partial 1/2 · Write ?"),
+            "{detail}"
+        );
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        codex["input"] = Value::Null;
+        codex["reported"]["input"] = json!(1);
+        codex["reported"]["cache_write"] = json!(1);
+        codex["cache_write"] = Value::Null;
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(
+            detail.contains("In p1/2 · Out p1/2 · Cache read p1/2 · Write p1/2"),
+            "{detail}"
+        );
+        let codex = &mut report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"];
+        *codex = json!({"input":150,"output":20,"cache_read":40,"cache_write":null});
         report["board_receipt_tokens"]["cmp-1"]["total"] = Value::Null;
         report["board_receipt_tokens"]["cmp-1"]["reported"] = json!(1);
         let detail = frame(&report, &nav, 80, 13, &read).join("\n");
