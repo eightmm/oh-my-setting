@@ -52,7 +52,8 @@ in this crate.
   retries are superseded only by a later successful/admitted round with the
   same task, purpose, eligible parent lineage and verbatim covering scope.
   Multiple historical workers therefore need not imply multiple candidates.
-  Independent candidates remain ambiguous for single-patch acceptance.
+  Independent reviewed candidates for the same task and lease can compose when
+  their full recorded base matches and their changed paths are disjoint.
 * Main lineage validates lifecycle shape and positive prior-host/native exit.
   Cross-provider ownership requires canonical room `main-swap` events read
   across sealed predecessors. Acceptance inherits only room-recorded swap
@@ -77,6 +78,8 @@ in this crate.
   tree, actual index/worktree and HEAD. It never reapplies the patch. It can
   finish the exact staged tree or an already-created exact commit, then record
   plan review and telemetry idempotently. A changed authority or tree refuses.
+  Composed recovery also requires the saved successful integration verifier
+  acknowledgement; staging component bytes cannot substitute for that check.
 * `--finalize --landed-commit` is represented by `FinalizeRequest.landed_commit`.
   It validates a private native plan-finish proof before canonical review/finish,
   checks the selected publication receipt digest and push base, and requires
@@ -94,6 +97,45 @@ in this crate.
   inventories indexed/unindexed patches, retained provenance and matching
   registered worktrees. Continuation rechecks an empty receipt against current
   evidence; a marker alone cannot discard reappearing work.
+
+## Composed acceptance
+
+The existing accept front door can integrate 2–16 stopped write workers for one
+task and lease. Each component must satisfy the ordinary native Main/Room and
+worker lineage, scope, immutable artifact, patch digest, and passing review
+checks. All components must record the same full Git base, which must still be
+the integration checkout's HEAD. Report-only workers do not contribute patches.
+Different tasks, leases or bases, overlapping paths (including directory/file
+overlap), and unresolved conflicts refuse before applying a patch. They need a
+separate owned integration candidate.
+
+Components are ordered by worker attempt ID. Their exact patch bytes are joined
+without rewriting and replayed in a private index to prove the combined tree.
+An immutable manifest under `.oms/artifacts/compositions/` retains every original
+candidate, worker binding and review gate, along with the integration owner,
+lease, verifier digest, base, patch digest and tree. The manifest is limited to
+32 KiB and the combined patch to 16 MiB. An expected patch digest, when supplied,
+names the combined patch. The existing Main is the integration owner; composition
+does not create another lifecycle attempt or claim another process completed.
+
+The ordinary landing service applies and verifies that exact combined tree
+before the acceptance owner commits it. Component reviews and the integration
+verifier are recorded separately: individually passing patches are insufficient
+when the combined verifier fails. Schema-2 acceptance records bind the manifest
+and the successful integration command/tree, while schema-1 single-candidate
+records and behavior remain unchanged. Native Plan validates every retained
+component and independently reconstructs the accepted tree before review.
+Older consumers that only support schema 1 refuse composed records.
+
+Recovery never reapplies the combined patch. It requires the same component
+evidence and a durable successful integration verifier acknowledgement, then
+checks the exact index/worktree or already-created commit. A failure or kill
+before that acknowledgement retains the artifacts and recovery record but does
+not authorize recovery to complete acceptance. After commit, registration is
+idempotent for the aggregate and each included worker so ordinary finalization
+can find all component admissions; partial registration can be completed by the
+existing explicit recovery path. This path does not resolve overlapping edits,
+compose across tasks, or provide new cancellation or publication authority.
 
 ## Route identity snapshots
 

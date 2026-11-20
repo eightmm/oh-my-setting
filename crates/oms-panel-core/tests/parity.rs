@@ -229,7 +229,17 @@ impl Services for Fake {
                     .status()
                     .unwrap();
                 assert!(status.success());
-                Ok(output(Value::Null))
+                let verify = args.iter().position(|arg| arg == "--verify").unwrap();
+                let status = Command::new("sh")
+                    .arg("-c")
+                    .arg(&args[verify + 1])
+                    .current_dir(repo)
+                    .status()
+                    .unwrap();
+                Ok(CommandOutput {
+                    code: status.code().unwrap_or(1),
+                    ..output(Value::Null)
+                })
             }
             NativeCommand::Plan => {
                 self.plans.borrow_mut().push(args.to_vec());
@@ -1029,6 +1039,199 @@ fn git(repo: &Path, args: &[&str], input: &[u8]) -> String {
         String::from_utf8_lossy(&done.stderr)
     );
     String::from_utf8(done.stdout).unwrap().trim().into()
+}
+fn composed_acceptance() {
+    for combined_passes in [true, false] {
+        let repo = repo(if combined_passes {
+            "composed-acceptance"
+        } else {
+            "composed-verifier-failure"
+        });
+        let fake = Fake::default();
+        git(&repo, &["init", "--quiet"], b"");
+        for name in ["product-a", "product-b"] {
+            std::fs::write(repo.join(name), b"before\n").unwrap();
+        }
+        git(&repo, &["add", "product-a", "product-b"], b"");
+        let tree = git(&repo, &["write-tree"], b"");
+        let base = git(
+            &repo,
+            &["commit-tree", &tree, "-m", "composition base"],
+            b"",
+        );
+        git(&repo, &["update-ref", "HEAD", &base], b"");
+        std::fs::write(repo.join(".git/info/exclude"), b".oms/\nlock\nsummary.md\n").unwrap();
+        let mut candidates = Vec::new();
+        let mut reviews = Vec::new();
+        for (id, name, after) in [
+            ("worker-a", "product-a", "after-a"),
+            ("worker-b", "product-b", "after-b"),
+        ] {
+            let body = format!(
+                "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-before\n+{after}\n"
+            );
+            let mut candidate = patch(&repo, id, body.as_bytes(), 0);
+            candidate["base_sha"] = base.clone().into();
+            reviews.push(json!({"kind":"review-outcome","task_id":"task-1","event_id":format!("review-{id}"),"exit":0,
+                "review":{"candidate":{"patch_sha256":candidate["patch_sha256"]},"gate_verify_exit":0,"seats":[{"verdict":"pass"}]}}));
+            candidates.push(candidate);
+        }
+        let mut rows = candidates.clone();
+        rows.extend(reviews);
+        index(&repo, &rows);
+        plan(&repo);
+        let verify = if combined_passes {
+            "grep -qx after-a product-a && grep -qx after-b product-b"
+        } else {
+            "! (grep -qx after-a product-a && grep -qx after-b product-b)"
+        };
+        let plan_path = repo.join(".oms/plan/tasks.json");
+        let mut task: Value = serde_json::from_slice(&std::fs::read(&plan_path).unwrap()).unwrap();
+        task["tasks"]["task-1"]["allowed_paths"] = json!(["product-a", "product-b"]);
+        task["tasks"]["task-1"]["verify"] = verify.into();
+        store_file(
+            &repo,
+            Path::new(".oms/plan/tasks.json"),
+            &serde_json::to_vec(&task).unwrap(),
+        );
+        prepare(
+            &fake,
+            &[worker("worker-a", "done", 1), worker("worker-b", "done", 2)],
+        );
+        fake.room.borrow_mut()["participants"][1]["owns"] = json!(["product-a"]);
+        fake.room.borrow_mut()["participants"][2]["owns"] = json!(["product-b"]);
+        for worker in fake.attempts.borrow().iter().skip(1) {
+            dispatch_envelopes(&repo, worker, true, false);
+        }
+        let mut request = results::AcceptRequest {
+            owner: "codex".into(),
+            task_id: "task-1".into(),
+            main_attempt_id: "main-1".into(),
+            message: "feat: integrate reviewed components".into(),
+            verify: verify.into(),
+            execution_repo: repo.clone(),
+            expected_patch_sha256: None,
+            allow_verifier_change: false,
+            allow_floor_change: None,
+        };
+        let mut stale = rows.clone();
+        stale[1]["base_sha"] = "0".repeat(40).into();
+        index(&repo, &stale);
+        assert!(
+            !results::accept(&repo, &request, &fake, &STOP)
+                .unwrap_err()
+                .publication_uncertain
+        );
+        let mut overlap = rows.clone();
+        overlap[1]["patch"] = candidates[0]["patch"].clone();
+        overlap[1]["patch_sha256"] = candidates[0]["patch_sha256"].clone();
+        fake.room.borrow_mut()["participants"][2]["owns"] = json!(["product-a"]);
+        index(&repo, &overlap);
+        assert!(
+            results::accept(&repo, &request, &fake, &STOP)
+                .unwrap_err()
+                .message
+                .contains("overlap")
+        );
+        fake.room.borrow_mut()["participants"][2]["owns"] = json!(["product-b"]);
+        let mut failed_review = rows.clone();
+        failed_review[3]["exit"] = 1.into();
+        index(&repo, &failed_review);
+        assert!(results::accept(&repo, &request, &fake, &STOP).is_err());
+        index(&repo, &rows);
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"], b""), base);
+        let joined = candidates
+            .iter()
+            .flat_map(|candidate| {
+                std::fs::read(repo.join(candidate["patch"].as_str().unwrap())).unwrap()
+            })
+            .collect::<Vec<_>>();
+        request.expected_patch_sha256 = Some(oms_panel_core::digest(&joined));
+        *fake.fail_plan.borrow_mut() = true;
+        let error = results::accept(&repo, &request, &fake, &STOP).unwrap_err();
+        assert!(error.publication_uncertain, "{error}");
+        let head = git(&repo, &["rev-parse", "HEAD"], b"");
+        *fake.fail_plan.borrow_mut() = false;
+        if !combined_passes {
+            assert_eq!(head, base, "failed integration verification cannot commit");
+            git(&repo, &["add", "product-a", "product-b"], b"");
+            assert!(
+                results::recover_accept(&repo, &request, &fake, &STOP)
+                    .unwrap_err()
+                    .message
+                    .contains("integration verifier")
+            );
+            assert_eq!(git(&repo, &["rev-parse", "HEAD"], b""), base);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&std::fs::read(&plan_path).unwrap()).unwrap()["tasks"]
+                    ["task-1"]["state"],
+                "running"
+            );
+            continue;
+        }
+        assert_ne!(head, base);
+        assert_eq!(
+            results::recover_accept(&repo, &request, &fake, &STOP).unwrap()["sha"],
+            head
+        );
+        let accepted =
+            serde_json::from_slice::<Value>(&std::fs::read(&plan_path).unwrap()).unwrap();
+        let record = &accepted["tasks"]["task-1"]["panel_accept"];
+        assert_eq!(record["schema"], 2);
+        assert_eq!(record["integration_verify"]["exit"], 0);
+        let manifest_path = repo.join(record["composition"]["path"].as_str().unwrap());
+        let manifest_raw = std::fs::read(&manifest_path).unwrap();
+        let manifest: Value = serde_json::from_slice(&manifest_raw).unwrap();
+        assert_eq!(manifest["components"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            manifest["tree"],
+            git(&repo, &["rev-parse", "HEAD^{tree}"], b"")
+        );
+        let rows_after = results::index_rows(&repo).unwrap();
+        assert_eq!(
+            rows_after
+                .iter()
+                .filter(|row| row["kind"] == "panel-accept")
+                .count(),
+            3
+        );
+        // A kill between aggregate and component registration must not strand
+        // the remaining worker behind the aggregate's idempotence check.
+        let incomplete = rows_after
+            .into_iter()
+            .filter(|row| !(row["kind"] == "panel-accept" && row["attempt_id"] == "worker-b"))
+            .collect::<Vec<_>>();
+        index(&repo, &incomplete);
+        results::recover_accept(&repo, &request, &fake, &STOP).unwrap();
+        assert_eq!(
+            results::index_rows(&repo)
+                .unwrap()
+                .iter()
+                .filter(|row| row["kind"] == "panel-accept" && row["attempt_id"] == "worker-b")
+                .count(),
+            1
+        );
+        let prior = std::fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap();
+        results::recover_accept(&repo, &request, &fake, &STOP).unwrap();
+        assert_eq!(
+            prior,
+            std::fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap()
+        );
+        std::fs::write(&manifest_path, b"changed manifest").unwrap();
+        assert!(results::recover_accept(&repo, &request, &fake, &STOP).is_err());
+        std::fs::write(&manifest_path, &manifest_raw).unwrap();
+        let mut finalize = finalize_request(&repo);
+        finalize.outcome = "accepted".into();
+        finalize.verify = Some(verify.into());
+        finalize.landed_commit = Some(head.clone());
+        finalize.evidence = vec![record["artifact"].as_str().unwrap().into()];
+        *fake.publication.borrow_mut() =
+            serde_json::to_vec(&json!({"push":{"base":base}})).unwrap();
+        assert_eq!(
+            results::finalize(&repo, &finalize, &fake, &STOP).unwrap()["outcome"],
+            "accepted"
+        );
+    }
 }
 fn acceptance_recovery() {
     let repo = repo("acceptance-recovery");
@@ -1997,6 +2200,7 @@ fn main() {
         ("retry_projection", retry_projection),
         ("multiworker_finalize", multiworker_finalize),
         ("acceptance_recovery", acceptance_recovery),
+        ("composed_acceptance", composed_acceptance),
         ("supervisor_settlement", supervisor_settlement),
         ("swap_lineage", swap_lineage),
         ("main_swap_workflow", main_swap_workflow),

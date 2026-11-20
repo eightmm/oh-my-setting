@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+#[path = "composition.rs"]
+mod composition;
+
 fn preflight<S: Services + ?Sized>(
     repo: &Path,
     request: &AcceptRequest,
@@ -137,105 +140,9 @@ fn preflight<S: Services + ?Sized>(
     )?;
     let workers = selection.workers;
     require(
-        workers.len() == 1,
-        "accept requires one unique worker candidate for this task",
+        !workers.is_empty() && workers.len() <= composition::MAX_COMPONENTS,
+        "accept requires 1..16 selected worker candidates for this task",
     )?;
-    let worker = &workers[0];
-    require(
-        parents.contains(&text(worker, "parent_attempt_id"))
-            && worker["refs"]["panel_lease_id"] == lease
-            && worker["refs"]["panel_purpose"] != "investigate",
-        "candidate worker is not bound to this main/lease or is report-only",
-    )?;
-    let candidates = rows
-        .iter()
-        .filter(|v| {
-            v["kind"] == "delegate"
-                && v["task_id"] == request.task_id
-                && v["attempt_id"] == worker["attempt_id"]
-                && v["patch_sha256"].is_string()
-        })
-        .collect::<Vec<_>>();
-    require(candidates.len() == 1, "candidate is ambiguous")?;
-    let candidate = candidates[0];
-    require(
-        candidate["exit"] == 0
-            && candidate["plan_id"] == plan_id
-            && request
-                .expected_patch_sha256
-                .as_ref()
-                .is_none_or(|v| candidate["patch_sha256"] == *v),
-        "candidate does not match current plan/digest",
-    )?;
-    if !applied {
-        require(
-            !rows.iter().any(|v| {
-                ["patch-land", "panel-accept"].contains(&text(v, "kind").as_str())
-                    && v["task_id"] == request.task_id
-                    && v["patch_sha256"] == candidate["patch_sha256"]
-                    && v["exit"] == 0
-            }),
-            "candidate already applied; never reapply blindly",
-        )?;
-    }
-    let body = verified_patch(&store, candidate)?;
-    require(!body.is_empty(), "empty candidate cannot be accepted")?;
-    let artifact = text(candidate, "artifact");
-    require(
-        artifact.starts_with(".oms/artifacts/"),
-        "candidate artifact outside evidence store",
-    )?;
-    let evidence = store.read(Path::new(&artifact), MAX_RESULT, false)?;
-    require(
-        candidate["artifact_sha256"]
-            .as_str()
-            .is_some_and(|v| crate::hex(v, 64) && crate::digest(&evidence) == v),
-        "candidate artifact digest differs",
-    )?;
-    let review = rows
-        .iter()
-        .rev()
-        .find(|v| {
-            v["kind"] == "review-outcome"
-                && v["task_id"] == request.task_id
-                && v["review"]["candidate"]["patch_sha256"] == candidate["patch_sha256"]
-        })
-        .ok_or_else(|| Error::new("candidate lacks a passing review gate"))?;
-    let seats = array(&review["review"]["seats"]);
-    require(
-        review["exit"] == 0
-            && review["review"]["gate_verify_exit"] == 0
-            && !seats.is_empty()
-            && seats.iter().all(|v| v["verdict"] == "pass"),
-        "candidate lacks a passing review gate",
-    )?;
-    let worker_room_id = text(&worker["refs"], "panel_room_id");
-    let worker_room = if worker_room_id == room_id {
-        room
-    } else {
-        crate::identifier(&worker_room_id)?;
-        query(
-            service,
-            NativeCommand::Room,
-            repo,
-            &["show", "--id", &worker_room_id, "--json"],
-            stop,
-        )?
-    };
-    let member = text(&worker["refs"], "panel_room_participant");
-    let declaration = array(&worker_room["participants"])
-        .iter()
-        .find(|v| v["participant"] == member)
-        .ok_or_else(|| Error::new("worker scope declaration unavailable"))?;
-    let scopes = array(&declaration["owns"])
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| Error::new("malformed worker scope"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    require(!scopes.is_empty(), "worker scope declaration is empty")?;
     let allowed = crate::control::effective_paths(repo, &task, &scoped_attempts)?;
     let forbidden = array(&task["forbidden_paths"])
         .iter()
@@ -245,25 +152,142 @@ fn preflight<S: Services + ?Sized>(
                 .ok_or_else(|| Error::new("malformed forbidden paths"))
         })
         .collect::<Result<Vec<_>>>()?;
-    for path in crate::files::patch_paths(&body)? {
+    let mut components = Vec::new();
+    for worker in &workers {
         require(
-            scopes
-                .iter()
-                .any(|scope| oms_command_room::overlaps(scope, &path))
-                && !allowed.is_empty()
-                && allowed
+            parents.contains(&text(worker, "parent_attempt_id"))
+                && worker["refs"]["panel_lease_id"] == lease
+                && worker["refs"]["panel_purpose"] != "investigate",
+            "candidate worker is not bound to this main/lease or is report-only",
+        )?;
+        let candidates = rows
+            .iter()
+            .filter(|v| {
+                v["kind"] == "delegate"
+                    && v["task_id"] == request.task_id
+                    && v["attempt_id"] == worker["attempt_id"]
+                    && v["patch_sha256"].is_string()
+            })
+            .collect::<Vec<_>>();
+        require(candidates.len() == 1, "candidate is ambiguous")?;
+        let candidate = candidates[0];
+        require(
+            candidate["exit"] == 0
+                && candidate["plan_id"] == plan_id
+                && (workers.len() > 1
+                    || request
+                        .expected_patch_sha256
+                        .as_ref()
+                        .is_none_or(|v| candidate["patch_sha256"] == *v)),
+            "candidate does not match current plan/digest",
+        )?;
+        if !applied {
+            require(
+                !rows.iter().any(|v| {
+                    ["patch-land", "panel-accept"].contains(&text(v, "kind").as_str())
+                        && v["task_id"] == request.task_id
+                        && v["patch_sha256"] == candidate["patch_sha256"]
+                        && v["exit"] == 0
+                }),
+                "candidate already applied; never reapply blindly",
+            )?;
+        }
+        let body = verified_patch(&store, candidate)?;
+        require(!body.is_empty(), "empty candidate cannot be accepted")?;
+        let artifact = text(candidate, "artifact");
+        require(
+            artifact.starts_with(".oms/artifacts/"),
+            "candidate artifact outside evidence store",
+        )?;
+        let evidence = store.read(Path::new(&artifact), MAX_RESULT, false)?;
+        require(
+            candidate["artifact_sha256"]
+                .as_str()
+                .is_some_and(|v| crate::hex(v, 64) && crate::digest(&evidence) == v),
+            "candidate artifact digest differs",
+        )?;
+        let review = rows
+            .iter()
+            .rev()
+            .find(|v| {
+                v["kind"] == "review-outcome"
+                    && v["task_id"] == request.task_id
+                    && v["review"]["candidate"]["patch_sha256"] == candidate["patch_sha256"]
+            })
+            .ok_or_else(|| Error::new("candidate lacks a passing review gate"))?;
+        let seats = array(&review["review"]["seats"]);
+        require(
+            review["exit"] == 0
+                && review["review"]["gate_verify_exit"] == 0
+                && !seats.is_empty()
+                && seats.iter().all(|v| v["verdict"] == "pass"),
+            "candidate lacks a passing review gate",
+        )?;
+        let worker_room_id = text(&worker["refs"], "panel_room_id");
+        let worker_room = if worker_room_id == room_id {
+            room.clone()
+        } else {
+            crate::identifier(&worker_room_id)?;
+            query(
+                service,
+                NativeCommand::Room,
+                repo,
+                &["show", "--id", &worker_room_id, "--json"],
+                stop,
+            )?
+        };
+        let member = text(&worker["refs"], "panel_room_participant");
+        let declaration = array(&worker_room["participants"])
+            .iter()
+            .find(|v| v["participant"] == member)
+            .ok_or_else(|| Error::new("worker scope declaration unavailable"))?;
+        let scopes = array(&declaration["owns"])
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| Error::new("malformed worker scope"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        require(!scopes.is_empty(), "worker scope declaration is empty")?;
+        for path in crate::files::patch_paths(&body)? {
+            require(
+                scopes
                     .iter()
                     .any(|scope| oms_command_room::overlaps(scope, &path))
-                && !forbidden
-                    .iter()
-                    .any(|scope| oms_command_room::overlaps(scope, &path)),
-            "candidate patch leaves its declared/plan scope",
-        )?;
+                    && !allowed.is_empty()
+                    && allowed
+                        .iter()
+                        .any(|scope| oms_command_room::overlaps(scope, &path))
+                    && !forbidden
+                        .iter()
+                        .any(|scope| oms_command_room::overlaps(scope, &path)),
+                "candidate patch leaves its declared/plan scope",
+            )?;
+        }
+        let gate = serde_json::json!({"event_id":review["event_id"],"patch_sha256":candidate["patch_sha256"],"exit":review["exit"],"gate_verify_exit":review["review"]["gate_verify_exit"],"seat_verdicts":seats.iter().map(|v| &v["verdict"]).collect::<Vec<_>>()});
+        components.push(serde_json::json!({"candidate":candidate,"worker":{"attempt_id":worker["attempt_id"],"task_id":worker["task_id"],"parent_attempt_id":worker["parent_attempt_id"],"refs":worker["refs"]},"review_gate":gate}));
     }
-    let gate = serde_json::json!({"event_id":review["event_id"],"patch_sha256":candidate["patch_sha256"],"exit":review["exit"],"gate_verify_exit":review["review"]["gate_verify_exit"],"seat_verdicts":seats.iter().map(|v| &v["verdict"]).collect::<Vec<_>>()});
-    Ok(
-        serde_json::json!({"task":task,"candidate":candidate,"worker":{"attempt_id":worker["attempt_id"],"task_id":worker["task_id"],"parent_attempt_id":worker["parent_attempt_id"],"refs":worker["refs"]},"review_gate":gate,"allowed_paths":allowed,"superseded_attempts":selection.superseded}),
-    )
+    if components.len() == 1 {
+        let component = components.remove(0);
+        return Ok(
+            serde_json::json!({"task":task,"candidate":component["candidate"],"worker":component["worker"],"review_gate":component["review_gate"],"allowed_paths":allowed,"superseded_attempts":selection.superseded}),
+        );
+    }
+    let snapshot = composition::snapshot(
+        repo,
+        request,
+        &task,
+        components,
+        &allowed,
+        &selection.superseded,
+        service,
+        stop,
+    )?;
+    if applied {
+        composition::verify_retained(&store, &snapshot)?;
+    }
+    Ok(snapshot)
 }
 fn recheck<S: Services + ?Sized>(
     repo: &Path,
@@ -575,6 +599,13 @@ pub(crate) fn run<S: Services + ?Sized>(
     )?;
     let snapshot = preflight(repo, request, service, stop, false)?;
     let candidate = &snapshot["candidate"];
+    if snapshot.get("composition").is_some() {
+        require(
+            snapshot["composition"]["base_sha"] == base,
+            "composed candidate requires the exact common integration base",
+        )?;
+        composition::retain(&store, &tx, &snapshot)?;
+    }
     let patch = verified_patch(&store, candidate)?;
     let scratch = crate::git::Scratch::new()?;
     let index = scratch.0.join("index");
@@ -674,6 +705,9 @@ pub(crate) fn run<S: Services + ?Sized>(
             "applied/index changes differ from reviewed patch",
         )?;
         recovery["stage"] = "commit".into();
+        if snapshot.get("composition").is_some() {
+            recovery["integration_verified"] = true.into();
+        }
         tx.write_json(Path::new(&record_path), &recovery, false, MAX_RESULT)?;
         let commit = exact_commit(
             repo, &execution, request, &snapshot, &base, &tree, service, stop,
@@ -725,7 +759,14 @@ fn complete<S: Services + ?Sized>(
 ) -> Result<()> {
     let store = Store::open(repo)?;
     let candidate = &snapshot["candidate"];
-    let record = serde_json::json!({"schema":1,"task_id":request.task_id,"plan_id":snapshot["task"]["plan_id"],"lease_id":snapshot["task"]["lease_id"],"candidate_event_id":candidate["event_id"],"candidate_attempt_id":snapshot["worker"]["attempt_id"],"patch_sha256":candidate["patch_sha256"],"artifact":candidate["artifact"],"patch":candidate["patch"],"commit":commit,"tree":tree,"base":base,"review_gate":snapshot["review_gate"]});
+    let mut record = serde_json::json!({"schema":1,"task_id":request.task_id,"plan_id":snapshot["task"]["plan_id"],"lease_id":snapshot["task"]["lease_id"],"candidate_event_id":candidate["event_id"],"candidate_attempt_id":snapshot["worker"]["attempt_id"],"patch_sha256":candidate["patch_sha256"],"artifact":candidate["artifact"],"patch":candidate["patch"],"commit":commit,"tree":tree,"base":base,"review_gate":snapshot["review_gate"]});
+    if snapshot.get("composition").is_some() {
+        record["schema"] = 2.into();
+        record["composition"] =
+            serde_json::json!({"path":candidate["artifact"],"sha256":candidate["artifact_sha256"]});
+        record["integration_verify"] =
+            serde_json::json!({"command":request.verify,"tree":tree,"exit":0});
+    }
     let mut review = ExecutionRequest::new(
         args(&[
             "review",
@@ -765,35 +806,47 @@ fn complete<S: Services + ?Sized>(
             "plan review does not match interrupted acceptance",
         )?;
     }
-    if index_rows(repo)?.iter().any(|v| {
-        v["kind"] == "panel-accept"
-            && v["task_id"] == request.task_id
-            && v["patch_sha256"] == candidate["patch_sha256"]
-            && v["base_sha"] == commit
-            && v["exit"] == 0
-    }) {
-        return Ok(());
+    let mut accepted = vec![(candidate, &snapshot["worker"])];
+    if let Some(manifest) = snapshot.get("composition") {
+        accepted.extend(
+            array(&manifest["components"])
+                .iter()
+                .map(|component| (&component["candidate"], &component["worker"])),
+        );
     }
-    let mut registration = oms_command_telemetry::store::AppendArtifactRequest {
-        kind: "panel-accept".into(),
-        provider: request.owner.clone(),
-        patch: Some(store.repo().join(text(candidate, "patch"))),
-        task_id: Some(request.task_id.clone()),
-        inherit_env: false,
-        ..Default::default()
-    };
-    for (name, value) in [
-        ("OMS_INDEX_PLAN_ID", text(&snapshot["task"], "plan_id")),
-        (
-            "OMS_INDEX_ATTEMPT_ID",
-            text(&snapshot["worker"], "attempt_id"),
-        ),
-        ("OMS_INDEX_BASE_SHA", commit.to_owned()),
-    ] {
-        registration.env_overrides.insert(name.into(), value);
+    let rows = index_rows(repo)?;
+    for (accepted_candidate, worker) in accepted {
+        if rows.iter().any(|v| {
+            v["kind"] == "panel-accept"
+                && v["task_id"] == request.task_id
+                && v["attempt_id"] == worker["attempt_id"]
+                && v["patch_sha256"] == accepted_candidate["patch_sha256"]
+                && v["base_sha"] == commit
+                && v["exit"] == 0
+        }) {
+            continue;
+        }
+        let mut registration = oms_command_telemetry::store::AppendArtifactRequest {
+            kind: "panel-accept".into(),
+            provider: request.owner.clone(),
+            patch: Some(store.repo().join(text(accepted_candidate, "patch"))),
+            artifact: snapshot
+                .get("composition")
+                .map(|_| store.repo().join(text(candidate, "artifact"))),
+            task_id: Some(request.task_id.clone()),
+            inherit_env: false,
+            ..Default::default()
+        };
+        for (name, value) in [
+            ("OMS_INDEX_PLAN_ID", text(&snapshot["task"], "plan_id")),
+            ("OMS_INDEX_ATTEMPT_ID", text(worker, "attempt_id")),
+            ("OMS_INDEX_BASE_SHA", commit.to_owned()),
+        ] {
+            registration.env_overrides.insert(name.into(), value);
+        }
+        oms_command_telemetry::store::append_artifact_index(repo, &registration, stop)
+            .map_err(crate::services::telemetry_error)?;
     }
-    oms_command_telemetry::store::append_artifact_index(repo, &registration, stop)
-        .map_err(crate::services::telemetry_error)?;
     Ok(())
 }
 
@@ -872,6 +925,7 @@ pub(crate) fn recover<S: Services + ?Sized>(
         "review_gate",
         "allowed_paths",
         "superseded_attempts",
+        "composition",
     ] {
         require(
             snapshot[field] == saved["snapshot"][field],
@@ -903,6 +957,12 @@ pub(crate) fn recover<S: Services + ?Sized>(
     )?;
     let base = text(&saved, "base");
     let tree = text(&saved, "tree");
+    if snapshot.get("composition").is_some() {
+        require(
+            saved["integration_verified"] == true,
+            "composed acceptance has no successful integration verifier acknowledgement; preserve candidate and landing recovery evidence",
+        )?;
+    }
     require(
         [&base, &tree]
             .iter()
@@ -1002,7 +1062,7 @@ fn accepted_product<S: Services + ?Sized>(
     let tree = text(record, "tree");
     let accepted = text(record, "commit");
     require(
-        record["schema"] == 1
+        (record["schema"] == 1 || record["schema"] == 2)
             && record["patch_sha256"] == crate::digest(patch)
             && [&base, &tree, &accepted]
                 .iter()
@@ -1128,7 +1188,12 @@ pub(crate) fn validate_landed<S: Services + ?Sized>(
     }
     if record.is_object() {
         require(
-            record["schema"] == 1
+            record["schema"]
+                == (if snapshot.get("composition").is_some() {
+                    2
+                } else {
+                    1
+                })
                 && record["task_id"] == request.task_id
                 && ["plan_id", "lease_id"]
                     .iter()
@@ -1141,6 +1206,15 @@ pub(crate) fn validate_landed<S: Services + ?Sized>(
                 && record["review_gate"] == snapshot["review_gate"],
             "stored acceptance identity changed",
         )?;
+        if snapshot.get("composition").is_some() {
+            require(
+                record["composition"]
+                    == serde_json::json!({"path":candidate["artifact"],"sha256":candidate["artifact_sha256"]})
+                    && record["integration_verify"]
+                        == serde_json::json!({"command":accept.verify,"tree":record["tree"],"exit":0}),
+                "composed acceptance verification changed",
+            )?;
+        }
         accepted_product(&execution, record, &patch, service, stop)?;
     }
     // Exercise the native finish proof against a private plan before moving the

@@ -84,6 +84,18 @@ returns a generic success boolean as completion authority.
 | `group_membership_resolver` | Fresh native account-database lookup for an observed gid. Domain checks every explicit member uid and the complete primary-member uid list; a primary gid or group membership boolean cannot prove private ownership |
 | `group_membership_before` | The same complete ownership evidence through bounded, cancellable native account probes, sharing the admission deadline |
 
+Panel review accepts both the existing schema-1 single-candidate record and a
+schema-2 composed record. The latter binds a content-addressed manifest containing
+2–16 reviewed workers for the same task, lease and full base. Plan re-reads each
+component's original artifact and patch, verifies its bindings and passing gate,
+and requires their ordered bytes to equal the aggregate patch. It separately
+requires the exact task verifier and combined tree in the successful integration
+record. The ordinary private-index reconstruction and commit-parent/tree checks
+then verify the aggregate product. A component review is not an integration
+verifier result, and a caller-provided tree or success flag alone grants no
+completion or publication authority. Single-candidate records keep schema 1;
+older consumers must refuse schema-2 records instead of selecting one component.
+
 `Plan::team_admission_before(AdmissionRequest, deadline)` returns an opaque
 contract guard. It pins the canonical writer order, expected immutable spec,
 member generation, root creation event, exact task/criterion/base/policy and
