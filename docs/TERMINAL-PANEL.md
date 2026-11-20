@@ -48,7 +48,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 ## Quick start
 
 1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. Choose an installed Main by number, or press Enter for the first choice. A new Main from this picker can open installed provider orchestrators in background windows. An existing Main is reused without another choice. Use `oms panel --watch` for the board by itself or `oms panel --launch pi` to select Pi explicitly.
-2. The main window keeps the board on the left whenever the window is wide enough (above the CLI only when it is too narrow); the right side is the reader for workers, advisors, reviews and results, alongside the native conversation. At wide widths it shows the graph; narrower layouts fall back to the tree. At fewer than 20 columns the board omits its tab box.
+2. A wide tmux window puts the board across the top. Main and a docked provider sit side by side below it. Narrower windows use a compact arrangement. See [Layout modes and resizing](#layout-modes-and-resizing).
 3. Weekly quota left sits directly below the Room title. Click the weekly line or press `w` for provider readings, sources and reset times. A dash means the Board has no verified reading. The header shows plan progress for work linked to the current Room.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
 5. On the Board, `Tab` switches between Overview and all tasks, `g` or `t` opens Relationships, and `D` inspects the selected call. In a reader, `Tab` switches reader views. Arrows move selection and Enter opens the selected item. Click a Codex native child row or select it and press Enter to read its verified recent replies. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
@@ -561,7 +561,6 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `w` or click Weekly | Open weekly usage details. Quota appears when the Board snapshot is fresh | — |
 | `U` | Refresh weekly quota from idle Claude or AGY sessions. Also available in weekly details | — |
 | `k` / `u` | Capacity / refresh | — |
-| `m` | Cycle Work / Overview / Focus in a managed panel | — |
 | `[` / `]` / `o` | `[` / `]` scroll the Log tab older / newer while it is active; the wheel scrolls over its body | Previous / next section / outline |
 | `o` / `O` in Files | — | Open the selected file in a read-only tmux popup / persistent split pane |
 | `/` | Filter the call rows: type words to narrow by title, role, provider, model or state (every word must match, case-insensitive); `Enter` keeps the filter, `Esc` clears it, arrows still move. The heading shows `Filter /text · shown N of M`. The Attention header and counts are never filtered, and a hidden call that waits on you is reported as `N waiting hidden`. Resets when the room changes | Search result text |
@@ -569,7 +568,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader; Esc from a file diff returns to Files |
 | `?` | Show/hide board key help | — |
 | `Ctrl+L` | Repaint the board | Repaint the reader |
-| `F5` / `F8` / `F9` / `F12` | Control window (when present) / cycle layout / swap chat-board focus / panel-wide key list in tmux | — |
+| `F5` / `F9` / `F12` | Control window (when present) / swap chat-board focus / panel-wide key list in tmux | — |
 | Shift-drag | Copy terminal selection in a managed panel | — |
 | Mouse click | Select a row/tab; graph calls and the main preview their cards | — |
 
@@ -607,42 +606,23 @@ scope and unknown values. A socket error does not stop the native sibling.
 
 ### Layout modes and resizing
 
-The board stays on the left in a landscape window; it moves above the CLI when the
-window is too narrow or physically tall (terminal cells are about twice as tall as wide,
-so rows × 2 ≥ 1.1 × columns, with at least 41 rows), and returns left when it is wide
-enough again (4 columns past the narrow limit and rows × 2 ≤ 0.9 × columns; between the
-two a window keeps its current edge) (28 percent of the width or 45 percent of the
-height the first time, sized from the terminal that is attaching; optional integer
-`OMS_PANEL_BOARD_PERCENT` overrides the landscape default, clamped to 25–35 percent,
-with invalid values ignored).
+In a managed tmux window, the board spans the top at 100 columns or more,
+at least 30 rows, and a width of at least twice the row count. It uses about
+28 percent of the height, reserving at least 17 rows for the board and
+12 for the native chat. Main
+sits below. When the window has a single provider pane bound to the same
+Main and Room, Main and the provider share the lower row.
 
-In Work mode, a landscape default or scaled record is capped at the smaller of 38
-percent of the window and the width that leaves 120 columns for the CLI; the existing
-minimum split rules apply on narrower windows. A new landscape board stays unsplit when
-20 board columns, the divider and 40 CLI columns cannot fit; a portrait split needs 20
-rows on each side of the divider. A deliberate border drag remains in effect for that
-Work window and is recorded there. A call opened from the board shows in a reader pane
-above the CLI. Herdr uses the same left board, starting at the same 28 percent share and
-honoring `OMS_PANEL_BOARD_PERCENT`; the tall-window rule is tmux-only and Herdr's
-placement is unchanged.
+In a compact two-pane window, the board sits below Main when the window is
+narrow or tall and has at least 20 rows. In a shorter window it sits at the
+left. When a provider is docked in a compact window, the board and provider
+stack to the left of Main where the split fits. A very narrow window can
+stack all three panes vertically when it has enough rows.
 
-Later Herdr resizing is not recorded or shared; `SplitSync` synchronizes the board width
-or portrait height only in tmux. In tmux, each window records its board edge and size in
-its window option `@oms_panel_split` (`left:<cells>c` or `top:<rows>r`; the older
-percent form is converted on first sight). Resizing recomputes the portrait/landscape
-edge with a small hysteresis band and scales the recorded size with the window, clamped
-to keep at least 20 cells for the board and chat. A flip moves the existing board pane
-without moving focus, preserving pane ids; dragging the border sets the size followed by
-later resizes.
-
-Press `m` on the board or `F8` in tmux to cycle Work, Overview and Focus. Overview gives
-the graph about 62 percent of the landscape width without changing the Work record.
-Focus zooms the CLI pane; leaving it unzooms and returning to Work restores its recorded
-width. SplitSync stays idle while Focus is zoomed and does not apply the Work record in
-Overview. Graph rendering falls back to the tree when the board is too narrow for the
-graph. The control window and other zoomed windows are left alone. A watcher whose OMS
-sources change re-executes itself once they compile, so updated boards need no manual
-restart; an open reader stays.
+Automatic reflow applies to unzoomed windows with a verified board and Main,
+optionally with one verified provider pane. It moves the existing panes and
+restores focus to the same pane. Inline and Herdr panels use their host's
+layout.
 
 Select `v` in the task panel to expand its graph; `Esc` or watcher shutdown collapses
 it. Native input and permission prompts stay in the original CLI. The room's detailed
@@ -792,7 +772,7 @@ that a panel is empty.
 Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
 are preserved, with one addition: `F9` selects the other pane
-of the window, `F8` cycles layout modes, `F5` opens the control window and `F12` shows
+of the window, `F5` opens the control window and `F12` shows
 the key list, all without the prefix (F10/F11 belong to terminal menus). tmux key
 bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
 passes the key through unchanged in every other session, and is not installed when the key is

@@ -1270,6 +1270,7 @@ pub fn frame_styled(
     board_frame(report, nav, columns, height, read, colored, fill_height).lines
 }
 
+#[derive(Default)]
 pub(crate) struct BoardFrame {
     pub lines: Vec<String>,
     pub provider_rows: [Option<usize>; 3],
@@ -1302,6 +1303,7 @@ pub(crate) fn board_frame(
         read,
         colored,
         fill_height,
+        false,
         &mut 1,
     )
 }
@@ -1313,6 +1315,9 @@ pub fn page_capacity(
     height: usize,
     read: &BTreeMap<String, String>,
 ) -> usize {
+    if nav.help || nav.health || nav.detail {
+        return 1;
+    }
     let mut capacity = 1;
     frame_with_capacity(
         report,
@@ -1322,9 +1327,21 @@ pub fn page_capacity(
         read,
         false,
         false,
+        true,
         &mut capacity,
     );
     capacity
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Work-row and overlay painting calls on this thread.
+    static ROW_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn count_row_render() {
+    #[cfg(test)]
+    ROW_RENDERS.with(|count| count.set(count.get() + 1));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1336,6 +1353,7 @@ fn frame_with_capacity(
     read: &BTreeMap<String, String>,
     colored: bool,
     fill_height: bool,
+    capacity_only: bool,
     page_capacity: &mut usize,
 ) -> BoardFrame {
     let columns = columns.max(1);
@@ -1476,6 +1494,7 @@ fn frame_with_capacity(
         ));
     }
     if overlay {
+        count_row_render();
         lines.extend(optional.iter().cloned());
         lines.extend(notices.iter().cloned());
         lines.extend(main.iter().cloned());
@@ -1595,6 +1614,10 @@ fn frame_with_capacity(
             row_capacity
         };
         *page_capacity = capacity.max(1);
+        // Per-key paging needs only the capacity; nothing below changes it.
+        if capacity_only {
+            return BoardFrame::default();
+        }
         let selected = selected_worker
             .unwrap_or(0)
             .min(calls.len().saturating_sub(1));
@@ -1893,6 +1916,7 @@ fn render_call_row(
     use_cards: bool,
     colored: bool,
 ) -> String {
+    count_row_render();
     let inner = columns - if use_cards { 4 } else { 0 };
     let display = call_display(call);
     let (glyph, role_sgr) = role_style(display.role);
@@ -2342,6 +2366,7 @@ fn render_provider_rows(
     worker_rows: &mut BTreeMap<usize, (String, String)>,
     base: usize,
 ) -> Vec<String> {
+    count_row_render();
     let mut lines = Vec::new();
     let direct_page = calls
         .iter()
@@ -3722,6 +3747,7 @@ fn render_summary_rows(
     use_cards: bool,
     colored: bool,
 ) -> Vec<String> {
+    count_row_render();
     let mut states = BTreeMap::new();
     for entry in calls {
         *states.entry(text(entry.call, "state")).or_insert(0usize) += 1;
@@ -5502,6 +5528,131 @@ mod tests {
             frame.contains("1 filt") && !frame.contains("1 fold"),
             "{frame}"
         );
+    }
+
+    #[test]
+    fn page_capacity_skips_row_painting_and_matches_full_frame() {
+        use navigation::Navigation;
+
+        let mut participants = vec![json!({
+            "participant":"M", "role":"main", "provider":"claude",
+            "state":"working", "joined":true, "title":"Lead",
+        })];
+        for n in 0..40 {
+            participants.push(json!({
+                "participant":format!("P{n:02}"), "role":"worker", "parent":"M",
+                "provider":(["codex", "claude", "antigravity"][n % 3]),
+                "state":"working", "title":format!("Work {n}"),
+            }));
+        }
+        let report = json!({
+            "collection":{"ok":true}, "plan":{"goal":"Ship"},
+            "provider_sessions":["codex", "claude", "antigravity"],
+            "room":{"id":"room", "main":"M", "participants":participants},
+        });
+        let read = BTreeMap::new();
+        let cases = [
+            ("provider overview", 80, 24, Navigation::default()),
+            (
+                "detail page",
+                80,
+                24,
+                Navigation {
+                    view: View::Detail,
+                    selected: 25,
+                    offset: 20,
+                    ..Default::default()
+                },
+            ),
+            (
+                "narrow filtered board",
+                40,
+                12,
+                Navigation {
+                    filter: "Work 1".into(),
+                    editing: true,
+                    notice: Some("Dispatched worker; this notice wraps across two rows".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "summary",
+                80,
+                24,
+                Navigation {
+                    view: View::Summary,
+                    ..Default::default()
+                },
+            ),
+            (
+                "help overlay",
+                80,
+                24,
+                Navigation {
+                    help: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "health overlay",
+                80,
+                24,
+                Navigation {
+                    health: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "detail overlay",
+                80,
+                24,
+                Navigation {
+                    detail: true,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (name, columns, height, nav) in cases {
+            let mut expected = 1;
+            ROW_RENDERS.with(|count| count.set(0));
+            let frame = frame_with_capacity(
+                &report,
+                &nav,
+                columns,
+                height,
+                &read,
+                false,
+                false,
+                false,
+                &mut expected,
+            );
+            assert!(ROW_RENDERS.with(std::cell::Cell::get) > 0, "{name}");
+            if nav.help || nav.health || nav.detail {
+                assert_eq!(expected, 1, "{name}");
+            } else if nav.view == View::Detail {
+                let selected = visible(&report, &nav);
+                assert!(
+                    expected > 1 && expected < nav.selected,
+                    "{name}: {expected}"
+                );
+                assert!(
+                    frame.worker_rows.values().any(|(participant, _)| {
+                        participant == text(&selected[nav.selected], "participant")
+                    }),
+                    "{name}"
+                );
+            } else if name == "provider overview" {
+                assert!(frame.provider_rows.iter().all(Option::is_some), "{name}");
+                assert!(expected > 1 && expected < 40, "{name}: {expected}");
+            }
+            ROW_RENDERS.with(|count| count.set(0));
+            assert_eq!(
+                page_capacity(&report, &nav, columns, height, &read),
+                expected,
+                "{name}"
+            );
+            assert_eq!(ROW_RENDERS.with(std::cell::Cell::get), 0, "{name}");
+        }
     }
 
     #[test]
