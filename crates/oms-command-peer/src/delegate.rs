@@ -571,6 +571,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         role,
     )?;
     route.explicit = !providers::panel_implicit_target() || route.account_pinned;
+    route.public_research = read && matches!(args.get("role"), "researcher" | "scholar");
     providers::bind_account(&mut route, &repo)?;
     let run = peer::run_id()?;
     let artifact = directory.join(format!("{}-delegate-{run}.md", target.provider));

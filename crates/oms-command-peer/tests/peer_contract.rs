@@ -473,6 +473,69 @@ fn council_seat_publication_stops_after_thread_append_failure() {
 }
 
 #[test]
+fn delegate_research_roles_expose_public_tools_without_file_write_authority() {
+    provider_isolated(
+        "delegate_research_roles_expose_public_tools_without_file_write_authority",
+        "private",
+        || {
+            let repo = provider_repo();
+            for provider in ["codex", "claude"] {
+                for role in ["", "repo-auditor", "researcher", "scholar"] {
+                    let public = matches!(role, "researcher" | "scholar");
+                    let mut values = args(&[
+                        "--to",
+                        provider,
+                        "--read-only",
+                        "--model",
+                        "fixture",
+                        "--no-task",
+                        "--no-memory",
+                        "--no-ml-context",
+                        "--no-graph-context",
+                    ]);
+                    if !role.is_empty() {
+                        values.extend(args(&["--role", role]));
+                    }
+                    values.push("Inspect relevant sources and cite the evidence".into());
+                    let probe = ProviderProbe::default();
+                    let output = oms_command_peer::run_with_executor(
+                        "peer-delegate",
+                        &values,
+                        &repo.0,
+                        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                        &STOP,
+                        &probe,
+                    );
+                    assert_eq!(output.0, 0, "{provider}/{role}: {}", message(&output));
+                    let calls = probe.calls.lock().unwrap();
+                    assert_eq!(calls.len(), 1);
+                    let argv = &calls[0].request.argv;
+                    assert_ne!(calls[0].request.cwd, repo.0);
+                    assert!(!argv.iter().any(|a| a == "--dangerously-skip-permissions" || a == "--allowedTools"));
+                    if provider == "codex" {
+                        assert_eq!(option_value(argv, "--sandbox").unwrap(), "read-only");
+                        assert!(argv.iter().any(|a| a == "features.apps=false"));
+                        let search = if public {
+                            "web_search=\"live\""
+                        } else {
+                            "web_search=\"disabled\""
+                        };
+                        assert!(argv.iter().any(|a| a == search));
+                    } else {
+                        assert_eq!(option_value(argv, "--permission-mode").unwrap(), "plan");
+                        let tools = option_value(argv, "--tools").unwrap().to_str().unwrap();
+                        assert_eq!(tools.contains("WebSearch"), public);
+                        assert_eq!(tools.contains("WebFetch"), public);
+                        assert!(!tools.contains("Write") && !tools.contains("Edit"));
+                        assert!(argv.iter().any(|a| a == "--strict-mcp-config"));
+                    }
+                }
+            }
+        },
+    );
+}
+
+#[test]
 fn provider_native_transports_match_shell_contract() {
     provider_isolated(
         "provider_native_transports_match_shell_contract",

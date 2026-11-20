@@ -101,6 +101,7 @@ pub fn begin_interactive_with_executor(
         explicit: request.selected_model.is_some(),
         account: request.account.unwrap_or("").into(),
         account_pinned: false,
+        public_research: false,
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     let physical = crate::process::PhysicalAttempt {
