@@ -873,6 +873,41 @@ impl oms_command_landing::Services for ControlServices<'_> {
     ) -> oms_command_landing::Result<oms_command_landing::V> {
         crate::services_landing::landing_review(self, request, self.interrupted)
     }
+    fn panel_accept(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+        fence: &oms_command_landing::V,
+    ) -> oms_command_landing::Result<()> {
+        let refuse = |message| oms_command_landing::Error::new(2, message);
+        let fence: Value = serde_json::from_slice(&fence.json(false)?)
+            .map_err(|_| refuse("malformed panel acceptance fence"))?;
+        if !request.task.is_empty()
+            || request.policy.ml
+            || request.policy.allow_test_reduction
+            || request.policy.allow_restructure
+            || request.policy.accept_encoding_loss
+            || request.policy.accept_salvaged
+            || fence["snapshot"]["candidate"]["patch_sha256"].as_str() != Some(request.patch_sha256)
+            || fence["base"].as_str() != Some(request.base)
+            || fence["verify"].as_str() != Some(request.policy.verify.as_str())
+            || fence["allow_verifier_change"].as_bool()
+                != Some(request.policy.allow_verifier_change)
+            || fence["allow_floor_change"].as_str().unwrap_or_default()
+                != request.policy.allow_floor_change
+        {
+            return Err(refuse("panel acceptance does not match this exact landing"));
+        }
+        let collab = crate::services_collab::CollabServices::new(self.interrupted, &self.source)
+            .map_err(|e| oms_command_landing::Error::new(2, e))?;
+        oms_panel_core::results::verify_accept_fence(
+            request.state_repo,
+            request.execution_repo,
+            &fence,
+            &collab,
+            self.interrupted,
+        )
+        .map_err(|e| oms_command_landing::Error::new(e.code, e.message))
+    }
     fn landing_approval(
         &self,
         request: &oms_command_landing::services::LandingRequest<'_>,

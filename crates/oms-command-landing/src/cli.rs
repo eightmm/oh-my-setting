@@ -75,6 +75,7 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                 "patch",
                 "verify",
                 "plan-task",
+                "panel-accept",
                 "allow-floor-change",
                 "approval",
                 "approval-token",
@@ -208,6 +209,16 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
             out.words.push(s.into());
         }
         i += 1;
+    }
+    if tool == "patch-land" && out.has("panel-accept") {
+        require(
+            !out.has("recover") && !out.has("plan-task"),
+            "panel acceptance uses its own task and recovery transaction",
+        )?;
+        require(
+            !out.get("panel-accept").is_empty() && out.get("panel-accept").len() <= 1024 * 1024,
+            "panel acceptance fence is empty or exceeds its bound",
+        )?;
     }
     if tool == "land" {
         require(

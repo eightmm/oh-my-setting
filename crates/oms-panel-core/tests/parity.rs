@@ -207,6 +207,17 @@ impl Services for Fake {
                 .ok_or_else(|| Error::new("unexpected council execution")),
             NativeCommand::Room => Ok(output(self.room.borrow().clone())),
             NativeCommand::Land => {
+                let at = args.iter().position(|v| v == "--panel-accept").unwrap();
+                let fence: Value = serde_json::from_str(args[at + 1].to_str().unwrap()).unwrap();
+                results::verify_accept_fence(repo, repo, &fence, self, &STOP)?;
+                for key in ["owner", "main_attempt_id", "task_id", "base", "verify"] {
+                    let mut stale = fence.clone();
+                    stale[key] = "changed".into();
+                    assert!(results::verify_accept_fence(repo, repo, &stale, self, &STOP).is_err());
+                }
+                let mut stale = fence.clone();
+                stale["snapshot"]["review_gate"]["exit"] = 1.into();
+                assert!(results::verify_accept_fence(repo, repo, &stale, self, &STOP).is_err());
                 let position = args.iter().position(|v| v == "--patch").unwrap();
                 let status = Command::new("git")
                     .args([

@@ -277,6 +277,58 @@ fn recheck<S: Services + ?Sized>(
         "candidate, digest, lease, task or review gate changed",
     )
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LandingFence {
+    schema: u32,
+    snapshot: Value,
+    owner: String,
+    main_attempt_id: String,
+    task_id: String,
+    execution_repo: PathBuf,
+    base: String,
+    verify: String,
+    allow_verifier_change: bool,
+    allow_floor_change: Option<String>,
+}
+
+pub(crate) fn verify_landing_fence<S: Services + ?Sized>(
+    repo: &Path,
+    execution: &Path,
+    value: &Value,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let fence: LandingFence = serde_json::from_value(value.clone()).map_err(Error::new)?;
+    require(fence.schema == 1, "unsupported panel acceptance fence")?;
+    let execution = std::fs::canonicalize(execution).map_err(Error::new)?;
+    require(
+        execution == std::fs::canonicalize(&fence.execution_repo).map_err(Error::new)?
+            && (crate::hex(&fence.base, 40) || crate::hex(&fence.base, 64))
+            && crate::git::text(service, &execution, &["rev-parse", "HEAD"], stop)? == fence.base,
+        "panel acceptance execution repository or base changed",
+    )?;
+    let request = AcceptRequest {
+        owner: fence.owner,
+        task_id: fence.task_id,
+        main_attempt_id: fence.main_attempt_id,
+        message: "validate existing panel acceptance".into(),
+        verify: fence.verify,
+        execution_repo: execution,
+        expected_patch_sha256: fence.snapshot["candidate"]["patch_sha256"]
+            .as_str()
+            .map(str::to_owned),
+        allow_verifier_change: fence.allow_verifier_change,
+        allow_floor_change: fence.allow_floor_change,
+    };
+    crate::results::validate_accept(&request)?;
+    require(
+        request.expected_patch_sha256.is_some(),
+        "panel acceptance candidate digest unavailable",
+    )?;
+    recheck(repo, &request, &fence.snapshot, service, stop)
+}
 struct IndexLock(PathBuf);
 impl Drop for IndexLock {
     fn drop(&mut self) {
@@ -566,7 +618,7 @@ pub(crate) fn run<S: Services + ?Sized>(
     let mut recovery = serde_json::json!({"schema":1,"task_id":request.task_id,"execution_repo":execution,"snapshot":snapshot,"base":base,"tree":tree,"stage":"application","commit":null,"message":request.message,"verify":request.verify});
     tx.write_json(Path::new(&record_path), &recovery, true, MAX_RESULT)?;
     let outcome = (|| -> Result<Value> {
-        let fence = serde_json::json!({"snapshot":snapshot,"owner":request.owner,"task_id":request.task_id,"base":base});
+        let fence = serde_json::json!({"schema":1,"snapshot":snapshot,"owner":request.owner,"main_attempt_id":request.main_attempt_id,"task_id":request.task_id,"execution_repo":execution,"base":base,"verify":request.verify,"allow_verifier_change":request.allow_verifier_change,"allow_floor_change":request.allow_floor_change});
         let mut argv = args(&[
             "--patch",
             store

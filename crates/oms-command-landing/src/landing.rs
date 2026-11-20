@@ -110,6 +110,13 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         frozen_patch: Path::new(""),
         patch: &raw,
     };
+    let panel_accept = o
+        .has("panel-accept")
+        .then(|| V::parse(o.get("panel-accept").as_bytes()))
+        .transpose()?;
+    if let Some(fence) = &panel_accept {
+        c.services.panel_accept(&prelim, fence)?;
+    }
     let approval_key = concat!("approval-", "to", "ken");
     let grants = [
         o.has("approval"),
@@ -289,6 +296,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "frozen patch changed after admission; intent left outstanding",
     )?;
     c.services.fence_landing(&request, &intent)?;
+    if let Some(fence) = &panel_accept {
+        c.services.panel_accept(&request, fence)?;
+    }
     require(
         git.snapshot()? == before,
         "tree moved during final authority fence",

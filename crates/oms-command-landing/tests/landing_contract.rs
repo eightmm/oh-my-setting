@@ -386,6 +386,20 @@ impl Services for RecordingServices {
         self.log(format!("review frozen={}", request.frozen_patch.display()));
         Ok(obj([]))
     }
+    fn panel_accept(
+        &self,
+        request: &oms_command_landing::services::LandingRequest<'_>,
+        fence: &V,
+    ) -> oms_command_landing::Result<()> {
+        if fence.get("schema").py() != "1"
+            || fence.get("patch_sha256").text() != Some(request.patch_sha256)
+            || fence.get("base").text() != Some(request.base)
+        {
+            return Err(oms_command_landing::Error::new(2, "changed panel fence"));
+        }
+        self.log(format!("panel frozen={}", request.frozen_patch.display()));
+        Ok(())
+    }
     fn fence_landing(
         &self,
         request: &oms_command_landing::services::LandingRequest<'_>,
@@ -643,10 +657,43 @@ fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
         &log_env,
     );
     assert_eq!(code, 0, "{err}");
+    let base = iso
+        .command(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let base = String::from_utf8(base.stdout).unwrap();
+    let panel = obj([
+        ("schema", 1usize.into()),
+        ("base", base.trim().into()),
+        (
+            "patch_sha256",
+            oms_command_plan::json::sha(fs::read(repo.join(patch)).unwrap()).into(),
+        ),
+    ]);
+    let mut stale = panel.clone();
+    stale.set("base", "changed");
+    let stale = String::from_utf8(stale.json(false).unwrap()).unwrap();
     let (code, _, err) = iso.run_env(
         "patch-land",
         &repo,
-        &["--patch", patch, "--allow-verifier-change"],
+        &["--patch", patch, "--panel-accept", &stale],
+        &log_env,
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("changed panel fence"), "{err}");
+    assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");
+    let panel = String::from_utf8(panel.json(false).unwrap()).unwrap();
+    let (code, _, err) = iso.run_env(
+        "patch-land",
+        &repo,
+        &[
+            "--patch",
+            patch,
+            "--allow-verifier-change",
+            "--panel-accept",
+            &panel,
+        ],
         &log_env,
     );
     assert_eq!(code, 0, "{err}");
@@ -669,12 +716,14 @@ fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
         "{frozen}"
     );
     // Review sees the path the intent records; the fence gets the consent.
-    assert_eq!(calls[2], format!("review frozen={frozen}"));
+    assert_eq!(calls[2], "panel frozen=");
+    assert_eq!(calls[3], format!("review frozen={frozen}"));
     assert_eq!(
-        calls[3],
+        calls[4],
         format!("fence frozen={frozen} patch={frozen} consent=true")
     );
-    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(calls[5], format!("panel frozen={frozen}"));
+    assert_eq!(calls.len(), 6, "{calls:?}");
     assert!(Path::new(&frozen).is_file());
     assert!(intent.get("verifier_change_consent").truth());
 }

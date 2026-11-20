@@ -61,6 +61,7 @@ labels, user-provided receipts or a successful worker exit.
 | `publication_scan` | Launch `review::scan_worker` as a dedicated native process. It lowers RLIMIT_AS; the parent must enforce wall/output limits and reap the whole process tree. Never invoke it in an embedded CLI thread |
 | `publication_guard` | The canonical shared-state/canonical-sync fence, retained through publication; busy/unknown is a refusal, with lock contention reported as 75 |
 | `landing_review` | Native main-reviewer and peer review receipts, exact reviewed patch/verifier/lease, salvage provenance/consent and mandatory security-review checks. Return the canonical review/done receipt digests |
+| `panel_accept` | Internal `--panel-accept` bridge. Bind the exact patch, base, execution repository and verifier policy, then reread the live Main, Room, Plan lease, candidate and review evidence before admission and again immediately before apply. Caller JSON is an expected snapshot, never a grant; an unwired service refuses. |
 | `landing_approval` | Request or read/validate an exact private approval; validation does not consume it. Bind execution policy, parameters, controller, base, digest, task, lease and attempt |
 | `fence_landing` | After durable intent, perform plan review-to-landing CAS and reserve the approved grant. The intent stores the consuming approval version |
 | `complete_landing` | Finalize actual plan completion and consumed approval from the exact durable intent; no blanket success flag may substitute |
