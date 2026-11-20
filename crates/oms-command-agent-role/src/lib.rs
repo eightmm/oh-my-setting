@@ -8,6 +8,8 @@
 
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
+pub mod native_model;
+
 #[cfg(unix)]
 mod native;
 #[cfg(unix)]

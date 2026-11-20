@@ -55,24 +55,41 @@ Native role renderer와 raw peer 등 실제 consumer별 차이를 확인한다.
 **기존 owner: MR-A / TM-01, TM-07~09.** Provider identity는 CC-01/03과 조정한다.
 CC-02의 full catalog consumer는 #276에 있으므로 별도 구현하지 않는다.
 
-### 확인한 source와 가장 작은 변경
+### 구현된 native 요청 검증과 남은 경계
 
-- `crates/oms-command-agent-role/src/policy.rs`: AGY 모델 suffix와 route effort가
-  `low/medium/high`에 묶여 있다.
-- `crates/oms-panel-core/src/routing.rs`: panel request/route 검증과 tier별 provider
-  중복 제한을 갖고 있고, 기존 snapshot·최종 eligibility 검증도 이미 존재한다.
-- `crates/oms-command-peer/src/providers.rs`: 다른 effort 집합을 허용하며 AGY도 일반
-  effort flag 경로를 사용한다.
-- `crates/oms-command-providers-skills/src/models.rs`: provider 단위 effort mechanism과
-  catalog를 수집한다. 목록에 있다는 것만으로 account entitlement를 증명하지 않는다.
+`oms-command-agent-role::native_model`의 작은 공통 validator를 role policy,
+panel resolver, peer route/argv, native orchestrator argv가 함께 사용한다. 기존
+dependency 경로를 재사용하며 새 catalog, registry, DB나 외부 dependency는 없다.
+Role renderer의 Claude 버전 목록과 panel의 세 단계 제한을 제거하고 versioned
+family 검증 및 기존 native effort vocabulary를 맞춘다.
 
-기존 `ProviderEvidence`, `CapabilityEvidence`, `RouteSnapshot`을 확장·재사용해
-catalog producer → resolver → argv builder의 descriptor/validation을 맞춘다.
-Native interactive, native headless, subscription bridge/API 경로를 구분하고,
-effort는 supported set / fixed / provider default / unknown을 표현한다.
-Exact native ID, display alias, composite profile 및 provider/CLI version·account·
-endpoint·관측 시각/만료 근거를 보존한다. Tier는 추천 정책이며 전체 선택 목록을
-대체하지 않는다. 현재 schema 2와 명시적 pin의 의미를 조용히 바꾸지 않는다.
+| Native 요청 | 검증 경계 |
+|---|---|
+| Codex | `low/medium/high/xhigh/max/ultra` 토큰 전달; 개별 모델 지원을 단정하지 않음 |
+| Claude | `low/medium/high/xhigh/max`; `ultra`는 거절 |
+| AGY Neon/Hydrogen | `xhigh` 포함 native 요청과 versioned selector 지원; `max/ultra` 거절 |
+| AGY fixed Orchestrator 2종 | effort 생략을 허용하며 구체적인 effort 요청은 argv 생성 전 거절 |
+| Unknown | 명시적 raw native 모델은 기존 token 검증 후 전달할 수 있지만 지원 근거는 `unknown`; managed role의 미확인 family/provider는 거절 |
+
+Schema 2 route의 `effort` 생략은 additive하게 허용하며 native 기본값을 뜻한다.
+기존 명시 effort 값과 role renderer의 출력은 유지한다. Fixed 모델만 명시한 panel
+요청은 이전 adjustable tier의 effort를 상속하지 않고, 명시한 effort와 충돌하면
+거절한다. `researcher`의 light/low 제한, 명시 account pin, catalog family upgrade와
+최종 resolved eligibility 검사는 유지한다. Fixed 모델의 자동 선택은 exact catalog
+entry를 요구하며 새 composite profile의 membership을 추론하지 않는다.
+
+기존 `ProviderEvidence`, `CapabilityEvidence`, `RouteSnapshot`은 계속 원본 목록과
+출처를 보존한다. `effort_support`에는 `fixed`, `provider_default`를 더하며, 실제
+exact-model 목록이 있을 때만 `reported_supported/unsupported`로 판정한다. Provider
+단위 effort 목록이나 모델 이름만으로 supported 목록을 만들지 않는다. 관측 account가
+선택 account와 다르거나 만료·미래 관측이면 해당 목록을 route에 적용하지 않는다.
+현재 native route는 endpoint를 증명하지 않으므로 endpoint가 지정된 capability
+근거도 `unknown`으로 보존한다. 고정 profile의 실제 effort 값이나 served/applied
+설정은 새로 추정하지 않는다.
+
+이 변경은 native 요청 검증이다. Subscription bridge/API의 capability, 새 endpoint
+binding, 실제 계정 entitlement·inference 성공은 별도 증거가 필요하다. Native display
+alias 정규화와 full catalog consumer는 기존 owner를 사용한다.
 
 ### 완료 조건
 
