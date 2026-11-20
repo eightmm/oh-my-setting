@@ -309,11 +309,8 @@ is_provider_cli() {
 }
 hide_provider_clis() {
   local rest="$PATH:" dir entry base hit shadow count=0 filtered=""
-  CHECK_PROVIDER_CLIS="opencode opencode2 $(
-    # shellcheck source=scripts/lib/provider-registry.sh
-    . "$ROOT/scripts/lib/provider-registry.sh"
-    for name in $(oms_provider_supported_names); do oms_provider_binary "$name"; done | tr '\n' ' '
-  )"
+  # Binary names of the supported provider CLIs (native provider registry).
+  CHECK_PROVIDER_CLIS="codex claude agy cursor-agent grok gemini qwen opencode opencode2 dsh vibe pi copilot droid aider muse kimi kiro-cli cn goose cline kilo openhands auggie"
   while [ -n "$rest" ]; do
     dir="${rest%%:*}"; rest="${rest#*:}"; hit=0
     if [ -n "$dir" ] && [ -d "$dir" ]; then
