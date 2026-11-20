@@ -2408,9 +2408,10 @@ fn board_split(
                 return None;
             };
             let (width, height) = size.split_once('\t')?;
-            crate::layout::wide_board_rows(
+            crate::layout::top_board_rows(
                 usize::from(width.parse::<u16>().ok()?),
                 usize::from(height.parse::<u16>().ok()?),
+                false,
             )
         })
         .flatten()

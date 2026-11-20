@@ -48,7 +48,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 ## Quick start
 
 1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. Choose an installed Main by number, or press Enter for the first choice. A new Main from this picker can open installed provider orchestrators in background windows. An existing Main is reused without another choice. Use `oms panel --watch` for the board by itself or `oms panel --launch pi` to select Pi explicitly.
-2. A wide tmux window puts the board across the top. Main and a docked provider sit side by side below it. Narrower windows use a compact arrangement. See [Layout modes and resizing](#layout-modes-and-resizing).
+2. A wide or tall (portrait) tmux window puts the board across the top. Main and a docked provider sit below it, side by side when both fit. Other windows use a compact arrangement. See [Layout modes and resizing](#layout-modes-and-resizing).
 3. Weekly quota left sits directly below the Room title. Click the weekly line or press `w` for provider readings, sources and reset times. A dash means the Board has no verified reading. The header shows plan progress for work linked to the current Room.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
 5. On the Board, `Tab` switches between Overview and all tasks, `g` or `t` opens Relationships, and `D` inspects the selected call. In a reader, `Tab` switches reader views. Arrows move selection and Enter opens the selected item. Click a Codex native child row or select it and press Enter to read its verified recent replies. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
@@ -606,15 +606,22 @@ scope and unknown values. A socket error does not stop the native sibling.
 
 ### Layout modes and resizing
 
-In a managed tmux window, the board spans the top at 100 columns or more,
-at least 30 rows, and a width of at least twice the row count. It uses about
-28 percent of the height, reserving at least 17 rows for the board and
-12 for the native chat. Main
-sits below. When the window has a single provider pane bound to the same
-Main and Room, Main and the provider share the lower row.
+In a managed tmux window, the board spans the top when the window is wide
+(100 columns or more and a width of at least twice the row count) or
+portrait (at least 40 columns and rows at least two thirds of the columns,
+about 4:3 tall with the usual 1:2 terminal cell) and has at least 30 rows.
+It uses about 28 percent
+of the height, reserving at least 17 rows for the board and 12 for the
+native chat; a 140x130 window gets a 36-row board. Main sits below. When the
+window has a single provider pane bound to the same Main and Room, Main and
+the provider share the lower row if the window is wider than 80 columns, so
+each keeps at least 40; otherwise the provider takes its own full-width row
+below Main, with at least 8 rows. After a resize, a board-above window keeps
+its existing split while every pane still meets these minimums; otherwise
+reflow restores them.
 
-In a compact two-pane window, the board sits below Main when the window is
-narrow or tall and has at least 20 rows. In a shorter window it sits at the
+Between those shapes, in a compact two-pane window, the board sits below Main
+when the window is narrow or tall and has at least 20 rows. In a shorter window it sits at the
 left. When a provider is docked in a compact window, the board and provider
 stack to the left of Main where the split fits. A very narrow window can
 stack all three panes vertically when it has enough rows.

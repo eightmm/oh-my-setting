@@ -342,10 +342,17 @@ impl<'a> Pane<'a> {
     }
 }
 
-pub(crate) fn wide_board_rows(width: usize, height: usize) -> Option<usize> {
-    // The existing native chat dock needs at least 17 rows in the board.
-    (width >= 100 && width >= height.saturating_mul(2) && height > TOP_MIN_ROWS + MAIN_MIN_ROWS)
-        .then(|| ((height - 1) * BOARD_SHARE / 100).clamp(TOP_MIN_ROWS, height - MAIN_MIN_ROWS - 1))
+/// Board rows above Main for a wide window (at least 100 columns and twice as
+/// many columns as rows) or a portrait one: rows at least two thirds of the
+/// columns, about 4:3 tall with the usual 1:2 cell shape. The board keeps about
+/// 28% of the height and at least 17 rows for its native chat dock; Main keeps
+/// 12, and a `stacked` provider below Main keeps 8 more.
+pub(crate) fn top_board_rows(width: usize, height: usize, stacked: bool) -> Option<usize> {
+    let wide = width >= 100 && width >= height.saturating_mul(2);
+    let portrait = width >= NATIVE_MIN && height.saturating_mul(3) >= width.saturating_mul(2);
+    let below = MAIN_MIN_ROWS + if stacked { MIN_DOCK_ROWS + 1 } else { 0 };
+    ((wide || portrait) && height > TOP_MIN_ROWS + below)
+        .then(|| ((height - 1) * BOARD_SHARE / 100).clamp(TOP_MIN_ROWS, height - below - 1))
 }
 
 fn plan_layout<'a>(
@@ -366,25 +373,46 @@ fn plan_layout<'a>(
         slots.push(pane.id);
         format!("{},{}", bounds.cell(), &pane.id[1..])
     };
-    let body = if let Some(rows) = wide_board_rows(w, h) {
+    // Main and a dock share the lower row only when each gets a usable width.
+    let stacked = dock.is_some() && w <= NATIVE_MIN * 2;
+    let body = if let Some(rows) = top_board_rows(w, h, stacked) {
+        // Keep a user's split only while every pane still meets its floor.
         if board_actual.y == 0
             && board_actual.width == w
+            && board_actual.height >= TOP_MIN_ROWS
             && main_actual.x == 0
             && board_actual.y < main_actual.y
-            && dock
-                .is_none_or(|pane| pane.bounds.y == main_actual.y && pane.bounds.x > main_actual.x)
+            && main_actual.height >= MAIN_MIN_ROWS
+            && dock.is_none_or(|pane| {
+                if stacked {
+                    pane.bounds.x == 0
+                        && pane.bounds.width == w
+                        && pane.bounds.y > main_actual.y
+                        && pane.bounds.height >= MIN_DOCK_ROWS
+                } else {
+                    pane.bounds.y == main_actual.y
+                        && pane.bounds.x > main_actual.x
+                        && main_actual.width >= NATIVE_MIN
+                        && pane.bounds.width >= NATIVE_MIN
+                }
+            })
         {
             return None;
         }
         let (top, work) = canvas.rows(rows)?;
         let top = leaf(top, board);
         let work = if let Some(dock) = dock {
-            let (left, right) = work.columns((w - 1) / 2)?;
+            let (first, second) = if stacked {
+                work.rows(((work.height - 1) / 2).max(MAIN_MIN_ROWS))?
+            } else {
+                work.columns((w - 1) / 2)?
+            };
+            let (open, close) = if stacked { ('[', ']') } else { ('{', '}') };
             format!(
-                "{}{{{},{}}}",
+                "{}{open}{},{}{close}",
                 work.cell(),
-                leaf(left, main),
-                leaf(right, dock)
+                leaf(first, main),
+                leaf(second, dock)
             )
         } else {
             leaf(work, main)
@@ -459,7 +487,7 @@ fn board_below(width: usize, height: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PANE_LAYOUT, Pane, reflow_with, wide_board_rows};
+    use super::{PANE_LAYOUT, Pane, reflow_with, top_board_rows};
     use std::path::Path;
     use std::process::Command;
 
@@ -476,12 +504,25 @@ mod tests {
     }
     #[test]
     fn orientation_leaves_room_for_main_and_board() {
-        assert_eq!(wide_board_rows(316, 90), Some(24));
-        assert_eq!(wide_board_rows(100, 30), Some(17));
-        assert_eq!(wide_board_rows(100, 29), None);
-        assert_eq!(wide_board_rows(140, 130), None);
+        // Wide: unchanged ratio and floors.
+        assert_eq!(top_board_rows(316, 90, false), Some(24));
+        assert_eq!(top_board_rows(100, 30, false), Some(17));
+        assert_eq!(top_board_rows(100, 29, false), None);
+        // Portrait (rows >= 2/3 of columns): the same 28% board above Main.
+        assert_eq!(top_board_rows(140, 130, false), Some(36));
+        assert_eq!(top_board_rows(140, 130, true), Some(36));
+        assert_eq!(top_board_rows(70, 110, true), Some(30));
+        // A stacked dock also needs its own rows below Main.
+        assert_eq!(top_board_rows(50, 36, false), Some(17));
+        assert_eq!(top_board_rows(50, 36, true), None);
+        assert_eq!(top_board_rows(39, 120, false), None);
+        // Midrange keeps the compact arrangement.
+        for (w, h) in [(100, 60), (140, 80), (59, 32), (80, 30)] {
+            assert_eq!(top_board_rows(w, h, false), None, "{w}x{h}");
+        }
+        assert_eq!(top_board_rows(220, 70, false), Some(19));
         assert!(!super::board_below(220, 70));
-        assert!(super::board_below(140, 130));
+        assert!(super::board_below(100, 60));
         assert!(super::board_below(80, 30));
         assert!(!super::board_below(80, 18));
     }
@@ -602,10 +643,21 @@ mod tests {
         };
 
         let main_pid = geometry(&main).1;
+        // Portrait 140x130: the board spans the top at 28%, Main below it.
         assert_eq!(reflow(), 1);
-        assert_eq!(geometry(&main).0.y, 0);
-        assert!(geometry(&board).0.y > 0);
+        let top = super::Bounds {
+            x: 0,
+            y: 0,
+            width: 140,
+            height: 36,
+        };
+        assert_eq!(geometry(&board).0, top);
+        assert_eq!((geometry(&main).0.x, geometry(&main).0.y), (0, 37));
+        assert_eq!(geometry(&main).0.width, 140);
+        assert!(geometry(&main).2);
+        assert_eq!(reflow(), 0);
         resize("316", "90");
+        // tmux shrinks the board to 16 rows here, below its floor: repair it once.
         assert_eq!(reflow(), 1);
         assert_eq!(geometry(&board).0.y, 0);
         assert_eq!(geometry(&board).0.width, 316);
@@ -649,11 +701,44 @@ mod tests {
         assert!(geometry(&provider).0.x > 0);
         assert!(geometry(&provider).2);
 
+        // Wide to portrait keeps the board above Main and the dock beside it.
         resize("140", "130");
+        assert_eq!(reflow(), 0);
+        assert_eq!((geometry(&board).0.y, geometry(&board).0.width), (0, 140));
+        assert_eq!(geometry(&main).0.x, 0);
+        assert!(geometry(&main).0.y > geometry(&board).0.height);
+        assert_eq!(geometry(&provider).0.y, geometry(&main).0.y);
+        assert!(geometry(&provider).0.x > 0);
+        assert!(geometry(&provider).2);
+        // Too narrow for two provider panes: Main and the dock take full-width rows.
+        resize("70", "110");
         assert_eq!(reflow(), 1);
-        assert_eq!(geometry(&board).0.x, 0);
+        assert_eq!(
+            geometry(&board).0,
+            super::Bounds {
+                width: 70,
+                height: 30,
+                ..top
+            }
+        );
+        assert_eq!((geometry(&main).0.x, geometry(&main).0.y), (0, 31));
+        assert_eq!(geometry(&main).0.width, 70);
         assert_eq!(geometry(&provider).0.x, 0);
-        assert_eq!(geometry(&main).0.height, 130);
+        assert_eq!(geometry(&provider).0.width, 70);
+        assert!(geometry(&provider).0.y > geometry(&main).0.y);
+        assert!(geometry(&main).0.height >= 12);
+        assert!(geometry(&provider).0.height >= 8);
+        assert!(geometry(&provider).2);
+        assert_eq!(reflow(), 0);
+        // A resize can keep the shape but squeeze panes below their floors.
+        resize("70", "47");
+        assert_eq!(reflow(), 1);
+        assert_eq!(geometry(&board).0.height, 17);
+        assert!(geometry(&main).0.height >= 12);
+        assert!(geometry(&provider).0.height >= 8);
+        assert!(geometry(&provider).0.y > geometry(&main).0.y);
+        assert!(geometry(&provider).2);
+        assert_eq!(reflow(), 0);
         resize("59", "32");
         assert_eq!(reflow(), 1);
         assert_eq!(geometry(&main).0.y, 0);
