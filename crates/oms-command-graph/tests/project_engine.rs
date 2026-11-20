@@ -548,7 +548,10 @@ fn rust_workspace_cache_and_impact() {
         ),
         ("core/Cargo.toml", "[package]\nname = \"core\"\n"),
         ("app/src/lib.rs", "pub fn app() {}\n"),
-        ("core/src/lib.rs", "pub fn core() {}\n"),
+        (
+            "core/src/lib.rs",
+            "pub fn core() {}\nimpl First { pub fn new() -> Self { Self } }\nimpl Second { pub fn new() -> Self { Self } }\n",
+        ),
         ("app/tests/check.rs", "#[test]\nfn check() {}\n"),
     ] {
         let target = f.0.join(path);
@@ -582,6 +585,21 @@ fn rust_workspace_cache_and_impact() {
             .unwrap()
             .iter()
             .any(|n| n["name"] == "check" && n["metadata"]["test"] == true)
+    );
+    let (code, api) = f.query(&["api", "core/src/lib.rs", "--no-refresh"]);
+    assert_eq!(code, 0);
+    let methods: Vec<_> = api["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["name"] == "new")
+        .collect();
+    assert_eq!(methods.len(), 2);
+    assert_ne!(methods[0]["id"], methods[1]["id"]);
+    assert!(
+        methods
+            .iter()
+            .all(|s| s["signature"].as_str().unwrap().contains("fn new()"))
     );
     let warm = f.build();
     assert!(warm["stats"]["cached"].as_u64().unwrap() > 0);

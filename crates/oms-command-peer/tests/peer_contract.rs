@@ -1142,6 +1142,19 @@ fn peer_dry_runs_and_ml_context() {
                 && delegate_prompts.contains("graph_context_probe"),
             "missing injected graph context in delegate prompt:\n{delegate_prompts}"
         );
+        assert!(delegate_prompts.contains("delivery_status"));
+        assert!(delegate_prompts.contains("worker_snapshot_bound"));
+        if let Ok(manifest) = fs::read_to_string(repo.0.join(".oms/project-graph/manifest.json")) {
+            let manifest = oms_command_operations::value::V::parse(manifest.as_bytes()).unwrap();
+            assert!(
+                !manifest
+                    .get("discovery")
+                    .get("exclude")
+                    .array()
+                    .iter()
+                    .any(|v| v.text() == Some("*.py"))
+            );
+        }
         for (option, message) in [
             ("--apply", "patch-admission"),
             ("--plan-task", "plan lease"),

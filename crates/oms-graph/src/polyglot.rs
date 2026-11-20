@@ -72,6 +72,7 @@ struct Token<'a> {
     text: &'a str,
     line: usize,
     string: bool,
+    start: usize,
 }
 
 fn rust_char_literal(text: &str) -> bool {
@@ -107,6 +108,35 @@ fn rust_char_literal(text: &str) -> bool {
     chars.next() == Some('\'')
 }
 
+fn raw_string(text: &str) -> Option<(usize, usize, usize)> {
+    let bytes = text.as_bytes();
+    let prefix = if bytes.starts_with(b"br") || bytes.starts_with(b"cr") {
+        2
+    } else if bytes.starts_with(b"r") {
+        1
+    } else {
+        return None;
+    };
+    let hashes = bytes[prefix..].iter().take_while(|&&c| c == b'#').count();
+    let quote = prefix + hashes;
+    if bytes.get(quote) != Some(&b'"') {
+        return None;
+    }
+    let start = quote + 1;
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"'
+            && bytes
+                .get(cursor + 1..cursor + 1 + hashes)
+                .is_some_and(|s| s.iter().all(|&c| c == b'#'))
+        {
+            return Some((start, cursor, cursor + 1 + hashes));
+        }
+        cursor += 1;
+    }
+    Some((start, bytes.len(), bytes.len()))
+}
+
 // A flat token stream keeps nesting depth independent of the process stack.
 fn tokens(text: &str, rust: bool) -> Vec<Token<'_>> {
     let bytes = text.as_bytes();
@@ -135,15 +165,29 @@ fn tokens(text: &str, rust: bool) -> Vec<Token<'_>> {
                     i += 1;
                 }
             }
+        } else if rust && let Some((start, end, consumed)) = raw_string(&text[i..]) {
+            out.push(Token {
+                text: &text[i + start..i + end],
+                line,
+                string: true,
+                start: i,
+            });
+            line += text[i..i + consumed]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count();
+            i += consumed;
         } else if matches!(bytes[i], b'"' | b'`')
             || (bytes[i] == b'\'' && (!rust || rust_char_literal(&text[i..])))
         {
             let quote = bytes[i];
+            let token_start = i;
             let start_line = line;
             i += 1;
             let start = i;
             while i < bytes.len() && bytes[i] != quote {
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    line += usize::from(bytes[i + 1] == b'\n');
                     i += 2;
                 } else {
                     line += usize::from(bytes[i] == b'\n');
@@ -155,6 +199,7 @@ fn tokens(text: &str, rust: bool) -> Vec<Token<'_>> {
                     text: value,
                     line: start_line,
                     string: true,
+                    start: token_start,
                 });
             }
             i += usize::from(i < bytes.len());
@@ -168,6 +213,7 @@ fn tokens(text: &str, rust: bool) -> Vec<Token<'_>> {
                 text: &text[start..i],
                 line,
                 string: false,
+                start,
             });
         } else {
             let start = i;
@@ -179,19 +225,233 @@ fn tokens(text: &str, rust: bool) -> Vec<Token<'_>> {
                 text: &text[start..i],
                 line,
                 string: false,
+                start,
             });
         }
     }
     out
 }
 
-pub(crate) fn parse(selection: Selection, path: &str, text: &str, digest: &str) -> GraphResult {
-    let lang = selection.language_version().unwrap().0;
-    let ts = tokens(text, selection == Selection::Rust);
+fn normalized_prefix(text: &str, max_chars: usize) -> (String, bool) {
+    let mut value = String::new();
+    let mut count = 0;
+    for word in text.split_whitespace() {
+        for c in (!value.is_empty())
+            .then_some(' ')
+            .into_iter()
+            .chain(word.chars())
+        {
+            if count == max_chars {
+                value.push('…');
+                return (value, true);
+            }
+            value.push(c);
+            count += 1;
+        }
+    }
+    (value, false)
+}
+
+fn rust_declarations(path: &str, text: &str, digest: &str, ts: &[Token<'_>]) -> GraphResult {
+    use std::collections::BTreeMap;
+    let file = format!("file:{path}");
     let mut result = GraphResult {
         nodes: vec![],
         edges: vec![],
         refs: vec![],
+    };
+    let mut pairs = vec![None; ts.len()];
+    let mut delimiters = Vec::new();
+    for (i, token) in ts.iter().enumerate().filter(|(_, t)| !t.string) {
+        match token.text {
+            "(" | "[" | "{" => delimiters.push(i),
+            ")" | "]" | "}" => {
+                if let Some(&start) = delimiters.last()
+                    && matches!(
+                        (ts[start].text, token.text),
+                        ("(", ")") | ("[", "]") | ("{", "}")
+                    )
+                {
+                    delimiters.pop();
+                    pairs[start] = Some(i);
+                    pairs[i] = Some(start);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Retain the stack for correct exits, but cap rendered ancestry and labels so
+    // deeply nested named scopes cannot produce quadratic-size graph output.
+    let mut scopes: Vec<(usize, usize, String)> = vec![];
+    let mut opening = BTreeMap::new();
+    let mut occurrences = BTreeMap::new();
+    let mut skip_header = 0;
+    for (i, token) in ts.iter().enumerate() {
+        while scopes.last().is_some_and(|(end, _, _)| *end < i) {
+            scopes.pop();
+        }
+        if let Some((offset, scope)) = opening.remove(&i) {
+            scopes.push((pairs[i].unwrap_or(ts.len()), offset, scope));
+        }
+        if token.string || i < skip_header {
+            continue;
+        }
+        let kind = match token.text {
+            "fn" => "function",
+            "struct" | "enum" | "trait" => "class",
+            "mod" | "impl" => "symbol",
+            _ => continue,
+        };
+        let Some(next) = ts.get(i + 1) else {
+            continue;
+        };
+        let raw_name = next.text == "r" && ts.get(i + 2).is_some_and(|t| t.text == "#");
+        let name_index = i + if raw_name { 3 } else { 1 };
+        let Some(name_token) = ts.get(name_index) else {
+            continue;
+        };
+        if token.text != "impl"
+            && (name_token.string
+                || !name_token
+                    .text
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_'))
+        {
+            continue;
+        }
+        let mut end_header = i + 1;
+        let mut angles = 0usize;
+        while end_header < ts.len() {
+            let current = &ts[end_header];
+            if !current.string {
+                match current.text {
+                    "(" | "[" => {
+                        if let Some(end) = pairs[end_header] {
+                            end_header = end + 1;
+                            continue;
+                        }
+                    }
+                    "<" => angles += 1,
+                    ">" => angles = angles.saturating_sub(1),
+                    "{" if angles > 0 => {
+                        if let Some(end) = pairs[end_header] {
+                            end_header = end + 1;
+                            continue;
+                        }
+                    }
+                    "{" | ";" if angles == 0 => break,
+                    "}" => break,
+                    _ => {}
+                }
+            }
+            end_header += 1;
+        }
+        let boundary = ts.get(end_header);
+        let body = boundary
+            .filter(|t| !t.string && t.text == "{")
+            .map(|_| end_header);
+        let (last, complete) = if let Some(open) = body {
+            (
+                pairs[open].unwrap_or_else(|| ts.len().saturating_sub(1)),
+                pairs[open].is_some(),
+            )
+        } else {
+            (
+                end_header.min(ts.len().saturating_sub(1)),
+                boundary.is_some_and(|t| t.text == ";"),
+            )
+        };
+        let mut start = i;
+        while start > 0
+            && matches!(
+                ts[start - 1].text,
+                "pub" | "async" | "unsafe" | "const" | "default" | "extern"
+            )
+        {
+            start -= 1;
+        }
+        let header_end = boundary.map_or(text.len(), |t| t.start);
+        let (signature, signature_truncated) =
+            normalized_prefix(&text[ts[start].start..header_end], 2048);
+        let (mut name, name_truncated) = if token.text == "impl" {
+            normalized_prefix(&text[token.start..header_end], 256)
+        } else {
+            normalized_prefix(name_token.text, 256)
+        };
+        if raw_name {
+            name = format!("r#{name}");
+        }
+        if name_truncated {
+            name.push_str(&format!("@{}", token.start));
+        }
+        let skipped = scopes.len().saturating_sub(16);
+        let mut parent = scopes[skipped..]
+            .iter()
+            .map(|(_, _, name)| name.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
+        if skipped > 0 {
+            parent = format!("scope@{}::{parent}", scopes[skipped - 1].1);
+        }
+        let occurrence = occurrences
+            .entry((parent.clone(), token.text.to_owned(), name.clone()))
+            .or_insert(0usize);
+        *occurrence += 1;
+        let segment = if *occurrence == 1 {
+            name.clone()
+        } else {
+            format!("{name}#{}", *occurrence)
+        };
+        let qualname = if parent.is_empty() {
+            segment.clone()
+        } else {
+            format!("{parent}::{segment}")
+        };
+        let id = format!("symbol:{}::{kind}:{qualname}", path.trim_start_matches('/'));
+        let mut metadata = json!({"qualname":qualname,"line":token.line,"end_line":ts[last].line,"signature":signature,"span_complete":complete,"syntax_only":true});
+        if signature_truncated {
+            metadata["signature_truncated"] = json!(true);
+        }
+        if skipped > 0 || name_truncated {
+            metadata["scope_truncated"] = json!(true);
+        }
+        if token.text == "fn" {
+            let prefix = &ts[..i];
+            let attr_start = prefix
+                .iter()
+                .rposition(|t| !t.string && matches!(t.text, ";" | "{" | "}"))
+                .map_or(0, |n| n + 1);
+            let attr: Vec<_> = prefix[attr_start..].iter().map(|t| t.text).collect();
+            if attr.windows(4).any(|w| w == ["#", "[", "test", "]"])
+                || attr
+                    .windows(7)
+                    .any(|w| w == ["#", "[", "tokio", ":", ":", "test", "]"])
+            {
+                metadata["test"] = json!(true);
+            }
+        }
+        result.nodes.push(json!({"id":id,"kind":kind,"name":name,"path":path,"language":"rust","source_digest":digest,"summary":null,"crux":null,"metadata":metadata}));
+        result.edges.push(json!({"source":file,"target":id,"relation":"contains","confidence":"EXTRACTED","evidence":{"path":path,"source_digest":digest,"line":token.line}}));
+        if let Some(open) = body {
+            opening.insert(open, (token.start, segment));
+        }
+        skip_header = end_header;
+    }
+    result
+}
+
+pub(crate) fn parse(selection: Selection, path: &str, text: &str, digest: &str) -> GraphResult {
+    let lang = selection.language_version().unwrap().0;
+    let ts = tokens(text, selection == Selection::Rust);
+    let mut result = if selection == Selection::Rust {
+        rust_declarations(path, text, digest, &ts)
+    } else {
+        GraphResult {
+            nodes: vec![],
+            edges: vec![],
+            refs: vec![],
+        }
     };
     let file = format!("file:{path}");
     let add_ref = |result: &mut GraphResult, value: &str, line: usize| {
@@ -205,12 +465,7 @@ pub(crate) fn parse(selection: Selection, path: &str, text: &str, digest: &str) 
         }
         let next = |offset: usize| ts.get(i + offset);
         let symbol = match selection {
-            Selection::Rust => match token.text {
-                "fn" => Some("function"),
-                "struct" | "enum" | "trait" => Some("class"),
-                "mod" | "impl" => Some("symbol"),
-                _ => None,
-            },
+            Selection::Rust => None,
             Selection::JavaScript => match token.text {
                 "function" => Some("function"),
                 "class" | "interface" => Some("class"),
@@ -238,22 +493,7 @@ pub(crate) fn parse(selection: Selection, path: &str, text: &str, digest: &str) 
                 .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
         {
             let id = format!("symbol:{}::{}", path.trim_start_matches('/'), name.text);
-            let mut metadata = json!({"qualname":name.text,"line":token.line,"end_line":name.line});
-            if selection == Selection::Rust && kind == "function" {
-                let prefix = &ts[..i];
-                let start = prefix
-                    .iter()
-                    .rposition(|t| matches!(t.text, ";" | "{" | "}"))
-                    .map_or(0, |n| n + 1);
-                let attr: Vec<&str> = prefix[start..].iter().map(|t| t.text).collect();
-                if attr.windows(4).any(|w| w == ["#", "[", "test", "]"])
-                    || attr
-                        .windows(7)
-                        .any(|w| w == ["#", "[", "tokio", ":", ":", "test", "]"])
-                {
-                    metadata["test"] = json!(true);
-                }
-            }
+            let metadata = json!({"qualname":name.text,"line":token.line,"end_line":name.line});
             result.nodes.push(json!({"id":id,"kind":kind,"name":name.text,"path":path,"language":lang,"source_digest":digest,"summary":null,"crux":null,"metadata":metadata}));
             result.edges.push(json!({"source":file,"target":id,"relation":"contains","confidence":"EXTRACTED","evidence":{"path":path,"source_digest":digest,"line":token.line}}));
         }
