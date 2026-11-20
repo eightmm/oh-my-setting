@@ -396,7 +396,10 @@ pub trait Executor: Sync {
         _timeout: Duration,
         _interrupted: &AtomicBool,
     ) -> Result<Completed> {
-        Err(Error::new(2, "native handoff projection service unavailable"))
+        Err(Error::new(
+            2,
+            "native handoff projection service unavailable",
+        ))
     }
     /// Read-only discovery preserves the host's qualified parser and group proof.
     fn context_dependencies(

@@ -119,18 +119,17 @@ fn capability_fields(value: &Value) -> Option<Value> {
         .as_array()?;
     if requested.is_empty()
         || requested.len() > 64
-        || requested
-            .iter()
-            .any(|name| name.as_str().is_none_or(|s| s.len() > 64 || !r::safe_name(s)))
+        || requested.iter().any(|name| {
+            name.as_str()
+                .is_none_or(|s| s.len() > 64 || !r::safe_name(s))
+        })
     {
         return None;
     }
     let primary = value
         .get("primary_provider")
         .or_else(|| value["plan"].get("primary_provider"));
-    if primary.is_some_and(|v| {
-        !matches!(v.as_str(), Some("auto" | "codex" | "claude" | "agy"))
-    }) {
+    if primary.is_some_and(|v| !matches!(v.as_str(), Some("auto" | "codex" | "claude" | "agy"))) {
         return None;
     }
     let allow_missing = match value.get("allow_missing") {
@@ -144,8 +143,8 @@ fn capability_fields(value: &Value) -> Option<Value> {
 // Keep this projection outside schema-1 identity so saved fingerprints retain
 // their original hash and comparison semantics.
 pub(crate) fn capability_provenance(paths: &Paths) -> Value {
-    let overridden = std::env::var_os("OMS_CAPABILITY_RECEIPT")
-        .is_some_and(|value| !value.is_empty());
+    let overridden =
+        std::env::var_os("OMS_CAPABILITY_RECEIPT").is_some_and(|value| !value.is_empty());
     let mut result = json!({
         "source":if overridden {"environment override"} else {"default receipt"},
         "scope":"installed tool capabilities; separate from the installation component profile",

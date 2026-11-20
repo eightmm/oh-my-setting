@@ -321,8 +321,8 @@ The remaining behavior is still refused or incomplete:
   debt warnings; compilation or outbound failure starts no worker. This does not
   enable plan-task claims, candidate admission or automatic apply.
 - Session checkpoint/fork/launch/compare/file restore, managed panel relocation,
-  full status projection and complete handoff-prompt synthesis need the native
-  checkpoint/panel interfaces. Native resume uses physical registration and its
+  and full status projection need the native checkpoint/panel interfaces.
+  Native resume uses physical registration and its
   final fence as described above. Prompts-only Antigravity capture is bounded by
   the general 64 MiB reader and is not a streaming history implementation.
 - Remote artifact views still refuse. Legacy `artifact_view.py::ssh_read` uses

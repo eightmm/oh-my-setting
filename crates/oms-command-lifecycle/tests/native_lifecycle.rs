@@ -185,8 +185,7 @@ fn bundled_skill_manifest_checks(root: &Path, host: &NativeServices) {
     let out = call("install-skills", &[], &source, host);
     assert_eq!(out.0, 2);
     assert!(
-        String::from_utf8_lossy(&out.2)
-            .contains("skill manifest name must match source directory")
+        String::from_utf8_lossy(&out.2).contains("skill manifest name must match source directory")
     );
     assert!(!source.join(".oms").exists());
 }
@@ -1395,7 +1394,11 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     assert_eq!(after["primary_provider"], "agy");
     assert_eq!(after["allow_missing"], true);
     assert_eq!(after["runtime"], "unknown");
-    assert_eq!(fingerprint(), missing, "schema-1 identity remains compatible");
+    assert_eq!(
+        fingerprint(),
+        missing,
+        "schema-1 identity remains compatible"
+    );
     let compared: Value = serde_json::from_slice(&success(call(
         "status",
         &["--compare", saved.to_str().unwrap(), "--json"],
@@ -1430,9 +1433,13 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     assert_eq!(inspect_selection()["status"], "invalid");
     let out = call("doctor", &["--json", "--no-model-doctor"], source, host);
     let report: Value = serde_json::from_slice(&out.1).unwrap();
-    assert!(report["findings"].as_array().unwrap().iter().any(|v| {
-        v["section"] == "capability selection" && v["level"] == "error"
-    }));
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| { v["section"] == "capability selection" && v["level"] == "error" })
+    );
     fs::remove_file(&capabilities).unwrap();
     symlink(&saved, &capabilities).unwrap();
     assert_eq!(inspect_selection()["status"], "unreadable");
@@ -1482,7 +1489,12 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     assert_eq!(stale["owned"], true);
     assert_eq!(stale["source_freshness"], "stale");
     assert_eq!(stale["level"], "error");
-    assert!(stale["message"].as_str().unwrap().contains("oms doctor --repair"));
+    assert!(
+        stale["message"]
+            .as_str()
+            .unwrap()
+            .contains("oms doctor --repair")
+    );
     fs::write(&target, b"local edit\n").unwrap();
     let modified = inspect_target();
     assert_eq!(modified["owned"], false);

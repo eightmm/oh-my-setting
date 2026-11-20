@@ -59,9 +59,8 @@ impl oms_command_autonomy::Services for Services<'_, '_> {
         interrupted: &std::sync::atomic::AtomicBool,
     ) -> oms_command_autonomy::Result<oms_command_autonomy::CommandResult> {
         use crate::process::HandoffProjection;
-        let unavailable = || {
-            oms_command_autonomy::Error::new(2, "native handoff projection unavailable")
-        };
+        let unavailable =
+            || oms_command_autonomy::Error::new(2, "native handoff projection unavailable");
         let state = command
             .environment
             .iter()
@@ -89,7 +88,11 @@ impl oms_command_autonomy::Services for Services<'_, '_> {
             .handoff_projection(projection, &command.cwd, state, command.wall, interrupted)
             .map_err(|e| oms_command_autonomy::Error::new(e.code, e.message))?;
         if !completed.complete
-            || completed.stdout.len().saturating_add(completed.stderr.len()) > 65536
+            || completed
+                .stdout
+                .len()
+                .saturating_add(completed.stderr.len())
+                > 65536
         {
             return Err(unavailable());
         }

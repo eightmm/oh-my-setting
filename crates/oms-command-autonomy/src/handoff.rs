@@ -36,7 +36,9 @@ pub fn render(
     services: &dyn Services,
     interrupted: &AtomicBool,
 ) -> Result<String> {
-    render_checked(repo, state, max_bytes, services, interrupted, &mut |_| Ok(()))
+    render_checked(repo, state, max_bytes, services, interrupted, &mut |_| {
+        Ok(())
+    })
 }
 
 /// The consumer may refuse complete source bytes before projection or budget
