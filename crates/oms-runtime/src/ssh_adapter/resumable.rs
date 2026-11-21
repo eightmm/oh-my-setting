@@ -20,6 +20,17 @@ pub(super) fn check_cancelled(interrupted: &AtomicBool) -> Result<()> {
     }
 }
 
+pub(super) fn check_request(req: &CollectRequest<'_>) -> Result<()> {
+    check_cancelled(req.interrupted)?;
+    if Instant::now() >= req.deadline {
+        return Err(status(
+            124,
+            "collection request timed out; destination unchanged",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Options {
     pub(super) size: u64,
@@ -84,7 +95,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn open_directory(path: &Path) -> Result<std::fs::File> {
+pub(super) fn open_directory(path: &Path) -> Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
         .custom_flags((rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32)
@@ -194,37 +205,8 @@ fn chunk_name(index: u64) -> String {
     format!("{index:05}.chunk")
 }
 
-struct SshChild(std::process::Child);
-impl Drop for SshChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, limit: usize) -> Result<bool> {
-    let mut buf = [0u8; 65536];
-    loop {
-        let bound = buf
-            .len()
-            .min(limit.saturating_sub(bytes.len()).saturating_add(1));
-        match pipe.read(&mut buf[..bound]) {
-            Ok(0) => return Ok(true),
-            Ok(n) => {
-                bytes.extend_from_slice(&buf[..n]);
-                require(
-                    bytes.len() <= limit,
-                    "collection chunk response exceeds byte bound",
-                )?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(error(e)),
-        }
-    }
-}
-
 fn fetch(req: &CollectRequest<'_>, options: Options, index: u64) -> Result<Vec<u8>> {
-    check_cancelled(req.interrupted)?;
+    check_request(req)?;
     // A second block on the last request detects bytes beyond the promised EOF.
     // POSIX operands only: no GNU-only skip_bytes/fullblock/status extensions.
     let count = if index + 1 == options.chunks() { 2 } else { 1 };
@@ -233,64 +215,13 @@ fn fetch(req: &CollectRequest<'_>, options: Options, index: u64) -> Result<Vec<u
         collect_target_script(req.remote, req.remote_path_rel),
         options.chunk_bytes,
     );
-    let mut child = SshChild(
-        build_ssh(req.host, req.port, req.control)
-            .arg(format!("sh -lc {}", quote(&script)))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(error)?,
-    );
-    let mut stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or_else(|| error("missing ssh stdout"))?;
-    let mut stderr = child
-        .0
-        .stderr
-        .take()
-        .ok_or_else(|| error("missing ssh stderr"))?;
-    for fd in [
-        &stdout as &dyn std::os::fd::AsFd,
-        &stderr as &dyn std::os::fd::AsFd,
-    ] {
-        let flags = rustix::fs::fcntl_getfl(fd).map_err(error)?;
-        rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK).map_err(error)?;
-    }
-    let started = Instant::now();
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let (mut out_done, mut err_done) = (false, false);
-    let code = loop {
-        check_cancelled(req.interrupted)?;
-        require(
-            started.elapsed() < CHUNK_TIMEOUT,
-            "collection chunk timed out; verified chunks retained",
-        )?;
-        if !out_done {
-            out_done = drain(&mut stdout, &mut out, options.chunk_len(index) as usize)?;
-        }
-        if !err_done {
-            err_done = drain(&mut stderr, &mut err, MAX_STDERR_BYTES as usize)?;
-        }
-        if let Some(code) = child.0.try_wait().map_err(error)?
-            && out_done
-            && err_done
-        {
-            break code;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    let chunk_request = CollectRequest {
+        max_bytes: options.chunk_len(index),
+        deadline: req.deadline.min(Instant::now() + CHUNK_TIMEOUT),
+        ..*req
     };
-    if !code.success() {
-        return Err(status(
-            exit_code(code),
-            format!(
-                "remote collection chunk failed: {}",
-                String::from_utf8_lossy(&err).trim(),
-            ),
-        ));
-    }
+    let mut out = Vec::new();
+    stream::collect(&chunk_request, &script, &mut out)?;
     require(
         out.len() as u64 == options.chunk_len(index),
         "remote collection chunk has wrong exact size",
@@ -305,7 +236,7 @@ pub(super) fn run(
     dest: &Path,
     destination_lock: &oms_lock::Guard,
 ) -> Result<Response> {
-    check_cancelled(req.interrupted)?;
+    check_request(&req)?;
     let expected = req.expected_sha256.expect("validated resumable digest");
     let identity = serde_json::json!({
         "host": req.host, "port": req.port.unwrap_or(22),
@@ -364,6 +295,7 @@ pub(super) fn run(
     };
     let (mut reused_chunks, mut reused_bytes) = (0u64, 0u64);
     for (key, row) in manifest["chunks"].as_object().expect("validated chunks") {
+        check_request(&req)?;
         let index = key
             .parse::<u64>()
             .map_err(|_| error("invalid cached chunk index"))?;
@@ -376,6 +308,7 @@ pub(super) fn run(
     }
     let mut fetched_bytes = 0u64;
     for index in 0..options.chunks() {
+        check_request(&req)?;
         if manifest["chunks"].get(index.to_string()).is_some() {
             continue;
         }
@@ -386,7 +319,7 @@ pub(super) fn run(
         // changing the checkpoint, even when final delivery will later refuse.
         destination_lock.check().map_err(error)?;
         transfer_lock.check().map_err(error)?;
-        check_cancelled(req.interrupted)?;
+        check_request(&req)?;
         let row = serde_json::json!({"bytes": bytes.len(), "sha256": sha256(&bytes)});
         cache.write(
             &chunk_name(index),
@@ -404,12 +337,11 @@ pub(super) fn run(
         fetched_bytes += bytes.len() as u64;
     }
     let directory = open_directory(parent)?;
-    let parent_meta = directory.metadata().map_err(error)?;
     let (mut temporary, mut guard) = create_private_temp(parent)?;
     let mut hasher = Sha256::new();
     let mut total = 0u64;
     for index in 0..options.chunks() {
-        check_cancelled(req.interrupted)?;
+        check_request(&req)?;
         let bytes = cache.chunk(index, options, &manifest["chunks"][index.to_string()])?;
         temporary.write_all(&bytes).map_err(error)?;
         hasher.update(&bytes);
@@ -423,7 +355,31 @@ pub(super) fn run(
     temporary.sync_all().map_err(error)?;
     destination_lock.check().map_err(error)?;
     transfer_lock.check().map_err(error)?;
-    check_cancelled(req.interrupted)?;
+    check_request(&req)?;
+    publish(&directory, parent, &temporary, &mut guard, dest)?;
+    json_response(
+        0,
+        &serde_json::json!({
+            "schema": 1, "action": "collect", "host": req.host,
+            "remote_dir": req.remote, "remote_path": req.remote_path_rel,
+            "dest": dest.to_string_lossy(), "bytes": total, "sha256": digest, "verified": true,
+            "resumable": true, "transfer_id": transfer_id, "chunk_bytes": options.chunk_bytes,
+            "chunks_reused": reused_chunks, "bytes_reused": reused_bytes,
+            "chunks_fetched": options.chunks() - reused_chunks, "bytes_fetched": fetched_bytes,
+            "cache_dir": cache.dir.to_string_lossy(),
+        }),
+        req.pretty,
+    )
+}
+
+pub(super) fn publish(
+    directory: &std::fs::File,
+    parent: &Path,
+    temporary: &std::fs::File,
+    guard: &mut TempFileGuard,
+    dest: &Path,
+) -> Result<()> {
+    let parent_meta = directory.metadata().map_err(error)?;
     let named_parent = std::fs::symlink_metadata(parent).map_err(error)?;
     require(
         named_parent.is_dir()
@@ -443,7 +399,7 @@ pub(super) fn run(
     let name = guard.path.file_name().expect("private temporary name");
     let named = std::fs::File::from(
         rustix::fs::openat(
-            &directory,
+            directory,
             name,
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
             rustix::fs::Mode::empty(),
@@ -458,29 +414,17 @@ pub(super) fn run(
         "collection temporary file changed",
     )?;
     rustix::fs::renameat(
-        &directory,
+        directory,
         name,
-        &directory,
+        directory,
         dest.file_name().expect("destination name"),
     )
     .map_err(error)?;
     guard.keep = true;
-    sync_directory(&directory).map_err(|e| {
+    sync_directory(directory).map_err(|e| {
         error(format!(
             "collection published but directory durability is unknown: {e}"
         ))
     })?;
-    json_response(
-        0,
-        &serde_json::json!({
-            "schema": 1, "action": "collect", "host": req.host,
-            "remote_dir": req.remote, "remote_path": req.remote_path_rel,
-            "dest": dest.to_string_lossy(), "bytes": total, "sha256": digest, "verified": true,
-            "resumable": true, "transfer_id": transfer_id, "chunk_bytes": options.chunk_bytes,
-            "chunks_reused": reused_chunks, "bytes_reused": reused_bytes,
-            "chunks_fetched": options.chunks() - reused_chunks, "bytes_fetched": fetched_bytes,
-            "cache_dir": cache.dir.to_string_lossy(),
-        }),
-        req.pretty,
-    )
+    Ok(())
 }

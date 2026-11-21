@@ -290,13 +290,14 @@ fn spec(r: &Request) -> Spec {
         (Mode::Experiment, "show", _) => ("", "", "", "", 1, 1, false),
         (Mode::Experiment, "run", _) => (
             "allow-existing-metrics",
-            "id arm seed metrics profile image adapter worktree timeout-seconds reason",
+            "id arm seed metrics profile image adapter worktree timeout-seconds reason target snapshot run-id",
             "",
-            "id arm seed metrics",
+            "id arm seed",
             0,
             0,
             true,
         ),
+        (Mode::Experiment, "reconcile", _) => ("", "run-id", "", "run-id", 0, 0, false),
         (Mode::Experiment, "summarize", _) => ("", "id", "", "id", 0, 0, false),
         (Mode::Experiment, "sweep", "plan") => ("", "emit", "", "", 1, 1, false),
         (Mode::Experiment, "invariants", _) => (
@@ -612,7 +613,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 Mode::Capsule => "export verify import diff",
                 Mode::Backend => "target describe check run",
                 Mode::Experiment => {
-                    "template validate compare register show run launch sweep summarize evaluate invariants"
+                    "template validate compare register show run reconcile launch sweep summarize evaluate invariants"
                 }
                 Mode::Benchmark => "show snapshot record compare",
                 Mode::Resources => "host status activate hold reconcile retire-team discard-write",

@@ -665,6 +665,35 @@ they are not evidence of real container or hardware enforcement.
 Generic adapter supervision is not wired into the native CLI. The target
 registry below is checkout management; explicit SSH adapter operations are a
 separate feature and do not make this generic profile ready.
+The experiment-specific remote path below connects those durable SSH operations
+to the experiment run ledger; it does not enable generic `backend run remote`.
+
+#### Bounded artifact collection
+
+`oms runtime ssh-adapter collect` keeps its single-file path, byte-limit, optional
+SHA256, and resumable chunk contracts. `--timeout-seconds N` sets a monotonic
+request budget (default 300 seconds, range 1–86400) for ordinary and resumable
+collection. Resumable transfers retain their separate 60-second per-chunk bound;
+the request deadline does not restart for each chunk.
+
+Ordinary collection streams to a private temporary file through the native
+supervisor; resume uses the same supervisor with a bounded chunk buffer. Both
+drain stderr with bounded capture and check interruption while waiting for either
+pipe and the SSH child. Cancellation returns 130 and a request
+deadline returns 124 after confirmed local cleanup. TERM gets 250 milliseconds;
+the polling loop allows two seconds for completion before reporting cleanup
+unknown (75), with at most five more seconds for the supervisor's final cleanup
+attempt on drop.
+This stops the local SSH process group, not an independent remote job or another
+transfer's ControlMaster. Blocking local filesystem calls are not preemptible.
+
+Both paths check the destination lock and directory/file identities before the
+final descriptor-relative rename. Prepublication failure preserves the previous
+destination; ordinary temporary files are removed and verified resume chunks
+are retained. A directory durability error after rename explicitly reports that
+publication has occurred but durability is unknown; the destination may already
+have changed. This command does not create a bundle delivery receipt or perform
+automatic cache deletion.
 
 #### Same-path git targets
 
@@ -908,6 +937,66 @@ oms runtime experiment run \
 oms runtime experiment summarize --id local-channel-ablation
 oms runtime experiment invariants experiment.json
 ```
+
+### Remote experiment runs
+
+A registered experiment can use an approved target and an execution snapshot:
+
+```bash
+oms runtime backend target approve cluster
+oms runtime exec-snapshot create
+# Use the snapshot_sha256 returned above. Code must already be present remotely.
+oms runtime experiment run --profile remote \
+  --id local-channel-ablation --arm baseline --seed 0 \
+  --target cluster --snapshot SNAPSHOT_SHA256 \
+  --run-id experiment-run-baseline-0 \
+  -- sh -c 'python3 train.py --seed "$OMS_EXPERIMENT_SEED" --metrics "$OMS_EXPERIMENT_METRICS"'
+oms runtime experiment reconcile --run-id experiment-run-baseline-0
+oms runtime experiment summarize --id local-channel-ablation
+```
+
+The command runs in the target's snapshot-checked checkout. OMS supplies
+`OMS_EXPERIMENT_METRICS`, `OMS_EXPERIMENT_RUN_ID`, `OMS_EXPERIMENT_ID`,
+`OMS_EXPERIMENT_ARM`, `OMS_EXPERIMENT_SEED`, and `OMS_EXEC_SNAPSHOT_SHA256`.
+The metrics path is a fresh sidecar in that durable operation's private result
+directory. The command must wait for computation to finish and write a regular
+JSON metrics object there (at most 64 KiB). Missing, reused, or symlink sidecars
+are refused. Training stdout goes to the operation's existing bounded diagnostic
+log; the result channel contains one JSON bundle binding metrics to the contract,
+run, arm, seed and snapshot. No per-file SCP or archive extraction is involved.
+
+Before SSH, the existing experiment run stream records the launch intent and
+consumes one run from the contract budget. An interrupted caller does not free
+that budget while its remote operation may still be active. By default the run
+ID is derived from the exact contract, target approval fingerprint, snapshot,
+arm, seed and command. An explicit `--run-id` must start with `experiment-run-`
+and have at most 64 characters. Reusing an ID with different inputs refuses;
+repeating an unchanged request reuses the existing durable operation and does
+not relaunch an unknown or running command. A deliberate new attempt uses a new
+run ID and consumes another run.
+
+The existing SSH owner may return `running` or `unknown` (exit 75). That response
+is pending execution evidence, not experimental completion. `experiment
+reconcile` queries the recorded operation without accepting a new command. It
+validates the target approval fingerprint, execution metadata and result identity
+before appending an updated row to the same run stream. Repeated terminal
+reconciliation is local. Valid results record `metrics_digest`,
+`result_bundle_sha256`, `execution_operation_id` and `execution_receipt`; malformed
+or mismatched results are terminal `invalid_result` (exit 3). Summaries use the
+existing metric, seed and invariant requirements. A transferred, correctly bound
+number still requires the project's scientific checks and parent review.
+
+This path currently requires the project's common checkout. Local-only
+`--metrics`, `--allow-existing-metrics`, `--worktree`, `--image`, `--adapter` and
+`--timeout-seconds` refuse for remote experiments. It reuses the existing SSH
+owner's launch/reconcile waiting behavior; it does not add client-side deadlines,
+remote execution time limits, or cancellation semantics. Generic `backend run
+remote`, Slurm job submission/monitoring, arbitrary multi-file result manifests,
+and GPU isolation are not implemented by this bridge. In particular, a successful
+`sbatch` exit is submission evidence only: this command must not be used to mark
+the queued job as a completed experiment.
+
+### Contract and comparison semantics
 
 A contract fixes:
 
