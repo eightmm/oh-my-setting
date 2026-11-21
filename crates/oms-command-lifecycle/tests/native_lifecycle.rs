@@ -318,6 +318,9 @@ impl Services for ColdUpdateHost {
             return (0, vec![], vec![]);
         }
         if phase == IncomingPhase::Verify {
+            if self.fail == "apply-locked-verify" {
+                fs::write(self.root.join("verify-reached"), b"").unwrap();
+            }
             return (
                 if matches!(self.fail.as_str(), "verify" | "apply-locked-verify") {
                     7
@@ -432,6 +435,44 @@ fn with_locked_receipt_ref(
         result
     });
     (result, selected)
+}
+
+fn with_pending_failure_publication(host: &ColdUpdateHost, run: impl FnOnce() -> Output) -> Output {
+    let mut settings = oms_lock::Settings::from_env().unwrap();
+    settings.cwd = host.source();
+    let receipt = oms_lock::Lock::for_file(&host.receipt(), settings.clone()).unwrap();
+    let state = oms_lock::Lock::for_file(&host.root.join("auto-update.status"), settings).unwrap();
+    let state_guard = state.acquire(None).unwrap();
+    let lifecycle_owner = host.root.join("locks/install-lifecycle.lock.d/owner");
+    let verify = host.root.join("verify-reached");
+    let journal = host
+        .root
+        .join("config/oh-my-setting/native-update/transaction.json");
+
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !verify.is_file() || journal.exists() {
+                assert!(Instant::now() < deadline, "update did not roll back");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // While the state lock prevents the rolled-back attempt from
+            // publishing, another apply must still be unable to enter.
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                assert!(
+                    lifecycle_owner.is_file(),
+                    "failure publication lost lifecycle ownership"
+                );
+                assert_eq!(receipt.probe(), oms_lock::Status::Held);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(state_guard);
+        });
+        let out = run();
+        observer.join().unwrap();
+        out
+    })
 }
 
 fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
@@ -688,6 +729,7 @@ exec "$root/bin/actual/git" "$@"
                 .unwrap()
                 .success()
         );
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o600)).unwrap();
         let digest = format!("{:x}", sha2::Sha256::digest(fs::read(&archive).unwrap()));
         fs::rename(&remote, host.root.join("offline-origin.git")).unwrap();
         fs::write(
@@ -714,7 +756,8 @@ exec "$root/bin/actual/git" "$@"
         };
         let rejected = prepare_bundle(&"0".repeat(64));
         assert_ne!(rejected.0, 0);
-        assert!(String::from_utf8_lossy(&rejected.2).contains("SHA-256 mismatch"));
+        let error = String::from_utf8_lossy(&rejected.2);
+        assert!(error.contains("SHA-256 mismatch"), "{error}");
         assert_eq!(*host.phases.borrow(), phases);
         assert_eq!(fs::read(&preparation).unwrap(), receipt);
         assert!(!cache.exists());
@@ -921,6 +964,15 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     assert_eq!(status()["status"], "up_to_date");
     assert_eq!(status()["last_apply_status"], "failed");
     assert_eq!(attention()["attention"], "failed");
+
+    let mut skipped_check = status();
+    skipped_check["status"] = json!("skipped");
+    write(&state, &skipped_check);
+    assert_eq!(
+        attention()["attention"],
+        "failed",
+        "a deferred check preserves apply failure attention"
+    );
 
     host.mark_worker();
     assert_eq!(call("auto-update", &["apply"], &source, host).0, 76);
@@ -1548,9 +1600,10 @@ echo build >> "$root/flow"
         let (out, _) =
             with_locked_receipt_ref(&host, if explicit { &host.before } else { &target }, || {
                 match host.fail.as_str() {
-                    "apply-locked-auto" | "apply-locked-verify" => {
+                    "apply-locked-auto" => call("auto-update", &["apply"], &source, &host),
+                    "apply-locked-verify" => with_pending_failure_publication(&host, || {
                         call("auto-update", &["apply"], &source, &host)
-                    }
+                    }),
                     "apply-locked-explicit" => {
                         call("update", &["--ref", &target, "--no-tools"], &source, &host)
                     }

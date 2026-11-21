@@ -10,7 +10,9 @@ ref from the install receipt after acquiring the lifecycle and receipt locks.
 If another lifecycle operation changes that receipt while the caller waits,
 the apply uses the new saved ref. An explicit `--ref` or reviewed release
 selection still takes precedence. Scheduled apply failures report the locked
-selection and resolved target when available.
+selection and resolved target when available. The scheduler publishes the
+result while holding both locks. A caller that cannot acquire the locks exits
+with its admission error and leaves the recorded apply outcome intact.
 
 ## Prepare, inspect, apply
 
@@ -157,8 +159,9 @@ keeps the last apply result separately. The optional `last_apply_run`,
 selected ref. A later check may report `up_to_date` while the last apply remains
 `partial` or `failed`: fetching the current commit does not retry provider tools.
 `auto-update attention` continues to report that failure until a later apply
-replaces the result or a newer installation supersedes it. Legacy status files
-remain readable and retain their apply result on the next check.
+replaces the result or a newer installation supersedes it. A deferred check
+leaves the failure visible. Legacy status files remain readable and retain
+their apply result on the next check.
 
 After a partial result, retry the existing tool refresh for the installation's
 capability selection with `oms install-profile --reapply --upgrade`; include the

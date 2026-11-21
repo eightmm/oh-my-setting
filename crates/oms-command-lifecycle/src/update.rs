@@ -192,15 +192,19 @@ fn attention(paths: &Paths, flag: &AtomicBool) -> Result<&'static str> {
         .as_str()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
     let apply = last_apply(&state);
+    let mut blocked = false;
     for record in std::iter::once(&state).chain(apply.as_ref()) {
         let superseded = installed.zip(run_time(record)).is_some_and(|(a, b)| a > b);
         if !superseded {
             match record["status"].as_str() {
                 Some("failed" | "partial") => return Ok("failed"),
-                Some("skipped") => return Ok("blocked"),
+                Some("skipped") => blocked = true,
                 _ => (),
             }
         }
+    }
+    if blocked {
+        return Ok("blocked");
     }
     if systemd && let Some(program) = r::find("loginctl", &paths.cwd) {
         let output = r::command(
@@ -684,24 +688,7 @@ fn run_selected(
             target: String::new(),
             reference: reference.into(),
         };
-        let result = apply_update(paths, options, flag, services, &mut attempt, reviewed);
-        if options.tool == "auto-update"
-            && let Err(error) = &result
-        {
-            publish_mode(
-                paths,
-                if matches!(error.0, 75 | 76) {
-                    "skipped"
-                } else {
-                    "failed"
-                },
-                &attempt.current,
-                &attempt.target,
-                &attempt.reference,
-                "apply",
-            )?;
-        }
-        return result;
+        return apply_update(paths, options, flag, services, &mut attempt, reviewed);
     }
     let _fetch_guard = fetch_lock(paths, flag)?;
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
@@ -1044,15 +1031,49 @@ fn apply_update(
     attempt: &mut ApplyAttempt,
     reviewed: Option<ReviewedRelease<'_>>,
 ) -> Result<crate::Output> {
-    use crate::{IncomingPhase as Phase, transaction::Transaction};
     r::child_guard()?;
     if borrowed(paths).unwrap_or(false) {
         return r::fail("an incoming gate cannot recursively update the installation");
     }
 
-    fences(paths, flag)?;
+    let scheduled = options.tool == "auto-update";
+    if !scheduled {
+        fences(paths, flag)?;
+    }
     let _operation = crate::lifecycle_lock::acquire(paths, flag)?;
     let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    let result = apply_update_locked(paths, options, flag, services, attempt, reviewed);
+    if scheduled && let Err(error) = &result {
+        // Rollback has completed or retained its recovery journal. Publish
+        // before releasing admission so another apply cannot overtake us.
+        publish_mode(
+            paths,
+            if matches!(error.0, 75 | 76) {
+                "skipped"
+            } else {
+                "failed"
+            },
+            &attempt.current,
+            &attempt.target,
+            &attempt.reference,
+            "apply",
+        )?;
+    }
+    result
+}
+
+fn apply_update_locked(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+    attempt: &mut ApplyAttempt,
+    reviewed: Option<ReviewedRelease<'_>>,
+) -> Result<crate::Output> {
+    use crate::{IncomingPhase as Phase, transaction::Transaction};
+    if options.tool == "auto-update" {
+        fences(paths, flag)?;
+    }
     // Roll back the transaction before deciding whether to remove its lease.
     let _lease;
     let mut tx = Transaction::begin_update(paths)?;
