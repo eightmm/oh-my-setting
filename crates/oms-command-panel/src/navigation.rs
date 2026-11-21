@@ -14,9 +14,17 @@ pub struct Navigation {
     pub detail: bool,
     pub health: bool,
     pub help: bool,
+    pub main_switch: Option<MainSwitchMenu>,
     pub folded: BTreeSet<String>,
     pub notice: Option<String>,
 }
+#[derive(Clone, Debug)]
+pub struct MainSwitchMenu {
+    pub current: String,
+    pub choices: Vec<String>,
+    pub selected: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     None,
@@ -30,6 +38,7 @@ pub enum Action {
     Results,
     Chats,
     Controls,
+    SwitchMain,
     Provider(usize),
 }
 impl Navigation {
@@ -96,6 +105,7 @@ impl Navigation {
             Key::Char('R') => return Action::Results,
             Key::Char('h') => return Action::Chats,
             Key::Char('j') => return Action::Controls,
+            Key::Char('s') => return Action::SwitchMain,
             Key::Char('1') => return Action::Provider(0),
             Key::Char('2') => return Action::Provider(1),
             Key::Char('3') => return Action::Provider(2),
@@ -168,6 +178,7 @@ mod tests {
             (Key::Char('r'), Action::ReadAll),
             (Key::Char('h'), Action::Chats),
             (Key::Char('j'), Action::Controls),
+            (Key::Char('s'), Action::SwitchMain),
             (Key::Char('u'), Action::Refresh),
             (Key::Char('U'), Action::Quota),
             (Key::Char('9'), Action::Refresh),

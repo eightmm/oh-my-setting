@@ -91,7 +91,23 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 
 ## 컨트롤 패널
 
-tmux를 사용할 수 있는 터미널에서 `oms`를 실행해 프로젝트 Main을 선택하거나 실행 중인 Main에 다시 연결합니다. 보드만 보려면 `oms panel --watch`를 실행합니다. **Needs you**에서 입력이나 검토가 필요한 항목을 열 수 있습니다. 호출을 선택하면 기록된 활동과 결과를 확인하고, `w`를 누르면 확인된 주간 쿼터, 출처, 보고된 리셋 시각을 확인할 수 있습니다. 확인 근거가 없는 사용량은 미확인으로 표시합니다. [패널 조작법](docs/TERMINAL-PANEL.md#keys)
+tmux를 사용할 수 있는 터미널에서 `oms`를 실행합니다. 처음 열 때는 설치된
+Main을 선택합니다. 실행 중인 Main이 확인되면 Enter로 **Continue current Main**을
+선택할 수 있습니다. 선택 메뉴 없이 Board를 복원하려면 기존 창에서
+`oms panel --reopen`을 실행합니다. 새 Main을 미리 지정하려면
+`OMS_PANEL_MAIN`을 설정합니다. [시작과 복구](docs/TERMINAL-PANEL.md#default-main-selection)
+
+전환을 지원하는 Main이 있는 tmux 관리 패널에서 Board의 `s`를 누르고
+대상 번호를 고른 뒤 `Y`로 확정합니다. Esc로 선택을 취소할 수 있습니다.
+Main이 안전하게 종료됐는지와 Room 소유권이 확인되어야 전환되며,
+대화 기록은 provider별로 보관됩니다.
+[Main 전환 조건](docs/TERMINAL-PANEL.md#swap-the-main)
+
+provider별 보기의 **Direct work**에는 Main이 직접 맡긴 활성 호출이 표시됩니다.
+호출을 골라 Enter를 누르면 확인 가능한 결과나 최근 응답을 Board 리더에서 볼 수 있습니다.
+**Needs you**에서 입력이나 검토가 필요한 항목을 열고, `w`로 보고된 주간
+쿼터와 출처, 리셋 시각을 확인할 수 있습니다. 근거가 없는 사용량은 미확인으로
+표시합니다. Board만 보려면 `oms panel --watch`를 실행합니다. [패널 조작법](docs/TERMINAL-PANEL.md#keys)
 
 `oms list`는 일상 명령을 표시합니다. 전체 목록은 `oms list --all`, 옵션은 `oms <명령> --help`에서 확인합니다. [명령 목록](docs/COMPONENTS.md)
 

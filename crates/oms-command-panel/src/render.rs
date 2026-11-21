@@ -2396,7 +2396,7 @@ fn render_provider_rows(
         .filter(|(_, entry)| is_direct_work(entry.call, direct));
     if direct_page.clone().next().is_some() {
         lines.push(card_top_styled(
-            "Overall Main · Direct work",
+            "Direct work",
             None,
             columns,
             colored,
@@ -3387,6 +3387,40 @@ fn render_main_section(
     out
 }
 
+pub(crate) fn main_switch_frame(
+    menu: &navigation::MainSwitchMenu,
+    columns: usize,
+    height: usize,
+) -> BoardFrame {
+    let mut lines = vec![clip(
+        &format!("Switch Main · current {}", menu.current),
+        columns,
+    )];
+    if let Some(choice) = menu.selected.and_then(|index| menu.choices.get(index)) {
+        lines.extend(wrap(
+            &format!("Replace Main with {choice}?"),
+            columns.max(1),
+        ));
+        lines.push("Y Confirm · Esc Cancel".into());
+    } else {
+        for (index, choice) in menu.choices.iter().enumerate() {
+            lines.push(format!("{}  {choice}", index + 1));
+        }
+        lines.push("Number Select · Esc Cancel".into());
+    }
+    lines.truncate(height);
+    lines.resize(height, String::new());
+    for line in &mut lines {
+        *line = clip(line, columns);
+    }
+    BoardFrame {
+        lines,
+        provider_rows: [None; 3],
+        worker_rows: Default::default(),
+        weekly_usage: None,
+    }
+}
+
 fn render_help_card(
     columns: usize,
     inner_width: usize,
@@ -3400,6 +3434,7 @@ fn render_help_card(
         ("D", "Read selected Call Detail and tokens"),
         ("f", "Open selected task results"),
         ("Click title · 1/2/3", "Read Codex, Claude or AGY chat"),
+        ("s", "Choose another Main and confirm the switch"),
         ("Click worker · c", "Read worker details or latest council"),
         ("Click weekly · w", "Read weekly usage details"),
         ("U", "Refresh Claude and AGY weekly usage"),
@@ -6082,7 +6117,8 @@ mod tests {
             assert!(board.lines.iter().all(|line| width(line) <= columns));
             assert_eq!(board.lines.len(), height);
             if columns >= 56 {
-                assert!(board.lines[hit - 1].contains("Overall Main · Direct work"));
+                assert!(board.lines[hit - 1].contains("Direct work"));
+                assert!(!board.lines[hit - 1].contains("Overall Main"));
                 let agy = board.provider_rows[2].unwrap();
                 assert!(agy > hit && board.lines[agy].contains("Lead chat [3]"));
                 assert!(!board.worker_rows.contains_key(&agy));

@@ -1046,7 +1046,7 @@ pub(crate) fn run_mode(
         return chats(&repo, options, services, stop);
     }
     if options.has("watch") || options.has("log") {
-        return crate::watch::run(&repo, options, services, stop);
+        return crate::watch::run_with_source(&repo, source, options, services, stop);
     }
     let state = snapshot(&repo, options, services, stop)?;
     if options.has("health") {
@@ -1120,7 +1120,7 @@ pub(crate) fn run_mode(
     if options.has("dry-run") {
         return crate::native_panel::dry_run_plan(&repo_req()?, source, options, services, stop);
     }
-    crate::watch::run(&repo_req()?, options, services, stop)
+    crate::watch::run_with_source(&repo_req()?, source, options, services, stop)
 }
 
 pub(crate) fn results_report(

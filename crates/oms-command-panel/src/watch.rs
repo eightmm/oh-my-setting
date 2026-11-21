@@ -6,7 +6,11 @@ use crate::{
     orchestrator::{ChatBinding, ObservationGeneration, Observations, Panel},
     render,
 };
-use oms_panel_core::{NativeCommand, Value, eventlog, state::Snapshot};
+use oms_panel_core::{
+    NativeCommand, Value, eventlog,
+    services::{ExecutionRequest, PeerExecutor},
+    state::Snapshot,
+};
 use serde_json::json;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -21,12 +25,33 @@ pub fn run(
     services: &dyn Services,
     interrupted: &AtomicBool,
 ) -> Result<Output> {
+    run_with_source(repo, Path::new(""), options, services, interrupted)
+}
+
+pub(crate) fn run_with_source(
+    repo: &Path,
+    source: &Path,
+    options: &Options,
+    services: &dyn Services,
+    interrupted: &AtomicBool,
+) -> Result<Output> {
     let mut output = std::io::stdout().lock();
-    run_with_writer(repo, options, services, interrupted, &mut output)
+    run_with_source_writer(repo, source, options, services, interrupted, &mut output)
 }
 /// Watch output is streamed rather than retained in an unbounded command result.
 pub fn run_with_writer(
     repo: &Path,
+    options: &Options,
+    services: &dyn Services,
+    interrupted: &AtomicBool,
+    output: &mut dyn Write,
+) -> Result<Output> {
+    run_with_source_writer(repo, Path::new(""), options, services, interrupted, output)
+}
+
+fn run_with_source_writer(
+    repo: &Path,
+    source: &Path,
     options: &Options,
     services: &dyn Services,
     interrupted: &AtomicBool,
@@ -90,6 +115,7 @@ pub fn run_with_writer(
     let mut observations = Observations::default();
     let mut main_footer = MainFooter::default();
     let mut selection_changed = SelectionFence::None;
+    let mut switch = MainSwitch::default();
     loop {
         if interrupted.load(Ordering::Acquire) {
             return Ok((130, vec![], vec![]));
@@ -175,6 +201,7 @@ pub fn run_with_writer(
                 nav.detail = false;
                 nav.folded.clear();
                 nav.notice = None;
+                switch.cancel_selection(&mut nav);
             }
             let mut report = board.phase.frame_report(result, previous.take(), &room);
             if rejected_native {
@@ -400,6 +427,11 @@ pub fn run_with_writer(
                     }
                 }
                 let mut changed = false;
+                if let Some(outcome) = switch.poll() {
+                    nav.notice = Some(outcome);
+                    changed = true;
+                    refresh = true;
+                }
                 let mut detail_repaint = false;
                 // A moved dock resizes this pane; paint before the slow snapshot.
                 let mut dock_moved = false;
@@ -408,6 +440,29 @@ pub fn run_with_writer(
                 weekly.repaint = false;
                 for key in keys {
                     if key == input::Key::Unbound {
+                        continue;
+                    }
+                    if nav.main_switch.is_some() {
+                        if key == input::Key::Eof {
+                            return Ok((0, vec![], vec![]));
+                        }
+                        if switch.key(
+                            &key,
+                            &mut nav,
+                            || {
+                                (snapshot_ok
+                                    && !woken
+                                    && !interrupted.load(Ordering::Acquire)
+                                    && crate::layout::dimensions() == last_size
+                                    && last_size.1 >= 6)
+                                    .then(|| target.sample(repo, services, interrupted).ok())
+                                    .flatten()
+                            },
+                            |scope, target| start_main_switch(repo, scope, target),
+                        ) {
+                            changed = true;
+                            break;
+                        }
                         continue;
                     }
                     if weekly.detail.is_none()
@@ -773,6 +828,18 @@ pub fn run_with_writer(
                             )?;
                             nav.notice = Some(format_chats_notice(&room, &catalog));
                         }
+                        navigation::Action::SwitchMain => {
+                            let shown = board.as_ref().and_then(|board| board.scope.as_ref());
+                            if last_size.1 < 6 {
+                                nav.notice = Some("Enlarge the Board to switch Main".into());
+                            } else if let Err(error) = switch.open(shown, &report, source, &mut nav)
+                            {
+                                nav.notice = Some(error.message);
+                            } else {
+                                chat = None;
+                            }
+                            break;
+                        }
                         navigation::Action::Controls => {
                             let mut counts = Vec::new();
                             let mut first_error = None;
@@ -960,7 +1027,8 @@ fn key_checks_scope(key: &input::Key, editing: bool, weekly_open: bool, docked: 
     match key {
         Key::Click(..) => true,
         Key::Escape => !editing && docked,
-        Key::Enter | Key::Char('1' | '2' | '3' | 'U' | 'w' | 'D' | 'c' | 'f' | 'r' | 'R' | 'h') => {
+        Key::Enter
+        | Key::Char('1' | '2' | '3' | 'U' | 'w' | 'D' | 'c' | 'f' | 'r' | 'R' | 'h' | 's') => {
             !editing
         }
         _ => false,
@@ -1012,12 +1080,218 @@ struct BoardScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiveMain {
     attempt: String,
+    member: String,
     owner: String,
     session: String,
     window: String,
     pane: String,
     pid: u32,
     birth: String,
+}
+
+#[derive(Default)]
+struct MainSwitch {
+    selection: Option<(BoardScope, Vec<crate::native_panel::MainSwitchTarget>)>,
+    running: Option<Receiver<Result<()>>>,
+}
+
+impl MainSwitch {
+    fn open(
+        &mut self,
+        scope: Option<&BoardScope>,
+        report: &Value,
+        source: &Path,
+        nav: &mut navigation::Navigation,
+    ) -> Result<()> {
+        crate::parent_only()?;
+        crate::require(
+            self.running.is_none(),
+            "A Main switch is already in progress",
+        )?;
+        let scope = scope
+            .filter(|scope| report["room"]["id"] == scope.room)
+            .ok_or_else(|| Error::new("Main switch requires a verified managed Board"))?;
+        let main = scope
+            .main
+            .as_ref()
+            .ok_or_else(|| Error::new("No current Main verified"))?;
+        let attempt = &report["room_attempts"][&main.attempt];
+        crate::require(
+            attempt["provider"] == main.owner
+                && attempt["refs"]["panel_host"] == "tmux"
+                && attempt["terminal"] == false
+                && attempt["state"] == "working"
+                && oms_panel_core::state::main_participant(attempt) == main.member,
+            "Current Main is unavailable for a managed switch",
+        )?;
+        let current = attempt["refs"]["panel_harness"]
+            .as_str()
+            .unwrap_or_default();
+        let targets = crate::native_panel::main_switch_targets(source, current)?;
+        nav.main_switch = Some(navigation::MainSwitchMenu {
+            current: current.into(),
+            choices: targets
+                .iter()
+                .map(|target| format!("{} · {}", target.harness, target.model))
+                .collect(),
+            selected: None,
+        });
+        nav.notice = None;
+        self.selection = Some((scope.clone(), targets));
+        Ok(())
+    }
+
+    fn cancel_selection(&mut self, nav: &mut navigation::Navigation) {
+        self.selection = None;
+        nav.main_switch = None;
+    }
+
+    /// Process one modal step per paint so a key batch cannot skip confirmation.
+    fn key(
+        &mut self,
+        key: &input::Key,
+        nav: &mut navigation::Navigation,
+        current: impl FnOnce() -> Option<BoardScope>,
+        submit: impl FnOnce(
+            &BoardScope,
+            &crate::native_panel::MainSwitchTarget,
+        ) -> Result<Receiver<Result<()>>>,
+    ) -> bool {
+        let Some(menu) = &mut nav.main_switch else {
+            return false;
+        };
+        match key {
+            input::Key::Escape | input::Key::Char('q' | 'n') => {
+                self.cancel_selection(nav);
+                true
+            }
+            input::Key::Char(number @ '1'..='9') if menu.selected.is_none() => {
+                let index = *number as usize - '1' as usize;
+                if index >= menu.choices.len() {
+                    return false;
+                }
+                menu.selected = Some(index);
+                true
+            }
+            input::Key::Char('y' | 'Y') if menu.selected.is_some() => {
+                let selected = menu.selected.unwrap();
+                let selection = self.selection.take();
+                nav.main_switch = None;
+                let result = (|| {
+                    let (expected, targets) =
+                        selection.ok_or_else(|| Error::new("Main switch selection expired"))?;
+                    crate::require(
+                        current().is_some_and(|scope| same_footer_scope(&scope, &expected)),
+                        "Main changed; reopen the switch menu",
+                    )?;
+                    let target = targets
+                        .get(selected)
+                        .ok_or_else(|| Error::new("Main switch selection expired"))?;
+                    self.running = Some(submit(&expected, target)?);
+                    Ok(format!("Switching Main to {}", target.harness))
+                })();
+                nav.notice = Some(result.unwrap_or_else(|error: Error| error.message));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn poll(&mut self) -> Option<String> {
+        let message = match self.running.as_ref()?.try_recv() {
+            Ok(Ok(())) => "Main switch verified".into(),
+            Ok(Err(error)) => error.message,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
+                "Main switch outcome unavailable; check the current Room".into()
+            }
+        };
+        self.running = None;
+        Some(message)
+    }
+}
+
+fn start_main_switch(
+    repo: &Path,
+    scope: &BoardScope,
+    target: &crate::native_panel::MainSwitchTarget,
+) -> Result<Receiver<Result<()>>> {
+    let services = oms_panel_core::SubcommandServices::sibling()?;
+    let request = main_switch_request(&services.executable, repo, scope, target)?;
+    let (completed, result) = mpsc::channel();
+    // The canonical host owns lifecycle reconciliation once submitted. Closing
+    // this display neither retries the transition nor sends a second request.
+    std::thread::Builder::new()
+        .name("oms-main-switch".into())
+        .spawn(move || {
+            let result = services
+                .execute(&request, &AtomicBool::new(false))
+                .and_then(|response| {
+                    if response.code == 0
+                        && response.cleanup_complete
+                        && response.output_complete
+                        && !response.limited
+                    {
+                        Ok(())
+                    } else {
+                        let detail = oms_panel_core::redact(&response.stderr).unwrap_or_default();
+                        let detail = render::clean(detail.trim(), 240);
+                        Err(Error::new(if detail.is_empty() {
+                            "Main switch outcome unavailable; check the current Room".into()
+                        } else {
+                            detail
+                        }))
+                    }
+                });
+            let _ = completed.send(result);
+        })
+        .map_err(Error::new)?;
+    Ok(result)
+}
+
+fn main_switch_request(
+    executable: &Path,
+    repo: &Path,
+    scope: &BoardScope,
+    target: &crate::native_panel::MainSwitchTarget,
+) -> Result<ExecutionRequest> {
+    let main = scope
+        .main
+        .as_ref()
+        .ok_or_else(|| Error::new("No current Main verified"))?;
+    crate::require(
+        executable.is_absolute() && executable.file_name().is_some_and(|name| name == "oms"),
+        "Canonical OMS dispatcher unavailable",
+    )?;
+    let mut argv = vec![
+        executable.as_os_str().into(),
+        "panel".into(),
+        "--repo".into(),
+        repo.as_os_str().into(),
+    ];
+    argv.extend(commands::strings(&[
+        "--host",
+        "tmux",
+        "--room",
+        &scope.room,
+        "--swap-main",
+        target.harness,
+        "--model",
+        &target.model,
+    ]));
+    let mut request = ExecutionRequest::new(argv, repo);
+    request.timeout = Duration::from_secs(420);
+    request.output_limit = 64 * 1024;
+    // Same explicit attempt override consumed by the command entrypoint.
+    request.environment.extend([
+        (
+            "OMS_PANEL_MAIN_ATTEMPT".into(),
+            main.attempt.as_str().into(),
+        ),
+        ("OMS_PANEL_OWNER".into(), main.owner.as_str().into()),
+        ("OMS_ROOM_PARTICIPANT".into(), main.member.as_str().into()),
+    ]);
+    Ok(request)
 }
 
 #[derive(Clone)]
@@ -1229,7 +1503,7 @@ impl BoardTarget {
                         && row[6] == board[6]
                         && row[7] == row[2]
                         && row[8] == board[8]
-                        && row[9] == row[6]
+                        && row[9] == board[9]
                         && row[10] == board[10]
                         && row[11] == board[11]
                 });
@@ -1244,7 +1518,7 @@ impl BoardTarget {
                         && board[4] == "0"
                         && board[5] == "1"
                         && board[7] == row[2]
-                        && board[9] == board[6]
+                        && crate::identifier(board[9]).is_ok()
                         && Some(board[11]) == repo.to_str()
                         && crate::orchestrator::PROVIDERS.contains(&row[8]),
                     "Exact Room Board custody unavailable",
@@ -1255,6 +1529,7 @@ impl BoardTarget {
                 launch_path = row.get(13).map(|path| (*path).to_owned());
                 main = Some(LiveMain {
                     attempt: row[6].into(),
+                    member: row[9].into(),
                     owner: row[8].into(),
                     session: row[0].into(),
                     window: row[1].into(),
@@ -1271,6 +1546,7 @@ impl BoardTarget {
                     room.as_deref(),
                     main.as_ref().map(|main| main.attempt.as_str()),
                 )?
+                .with_member(main.as_ref().map(|main| main.member.as_str()))?
                 .with_launch_path(launch_path.clone()),
                 room: room.unwrap_or_default(),
                 main,
@@ -1655,9 +1931,9 @@ impl InteractiveRefresh {
                         let attempt = &snapshot.report["room_attempts"][&main.attempt];
                         let member = crate::rows(&snapshot.report["room"]["participants"])
                             .iter()
-                            .find(|row| row["participant"] == main.attempt);
+                            .find(|row| row["participant"] == main.member);
                         attempt["provider"] == main.owner
-                            && oms_panel_core::state::main_participant(attempt) == main.attempt
+                            && oms_panel_core::state::main_participant(attempt) == main.member
                             && member.is_some_and(|row| {
                                 row["terminal"] != true
                                     && !row["state"].as_str().is_some_and(|state| {
@@ -1747,7 +2023,8 @@ fn allow_board_action(
         | Action::Open
         | Action::Detail
         | Action::ReadAll
-        | Action::Results => row_authority,
+        | Action::Results
+        | Action::SwitchMain => row_authority,
         Action::None | Action::Quit | Action::Refresh | Action::Controls => true,
     };
     if allowed {
@@ -2535,6 +2812,9 @@ fn frame(
     weekly: Option<(&mut ChatDock, WeeklyPhase)>,
 ) -> render::BoardFrame {
     let (columns, height) = size;
+    if let Some(menu) = &nav.main_switch {
+        return render::main_switch_frame(menu, columns, height);
+    }
     let chat = chat.filter(|dock| !private_chat_hidden(report, dock));
     let dock_rows = split.map(|split| {
         split.paint(
@@ -4248,6 +4528,95 @@ mod tests {
     }
 
     #[test]
+    fn main_switch_requires_separate_confirmation_for_the_exact_scope() {
+        use super::*;
+        use input::Key;
+        let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let scope = BoardScope {
+            key: RefreshKey::new(&repo, Some("room-one"), Some("attempt-old"))
+                .unwrap()
+                .with_member(Some("main-member"))
+                .unwrap(),
+            room: "room-one".into(),
+            main: Some(LiveMain {
+                attempt: "attempt-old".into(),
+                member: "main-member".into(),
+                owner: "codex".into(),
+                session: "$1".into(),
+                window: "@1".into(),
+                pane: "%1".into(),
+                pid: 52,
+                birth: "start-one".into(),
+            }),
+        };
+        let make_menu = || {
+            let target = crate::native_panel::MainSwitchTarget {
+                harness: "agy",
+                model: "gemini-4-carbon-high".into(),
+            };
+            let menu = navigation::MainSwitchMenu {
+                current: "codex".into(),
+                choices: vec!["agy · gemini-4-carbon-high".into()],
+                selected: None,
+            };
+            (
+                MainSwitch {
+                    selection: Some((scope.clone(), vec![target])),
+                    running: None,
+                },
+                navigation::Navigation {
+                    main_switch: Some(menu),
+                    ..Default::default()
+                },
+            )
+        };
+        let refuse = |_: &BoardScope, _: &crate::native_panel::MainSwitchTarget| {
+            panic!("cancelled or stale switch reached the dispatcher")
+        };
+        let (mut flow, mut nav) = make_menu();
+        assert!(!flow.key(&Key::Char('y'), &mut nav, || None, refuse));
+        assert!(flow.key(&Key::Char('1'), &mut nav, || None, refuse));
+        let frame = render::main_switch_frame(nav.main_switch.as_ref().unwrap(), 31, 6);
+        assert!(frame.lines.iter().any(|line| line.contains("Y Confirm")));
+        assert!(frame.worker_rows.is_empty());
+        assert!(flow.key(&Key::Escape, &mut nav, || None, refuse));
+        assert!(flow.selection.is_none() && nav.main_switch.is_none());
+        let (mut flow, mut nav) = make_menu();
+        assert!(flow.key(&Key::Char('1'), &mut nav, || None, refuse));
+        let mut replaced = scope.clone();
+        replaced.main.as_mut().unwrap().birth = "start-two".into();
+        assert!(flow.key(&Key::Char('y'), &mut nav, || Some(replaced), refuse));
+        assert!(nav.notice.unwrap().contains("Main changed"));
+        let (mut flow, mut nav) = make_menu();
+        assert!(flow.key(&Key::Char('1'), &mut nav, || None, refuse));
+        assert!(flow.key(
+            &Key::Char('y'),
+            &mut nav,
+            || Some(scope.clone()),
+            |expected, target| {
+                assert_eq!(expected, &scope);
+                let req = main_switch_request(Path::new("/fixture/oms"), &repo, expected, target)?;
+                let opts = Options::parse(&req.argv[2..])?;
+                assert_eq!(opts.get("room"), Some("room-one"));
+                assert_eq!(opts.get("swap-main"), Some("agy"));
+                assert_eq!(opts.get("model"), Some("gemini-4-carbon-high"));
+                assert_eq!(
+                    req.environment,
+                    [
+                        ("OMS_PANEL_MAIN_ATTEMPT".into(), "attempt-old".into()),
+                        ("OMS_PANEL_OWNER".into(), "codex".into()),
+                        ("OMS_ROOM_PARTICIPANT".into(), "main-member".into()),
+                    ]
+                );
+                let (done, result) = mpsc::channel();
+                done.send(Ok(())).unwrap();
+                Ok(result)
+            }
+        ));
+        assert_eq!(flow.poll().as_deref(), Some("Main switch verified"));
+    }
+
+    #[test]
     fn managed_refresh_scope_follows_live_tags_and_ignores_focus() {
         use super::*;
         use crate::orchestrator::codex_chat_fixture::BoardSpy;
@@ -4257,6 +4626,8 @@ mod tests {
             repo: &'a Path,
             room: &'static str,
             attempt: &'static str,
+            member: Option<&'static str>,
+            board_member: Option<&'static str>,
             owner: &'static str,
             main_first: bool,
             board_tagged: bool,
@@ -4272,14 +4643,16 @@ mod tests {
                 let pid = std::process::id();
                 let room = self.room;
                 let main = self.attempt;
+                let member = self.member.unwrap_or(main);
+                let board_member = self.board_member.unwrap_or(member);
                 let owner = self.owner;
                 let repo = self.repo.display();
                 let tagged = u8::from(self.board_tagged);
                 let board = format!(
-                    "$1\t@1\t%2\t{pid}\t0\t{tagged}\t{main}\t%1\t{owner}\t{main}\t{room}\t{repo}\t."
+                    "$1\t@1\t%2\t{pid}\t0\t{tagged}\t{main}\t%1\t{owner}\t{board_member}\t{room}\t{repo}\t."
                 );
                 let mut main = format!(
-                    "$1\t@1\t%1\t{pid}\t0\t0\t{main}\t%1\t{owner}\t{main}\t{room}\t{repo}\t."
+                    "$1\t@1\t%1\t{pid}\t0\t0\t{main}\t%1\t{owner}\t{member}\t{room}\t{repo}\t."
                 );
                 if let Some(path) = self.launch_path {
                     main.push('\t');
@@ -4325,6 +4698,8 @@ mod tests {
             room: "room-a",
             attempt: "att_11111111111111111111111111111111",
             owner: "codex",
+            member: None,
+            board_member: None,
             main_first: false,
             board_tagged: true,
             launch_path: None,
@@ -4333,6 +4708,27 @@ mod tests {
         assert_eq!(first.room, "room-a");
         tmux.main_first = true;
         assert_eq!(target.sample(repo, &tmux, &stop).unwrap(), first);
+        tmux.member = Some("original-participant");
+        let swapped = target.sample(repo, &tmux, &stop).unwrap();
+        assert_ne!(swapped, first);
+        assert_eq!(
+            swapped.main.as_ref().unwrap().member,
+            "original-participant"
+        );
+        let snapshot = Snapshot {
+            status: 0,
+            report: json!({"room":{"id":"room-a","closed":false,"participants":[
+                {"participant":"original-participant","role":"main","provider":"codex","joined":true}
+            ]},"room_attempts":{(tmux.attempt):{"attempt_id":tmux.attempt,"provider":"codex","tool":"panel-main","terminal":false,"state":"working","refs":{
+                "panel_room_id":"room-a","panel_role":"main","panel_room_participant":"original-participant"
+            }}}}),
+        };
+        assert!(swapped.key.matches(&snapshot));
+        assert!(!first.key.matches(&snapshot));
+        tmux.board_member = Some("foreign-member");
+        assert!(target.sample(repo, &tmux, &stop).is_err());
+        tmux.member = None;
+        tmux.board_member = None;
         tmux.launch_path = repo.to_str();
         let added = target.sample(repo, &tmux, &stop).unwrap();
         assert_eq!(
@@ -4674,6 +5070,7 @@ mod tests {
             room: room.into(),
             main: Some(LiveMain {
                 attempt: MAIN.into(),
+                member: MAIN.into(),
                 owner: "codex".into(),
                 session: "$1".into(),
                 window: "@1".into(),

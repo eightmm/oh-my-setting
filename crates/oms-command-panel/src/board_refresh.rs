@@ -23,19 +23,27 @@ pub(crate) struct RefreshKey {
     inode: u64,
     room: Option<String>,
     main: Option<String>,
+    member: Option<String>,
     launch_path: Option<PathBuf>,
 }
 
 impl PartialEq for RefreshKey {
     fn eq(&self, other: &Self) -> bool {
-        (&self.repo, self.device, self.inode, &self.room, &self.main)
-            == (
-                &other.repo,
-                other.device,
-                other.inode,
-                &other.room,
-                &other.main,
-            )
+        (
+            &self.repo,
+            self.device,
+            self.inode,
+            &self.room,
+            &self.main,
+            &self.member,
+        ) == (
+            &other.repo,
+            other.device,
+            other.inode,
+            &other.room,
+            &other.main,
+            &other.member,
+        )
     }
 }
 
@@ -63,8 +71,22 @@ impl RefreshKey {
             inode: metadata.ino(),
             room: room.map(str::to_owned),
             main: main.map(str::to_owned),
+            member: main.map(str::to_owned),
             launch_path: None,
         })
+    }
+
+    // A native swap retains the Room participant across Main attempt generations.
+    pub(crate) fn with_member(mut self, member: Option<&str>) -> Result<Self> {
+        require(
+            member.is_some() == self.main.is_some(),
+            "Board Main requires a Room participant",
+        )?;
+        if let Some(member) = member {
+            identifier(member)?;
+        }
+        self.member = member.map(str::to_owned);
+        Ok(self)
     }
 
     pub(crate) fn with_launch_path(mut self, path: Option<String>) -> Self {
@@ -87,7 +109,7 @@ impl RefreshKey {
         })
     }
 
-    fn matches(&self, snapshot: &Snapshot) -> bool {
+    pub(crate) fn matches(&self, snapshot: &Snapshot) -> bool {
         let report = &snapshot.report;
         let room = &report["room"];
         if self.room.as_ref().is_some_and(|id| room["id"] != *id) {
@@ -118,6 +140,9 @@ impl RefreshKey {
             return false;
         };
         let member = state::main_participant(attempt);
+        if self.member.as_deref() != Some(member) {
+            return false;
+        }
         let mut mains = rows(&room["participants"]).iter().filter(|row| {
             row["participant"] == member || (row["role"] == "main" && row["joined"] == true)
         });

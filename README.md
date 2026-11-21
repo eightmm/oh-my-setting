@@ -91,7 +91,23 @@ Update oh-my-setting and re-run its doctor.
 
 ## Control panel
 
-Run `oms` in a foreground terminal with tmux to choose or reconnect to the project's Main. Use `oms panel --watch` for the board by itself. **Needs you** links to items that require input or review. Select a call to inspect recorded activity or results, and press `w` to see reported weekly quota, sources, and available reset times. Missing readings stay unknown. [Panel controls](docs/TERMINAL-PANEL.md#keys)
+Run `oms` in a foreground terminal with tmux. Pick an installed Main on a
+fresh start. When OMS verifies a running Main, Enter selects **Continue current
+Main**. Run `oms panel --reopen` in the existing window to restore its Board
+without the picker. Set `OMS_PANEL_MAIN` to preselect a harness for a fresh launch.
+[Startup and recovery](docs/TERMINAL-PANEL.md#default-main-selection)
+
+In a managed tmux panel with a swap-capable Main, press `s` on the Board,
+pick a numbered target and press `Y` to confirm. Esc cancels the selection.
+The switch requires a verified safe exit and Room ownership. Each provider
+keeps its own chat history.
+[Main switching and requirements](docs/TERMINAL-PANEL.md#swap-the-main)
+
+In the provider overview, **Direct work** shows active calls assigned directly
+by Main. Select a call and press Enter to open its available result or recent
+replies in the Board reader. **Needs you** links to items that require input or review. Press `w`
+for reported weekly quota, sources, and reset times. Missing readings stay
+unknown. Use `oms panel --watch` for a standalone Board. [Panel controls](docs/TERMINAL-PANEL.md#keys)
 
 `oms list` shows the everyday commands. Use `oms list --all` for the full catalog and `oms <command> --help` for flags. [Command catalog](docs/COMPONENTS.md)
 

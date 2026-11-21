@@ -389,6 +389,9 @@ pub(crate) fn default_main(
         };
         return launch(repo, source, capability.harness, options, services, stop).map(Some);
     }
+    if std::env::var_os("OMS_PANEL_MAIN").is_none() {
+        main_picker_foreground(std::io::stdin().as_fd())?;
+    }
     oms_command_peer::admission::interactive_state(repo).map_err(admission_error)?;
     let prefix = entry_prefix(source)?;
     let policy = load_policy(source)?;
@@ -673,7 +676,61 @@ fn split_panel<'a>(
             (main, relay, start_lock)
         }
         SplitRequest::ReuseOrPick => {
+            let configured = std::env::var_os("OMS_PANEL_MAIN");
             (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
+            if owner.is_some()
+                && configured.is_none()
+                && let Some(existing) =
+                    verified_startup_main(repo, &session, requested_room, services, stop)?
+            {
+                let to_board = pick_existing_main(&existing, policy, stop)?;
+                if stop.load(Ordering::Acquire) {
+                    return Err(main_selection_cancelled());
+                }
+                let start_lock = take_start_lock()?;
+                let (current_session, current_owner) =
+                    resolve_checked_session(repo, &repo_str, services, stop)?;
+                require(
+                    current_session == session && current_owner == owner,
+                    "Managed session changed during Main selection; retry",
+                )?;
+                require(
+                    verified_startup_main(repo, &session, requested_room, services, stop)?.as_ref()
+                        == Some(&existing),
+                    "Main changed during selection; retry",
+                )?;
+                start_lock.check()?;
+                reopen_pane(repo, prefix, &existing.pane, false, services, stop)?;
+                if to_board {
+                    let panes = discover_panel_panes(repo, services, stop)?;
+                    let mut boards = panes.iter().filter(|pane| {
+                        pane.mode == PaneMode::Watch
+                            && pane.session == session
+                            && pane.window == existing.pane.window
+                    });
+                    let board = boards
+                        .next()
+                        .filter(|_| boards.next().is_none())
+                        .ok_or_else(|| Error::new("A unique Board could not be verified"))?;
+                    verify_startup_board(repo, &existing, board, services, stop)?;
+                    start_lock.check()?;
+                    terminals::tmux(
+                        services,
+                        repo,
+                        &crate::commands::strings(&["select-pane", "-t", &board.pane]),
+                        stop,
+                    )?;
+                }
+                start_lock.check()?;
+                terminals::tmux(
+                    services,
+                    repo,
+                    &crate::commands::strings(&["select-window", "-t", &existing.pane.pane]),
+                    stop,
+                )?;
+                drop(start_lock);
+                return attach_session(&session).map(|()| true);
+            }
             let lock = if owner.is_some() {
                 let start_lock = take_start_lock()?;
                 (session, owner) = resolve_checked_session(repo, &repo_str, services, stop)?;
@@ -697,7 +754,7 @@ fn split_panel<'a>(
             };
             ensure_no_active_main(repo, &session, owner.is_some(), options, services, stop)?;
             drop(lock);
-            let chosen = match std::env::var_os("OMS_PANEL_MAIN") {
+            let chosen = match configured {
                 Some(raw) => environment_main(&raw)?,
                 None => {
                     MainPermissions::from_env()?;
@@ -982,6 +1039,235 @@ fn resolve_checked_session(
     Ok((session, owner))
 }
 
+#[derive(PartialEq, Eq)]
+struct StartupMain {
+    pane: PanelPane,
+    session: terminals::SessionProof,
+    process: oms_panel_core::native::reference::process::Owner,
+    owner: String,
+    harness: String,
+    room: String,
+    attempt: String,
+    member: String,
+}
+
+fn startup_native_candidate(
+    repo: &Path,
+    session: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Option<PanelPane>> {
+    let mut panes = discover_panel_panes(repo, services, stop)?
+        .into_iter()
+        .filter(|pane| pane.session == session && pane.mode == PaneMode::Native);
+    let candidate = panes.next();
+    require(
+        panes.next().is_none(),
+        "multiple native Main panes found; reopen from the intended OMS window",
+    )?;
+    Ok(candidate)
+}
+
+fn verified_startup_main(
+    repo: &Path,
+    session: &str,
+    requested_room: Option<&str>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Option<StartupMain>> {
+    const FORMAT: &str = "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@oms_panel_owner}\t#{@oms_panel_harness}\t#{@oms_panel_room}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t#{@oms_panel_native_pane}\t.";
+    const UNAVAILABLE: &str =
+        "Current Main generation could not be verified; use --reopen to reconnect";
+    let Some(pane) = startup_native_candidate(repo, session, services, stop)? else {
+        return Ok(None);
+    };
+    let capture = terminals::tmux(
+        services,
+        repo,
+        &crate::commands::strings(&["display-message", "-p", "-t", &pane.pane, FORMAT]),
+        stop,
+    )?;
+    let fields: Vec<_> = capture.split('\t').collect();
+    let [
+        id,
+        name,
+        window,
+        pane_id,
+        pid,
+        "0",
+        owner,
+        harness,
+        room_id,
+        attempt,
+        member,
+        native,
+        ".",
+    ] = fields.as_slice()
+    else {
+        return Err(Error::new(UNAVAILABLE));
+    };
+    require(
+        *name == session
+            && *window == pane.window
+            && *pane_id == pane.pane
+            && native == pane_id
+            && main_capability(harness).is_some_and(|capability| capability.owner == *owner)
+            && [room_id, attempt, member]
+                .into_iter()
+                .all(|value| crate::identifier(value).is_ok()),
+        UNAVAILABLE,
+    )?;
+    require(
+        requested_room.is_none_or(|requested| requested == *room_id),
+        "existing Main belongs to a different room; existing sessions preserved",
+    )?;
+    let session = terminals::provider_session_proof(services, repo, id, stop)?;
+    let process = terminals::process(pid.parse().map_err(Error::new)?)?;
+    require(
+        process.uid == rustix::process::getuid().as_raw(),
+        UNAVAILABLE,
+    )?;
+    let attempts = crate::commands::query(
+        services,
+        NativeCommand::Events,
+        repo,
+        &["list", "--json"],
+        stop,
+    )?;
+    let mut live = rows(&attempts).iter().filter(|event| {
+        event["attempt_id"] == *attempt
+            || (event["tool"] == "panel-main"
+                && event["terminal"] != true
+                && event["refs"]["panel_room_id"] == *room_id)
+    });
+    require(
+        live.next().is_some_and(|event| {
+            event["attempt_id"] == *attempt
+                && event["provider"] == *owner
+                && event["tool"] == "panel-main"
+                && event["terminal"] == false
+                && event["refs"]["panel_role"] == "main"
+                && event["refs"]["panel_room_id"] == *room_id
+                && event["refs"]["panel_harness"] == *harness
+                && state::main_participant(event) == *member
+                && event["state"]
+                    .as_str()
+                    .is_some_and(|phase| state::LIVE_STATES.contains(&phase))
+        }) && live.next().is_none(),
+        UNAVAILABLE,
+    )?;
+    require(
+        current_auto_orchestrator_room(repo, room_id, member, owner, services, stop)
+            && terminals::process(process.pid).ok().as_ref() == Some(&process),
+        UNAVAILABLE,
+    )?;
+    Ok(Some(StartupMain {
+        pane,
+        session,
+        process,
+        owner: (*owner).into(),
+        harness: (*harness).into(),
+        room: (*room_id).into(),
+        attempt: (*attempt).into(),
+        member: (*member).into(),
+    }))
+}
+
+fn verify_startup_board(
+    repo: &Path,
+    main: &StartupMain,
+    board: &PanelPane,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let format = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t#{@oms_panel_main_watch}\t#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}\t#{@oms_panel_repo}";
+    let live = terminals::tmux(
+        services,
+        repo,
+        &crate::commands::strings(&["display-message", "-p", "-t", &board.pane, format]),
+        stop,
+    )?;
+    require(
+        live.split('\t').eq([
+            main.session.session.as_str(),
+            &main.pane.window,
+            &board.pane,
+            "0",
+            "1",
+            &main.attempt,
+            &main.pane.pane,
+            &main.member,
+            &main.room,
+            repo.to_str().unwrap_or_default(),
+        ]),
+        "Board binding changed; reconnect to Main and reopen its Board",
+    )
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MainSwitchTarget {
+    pub(crate) harness: &'static str,
+    pub(crate) model: String,
+}
+
+pub(crate) fn main_switch_targets(source: &Path, current: &str) -> Result<Vec<MainSwitchTarget>> {
+    require(
+        main_capability(current).is_some(),
+        "Current Main harness is unverified",
+    )?;
+    let targets = available_main_switch_targets(&load_policy(source)?, current);
+    require(
+        !targets.is_empty(),
+        "No installed Main target has a configured model",
+    )?;
+    Ok(targets)
+}
+
+fn available_main_switch_targets(policy: &routing::Policy, current: &str) -> Vec<MainSwitchTarget> {
+    MAIN_CAPABILITIES
+        .iter()
+        .filter(|entry| entry.harness != current && entry.installed())
+        .filter_map(|entry| {
+            let model = resolve_main(policy, entry, None).model?;
+            (!model.is_empty()
+                && model.len() <= 160
+                && model
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte)))
+            .then_some(MainSwitchTarget {
+                harness: entry.harness,
+                model,
+            })
+        })
+        .collect()
+}
+
+fn pick_existing_main(
+    main: &StartupMain,
+    policy: &routing::Policy,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    let stdin = std::io::stdin();
+    let alternatives = available_main_switch_targets(policy, &main.harness)
+        .into_iter()
+        .map(|entry| entry.harness)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let keep = format!("Continue current Main ({})", main.harness);
+    let board = if alternatives.is_empty() {
+        "Open the Board".into()
+    } else {
+        format!("Open the Board to switch Main ({alternatives})")
+    };
+    pick_number(
+        &[&keep, &board],
+        stdin.as_fd(),
+        stop,
+        &mut std::io::stderr(),
+    )
+    .map(|index| index == 1)
+}
+
 fn try_reuse_native_main(
     repo: &Path,
     prefix: &[String],
@@ -991,22 +1277,13 @@ fn try_reuse_native_main(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<bool> {
-    let panes = discover_panel_panes(repo, services, stop)?;
-    let candidates: Vec<_> = panes
-        .iter()
-        .filter(|pane| pane.session == session && pane.mode == PaneMode::Native)
-        .collect();
-    require(
-        candidates.len() <= 1,
-        "multiple native Main panes found; reopen from the intended OMS window",
-    )?;
-    let Some(base) = candidates.first() else {
+    let Some(base) = startup_native_candidate(repo, session, services, stop)? else {
         return Ok(false);
     };
     start_lock.check()?;
-    check_reattach_room(repo, base, requested_room, services, stop)?;
+    check_reattach_room(repo, &base, requested_room, services, stop)?;
     start_lock.check()?;
-    reopen_pane(repo, prefix, base, false, services, stop)?;
+    reopen_pane(repo, prefix, &base, false, services, stop)?;
     start_lock.check()?;
     terminals::tmux(
         services,
@@ -1348,15 +1625,32 @@ fn pick_main(stop: &AtomicBool) -> Result<&'static MainCapability> {
     pick_from(&choices, stdin.as_fd(), stop, &mut std::io::stderr())
 }
 
+fn main_picker_foreground(input: BorrowedFd<'_>) -> Result<()> {
+    require(
+        rustix::termios::tcgetpgrp(input).ok() == Some(rustix::process::getpgrp()),
+        "Main selection requires a foreground terminal",
+    )
+}
+
 fn pick_from<'a>(
     choices: &[&'a MainCapability],
     input: BorrowedFd<'_>,
     stop: &AtomicBool,
     out: &mut dyn Write,
 ) -> Result<&'a MainCapability> {
+    let labels: Vec<_> = choices.iter().map(|provider| provider.harness).collect();
+    pick_number(&labels, input, stop, out).map(|index| choices[index])
+}
+
+fn pick_number(
+    choices: &[&str],
+    input: BorrowedFd<'_>,
+    stop: &AtomicBool,
+    out: &mut dyn Write,
+) -> Result<usize> {
     writeln!(out, "Choose a Main provider:").map_err(Error::new)?;
-    for (index, provider) in choices.iter().enumerate() {
-        writeln!(out, "  {}. {}", index + 1, provider.harness).map_err(Error::new)?;
+    for (index, label) in choices.iter().enumerate() {
+        writeln!(out, "  {}. {}", index + 1, label).map_err(Error::new)?;
     }
     let mut pending = Vec::new();
     loop {
@@ -1365,12 +1659,15 @@ fn pick_from<'a>(
         let line = read_selection(input, &mut pending, stop)?;
         let selection = line.trim();
         if selection.is_empty() {
-            return Ok(choices[0]);
+            return Ok(0);
+        }
+        if matches!(selection, "q" | "quit") {
+            return Err(main_selection_cancelled());
         }
         if let Ok(index) = selection.parse::<usize>()
-            && let Some(provider) = index.checked_sub(1).and_then(|i| choices.get(i))
+            && let Some(index) = index.checked_sub(1).filter(|index| *index < choices.len())
         {
-            return Ok(provider);
+            return Ok(index);
         }
         writeln!(out, "Choose one of the listed numbers.").map_err(Error::new)?;
     }
@@ -4428,7 +4725,7 @@ exit 98
             command
                 .env_clear()
                 .env("TMUX_TMPDIR", "/tmp")
-                .arg("-L")
+                .args(["-u", "-L"])
                 .arg(&self.name);
             command
         }
@@ -4599,6 +4896,24 @@ exit 98
                     )
                     .unwrap();
                 }
+                "existing-picker" | "existing-cancel" => {
+                    let options = crate::cli::Options::parse(&[]).unwrap();
+                    let result = super::split_panel(
+                        &repo,
+                        &prefix,
+                        &policy,
+                        super::SplitRequest::ReuseOrPick,
+                        &options,
+                        &service,
+                        &stop,
+                    );
+                    if stage == "existing-cancel" {
+                        let error = result.unwrap_err();
+                        assert_eq!(error.code, 130, "{}", error.message);
+                    } else {
+                        assert!(result.unwrap());
+                    }
+                }
                 "main" => {
                     let argv = fixture_argv(&repo.join("relay-argv"));
                     let args: Vec<_> = argv[1..].iter().map(OsString::from).collect();
@@ -4737,8 +5052,9 @@ exit 98
         for (name, body) in [
             (
                 "tmux",
+                // With a cleared locale, tmux rewrites format tabs as underscores.
                 r#"case "$1" in attach-session|switch-client) exit 0;; esac
-exec "$OMS_PI_FIXTURE_TMUX" -L "$OMS_PI_FIXTURE_SOCKET" -f /dev/null "$@""#,
+exec "$OMS_PI_FIXTURE_TMUX" -u -L "$OMS_PI_FIXTURE_SOCKET" -f /dev/null "$@""#,
             ),
             (
                 "oms",
@@ -4779,29 +5095,32 @@ exec /bin/sleep 30"#,
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let fixture_exe = std::env::current_exe().unwrap();
-        let mut child = Command::new(&fixture_exe)
-            .env_clear()
-            .env("PATH", &bin)
-            .env("HOME", &home.0)
-            .env("XDG_CACHE_HOME", home.0.join(".cache"))
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm")
-            .env("OMS_PANEL_MAIN_PERMISSIONS", "native")
-            .env("TMUX_TMPDIR", "/tmp")
-            .env("OMS_PI_FIXTURE_TMUX", fs::canonicalize(&tmux).unwrap())
-            .env("OMS_PI_FIXTURE_SOCKET", &socket.name)
-            .env("OMS_PI_FIXTURE_REPO", &repo.0)
-            .env("OMS_PI_FIXTURE_EXE", &fixture_exe)
-            .env("OMS_PI_FIXTURE_NAME", NAME)
-            .env(STAGE, "picker")
-            .args(["--exact", NAME, "--nocapture"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(b"2\n").unwrap();
-        let result = child.wait_with_output().unwrap();
+        let invoke_picker = |stage: &str, selection: &[u8]| {
+            let mut child = Command::new(&fixture_exe)
+                .env_clear()
+                .env("PATH", &bin)
+                .env("HOME", &home.0)
+                .env("XDG_CACHE_HOME", home.0.join(".cache"))
+                .env("SHELL", "/bin/sh")
+                .env("TERM", "xterm")
+                .env("OMS_PANEL_MAIN_PERMISSIONS", "native")
+                .env("TMUX_TMPDIR", "/tmp")
+                .env("OMS_PI_FIXTURE_TMUX", fs::canonicalize(&tmux).unwrap())
+                .env("OMS_PI_FIXTURE_SOCKET", &socket.name)
+                .env("OMS_PI_FIXTURE_REPO", &repo.0)
+                .env("OMS_PI_FIXTURE_EXE", &fixture_exe)
+                .env("OMS_PI_FIXTURE_NAME", NAME)
+                .env(STAGE, stage)
+                .args(["--exact", NAME, "--nocapture"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(selection).unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let result = invoke_picker("picker", b"2\n");
         let log = String::from_utf8_lossy(&result.stderr);
         assert!(result.status.success(), "{log}");
         let (_, menu) = log
@@ -4911,6 +5230,56 @@ exec /bin/sleep 30"#,
         }
 
         let session = super::session_candidates(&repo.0)[0].clone();
+        let snapshot = || {
+            let output = socket.command().args(["list-panes", "-s", "-t", &format!("={session}"), "-F",
+                "#{pane_id}|#{pane_pid}|#{@oms_panel_harness}|#{@oms_panel_main_watch}|#{pane_active}"]).output().unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let before = snapshot();
+        let census = socket.command().args(["list-panes", "-a", "-F", "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_dead}\t#{@oms_panel_reader}\t#{pane_start_command}"]).output().unwrap();
+        let census = String::from_utf8(census.stdout).unwrap();
+        assert!(
+            census.lines().any(|line| line
+                .splitn(6, '\t')
+                .nth(5)
+                .is_some_and(|command| super::match_panel_entry(command, &repo.0)
+                    == Some(super::PaneMode::Native))),
+            "Native pane not discoverable: {census}"
+        );
+        let rejected = invoke_picker("existing-cancel", b"q\n");
+        assert!(rejected.status.success(), "{}; start commands: {}", String::from_utf8_lossy(&rejected.stderr), String::from_utf8_lossy(&socket.command().args(["list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|#{@oms_panel_reader}|#{pane_start_command}"]).output().unwrap().stdout));
+        assert_eq!(
+            snapshot(),
+            before,
+            "cancelled picker changed live pane selection"
+        );
+        let attached = invoke_picker("existing-picker", b"2\n");
+        let menu = String::from_utf8_lossy(&attached.stderr);
+        assert!(attached.status.success(), "{menu}");
+        assert!(menu.contains("1. Continue current Main (pi)"), "{menu}");
+        assert!(
+            menu.contains("2. Open the Board to switch Main (codex)"),
+            "{menu}"
+        );
+        let board_focused = snapshot();
+        assert!(
+            board_focused
+                .lines()
+                .any(|line| line.ends_with("||1|1") || line.ends_with("|pi|1|1")),
+            "{board_focused}"
+        );
+        let continued = invoke_picker("existing-picker", b"\n");
+        assert!(
+            continued.status.success(),
+            "{}",
+            String::from_utf8_lossy(&continued.stderr)
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "continue did not preserve panes and restore Main focus"
+        );
         let trigger = |stage: &str, repo: &Path, session: &str| {
             let argv = [
                 fixture_exe.to_str().unwrap(),
@@ -6309,6 +6678,20 @@ mod main_selection_tests {
     #[test]
     fn main_selection_reads_lines_and_reprompts() {
         let stop = AtomicBool::new(false);
+        for (input_bytes, expected) in [(b"\n".as_slice(), 0), (b"2\n".as_slice(), 1)] {
+            let (reader, writer) = input(input_bytes);
+            drop(writer);
+            let mut out = Vec::new();
+            let choices = [
+                "Continue current Main (pi)",
+                "Open the Board to switch Main (codex)",
+            ];
+            let index = super::pick_number(&choices, reader.as_fd(), &stop, &mut out).unwrap();
+            assert_eq!(index, expected);
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("1. Continue current Main (pi)"));
+            assert!(out.contains("2. Open the Board to switch Main (codex)"));
+        }
         assert_eq!(pick(b"2\n", &stop).0.unwrap(), "claude");
         assert_eq!(pick(b"\n", &stop).0.unwrap(), "codex");
         for bytes in [&b"9\nx\n1\n"[..], b"\xff\n0\n1\n"] {
@@ -6319,6 +6702,9 @@ mod main_selection_tests {
         }
         assert_cancelled(pick(b"", &stop).0);
         assert_cancelled(pick(b"2", &stop).0);
+        assert_cancelled(pick(b"q\n", &stop).0);
+        let (reader, _writer) = input(b"");
+        assert!(super::main_picker_foreground(reader.as_fd()).is_err());
         stop.store(true, Ordering::Release);
         assert_cancelled(pick(b"2\n", &stop).0);
     }

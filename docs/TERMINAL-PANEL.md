@@ -7,7 +7,7 @@ It covers startup, navigation, role routing, results, recovery and the contracts
 
 | I want to… | Jump to |
 |---|---|
-| Open a main conversation | [Quick start](#quick-start) |
+| Open or switch Main | [Quick start](#quick-start) · [Main switching](#swap-the-main) |
 | Find a key or change focus | [Keys](#keys) · [Control menu](#control-menu-and-focus) |
 | Choose an account or dispatch work | [Provider accounts](#provider-accounts) · [Roles and tiers](#dispatch-roles-and-tiers) |
 | Review and accept a result | [Finalize an outcome](#finalize-an-outcome) · [Accept a patch](#accept-and-publish-a-patch) |
@@ -47,15 +47,15 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 
 ## Quick start
 
-1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. Choose an installed Main by number, or press Enter for the first choice. A new Main from this picker can open installed provider orchestrators in background windows. An existing Main is reused without another choice. Use `oms panel --watch` for the board by itself or `oms panel --launch pi` to select Pi explicitly.
+1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. For a fresh Main, choose an installed harness by number or press Enter for the first choice. A new Main can open installed provider orchestrators in background windows. For a verified running Main, Enter selects **Continue current Main**. Choose **Open the Board to switch Main** to focus its Board and open the switch menu with `s`. Run `oms panel --reopen` in the existing window to restore its Board without the picker.
 2. A landscape tmux window puts the board and its docked orchestrator on the left, with Overall Main on the right. A portrait window stacks the board, docked orchestrator and Overall Main in that order. See [Layout modes and resizing](#layout-modes-and-resizing).
 3. Weekly quota left sits directly below the Room title. Click the weekly line or press `w` for provider readings, sources and reset times. A dash means the Board has no verified reading. The header shows plan progress for work linked to the current Room.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
-5. On the Board, `Tab` switches between Overview and all tasks, `g` or `t` opens Relationships, and `D` inspects the selected call. In a reader, `Tab` switches reader views. Arrows move selection and Enter opens the selected item. Click a Codex native child row or select it and press Enter to read its verified recent replies. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
+5. The Board's **Direct work** section shows verified active calls assigned by the Overall Main. Click a call or select it and press Enter to open its available result or recent replies in the Board reader. `Tab` changes views, `g` or `t` opens Relationships, and `D` opens Call Detail. `Esc` closes the reader or backs out. See [Keys](#keys).
 6. At a main's exit prompt, `r` resumes or restarts in that pane and Enter closes the window. `F9` switches between chat and board; `F5` opens the control window, and from that window returns to the previous one; `F12` shows panel-wide keys.
 
 ```bash
-oms panel                                # open the Main picker or reuse the current Main
+oms panel                                # choose a Main or continue the verified one
 oms panel --repo . --launch codex         # start a Codex main
 oms panel --repo . --launch agy           # start a fresh Agy main
 oms panel --repo . --results              # read retained results
@@ -68,7 +68,7 @@ oms panel --repo . --results              # read retained results
 oms panel --repo . --host inline --launch codex # run a native Main in this terminal
 oms panel --repo . --host tmux --launch codex   # team graph left of native chat
 oms panel --repo . --host tmux --launch claude
-oms panel --repo . --reopen                # restore only a missing tmux board
+oms panel --repo . --reopen                # restore a missing Board in the existing tmux window
 oms panel --repo . --json                  # read-only status and role policy
 oms panel --repo . --routes                # read-only role policy
 oms panel --repo . --recommend debug --diff main..HEAD --failed 2   # read-only tier/effort advice
@@ -136,58 +136,30 @@ model, effort, and account require separate provider evidence.
 
 ### Swap the main
 
-**Current native status (2026-11-18, `f9a695ea`):** the CLI and core validation
-exist, but the installed `CollabServices` does not implement `swap_main_host`.
-After the caller satisfies the Main/Room/tmux preconditions, the native host
-boundary refuses with `native main swap host adapter unavailable`. The swap and
-automatic-quota flow below records the intended/legacy workflow, not a supported
-native replacement path. The core's injected-host fixture does not prove native
-host support. See [CC-09](CALLABLE-CONSOLIDATION-WORK-PACKETS.md#cc-09--native-main-swap-host-연결)
-for the existing contract to connect; model/effort selection at a new orchestrator
-launch is a separate operation.
+On a verified managed tmux Board, press `s` to list installed alternatives
+with a resolved model. Choose a number to review the target, then press `Y`
+to confirm in a separate step. Esc cancels the selection. OMS rechecks the
+Main generation and Room selected by the Board before submitting the swap.
 
-The `s` board key lists installed main targets and their weekly quota readings, then
-requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER [--model
-MODEL]` is the command form. It requires an existing tmux panel, one verified live main.
-A land in flight does not block it; the handoff names the land and its
-`oms land status --repo PATH` command. The current main is asked for a handoff of at most
-3000 bytes (90 seconds by default via `OMS_PANEL_SWAP_HANDOFF_SECONDS`, capped at 300);
-if none arrives, OMS uses a recorded-state digest. Before asking the main to exit, OMS
-validates the target's durable owner/harness pair, prepares the replacement command and
-rechecks the current room, attempt and window ownership.
-Both the handoff request and the exit request recheck the original pane's process id,
-live state, main attempt and native-pane binding immediately before typing. A changed
-or unreadable binding refuses that input without transferring the room or respawning;
-cleanup only removes options still owned by the verified attempt. The tmux comparison
-and send remain separate operations, including the delay before Enter, so this is not
-an atomic input guarantee.
+The command form is `oms panel --swap-main HARNESS [--model MODEL]`. A swap
+requires one live, swap-capable managed Main with verifiable lifecycle
+evidence and Room ownership. An older Main launched before that evidence was
+recorded may need a fresh managed Main. Use the provider's normal exit and
+check the panel's recovery state before starting it.
+[Resume and restart](#resume-and-restart)
 
-OMS then exits the old main and relaunches the replacement in the same pane and room
-without stopping workers. If preparation or a recheck fails before the exit request, OMS
-removes that swap's handoff file so the preserved main can be swapped again. If the old
-main does not exit, the panel preserves it and the room claims. A current Pi main can be
-swapped without a resume binding: the replacement starts fresh. If replacement startup
-fails or ownership cannot be verified, OMS does not restore Pi; it reports no verified
-replacement main and retains the handoff file and room claims for recovery.
+OMS prepares the replacement and a bounded handoff from recorded Room state,
+including identifiers and role summaries. It requires proof that the previous Main exited safely before replacing it in
+the same managed pane. A successful change has a verified replacement and
+Room lineage. If the panel reports an uncertain outcome, inspect the current
+Room and attempts before trying again. Provider conversations keep their
+separate histories. Proven chats can be opened in their original sessions.
+[Original chats and recovery](#original-chats-and-recovery)
 
-`--model` selects an exact installed catalog model; swap has no dry-run and requires
-tmux.
+#### Quota and switching
 
-#### Automatic quota swaps
-
-The main board also requests this swap automatically when its fresh weekly quota
-reading reaches 97%. Thresholds compare whole percentages as displayed: 97% for
-the current main and 90% for targets. It chooses an installed alternative below
-90% weekly usage, or an alternative with unknown usage, and waits 30 minutes between automatic
-attempts. Set `OMS_PANEL_AUTO_SWAP=0` to disable this behavior. Five-hour quota
-does not trigger a swap. Codex target ranking reads up to 64 recently modified
-session logs and chooses their newest unexpired weekly event. Before handoff,
-the automatic swap checks the target's weekly quota again. Below 100% usage it
-postpones the swap if the main does not provide a handoff; at 100% it may use
-the recorded-state digest. An active land does not hold the swap back; the
-handoff names it. A postponed handoff does not start the cooldown.
-Other refused automatic attempts, including a changed pane, retain the attempt
-cooldown; that receipt does not claim an exit was delivered or a replacement started.
+Use Weekly to compare available quota readings before selecting a target.
+The Board waits for confirmation before requesting a Main switch.
 
 ### Installation deferral while workers are live
 
@@ -560,7 +532,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `b` / `v` | Toggle attention-only / expand or collapse the board | — |
 | `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
 | `N` | — | Previous search match |
-| `s`, then `1` / `2` / `0` | Swap main to Claude / Pi / Codex in a managed panel | — |
+| `s`, then a listed number, then `Y` | Select and confirm a Main switch on its managed Board. `Esc` cancels the selection | — |
 | `a` / `c` | Ask advisor / request selected call cancellation | — |
 | `w` or click Weekly | Open weekly usage details. Quota appears when the Board snapshot is fresh | — |
 | `U` | Refresh weekly quota from idle Claude or AGY sessions. Also available in weekly details | — |
@@ -651,9 +623,9 @@ the tree (`t`). Model-call usage stays at the top, while taller views show
 provider readings, recorded messages or repository tasks. Missing router,
 progress, locks or billing data is never invented. Smaller interactive panes
 retain tree navigation; passive output shows the list.
-Clicking a main requests navigation to its original chat; workers show their
-content in the right-side reader (or the board detail area). The remaining chat pane retains the provider's native interactive terminal,
-including editing, pasted input and permission prompts. `--launch` opens this
+Clicking a Main requests navigation to its original chat. Selecting a call
+opens its available record in the Board's reader. The chat pane remains the
+provider's interactive terminal for editing, pasted input and permission prompts. `--launch` opens this
 layout in the checkout's panel when tmux is available, while `--host inline
 --launch` runs the CLI alone.
 
@@ -729,9 +701,13 @@ with the selected Main and its Board, and records the checkout on the session.
 
 #### Default main selection
 
-Foreground `oms panel` reuses a discoverable Main in the checkout's owned tmux
-session or offers the installed entries below, in this order. Use `--repo PATH`
-to select the checkout or `--room ID` to select the Room on startup.
+Foreground `oms panel` opens a picker when the managed tmux path is active
+and `OMS_PANEL_MAIN` is unset. For a verified live Main, choice 1 and Enter
+both select **Continue current Main**. Choice 2 focuses the existing Board
+for a possible switch with `s`. It appears as **Open the Board** when there
+are no installed alternatives. For a fresh Main, the picker offers the
+installed entries below in this order. Use `--repo PATH` for the checkout
+and `--room ID` for the Room on startup.
 
 | Main selector | OMS owner | Transport | Executables on PATH |
 | --- | --- | --- | --- |
@@ -741,14 +717,15 @@ to select the checkout or `--room ID` to select the Room on startup.
 | `pi` | `codex` | Pi UI through `oms harness pi` with Codex gateway inference | `pi`, `codex`, `oms` |
 
 The picker numbers the available entries consecutively. Enter selects the first
-one. EOF or Ctrl-C cancels with exit status 130. These numbers are separate from
-the Board start shortcuts. An existing Main is reused before startup evaluates
-`OMS_PANEL_MAIN`. For a fresh Main, set `OMS_PANEL_MAIN` to a selector in the
-table. A blank value opens the Board alone. Inline and Herdr startup without a
-selector also open the Board. An explicit `--launch SELECTOR` takes precedence
+one. `q`, EOF or Ctrl-C cancels with exit status 130. Run `oms panel --reopen`
+inside the existing tmux window to restore a missing Board without the picker.
+When `OMS_PANEL_MAIN` is present, startup reuses an existing
+Main or uses the specified selector for a fresh Main. A blank value opens
+a Board alone when there is no existing Main. Inline and Herdr startup without
+a selector also open the Board. An explicit `--launch SELECTOR` takes precedence
 over the environment setting and requires a terminal. `--spawn-main` targets an
-existing managed session. Use `--watch` for the Board alone and `--dry-run` to
-inspect the launch plan.
+existing managed session. Use `--watch` for a standalone Board and `--dry-run` to
+inspect a launch plan.
 
 Main selection uses the [typed `MAIN_CAPABILITIES` table in `native_panel.rs`](../crates/oms-command-panel/src/native_panel.rs).
 Add a Main entry there with its canonical harness, a supported OMS owner, a typed
@@ -801,8 +778,12 @@ when the native CLI exits and refreshes then; it has no permanent sidebar.
 
 ### Activity and usage
 
-The board has one MAIN card for its live main, with its team grouped into ADVISORS,
-REVIEWERS and WORKERS. Team counts and elapsed time appear with the main summary; call
+The Board has one MAIN card for its live Main. The provider overview groups
+active calls with a verified direct assignment from the current Overall Main
+under **Direct work** when those rows are visible. Provider leads and their
+recorded children keep their provider grouping. Role views group the team
+into ADVISORS, REVIEWERS and WORKERS. Team counts and elapsed time appear
+with the Main summary; call
 rows show state, model and task title. Calls remain attached to their recorded parent,
 and each row opens its reader. The repository control view shows `NEXT MAIN` as a
 one-line preset; that preset never fills missing model/effort fields in a recorded main.
@@ -1930,8 +1911,8 @@ Cache advisory (no behavior change): the continuation note also shows the native
 (`session last active 4m12s ago`, from the session file mtime or the attempt's `updated_at`; `unknown`
 when neither exists) so the parent can choose resume or a fresh dispatch. When a resumed session is
 inside the warm window (`OMS_CACHE_WARM_SECONDS`, default 300, `0` disables) and the route's model or
-effort differs from the recorded one, and when `--swap-main` replaces a main active inside the window, one
-`note:` line says the provider prompt-cache prefix will be rebuilt. The action always proceeds.
+effort differs from the recorded one, a `note:` line says the provider
+prompt-cache prefix will be rebuilt. The continuation still proceeds.
 
 A timed-out write result card advises salvage first; a timed-out read keeps the
 `--continue` hint. Salvage of an attempt with nothing to recover reports
@@ -2444,24 +2425,14 @@ warnings are present, a board at least 20 columns wide and 8 rows high uses the 
 chat/result navigation and warnings. Passive output retains its list fallback. `--view
 compact|detail` keeps the list at any size.
 
-On a POSIX terminal, the board watcher accepts clicks, arrow keys/Tab and Enter.
-Clicking a main focuses its proven existing tmux conversation pane; if no terminal
-exists, a proven exact Codex app link can open its original chat. An unresolved or
-departed participant shows a reason. These clicks do not start or resume CLI sessions,
-send a prompt or call a model. In the graph, the click (or Enter) on a worker, advisor,
-reviewer, researcher or council seat keeps a short summary in the board's detail area
-and opens the call's full retained result (answer, review state, changed files) in a
-reader pane on the right: the native chat pane is split, the reader on top (about 62
-percent of its height) and the chat below, and the board keeps its width.
-
-Another call reuses that reader. `q` or Esc in the reader, or Esc on the board, closes
-only the reader, and focus returns to the board; selecting a main closes it and shows
-the chat. The reader is started as `oms panel --results --participant ID [--task-id ID]`
-with identifiers revalidated from recorded state, closes itself when its board pane goes
-away, and is never discovered as a board or an input pane by `--reopen`. When the reader
-would get fewer than 8 rows, and outside a managed tmux main window (inline layout,
-Herdr, a standalone `--watch`, the control window), the call's content stays in the
-board's detail area as before.
+On a POSIX terminal, the Board watcher accepts clicks, arrows and Enter.
+Click a Main to focus its proven provider conversation. Click or press
+Enter on a call to open its available result or recent replies under the
+activity list. A second selection replaces that reader's content. Scroll
+inside the reader to inspect a longer record. The reader shares the Board
+pane and requires enough rows. Esc closes it and returns those rows to the
+activity list. `oms panel --results --participant ID [--task-id ID]` opens
+the full retained result separately.
 
 A main's detail lists its whole team, finished calls included, and clicking a team row
 opens that call the same way, as does Enter on a call in the tree. Repository tasks show
@@ -2888,18 +2859,10 @@ artifact index rows when available; these are recorded usage, not a quota percen
 The reader shares the pane with the activity list while a selected result or
 chat is visible. When the board is too short for both, the list uses the whole pane.
 
-When the main preview is automatic, it is marked `auto` and does not replace a chosen
-preview. Esc closes the reader. Choosing a block replaces the reader content;
-it shows the selected content,
-starting with outcome and verification: for a worker or advisor the latest retained
-answer, the changed files of a recorded patch (summarized only while its SHA-256 still
-matches, so it survives worktree cleanup), outcome, verification and artifact references
-(read in the background, refreshed with each snapshot); for a main its addressed mail
-and team.
-
-Reading mail there never acknowledges it. The native CLI pane itself is never used for
-detail; the reader is a separate pane split from it. A CLI exit never changes a task to
-accepted. The board is repository-wide, not a claim that every displayed task belongs to
+Selecting another call replaces the Board reader's content. Use `D` for Call
+Detail and the [full Results reader](#results-reader) for retained verification,
+changed files and artifact references. The Main's native conversation stays in
+its terminal. A CLI exit never changes a task to accepted. The board is repository-wide, not a claim that every displayed task belongs to
 this room. Declared scopes are labels, not file locks or authority; write workers still
 use isolated patches, verifiers and owner admission. Usage retains the
 recent-eight-artifact limit, selected/served attribution and unknown native usage.
