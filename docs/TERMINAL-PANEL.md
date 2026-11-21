@@ -499,11 +499,11 @@ already stores it.
 
 ## Layout and activity
 
-When the window has room, the board stays on the left, with the native
-conversation beside it and a right-side reader for selected calls and results.
-The board's bottom dock has Log, Detail, Plan, Messages, Past and Attention tabs,
-plus Debate while a debate exists. Needs you is an attention strip above activity. The
-dock opens on Log (the recorded session events) and takes every row the activity tree leaves.
+The board uses its full pane for activity until you open a call's reader.
+Click a call or select it and press Enter to read its available result or
+recent chat. The reader opens under the activity list when it fits. Drag its
+title to resize it, and press Esc to give the rows back to the list. Use
+`w` or select the weekly usage line for the full-board quota view.
 Call rows keep status, token totals and age aligned; fresh calls show their
 recorded role and queued state before an attempt exists. The Board shows a
 token total for the displayed attempt when space permits. It uses the receipt
@@ -2087,8 +2087,8 @@ arrive, the header adds `↓ N new` (`v N new` in ASCII) next to the `a-b of N` 
 
 #### Detail and Past
 
-Detail is the selected call's persistent, reserved reader; it remains present
-when dismissed or when there is no selection. Past lists every settled call of the room's mains
+The selected call's reader opens on demand and releases its rows when closed.
+Past lists every settled call of the room's mains
 and of calls with no known main, newest first, one row each (role and model, task, how it ended,
 end time). Up/Down pick a row; Enter or a click shows it in Detail exactly as a board card would,
 and `f` opens its full result on the right.
@@ -2871,18 +2871,18 @@ accounts are listed separately with their session-log reading, log age and reset
 unavailable, press `u` in the overlay to retry the Board refresh. Press `Esc` to
 close the overlay.
 
-The board is an overview above and a detail area below. Cards keep only the rows their
+The board is an overview with an on-demand reader below. Cards keep only the rows their
 content needs (an unrecorded location stays in the detail), and a provider without a
 reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where
 model-use data exists). Antigravity shows rolling seven-day input, cached and output
 tokens and calls (`agy 7d in … · cached … · out … / N calls`) from the most recent 1000
-artifact index rows when available; these are recorded usage, not a quota percentage. On
-a board of 24 rows or more, the bottom dock is reserved before the upper layout is sized
-and then grows to the rows left under the tree.
+artifact index rows when available; these are recorded usage, not a quota percentage.
+The reader shares the pane with the activity list while a selected result or
+chat is visible. When the board is too short for both, the list uses the whole pane.
 
 When the main preview is automatic, it is marked `auto` and does not replace a chosen
-preview. Esc dismisses the preview while preserving the box. Choosing a block replaces
-the Detail content without resizing the reserved box; it shows the selected content,
+preview. Esc closes the reader. Choosing a block replaces the reader content;
+it shows the selected content,
 starting with outcome and verification: for a worker or advisor the latest retained
 answer, the changed files of a recorded patch (summarized only while its SHA-256 still
 matches, so it survives worktree cleanup), outcome, verification and artifact references
