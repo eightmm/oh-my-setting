@@ -1170,6 +1170,31 @@ impl PanelServices for CollabServices<'_> {
     fn physical_executor(&self) -> Option<&dyn PeerProcessExecutor> {
         Some(self)
     }
+    fn accepted_writes(
+        &self,
+        repo: &Path,
+        request: &oms_panel_core::results::AcceptRequest,
+        record: &Value,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<Option<Value>> {
+        self.check(stop).map_err(panel_error)?;
+        let record =
+            oms_command_plan::json::parse(&serde_json::to_vec(record).map_err(panel_error)?)
+                .map_err(panel_error)?;
+        crate::services_runtime::resources::accepted_writes(
+            repo,
+            request,
+            &record,
+            &self.control,
+            stop,
+        )
+        .map_err(panel_error)?
+        .map(|value| {
+            serde_json::from_slice(&oms_command_plan::json::encoded(&value).map_err(panel_error)?)
+                .map_err(panel_error)
+        })
+        .transpose()
+    }
     fn publication_receipt(
         &self,
         repo: &Path,

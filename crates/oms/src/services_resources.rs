@@ -292,6 +292,42 @@ pub(crate) fn team_withdrawn(
     let deadline = Instant::now() + Duration::from_secs(10);
     team_withdrawn_before(context, team_id, spec_sha256, control, stop, deadline)
 }
+
+pub(crate) fn accepted_writes(
+    repo: &Path,
+    request: &oms_panel_core::results::AcceptRequest,
+    record: &Value,
+    control: &dyn oms_command_plan::Services,
+    stop: &AtomicBool,
+) -> Result<Option<Value>> {
+    parent()?;
+    if resources::snapshot(repo, stop)
+        .map_err(store_error)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let context = oms_command_plan::Context::from_selected_state_before(
+        &oms_command_plan::Request::new(oms_command_plan::Action::Status),
+        &request.execution_repo,
+        &request.execution_repo,
+        repo,
+        stop,
+        deadline,
+    )?;
+    if context.panel_main_attempt != request.main_attempt_id
+        || record.text("task_id") != request.task_id
+    {
+        return Err(error(
+            75,
+            "accepted write settlement belongs to another Main or task",
+        ));
+    }
+    let plan = oms_command_plan::Plan::open(context, control, stop)?;
+    retirement::accepted(&plan, record, &request.owner, deadline).map(Some)
+}
+
 fn team_withdrawn_before(
     context: &oms_command_plan::Context,
     team_id: &str,
@@ -395,6 +431,99 @@ mod tests {
                 super::super::RuntimeServices::with_overrides(&stop, source, vec![], None).unwrap();
             let words: Vec<String> =
                 serde_json::from_str(&std::env::var("OMS_RESOURCE_FIXTURE_ARGS").unwrap()).unwrap();
+            if words[0] == "accepted-writes" {
+                use oms_panel_core::Services;
+                let collab = crate::services_collab::CollabServices::new(&stop, source).unwrap();
+                let mut record: serde_json::Value =
+                    serde_json::from_str(&std::env::var("OMS_PANEL_ACCEPT_RECORD_JSON").unwrap())
+                        .unwrap();
+                let task = &words[1];
+                let show = oms_command_plan::run_with_services(
+                    &["show".into(), "--id".into(), task.into()],
+                    &repo,
+                    &stop,
+                    &services.control,
+                );
+                assert_eq!(show.0, 0, "{}", String::from_utf8_lossy(&show.2));
+                if serde_json::from_slice::<serde_json::Value>(&show.1).unwrap()["state"]
+                    == "claimed"
+                {
+                    let review = oms_command_plan::run_with_services(
+                        &[
+                            "review".into(),
+                            "--id".into(),
+                            task.into(),
+                            "--lease-id".into(),
+                            record["lease_id"].as_str().unwrap().into(),
+                            "--artifact".into(),
+                            record["artifact"].as_str().unwrap().into(),
+                            "--patch".into(),
+                            record["patch"].as_str().unwrap().into(),
+                        ],
+                        &repo,
+                        &stop,
+                        &services.control,
+                    );
+                    assert_eq!(review.0, 0, "{}", String::from_utf8_lossy(&review.2));
+                }
+                if words[2] == "wrong-lease" {
+                    record["lease_id"] = format!("lease_{}", "0".repeat(32)).into();
+                }
+                let mut request = oms_panel_core::results::AcceptRequest {
+                    owner: "codex".into(),
+                    task_id: task.clone(),
+                    main_attempt_id: std::env::var("OMS_PANEL_MAIN_ATTEMPT").unwrap(),
+                    message: "fixture accepted candidate".into(),
+                    verify: "true".into(),
+                    execution_repo: repo.clone(),
+                    expected_patch_sha256: None,
+                    allow_verifier_change: false,
+                    allow_floor_change: None,
+                };
+                if words[2] == "wrong-owner" {
+                    request.main_attempt_id = "foreign-main".into();
+                }
+                let index = repo.join(".oms/artifacts/index.jsonl");
+                let indexed = std::fs::read(&index).unwrap();
+                if words[2] == "wrong-operation" {
+                    let mut changed = Vec::new();
+                    for line in indexed
+                        .split(|byte| *byte == b'\n')
+                        .filter(|line| !line.is_empty())
+                    {
+                        let mut row: serde_json::Value = serde_json::from_slice(line).unwrap();
+                        if row["kind"] == "delegate" && row["task_id"] == *task {
+                            row["operation_id"] = "foreign-operation".into();
+                        }
+                        changed.extend(serde_json::to_vec(&row).unwrap());
+                        changed.push(b'\n');
+                    }
+                    std::fs::write(&index, changed).unwrap();
+                }
+                let before = std::fs::read(repo.join(dispatch::REGISTRY)).unwrap();
+                let result = collab.accepted_writes(&repo, &request, &record, &stop);
+                if words[2].starts_with("wrong-") {
+                    assert!(result.is_err(), "{result:?}");
+                    if words[2] == "wrong-operation" {
+                        assert!(
+                            result
+                                .unwrap_err()
+                                .message
+                                .contains("exact physical operation binding")
+                        );
+                    }
+                    assert_eq!(
+                        before,
+                        std::fs::read(repo.join(dispatch::REGISTRY)).unwrap()
+                    );
+                } else {
+                    assert_eq!(result.unwrap().unwrap()["status"], words[2]);
+                }
+                if words[2] == "wrong-operation" {
+                    std::fs::write(index, indexed).unwrap();
+                }
+                return;
+            }
             let args = words.iter().map(OsString::from).collect::<Vec<_>>();
             let before = std::fs::read(repo.join(dispatch::REGISTRY)).unwrap();
             let result = oms_runtime::run(&args, &repo, source, &services, stop.as_ref());
@@ -604,6 +733,7 @@ mod tests {
         let held = value::parse(&held.stdout).unwrap();
         let mut next = policy.clone();
         next.epoch = "resumed-epoch".into();
+        next.max_write_wip = 2;
         std::fs::write(&selected, next.to_json().unwrap()).unwrap();
         let resume = |snapshot: &str| {
             run(&[
@@ -1085,5 +1215,366 @@ mod tests {
             resources::snapshot(repo, stop).unwrap().unwrap().occupancy,
             resources::Occupancy::default()
         );
+        accepted_write_flow(&plan, &second_binding, stop, test_name);
+    }
+
+    // The same native fixture now continues through canonical Plan review and
+    // the production panel service callback, with sealed local child cleanup.
+    fn accepted_write_flow(
+        plan: &oms_command_plan::Plan<'_>,
+        binding: &resources::Binding,
+        stop: &Arc<AtomicBool>,
+        test_name: &str,
+    ) {
+        use oms_command_operations::value::obj;
+        use oms_command_operations::{StartRequest, append_lifecycle, create_attempt, new_event};
+        use oms_command_peer::process::{Executor, Invocation, Native};
+        use oms_command_plan::{Request, json};
+        use oms_command_telemetry::store::{physical, usage};
+        use serde_json::json as j;
+        let repo = &plan.context.state_repo;
+        let convert =
+            |value: &serde_json::Value| json::parse(&serde_json::to_vec(value).unwrap()).unwrap();
+        let append = |value: &serde_json::Value| {
+            plan.store
+                .append(".oms/artifacts/index.jsonl", &convert(value))
+                .unwrap()
+        };
+        let deadline = || Instant::now() + Duration::from_secs(5);
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        let call = |args: &[&str]| {
+            plan.execute(
+                &Request::parse(&args.iter().map(OsString::from).collect::<Vec<_>>()).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut binding = binding.clone();
+        binding.team = None;
+        for count in [1, 2] {
+            let task_id = format!("accepted-{count}");
+            for index in 0..count {
+                std::fs::write(repo.join(format!("src/{task_id}-{index}")), b"before\n").unwrap();
+            }
+            git(&["add", "src"]);
+            git(&["commit", "-qm", "accepted fixture base"]);
+            let base = git(&["rev-parse", "HEAD"]);
+            call(&[
+                "add",
+                "--id",
+                &task_id,
+                "--title",
+                "accepted write",
+                "--allowed",
+                "src",
+                "--verify",
+                "true",
+            ]);
+            call(&["claim", "--id", &task_id, "--provider", "codex"]);
+            let snapshot = plan.load().unwrap();
+            let task = snapshot.task(&task_id).unwrap();
+            let lease = task.text("lease_id");
+            let mut components = Vec::new();
+            let mut pending_cleanup = None;
+            for index in 0..count {
+                let path = format!("src/{task_id}-{index}");
+                let patch = format!(
+                    "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-before\n+after\n"
+                );
+                let (patch_ref, _) = plan
+                    .store
+                    .immutable(
+                        ".oms/artifacts/accepted-fixture",
+                        patch.as_bytes(),
+                        ".patch",
+                        1024 * 1024,
+                    )
+                    .unwrap();
+                let (artifact, _) = plan
+                    .store
+                    .immutable(
+                        ".oms/artifacts/accepted-fixture",
+                        format!("candidate {task_id} {index}\n").as_bytes(),
+                        ".md",
+                        4096,
+                    )
+                    .unwrap();
+                let attempt = create_attempt(
+                    repo,
+                    &StartRequest {
+                        provider: "codex".into(),
+                        tool: "peer-delegate".into(),
+                        task_id: task_id.clone(),
+                        parent_attempt_id: binding.root_owner.clone(),
+                        refs: obj([
+                            ("panel_role", "worker".into()),
+                            ("panel_access", "write".into()),
+                            ("panel_lease_id", lease.into()),
+                            ("panel_room_id", plan.context.room_id.as_str().into()),
+                        ]),
+                        ..Default::default()
+                    },
+                    stop,
+                )
+                .unwrap();
+                for state in ["starting", "working", "review"] {
+                    append_lifecycle(
+                        repo,
+                        new_event(
+                            &attempt,
+                            0usize.into(),
+                            "attempt.state_changed",
+                            obj([("to_state", state.into())]),
+                        )
+                        .unwrap(),
+                        stop,
+                    )
+                    .unwrap();
+                }
+                let operation = format!("operation-{task_id}-{index}");
+                let candidate = j!({"kind":"delegate", "event_id":format!("candidate-{task_id}-{index}"),
+                    "attempt_id":attempt,"operation_id":operation,"task_id":task_id,
+                    "plan_id":snapshot.plan.text("plan_id"),"base_sha":base,"exit":0,
+                    "patch":patch_ref.text("path"),"patch_sha256":patch_ref.text("sha256"),
+                    "artifact":artifact.text("path"),"artifact_sha256":artifact.text("sha256")});
+                let gate = j!({"event_id":format!("review-{task_id}-{index}"),
+                    "patch_sha256":patch_ref.text("sha256"),"exit":0,"gate_verify_exit":0,"seat_verdicts":["pass"]});
+                append(&candidate);
+                append(
+                    &j!({"kind":"review-outcome","event_id":gate["event_id"],"task_id":task_id,
+                    "exit":0,"review":{"gate_verify_exit":0,"candidate":{"patch_sha256":candidate["patch_sha256"]},"seats":[{"verdict":"pass"}]}}),
+                );
+                components.push(j!({"candidate":candidate,"review_gate":gate,
+                    "worker":{"attempt_id":attempt,"task_id":task_id,"refs":{"panel_role":"worker",
+                        "panel_access":"write","panel_lease_id":lease}}}));
+                git(&["apply", patch_ref.text("path")]);
+                let call_id = format!("call-{task_id}-{index}");
+                physical::begin_bound_checked(
+                    repo,
+                    physical::Request {
+                        identity: usage::Identity {
+                            call_id: call_id.clone(),
+                            operation_id: operation,
+                            provider: "codex".into(),
+                            task_id: Some(task_id.clone()),
+                            attempt_id: Some(attempt),
+                            ..Default::default()
+                        },
+                        cumulative: None,
+                        write: true,
+                        campaign_manifest_sha256: None,
+                    },
+                    &binding,
+                    stop,
+                    deadline(),
+                    |_, _| Ok(()),
+                )
+                .unwrap();
+                let tag = oms_supervisor::process::PhysicalCall::new(&call_id).unwrap();
+                let done = Native
+                    .execute(
+                        Invocation {
+                            argv: vec!["sh".into(), "-c".into(), "true".into()],
+                            cwd: repo.clone(),
+                            input: None,
+                            environment: vec![],
+                            remove_environment: vec![],
+                            timeout: Duration::from_secs(5),
+                            max_bytes: 1024,
+                            merge: false,
+                            physical_call: Some(tag.clone()),
+                            launch_fence: None,
+                        },
+                        stop,
+                    )
+                    .unwrap();
+                assert_eq!(done.code, 0);
+                let cleanup = done.owned_cleanup.unwrap();
+                if index + 1 == count {
+                    pending_cleanup = Some((tag, cleanup));
+                } else {
+                    resources::settle_execution(
+                        repo,
+                        &binding,
+                        &tag,
+                        &cleanup,
+                        1,
+                        stop,
+                        deadline(),
+                    )
+                    .unwrap();
+                }
+            }
+            git(&["add", "src"]);
+            git(&["commit", "-qm", "fixture accepted candidate"]);
+            let commit = git(&["rev-parse", "HEAD"]);
+            let tree = git(&["rev-parse", "HEAD^{tree}"]);
+            components.sort_by_key(|component| {
+                component["candidate"]["attempt_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            });
+            let candidate = &components[0]["candidate"];
+            let mut record = j!({"schema":1,"task_id":task_id,"plan_id":snapshot.plan.text("plan_id"),"lease_id":lease,
+                "candidate_event_id":candidate["event_id"],"candidate_attempt_id":candidate["attempt_id"],
+                "patch_sha256":candidate["patch_sha256"],"artifact":candidate["artifact"],"patch":candidate["patch"],
+                "commit":commit,"tree":tree,"base":base,"review_gate":components[0]["review_gate"]});
+            if count == 2 {
+                let joined = components
+                    .iter()
+                    .flat_map(|c| {
+                        std::fs::read(repo.join(c["candidate"]["patch"].as_str().unwrap())).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let (patch, _) = plan
+                    .store
+                    .immutable(
+                        ".oms/artifacts/compositions",
+                        &joined,
+                        ".patch",
+                        1024 * 1024,
+                    )
+                    .unwrap();
+                let manifest = j!({"schema":1,"kind":"oms-composed-candidate","owner":"codex",
+                    "main_attempt_id":binding.root_owner,"task_id":task_id,"plan_id":snapshot.plan.text("plan_id"),
+                    "lease_id":lease,"verify_sha256":json::sha(b"true"),"base_sha":base,"tree":tree,
+                    "patch_sha256":patch.text("sha256"),"components":components});
+                let (reference, _) = plan
+                    .store
+                    .immutable(
+                        ".oms/artifacts/compositions",
+                        &json::canonical(&convert(&manifest)).unwrap(),
+                        ".json",
+                        32768,
+                    )
+                    .unwrap();
+                record["schema"] = 2.into();
+                record["candidate_event_id"] =
+                    format!("composition_{}", reference.text("sha256")).into();
+                record["candidate_attempt_id"] = binding.root_owner.clone().into();
+                record["patch_sha256"] = patch.text("sha256").into();
+                record["patch"] = patch.text("path").into();
+                record["artifact"] = reference.text("path").into();
+                record["composition"] =
+                    j!({"path":reference.text("path"),"sha256":reference.text("sha256")});
+                record["integration_verify"] = j!({"command":"true","tree":tree,"exit":0});
+                record["review_gate"] = j!({"kind":"component-reviews","event_id":record["candidate_event_id"],
+                    "patch_sha256":record["patch_sha256"],"exit":0,"seat_verdicts":["pass","pass"]});
+                let (report, _) = plan
+                    .store
+                    .immutable(
+                        ".oms/artifacts/admit",
+                        b"combined native fixture verifier\n",
+                        ".md",
+                        4096,
+                    )
+                    .unwrap();
+                append(
+                    &j!({"kind":"patch-admit","event_id":"accepted-integration","exit":0,"verify_exit":0,
+                    "verification":"command","base":base,"patch_sha256":record["patch_sha256"],
+                    "artifact":report.text("path"),"artifact_sha256":report.text("sha256")}),
+                );
+                append(
+                    &j!({"kind":"patch-land","exit":0,"base":base,"patch_sha256":record["patch_sha256"],
+                    "panel_composition":{"manifest_sha256":reference.text("sha256"),"participant":binding.root_owner,
+                        "tree":tree,"verify_sha256":json::sha(b"true"),"admission_event_id":"accepted-integration"}}),
+                );
+            }
+            for component in &components {
+                append(
+                    &j!({"kind":"panel-accept","task_id":task_id,"plan_id":snapshot.plan.text("plan_id"),
+                    "attempt_id":component["candidate"]["attempt_id"],"patch_sha256":component["candidate"]["patch_sha256"],"base_sha":commit,"exit":0}),
+                );
+            }
+            let child = |status: &str| {
+                let out = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env("OMS_RESOURCE_FIXTURE_REPO", repo)
+                    .env(
+                        "OMS_RESOURCE_FIXTURE_ARGS",
+                        serde_json::to_string(&["accepted-writes", &task_id, status]).unwrap(),
+                    )
+                    .env("OMS_PANEL_ACCEPT_RECORD_JSON", record.to_string())
+                    .env("OMS_PANEL_MAIN_ATTEMPT", &binding.root_owner)
+                    .env("OMS_ROOM_ID", &plan.context.room_id)
+                    .env("OMS_ROOM_PARTICIPANT", &binding.root_owner)
+                    .env_remove("OMS_HARNESS_CHILD")
+                    .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                    .env_remove("OMS_STATE_REPO")
+                    .current_dir(repo)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+            let unknown_usage = std::fs::read(repo.join(usage::RECEIPTS)).unwrap();
+            child("pending");
+            assert_eq!(
+                resources::snapshot(repo, stop)
+                    .unwrap()
+                    .unwrap()
+                    .occupancy
+                    .write_wip,
+                1
+            );
+            child("wrong-lease");
+            child("wrong-owner");
+            if count == 1 {
+                child("wrong-operation");
+            }
+            let (tag, cleanup) = pending_cleanup.unwrap();
+            resources::settle_execution(repo, &binding, &tag, &cleanup, 1, stop, deadline())
+                .unwrap();
+            child("retired");
+            assert_eq!(
+                resources::snapshot(repo, stop).unwrap().unwrap().occupancy,
+                resources::Occupancy::default()
+            );
+            let retired = std::fs::read(repo.join(dispatch::REGISTRY)).unwrap();
+            child("retired");
+            assert_eq!(
+                retired,
+                std::fs::read(repo.join(dispatch::REGISTRY)).unwrap()
+            );
+            assert_eq!(
+                unknown_usage,
+                std::fs::read(repo.join(usage::RECEIPTS)).unwrap()
+            );
+            for component in &components {
+                let candidate = &component["candidate"];
+                assert_eq!(
+                    json::sha(
+                        std::fs::read(repo.join(candidate["patch"].as_str().unwrap())).unwrap()
+                    ),
+                    candidate["patch_sha256"].as_str().unwrap()
+                );
+            }
+            assert_eq!(
+                plan.load().unwrap().task(&task_id).unwrap().text("state"),
+                "review"
+            );
+        }
     }
 }

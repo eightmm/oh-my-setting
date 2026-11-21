@@ -258,6 +258,237 @@ pub(super) fn retire(
     Ok(reference)
 }
 
+pub(super) fn accepted(
+    original: &Plan<'_>,
+    record: &Value,
+    owner: &str,
+    deadline: Instant,
+) -> Result<Value> {
+    let mut reports = Vec::new();
+    let mut teams = std::collections::BTreeSet::new();
+    {
+        let guard = original.root_admission_before(deadline)?;
+        let plan = guard.writer_before()?;
+        let candidates = plan.accepted_panel_candidates(record, owner)?;
+        let host = super::super::observed_host_generation_before(deadline, plan.interrupted)?;
+        let snapshot = resources::snapshot(&plan.context.state_repo, plan.interrupted)
+            .map_err(store_error)?
+            .ok_or_else(|| error(75, "resource domain disappeared"))?;
+        let intents = oms_command_telemetry::store::physical::load(
+            &plan.context.state_repo,
+            plan.interrupted,
+        )
+        .map_err(store_error)?;
+        let root = guard.binding();
+        let mut selected = Vec::new();
+        for candidate in &candidates {
+            let attempt = candidate.text("attempt_id");
+            let related = intents
+                .iter()
+                .filter(|intent| {
+                    intent.write
+                        && intent.identity.attempt_id.as_deref() == Some(attempt)
+                        && intent.resource_binding.is_some()
+                })
+                .collect::<Vec<_>>();
+            if related.is_empty() {
+                require(
+                    !snapshot
+                        .writes
+                        .iter()
+                        .any(|write| write.operation_id == candidate.text("operation_id")),
+                    "accepted candidate physical evidence is missing or belongs to another attempt",
+                )?;
+                reports.push(object([
+                    ("attempt_id", string(attempt)),
+                    ("status", string("not_reserved")),
+                ]));
+                continue;
+            }
+            let operation = candidate.text("operation_id");
+            require(
+                !operation.is_empty()
+                    && related.iter().all(|intent| {
+                        intent.identity.operation_id == operation
+                            && intent.identity.task_id.as_deref() == Some(record.text("task_id"))
+                    }),
+                "accepted candidate has no exact physical operation binding",
+            )?;
+            let write = snapshot
+                .writes
+                .iter()
+                .find(|write| write.operation_id == operation)
+                .ok_or_else(|| error(75, "accepted candidate write custody is missing"))?;
+            let binding = &write.binding;
+            require(
+                binding.root_owner == root.text("root_owner")
+                    && binding.root_generation == root.text("root_owner_generation")
+                    && binding.host_generation_sha256 == host
+                    && snapshot.policy.host_generation_sha256 == host,
+                "accepted write belongs to another owner or host generation",
+            )?;
+            require(
+                intents
+                    .iter()
+                    .filter(|intent| intent.identity.operation_id == operation)
+                    .all(|intent| {
+                        intent.identity.attempt_id.as_deref() == Some(attempt)
+                            && intent.identity.task_id.as_deref() == Some(record.text("task_id"))
+                            && intent.resource_binding.as_ref().is_some_and(|actual| {
+                                actual.root_owner == binding.root_owner
+                                    && actual.root_generation == binding.root_generation
+                                    && actual.host_generation_sha256
+                                        == binding.host_generation_sha256
+                                    && actual.team == binding.team
+                            })
+                    }),
+                "accepted write operation contains foreign physical calls",
+            )?;
+            if let Some(team) = &binding.team {
+                let spec = team_spec(&plan, &team.id, &team.spec_sha256, false)?;
+                require(
+                    spec.get("task_id") == record.get("task_id")
+                        && spec.get("plan_id") == record.get("plan_id")
+                        && spec.text("root_owner_generation") == binding.root_generation
+                        && spec.get("members").array()?.iter().any(|member| {
+                            member.text("id") == team.member
+                                && member.get("generation").is_int(team.member_generation)
+                                && member.text("access") == "write"
+                        }),
+                    "accepted write Team member or task changed",
+                )?;
+                teams.insert((team.id.clone(), team.spec_sha256.clone()));
+            }
+            selected.push((candidate, write));
+        }
+        // Resolve every identity before the first write. A retry validates all
+        // candidates again and uses each operation's original custody revision.
+        for (candidate, write) in selected {
+            let mut report = object([
+                ("attempt_id", candidate.get("attempt_id").clone()),
+                ("operation_id", string(&write.operation_id)),
+                ("status", string("pending")),
+            ]);
+            if write.execution_pending {
+                report.set("execution_pending", b(true))?;
+                reports.push(report);
+                continue;
+            }
+            let revision = if write.active {
+                write.revision
+            } else {
+                write
+                    .revision
+                    .checked_sub(1)
+                    .filter(|revision| *revision > 0)
+                    .ok_or_else(|| error(75, "accepted write retirement revision is invalid"))?
+            };
+            let body = object([
+                ("schema", number(1)),
+                ("kind", string("oms-resource-disposition")),
+                ("disposition", string("accepted")),
+                ("root_owner", string(root.text("root_owner"))),
+                (
+                    "root_generation",
+                    string(root.text("root_owner_generation")),
+                ),
+                ("room_id", string(&plan.context.room_id)),
+                ("host_generation_sha256", string(&host)),
+                ("artifacts_preserved", b(true)),
+                ("operation_id", string(&write.operation_id)),
+                ("expected_revision", number(revision)),
+                ("candidate_event_id", candidate.get("event_id").clone()),
+                ("acceptance", record.clone()),
+                (
+                    "call_ids",
+                    Value::Array(write.call_ids.iter().map(string).collect()),
+                ),
+            ]);
+            guard.check()?;
+            let (decision, reference) = retain(&plan.store, body, revision)?;
+            guard.check()?;
+            resources::retire_write_checked(
+                &plan.context.state_repo,
+                &write.binding,
+                &write.operation_id,
+                revision,
+                plan.interrupted,
+                deadline,
+                |repo, target| {
+                    guard.check_pinned().map_err(|_| {
+                        StoreError::Invalid("accepted write producer guard changed")
+                    })?;
+                    let resources::DecisionTarget::Write {
+                        binding,
+                        operation_id,
+                        revision: actual_revision,
+                    } = target
+                    else {
+                        return Err(StoreError::Invalid("accepted write target changed"));
+                    };
+                    if repo != plan.context.state_repo
+                        || **binding != write.binding
+                        || *operation_id != write.operation_id
+                        || *actual_revision != revision
+                    {
+                        return Err(StoreError::Invalid("accepted write target changed"));
+                    }
+                    Ok(decision.clone())
+                },
+            )
+            .map_err(mutation_error)?;
+            guard.check().map_err(|_| error(75, "accepted write retirement may already be published; retry the exact acceptance"))?;
+            report.set("status", string("retired"))?;
+            report.set("decision", reference)?;
+            reports.push(report);
+        }
+        require(
+            plan.accepted_panel_candidates(record, owner)? == candidates,
+            "accepted write retirement may already be published; acceptance evidence changed",
+        )?;
+        guard.check()?;
+    }
+    let pending = reports
+        .iter()
+        .any(|report| report.text("status") == "pending");
+    let retired = reports
+        .iter()
+        .any(|report| report.text("status") == "retired");
+    let mut team_reports = Vec::new();
+    for (id, digest) in teams {
+        let report = match super::team_withdrawn_before(
+            &original.context,
+            &id,
+            &digest,
+            original.services,
+            original.interrupted,
+            deadline,
+        ) {
+            Ok(Some(value)) => value,
+            Ok(None) => object([("status", string("not_reserved"))]),
+            Err(error) => object([
+                ("status", string("unknown")),
+                ("reason", string(error.message)),
+            ]),
+        };
+        team_reports.push(report);
+    }
+    Ok(object([
+        (
+            "status",
+            string(if pending {
+                "pending"
+            } else if retired {
+                "retired"
+            } else {
+                "not_reserved"
+            }),
+        ),
+        ("writes", Value::Array(reports)),
+        ("teams", Value::Array(team_reports)),
+    ]))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reconcile(
     repo: &Path,

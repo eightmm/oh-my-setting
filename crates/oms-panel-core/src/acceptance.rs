@@ -610,6 +610,12 @@ pub(crate) fn run<S: Services + ?Sized>(
         )?;
     }
     let store = Store::open(repo)?;
+    if let Some(digest) = &request.expected_patch_sha256 {
+        let path = format!(".oms/panel/acceptances/{}-{digest}.json", request.task_id);
+        if store.json(Path::new(&path), MAX_RESULT, true)?.is_some() {
+            return recover_inner(repo, request, service, stop, true);
+        }
+    }
     let execution = std::fs::canonicalize(&request.execution_repo).map_err(Error::new)?;
     let digest = crate::digest(execution.as_os_str().as_encoded_bytes());
     let tx = store.transaction(
@@ -775,16 +781,41 @@ pub(crate) fn run<S: Services + ?Sized>(
         )?;
         recheck_applied(repo, request, &snapshot, service, stop)?;
         tx.check()?;
-        complete(
+        let record = complete(
             repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
         )?;
         recovery["stage"] = "recorded".into();
+        // Make the narrow settlement retry durable before custody mutation.
         tx.write_json(Path::new(&record_path), &recovery, false, MAX_RESULT)?;
-        Ok(
-            serde_json::json!({"sha":commit,"task_id":request.task_id,"patch_sha256":candidate["patch_sha256"]}),
-        )
+        let retirement = settle_accepted(repo, request, &record, service, stop);
+        let mut result = serde_json::json!({"sha":commit,"task_id":request.task_id,"patch_sha256":candidate["patch_sha256"]});
+        if let Some(retirement) = retirement {
+            recovery["resource_retirement"] = retirement.clone();
+            result["resource_retirement"] = retirement;
+        }
+        tx.write_json(Path::new(&record_path), &recovery, false, MAX_RESULT)?;
+        Ok(result)
     })();
     outcome.map_err(|e| Error { publication_uncertain:true,..Error::new(format!("accept {} failed; preserve state, never reapply blindly; reconcile {record_path} and patch-land --recover: {}",text(&recovery,"stage"),e.message)) })
+}
+
+fn acceptance_record(
+    request: &AcceptRequest,
+    snapshot: &Value,
+    base: &str,
+    tree: &str,
+    commit: &str,
+) -> Value {
+    let candidate = &snapshot["candidate"];
+    let mut record = serde_json::json!({"schema":1,"task_id":request.task_id,"plan_id":snapshot["task"]["plan_id"],"lease_id":snapshot["task"]["lease_id"],"candidate_event_id":candidate["event_id"],"candidate_attempt_id":snapshot["worker"]["attempt_id"],"patch_sha256":candidate["patch_sha256"],"artifact":candidate["artifact"],"patch":candidate["patch"],"commit":commit,"tree":tree,"base":base,"review_gate":snapshot["review_gate"]});
+    if snapshot.get("composition").is_some() {
+        record["schema"] = 2.into();
+        record["composition"] =
+            serde_json::json!({"path":candidate["artifact"],"sha256":candidate["artifact_sha256"]});
+        record["integration_verify"] =
+            serde_json::json!({"command":request.verify,"tree":tree,"exit":0});
+    }
+    record
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -798,17 +829,10 @@ fn complete<S: Services + ?Sized>(
     commit: &str,
     service: &S,
     stop: &AtomicBool,
-) -> Result<()> {
+) -> Result<Value> {
     let store = Store::open(repo)?;
     let candidate = &snapshot["candidate"];
-    let mut record = serde_json::json!({"schema":1,"task_id":request.task_id,"plan_id":snapshot["task"]["plan_id"],"lease_id":snapshot["task"]["lease_id"],"candidate_event_id":candidate["event_id"],"candidate_attempt_id":snapshot["worker"]["attempt_id"],"patch_sha256":candidate["patch_sha256"],"artifact":candidate["artifact"],"patch":candidate["patch"],"commit":commit,"tree":tree,"base":base,"review_gate":snapshot["review_gate"]});
-    if snapshot.get("composition").is_some() {
-        record["schema"] = 2.into();
-        record["composition"] =
-            serde_json::json!({"path":candidate["artifact"],"sha256":candidate["artifact_sha256"]});
-        record["integration_verify"] =
-            serde_json::json!({"command":request.verify,"tree":tree,"exit":0});
-    }
+    let record = acceptance_record(request, snapshot, base, tree, commit);
     let mut review = ExecutionRequest::new(
         args(&[
             "review",
@@ -889,7 +913,25 @@ fn complete<S: Services + ?Sized>(
         oms_command_telemetry::store::append_artifact_index(repo, &registration, stop)
             .map_err(crate::services::telemetry_error)?;
     }
-    Ok(())
+    Ok(record)
+}
+
+fn settle_accepted<S: Services + ?Sized>(
+    repo: &Path,
+    request: &AcceptRequest,
+    record: &Value,
+    service: &S,
+    stop: &AtomicBool,
+) -> Option<Value> {
+    // Acceptance is already durable. A failed custody writer cannot undo it or
+    // authorize reapplication; the exact recovery path retries this hook.
+    match service.accepted_writes(repo, request, record, stop) {
+        Ok(value) => value,
+        Err(error) => Some(
+            serde_json::json!({"status":"unknown","reason":error.message,
+            "reconcile_required":true}),
+        ),
+    }
 }
 
 fn replay<S: Services + ?Sized>(
@@ -935,6 +977,16 @@ pub(crate) fn recover<S: Services + ?Sized>(
     service: &S,
     stop: &AtomicBool,
 ) -> Result<Value> {
+    recover_inner(repo, request, service, stop, false)
+}
+
+fn recover_inner<S: Services + ?Sized>(
+    repo: &Path,
+    request: &AcceptRequest,
+    service: &S,
+    stop: &AtomicBool,
+    recorded_only: bool,
+) -> Result<Value> {
     crate::parent_only()?;
     let digest = request
         .expected_patch_sha256
@@ -960,6 +1012,14 @@ pub(crate) fn recover<S: Services + ?Sized>(
             && saved["verify"] == request.verify,
         "acceptance recovery request differs from saved intent",
     )?;
+    if recorded_only {
+        require(
+            saved["stage"] == "recorded"
+                && (crate::hex(&text(&saved, "commit"), 40)
+                    || crate::hex(&text(&saved, "commit"), 64)),
+            "accept retry requires recorded acceptance; incomplete acceptance must be explicitly reconciled",
+        )?;
+    }
     let snapshot = preflight(repo, request, service, stop, Application::AfterApply)?;
     for field in [
         "candidate",
@@ -1075,12 +1135,67 @@ pub(crate) fn recover<S: Services + ?Sized>(
         }
         head
     };
+    if recorded_only {
+        let record = acceptance_record(request, &snapshot, &base, &tree, &commit);
+        require(
+            ["review", "done"].contains(&text(&snapshot["task"], "state").as_str())
+                && snapshot["task"]["panel_accept"] == record
+                && snapshot["task"]["review_lease_id"] == snapshot["task"]["lease_id"],
+            "accept retry has no exact canonical acceptance",
+        )?;
+        let rows = index_rows(repo)?;
+        require(
+            rows.iter()
+                .filter(|row| {
+                    row["kind"] == "patch-land"
+                        && row["exit"] == 0
+                        && (row["task_id"] == "" || row["task_id"] == request.task_id)
+                        && row["base"] == base
+                        && row["patch_sha256"] == snapshot["candidate"]["patch_sha256"]
+                })
+                .count()
+                == 1,
+            "accept retry lacks unique native landing evidence",
+        )?;
+        let mut accepted = vec![(&snapshot["candidate"], &snapshot["worker"])];
+        if let Some(manifest) = snapshot.get("composition") {
+            accepted.extend(
+                array(&manifest["components"])
+                    .iter()
+                    .map(|component| (&component["candidate"], &component["worker"])),
+            );
+        }
+        require(
+            accepted.iter().all(|(candidate, worker)| {
+                rows.iter().any(|row| {
+                    row["kind"] == "panel-accept"
+                        && row["exit"] == 0
+                        && row["task_id"] == request.task_id
+                        && row["attempt_id"] == worker["attempt_id"]
+                        && row["patch_sha256"] == candidate["patch_sha256"]
+                        && row["base_sha"] == commit
+                })
+            }),
+            "accept retry has incomplete candidate registration",
+        )?;
+        recheck_applied(repo, request, &snapshot, service, stop)?;
+        tx.check()?;
+        let retirement = settle_accepted(repo, request, &record, service, stop);
+        let mut result = serde_json::json!({"sha":commit,"task_id":request.task_id,
+            "patch_sha256":digest,"settlement_only":true});
+        if let Some(retirement) = retirement {
+            saved["resource_retirement"] = retirement.clone();
+            result["resource_retirement"] = retirement;
+        }
+        tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
+        return Ok(result);
+    }
     saved["commit"] = commit.clone().into();
     saved["stage"] = "plan review".into();
     tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
     recheck_applied(repo, request, &snapshot, service, stop)?;
     tx.check()?;
-    complete(
+    let record = complete(
         repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
     )
     .map_err(|e| Error {
@@ -1089,9 +1204,14 @@ pub(crate) fn recover<S: Services + ?Sized>(
     })?;
     saved["stage"] = "recorded".into();
     tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
-    Ok(
-        serde_json::json!({"sha":commit,"task_id":request.task_id,"patch_sha256":digest,"recovered":true}),
-    )
+    let retirement = settle_accepted(repo, request, &record, service, stop);
+    let mut result = serde_json::json!({"sha":commit,"task_id":request.task_id,"patch_sha256":digest,"recovered":true});
+    if let Some(retirement) = retirement {
+        saved["resource_retirement"] = retirement.clone();
+        result["resource_retirement"] = retirement;
+    }
+    tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
+    Ok(result)
 }
 
 fn accepted_product<S: Services + ?Sized>(

@@ -299,6 +299,11 @@ candidate disposition use canonical producer guards before/after the checked
 retirement APIs; their callbacks check only pinned guards under dispatch. Team
 withdrawal never supplies an OS cleanup proof. Epoch reconciliation preserves
 unknown usage liabilities and requires independently drained custody.
+The panel acceptance callback also uses `retire_write_checked` after reopening
+canonical acceptance and each original candidate operation. It requires sealed
+execution settlement, preserves candidate/usage evidence, and replays exact
+decisions independently for composed workers. A failed custody write leaves
+acceptance intact and is retried by exact panel acceptance recovery.
 Unknown native descendants, provider-account capacity and cross-host global hard
 bounds are unsupported. Calls without a qualifying native owner refuse in an
 active domain. The existing usage fixture covers mixed-call concurrency, partial writes,

@@ -309,6 +309,18 @@ pub trait Services: PeerExecutor {
     ) -> Result<Value> {
         crate::results::accept_native(repo, request, self, interrupted)
     }
+    /// Reconciles write custody only after canonical acceptance and every
+    /// component registration. The native producer must revalidate the saved
+    /// acceptance under its owner guards; these arguments grant no authority.
+    fn accepted_writes(
+        &self,
+        _repo: &Path,
+        _request: &crate::results::AcceptRequest,
+        _record: &Value,
+        _interrupted: &AtomicBool,
+    ) -> Result<Option<Value>> {
+        Ok(None)
+    }
     fn finalize_authority(
         &self,
         repo: &Path,
