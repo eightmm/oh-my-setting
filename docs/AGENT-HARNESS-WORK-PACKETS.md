@@ -87,8 +87,11 @@ Pi가 `unsupported`, Claude와 Antigravity가 `unknown`이다. `usage`는 Antigr
    기존 `exec-only`와 네 provider의 현재 status는 바꾸지 않는다.
 2. 등급별 승격 조건을 표의 `doc` 또는 인접 계약에 적는다. 조건은 code path,
    AH-08 conformance 통과, 고정된 binary version의 fixture 출처다.
-3. `MAIN_OWNERS`처럼 provider 이름을 나열한 상수는 표의 해당 capability를 읽는
-   하나의 조회로 바꾼다. 표를 읽지 못하면 현재 네 이름으로 fail-closed한다.
+3. `MAIN_OWNERS`는 Room log 검증([validate.rs](../crates/oms-command-room/src/validate.rs)
+   349행)과 carry의 bind 판정(`carry.rs` 297행)이 함께 쓴다. 표 조회로 단순 치환하면
+   표가 바뀔 때 이미 기록된 log의 유효성이 달라진다. 따라서 새 Main 소유 provider는
+   `main-resume`처럼 구 writer가 거절하는 versioned log 규칙으로 추가하고, 기존 log의
+   판정은 현재 네 이름으로 고정한다. 표 조회는 새 참여를 받는 지점에만 둔다.
 4. [CC-01](CALLABLE-CONSOLIDATION-WORK-PACKETS.md)의 provider identity/alias 공유와
    같은 owner에서 진행한다. 두 번째 provider registry를 만들지 않는다.
 
@@ -204,8 +207,10 @@ network와 자격증명을 그대로 가진다.
 
 1. 먼저 계측한다: transport별로 sandbox가 적용된 호출 수, backend, 거절 수.
    기존 receipt에 backend 이름을 남기는 것으로 충분한지 확인한다.
-2. Network 허용을 호출자가 선택할 수 있게 한다. 기본값은 현재와 같은 허용이며,
-   읽기 전용 자문처럼 network가 필요 없는 route만 명시적으로 끌 수 있다.
+2. Network 차단은 대부분의 route에 쓸 수 없다. Provider CLI가 추론 요청에 network를
+   쓰므로 sandbox에서 network를 끊으면 호출 자체가 실패한다. 선택지는 로컬 모델을
+   쓰는 adapter처럼 추론에 외부 network가 필요 없는 route로 한정하고, 그 밖의 route는
+   현재의 허용을 유지한다. Host 단위 허용 목록은 이 backend 범위 밖이다.
 3. 쓰기 가능 directory를 route의 provider에 필요한 것으로 좁힌다. 좁힌 뒤 인증이
    깨지는 provider는 목록에 남기고 이유를 적는다.
 4. Custom adapter와 guard coverage가 없는 transport에 `auto`를 기본 적용하는 안은
@@ -248,6 +253,10 @@ carrier 결과를 독립 증거로 세지 않는 현재 규칙을 유지한다.
    자동으로 쓰지 않는다. 표 변경은 검토되는 commit이다.
 4. 실제 provider를 호출하는 live probe는 별도 명시 옵션과 비용·계정 고지가 있을
    때만 실행하며 결정적 conformance와 결과를 섞지 않는다.
+
+One-shot 계약의 시나리오는 reference 스크립트 초안
+([#319](https://github.com/eightmm/oh-my-setting/pull/319))으로 먼저 고정한다. Native
+경로는 같은 시나리오와 status 어휘를 옮긴다.
 
 ### 완료 조건과 시험
 
@@ -292,8 +301,12 @@ MCP 도구 32개 중 `readOnlyHint`가 false인 것은 `oms_peer_start`와 `oms_
 
 ### 구현 지시
 
-1. 기본 좌석 목록을 기존 routing 설정에서 읽는다. 설정이 없으면 현재 세 이름이다.
-   새 설정 파일을 만들지 않는다.
+1. 기본 좌석을 설치가 정할 수 있게 한다. 설정이 없으면 현재 세 이름이다. 두 경로가
+   있다. (a) `OMS_ADVISOR_PROVIDER`·`OMS_CONSULT_PROVIDER`와 같은 환경 변수: `peer.rs`
+   한 곳의 변경이며 초안은 [#318](https://github.com/eightmm/oh-my-setting/pull/318)이다.
+   (b) `config/panel-routing.json`의 새 키: 이 정책은 schema 2이고 알 수 없는 field를
+   거절하므로 `oms-panel-core`의 정책 struct와 schema 판단이 함께 바뀐다. Panel council은
+   이미 이 정책에서 좌석을 만들므로 고정값은 CLI 경로에만 있다. 새 설정 파일은 만들지 않는다.
 2. 설정된 좌석도 현재 규칙을 그대로 통과해야 한다: 발견·usability probe, 읽기 모드가
    문서화된 transport만 read/council 좌석, writer와 같은 model family의 경고.
 3. 설치된 CLI가 늘어난다고 좌석이 자동으로 늘지 않는다. 좌석 변경은 명시적 설정이다.
