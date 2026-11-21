@@ -679,7 +679,12 @@ fn run_selected(
     let check = options.has("--check")
         || options.tool == "auto-update" && options.action != "apply" && !options.has("--apply");
     if !check {
-        let result = apply_update(paths, options, flag, services, reference, reviewed);
+        let mut attempt = ApplyAttempt {
+            current,
+            target: String::new(),
+            reference: reference.into(),
+        };
+        let result = apply_update(paths, options, flag, services, &mut attempt, reviewed);
         if options.tool == "auto-update"
             && let Err(error) = &result
         {
@@ -690,9 +695,9 @@ fn run_selected(
                 } else {
                     "failed"
                 },
-                &current,
-                "",
-                reference,
+                &attempt.current,
+                &attempt.target,
+                &attempt.reference,
                 "apply",
             )?;
         }
@@ -1023,12 +1028,20 @@ fn managed_paths(paths: &Paths, old: &Value) -> Result<Vec<PathBuf>> {
     }
     Ok(targets.into_iter().collect())
 }
+// Retain the locked selection for failure reporting, including failures before
+// activation. The caller's initial snapshot is only a pre-admission fallback.
+struct ApplyAttempt {
+    current: String,
+    target: String,
+    reference: String,
+}
+
 fn apply_update(
     paths: &Paths,
     options: &Options,
     flag: &AtomicBool,
     services: &dyn crate::Services,
-    reference: &str,
+    attempt: &mut ApplyAttempt,
     reviewed: Option<ReviewedRelease<'_>>,
 ) -> Result<crate::Output> {
     use crate::{IncomingPhase as Phase, transaction::Transaction};
@@ -1046,12 +1059,21 @@ fn apply_update(
     let old = paths
         .require_owner()?
         .ok_or_else(|| r::Error(2, "update requires an install receipt".into()))?;
+    attempt.reference = selected_reference(
+        reviewed
+            .map(|r| r.reference)
+            .or_else(|| options.get("--ref")),
+        Some(&old),
+    )?
+    .into();
+    let reference = attempt.reference.as_str();
     let lease_path = paths.config.join("native-update/lease.json");
     if r::exists(&lease_path) {
         std::fs::remove_file(&lease_path)?;
         r::sync_dir(lease_path.parent().unwrap())?;
     }
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
+    attempt.current.clone_from(&current);
     if !r::git(
         &paths.source,
         &["status", "--porcelain", "--untracked-files=normal"],
@@ -1094,6 +1116,11 @@ fn apply_update(
     } else {
         fetch(paths, reference, options.has("--fallback-to-edge"), flag)?
     };
+    // Prepared candidates and explicit edge fallback may select another ref.
+    let reference = reference.to_owned();
+    attempt.reference.clone_from(&reference);
+    let reference = reference.as_str();
+    attempt.target.clone_from(&target);
     if reviewed.is_some_and(|r| r.target != target) {
         return Err(r::Error(
             75,
@@ -1145,6 +1172,7 @@ fn apply_update(
             ));
         }
         target = selected;
+        attempt.target.clone_from(&target);
     }
     if (options.tool == "auto-update"
         || reviewed.is_some_and(|r| r.channel == crate::ReleaseChannel::Edge))
@@ -1293,9 +1321,6 @@ fn apply_update(
                 error
                     .1
                     .push_str("; rollback incomplete, recovery journal and prior payload retained");
-            }
-            if options.tool == "auto-update" {
-                publish_mode(paths, "failed", &current, &target, reference, "apply")?;
             }
             return Err(error);
         }

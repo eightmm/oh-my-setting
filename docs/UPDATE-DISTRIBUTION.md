@@ -5,6 +5,13 @@ build locally or import a native payload built on another host. The receiving
 installation keeps its Git source checkout and the existing rollback-capable
 installation transaction.
 
+A regular `oms update` or `oms auto-update apply` also selects an inherited
+ref from the install receipt after acquiring the lifecycle and receipt locks.
+If another lifecycle operation changes that receipt while the caller waits,
+the apply uses the new saved ref. An explicit `--ref` or reviewed release
+selection still takes precedence. Scheduled apply failures report the locked
+selection and resolved target when available.
+
 ## Prepare, inspect, apply
 
 ```bash
