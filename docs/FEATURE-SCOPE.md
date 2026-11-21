@@ -105,10 +105,13 @@ Share validation and read projections where their contracts agree. Preserve
 domain locks, CAS, receipts, generations and unknown states. Fewer files or verbs
 alone are not a reason to combine these owners.
 
-Current views do not all consume the complete runtime envelope. The native
-[state route](../crates/oms-command-state/README.md) uses a source-health fallback
-with empty criteria/next-actions when that envelope is not injected. Empty
-fallback fields do not prove that no work or acceptance criteria remain.
+Native `state`, `state-verify`, `inbox` and `dashboard` views obtain the canonical
+schema-2 runtime envelope through the [state host callback](../crates/oms-command-state/README.md).
+The root adapter resolves the selected repository and refreshes the projection
+on every snapshot; an unavailable producer is reported as degraded. Library-only
+callers without either an explicit runtime snapshot or that callback retain the
+bounded source-health fallback with empty criteria/next-actions. Those fallback
+fields do not prove that no work or acceptance criteria remain.
 
 ## Optional workflows
 
