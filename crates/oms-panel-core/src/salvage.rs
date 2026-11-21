@@ -630,7 +630,9 @@ pub fn salvage(
                 .filter(|v| {
                     v["task_id"] == request.task_id
                         && v["attempt_id"] == request.attempt_id
-                        && v["patch"].is_string()
+                        && (!v["patch"].is_null()
+                            || !v["patch_sha256"].is_null()
+                            || !v["patch_external"].is_null())
                 })
                 .all(|v| crate::results::verified_patch(&store, v).is_ok_and(|v| v.is_empty())),
             "indexed recovery evidence prevents empty salvage",
@@ -640,7 +642,7 @@ pub fn salvage(
             continuation_patch(&store, &request.task_id, &request.attempt_id)?.is_none(),
             "published salvage prevents an empty recovery receipt",
         )?;
-        no_unindexed_recovery(&store, request, worker, &rows)?;
+        no_unindexed_recovery(&store, request, worker, &rows, LIMITS)?;
         let sha = empty_identity(&request.task_id, &request.attempt_id)?;
         let relative = format!(".oms/salvage-provenance/empty-{sha}.json");
         let proof = serde_json::json!({"schema":1,"payload_sha256":sha,"records":[{"salvaged_from":{"task":request.task_id,"attempt":request.attempt_id,"outcome":"nothing_to_recover","reason":"stopped delegate recovery inventory was empty"},"base_sha":captured.base,"encoding_warnings":[]}]});
@@ -817,7 +819,11 @@ pub(crate) fn verified_empty<S: Services + ?Sized>(
     require(
         rows.iter()
             .filter(|v| {
-                v["task_id"] == task && v["attempt_id"] == attempt && v["patch"].is_string()
+                v["task_id"] == task
+                    && v["attempt_id"] == attempt
+                    && (!v["patch"].is_null()
+                        || !v["patch_sha256"].is_null()
+                        || !v["patch_external"].is_null())
             })
             .all(|v| crate::results::verified_patch(&store, v).is_ok_and(|v| v.is_empty())),
         "empty salvage has indexed recovery bytes",
@@ -849,7 +855,11 @@ pub(crate) fn verified_empty<S: Services + ?Sized>(
         base,
     };
     registered_empty(&request, service, stop)?;
-    no_unindexed_recovery(&store, &request, worker, &rows)?;
+    require(
+        continuation_patch(&store, &request.task_id, &request.attempt_id)?.is_none(),
+        "published salvage prevents an empty recovery receipt",
+    )?;
+    no_unindexed_recovery(&store, &request, worker, &rows, LIMITS)?;
     Ok(true)
 }
 
@@ -858,34 +868,43 @@ fn no_unindexed_recovery(
     request: &SalvageRequest,
     worker: &Value,
     rows: &[Value],
+    limits: Limits,
 ) -> Result<()> {
     let provenance = Path::new(".oms/salvage-provenance");
-    match std::fs::read_dir(store.repo().join(provenance)) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry.map_err(Error::new)?;
-                let name = entry.file_name();
-                if name
-                    .to_str()
-                    .is_none_or(|v| !v.ends_with(".json") || v.starts_with("empty-"))
-                {
-                    continue;
-                }
-                let Ok(Some(value)) = store.json(&provenance.join(name), MAX_EVIDENCE, false)
-                else {
-                    continue;
-                };
-                require(
-                    !crate::value::array(&value["records"]).iter().any(|v| {
-                        v["salvaged_from"]["task"] == request.task_id
-                            && v["salvaged_from"]["attempt"] == request.attempt_id
-                    }),
-                    "retained recovery provenance prevents empty salvage",
-                )?;
-            }
+    let mut remaining = limits.bytes;
+    for (count, entry) in read_real_dir(&store.repo().join(provenance))?
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        require(
+            count < limits.raw,
+            "salvage provenance exceeds bounded scan",
+        )?;
+        let entry = entry.map_err(Error::new)?;
+        let name = entry.file_name();
+        let raw_name = name.as_bytes();
+        if raw_name.starts_with(b".")
+            || (raw_name.starts_with(b"empty-") && raw_name.ends_with(b".json"))
+        {
+            continue;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Error::new(e)),
+        let name = name
+            .into_string()
+            .map_err(|_| Error::new("non-UTF-8 salvage provenance name"))?;
+        require(
+            name.ends_with(".json"),
+            "unrecognized salvage provenance artifact",
+        )?;
+        let raw = budgeted_read(store, &provenance.join(&name), MAX_EVIDENCE, &mut remaining)?;
+        let value = crate::decode(&raw, MAX_EVIDENCE)?;
+        require(
+            !crate::value::array(&value["records"]).iter().any(|v| {
+                v["salvaged_from"]["task"] == request.task_id
+                    && v["salvaged_from"]["attempt"] == request.attempt_id
+            }),
+            "retained recovery provenance prevents empty salvage",
+        )?;
     }
     if rows.iter().any(|v| {
         v["task_id"] == request.task_id
@@ -924,38 +943,38 @@ fn no_unindexed_recovery(
     )
     .map_err(|_| Error::new("unindexed delegate creation evidence unavailable"))?;
     let directory = Path::new(".oms/artifacts/delegate");
-    match std::fs::read_dir(store.repo().join(directory)) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry.map_err(Error::new)?;
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else {
-                    continue;
-                };
-                let Some(captures) = pattern.captures(name) else {
-                    continue;
-                };
-                let stamp = chrono::NaiveDateTime::parse_from_str(&captures[1], "%Y%m%dT%H%M%SZ")
-                    .map_err(Error::new)?;
-                let path = directory.join(name);
-                if (stamp - created).num_seconds().unsigned_abs() > 300
-                    || rows.iter().any(|v| {
-                        v["attempt_id"] != request.attempt_id
-                            && v["patch"] == path.to_string_lossy().as_ref()
-                    })
-                {
-                    continue;
-                }
-                require(
-                    store
-                        .read(&path, crate::results::PATCH_MAX, false)?
-                        .is_empty(),
-                    "unindexed delegate patch prevents empty salvage",
-                )?;
-            }
+    for (count, entry) in read_real_dir(&store.repo().join(directory))?
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        require(
+            count < limits.raw,
+            "salvage inventory exceeds bounded raw scan",
+        )?;
+        let entry = entry.map_err(Error::new)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(captures) = pattern.captures(name) else {
+            continue;
+        };
+        let stamp = chrono::NaiveDateTime::parse_from_str(&captures[1], "%Y%m%dT%H%M%SZ")
+            .map_err(Error::new)?;
+        let path = directory.join(name);
+        if (stamp - created).num_seconds().unsigned_abs() > 300
+            || rows.iter().any(|v| {
+                v["attempt_id"] != request.attempt_id
+                    && v["patch"] == path.to_string_lossy().as_ref()
+            })
+        {
+            continue;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Error::new(e)),
+        require(
+            budgeted_read(store, &path, crate::results::PATCH_MAX, &mut remaining)?.is_empty(),
+            "unindexed delegate patch prevents empty salvage",
+        )?;
     }
     Ok(())
 }
@@ -999,6 +1018,50 @@ fn budgeted_read(
     *remaining -= bytes.len();
     Ok(bytes)
 }
+fn is_hex16(bytes: &[u8]) -> bool {
+    bytes.len() == 16
+        && bytes
+            .iter()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SalvageEntry<'a> {
+    Canonical(&'a [u8]),
+    Ambiguous,
+}
+
+fn classify_salvage_entry(raw: &[u8]) -> Option<SalvageEntry<'_>> {
+    let rest = raw.strip_prefix(b"salvage-")?;
+    if let Some(stem) = rest
+        .strip_suffix(b".patch.json")
+        .or_else(|| rest.strip_suffix(b".patch"))
+        && let Some(sep) = stem.iter().rposition(|&b| b == b'-')
+    {
+        let (owner, nonce) = (&stem[..sep], &stem[sep + 1..]);
+        if is_hex16(nonce)
+            && std::str::from_utf8(owner)
+                .ok()
+                .is_some_and(|s| crate::identifier(s).is_ok())
+        {
+            return Some(SalvageEntry::Canonical(owner));
+        }
+    }
+    Some(SalvageEntry::Ambiguous)
+}
+fn read_real_dir(path: &Path) -> Result<Option<std::fs::ReadDir>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            require(
+                meta.is_dir() && !meta.file_type().is_symlink(),
+                "salvage directory cannot be a symlink or file",
+            )?;
+            std::fs::read_dir(path).map(Some).map_err(Error::new)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::new(e)),
+    }
+}
 /// Select only paired, digest-checked patches with matching provenance. A patch
 /// without its sidecar, or provenance without its patch, remains unconfirmed.
 pub fn continuation_patch(store: &Store, task: &str, attempt: &str) -> Result<Option<Value>> {
@@ -1013,13 +1076,9 @@ fn continuation_within(
     crate::identifier(task)?;
     crate::identifier(attempt)?;
     let directory = store.repo().join(".oms/artifacts/delegate");
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(v) => Some(v),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(Error::new(e)),
-    };
+    let entries = read_real_dir(&directory)?;
     let prefix = format!("salvage-{task}-");
-    let mut names = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeMap::new();
     for (count, entry) in entries.into_iter().flatten().enumerate() {
         require(
             count < limits.raw,
@@ -1027,9 +1086,22 @@ fn continuation_within(
         )?;
         let entry = entry.map_err(Error::new)?;
         let name = entry.file_name();
-        if !name.as_bytes().starts_with(prefix.as_bytes()) {
-            continue;
-        }
+        let raw_name = name.as_bytes();
+        let canonical_exact = match classify_salvage_entry(raw_name) {
+            None => continue,
+            Some(SalvageEntry::Canonical(owner)) => {
+                if owner != task.as_bytes() {
+                    continue;
+                }
+                true
+            }
+            Some(SalvageEntry::Ambiguous) => {
+                if !raw_name.starts_with(prefix.as_bytes()) {
+                    continue;
+                }
+                false
+            }
+        };
         require(
             names.len() < limits.relevant,
             "salvage inventory exceeds bounded relevant scan",
@@ -1037,29 +1109,38 @@ fn continuation_within(
         let name = name
             .into_string()
             .map_err(|_| Error::new("non-UTF-8 salvage name"))?;
-        names.insert(name);
+        names.insert(name, canonical_exact);
     }
     let mut selected = Vec::new();
     let mut covered = std::collections::BTreeSet::new();
-    for name in &names {
-        if !name.starts_with(&prefix) || !name.ends_with(".patch") {
-            continue;
+    for name in names.keys() {
+        if name.ends_with(".patch") {
+            require(
+                names.contains_key(&format!("{name}.json")),
+                "salvage publication incomplete: patch has no sidecar",
+            )?;
+        } else if name.ends_with(".patch.json") {
+            require(
+                names.contains_key(&name[..name.len() - 5]),
+                "salvage publication incomplete: sidecar has no patch",
+            )?;
+        } else {
+            return Err(Error::new(
+                "salvage publication incomplete: unrecognized salvage artifact",
+            ));
         }
-        require(
-            names.contains(&format!("{name}.json")),
-            "salvage publication incomplete: patch has no sidecar",
-        )?;
     }
-    let sidecars: Vec<&String> = names
+    let sidecars: Vec<(&String, bool)> = names
         .iter()
-        .filter(|n| n.ends_with(".patch.json"))
+        .filter(|(n, _)| n.ends_with(".patch.json"))
+        .map(|(n, &exact)| (n, exact))
         .collect();
     require(
         sidecars.len() <= limits.sidecars,
         "salvage inventory exceeds bounded sidecar scan",
     )?;
     let mut remaining = limits.bytes;
-    for name in sidecars {
+    for (name, canonical_exact) in sidecars {
         let path = format!(".oms/artifacts/delegate/{}", &name[..name.len() - 5]);
         let raw = budgeted_read(
             store,
@@ -1069,7 +1150,8 @@ fn continuation_within(
         )?;
         let meta = crate::decode(&raw, MAX_EVIDENCE)?;
         let owner = crate::value::text(&meta["salvaged_from"], "task");
-        let foreign = owner != task
+        let foreign = !canonical_exact
+            && owner != task
             && owner.starts_with(&format!("{task}-"))
             && crate::identifier(&owner).is_ok()
             && name.starts_with(&format!("salvage-{owner}-"));
@@ -1077,7 +1159,9 @@ fn continuation_within(
             owner == task || foreign,
             "salvage task differs from filename",
         )?;
-        if !foreign && meta["salvaged_from"]["attempt"] != attempt {
+        let recorded_attempt = crate::value::text(&meta["salvaged_from"], "attempt");
+        crate::identifier(&recorded_attempt)?;
+        if !foreign && recorded_attempt != attempt {
             continue;
         }
         require(
@@ -1114,9 +1198,8 @@ fn continuation_within(
             "salvage payload digest differs",
         )?;
         let proof_path = format!(".oms/salvage-provenance/{sha}.json");
-        let proof = store
-            .json(Path::new(&proof_path), MAX_EVIDENCE, false)?
-            .ok_or_else(|| Error::new("salvage provenance absent"))?;
+        let proof_raw = budgeted_read(store, Path::new(&proof_path), MAX_EVIDENCE, &mut remaining)?;
+        let proof = crate::decode(&proof_raw, MAX_EVIDENCE)?;
         require(
             proof["schema"] == 1
                 && proof["payload_sha256"] == sha
@@ -1131,30 +1214,43 @@ fn continuation_within(
         }
     }
     let proof_dir = store.repo().join(".oms/salvage-provenance");
-    if proof_dir.exists() {
-        for (count, entry) in std::fs::read_dir(proof_dir)
-            .map_err(Error::new)?
-            .enumerate()
+    for (count, entry) in read_real_dir(&proof_dir)?.into_iter().flatten().enumerate() {
+        require(
+            count < limits.raw,
+            "salvage provenance exceeds bounded scan",
+        )?;
+        let name = entry.map_err(Error::new)?.file_name();
+        let raw_name = name.as_bytes();
+        if raw_name.starts_with(b".")
+            || (raw_name.starts_with(b"empty-") && raw_name.ends_with(b".json"))
         {
-            require(count < 10000, "salvage provenance exceeds bounded scan")?;
-            let name = entry.map_err(Error::new)?.file_name();
-            let relative = PathBuf::from(".oms/salvage-provenance").join(&name);
-            let value = store
-                .json(&relative, MAX_EVIDENCE, false)?
-                .ok_or_else(|| Error::new("salvage provenance disappeared"))?;
-            let relevant = crate::value::array(&value["records"]).iter().any(|v| {
-                v["salvaged_from"]["task"] == task
-                    && v["salvaged_from"]["attempt"] == attempt
-                    && v["salvaged_from"]["outcome"] != "nothing_to_recover"
-            });
-            if relevant {
-                require(
-                    value["payload_sha256"]
-                        .as_str()
-                        .is_some_and(|v| covered.contains(v)),
-                    "salvage publication incomplete: provenance has no paired patch",
-                )?;
-            }
+            continue;
+        }
+        let name = name
+            .into_string()
+            .map_err(|_| Error::new("non-UTF-8 salvage provenance name"))?;
+        require(
+            name.ends_with(".json"),
+            "unrecognized salvage provenance artifact",
+        )?;
+        if covered.contains(&name[..name.len() - 5]) {
+            continue;
+        }
+        let relative = PathBuf::from(".oms/salvage-provenance").join(&name);
+        let raw = budgeted_read(store, &relative, MAX_EVIDENCE, &mut remaining)?;
+        let value = crate::decode(&raw, MAX_EVIDENCE)?;
+        let relevant = crate::value::array(&value["records"]).iter().any(|v| {
+            v["salvaged_from"]["task"] == task
+                && v["salvaged_from"]["attempt"] == attempt
+                && v["salvaged_from"]["outcome"] != "nothing_to_recover"
+        });
+        if relevant {
+            require(
+                value["payload_sha256"]
+                    .as_str()
+                    .is_some_and(|v| covered.contains(v)),
+                "salvage publication incomplete: provenance has no paired patch",
+            )?;
         }
     }
     selected.sort_by_key(|v| {
@@ -1243,9 +1339,34 @@ mod tests {
     fn continuation_scans_flat_inventory_above_relevant_limit() {
         let scratch = Scratch::new().unwrap();
         let directory = delegate_dir(&scratch);
-        for i in 0..=INVENTORY_RELEVANT_LIMIT {
+        for i in 0..10_500 {
             touch(&directory, &format!("delegate-{i}.patch"));
+            touch(
+                &directory,
+                &format!("codex-target-20260101T000000Z-{i}.patch"),
+            );
         }
+        for i in 0..125 {
+            touch(&directory, &format!("salvage-target-legacy-{i:016x}.patch"));
+        }
+        for i in 0..55 {
+            touch(&directory, &format!("salvage-legacy-{i:016x}.patch"));
+        }
+        for i in 0..35 {
+            let patch_name = format!("salvage-target-old-{i:016x}.patch");
+            touch(&directory, &patch_name);
+            std::fs::write(
+                directory.join(format!("{patch_name}.json")),
+                br#"{"salvaged_from":{"task":"target-old","attempt":"old"}}"#,
+            )
+            .unwrap();
+        }
+        let proof_dir = scratch.0.join(".oms/salvage-provenance");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        for i in 0..=INVENTORY_RELEVANT_LIMIT {
+            touch(&proof_dir, &format!("empty-{i}.json"));
+        }
+        std::fs::write(proof_dir.join(".proof.json.tmp.1"), b"{partial").unwrap();
         let store = Store::open(&scratch.0).unwrap();
         assert!(
             continuation_patch(&store, "target", "attempt")
@@ -1254,6 +1375,22 @@ mod tests {
         );
         touch(&directory, "salvage-target-incomplete.patch");
         assert!(failure(&store, LIMITS).contains("patch has no sidecar"));
+        std::fs::remove_file(directory.join("salvage-target-incomplete.patch")).unwrap();
+        publish_at(
+            &directory,
+            "salvage-target-0000000000000001.patch",
+            "target",
+            "target",
+            "attempt",
+            "2026-01-01T00:00:01.000000Z",
+        );
+        let recovered = continuation_patch(&store, "target", "attempt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered["patch"],
+            ".oms/artifacts/delegate/salvage-target-0000000000000001.patch"
+        );
     }
 
     #[test]
@@ -1268,7 +1405,28 @@ mod tests {
             return;
         }
         assert!(make(b"other-\xff"));
+        assert!(make(b"salvage-other-\xff"));
+        assert!(make(b"salvage-target-other-0000000000000001.patch"));
         let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            continuation_patch(&store, "target", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(directory.join("salvage-target-other-0000000000000001.patch"))
+            .unwrap();
+        assert!(make(b"salvage-target-other-\xff"));
+        assert!(failure(&store, LIMITS).contains("non-UTF-8 salvage name"));
+        assert!(
+            continuation_patch(&store, "target-other", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("non-UTF-8 salvage name")
+        );
+        std::fs::remove_file(
+            directory.join(OsString::from_vec(b"salvage-target-other-\xff".to_vec())),
+        )
+        .unwrap();
         assert!(
             continuation_patch(&store, "target", "attempt")
                 .unwrap()
@@ -1319,10 +1477,21 @@ mod tests {
     }
 
     fn publish(directory: &Path, name: &str, task: &str, claimed: &str) {
-        let from = serde_json::json!({"task":task,"attempt":"x"});
-        let payload = format!("diff --git a/{task} b/{task}\n");
+        publish_at(directory, name, task, claimed, "x", "now");
+    }
+
+    fn publish_at(
+        directory: &Path,
+        name: &str,
+        task: &str,
+        claimed: &str,
+        attempt: &str,
+        salvaged_at: &str,
+    ) -> String {
+        let from = serde_json::json!({"task":task,"attempt":attempt});
+        let payload = format!("diff --git a/{task} b/{task}\n+{name}\n");
         let sha = crate::digest(payload.as_bytes());
-        let head = serde_json::json!({"salvaged_from":from,"salvaged_at":"now","payload_sha256":sha,"base_sha":"base","encoding_warnings":[]});
+        let head = serde_json::json!({"salvaged_from":from,"salvaged_at":salvaged_at,"payload_sha256":sha,"base_sha":"base","encoding_warnings":[]});
         let body = format!("{PREFIX}{head}\n{}", payload);
         std::fs::write(directory.join(name), &body).unwrap();
         let path = format!(".oms/artifacts/delegate/{name}");
@@ -1340,13 +1509,262 @@ mod tests {
         std::fs::create_dir_all(&proof_dir).unwrap();
         let proof = serde_json::json!({"schema":1,"payload_sha256":sha,"records":[{"salvaged_from":from,"base_sha":"base"}]});
         std::fs::write(proof_dir.join(format!("{sha}.json")), proof.to_string()).unwrap();
+        sha
+    }
+
+    #[test]
+    fn continuation_isolates_shared_prefix_tasks_and_preserves_integrity() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        for task in [
+            "a-b",
+            "a-b-c",
+            "a-0123456789abcdef",
+            "a.b",
+            "a_b",
+            "ab",
+            "sub-a",
+        ] {
+            publish_at(
+                &directory,
+                &format!("salvage-{task}-0000000000000001.patch"),
+                task,
+                task,
+                "attempt",
+                "t1",
+            );
+        }
+        publish_at(
+            &directory,
+            "salvage-a-b-0000000000000002.patch",
+            "a-b",
+            "a-b",
+            "attempt",
+            "t2",
+        );
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            continuation_within(
+                &store,
+                "a",
+                "attempt",
+                Limits {
+                    relevant: 1,
+                    sidecars: 0,
+                    ..LIMITS
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        for task in [
+            "a-b",
+            "a-b-c",
+            "a-0123456789abcdef",
+            "a.b",
+            "a_b",
+            "ab",
+            "sub-a",
+        ] {
+            assert!(
+                continuation_patch(&store, task, "attempt")
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            continuation_within(
+                &store,
+                "a-b",
+                "attempt",
+                Limits {
+                    relevant: 3,
+                    ..LIMITS
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("bounded relevant scan")
+        );
+        assert!(
+            continuation_within(
+                &store,
+                "a-b",
+                "attempt",
+                Limits {
+                    sidecars: 1,
+                    ..LIMITS
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("bounded sidecar scan")
+        );
+        assert!(
+            continuation_within(
+                &store,
+                "a-b",
+                "attempt",
+                Limits {
+                    bytes: 16,
+                    ..LIMITS
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("refused")
+        );
+
+        touch(&directory, "salvage-a-b-0000000000000003.patch");
+        assert!(
+            continuation_patch(&store, "a", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            continuation_patch(&store, "a-b", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("patch has no sidecar")
+        );
+        std::fs::remove_file(directory.join("salvage-a-b-0000000000000003.patch")).unwrap();
+
+        touch(&directory, "salvage-a-b-0000000000000004.patch");
+        std::fs::write(
+            directory.join("salvage-a-b-0000000000000004.patch.json"),
+            b"{corrupt",
+        )
+        .unwrap();
+        assert!(
+            continuation_patch(&store, "a", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            continuation_patch(&store, "a-b", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("invalid panel JSON")
+        );
+        std::fs::remove_file(directory.join("salvage-a-b-0000000000000004.patch")).unwrap();
+        std::fs::remove_file(directory.join("salvage-a-b-0000000000000004.patch.json")).unwrap();
+
+        let missing_sha = publish_at(
+            &directory,
+            "salvage-a-b-0000000000000005.patch",
+            "a-b",
+            "a-b",
+            "attempt",
+            "t3",
+        );
+        std::fs::remove_file(
+            scratch
+                .0
+                .join(format!(".oms/salvage-provenance/{missing_sha}.json")),
+        )
+        .unwrap();
+        assert!(
+            continuation_patch(&store, "a", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            continuation_patch(&store, "a-b", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("refused")
+        );
+        std::fs::remove_file(directory.join("salvage-a-b-0000000000000005.patch")).unwrap();
+        std::fs::remove_file(directory.join("salvage-a-b-0000000000000005.patch.json")).unwrap();
+
+        publish_at(
+            &directory,
+            "salvage-a-b-0000000000000006.patch",
+            "other",
+            "a-b",
+            "attempt",
+            "t4",
+        );
+        assert!(
+            continuation_patch(&store, "a", "attempt")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            continuation_patch(&store, "a-b", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("header differs")
+        );
+        std::fs::remove_file(directory.join("salvage-a-b-0000000000000006.patch")).unwrap();
+        std::fs::remove_file(directory.join("salvage-a-b-0000000000000006.patch.json")).unwrap();
+
+        for (ambiguous_name, expected_err) in [
+            ("salvage-a-b-000000000000000A.patch", "patch has no sidecar"),
+            ("salvage-a-b-000000000000001.patch", "patch has no sidecar"),
+            (
+                "salvage-a-b-00000000000000001.patch",
+                "patch has no sidecar",
+            ),
+            (
+                "salvage-a-b-0000000000000001.bak",
+                "unrecognized salvage artifact",
+            ),
+        ] {
+            touch(&directory, ambiguous_name);
+            assert!(
+                continuation_patch(&store, "a", "attempt")
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected_err)
+            );
+            std::fs::remove_file(directory.join(ambiguous_name)).unwrap();
+        }
+
+        let renamed = Scratch::new().unwrap();
+        let renamed_dir = delegate_dir(&renamed);
+        publish_at(
+            &renamed_dir,
+            "salvage-a-0000000000000001.patch",
+            "a",
+            "a",
+            "attempt",
+            "t1",
+        );
+        let renamed_store = Store::open(&renamed.0).unwrap();
+        assert!(
+            continuation_patch(&renamed_store, "a", "attempt")
+                .unwrap()
+                .is_some()
+        );
+        std::fs::rename(
+            renamed_dir.join("salvage-a-0000000000000001.patch"),
+            renamed_dir.join("salvage-a-b-0000000000000001.patch"),
+        )
+        .unwrap();
+        std::fs::rename(
+            renamed_dir.join("salvage-a-0000000000000001.patch.json"),
+            renamed_dir.join("salvage-a-b-0000000000000001.patch.json"),
+        )
+        .unwrap();
+        assert!(
+            continuation_patch(&renamed_store, "a", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("provenance has no paired patch")
+        );
+        assert!(
+            continuation_patch(&renamed_store, "a-b", "attempt")
+                .unwrap_err()
+                .to_string()
+                .contains("salvage task differs from filename")
+        );
     }
 
     #[test]
     fn continuation_skips_only_proven_longer_task_pair() {
         let scratch = Scratch::new().unwrap();
-        let directory = scratch.0.join(".oms/artifacts/delegate");
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = delegate_dir(&scratch);
         publish(&directory, "salvage-a-b-1.patch", "a-b", "a-b");
         let store = Store::open(&scratch.0).unwrap();
         assert!(
@@ -1371,73 +1789,6 @@ mod tests {
                 .contains("task differs")
         );
     }
-    #[test]
-    fn continuation_bounds_patch_bytes_for_foreign_prefix() {
-        let scratch = Scratch::new().unwrap();
-        let directory = delegate_dir(&scratch);
-        publish(
-            &directory,
-            "salvage-target-long-1.patch",
-            "target-long",
-            "target-long",
-        );
-        let sidecar = std::fs::metadata(directory.join("salvage-target-long-1.patch.json"))
-            .unwrap()
-            .len() as usize;
-        let store = Store::open(&scratch.0).unwrap();
-        let limits = Limits {
-            bytes: sidecar + 4,
-            ..LIMITS
-        };
-        assert!(failure(&store, limits).contains("refused"));
-    }
-    #[test]
-    fn continuation_bounds_aggregate_patch_reads() {
-        let scratch = Scratch::new().unwrap();
-        let directory = delegate_dir(&scratch);
-        publish(
-            &directory,
-            "salvage-target-long-1.patch",
-            "target-long",
-            "target-long",
-        );
-        publish(
-            &directory,
-            "salvage-target-longer-2.patch",
-            "target-longer",
-            "target-longer",
-        );
-        let bytes = |name: &str| std::fs::metadata(directory.join(name)).unwrap().len() as usize;
-        let budget = bytes("salvage-target-long-1.patch.json")
-            + bytes("salvage-target-long-1.patch")
-            + bytes("salvage-target-longer-2.patch.json")
-            + bytes("salvage-target-longer-2.patch")
-            - 1;
-        let store = Store::open(&scratch.0).unwrap();
-        assert!(
-            failure(
-                &store,
-                Limits {
-                    bytes: budget,
-                    ..LIMITS
-                }
-            )
-            .contains("refused")
-        );
-        assert!(
-            continuation_within(
-                &store,
-                "target",
-                "attempt",
-                Limits {
-                    bytes: budget + 2,
-                    ..LIMITS
-                }
-            )
-            .unwrap()
-            .is_none()
-        );
-    }
 
     #[test]
     fn continuation_rejects_foreign_pair_without_provenance() {
@@ -1452,5 +1803,333 @@ mod tests {
         std::fs::remove_dir_all(scratch.0.join(".oms/salvage-provenance")).unwrap();
         let store = Store::open(&scratch.0).unwrap();
         assert!(failure(&store, LIMITS).contains("refused"));
+    }
+
+    #[test]
+    fn continuation_recovers_valid_legacy_pair_and_rejects_ambiguous_stray() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        publish_at(
+            &directory,
+            "salvage-target-1.patch",
+            "target",
+            "target",
+            "attempt",
+            "2026-01-01T00:00:01.000000Z",
+        );
+        let store = Store::open(&scratch.0).unwrap();
+        let recovered = continuation_patch(&store, "target", "attempt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered["patch"],
+            ".oms/artifacts/delegate/salvage-target-1.patch"
+        );
+        touch(&directory, "salvage-target-stray");
+        assert!(failure(&store, LIMITS).contains("unrecognized salvage artifact"));
+        std::fs::remove_file(directory.join("salvage-target-stray")).unwrap();
+
+        let proof_dir = scratch.0.join(".oms/salvage-provenance");
+        std::fs::write(proof_dir.join("empty-corrupt.tmp"), b"{partial").unwrap();
+        assert!(failure(&store, LIMITS).contains("unrecognized salvage provenance artifact"));
+        std::fs::remove_file(proof_dir.join("empty-corrupt.tmp")).unwrap();
+
+        if !cfg!(target_os = "macos") {
+            std::fs::File::create(proof_dir.join(OsString::from_vec(b"bad-\xff.json".to_vec())))
+                .unwrap();
+            assert!(failure(&store, LIMITS).contains("non-UTF-8 salvage provenance name"));
+        }
+    }
+
+    #[test]
+    fn continuation_bounds_aggregate_patch_reads() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        let sha1 = publish_at(
+            &directory,
+            "salvage-target-0000000000000001.patch",
+            "target",
+            "target",
+            "attempt",
+            "2026-01-01T00:00:01.000000Z",
+        );
+        let sha2 = publish_at(
+            &directory,
+            "salvage-target-0000000000000002.patch",
+            "target",
+            "target",
+            "attempt",
+            "2026-01-01T00:00:02.000000Z",
+        );
+        let bytes = |name: &str| std::fs::metadata(directory.join(name)).unwrap().len() as usize;
+        let proof_bytes = |sha: &str| {
+            std::fs::metadata(
+                scratch
+                    .0
+                    .join(format!(".oms/salvage-provenance/{sha}.json")),
+            )
+            .unwrap()
+            .len() as usize
+        };
+        let sidecar1 = bytes("salvage-target-0000000000000001.patch.json");
+        let patch1 = bytes("salvage-target-0000000000000001.patch");
+        let proof1 = proof_bytes(&sha1);
+        let sidecar2 = bytes("salvage-target-0000000000000002.patch.json");
+        let patch2 = bytes("salvage-target-0000000000000002.patch");
+        let proof2 = proof_bytes(&sha2);
+        let budget = sidecar1 + patch1 + proof1 + sidecar2 + patch2 + proof2;
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            failure(
+                &store,
+                Limits {
+                    bytes: sidecar1 + patch1 + 1,
+                    ..LIMITS
+                }
+            )
+            .contains("refused")
+        );
+        assert!(
+            failure(
+                &store,
+                Limits {
+                    bytes: budget,
+                    ..LIMITS
+                }
+            )
+            .contains("refused")
+        );
+        let selected = continuation_within(
+            &store,
+            "target",
+            "attempt",
+            Limits {
+                bytes: budget + 1,
+                ..LIMITS
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selected["patch"],
+            ".oms/artifacts/delegate/salvage-target-0000000000000002.patch"
+        );
+
+        let sha_foreign = publish_at(
+            &directory,
+            "salvage-target-long-1.patch",
+            "target-long",
+            "target-long",
+            "attempt",
+            "2026-01-01T00:00:03.000000Z",
+        );
+        assert!(
+            failure(
+                &store,
+                Limits {
+                    bytes: budget + 1,
+                    ..LIMITS
+                }
+            )
+            .contains("refused")
+        );
+        let with_foreign = budget
+            + bytes("salvage-target-long-1.patch.json")
+            + bytes("salvage-target-long-1.patch")
+            + 2 * proof_bytes(&sha_foreign);
+        assert!(
+            failure(
+                &store,
+                Limits {
+                    bytes: with_foreign,
+                    ..LIMITS
+                }
+            )
+            .contains("refused")
+        );
+        let selected = continuation_within(
+            &store,
+            "target",
+            "attempt",
+            Limits {
+                bytes: with_foreign + 1,
+                ..LIMITS
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selected["patch"],
+            ".oms/artifacts/delegate/salvage-target-0000000000000002.patch"
+        );
+    }
+
+    #[test]
+    fn no_unindexed_recovery_shares_cumulative_proof_and_patch_budget() {
+        let scratch = Scratch::new().unwrap();
+        let proof_dir = scratch.0.join(".oms/salvage-provenance");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        let proof1 = proof_dir.join("proof-1.json");
+        let proof2 = proof_dir.join("proof-2.json");
+        std::fs::write(
+            &proof1,
+            br#"{"schema":1,"payload_sha256":"a","records":[{"salvaged_from":{"task":"other","attempt":"other"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &proof2,
+            br#"{"schema":1,"payload_sha256":"b","records":[{"salvaged_from":{"task":"other","attempt":"attempt","outcome":"nothing_to_recover"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            proof_dir.join("empty-target.json"),
+            br#"{"schema":1,"payload_sha256":"c","records":[{"salvaged_from":{"task":"target","attempt":"attempt","outcome":"nothing_to_recover"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(proof_dir.join(".tmp.1"), b"{partial").unwrap();
+
+        let delegate = delegate_dir(&scratch);
+        let unindexed = delegate.join("codex-target-20260101T000010Z-1.patch");
+        std::fs::write(&unindexed, b"").unwrap();
+        let store = Store::open(&scratch.0).unwrap();
+        let request = SalvageRequest {
+            task_id: "target".into(),
+            attempt_id: "attempt".into(),
+            member: "member".into(),
+            kept: scratch.0.clone(),
+            execution_repo: scratch.0.clone(),
+            base: "0".repeat(40),
+        };
+        let worker = serde_json::json!({"provider":"codex","created_at":"2026-01-01T00:00:00Z"});
+
+        let p1 = std::fs::metadata(&proof1).unwrap().len() as usize;
+        let p2 = std::fs::metadata(&proof2).unwrap().len() as usize;
+        let total = p1 + p2;
+        assert!(
+            no_unindexed_recovery(
+                &store,
+                &request,
+                &worker,
+                &[],
+                Limits {
+                    bytes: total,
+                    ..LIMITS
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("refused")
+        );
+        no_unindexed_recovery(
+            &store,
+            &request,
+            &worker,
+            &[],
+            Limits {
+                bytes: total + 1,
+                ..LIMITS
+            },
+        )
+        .unwrap();
+
+        std::fs::write(&unindexed, b"diff --git a/x b/x\n").unwrap();
+        assert!(
+            no_unindexed_recovery(
+                &store,
+                &request,
+                &worker,
+                &[],
+                Limits {
+                    bytes: total + 4,
+                    ..LIMITS
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("refused")
+        );
+        std::fs::write(&unindexed, b"").unwrap();
+
+        assert!(
+            no_unindexed_recovery(&store, &request, &worker, &[], Limits { raw: 1, ..LIMITS },)
+                .unwrap_err()
+                .to_string()
+                .contains("salvage provenance exceeds bounded scan")
+        );
+
+        std::fs::write(&proof2, br#"{"schema":1,"payload_sha256":"b","records":[{"salvaged_from":{"task":"target","attempt":"attempt","outcome":"nothing_to_recover"}}]}"#).unwrap();
+        assert!(
+            no_unindexed_recovery(&store, &request, &worker, &[], LIMITS)
+                .unwrap_err()
+                .to_string()
+                .contains("retained recovery provenance prevents empty salvage")
+        );
+        std::fs::remove_file(&proof2).unwrap();
+
+        std::fs::write(proof_dir.join("corrupt.json"), b"{bad").unwrap();
+        assert!(
+            no_unindexed_recovery(&store, &request, &worker, &[], LIMITS)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid panel JSON")
+        );
+    }
+
+    #[test]
+    fn continuation_bounds_provenance_raw_scan() {
+        let scratch = Scratch::new().unwrap();
+        let proof_dir = scratch.0.join(".oms/salvage-provenance");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        std::fs::write(proof_dir.join("proof-1.json"), b"{}").unwrap();
+        std::fs::write(proof_dir.join("proof-2.json"), b"{}").unwrap();
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(
+            failure(&store, Limits { raw: 1, ..LIMITS })
+                .contains("salvage provenance exceeds bounded scan")
+        );
+    }
+
+    #[test]
+    fn continuation_rejects_orphaned_sidecar_and_invalid_attempt() {
+        let scratch = Scratch::new().unwrap();
+        let directory = delegate_dir(&scratch);
+        std::fs::write(directory.join("salvage-target-orphan.patch.json"), b"{}").unwrap();
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(failure(&store, LIMITS).contains("sidecar has no patch"));
+        std::fs::remove_file(directory.join("salvage-target-orphan.patch.json")).unwrap();
+
+        publish_at(
+            &directory,
+            "salvage-target-1.patch",
+            "target",
+            "target",
+            "attempt",
+            "t1",
+        );
+        let sidecar_path = directory.join("salvage-target-1.patch.json");
+        let mut meta: Value =
+            serde_json::from_slice(&std::fs::read(&sidecar_path).unwrap()).unwrap();
+        meta["salvaged_from"]
+            .as_object_mut()
+            .unwrap()
+            .remove("attempt");
+        std::fs::write(&sidecar_path, meta.to_string()).unwrap();
+        assert!(failure(&store, LIMITS).contains("invalid panel identifier"));
+
+        meta["salvaged_from"]["attempt"] = "../bad".into();
+        std::fs::write(&sidecar_path, meta.to_string()).unwrap();
+        assert!(failure(&store, LIMITS).contains("invalid panel identifier"));
+    }
+
+    #[test]
+    fn continuation_rejects_symlink_directories() {
+        let scratch = Scratch::new().unwrap();
+        let target = scratch.0.join("real-dir");
+        std::fs::create_dir_all(&target).unwrap();
+        let oms = scratch.0.join(".oms/artifacts");
+        std::fs::create_dir_all(&oms).unwrap();
+        std::os::unix::fs::symlink(&target, oms.join("delegate")).unwrap();
+        let store = Store::open(&scratch.0).unwrap();
+        assert!(failure(&store, LIMITS).contains("cannot be a symlink or file"));
     }
 }
