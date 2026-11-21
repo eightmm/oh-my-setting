@@ -1,6 +1,8 @@
 //! Role allocation and runtime account selection. Access is independent of tier.
 use crate::value::{array, text};
 use crate::{Error, Result, Value, decode, require};
+pub use native_model::route_family;
+use oms_command_peer::native_model;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -38,6 +40,7 @@ pub const ROLES: &[&str] = &[
 pub struct Candidate {
     pub provider: String,
     pub model: String,
+    #[serde(default)]
     pub effort: String,
     #[serde(default)]
     pub public_only: bool,
@@ -270,6 +273,31 @@ impl CapabilityFreshness {
     }
 }
 impl ProviderEvidence {
+    fn applicable_efforts(&self, model: &str, account: Option<&str>) -> Option<&[String]> {
+        if let Some(scope) = &self.capability_evidence {
+            // Native routes do not yet bind an endpoint. Preserve scoped source
+            // evidence in snapshots, but do not apply it to an unproved target.
+            if scope.endpoint.is_some()
+                || scope
+                    .account_alias
+                    .as_deref()
+                    .is_some_and(|observed| Some(observed) != account)
+                || scope
+                    .observed_at
+                    .is_some_and(|observed| self.read_at.is_none_or(|read| observed > read))
+                || scope
+                    .expires_at
+                    .is_some_and(|expiry| self.read_at.is_none_or(|read| read >= expiry))
+            {
+                return None;
+            }
+        }
+        self.model_effort_scales
+            .get(model)
+            .filter(|values| !values.is_empty())
+            .map(Vec::as_slice)
+    }
+
     pub fn from_catalog_row(row: &Value) -> Result<Self> {
         let bounded_text = |value: Option<&Value>| -> Result<Option<String>> {
             let Some(value) = value.filter(|v| !v.is_null()) else {
@@ -356,6 +384,8 @@ pub struct CatalogSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EffortSupport {
+    Fixed,
+    ProviderDefault,
     ReportedSupported,
     ReportedUnsupported,
     Unknown,
@@ -545,12 +575,18 @@ impl Route {
             .and_then(|e| e.model_effort_scales.get(&self.candidate.model))
             .filter(|v| !v.is_empty())
             .cloned();
-        let effort_support = match &exact_efforts {
-            Some(efforts) if efforts.contains(&self.candidate.effort) => {
-                EffortSupport::ReportedSupported
-            }
-            Some(_) => EffortSupport::ReportedUnsupported,
-            None => EffortSupport::Unknown,
+        let effort_support = match native_model::effort_support(
+            &self.candidate.provider,
+            &self.candidate.model,
+            &self.candidate.effort,
+            evidence
+                .and_then(|e| e.applicable_efforts(&self.candidate.model, self.account.as_deref())),
+        ) {
+            native_model::EffortSupport::Fixed => EffortSupport::Fixed,
+            native_model::EffortSupport::ProviderDefault => EffortSupport::ProviderDefault,
+            native_model::EffortSupport::ReportedSupported => EffortSupport::ReportedSupported,
+            native_model::EffortSupport::ReportedUnsupported => EffortSupport::ReportedUnsupported,
+            native_model::EffortSupport::Unknown => EffortSupport::Unknown,
         };
         let model_family = route_family(&self.candidate.provider, &self.candidate.model)
             .and_then(|_| model_family(&self.candidate.provider, &self.candidate.model).ok())
@@ -641,34 +677,6 @@ pub fn kind(role: &str) -> Result<&'static str> {
         _ => Err(Error::new("unsupported panel role")),
     }
 }
-pub fn route_family(provider: &str, model: &str) -> Option<(String, Vec<u64>)> {
-    let pattern = match provider {
-        "codex" => r"^gpt-(\d+(?:\.\d+)?)-(astra|sol|terra|luna)$",
-        "claude" => r"^claude-(opus|sonnet|fable|haiku)-(\d+(?:-\d+)*)$",
-        "antigravity" => {
-            r"^gemini-(\d+(?:\.\d+)?)-([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-(low|medium|high)$"
-        }
-        _ => return None,
-    };
-    let regex = regex::Regex::new(pattern).ok()?;
-    let found = regex.captures(model)?;
-    let (family, number) = if provider == "claude" {
-        (found[1].to_owned(), &found[2])
-    } else if provider == "antigravity" {
-        (format!("{}-{}", &found[2], &found[3]), &found[1])
-    } else {
-        (found[2].to_owned(), &found[1])
-    };
-    let mut version: Vec<u64> = number
-        .split(['.', '-'])
-        .map(str::parse)
-        .collect::<std::result::Result<_, _>>()
-        .ok()?;
-    while version.len() > 1 && version.last() == Some(&0) {
-        version.pop();
-    }
-    Some((family, version))
-}
 pub fn model_family(provider: &str, model: &str) -> Result<&'static str> {
     let lower = model.to_ascii_lowercase();
     if lower.starts_with("orchestrator") || lower.starts_with("gemini ") {
@@ -701,41 +709,30 @@ pub fn model_family(provider: &str, model: &str) -> Result<&'static str> {
 }
 pub fn valid_route(route: &Candidate) -> Result<()> {
     require(
-        ["low", "medium", "high"].contains(&route.effort.as_str())
-            && route
-                .access
-                .as_deref()
-                .is_none_or(|v| ["read", "write"].contains(&v)),
-        "invalid panel route effort/access",
+        route
+            .access
+            .as_deref()
+            .is_none_or(|v| ["read", "write"].contains(&v)),
+        "invalid panel route access",
     )?;
-    if ["pi", "opencode"].contains(&route.provider.as_str()) {
-        let pieces: Vec<_> = route.model.splitn(2, '/').collect();
-        return require(
-            pieces.len() == 2
-                && !pieces[0].is_empty()
-                && !pieces[1].is_empty()
-                && !route.model.starts_with('-')
-                && !route.model.chars().any(|c| c.is_whitespace() || c == '\0'),
-            "invalid exact model route",
-        );
-    }
     require(
-        route_family(&route.provider, &route.model).is_some(),
-        "role route requires a versioned model family",
+        native_model::valid_role_model(&route.provider, &route.model),
+        "role route requires a supported model family or exact adapter model",
     )?;
-    if route.provider == "codex" {
-        require(
-            route_family("codex", &route.model).unwrap().1[0] >= 6,
-            "Codex generations before 6 are not routed",
-        )?;
-    }
-    Ok(())
+    native_model::validate_effort(&route.provider, &route.model, &route.effort).map_err(Error::new)
 }
 pub fn routable_route_model(
     provider: &str,
     configured: &str,
     catalog: &[String],
 ) -> Result<String> {
+    if let Some(fixed) = native_model::fixed_effort_model(provider, configured) {
+        require(
+            catalog.iter().any(|model| model == fixed),
+            "Antigravity requires the exact fixed model in a routable catalog",
+        )?;
+        return Ok(fixed.into());
+    }
     if ["pi", "opencode"].contains(&provider) {
         require(
             catalog.is_empty() || catalog.iter().any(|v| v == configured),
@@ -860,7 +857,7 @@ pub fn allocate_with_account_rank(
     )?;
     if let Some(effort) = &inputs.requested_effort {
         require(
-            ["low", "medium", "high"].contains(&effort.as_str()),
+            effort == "auto" || native_model::EFFORTS.contains(&effort.as_str()),
             "invalid requested route effort",
         )?;
         require(
@@ -895,12 +892,19 @@ pub fn allocate_with_account_rank(
     let configured = candidates.clone();
     if let Some(effort) = &inputs.requested_effort {
         for candidate in &mut candidates {
-            candidate.effort.clone_from(effort);
+            candidate.effort = native_model::normalized_effort(effort).into();
         }
     }
     if let Some(req) = &inputs.requested_model {
         for c in &mut candidates {
             c.model.clone_from(req);
+            if inputs.requested_effort.is_none()
+                && native_model::fixed_effort_model(&c.provider, req).is_some()
+            {
+                // A model-only fixed-profile pin does not inherit the previous
+                // adjustable tier's effort. An explicit effort still refuses.
+                c.effort.clear();
+            }
         }
         if let Some(pref) = &inputs.preferred
             && let Some(c) = candidates.iter().find(|c| &c.provider == pref)
@@ -958,15 +962,20 @@ pub fn allocate_with_account_rank(
         {
             continue;
         }
-        if inputs
-            .provider_evidence
-            .get(&c.provider)
-            .and_then(|e| e.model_effort_scales.get(&c.model))
-            .filter(|efforts| !efforts.is_empty())
-            .is_some_and(|efforts| !efforts.contains(&c.effort))
-        {
-            continue;
+        if role == "researcher" {
+            c.effort = "low".into();
         }
+        let effort_allowed = |account: Option<&str>| {
+            native_model::effort_support(
+                &c.provider,
+                &c.model,
+                &c.effort,
+                inputs
+                    .provider_evidence
+                    .get(&c.provider)
+                    .and_then(|e| e.applicable_efforts(&c.model, account)),
+            ) != native_model::EffortSupport::ReportedUnsupported
+        };
         let mut account = None;
         let mut account_reason = None;
         let mut account_rank = None;
@@ -991,6 +1000,7 @@ pub fn allocate_with_account_rank(
                 inputs.explicit_target,
                 inputs.requested_account.as_deref(),
                 now,
+                |id| effort_allowed(Some(id)),
             ) {
                 Ok((entry, reason, rank)) => {
                     used = account_weekly_used(&readings[&entry.id], now);
@@ -1000,10 +1010,12 @@ pub fn allocate_with_account_rank(
                 }
                 Err(_) => continue,
             }
-        } else if let Some(accounts) = &inputs.accounts
-            && ACCOUNT_PROVIDERS.contains(&c.provider.as_str())
-            && active_account_home(&c.provider)
-                .is_some_and(|home| accounts.home_claimed_by_other(&c.provider, &home))
+        } else if !effort_allowed(None)
+            || inputs.accounts.as_ref().is_some_and(|accounts| {
+                ACCOUNT_PROVIDERS.contains(&c.provider.as_str())
+                    && active_account_home(&c.provider)
+                        .is_some_and(|home| accounts.home_claimed_by_other(&c.provider, &home))
+            })
         {
             continue;
         }
@@ -1102,10 +1114,7 @@ pub fn allocate_with_account_rank(
     if !independent && let Some(preferred) = &inputs.preferred {
         eligible.sort_by_key(|v| &v.0.provider != preferred);
     }
-    let (mut candidate, _, account, account_reason, account_rank) = eligible.remove(0);
-    if role == "researcher" {
-        candidate.effort = "low".into();
-    }
+    let (candidate, _, account, account_reason, account_rank) = eligible.remove(0);
     let judge_note = if independent
         && inputs.explicit_target
         && model_family(&candidate.provider, &candidate.model).ok() == judged_family.as_deref()
@@ -1442,6 +1451,7 @@ impl Accounts {
             explicit,
             requested,
             crate::timestamp(),
+            |_| true,
         )
         .map(|(account, reason, _)| (account, reason))
     }
@@ -1456,6 +1466,7 @@ impl Accounts {
         explicit: bool,
         requested: Option<&str>,
         now: u64,
+        effort_allowed: impl Fn(&str) -> bool,
     ) -> Result<(Account, String, Option<AccountRank>)> {
         let config = self
             .providers
@@ -1488,6 +1499,9 @@ impl Accounts {
                 bucket,
             ));
         }
+        // The default home must not relabel an incompatible registered account.
+        let allow_default = eligible.is_empty() && effort_allowed("default");
+        eligible.retain(|(_, _, _, entry, _)| effort_allowed(&entry.id));
         eligible.sort_by_key(|v| (v.0, v.1, v.2));
         if let Some((quota, load, _, entry, bucket)) = eligible.first() {
             let next = eligible.get(1);
@@ -1523,7 +1537,8 @@ impl Accounts {
             ));
         }
         let has_default = config.accounts.iter().any(|e| e.id == "default");
-        if has_default
+        if !allow_default
+            || has_default
             || requested.is_some() && requested != Some("default")
             || requested.is_none() && !explicit
         {
@@ -1690,6 +1705,81 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn account_ranking_excludes_only_the_account_with_unsupported_effort() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let homes = crate::git::Scratch::new().unwrap();
+        let accounts = ["limited", "busy", "spare", "unobserved"]
+            .into_iter()
+            .map(|id| {
+                let home = homes.0.join(id);
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&home)
+                    .unwrap();
+                Account {
+                    id: id.into(),
+                    home,
+                }
+            })
+            .collect();
+        let policy = Policy::bundled().unwrap();
+        let mut inputs = claude_inputs();
+        inputs.accounts = Some(Accounts {
+            providers: BTreeMap::from([(
+                "claude".into(),
+                ProviderAccounts {
+                    policy: "spread".into(),
+                    accounts,
+                },
+            )]),
+        });
+        inputs.requested_effort = Some("high".into());
+        inputs.running_accounts.insert("claude:busy".into(), 2);
+        inputs.status = json!({"claude":{"accounts":{
+            "limited":{"weekly_used":8},
+            "busy":{"weekly_used":42},
+            "spare":{"weekly_used":47}
+        }}});
+        let pick = |inputs: &RoutingInputs| {
+            allocate_with_account_rank(&policy, "codex", "worker", None, "read", None, inputs)
+        };
+        assert_eq!(pick(&inputs).unwrap().0.account.as_deref(), Some("limited"));
+
+        inputs.provider_evidence.insert(
+            "claude".into(),
+            ProviderEvidence::from_catalog_row(&json!({
+                "model_effort_scales":{"claude-sonnet-5-6":["low","medium"]},
+                "capability_evidence":{"schema":1,"source":"fixture","account_alias":"limited"}
+            }))
+            .unwrap(),
+        );
+        let (route, rank) = pick(&inputs).unwrap();
+        assert_eq!(route.account.as_deref(), Some("spare"));
+        assert_eq!(
+            route.snapshot.unwrap().capabilities.effort_support,
+            EffortSupport::Unknown
+        );
+        let rank = rank.unwrap();
+        assert_eq!(rank.eligible_accounts, 3);
+        assert_eq!(rank.decided_by, "working_attempts");
+
+        inputs.status["claude"]["accounts"]["busy"]["weekly_used"] = json!(97);
+        inputs.status["claude"]["accounts"]["spare"]["weekly_used"] = json!(95);
+        let (route, rank) = pick(&inputs).unwrap();
+        assert_eq!(route.account.as_deref(), Some("unobserved"));
+        assert_eq!(rank.unwrap().weekly_bucket, None);
+
+        inputs.requested_account = Some("limited".into());
+        assert!(pick(&inputs).is_err());
+        inputs.requested_account = Some("busy".into());
+        let (route, _) = pick(&inputs).unwrap();
+        assert_eq!(route.account.as_deref(), Some("busy"));
+        assert!(route.account_pinned);
+    }
+
     #[test]
     fn explicit_reviewer_provider_is_required_and_unpinned_routing_stays_independent() {
         let policy = Policy::bundled().unwrap();
@@ -1873,6 +1963,97 @@ mod tests {
     fn exact_effort_evidence_and_final_fable_eligibility_are_checked() {
         let policy = Policy::bundled().unwrap();
         let mut inputs = claude_inputs();
+        for effort in ["xhigh", "max"] {
+            inputs.requested_effort = Some(effort.into());
+            let route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+            assert_eq!(route.candidate.effort, effort);
+            assert_eq!(
+                route.snapshot.unwrap().capabilities.effort_support,
+                EffortSupport::Unknown
+            );
+        }
+        inputs.requested_effort = Some("auto".into());
+        let route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+        assert!(route.candidate.effort.is_empty());
+        assert_eq!(
+            route.snapshot.unwrap().capabilities.effort_support,
+            EffortSupport::ProviderDefault
+        );
+        inputs.requested_effort = Some("ultra".into());
+        assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        inputs.requested_effort = Some("xhigh".into());
+        assert!(allocate(&policy, "codex", "researcher", None, "read", None, &inputs).is_err());
+        for model in native_model::AGY_FIXED_EFFORT_MODELS {
+            let mut fixed_inputs = RoutingInputs {
+                installed: Some(["antigravity".into()].into()),
+                preferred: Some("antigravity".into()),
+                explicit_target: true,
+                requested_model: Some(model.into()),
+                ..RoutingInputs::default()
+            };
+            let route = allocate(
+                &policy,
+                "codex",
+                "worker",
+                Some("deep"),
+                "read",
+                None,
+                &fixed_inputs,
+            )
+            .unwrap();
+            assert!(route.candidate.effort.is_empty());
+            let snapshot = route.snapshot.unwrap();
+            assert_eq!(snapshot.capabilities.effort_support, EffortSupport::Fixed);
+            assert_eq!(snapshot.served_effort, None);
+            fixed_inputs.requested_effort = Some("high".into());
+            assert!(
+                allocate(
+                    &policy,
+                    "codex",
+                    "worker",
+                    Some("deep"),
+                    "read",
+                    None,
+                    &fixed_inputs
+                )
+                .is_err()
+            );
+            let mut data = serde_json::to_value(&policy).unwrap();
+            data["tiers"]["deep"][2] =
+                json!({"provider":"antigravity","model":model,"access":"read"});
+            let fixed_policy = Policy::parse(&serde_json::to_vec(&data).unwrap()).unwrap();
+            fixed_inputs.requested_effort = None;
+            fixed_inputs.requested_model = None;
+            fixed_inputs
+                .catalogs
+                .insert("antigravity".into(), vec![model.into()]);
+            let route = allocate(
+                &fixed_policy,
+                "codex",
+                "worker",
+                Some("deep"),
+                "read",
+                None,
+                &fixed_inputs,
+            )
+            .unwrap();
+            assert_eq!(route.candidate.model, model);
+            assert!(route.candidate.effort.is_empty());
+        }
+        for (provider, model) in [("unknown", "gpt-6.2-sol"), ("claude", "unknown-model")] {
+            let candidate = Candidate {
+                provider: provider.into(),
+                model: model.into(),
+                effort: "high".into(),
+                public_only: false,
+                access: None,
+            };
+            assert!(valid_route(&candidate).is_err());
+            assert_eq!(
+                native_model::effort_support(provider, model, "high", None),
+                native_model::EffortSupport::Unknown
+            );
+        }
         inputs.requested_effort = Some("high".into());
         inputs.provider_evidence.insert(
             "claude".into(),
@@ -1883,6 +2064,28 @@ mod tests {
             .unwrap(),
         );
         assert!(allocate(&policy, "codex", "worker", None, "read", None, &inputs).is_err());
+        for scope in [
+            json!({"schema":1,"source":"fixture","account_alias":"other"}),
+            json!({"schema":1,"source":"fixture","endpoint":"native-other"}),
+        ] {
+            inputs
+                .provider_evidence
+                .get_mut("claude")
+                .unwrap()
+                .capability_evidence = Some(CapabilityEvidence::parse(&scope).unwrap());
+            let route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
+            let snapshot = route.snapshot.unwrap();
+            assert_eq!(snapshot.capabilities.effort_support, EffortSupport::Unknown);
+            assert_eq!(
+                snapshot.capabilities.exact_model_efforts,
+                Some(vec!["low".into(), "medium".into()])
+            );
+        }
+        inputs
+            .provider_evidence
+            .get_mut("claude")
+            .unwrap()
+            .capability_evidence = None;
         inputs.requested_effort = Some("medium".into());
         let route = allocate(&policy, "codex", "worker", None, "read", None, &inputs).unwrap();
         assert_eq!(

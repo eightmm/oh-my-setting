@@ -90,7 +90,11 @@ pub(crate) fn render(
         ];
         if let Some(route) = route {
             lines.push(format!("model: {}", route["model"].as_str().unwrap()));
-            lines.push(format!("effort: {}", route["effort"].as_str().unwrap()));
+            let effort =
+                crate::native_model::normalized_effort(route["effort"].as_str().unwrap_or(""));
+            if !effort.is_empty() {
+                lines.push(format!("effort: {effort}"));
+            }
         }
         lines.extend(["---".into(), String::new(), body]);
         return Ok(lines.join("\n"));
@@ -106,13 +110,14 @@ pub(crate) fn render(
         format!("description = {}", quoted(&desc)),
     ];
     if let Some(route) = route {
-        lines.extend([
-            format!("model = {}", quoted(route["model"].as_str().unwrap())),
-            format!(
-                "model_reasoning_effort = {}",
-                quoted(route["effort"].as_str().unwrap())
-            ),
-        ]);
+        lines.push(format!(
+            "model = {}",
+            quoted(route["model"].as_str().unwrap())
+        ));
+        let effort = crate::native_model::normalized_effort(route["effort"].as_str().unwrap_or(""));
+        if !effort.is_empty() {
+            lines.push(format!("model_reasoning_effort = {}", quoted(effort)));
+        }
     }
     lines.push(format!(
         "sandbox_mode = {}",

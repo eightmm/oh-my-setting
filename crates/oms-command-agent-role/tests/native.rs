@@ -707,6 +707,43 @@ fn routing_defaults_order_and_validation_edges() {
     let result = apply(&data);
     assert_eq!(result.0, 0);
     assert!(!String::from_utf8_lossy(&result.1).contains("model ="));
+    for (provider, model, effort) in [
+        ("codex", "gpt-6.2-sol", "xhigh"),
+        ("codex", "gpt-6.2-astra", "ultra"),
+        ("claude", "claude-opus-5-6", "max"),
+        ("claude", "claude-sonnet-5-6", "xhigh"),
+    ] {
+        let mut data = baseline.clone();
+        data["tiers"]["routine"] = json!([{"provider":provider,"model":model,"effort":effort}]);
+        assert_eq!(apply(&data).0, 0);
+        let rendered = f.ok(&["render", "--name", "builder", "--provider", provider]);
+        let rendered = String::from_utf8_lossy(&rendered);
+        assert!(
+            rendered.contains(model) && rendered.contains(effort),
+            "{rendered}"
+        );
+    }
+    for model in ["gemini-pro-orchestrator", "gemini-pro-orchestrator-argon"] {
+        let mut data = baseline.clone();
+        data["tiers"]["deep"][2] = json!({"provider":"antigravity","model":model,"access":"read"});
+        assert_eq!(apply(&data).0, 0);
+        data["tiers"]["deep"][2]["effort"] = "high".into();
+        assert_ne!(apply(&data).0, 0);
+    }
+    let mut data = baseline.clone();
+    data["tiers"]["deep"][2]["model"] = "gemini-4-hydrogen-xhigh".into();
+    data["tiers"]["deep"][2]["effort"] = "xhigh".into();
+    assert_eq!(apply(&data).0, 0);
+    data["tiers"]["deep"][2]["effort"] = "max".into();
+    assert_ne!(apply(&data).0, 0);
+    let mut data = baseline.clone();
+    data["tiers"]["routine"][2]
+        .as_object_mut()
+        .unwrap()
+        .remove("effort");
+    let default_effort = apply(&data);
+    assert_eq!(default_effort.0, 0);
+    assert!(!String::from_utf8_lossy(&default_effort.1).contains("model_reasoning_effort ="));
     for (pointer, replacement, message) in [
         ("", json!([]), "unsupported panel routing policy"),
         ("/schema", json!(3), "unsupported panel routing policy"),
@@ -779,7 +816,7 @@ fn routing_defaults_order_and_validation_edges() {
         ),
         (
             "/main/codex/effort",
-            json!("xhigh"),
+            json!("not-an-effort"),
             "invalid panel route: main/codex",
         ),
         (

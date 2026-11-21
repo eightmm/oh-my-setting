@@ -268,20 +268,13 @@ fn route_with_source(
     effort: &str,
     role: &str,
 ) -> Result<Route> {
-    if !["", "auto", "low", "medium", "high", "xhigh", "max", "ultra"].contains(&effort) {
-        return fail("invalid reasoning effort");
-    }
     let mut selected = if !model.is_empty() {
         model.to_owned()
     } else {
         target.model.clone()
     };
     let explicit = !selected.is_empty();
-    let mut resolved = if effort == "auto" {
-        String::new()
-    } else {
-        effort.into()
-    };
+    let mut resolved = crate::native_model::normalized_effort(effort).to_owned();
     if selected.is_empty() {
         let policy = config_from(source, "panel-routing.json")?;
         let tier = policy
@@ -306,17 +299,11 @@ fn route_with_source(
         }
     }
     model_name(&selected)?;
+    crate::native_model::validate_effort(&target.provider, &selected, &resolved)
+        .map_err(|message| Error::new(2, message))?;
+    resolved = crate::native_model::normalized_effort(&resolved).to_owned();
     if !target.account.is_empty() && isolated(&target.provider).is_none() {
         return fail("provider account isolation is unproved");
-    }
-    if target.provider == "claude"
-        && !resolved.is_empty()
-        && !matches!(
-            resolved.as_str(),
-            "low" | "medium" | "high" | "xhigh" | "max"
-        )
-    {
-        return fail("Claude does not support the requested effort");
     }
     Ok(Route {
         provider: target.provider.clone(),
@@ -1302,9 +1289,10 @@ impl Transport {
         }
     }
     fn effort(&mut self, route: &Route, flag: &str) {
-        if !route.effort.is_empty() {
-            self.option(flag, &route.effort);
-            self.selected_effort = Some(route.effort.clone());
+        let effort = crate::native_model::normalized_effort(&route.effort);
+        if !effort.is_empty() {
+            self.option(flag, effort);
+            self.selected_effort = Some(effort.into());
         }
     }
     fn prompt_file(&mut self, provider: &str, prompt: &[u8]) -> Result<PathBuf> {
@@ -1322,6 +1310,8 @@ fn transport(
     timeout: u64,
 ) -> Result<Transport> {
     let provider = route.provider.as_str();
+    crate::native_model::validate_effort(provider, &route.model, &route.effort)
+        .map_err(|message| Error::new(2, message))?;
     let mut cmd = Transport {
         argv: vec![binary_path(provider).into_os_string()],
         selected_effort: None,
@@ -1384,9 +1374,10 @@ fn transport(
         "codex" => {
             cmd.args(&["exec"]);
             cmd.model(route);
-            if !route.effort.is_empty() {
-                cmd.option("-c", format!("model_reasoning_effort=\"{}\"", route.effort));
-                cmd.selected_effort = Some(route.effort.clone());
+            let effort = crate::native_model::normalized_effort(&route.effort);
+            if !effort.is_empty() {
+                cmd.option("-c", format!("model_reasoning_effort=\"{effort}\""));
+                cmd.selected_effort = Some(effort.into());
             }
             cmd.args(&["--json"]);
             if !write {
@@ -3866,6 +3857,38 @@ mod bridge_route_tests {
             assert_eq!(claude.model, "claude-opus-5-5");
             assert!(claude.explicit);
         }
+        for model in crate::native_model::AGY_FIXED_EFFORT_MODELS {
+            let fixed = resolve_route(source, "agy", model, "", "worker").unwrap();
+            assert!(fixed.effort.is_empty());
+            let command = transport(&fixed, b"inspect", source, false, 30).unwrap();
+            assert!(!command.argv.iter().any(|arg| arg == "--effort"));
+            assert_eq!(command.selected_effort, None);
+            assert!(resolve_route(source, "agy", model, "high", "worker").is_err());
+            let mut invalid = fixed;
+            invalid.effort = "high".into();
+            assert!(transport(&invalid, b"inspect", source, false, 30).is_err());
+        }
+        for model in ["gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh"] {
+            let route = resolve_route(source, "agy", model, "xhigh", "worker").unwrap();
+            let command = transport(&route, b"inspect", source, false, 30).unwrap();
+            assert_eq!(command.selected_effort.as_deref(), Some("xhigh"));
+            assert!(resolve_route(source, "agy", model, "max", "worker").is_err());
+        }
+        assert_eq!(
+            crate::native_model::effort_support("fixture-provider", "unknown-model", "high", None),
+            crate::native_model::EffortSupport::Unknown
+        );
+        let pinned = resolve_route(
+            source,
+            "codex:account=work",
+            "gpt-6.2-sol",
+            "ultra",
+            "worker",
+        )
+        .unwrap();
+        assert_eq!(pinned.effort, "ultra");
+        assert_eq!(pinned.account, "work");
+        assert!(pinned.account_pinned);
         assert!(resolve_route(source, "claude", "claude-opus-5-5", "ultra", "worker").is_err());
         assert!(resolve_route(source, "", "", "", "worker").is_err());
         assert!(resolve_route(source, "codex", "", "bad", "worker").is_err());

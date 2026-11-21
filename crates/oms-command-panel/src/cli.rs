@@ -399,7 +399,10 @@ impl Options {
                 )?;
             }
         } else {
-            self.choice("reasoning-effort", &["low", "medium", "high"])?;
+            self.choice(
+                "reasoning-effort",
+                &["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
+            )?;
         }
         let modes = [
             "watch",
@@ -1071,6 +1074,9 @@ mod tests {
             }
         }
         assert!(parse(&["--dispatch", "worker", "--reasoning-effort", "high"]).is_ok());
-        assert!(parse(&["--dispatch", "worker", "--reasoning-effort", "xhigh"]).is_err());
+        for effort in ["auto", "xhigh", "max", "ultra"] {
+            assert!(parse(&["--dispatch", "worker", "--reasoning-effort", effort]).is_ok());
+        }
+        assert!(parse(&["--dispatch", "worker", "--reasoning-effort", "unknown"]).is_err());
     }
 }

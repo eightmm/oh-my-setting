@@ -1,6 +1,6 @@
-use regex::Regex;
+use crate::native_model;
 use serde_json::Value;
-use std::{collections::BTreeSet, fs, path::Path, sync::LazyLock};
+use std::{collections::BTreeSet, fs, path::Path};
 
 const KINDS: &[&str] = &[
     "worker",
@@ -20,13 +20,6 @@ const KINDS: &[&str] = &[
     "security-auditor",
 ];
 const TIERS: &[&str] = &["light", "routine", "deep", "frontier"];
-static CODEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^gpt-\d+(?:\.\d+)?-(?:astra|sol|terra|luna)$").unwrap());
-static AGY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^gemini-\d+(?:\.\d+)?-[a-z][a-z0-9]*(?:-[a-z0-9]+)*-(?:low|medium|high)$").unwrap()
-});
-static COUNCIL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*$").unwrap());
 fn keys(value: &Value, names: &[&str]) -> bool {
     value.as_object().is_some_and(|m| {
         m.keys().map(String::as_str).collect::<BTreeSet<_>>() == names.iter().copied().collect()
@@ -39,11 +32,11 @@ fn allowed(value: &Value, required: &[&str], optional: &[&str]) -> bool {
                 .all(|k| required.contains(&k.as_str()) || optional.contains(&k.as_str()))
     })
 }
-fn route(value: &Value, council: bool) -> bool {
+fn route(value: &Value) -> bool {
     if !allowed(
         value,
-        &["provider", "model", "effort"],
-        &["public_only", "access"],
+        &["provider", "model"],
+        &["effort", "public_only", "access"],
     ) {
         return false;
     }
@@ -57,42 +50,12 @@ fn route(value: &Value, council: bool) -> bool {
     let (Some(provider), Some(model), Some(effort)) = (
         value["provider"].as_str(),
         value["model"].as_str(),
-        value["effort"].as_str(),
+        value.get("effort").map_or(Some(""), Value::as_str),
     ) else {
         return false;
     };
-    if !["low", "medium", "high"].contains(&effort) {
-        return false;
-    }
-    match provider {
-        "codex" => CODEX.is_match(model),
-        "claude" => [
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-fable-5-1",
-            "claude-haiku-5-5",
-        ]
-        .contains(&model),
-        "antigravity" => {
-            if council {
-                COUNCIL.is_match(model)
-            } else {
-                AGY.is_match(model)
-            }
-        }
-        "pi" | "opencode" => {
-            let Some((prefix, tail)) = model.split_once('/') else {
-                return false;
-            };
-            !prefix.is_empty()
-                && !prefix.starts_with('-')
-                && !tail.is_empty()
-                && !model
-                    .chars()
-                    .any(|c| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c) || c == '\0')
-        }
-        _ => false,
-    }
+    native_model::valid_role_model(provider, model)
+        && native_model::validate_effort(provider, model, effort).is_ok()
 }
 
 pub(crate) fn load(root: &Path) -> Result<Value, String> {
@@ -123,9 +86,7 @@ pub(crate) fn load(root: &Path) -> Result<Value, String> {
     }
     if let Some(council) = value.get("council") {
         let extra = council["extra"].as_array();
-        if !keys(council, &["extra"])
-            || extra.is_none()
-            || extra.unwrap().iter().any(|r| !route(r, true))
+        if !keys(council, &["extra"]) || extra.is_none() || extra.unwrap().iter().any(|r| !route(r))
         {
             return Err("invalid panel council extra routes".into());
         }
@@ -145,7 +106,7 @@ pub(crate) fn load(root: &Path) -> Result<Value, String> {
     }
     for provider in ["codex", "claude"] {
         let r = &value["main"][provider];
-        if !route(r, false) || r["provider"] != provider {
+        if !route(r) || r["provider"] != provider {
             return Err(format!("invalid panel route: main/{provider}"));
         }
     }
@@ -157,9 +118,9 @@ pub(crate) fn load(root: &Path) -> Result<Value, String> {
             return Err(format!("invalid panel tier: {tier}"));
         };
         if routes.is_empty()
-            || routes.iter().any(|r| {
-                !route(r, false) || (r["provider"] == "antigravity" && r["access"] != "read")
-            })
+            || routes
+                .iter()
+                .any(|r| !route(r) || (r["provider"] == "antigravity" && r["access"] != "read"))
         {
             return Err(format!("invalid panel tier: {tier}"));
         }

@@ -8,6 +8,7 @@ use account_binding::{
     AccountHost, AccountSelectionReceipt, AccountVerification, AlternateLeadScope, BindingAnchor,
     CodexChatHome, PersistedAccountBinding, SelectionTarget, SystemAccountHost,
 };
+use oms_command_peer::native_model::{self, AGY_FIXED_EFFORT_MODELS};
 use oms_panel_core::native::reference::process::Owner;
 use oms_panel_core::{NativeCommand, Store, Transaction, Value, state::AttemptCache, terminals};
 use serde_json::json;
@@ -60,19 +61,12 @@ const PROVIDER_SPAWN_FORMAT: &str = "#{pane_id}\t#{pane_pid}";
 const ALTERNATE_SPAWN_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}";
 const ALTERNATE_PANE_FORMAT: &str =
     "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}\t.";
-const AGY_FIXED_EFFORT_MODELS: [&str; 2] =
-    ["gemini-pro-orchestrator", "gemini-pro-orchestrator-argon"];
 
 pub(crate) fn agy_fixed_effort_model(raw: &str) -> Option<&'static str> {
-    AGY_FIXED_EFFORT_MODELS
-        .into_iter()
-        .find(|model| model.eq_ignore_ascii_case(raw))
-        .or_else(|| {
-            let canonical = crate::native_panel::normalize_antigravity_model(raw)?;
-            AGY_FIXED_EFFORT_MODELS
-                .into_iter()
-                .find(|model| *model == canonical)
-        })
+    native_model::fixed_effort_model("antigravity", raw).or_else(|| {
+        let canonical = crate::native_panel::normalize_antigravity_model(raw)?;
+        native_model::fixed_effort_model("antigravity", &canonical)
+    })
 }
 
 pub(crate) fn orchestrator_default_model(provider: &str) -> Result<&'static str> {
@@ -95,12 +89,13 @@ fn orchestrator_command(
         "antigravity" => ("agy", "--dangerously-skip-permissions"),
         _ => return Err(Error::new("unsupported provider orchestrator")),
     };
+    native_model::validate_effort(provider, model, effort.unwrap_or_default())
+        .map_err(Error::new)?;
     let mut command = commands::strings(&[program, "--model", model, permission_flag]);
-    if let Some(effort) = effort {
-        require(
-            provider != "antigravity" || !AGY_FIXED_EFFORT_MODELS.contains(&model),
-            "Antigravity Orchestrator has fixed effort; omit --reasoning-effort or select an adjustable model",
-        )?;
+    if let Some(effort) = effort
+        .map(native_model::normalized_effort)
+        .filter(|e| !e.is_empty())
+    {
         if provider == "codex" {
             command.extend(commands::strings(&[
                 "-c",
@@ -5387,6 +5382,11 @@ mod tests {
 
     #[test]
     fn provider_commands_apply_model_permissions_and_startup_role() {
+        for model in ["gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh"] {
+            assert!(orchestrator_command("antigravity", model, Some("xhigh")).is_ok());
+            assert!(orchestrator_command("antigravity", model, Some("max")).is_err());
+        }
+        assert!(orchestrator_command("claude", "opus", Some("ultra")).is_err());
         for (provider, program, model, permission_flag, prompt_option) in [
             (
                 "codex",

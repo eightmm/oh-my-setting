@@ -43,6 +43,7 @@ pub mod admission {
 }
 mod view;
 
+pub use oms_command_agent_role::native_model;
 pub use oms_command_operations::value::{V, obj};
 use std::{
     ffi::OsString,
