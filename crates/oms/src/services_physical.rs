@@ -32,7 +32,7 @@ impl super::CollabServices<'_> {
         register: RegisterPhysical<'_>,
     ) -> Result<()> {
         before(stop, deadline)?;
-        let domain = resources::snapshot(attempt.state_root, stop)
+        let domain = resources::summary(attempt.state_root, stop)
             .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
         let Some(domain) = domain else {
             if attempt.team.is_some() {

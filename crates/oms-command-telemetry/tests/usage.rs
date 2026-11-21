@@ -701,6 +701,7 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
     };
     let root = Temp::private();
     assert!(resources::snapshot(&root.0, &stop).unwrap().is_none());
+    assert!(resources::summary(&root.0, &stop).unwrap().is_none());
     assert!(!root.0.join(dispatch::LOCK).exists());
     resources::activate(&root.0, &policy, None, &stop, deadline()).unwrap();
     let initial = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
@@ -791,6 +792,13 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         ),
         (1, 1, 1, 1)
     );
+    let summary = resources::summary(&root.0, &stop).unwrap().unwrap();
+    let detailed = resources::snapshot(&root.0, &stop).unwrap().unwrap();
+    assert!(summary.active && detailed.active);
+    assert_eq!(summary.policy, detailed.policy);
+    assert_eq!(summary.occupancy, detailed.occupancy);
+    assert_eq!(detailed.teams.len(), 1);
+    assert_eq!(detailed.writes.len(), 1);
     assert_eq!(usage::load(&root.0).unwrap().calls.len(), 1);
     let admitted = std::fs::read(root.0.join(dispatch::REGISTRY)).unwrap();
     let mut old_registry = oms_json::parse_strict(&admitted).unwrap();
@@ -828,6 +836,7 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         "downgrade",
         "missing-claims",
         "missing-intents",
+        "write-without-writer",
         "legacy-dispatch",
         "resource-version",
     ] {
@@ -848,6 +857,26 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
             }
             "missing-intents" => {
                 fields.remove(&oms_json::PyString::from("physical"));
+            }
+            "write-without-writer" => {
+                let writes = fields
+                    .get_mut(&oms_json::PyString::from("resources"))
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .get_mut(&oms_json::PyString::from("write_wip"))
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                let mut orphan = writes.values().next().unwrap().clone_bounded().unwrap();
+                let operation_id = oms_json::PyString::from("operation-without-writer");
+                let fields = orphan.as_object_mut().unwrap();
+                fields.insert(
+                    "operation_id".into(),
+                    oms_json::Value::String(operation_id.clone()),
+                );
+                fields.insert("active".into(), oms_json::Value::Bool(false));
+                writes.insert(operation_id, orphan);
             }
             "legacy-dispatch" => {
                 fields.insert(
@@ -870,6 +899,15 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
         assert!(dispatch::read_snapshot(&root.0, &stop).is_err(), "{damage}");
         assert!(physical::load(&root.0, &stop).is_err(), "{damage}");
         assert!(resources::snapshot(&root.0, &stop).is_err(), "{damage}");
+        let summary_error = resources::summary(&root.0, &stop).expect_err(damage);
+        if damage == "write-without-writer" {
+            assert_eq!(
+                summary_error,
+                oms_command_telemetry::store::StoreError::Invalid(
+                    "write custody has no physical writer"
+                )
+            );
+        }
         assert!(
             physical::begin(
                 &root.0,
@@ -1219,8 +1257,13 @@ fn resource_domain_reserves_mixed_calls_and_keeps_independent_custody() {
     )
     .unwrap();
     let evolved = resources::snapshot(&root.0, &stop).unwrap().unwrap();
+    let summary = resources::summary(&root.0, &stop).unwrap().unwrap();
     assert!(evolved.active);
     assert_eq!(evolved.policy, next_policy);
+    assert!(summary.active);
+    assert_eq!(summary.policy, evolved.policy);
+    assert_eq!(summary.occupancy, evolved.occupancy);
+    assert!(!evolved.teams.is_empty() && !evolved.writes.is_empty());
     assert_eq!(
         physical::load(&root.0, &stop).unwrap().len(),
         2,

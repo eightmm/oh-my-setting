@@ -178,7 +178,7 @@ fn project_raw(raw: &[u8], intents: Option<&[physical::Intent]>) -> Result<Value
 fn project(list: &Value, intents: Option<&[physical::Intent]>) -> Result<Value> {
     project_raw(&serde_json::to_vec(list).map_err(Error::new)?, intents)
 }
-fn resource_view(snapshot: Option<&resources::Snapshot>) -> Value {
+fn resource_view(snapshot: Option<&resources::Summary>) -> Value {
     snapshot.map_or(Value::Null, |s| json!({"scope":"host_local_accounting_domain","domain":s.policy.domain,"epoch":s.policy.epoch,
         "host_generation_sha256":s.policy.host_generation_sha256,"active":s.active,
         "occupancy":{"teams":s.occupancy.teams,"invocations":s.occupancy.invocations,"open_process_claims":s.occupancy.open_processes,"write_wip":s.occupancy.write_wip},
@@ -204,7 +204,7 @@ pub fn read_at(
             Ok(output.stdout)
         });
     checkpoint(stop)?;
-    let capacity = resources::snapshot(repo, stop);
+    let capacity = resources::summary(repo, stop);
     checkpoint(stop)?;
     let intents = physical::load(repo, stop);
     checkpoint(stop)?;
@@ -352,8 +352,7 @@ mod tests {
     }
     #[test]
     fn resource_claim_dimensions_and_unknown_native_scope_stay_separate() {
-        let snapshot = resources::Snapshot {
-            sha256: "d".repeat(64),
+        let snapshot = resources::Summary {
             policy: resources::Policy {
                 domain: "domain-a".into(),
                 epoch: "epoch-a".into(),
@@ -371,8 +370,6 @@ mod tests {
                 open_processes: 5,
                 write_wip: 3,
             },
-            teams: Vec::new(),
-            writes: Vec::new(),
         };
         let view = resource_view(Some(&snapshot));
         assert_eq!(view["scope"], "host_local_accounting_domain");

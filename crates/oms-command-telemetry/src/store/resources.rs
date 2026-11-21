@@ -6,7 +6,7 @@ use crate::value::{V, encode, obj, parse};
 use oms_safe_fs::Root;
 use oms_supervisor::process::{OwnedCleanup, PhysicalCall, Scope};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -46,6 +46,12 @@ pub struct Occupancy {
     pub invocations: u64,
     pub open_processes: u64,
     pub write_wip: u64,
+}
+#[derive(Clone, Debug)]
+pub struct Summary {
+    pub policy: Policy,
+    pub active: bool,
+    pub occupancy: Occupancy,
 }
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -547,6 +553,7 @@ fn count(registry: &V, resource: &V, policy: &Policy) -> Result<Occupancy, Store
     let V::Object(claims) = &resource["claims"] else {
         return Err(invalid("invalid resource claims"));
     };
+    let mut physical_writes = BTreeSet::new();
     for (id, claim) in claims {
         let mut keys = vec![
             "call_id",
@@ -606,7 +613,9 @@ fn count(registry: &V, resource: &V, policy: &Policy) -> Result<Occupancy, Store
         checked_add(&mut total.invocations, u64::from(*invocation))?;
         checked_add(&mut total.open_processes, u64::from(*process))?;
         if physical["request"]["access"].text() == Some("write") {
-            let wip = &resource["write_wip"][claim["operation_id"].text().unwrap()];
+            let operation_id = claim["operation_id"].text().unwrap();
+            physical_writes.insert(operation_id);
+            let wip = &resource["write_wip"][operation_id];
             require(
                 wip["owner"] == write_owner(&binding),
                 "physical writer lost write custody",
@@ -644,23 +653,16 @@ fn count(registry: &V, resource: &V, policy: &Policy) -> Result<Occupancy, Store
     };
     for (operation, entry) in wip {
         custody_keys(entry, &["operation_id", "owner", "active"])?;
+        let operation_id = entry["operation_id"].text().unwrap_or_default();
         require(
-            entry["operation_id"]
-                .text()
-                .is_some_and(|s| operation == s.as_bytes() && crate::store::resources::id(s)),
+            operation == operation_id.as_bytes() && id(operation_id),
             "invalid write operation",
         )?;
         usage::keys(&entry["owner"], &["root_owner", "root_generation", "team"])?;
         require(
             id_text(&entry["owner"]["root_owner"])
                 && id_text(&entry["owner"]["root_generation"])
-                && claims.values().any(|claim| {
-                    claim["operation_id"] == entry["operation_id"]
-                        && registry["physical"]["calls"]
-                            [claim["call_id"].text().unwrap_or_default()]["request"]["access"]
-                            .text()
-                            == Some("write")
-                }),
+                && physical_writes.contains(operation_id),
             "write custody has no physical writer",
         )?;
         let V::Bool(active) = entry["active"] else {
@@ -680,9 +682,9 @@ fn count(registry: &V, resource: &V, policy: &Policy) -> Result<Occupancy, Store
 fn id_text(value: &V) -> bool {
     value.text().is_some_and(id)
 }
-pub(super) fn validate(registry: &V) -> Result<(), StoreError> {
+pub(super) fn validate(registry: &V) -> Result<Option<Summary>, StoreError> {
     if let Some((resource, policy)) = read(registry)? {
-        count(registry, resource, &policy)?;
+        let occupancy = count(registry, resource, &policy)?;
         if registry.get("physical").is_some() {
             for intent in physical::intents(&registry["physical"])? {
                 require(
@@ -692,8 +694,13 @@ pub(super) fn validate(registry: &V) -> Result<(), StoreError> {
                 )?;
             }
         }
+        return Ok(Some(Summary {
+            policy,
+            active: resource["state"].text() == Some("active"),
+            occupancy,
+        }));
     }
-    Ok(())
+    Ok(None)
 }
 pub(super) fn validate_receipts(
     registry: &V,
@@ -815,17 +822,25 @@ pub fn activate(
 }
 
 pub fn occupancy(repo: &Path, stop: &AtomicBool) -> Result<Option<Occupancy>, StoreError> {
-    Ok(snapshot(repo, stop)?.map(|snapshot| snapshot.occupancy))
+    Ok(summary(repo, stop)?.map(|summary| summary.occupancy))
+}
+/// Validated policy and aggregate custody without projecting retained details.
+/// Admission always rechecks the original state under the dispatch writer.
+pub fn summary(repo: &Path, stop: &AtomicBool) -> Result<Option<Summary>, StoreError> {
+    Ok(dispatch::read_resource_snapshot(repo, stop)?.and_then(|state| state.resources))
 }
 /// Read-only observation. Admission always rechecks it under the dispatch writer.
 pub fn snapshot(repo: &Path, stop: &AtomicBool) -> Result<Option<Snapshot>, StoreError> {
-    let Some(raw) = dispatch::read_snapshot(repo, stop)? else {
+    let Some(dispatch::RegistrySnapshot {
+        raw,
+        resources: Some(summary),
+    }) = dispatch::read_resource_snapshot(repo, stop)?
+    else {
         return Ok(None);
     };
     let registry = decode(&raw)?;
-    validate(&registry)?;
     read(&registry)?
-        .map(|(resource, policy)| {
+        .map(|(resource, _)| {
             let V::Object(teams) = &resource["teams"] else {
                 unreachable!()
             };
@@ -894,9 +909,9 @@ pub fn snapshot(repo: &Path, stop: &AtomicBool) -> Result<Option<Snapshot>, Stor
                 .collect::<Result<Vec<_>, StoreError>>()?;
             Ok(Snapshot {
                 sha256: format!("{:x}", Sha256::digest(&raw)),
-                occupancy: count(&registry, resource, &policy)?,
-                active: resource["state"].text() == Some("active"),
-                policy,
+                occupancy: summary.occupancy,
+                active: summary.active,
+                policy: summary.policy,
                 teams,
                 writes,
             })
