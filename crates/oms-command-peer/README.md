@@ -25,6 +25,35 @@ explicit verification commands and provider executables run through the
 execution boundary. Online citation lookup additionally needs `curl`; an
 unavailable request remains unverified.
 
+### Session handoff prompt
+
+Explicit `session-handoff prompt` calls the existing autonomy handoff renderer
+through `native::Services`. It reads the selected repository's plan and task
+records, then requests five typed native projections: task status, the runtime
+evidence matrix, explained next actions, journal decisions and open review findings.
+`process::Executor::handoff_projection` defaults to unavailable; the root host
+uses its existing staged native launcher and supervised execution. Each request
+has a 65,536-byte combined output cap and uses the remaining shared 40-second
+read budget. Process cleanup may extend return time beyond that budget.
+
+The Markdown draft contains Goal, State, Decisions, Open findings, Verified /
+Not verified, Next step and Pointers with source labels. Missing, failed,
+incomplete or oversized sources remain labelled gaps. The public prompt scans
+complete plan/task snapshots and bounded producer output before projection.
+A source that fails the sensitive-content check is withheld while other sources
+remain available. The completed draft is scanned again before printing or
+writing. Collection sources contribute up to six complete records under the
+2,048-byte per-row budget. The final UTF-8 output respects `--max-bytes` and
+counts omitted records reported by a producer, records dropped by the row
+budget and lines dropped by the draft budget. Recorded verification claims
+retain their scope as claims.
+
+These projections run only for an explicit `prompt` request. Session-start
+hooks, historical transcript capture, pickup receipts and native resume keep
+their existing paths. No provider or model call is requested. The existing
+`peer_contract` fixture exercises the public prompt, incomplete and unavailable
+reads, malformed JSON, output bounds, cancellation and withholding one source.
+
 ## Modules and implemented paths
 
 | Module | Responsibilities |
@@ -40,11 +69,11 @@ unavailable request remains unverified.
 | `delegate` | Detached worktrees, role defaults, patch capture before verification, repair and lifecycle review state |
 | `review` | Criterion coverage, singleton confirmation, incremental review outcomes, finding anchors/dispositions, pinned verification scopes and advisory security pass |
 | `review_red` | Advisory bare-base control and bounded individual test-patch checks in disposable worktrees |
-| `native` | Runtime criterion projections through native task status, verified plan snapshots, room projection and lifecycle projection |
+| `native` | Runtime criterion projections through native task status, verified plan snapshots, room projection and lifecycle projection; typed handoff read adapter |
 | `context_pack` | Bounded supplied graph-pack validation and reference-only orientation |
 | `ml_context` | Sanitized ML project fields, manifest identifiers, entrypoint names, verification hints and recent experiment summaries |
 | `thread` | Thread creation, typed Room append, context, schema-1 listing/statistics, stale-close preview/apply, current pointer, cursors, updates and consumption receipts |
-| `session` | Repository-bound transcript discovery/search/open, origin-only bookmarks/reopen, guarded resume planning and prompts-only Antigravity handoff capture |
+| `session` | Repository-bound transcript discovery/search/open, origin-only bookmarks/reopen, guarded resume planning, source-labelled handoff prompts and prompts-only Antigravity capture |
 | `digest` | Streamed file digests, capture redaction, retrieval descriptors, collision-resistant capture names and command exit propagation |
 | `receipts` | External receipts, hash drift, DOI/arXiv normalization, offline/online verification and BibTeX export |
 | `manifest` | CSV/TSV/line IDs, hashes, key mappings, provenance, drift, ID/key overlap and ordered time checks |
@@ -294,8 +323,8 @@ The remaining behavior is still refused or incomplete:
   debt warnings; compilation or outbound failure starts no worker. This does not
   enable plan-task claims, candidate admission or automatic apply.
 - Session checkpoint/fork/launch/compare/file restore, managed panel relocation,
-  full status projection and complete handoff-prompt synthesis need the native
-  checkpoint/panel interfaces. Native resume uses physical registration and its
+  and full status projection need the native checkpoint/panel interfaces.
+  Native resume uses physical registration and its
   final fence as described above. Prompts-only Antigravity capture is bounded by
   the general 64 MiB reader and is not a streaming history implementation.
 - Remote artifact views still refuse. Legacy `artifact_view.py::ssh_read` uses

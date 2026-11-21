@@ -23,6 +23,13 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
+/// Statically validates one `custom-skills/oms-*` bundle under a verified source
+/// root. Reuses the project skill budgets, scrubber and reference checks without
+/// executing host commands or writing state. The caller owns manifest selection.
+pub fn validate_bundled_skill(source: &Path, skill: &str) -> std::result::Result<(), String> {
+    skills::validate_bundled(source, skill).map_err(|error| error.message)
+}
+
 /// Classification is side-effect free, including malformed command arguments.
 pub fn owns(tool: &str, _args: &[OsString]) -> bool {
     matches!(

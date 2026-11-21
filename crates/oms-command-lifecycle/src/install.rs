@@ -113,6 +113,9 @@ pub(crate) fn materialize(
     Ok(())
 }
 pub(crate) fn skill_sources(paths: &Paths) -> Result<Vec<PathBuf>> {
+    skill_sources_with_validation(paths, false)
+}
+fn skill_sources_with_validation(paths: &Paths, validate_content: bool) -> Result<Vec<PathBuf>> {
     let manifest = r::value(&paths.source.join("skills.manifest.json"))?;
     let rows = manifest["skills"]
         .as_array()
@@ -144,6 +147,14 @@ pub(crate) fn skill_sources(paths: &Paths) -> Result<Vec<PathBuf>> {
             || !path.join("SKILL.md").is_file()
         {
             return r::fail("skill source is missing or escapes its owner");
+        }
+        // Static catalog checks include skills unavailable on this execution host.
+        if validate_content {
+            if row["name"].as_str() != Some(name) {
+                return r::fail("skill manifest name must match source directory");
+            }
+            oms_command_providers_skills::validate_bundled_skill(&paths.source, name)
+                .map_err(|message| r::Error(2, format!("bundled skill {name}: {message}")))?;
         }
         if let Some(required) = row.get("requires") {
             let required = required
@@ -463,7 +474,7 @@ pub(crate) fn run(
     if options.tool == "install-skills" {
         return Ok(r::text(format!(
             "skills: {} enabled sources validated",
-            skill_sources(paths)?.len()
+            skill_sources_with_validation(paths, true)?.len()
         )));
     }
     if options.tool == "link" {

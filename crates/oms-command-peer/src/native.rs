@@ -15,6 +15,9 @@ pub(crate) fn state_repo(repo: &Path) -> Result<PathBuf> {
 }
 pub(crate) struct Services<'a, 'b>(pub &'a Context<'b>);
 impl oms_command_plan::Services for Services<'_, '_> {
+    fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        self.0.executor.group_resolver()
+    }
     fn project_lifecycle(&self, raw: &[u8]) -> oms_command_plan::Result<ProjectedLifecycle> {
         let rows = storage::rows(raw).map_err(domain)?;
         let attempts = oms_command_operations::project_attempts(&rows).map_err(domain)?;
@@ -47,6 +50,53 @@ impl oms_command_plan::Services for Services<'_, '_> {
     }
     fn normalize_provider(&self, provider: &str) -> oms_command_plan::Result<String> {
         crate::providers::normalize(provider).map_err(domain)
+    }
+}
+impl oms_command_autonomy::Services for Services<'_, '_> {
+    fn invoke(
+        &self,
+        command: &oms_command_autonomy::Invocation,
+        interrupted: &std::sync::atomic::AtomicBool,
+    ) -> oms_command_autonomy::Result<oms_command_autonomy::CommandResult> {
+        use crate::process::HandoffProjection;
+        let unavailable =
+            || oms_command_autonomy::Error::new(2, "native handoff projection unavailable");
+        let state = command
+            .environment
+            .iter()
+            .find_map(|(key, value)| (key == "OMS_STATE_REPO").then_some(Path::new(value)))
+            .ok_or_else(unavailable)?;
+        let projection = [
+            HandoffProjection::TaskStatus,
+            HandoffProjection::EvidenceMatrix,
+            HandoffProjection::NextStep,
+            HandoffProjection::JournalDecisions,
+            HandoffProjection::ReviewFindings,
+        ]
+        .into_iter()
+        .find(|projection| {
+            let fixed = projection.command(&command.cwd, state, command.wall);
+            fixed.argv[1] == command.tool.as_str() && fixed.argv[2..] == command.args
+        })
+        .ok_or_else(unavailable)?;
+        if command.wall.is_zero() {
+            return Err(unavailable());
+        }
+        let completed = self
+            .0
+            .executor
+            .handoff_projection(projection, &command.cwd, state, command.wall, interrupted)
+            .map_err(|e| oms_command_autonomy::Error::new(e.code, e.message))?;
+        if !completed.complete
+            || completed
+                .stdout
+                .len()
+                .saturating_add(completed.stderr.len())
+                > 65536
+        {
+            return Err(unavailable());
+        }
+        Ok((completed.code, completed.stdout, completed.stderr))
     }
 }
 impl Services<'_, '_> {

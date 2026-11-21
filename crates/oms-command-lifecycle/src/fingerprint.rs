@@ -107,6 +107,81 @@ fn release_digest(path: &Path) -> Result<String> {
     without_observation_times(&mut value);
     Ok(r::hash(&r::bytes(&value)?))
 }
+
+fn capability_fields(value: &Value) -> Option<Value> {
+    if value["schema"] != 1 {
+        return None;
+    }
+    let requested = value
+        .get("requested")
+        .or_else(|| value["plan"].get("requested"))
+        .or_else(|| value.get("profiles"))?
+        .as_array()?;
+    if requested.is_empty()
+        || requested.len() > 64
+        || requested.iter().any(|name| {
+            name.as_str()
+                .is_none_or(|s| s.len() > 64 || !r::safe_name(s))
+        })
+    {
+        return None;
+    }
+    let primary = value
+        .get("primary_provider")
+        .or_else(|| value["plan"].get("primary_provider"));
+    if primary.is_some_and(|v| !matches!(v.as_str(), Some("auto" | "codex" | "claude" | "agy"))) {
+        return None;
+    }
+    let allow_missing = match value.get("allow_missing") {
+        Some(v) => v.as_bool()?,
+        None => false,
+    };
+    Some(json!({"requested":requested,"primary_provider":primary,
+        "allow_missing":allow_missing}))
+}
+
+// Keep this projection outside schema-1 identity so saved fingerprints retain
+// their original hash and comparison semantics.
+pub(crate) fn capability_provenance(paths: &Paths) -> Value {
+    let overridden =
+        std::env::var_os("OMS_CAPABILITY_RECEIPT").is_some_and(|value| !value.is_empty());
+    let mut result = json!({
+        "source":if overridden {"environment override"} else {"default receipt"},
+        "scope":"installed tool capabilities; separate from the installation component profile",
+        "status":"missing","fingerprint":"excluded from schema 1","runtime":"unknown",
+        "runtime_reason":"recorded selection does not establish running provider or repository runtime configuration"
+    });
+    let Ok(path) = crate::tools::receipt_path(paths, &crate::cli::Options::default()) else {
+        result["status"] = json!("unreadable");
+        return result;
+    };
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return result,
+        Err(_) => {
+            result["status"] = json!("unreadable");
+            return result;
+        }
+        Ok(_) => (),
+    }
+    let Ok(raw) = r::read(&path, r::LIMIT) else {
+        result["status"] = json!("unreadable");
+        return result;
+    };
+    let fields = r::parse(&raw)
+        .ok()
+        .and_then(|value| capability_fields(&value));
+    let Some(fields) = fields else {
+        result["status"] = json!("invalid");
+        return result;
+    };
+    result["status"] = json!("recorded");
+    result
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    result
+}
+
 pub(crate) fn build(paths: &Paths) -> Result<Value> {
     let (state, row) = if !r::exists(&paths.receipt) {
         ("missing", json!({}))

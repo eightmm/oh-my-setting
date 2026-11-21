@@ -1136,6 +1136,51 @@ fn accounts(paths: &Paths) -> Vec<Value> {
     }
     rows
 }
+fn source_matches(source: &Path, target: &Path) -> Result<bool> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return r::fail("managed source is not a regular file or directory");
+    }
+    let source_digest = crate::transaction::identity(source)?
+        .ok_or_else(|| r::Error(2, "managed source disappeared".into()))?;
+    if fs::symlink_metadata(target)?.file_type().is_symlink() {
+        if !crate::install::owned(source, target)? {
+            return r::fail("managed link changed during diagnosis");
+        }
+        return Ok(true);
+    }
+    let target_digest = crate::transaction::identity(target)?
+        .ok_or_else(|| r::Error(2, "managed target disappeared".into()))?;
+    Ok(source_digest == target_digest)
+}
+
+fn managed_inventory(paths: &Paths, source: &Path, target: &Path) -> Result<Value> {
+    let owned = crate::install::owned(source, target)?;
+    let (freshness, level, message) = if !owned {
+        ("not checked", "error", "missing, modified or foreign")
+    } else {
+        match source_matches(source, target) {
+            Ok(true) => ("current", "ok", "owned; current source matches"),
+            Ok(false) => (
+                "stale",
+                "error",
+                "owned copy is stale; run oms doctor --repair",
+            ),
+            Err(_) => (
+                "unknown",
+                "error",
+                "owned; source freshness could not be verified (unsafe, missing or unreadable content)",
+            ),
+        }
+    };
+    let target = target.strip_prefix(&paths.home).unwrap_or(target).display();
+    let mut row = finding("managed inventory", level, format!("{target}: {message}"));
+    row["target"] = json!(target.to_string());
+    row["owned"] = json!(owned);
+    row["source_freshness"] = json!(freshness);
+    Ok(row)
+}
+
 fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     match paths.load() {
@@ -1187,6 +1232,21 @@ fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> R
             "install receipt invalid; automatic takeover refused",
         )),
     }
+    let selection = crate::fingerprint::capability_provenance(paths);
+    let (level, message) = match selection["status"].as_str() {
+        Some("recorded") => (
+            "info",
+            "installed tool capability selection recorded; live provider selection unknown",
+        ),
+        Some("missing") => ("note", "no installed tool capability selection recorded"),
+        _ => (
+            "error",
+            "capability receipt is invalid or unreadable; configured selection unknown",
+        ),
+    };
+    let mut row = finding("capability selection", level, message);
+    row["selection"] = selection;
+    rows.push(row);
     match crate::payload::verify(paths, flag) {
         Ok(p) => rows.push(finding(
             "native payload",
@@ -1314,23 +1374,7 @@ fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> R
             return Ok(rows);
         };
         for (source, target) in crate::install::targets(&owner_paths, &frontdoor)? {
-            let owned = crate::install::owned(&source, &target)?;
-            rows.push(finding(
-                "managed inventory",
-                if owned { "ok" } else { "error" },
-                format!(
-                    "{}: {}",
-                    target
-                        .strip_prefix(&paths.home)
-                        .unwrap_or(&target)
-                        .display(),
-                    if owned {
-                        "source/digest identity matches"
-                    } else {
-                        "missing, modified or foreign"
-                    }
-                ),
-            ));
+            rows.push(managed_inventory(paths, &source, &target)?);
         }
     }
     Ok(rows)
@@ -1526,7 +1570,9 @@ pub(crate) fn status(paths: &Paths, options: &Options, flag: &AtomicBool) -> Res
     let receipt = paths.load()?;
     if options.has("--json") {
         return r::json(
-            &json!({"schema":1,"install":receipt,"native":true,"source_root":paths.source,"state_root":paths.state}),
+            &json!({"schema":1,"install":receipt,"native":true,"source_root":paths.source,"state_root":paths.state,
+                "install_profile_scope":"installation components",
+                "capability_selection":crate::fingerprint::capability_provenance(paths)}),
         );
     }
     Ok(r::text(format!(

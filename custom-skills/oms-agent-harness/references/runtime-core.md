@@ -155,4 +155,7 @@ you hold the question; none starts, retries, kills, or merges anything.
 | Are checkpoints piling up? | `oms run checkpoints` | Per directory: file count, size, `ok:` or `warn:` against latest/best. |
 | What needs attention? | `oms inbox --repo .` | Ranked items with one exact next command each. |
 
+When review advice recommends `gate+security` or `council`, the coordinator
+applies the [spec stage before deep review](review-gates.md#spec-stage-first).
+
 Read the output as a prompt to look, then verify in the source of record.

@@ -281,6 +281,56 @@ fn runtime_host_entry_threads_host_services() {
     assert_eq!(custom.get("task").text("marker"), "host-task");
     assert!(custom.get("runtime").get("healthy").truth());
     assert!(!call(&NoHostServices).get("plan").get("healthy").truth());
+
+    struct FreshRuntime {
+        repo: PathBuf,
+        calls: AtomicU64,
+        unavailable: bool,
+    }
+    impl HostServices for FreshRuntime {
+        fn runtime_envelope(
+            &self,
+            repo: &Path,
+            _: &AtomicBool,
+        ) -> Option<oms_command_state::Result<json::Value>> {
+            assert_eq!(repo, self.repo);
+            let generation = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+            Some(if self.unavailable {
+                Err(oms_command_state::Error {
+                    code: 2,
+                    message: "unavailable fixture".into(),
+                })
+            } else {
+                json::parse(format!("{{\"schema\":2,\"generation\":{generation},\"criteria\":[{{\"id\":\"C1\"}}],\"next_actions\":[{{\"action\":\"collect evidence\"}}]}}").as_bytes())
+            })
+        }
+    }
+    let host = FreshRuntime {
+        repo: repo.path().to_owned(),
+        calls: AtomicU64::new(0),
+        unavailable: false,
+    };
+    for generation in 1..=2 {
+        let snapshot = state(repo.path(), &host);
+        let runtime = snapshot.get("runtime");
+        assert_eq!(runtime.get("generation").int().unwrap(), generation);
+        assert_eq!(runtime.get("criteria").array().unwrap().len(), 1);
+        assert_eq!(runtime.get("next_actions").array().unwrap().len(), 1);
+        assert!(runtime.get("healthy").truth());
+    }
+    // Explicit snapshots retain their API semantics and do not invoke a fresh producer.
+    assert!(call(&host).get("runtime").get("healthy").truth());
+    assert_eq!(host.calls.load(Ordering::Relaxed), 2);
+    let unavailable = FreshRuntime {
+        unavailable: true,
+        ..host
+    };
+    let failed = state(repo.path(), &unavailable);
+    assert!(!failed.get("runtime").get("healthy").truth());
+    assert_eq!(
+        failed.get("runtime").text("error"),
+        "canonical-runtime-unavailable"
+    );
 }
 
 #[test]

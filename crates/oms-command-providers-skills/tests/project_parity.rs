@@ -1,4 +1,4 @@
-use oms_command_providers_skills::run_with_source;
+use oms_command_providers_skills::{run_with_source, validate_bundled_skill};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -896,6 +896,132 @@ fn named_skill(name: &str, body_tail: &str) -> String {
     format!(
         "---\nname: {name}\ndescription: Demo skill used only by the parity tests for reference checks.\n---\n{body_tail}"
     )
+}
+
+#[test]
+fn bundled_skill_validation_covers_enabled_source_catalog() {
+    let source = oms_source();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.join("skills.manifest.json")).expect("manifest"))
+            .expect("manifest JSON");
+    let enabled: Vec<_> = manifest["skills"]
+        .as_array()
+        .expect("skills array")
+        .iter()
+        .filter(|row| row["enabled"] == true)
+        .collect();
+    assert!(!enabled.is_empty(), "bundled catalog must be exercised");
+    for row in enabled {
+        let name = row["name"].as_str().expect("skill name");
+        assert_eq!(row["source"], format!("custom-skills/{name}"));
+        validate_bundled_skill(&source, name).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+}
+
+#[test]
+fn bundled_skill_validation_reuses_contract_and_reference_checks() {
+    let tmp = TempDir::new("bundled-contract");
+    let source = tmp.path();
+    let directory = source.join("custom-skills/oms-demo");
+    let valid = named_skill(
+        "oms-demo",
+        "[a](references/a.md)\n[repository](../../docs/guide.md)\n",
+    );
+    write_all(
+        source,
+        &[
+            ("custom-skills/oms-demo/SKILL.md", &valid),
+            (
+                "custom-skills/oms-demo/references/a.md",
+                "[b](b.md#anchor)\n[generated](future.generated.md)\n",
+            ),
+            ("custom-skills/oms-demo/references/b.md", "[a](a.md)\n"),
+        ],
+    );
+    // Existing non-managed repository links, cycles and generated references stay valid.
+    validate_bundled_skill(source, "oms-demo").expect("valid bundled references");
+    for (body, expected) in [
+        ("no frontmatter\n".into(), "missing frontmatter"),
+        (named_skill("oms-other", ""), "name must match directory"),
+        (
+            "---\nname: oms-demo\ndescription: Short.\n---\n".into(),
+            "description too thin",
+        ),
+        (
+            named_skill("oms-demo", &"line\n".repeat(501)),
+            "500-line body budget",
+        ),
+        (
+            valid.replace("name: oms-demo", "name: oms-demo\nverify: true"),
+            "non-portable frontmatter",
+        ),
+        (
+            named_skill("oms-demo", "[escape](references/../../outside.md)\n"),
+            "unsafe local reference",
+        ),
+    ] {
+        fs::write(directory.join("SKILL.md"), body).expect("invalid skill");
+        let error = validate_bundled_skill(source, "oms-demo").expect_err("must refuse");
+        assert!(error.contains(expected), "{error}");
+    }
+    fs::write(directory.join("SKILL.md"), &valid).expect("restore skill");
+    fs::write(directory.join("references/b.md"), "[missing](missing.md)\n")
+        .expect("broken recursive link");
+    let error = validate_bundled_skill(source, "oms-demo").expect_err("missing reference");
+    assert!(error.contains("missing local reference"), "{error}");
+    fs::write(directory.join("references/b.md"), "[a](a.md)\n").expect("restore reference");
+    fs::write(directory.join("references/orphan.md"), "unlinked\n").expect("orphan");
+    let error = validate_bundled_skill(source, "oms-demo").expect_err("orphan reference");
+    assert!(error.contains("orphan local reference"), "{error}");
+    fs::remove_file(directory.join("references/orphan.md")).expect("remove orphan");
+    validate_bundled_skill(source, "oms-demo").expect("restored bundle");
+    assert!(
+        !source.join(".oms").exists(),
+        "static validation writes no state"
+    );
+}
+
+#[test]
+fn bundled_skill_validation_stays_under_its_source_owner() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new("bundled-owner");
+    let source = tmp.path();
+    let directory = source.join("custom-skills/oms-demo");
+    write_all(
+        source,
+        &[(
+            "custom-skills/oms-demo/SKILL.md",
+            &named_skill("oms-demo", "plain body\n"),
+        )],
+    );
+    for invalid in ["demo", "../oms-demo", "oms-demo/other", "/oms-demo"] {
+        assert!(validate_bundled_skill(source, invalid).is_err());
+    }
+    // Parent and bundle aliases may not redirect the managed tree.
+    let saved = source.join("saved-skills");
+    fs::rename(source.join("custom-skills"), &saved).expect("save parent");
+    symlink(&saved, source.join("custom-skills")).expect("parent symlink");
+    assert!(validate_bundled_skill(source, "oms-demo").is_err());
+    fs::remove_file(source.join("custom-skills")).expect("remove parent symlink");
+    fs::rename(&saved, source.join("custom-skills")).expect("restore parent");
+    let saved = source.join("saved-skill");
+    fs::rename(&directory, &saved).expect("save bundle");
+    symlink(&saved, &directory).expect("bundle symlink");
+    assert!(validate_bundled_skill(source, "oms-demo").is_err());
+    fs::remove_file(&directory).expect("remove bundle symlink");
+    fs::rename(&saved, &directory).expect("restore bundle");
+
+    // Even an unlinked child cannot introduce a symlink or a hardlink alias.
+    let outside = source.join("outside.md");
+    fs::write(&outside, "outside\n").expect("outside file");
+    let alias = directory.join("unlinked.md");
+    symlink(&outside, &alias).expect("child symlink");
+    assert!(validate_bundled_skill(source, "oms-demo").is_err());
+    fs::remove_file(&alias).expect("remove child symlink");
+    fs::hard_link(&outside, &alias).expect("child hardlink");
+    assert!(validate_bundled_skill(source, "oms-demo").is_err());
+    fs::remove_file(&alias).expect("remove child hardlink");
+    validate_bundled_skill(source, "oms-demo").expect("restored owner");
 }
 
 #[test]

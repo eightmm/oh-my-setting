@@ -262,6 +262,51 @@ fn dispatch_availability_does_not_replace_incoming_source_proof() {
 }
 
 #[test]
+fn native_state_views_use_fresh_canonical_runtime_evidence() {
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    let repo = f.0.join("data");
+    let project = repo.join("PROJECT.md");
+    std::fs::write(
+        &project,
+        "# Project\n\n## Acceptance\n- A canonical criterion is visible.\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let output = f
+            .public(&bin)
+            .current_dir(&f.0)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            !output.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let path = repo.to_str().unwrap();
+    let canonical = run(&["runtime", "envelope", "show", "--repo", path]);
+    assert_eq!(canonical["criteria"].as_array().unwrap().len(), 1);
+    assert!(!canonical["next_actions"].as_array().unwrap().is_empty());
+    let state = run(&["state", "--repo", path, "--json"]);
+    assert_eq!(state["runtime"]["healthy"], true);
+    assert_eq!(state["runtime"]["criteria"], canonical["criteria"]);
+    assert_eq!(state["runtime"]["next_actions"], canonical["next_actions"]);
+    let dashboard = run(&["dashboard", "--repo", path, "--json"]);
+    assert_eq!(dashboard["acceptance"]["criteria"], canonical["criteria"]);
+    // Each command reads current producers, not the preceding rendered envelope.
+    std::fs::write(&project, "# Project\n\n## Acceptance\n- A revised canonical criterion is visible.\n- Another criterion is visible.\n").unwrap();
+    let refreshed = run(&["state", "--repo", path, "--json"]);
+    assert_eq!(
+        refreshed["runtime"]["criteria"].as_array().unwrap().len(),
+        2
+    );
+    assert_ne!(refreshed["runtime"]["criteria"], canonical["criteria"]);
+}
+
+#[test]
 fn public_entry_dispatches_without_python() {
     let f = Fixture::new();
     use std::os::unix::fs::PermissionsExt;

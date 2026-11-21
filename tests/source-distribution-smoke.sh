@@ -74,6 +74,9 @@ EOF
   expected_ci_record affected false > "$check_probe/expected.out"
   cmp -s "$check_probe/docs.out" "$check_probe/expected.out" || fail "documentation CI selection changed"
 
+  selected="$(invoke_check --affected --list-stages --changed-from "$base" --changed-to "$docs")"
+  [ "$selected" = "$(printf 'doc-references\ncheck: ok')" ] || fail "documentation-only stages are not reference checks only: $selected"
+
   mkdir -p "$repo/crates/oms/src"
   printf 'fn main() {}\n' > "$repo/crates/oms/src/main.rs"
   git -C "$repo" add .
@@ -113,6 +116,17 @@ EOF
     > "$check_probe/execution.out" 2>&1 || status=$?
   [ "$status" -eq 97 ] || fail "actual affected verification bypassed the maintenance gate"
   grep -Fxq maintenance-begin "$check_probe/forbidden.log" || fail "execution omitted maintenance protection"
+
+  # Preflight readiness must match the lanes: lint runs Cargo (oms-migrate), so
+  # ShellCheck alone (blocked rustup/cargo stubs above) leaves no lane runnable.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$check_probe/bin/shellcheck"
+  chmod +x "$check_probe/bin/shellcheck"
+  cp "$ROOT/rust-toolchain.toml" "$repo/rust-toolchain.toml"
+  status=0
+  invoke_check --preflight > "$check_probe/preflight.out" 2>&1 || status=$?
+  [ "$status" -eq 1 ] || fail "preflight without the pinned toolchain must report missing prerequisites"
+  grep -Fxq 'ok       shellcheck (shellcheck)' "$check_probe/preflight.out" || fail "preflight missed the ShellCheck stub"
+  ! grep -q '^  yes ' "$check_probe/preflight.out" || fail "preflight claims a lane runnable without the pinned toolchain: $(cat "$check_probe/preflight.out")"
 )
 
 check_markdown_links() {
@@ -262,6 +276,8 @@ fi
 if grep -Fq -- '--effort' "$ROOT/custom-skills/oms-agent-harness/references/model-routing.md"; then
   fail "model routing skill advertises wrong public effort option"
 fi
+grep -Fq 'Spec stage first' "$ROOT/custom-skills/oms-agent-harness/references/review-gates.md" ||
+  fail "review gates reference lost the spec-compliance stage before deep review"
 
 # 6. CI workflow invariants (gate completeness, no setup-python, no windows-latest)
 workflow="$ROOT/.github/workflows/test.yml"

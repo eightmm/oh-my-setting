@@ -1338,6 +1338,7 @@ fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     if reasons.is_empty() {
         reasons.push("none: no risk or contract path above the size floor".into());
     }
+    let spec_stage = matches!(depth, "gate+security" | "council");
     let red = if args.has("red-check") {
         Some(crate::review_red::run(
             &repo,
@@ -1354,6 +1355,7 @@ fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         ("schema", 1usize.into()),
         ("advisory", true.into()),
         ("depth", depth.into()),
+        ("spec_stage", spec_stage.into()),
         (
             "reasons",
             V::Arr(reasons.iter().map(|s| s.as_str().into()).collect()),
@@ -1379,7 +1381,12 @@ fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     Ok(out(if args.has("json") {
         json(&value)?
     } else {
-        format!("review depth: {depth}\n{}\n{red_text}advice only: this starts no review and changes no gate verdict\n",reasons.join("\n")).into_bytes()
+        let spec_line = if spec_stage {
+            "spec stage: run one routine-tier spec/acceptance check before the deep review\n"
+        } else {
+            ""
+        };
+        format!("review depth: {depth}\n{}\n{spec_line}{red_text}advice only: this starts no review and changes no gate verdict\n",reasons.join("\n")).into_bytes()
     }))
 }
 

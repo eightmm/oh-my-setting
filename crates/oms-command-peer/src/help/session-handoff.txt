@@ -1,4 +1,4 @@
-Usage: session-handoff.sh <capture|list|show> [options]
+Usage: oms session-handoff <capture|list|show|prompt> [options]
 
 Distill an agent CLI session into a portable handoff digest.
 
@@ -12,10 +12,18 @@ Subcommands:
             not verified, next step, pointers. No model call, read-only.
 
 prompt options:
-  --cwd PATH       Project dir (default: OMS_STATE_REPO or current dir).
+  --cwd PATH       Project dir (default: current dir).
   --max-bytes N    Bound the output (512-65536, default 4096); the cut is
                    named on a "truncated:" line.
   --output FILE    Write to a new file (refuses to overwrite) and print its path.
+
+  The five native read projections share a 40-second read budget and each
+  permits at most 65536 output bytes; supervised cleanup can take longer.
+  Missing, failed or incomplete sources remain labelled gaps. Collections
+  contribute up to six complete bounded rows each. Sources that fail the
+  sensitive-content check are withheld before projection; the draft also
+  passes the outbound scan. --allow-sensitive applies only to capture.
+  Recorded claims require fresh verification before resuming work.
 
 list options:
   --json           Emit JSON.

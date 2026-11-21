@@ -87,6 +87,11 @@ pub trait HostServices {
     fn task_status(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Output> {
         None
     }
+    /// Fresh canonical runtime evidence for this exact repository and snapshot.
+    /// `None` keeps the library-only fallback; an error is a degraded source.
+    fn runtime_envelope(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Result<Value>> {
+        None
+    }
     fn gc_landing_captures(&self, _repo: &Path, _days: u64, _apply: bool) -> Result<GcHookResult> {
         Ok(GcHookResult::Deferred(
             "landing capture retention deferred: host service unavailable".into(),

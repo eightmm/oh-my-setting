@@ -8,6 +8,7 @@ rust-version = "1.99.1"
 [dependencies]
 oms-runtime = { path = "../oms-runtime" }
 oms-command-graph = { path = "../oms-command-graph" }
+oms-command-autonomy = { path = "../oms-command-autonomy" }
 oms-command-plan = { path = "../oms-command-plan" }
 oms-toml = { path = "../oms-toml" }
 oms-command-operations = { path = "../oms-command-operations" }

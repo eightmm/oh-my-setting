@@ -276,7 +276,7 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
     }
     state.set("room_mail", mail)?;
     state.set("repo", string(ctx.repo.to_string_lossy()))?;
-    projection::enrich(ctx, &mut state)?;
+    projection::enrich(ctx, host, &mut state)?;
     Ok(state)
 }
 

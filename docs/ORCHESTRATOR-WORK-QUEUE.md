@@ -9,6 +9,11 @@
 제품 범위와 개념의 구분은 [Feature scope](FEATURE-SCOPE.md), 실제 착수 상태는 이 큐가 소유한다.
 이전 CP/TM/MR/UX/NF 번호는 acceptance의 출처이며 별도 전체 구현 지시가 아니다.
 
+2026-11-20 공유 제안의 코드 대조와 후속 구현 범위는
+[현재 감사 §10](ORCHESTRATOR-COMPLETION-AUDIT.md#10-2026-11-20-공유-제안의-현재-코드-대조와-구현)에
+기록한다. 공개 handoff prompt 연결, 소유권과 최신성의 진단 구분, 기존 skill-manifest
+검증 강화이며, 아래 lifecycle/Main 인계/실제 모델 평가 과제의 완료를 뜻하지 않는다.
+
 ## 1. PR 지도
 
 | PR / 작업 | 실제 변경 | 구현 상태 / 다음 행동 |

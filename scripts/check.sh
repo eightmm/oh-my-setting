@@ -10,6 +10,61 @@ umask 022
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
 
+# Report-only prerequisite check: prints and exits before any runtime dir,
+# lease, install, or build is created.
+if [ "${1:-}" = --preflight ]; then
+  [ "$#" -eq 1 ] || { echo "error: --preflight takes no other options" >&2; exit 2; }
+  pf_missing=0
+  pf_ok() { printf 'ok       %s\n' "$1"; }
+  pf_bad() { printf 'MISSING  %s\n' "$1"; pf_missing=1; }
+  pf_ok "bash ${BASH_VERSION} (>= 5.0)"
+  SHELLCHECK="${OMS_SHELLCHECK_BIN:-shellcheck}"
+  pf_shellcheck=0
+  if command -v "$SHELLCHECK" >/dev/null 2>&1; then pf_shellcheck=1; pf_ok "shellcheck ($SHELLCHECK)"; else pf_bad "shellcheck (needed by lint)"; fi
+  pf_chan="$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' rust-toolchain.toml 2>/dev/null | head -n 1)"
+  pf_tool=0
+  if [ -z "$pf_chan" ]; then
+    pf_bad "rust-toolchain.toml channel not readable"
+  elif command -v rustup >/dev/null 2>&1; then
+    if rustup toolchain list 2>/dev/null | grep -q "^${pf_chan}\([-[:space:]]\|\$\)"; then
+      pf_tool=1
+      pf_comp="$(rustup component list --installed --toolchain "$pf_chan" 2>/dev/null || true)"
+      for pf_c in clippy rustfmt; do
+        printf '%s\n' "$pf_comp" | grep -q "^${pf_c}" || { pf_tool=0; pf_bad "rust $pf_chan component $pf_c"; }
+      done
+      [ "$pf_tool" = 0 ] || pf_ok "rust toolchain $pf_chan with clippy and rustfmt"
+    else
+      pf_bad "rust toolchain $pf_chan (rustup toolchain install $pf_chan)"
+    fi
+  elif command -v rustc >/dev/null 2>&1 && rustc --version 2>/dev/null | grep -q "^rustc ${pf_chan} "; then
+    pf_tool=1; pf_ok "rust toolchain $pf_chan (no rustup; clippy/rustfmt not verified)"
+  else
+    pf_bad "rust toolchain $pf_chan"
+  fi
+  pf_deps=0
+  if [ "$pf_tool" = 1 ]; then
+    # Only run with the pinned toolchain installed, so rustup never auto-installs.
+    if RUSTUP_TOOLCHAIN="$pf_chan" cargo fetch --locked --offline >/dev/null 2>&1; then
+      pf_deps=1; pf_ok "crate dependencies (cargo fetch --locked --offline)"
+    else
+      pf_bad "crate dependencies (cargo fetch --locked, then rerun)"
+    fi
+  else
+    pf_bad "crate dependencies (not checked: pinned toolchain missing)"
+  fi
+  echo "runnable check.sh modes:"
+  pf_mode() { if [ "$2" = 1 ]; then echo "  yes  $1"; else echo "  no   $1"; fi; }
+  pf_native=0; [ "$pf_tool" = 1 ] && [ "$pf_deps" = 1 ] && pf_native=1
+  pf_both=0; [ "$pf_native" = 1 ] && [ "$pf_shellcheck" = 1 ] && pf_both=1
+  # Lint also runs the oms-migrate check through Cargo, so it needs the native build.
+  pf_mode "--lint-only (shellcheck + native build)" "$pf_both"
+  pf_mode "--focused-only (native build)" "$pf_native"
+  pf_mode "--affected, --quick, full (default gate)" "$pf_both"
+  [ "$pf_missing" = 0 ] || { echo "preflight: prerequisites missing" >&2; exit 1; }
+  echo "preflight: ok"
+  exit 0
+fi
+
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 unset TMUX TMUX_PANE OMS_STATE_REPO OMS_PLAN_LEASE_ID OMS_TASK_ID OMS_ATTEMPT_ID
 
@@ -79,6 +134,7 @@ skill manifest, doc references) then focused smoke suites and Rust tests.
   invariants            Run fast repository-wide pre-land invariants.
   --shard I/N           Accepted compatibility flag.
   --list-stages         Print selected stage names without running them.
+  --preflight           Report-only: missing shellcheck/toolchain/crates; exit 1 if any.
   --quick               Run changed-file checks plus invariants.
   --affected            Plan and verify affected scope (--changed-from/--changed-to).
   --print-affected-mode Print affected or full after planning and exit.
@@ -190,6 +246,7 @@ RUN_FOCUSED=0
 RUN_RUST=0
 RUN_INVARIANTS=0
 RUN_QUICK=0
+RUN_DOCS=0
 RUN_AFFECTED=0
 case "$MODE" in
   full) [ "$SKIP_LINT" = 1 ] || RUN_LINT=1; RUN_FOCUSED=1; RUN_RUST=1 ;;
@@ -309,11 +366,8 @@ is_provider_cli() {
 }
 hide_provider_clis() {
   local rest="$PATH:" dir entry base hit shadow count=0 filtered=""
-  CHECK_PROVIDER_CLIS="opencode opencode2 $(
-    # shellcheck source=scripts/lib/provider-registry.sh
-    . "$ROOT/scripts/lib/provider-registry.sh"
-    for name in $(oms_provider_supported_names); do oms_provider_binary "$name"; done | tr '\n' ' '
-  )"
+  # Binary names of the supported provider CLIs (native provider registry).
+  CHECK_PROVIDER_CLIS="codex claude agy cursor-agent grok gemini qwen opencode opencode2 dsh vibe pi copilot droid aider muse kimi kiro-cli cn goose cline kilo openhands auggie"
   while [ -n "$rest" ]; do
     dir="${rest%%:*}"; rest="${rest#*:}"; hit=0
     if [ -n "$dir" ] && [ -d "$dir" ]; then
@@ -374,7 +428,9 @@ prepare_affected_gate() {
   else
     AFFECTED_MODE=full; AFFECTED_REASONS="changed-code-full"
   fi
-  if [ "$AFFECTED_MODE" = affected ]; then
+  if [ "$AFFECTED_REASONS" = documentation-only ]; then
+    RUN_DOCS=1
+  elif [ "$AFFECTED_MODE" = affected ]; then
     RUN_QUICK=1
   elif [ "$CI_PARITY" = 1 ]; then
     [ "$SKIP_LINT" = 1 ] || RUN_LINT=1
@@ -427,6 +483,11 @@ if [ "$RUN_RUST" = 1 ]; then
     cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline &&
       cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
   '
+fi
+
+# Ordinary documentation needs reference checks only: no Cargo, no suite run.
+if [ "$RUN_DOCS" = 1 ]; then
+  stage doc-references bash tests/source-distribution-smoke.sh --docs-only
 fi
 
 if [ "$RUN_INVARIANTS" = 1 ] || [ "$RUN_QUICK" = 1 ]; then

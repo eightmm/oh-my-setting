@@ -1205,6 +1205,27 @@ impl oms_command_state::HostServices for ControlServices<'_> {
     fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
         self
     }
+    fn runtime_envelope(
+        &self,
+        repo: &Path,
+        interrupted: &AtomicBool,
+    ) -> Option<oms_command_state::Result<oms_command_state::Value>> {
+        Some((|| {
+            let services =
+                crate::services_runtime::RuntimeServices::new(self.interrupted, &self.source)
+                    .map_err(|e| state_err(2, e))?;
+            let roots = oms_runtime::Services::resolve_roots(&services, repo, repo.as_os_str())?;
+            let mut runtime = oms_runtime::storage::Runtime::open(
+                &roots.execution_repo,
+                &roots.state_repo,
+                &self.source,
+                &services,
+                interrupted,
+            )?;
+            runtime.cwd = repo.to_path_buf();
+            oms_runtime::projection::envelope(&runtime)
+        })())
+    }
     /// Scoped to the exact repository (`--repo`) and run with the full native
     /// task services, so the state projection reads the same reference
     /// ownership the task command itself would use.

@@ -5,6 +5,7 @@ use oms_command_lifecycle::{
     apply_release_with_services, run_with_services,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
     ffi::OsString,
@@ -141,6 +142,52 @@ fn native_only(value: &Value) {
             "retired runtime in configuration: {raw}"
         );
     }
+}
+
+fn bundled_skill_manifest_checks(root: &Path, host: &NativeServices) {
+    let source = root.join("bundled-skill-catalog");
+    let directory = source.join("custom-skills/oms-gated");
+    fs::create_dir_all(&directory).unwrap();
+    let mut manifest = json!({"skills":[{
+        "name":"oms-gated", "source":"custom-skills/oms-gated", "enabled":true,
+        "requires":[source.join("missing-host-tool")]
+    }]});
+    let manifest_path = source.join("skills.manifest.json");
+    write(&manifest_path, &manifest);
+    let valid = "---\nname: oms-gated\ndescription: Fixture skill for checking bundled validation before host selection.\n---\nplain body\n";
+    fs::write(directory.join("SKILL.md"), valid).unwrap();
+    assert_eq!(
+        String::from_utf8(success(call("install-skills", &[], &source, host)))
+            .unwrap()
+            .trim(),
+        "skills: 0 enabled sources validated"
+    );
+    // An unavailable host requirement must not hide malformed bundled content.
+    for (body, expected) in [
+        ("no frontmatter\n".to_owned(), "missing frontmatter"),
+        (
+            format!("{valid}[missing](references/missing.md)\n"),
+            "missing local reference",
+        ),
+    ] {
+        fs::write(directory.join("SKILL.md"), body).unwrap();
+        let out = call("install-skills", &[], &source, host);
+        assert_eq!(out.0, 2);
+        assert!(String::from_utf8_lossy(&out.2).contains(expected));
+    }
+    manifest["skills"][0]["enabled"] = json!(false);
+    write(&manifest_path, &manifest);
+    success(call("install-skills", &[], &source, host));
+    fs::write(directory.join("SKILL.md"), valid).unwrap();
+    manifest["skills"][0]["enabled"] = json!(true);
+    manifest["skills"][0]["name"] = json!("oms-other");
+    write(&manifest_path, &manifest);
+    let out = call("install-skills", &[], &source, host);
+    assert_eq!(out.0, 2);
+    assert!(
+        String::from_utf8_lossy(&out.2).contains("skill manifest name must match source directory")
+    );
+    assert!(!source.join(".oms").exists());
 }
 
 struct ColdUpdateHost {
@@ -1313,6 +1360,174 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     }
     fs::remove_file(releases).unwrap();
     assert_eq!(fingerprint(), missing);
+
+    let capabilities = root.join("selected capabilities.json");
+    assert!(!capabilities.exists());
+    let inspect_selection = || -> Value {
+        let raw = success(call("status", &["--json"], source, host));
+        assert!(!String::from_utf8_lossy(&raw).contains(hidden));
+        assert!(!String::from_utf8_lossy(&raw).contains("selected capabilities.json"));
+        serde_json::from_slice::<Value>(&raw).unwrap()["capability_selection"].clone()
+    };
+    let selection = inspect_selection();
+    assert_eq!(selection["status"], "missing");
+    assert_eq!(selection["source"], "environment override");
+    assert_eq!(selection["runtime"], "unknown");
+    assert_eq!(selection["fingerprint"], "excluded from schema 1");
+    let saved = root.join("fingerprint.json");
+    write(&saved, &missing);
+    let mut selected = json!({"schema":1,"requested":["core"],
+        "primary_provider":"codex","allow_missing":false,"private":hidden});
+    write(&capabilities, &selected);
+    let before = inspect_selection();
+    assert_eq!(before["status"], "recorded");
+    assert_eq!(before["requested"], json!(["core"]));
+    assert_eq!(before["primary_provider"], "codex");
+    assert_eq!(before["allow_missing"], false);
+    selected["requested"] = json!(["core", "research"]);
+    selected["primary_provider"] = json!("agy");
+    selected["allow_missing"] = json!(true);
+    write(&capabilities, &selected);
+    let after = inspect_selection();
+    assert_ne!(after, before);
+    assert_eq!(after["requested"], json!(["core", "research"]));
+    assert_eq!(after["primary_provider"], "agy");
+    assert_eq!(after["allow_missing"], true);
+    assert_eq!(after["runtime"], "unknown");
+    assert_eq!(
+        fingerprint(),
+        missing,
+        "schema-1 identity remains compatible"
+    );
+    let compared: Value = serde_json::from_slice(&success(call(
+        "status",
+        &["--compare", saved.to_str().unwrap(), "--json"],
+        source,
+        host,
+    )))
+    .unwrap();
+    assert_eq!(compared, json!({"same":true,"differences":[]}));
+    let report = call("doctor", &["--json", "--no-model-doctor"], source, host);
+    let report: Value = serde_json::from_slice(&report.1).unwrap();
+    let selection = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["section"] == "capability selection")
+        .unwrap();
+    assert_eq!(selection["selection"], after);
+    write(
+        &capabilities,
+        &json!({"schema":1,"plan":{"requested":["hpc"],"primary_provider":"claude"}}),
+    );
+    assert_eq!(inspect_selection()["requested"], json!(["hpc"]));
+    for invalid in [
+        json!({"schema":1,"requested":[]}),
+        json!({"schema":1,"requested":["x".repeat(65)]}),
+        json!({"schema":1,"requested":["core"],"allow_missing":"yes"}),
+    ] {
+        write(&capabilities, &invalid);
+        assert_eq!(inspect_selection()["status"], "invalid");
+    }
+    fs::write(&capabilities, format!("{{invalid {hidden}")).unwrap();
+    assert_eq!(inspect_selection()["status"], "invalid");
+    let out = call("doctor", &["--json", "--no-model-doctor"], source, host);
+    let report: Value = serde_json::from_slice(&out.1).unwrap();
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| { v["section"] == "capability selection" && v["level"] == "error" })
+    );
+    fs::remove_file(&capabilities).unwrap();
+    symlink(&saved, &capabilities).unwrap();
+    assert_eq!(inspect_selection()["status"], "unreadable");
+    fs::remove_file(capabilities).unwrap();
+    fs::remove_file(saved).unwrap();
+
+    let rules = source.join("rules/global-AGENTS.md");
+    fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    fs::write(&rules, b"managed rules\n").unwrap();
+    let manifest = source.join("skills.manifest.json");
+    write(&manifest, &json!({"skills":[]}));
+    let receipt = root.join("config/oh-my-setting/install.json");
+    write(
+        &receipt,
+        &json!({"schema":1,"source_root":source,"version":"1","commit":"a".repeat(40),
+            "channel":"edge","installed_at":"fixture","profile":"custom",
+            "plugin":{"name":"oh-my-setting","version":"1","sha256":"a".repeat(64)},
+            "native":{"frontdoor":source.join("frontdoor")}}),
+    );
+    let target = home.join(".codex/AGENTS.md");
+    fs::write(&target, b"managed rules\n").unwrap();
+    let marker = home.join(".codex/.AGENTS.md.oh-my-setting-managed.json");
+    write(
+        &marker,
+        &json!({"schema":1,"source":rules,"kind":"file",
+            "sha256":format!("{:x}", Sha256::digest(b"file\0managed rules\n"))}),
+    );
+    let inspect_target = || -> Value {
+        let before = snapshot(root);
+        let out = call("doctor", &["--json", "--no-model-doctor"], source, host);
+        let report: Value = serde_json::from_slice(&out.1).unwrap();
+        assert_eq!(snapshot(root), before, "doctor is read-only");
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["section"] == "managed inventory" && v["target"] == ".codex/AGENTS.md")
+            .unwrap()
+            .clone()
+    };
+    let current = inspect_target();
+    assert_eq!(current["owned"], true);
+    assert_eq!(current["source_freshness"], "current");
+    assert_eq!(current["level"], "ok");
+    fs::write(&rules, b"updated rules\n").unwrap();
+    let stale = inspect_target();
+    assert_eq!(stale["owned"], true);
+    assert_eq!(stale["source_freshness"], "stale");
+    assert_eq!(stale["level"], "error");
+    assert!(
+        stale["message"]
+            .as_str()
+            .unwrap()
+            .contains("oms doctor --repair")
+    );
+    fs::write(&target, b"local edit\n").unwrap();
+    let modified = inspect_target();
+    assert_eq!(modified["owned"], false);
+    assert_eq!(modified["source_freshness"], "not checked");
+    fs::write(&target, b"managed rules\n").unwrap();
+    fs::remove_file(&rules).unwrap();
+    symlink(&marker, &rules).unwrap();
+    let unsafe_source = inspect_target();
+    assert_eq!(unsafe_source["owned"], true);
+    assert_eq!(unsafe_source["source_freshness"], "unknown");
+    assert_eq!(unsafe_source["level"], "error");
+    fs::remove_file(&rules).unwrap();
+    assert_eq!(inspect_target()["source_freshness"], "unknown");
+    fs::write(&rules, b"managed rules\n").unwrap();
+    fs::remove_file(&target).unwrap();
+    symlink(&rules, &target).unwrap();
+    assert_eq!(inspect_target()["source_freshness"], "current");
+    let alias = source.join("rules-alias");
+    fs::hard_link(&rules, &alias).unwrap();
+    let unsafe_link_source = inspect_target();
+    assert_eq!(unsafe_link_source["owned"], true);
+    assert_eq!(unsafe_link_source["source_freshness"], "unknown");
+    assert_eq!(unsafe_link_source["level"], "error");
+    fs::remove_file(alias).unwrap();
+    fs::remove_file(&target).unwrap();
+    symlink(&marker, &target).unwrap();
+    let foreign = inspect_target();
+    assert_eq!(foreign["owned"], false);
+    assert_eq!(foreign["source_freshness"], "not checked");
+    for file in [target, marker, rules, manifest, receipt] {
+        fs::remove_file(file).unwrap();
+    }
+    fs::remove_dir(source.join("rules")).unwrap();
 }
 
 fn run_fixture_cron(root: &Path) -> String {
@@ -1545,6 +1760,7 @@ esac
     let source = root.join("source");
     let home = root.join("home");
     let host = NativeServices::default();
+    bundled_skill_manifest_checks(&root, &host);
     doctor_provider_capability_evidence(&source, &root, &host);
     doctor_configuration_diagnostics(&source, &root, &host);
     assert!(

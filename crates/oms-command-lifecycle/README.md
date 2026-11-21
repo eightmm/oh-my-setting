@@ -19,6 +19,14 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   account effects, retire owned interpreter trees, and optionally remove the
   checkout. Dirty purge needs `--purge-dirty`; unsafe root/ancestor paths and
   ambiguous ownership fail closed. Permission cleanup preserves unrelated grants.
+- `install-skills` (the existing `skill-manifest` check): statically validates
+  every enabled bundled skill before the host `requires` filter. Manifest and
+  frontmatter names must match the source directory; the existing native skill
+  validator checks portable frontmatter, body/bundle budgets, sensitive content
+  and the managed reference graph. Managed bundle/reference symlinks are refused.
+  No host command or model runs. The reported count retains its existing
+  meaning: enabled sources whose host requirements are available. Installation,
+  linking and doctor retain their existing host-based selection.
 - `install-codex-plugin`: inventory through the bounded Codex CLI, initial
   marketplace/plugin registration, moved-marketplace/version refresh, and full
   removal. Deleted previous checkouts do not prevent removal. Unmanaged TOML
@@ -73,6 +81,17 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   probe memoization. MCP cache keys include command, execution context, timeout,
   and binary identity; a memo contains validated tool hashes, not arbitrary
   provider output. Unknown model families cannot certify diversity.
+  Managed inventory separates ownership from current-source freshness: an
+  unchanged managed copy can be stale and repaired without becoming foreign.
+  Unsafe or unreadable source content leaves freshness unknown and fails the
+  diagnostic. Doctor findings and `status --json` separately project the saved
+  tool capability selection, with bounded fields and no receipt path or extra
+  contents. This is distinct from the installation component profile; malformed
+  or unreadable capability receipts are reported as such. Schema-1 fingerprints
+  and comparisons retain their existing identity, which excludes this selection.
+  Neither recorded capabilities nor matching installed files prove which
+  configuration a running provider selected; repository runtime profiles are
+  not included in installation identity.
 - Existing status, sandbox, residue, pins, scheduler, and tick behavior remains
   native. Optional external adapters must actually satisfy profile requirements;
   their absence is accepted only by explicit allow-missing policy.
@@ -227,4 +246,5 @@ retain minimal shell launchers that execute native commands directly.
 
 Provider CLI compatibility, real Linux/macOS installation, live surface/model
 probes, signal/crash recovery, and cross-process contention require host
-verification. No dependency, lockfile, or external dispatcher changes are made.
+verification. Bundled-skill validation reuses the existing providers-skills crate
+through a workspace path dependency; it introduces no external runtime.
