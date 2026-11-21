@@ -2,9 +2,11 @@
 
 **상태: 일부 정확성 수정 구현, 나머지는 DESIGN ONLY.** DR-01의 후보 보존은 현재
 `journal distill`에 연결됐다. 기존 SQLite의 active decision/blocker 행에서 후보를
-다시 계산하고, 기존 `distill.json`의 완료 fingerprint로 중복을 막는다. 5개 cap의 초과분과
-append 실패는 다음 pass에 남고, 늦게 들어온 사건 및 날짜를 나눠 기록한 blocker도
-대상이 된다. Legacy cursor는 관측 정보로 유지하며 기존 memory 내용과 먼저 중복 검사한다.
+다시 계산하고, 기존 `distill.json`의 완료 fingerprint로 중복을 막는다. 한 pass에서 최대
+5개를 시도하며 마지막 시도 후보 다음부터 이어 확인한다. 계속 거절되는 후보가 있어도
+뒤의 후보를 처리하고, 실패한 후보는 목록을 한 바퀴 돈 뒤 다시 시도한다. 늦게 들어온
+사건과 날짜를 나눠 기록한 blocker도 대상이다. Legacy cursor는 관측 정보로 유지하며
+기존 memory 내용과 먼저 중복 검사한다.
 한 pass의 annotation 입력은 16,384개, 완료 receipt는 4,096개, receipt 파일은 512 KiB로
 제한한다. 한도를 초과하면 명시적으로 실패하며 원본·cursor를 소비하거나 일부 완료로
 표시하지 않는다. 이 제한의 확대·압축은 별도 측정 후 결정한다. 원문 전체 대신 indexed

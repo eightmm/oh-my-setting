@@ -1391,7 +1391,7 @@ impl JournalStore {
             })
             .transpose()?;
         let mut completed = BTreeSet::new();
-        if let Some(state) = &state {
+        let last_attempted_candidate = if let Some(state) = &state {
             if state.at("schema_version").as_u64() != Some(1) {
                 return Err("unsupported distill receipt schema".into());
             }
@@ -1405,14 +1405,16 @@ impl JournalStore {
                     );
                 }
                 for key in keys {
-                    let key = key.as_str().ok_or("invalid distill candidate identity")?;
-                    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        return Err("invalid distill candidate identity".into());
-                    }
-                    completed.insert(key);
+                    completed.insert(distill_receipt_key(key)?);
                 }
             }
-        }
+            state
+                .get("last_attempted_candidate")
+                .map(distill_receipt_key)
+                .transpose()?
+        } else {
+            None
+        };
 
         // Occurrence time is not ingestion order: late events and daily blocker
         // observations remain eligible. Only annotation rows are revisited, with
@@ -1446,9 +1448,17 @@ impl JournalStore {
         )?
         .map(|b| distill_normalized_text(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
+        let mut candidates = distill_candidates(&pending);
+        // Rotate before deduplication so a completed candidate can still mark the
+        // prior batch boundary. A refusal advances the scan, not completion.
+        if let Some(key) = last_attempted_candidate
+            && let Some(position) = candidates.iter().position(|candidate| candidate.key == key)
+        {
+            candidates.rotate_left(position + 1);
+        }
         let mut fresh = Vec::new();
         let mut deduped = 0;
-        for candidate in distill_candidates(&pending) {
+        for candidate in candidates {
             if completed.contains(&candidate.key) {
                 continue;
             }
@@ -1462,8 +1472,8 @@ impl JournalStore {
                 fresh.push(candidate);
             }
         }
-        let dropped = fresh.len().saturating_sub(5);
-        fresh.truncate(5);
+        let dropped = fresh.len().saturating_sub(MAX_DISTILL_ATTEMPTS);
+        fresh.truncate(MAX_DISTILL_ATTEMPTS);
         if completed.len() + fresh.len() > MAX_DISTILL_RECEIPTS {
             return Err("distill candidate receipt limit exceeded; no input consumed".into());
         }
@@ -1478,6 +1488,10 @@ impl JournalStore {
             });
         }
 
+        let next_candidate_cursor = fresh
+            .last()
+            .filter(|_| dropped > 0)
+            .map(|candidate| candidate.key.clone());
         let mut promoted_lessons = Vec::new();
         let mut skipped_refused = Vec::new();
         if !fresh.is_empty() {
@@ -1518,6 +1532,9 @@ impl JournalStore {
             "pending_candidates".into(),
             crate::json::json!(dropped + skipped_refused.len()),
         );
+        if let Some(key) = next_candidate_cursor {
+            state_obj.insert("last_attempted_candidate".into(), crate::json::json!(key));
+        }
         state_obj.insert(
             "last_run_date".into(),
             Value::String(today_str.as_str().into()),
@@ -1939,6 +1956,14 @@ fn distill_normalized_text(text: &str) -> String {
 
 const MAX_DISTILL_INPUTS: usize = 16_384;
 const MAX_DISTILL_RECEIPTS: usize = 4_096;
+const MAX_DISTILL_ATTEMPTS: usize = 5;
+
+fn distill_receipt_key(value: &Value) -> Result<String, String> {
+    value
+        .as_str()
+        .filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| "invalid distill candidate identity".into())
+}
 
 struct DistillCandidate {
     key: String,
