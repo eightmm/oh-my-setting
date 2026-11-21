@@ -368,3 +368,28 @@ Main 소유 상수, MCP `tools.json`의 도구와 annotation, doctor의 provider
 미확인 범위: 각 provider CLI의 실제 실행, 훅이 설치된 뒤 각 CLI가 실제로 호출하는지, macOS
 sandbox 경로, ACP·A2A의 schema와 SDK. 작성 환경에 고정 toolchain이 없어 Rust 시험을
 실행하지 않았다.
+
+## 18. 비용 관점에서 다시 본 순서 (2026-11-21 보강)
+
+협업과 위임의 token 비용을 기준으로 16절의 순서를 다시 본 결과다. 새 패킷이나 새
+계측을 더하지 않는다. 필요한 값은 이미 기록되고 있으므로 설치된 저장소에서 먼저 읽는다.
+
+| 먼저 읽을 값 | 기존 출처 | 값에 따른 판단 |
+|---|---|---|
+| role별 admit당 token, admit되지 않은 위임 token | `oms artifact-index telemetry --by role` | write role의 미admit 비중이 높으면 Main의 위임 기준 문구를 검토한다. 낮으면 문구를 바꾸지 않는다 |
+| role별 cache-read share | 같은 명령 (`OMS_TELEMETRY_CACHE_MIN_PCT` 경고) | 낮은 role은 호출마다 새 세션을 여는 경로다. AH-03/04의 세션 재개가 비용 근거를 얻는다 |
+| 반복 실패 위임, 세션별 훅 주입 byte, 큰 저장 출력 | `oms artifact-index telemetry --waste` | 상위 항목이 가리키는 brief·훅·출력 하나를 고친다. 일괄 축소를 하지 않는다 |
+| MCP 도구 정의 크기 | `oms doctor --mcp --probe-tools NAME`, [tools.json](../crates/oms-mcp-server/src/tools.json) | 32개 정의는 compact JSON으로 약 27 KB다. client가 전부를 세션에 싣는지 provider별로 확인한 뒤에만 subset을 검토한다 |
+
+위 값은 provider가 보고한 수치이며 가격이나 승인 근거가 아니다. 수치를 읽기 전에는
+위임 기본값, council 좌석, 도구 설명을 비용 명목으로 바꾸지 않는다.
+
+비용을 기준으로 삼으면 AH-03과 AH-04가 AH-01·AH-10보다 앞선다. 사용량 보고와 세션
+재개가 없는 transport는 tier에 넣어 비교할 수 없고, 호출마다 cache 없이 저장소를 다시
+읽기 때문이다. 순서는 **기존 값 읽기 → AH-08 → AH-03(사용량·재개 message 먼저) → AH-04
+→ 나머지**다. 실행 비교와 작업별 성과 계약은 [후속 연구](RESEARCH-FOLLOWUPS.md)의
+RF-06 owner가 다루며 이 문서에서 복제하지 않는다.
+
+정정 기록: 이 절을 쓰면서 "admit된 patch당 token" 지표가 없다고 보고 낭비 뷰에 같은
+값을 추가하는 PR을 열었으나, `--by role`이 이미 `tokens_per_admitted`를 보고하고 있어
+닫았다. 새 지표를 제안하기 전에 [telemetry 문서](COMPONENTS.md)의 기존 값을 확인한다.
