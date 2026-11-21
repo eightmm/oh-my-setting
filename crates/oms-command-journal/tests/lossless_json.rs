@@ -846,6 +846,299 @@ fn distill_rotates_past_five_refused_candidates_without_consuming_them() {
     assert_eq!(fs::read(&receipt).unwrap(), malformed);
 }
 
+fn native_memory_batch(
+    repo: &std::path::Path,
+    batch: &str,
+    proposals: &[oms_command_journal::MemoryProposal],
+) -> Result<oms_command_journal::MemoryBatchReport, String> {
+    use oms_command_journal::{MemoryBatchOutcome, MemoryBatchReport};
+    use oms_command_memory::{JournalProposal, JournalPublication};
+    let notes: Vec<_> = proposals
+        .iter()
+        .map(|p| JournalProposal {
+            key: &p.key,
+            source_sha256: &p.source_sha256,
+            body: &p.lesson,
+            source_current: p.source_current,
+        })
+        .collect();
+    let result = oms_command_memory::append_journal_batch(
+        repo,
+        batch,
+        &notes,
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
+    Ok(MemoryBatchReport {
+        outcomes: proposals
+            .iter()
+            .zip(result.outcomes)
+            .map(|(p, outcome)| {
+                (
+                    p.key.clone(),
+                    match outcome {
+                        JournalPublication::Appended(_) => MemoryBatchOutcome::Appended,
+                        JournalPublication::AlreadyPresent(_) => MemoryBatchOutcome::AlreadyPresent,
+                        JournalPublication::Refused(reason) => MemoryBatchOutcome::Refused(reason),
+                    },
+                )
+            })
+            .collect(),
+        warnings: String::from_utf8_lossy(&result.warnings)
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+    })
+}
+
+#[test]
+fn distill_reconciles_interrupted_native_batches_without_rebasing_or_stale_appends() {
+    use std::cell::RefCell;
+    use std::sync::atomic::AtomicBool;
+    for published_before_interrupt in [false, true] {
+        let scratch = Scratch::new();
+        let now = parse_rfc3339_utc("2026-07-31T03:00:00Z").unwrap();
+        let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+        for day in [28, 29] {
+            store.record_event(&parse(&format!(r#"{{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-{day}T00:00:00Z","source":{{"type":"manual","id":"snapshot-{day}"}},"blocker":"Use exact retry snapshots"}}"#)), now).unwrap();
+        }
+        for n in 0..2 {
+            store.record_event(&parse(&format!(r#"{{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T00:00:0{n}Z","source":{{"type":"manual","id":"snapshot-decision-{n}"}},"decision":"Preserve publication boundary {n}"}}"#)), now).unwrap();
+        }
+        let receipt = store.root.join("distill.json");
+        let first_batch = RefCell::new(String::new());
+        let stop_before_receipt =
+            |repo: &std::path::Path,
+             batch: &str,
+             proposals: &[oms_command_journal::MemoryProposal]| {
+                assert!(
+                    receipt.exists(),
+                    "the batch must precede source publication"
+                );
+                *first_batch.borrow_mut() = batch.into();
+                if published_before_interrupt {
+                    let result = native_memory_batch(repo, batch, proposals)?;
+                    assert_eq!(result.outcomes.len(), 3);
+                }
+                Err("fixture interruption before completion receipt".into())
+            };
+        assert!(
+            store
+                .distill_batch(false, Some(&stop_before_receipt), now)
+                .unwrap_err()
+                .contains("fixture interruption")
+        );
+        let prepared = fs::read(&receipt).unwrap();
+        assert_eq!(store.distill_batch(true, None, now).unwrap().promoted, 3);
+        assert_eq!(
+            fs::read(&receipt).unwrap(),
+            prepared,
+            "preview must not mutate the prepared batch"
+        );
+        assert!(store.distill_due_today(now).unwrap());
+
+        let mut invalid: serde_json::Value = serde_json::from_slice(&prepared).unwrap();
+        invalid["prepared_batch"]["project_id"] = "another-project".into();
+        fs::write(&receipt, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(
+            store
+                .distill_batch(false, Some(&native_memory_batch), now)
+                .unwrap_err()
+                .contains("scope or policy")
+        );
+        invalid = serde_json::from_slice(&prepared).unwrap();
+        invalid["prepared_batch"]["proposals"][0]["lesson"] = "unbound replacement".into();
+        fs::write(&receipt, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(
+            store
+                .distill_batch(false, Some(&native_memory_batch), now)
+                .unwrap_err()
+                .contains("digest mismatch")
+        );
+        fs::write(&receipt, &prepared).unwrap();
+
+        if published_before_interrupt {
+            let source = scratch.0.join(".oms/memory/shared.md");
+            let original = fs::read_to_string(&source).unwrap();
+            let snapshot: serde_json::Value = serde_json::from_slice(&prepared).unwrap();
+            let digest = snapshot["prepared_batch"]["proposals"][0]["source_sha256"]
+                .as_str()
+                .unwrap();
+            let key = snapshot["prepared_batch"]["proposals"][0]["key"]
+                .as_str()
+                .unwrap();
+            let conflicting = original
+                .replacen(
+                    &format!("journal_source_sha256: {digest}"),
+                    &format!("journal_source_sha256: {}", "0".repeat(64)),
+                    1,
+                )
+                .replacen(
+                    &format!("journal_candidate: {key}"),
+                    &format!("  journal_candidate : {key}"),
+                    1,
+                );
+            assert_ne!(conflicting, original);
+            fs::write(&source, conflicting.as_bytes()).unwrap();
+            for attempt in 0..2 {
+                let collision = store
+                    .distill_batch(false, Some(&native_memory_batch), now)
+                    .unwrap();
+                assert_eq!(collision.promoted, 0);
+                assert_eq!(
+                    collision.skipped_refused.len(),
+                    1,
+                    "keyed collision must survive the next fresh pass (attempt {attempt})"
+                );
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+                assert_eq!(receipt["completed_candidates"].as_array().unwrap().len(), 2);
+            }
+            let legacy = |_: &std::path::Path,
+                          _: &str,
+                          _: &str|
+             -> Result<oms_command_journal::MemoryAppendOutcome, String> {
+                panic!("legacy callback must not bypass keyed reconciliation");
+            };
+            let legacy_report = store.distill(false, Some(&legacy), now).unwrap();
+            assert_eq!(legacy_report.skipped_refused.len(), 1);
+            assert_eq!(legacy_report.deduped, 0);
+            assert_eq!(fs::read_to_string(&source).unwrap(), conflicting);
+            fs::write(&source, original).unwrap();
+            fs::write(&receipt, &prepared).unwrap();
+        }
+
+        let (code, _, error) = oms_command_memory::append_project_note(
+            &scratch.0,
+            "manual",
+            "note",
+            "An independent manual record",
+            &AtomicBool::new(false),
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+        let source = scratch.0.join(".oms/memory/shared.md");
+        let before = fs::read(&source).unwrap();
+        store.record_event(&parse(r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-30T00:00:00Z","source":{"type":"manual","id":"snapshot-30"},"blocker":"Use exact retry snapshots"}"#), now).unwrap();
+        drop(store);
+        let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+        let retry = |repo: &std::path::Path,
+                     batch: &str,
+                     proposals: &[oms_command_journal::MemoryProposal]| {
+            assert_eq!(
+                batch,
+                first_batch.borrow().as_str(),
+                "own appends and unrelated writes must not create another batch"
+            );
+            let old = proposals
+                .iter()
+                .find(|p| p.lesson.contains("blocker seen"))
+                .unwrap();
+            assert!(old.lesson.contains("blocker seen 2d"));
+            assert!(
+                !old.source_current,
+                "new source evidence must be revalidated"
+            );
+            native_memory_batch(repo, batch, proposals)
+        };
+        let report = store.distill_batch(false, Some(&retry), now).unwrap();
+        if published_before_interrupt {
+            assert_eq!(
+                (
+                    report.promoted,
+                    report.deduped,
+                    report.skipped_refused.len()
+                ),
+                (0, 3, 0)
+            );
+            assert_eq!(fs::read(&source).unwrap(), before);
+        } else {
+            assert_eq!(
+                (
+                    report.promoted,
+                    report.deduped,
+                    report.skipped_refused.len()
+                ),
+                (2, 0, 1)
+            );
+            assert!(report.warnings.iter().any(|w| w.contains("source changed")));
+            let next = store
+                .distill_batch(false, Some(&native_memory_batch), now)
+                .unwrap();
+            assert_eq!(next.promoted, 1);
+            assert!(next.lessons[0].contains("blocker seen 3d"));
+        }
+        assert!(fs::read(&source).unwrap().starts_with(&before));
+        assert_eq!(store.distill_batch(true, None, now).unwrap().promoted, 0);
+        let (code, out, err) = oms_command_memory::run_with_source(
+            &["search".into(), "journal-distill".into(), "--json".into()],
+            &scratch.0,
+            &scratch.0,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(String::from_utf8(out).unwrap().lines().count(), 3);
+        let final_receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+        assert!(final_receipt.get("prepared_batch").is_none());
+        assert_eq!(
+            final_receipt["completed_candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+}
+
+#[test]
+fn distill_legacy_callback_reconciles_a_note_published_before_interruption() {
+    use oms_command_journal::MemoryAppendOutcome;
+    let scratch = Scratch::new();
+    let now = parse_rfc3339_utc("2026-07-31T03:00:00Z").unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    for n in 0..2 {
+        store.record_event(&parse(&format!(r#"{{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T00:00:0{n}Z","source":{{"type":"manual","id":"legacy-retry-{n}"}},"decision":"Keep legacy lesson {n}"}}"#)), now).unwrap();
+    }
+    let append = |repo: &std::path::Path, agent: &str, lesson: &str| {
+        let (code, _, error) = oms_command_memory::append_project_note(
+            repo,
+            agent,
+            "journal",
+            lesson,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        if code == 0 {
+            Ok(MemoryAppendOutcome::Appended)
+        } else {
+            Err(String::from_utf8_lossy(&error).into_owned())
+        }
+    };
+    let interrupted = |repo: &std::path::Path,
+                       agent: &str,
+                       lesson: &str|
+     -> Result<MemoryAppendOutcome, String> {
+        append(repo, agent, lesson)?;
+        panic!("fixture interruption after the first legacy source append");
+    };
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.distill(
+            false,
+            Some(&interrupted),
+            now
+        )))
+        .is_err()
+    );
+    let before = fs::read(scratch.0.join(".oms/memory/shared.md")).unwrap();
+    let report = store.distill(false, Some(&append), now).unwrap();
+    assert_eq!((report.promoted, report.deduped), (1, 1));
+    let after = fs::read(scratch.0.join(".oms/memory/shared.md")).unwrap();
+    assert!(after.starts_with(&before));
+    let text = String::from_utf8(after).unwrap();
+    for n in 0..2 {
+        assert_eq!(text.matches(&format!("Keep legacy lesson {n}")).count(), 1);
+    }
+    assert_eq!(store.distill(true, None, now).unwrap().promoted, 0);
+}
+
 #[test]
 fn cached_cold_archives_are_not_read_until_their_stat_stamp_changes() {
     use std::os::unix::fs::MetadataExt;

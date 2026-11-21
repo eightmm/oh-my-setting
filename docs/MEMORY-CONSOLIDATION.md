@@ -12,7 +12,18 @@
 표시하지 않는다. 이 제한의 확대·압축은 별도 측정 후 결정한다. 원문 전체 대신 indexed
 annotation을 다시 읽는 정확성 수정이며 I/O 절감이나 semantic 품질 개선을 주장하지 않는다.
 후보에 source event ID와 검증되지 않은 기록이라는 설명을 붙이지만 기존 memory review
-eligibility는 유지한다. 아래 DR-01의 batch 파생 갱신과 DR-02~06은 계속 구현 명세다.
+eligibility는 유지한다. Native writer는 같은 `distill.json`에 project·policy·입력 digest·
+기준 memory digest와 최대 5개 준비 후보를 먼저 고정한다. 재시도는 이 batch identity와
+본문을 유지하며, source가 바뀐 후보는 기존 publication 확인만 하고 새로 append하지 않는다.
+후보 key·source digest·본문 digest는 memory 원문과 함께 한 번에 atomic publication된다.
+동일 key의 다른 payload는 거절하고, retired/redacted 원문도 재시도 중 다시 만들지 않는다.
+Source lock을 해제한 뒤 batch당 compact/index refresh를 각각 한 번 수행한다. 파생 갱신
+실패는 durable 원문과 구분한 warning으로 반환하며 재시도에서 파생 갱신을 다시 수행한다.
+`oms agent-memory redact`는 journal 원문이나 미완료 준비 snapshot까지 지우지 않는다. Keyed
+재시도가 redacted memory 본문을 복원하지 않는 보장과 store 간 삭제 전파는 별개다.
+Legacy callback의 원문 중복 검사와 기존 receipt 읽기도 유지한다. 이 보장은 deterministic
+journal 경로의 DR-01 구현이며 I/O 개선 수치나 semantic producer 완성을 뜻하지 않는다.
+DR-02~06은 계속 구현 명세다.
 이 문서 병합 자체로 모델 호출,
 자동화, memory 승격, 새 CLI/schema/default가 활성화되지 않는다. 아래 필드 이름은
 설계상의 의미이며 공개 API가 아니다. 실제 착수 상태는
@@ -49,7 +60,7 @@ Claude/Codex/Antigravity 작업에서 재사용하는 것이다. 기존
 | 파일 원본, SQLite FTS5, scope/path-aware recall, provenance와 citation 검사가 있다. | [memory README](../crates/oms-command-memory/README.md) | 여러 사건의 의미 관계와 실패·복구·결과 연결 |
 | 자동 생성 후보는 review acceptance가 있어야 context에 들어간다. 수동 기록은 별도 규칙이다. | [review.rs](../crates/oms-command-memory/src/review.rs), [#250](https://github.com/eightmm/oh-my-setting/pull/250) | 기존 eligibility를 유지하면서 사실 근거와 검증 범위를 별도로 표현 |
 | distill은 decision 추출과 동일한 normalized blocker의 서로 다른 날짜 집계다. | [journal store](../crates/oms-command-journal/src/store.rs), `distill`, `distill_candidates` | 다른 표현의 반복 문제, 해결 결과, 모순을 해석하는 producer |
-| compact는 eligible 항목의 첫 줄 240자와 최신 40줄을 사용한다. append 후 compact와 DB sync가 반복된다. | [memory store](../crates/oms-command-memory/src/store.rs), `summary_body`, `compact`, `after_write` | 의미를 고려한 선택과 여러 변경의 일괄 파생 갱신 |
+| compact는 eligible 항목의 첫 줄 240자와 최신 40줄을 사용한다. Native journal batch는 원문 publication 뒤 compact와 DB sync를 각각 한 번 호출한다. | [memory store](../crates/oms-command-memory/src/store.rs), `summary_body`, `compact`, `after_write`; [journal batch](../crates/oms-command-memory/src/batch.rs) | 의미를 고려한 선택; 일반 단건 append/import는 기존 경계 유지 |
 | supersede/retire/redact, hygiene, promote/graduate와 source lock/atomic publication이 있다. | 같은 memory README/store | 새 명령군 대신 기존 상태 전이와 쓰기 경계에 변경 후보 연결 |
 | journal capture, resume/handoff, task-context recall, skill-forge가 있다. | [state-memory](../custom-skills/oms-agent-harness/references/state-memory.md) | 교훈에서 검증된 절차로의 연결과 결과 피드백 |
 | 제한된 opt-in feedback repair consumer가 구현되어 있다. | [#238](https://github.com/eightmm/oh-my-setting/pull/238), [#239](https://github.com/eightmm/oh-my-setting/pull/239) | repair engine을 재구현하지 않고 그 결과를 경험의 근거로 사용 |
@@ -60,8 +71,9 @@ Claude/Codex/Antigravity 작업에서 재사용하는 것이다. 기존
    marker를 전진시킨다. 초과 후보가 다음 pass에 남는지 canonical fixture로 확인한다.
 2. blocker 반복은 증분 조회 범위 안에서 서로 다른 날짜를 요구한다. 일별 실행에서도
    이전 날짜의 관측과 연결되는지 확인한다.
-3. 여러 후보의 append마다 파생 compact/sync가 반복된다. 실제 write 횟수·bytes·지연을
-   측정한 뒤 batch 범위와 갱신 방식을 결정한다. Rust 전환만으로 I/O 절감을 추정하지 않는다.
+3. 조사 당시 여러 후보의 append마다 파생 compact/sync가 반복됐다. 현재 native journal
+   batch는 이를 모으지만, write 횟수·bytes·지연의 개선 수치는 별도 측정한다.
+   Rust 전환이나 refresh 호출 수만으로 I/O 절감을 추정하지 않는다.
 
 위 항목의 실행 재현과 성능 측정은 이 명세 PR의 결과가 아니다.
 조사 시점 [#258](https://github.com/eightmm/oh-my-setting/pull/258)은 draft,

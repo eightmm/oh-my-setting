@@ -1556,23 +1556,45 @@ fn dispatch_owned(
         "agent-memory" => oms_command_memory::run_with_source(local, &cwd, source, interrupted),
         "slurm-lint" => oms_command_slurm_lint::run_with_source(local, &cwd, source, interrupted),
         "journal" => {
-            let append_cb = |repo: &Path, src: &str, lesson: &str| {
-                let (code, _, stderr) = oms_command_memory::append_project_note(
-                    repo,
-                    src,
-                    "journal",
-                    lesson,
-                    interrupted,
-                );
-                if code == 0 {
-                    Ok(oms_command_journal::MemoryAppendOutcome::Appended)
-                } else {
-                    Ok(oms_command_journal::MemoryAppendOutcome::Refused(
-                        String::from_utf8_lossy(&stderr).trim().to_owned(),
-                    ))
-                }
-            };
-            oms_command_journal::run_with_services(
+            let append_cb =
+                |repo: &Path, batch: &str, proposals: &[oms_command_journal::MemoryProposal]| {
+                    let notes: Vec<_> = proposals
+                        .iter()
+                        .map(|p| oms_command_memory::JournalProposal {
+                            key: &p.key,
+                            source_sha256: &p.source_sha256,
+                            body: &p.lesson,
+                            source_current: p.source_current,
+                        })
+                        .collect();
+                    let result =
+                        oms_command_memory::append_journal_batch(repo, batch, &notes, interrupted)?;
+                    Ok(oms_command_journal::MemoryBatchReport {
+                        outcomes: proposals
+                            .iter()
+                            .zip(result.outcomes)
+                            .map(|(p, outcome)| {
+                                let outcome = match outcome {
+                                    oms_command_memory::JournalPublication::Appended(_) => {
+                                        oms_command_journal::MemoryBatchOutcome::Appended
+                                    }
+                                    oms_command_memory::JournalPublication::AlreadyPresent(_) => {
+                                        oms_command_journal::MemoryBatchOutcome::AlreadyPresent
+                                    }
+                                    oms_command_memory::JournalPublication::Refused(reason) => {
+                                        oms_command_journal::MemoryBatchOutcome::Refused(reason)
+                                    }
+                                };
+                                (p.key.clone(), outcome)
+                            })
+                            .collect(),
+                        warnings: String::from_utf8_lossy(&result.warnings)
+                            .lines()
+                            .map(|line| line.strip_prefix("warning: ").unwrap_or(line).to_owned())
+                            .collect(),
+                    })
+                };
+            oms_command_journal::run_with_batch_services(
                 local,
                 &cwd,
                 source,

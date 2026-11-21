@@ -20,6 +20,10 @@ committed citations, and provenance.
 - `append_project_note` preserves the caller's kind for task-close and journal
   producers. Opt-in task-close proposals use `task_close`; journal
   distillation also remains recognizable by its journal author and body prefix.
+- `append_journal_batch` publishes at most five journal proposals into project
+  memory. Candidate/source/payload identities share the source publication;
+  retries retain the original event IDs, including retired and redacted records.
+  Its `distill` notes still require the existing review acceptance.
 - `provider_context` composes global and project memory, compact/full/relevant
   modes, query-ranked recall, path scopes, screening, and existing byte budgets.
   It replaces `ma_write_shared_memory_context` used by peer context assembly.
@@ -84,6 +88,13 @@ contradiction normalization reuses the workspace's pinned Unicode normalizer.
   a prefix. A killed copy-on-write operation publishes either the old source or
   a whole new record. Metadata is captured before the source lock. Supersession
   and retirement validate their target while holding that lock.
+- Journal batches prepare provenance before the source lock, reconcile keys and
+  append the accepted records in one atomic source publication. The journal's
+  existing `distill.json` fixes the batch before that call. A changed source can
+  reconcile a prior append but cannot publish an obsolete proposal. Conflicting
+  keys and individual refusals do not become completed candidates. One summary
+  and index refresh follows publication, with warnings returned separately from
+  durable outcomes; replay also repairs interrupted derived refreshes.
 - `summary.md`: writers serialize on the summary lock. It is derived, and a
   source append can survive with a missing/stale summary; the command warns.
   Redaction locks both logs and the derived outputs, invalidates derived copies

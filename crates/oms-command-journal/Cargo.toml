@@ -19,5 +19,8 @@ serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.10.9"
 users = { version = "=0.11.0", default-features = false }
 
+[dev-dependencies]
+oms-command-memory = { path = "../oms-command-memory" }
+
 [lints.rust]
 unsafe_code = "forbid"

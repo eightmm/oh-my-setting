@@ -322,7 +322,7 @@ impl Store {
         }
         Ok(())
     }
-    fn initial(&self) -> String {
+    pub(crate) fn initial(&self) -> String {
         format!(
             "# Shared Agent Memory\n\n- scope: {}\n- owner: oh-my-setting agent harness\n\nStable preferences, recurring workflow notes, and known pitfalls shared by Codex, Claude Code, and Antigravity.\n{}\nThis file is the human-readable source log. Provider prompts use pins.md and summary.md by default.\n\n",
             self.scope,
@@ -358,7 +358,7 @@ impl Store {
         }
         Ok(())
     }
-    fn metadata(&self, kind: &str, flag: &AtomicBool) -> BTreeMap<String, String> {
+    pub(crate) fn metadata(&self, kind: &str, flag: &AtomicBool) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         let stamp = now().replace(['-', ':'], "");
         m.insert("schema".into(), "1".into());

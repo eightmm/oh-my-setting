@@ -19,6 +19,7 @@ use crate::tz::{
 use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension as _, params};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,76 @@ pub enum MemoryAppendOutcome {
 }
 
 pub type MemoryAppendFn<'a> = &'a dyn Fn(&Path, &str, &str) -> Result<MemoryAppendOutcome, String>;
+
+#[derive(Clone, Debug)]
+pub struct MemoryProposal {
+    pub key: String,
+    pub source_sha256: String,
+    pub lesson: String,
+    pub source_current: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct MemoryBatchReport {
+    pub outcomes: Vec<(String, MemoryBatchOutcome)>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryBatchOutcome {
+    Appended,
+    AlreadyPresent,
+    Refused(String),
+}
+
+pub type MemoryBatchAppendFn<'a> =
+    &'a dyn Fn(&Path, &str, &[MemoryProposal]) -> Result<MemoryBatchReport, String>;
+
+pub(crate) fn legacy_memory_batch(
+    repo: &Path,
+    proposals: &[MemoryProposal],
+    append: MemoryAppendFn<'_>,
+) -> Result<MemoryBatchReport, String> {
+    let shared =
+        read_regular_no_symlink_bytes(&repo.join(".oms/memory/shared.md"))?.unwrap_or_default();
+    let text = String::from_utf8_lossy(&shared);
+    let keyed = distill_memory_keys(&text);
+    let mut recorded = distill_normalized_text(&text);
+    let mut outcomes = Vec::new();
+    for proposal in proposals {
+        // Legacy callbacks cannot bind a key atomically. Retain their historical
+        // content reconciliation when a prepared batch survived an interruption.
+        let lesson = distill_normalized_text(&proposal.lesson);
+        let outcome = if keyed.contains(proposal.key.as_str()) {
+            MemoryBatchOutcome::Refused(
+                "keyed journal candidate requires native batch reconciliation".into(),
+            )
+        } else if !lesson.is_empty() && recorded.contains(&lesson) {
+            MemoryBatchOutcome::AlreadyPresent
+        } else if proposal.source_current {
+            match append(repo, "journal", &proposal.lesson) {
+                Ok(MemoryAppendOutcome::Appended) => MemoryBatchOutcome::Appended,
+                Ok(MemoryAppendOutcome::Refused(reason)) | Err(reason) => {
+                    MemoryBatchOutcome::Refused(reason)
+                }
+            }
+        } else {
+            MemoryBatchOutcome::Refused("journal source changed before publication".into())
+        };
+        if matches!(
+            outcome,
+            MemoryBatchOutcome::Appended | MemoryBatchOutcome::AlreadyPresent
+        ) {
+            recorded.push(' ');
+            recorded.push_str(&lesson);
+        }
+        outcomes.push((proposal.key.clone(), outcome));
+    }
+    Ok(MemoryBatchReport {
+        outcomes,
+        warnings: Vec::new(),
+    })
+}
 
 fn event_id_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -1375,16 +1446,37 @@ impl JournalStore {
         Ok(Some(lines.join("\n")))
     }
 
+    /// Compatibility adapter for callers that still append individual notes.
     pub fn distill(
         &self,
         dry_run: bool,
         memory_append: Option<MemoryAppendFn<'_>>,
         now: DateTime<Utc>,
     ) -> Result<DistillReport, String> {
+        let adapter = |repo: &Path, _: &str, proposals: &[MemoryProposal]| {
+            legacy_memory_batch(
+                repo,
+                proposals,
+                memory_append.ok_or("native memory append adapter is not wired")?,
+            )
+        };
+        self.distill_batch(
+            dry_run,
+            memory_append.map(|_| &adapter as MemoryBatchAppendFn<'_>),
+            now,
+        )
+    }
+
+    pub fn distill_batch(
+        &self,
+        dry_run: bool,
+        memory_append: Option<MemoryBatchAppendFn<'_>>,
+        now: DateTime<Utc>,
+    ) -> Result<DistillReport, String> {
         let state_path = self.root.join("distill.json");
         let state = read_regular_no_symlink_bytes(&state_path)?
             .map(|bytes| {
-                if bytes.len() > 512 * 1024 {
+                if bytes.len() > MAX_DISTILL_STATE {
                     return Err("distill receipt exceeds its bounded state limit".to_string());
                 }
                 crate::json::from_slice(&bytes).map_err(|e| format!("invalid distill receipt: {e}"))
@@ -1415,16 +1507,18 @@ impl JournalStore {
         } else {
             None
         };
+        let prepared = state
+            .as_ref()
+            .and_then(|s| s.get("prepared_batch"))
+            .map(|value| PreparedDistill::read(value, &self.project.id))
+            .transpose()?;
 
-        // Occurrence time is not ingestion order: late events and daily blocker
-        // observations remain eligible. Only annotation rows are revisited, with
-        // an explicit bound; completed fingerprints live in this existing receipt.
+        // Occurrence time is not ingestion order. Revisit bounded active
+        // annotations, including late arrivals and observations on earlier days.
         let conn = self.ensure_index_current(false)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT payload FROM events WHERE active = 1 AND ((json_type(payload, '$.decision') = 'text' AND json_extract(payload, '$.decision') != '') OR (json_type(payload, '$.blocker') = 'text' AND json_extract(payload, '$.blocker') != '')) ORDER BY occurred_at ASC, event_id ASC LIMIT ?1",
-            )
-            .map_err(|e| format!("sqlite distill query failed: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT payload FROM events WHERE active = 1 AND ((json_type(payload, '$.decision') = 'text' AND json_extract(payload, '$.decision') != '') OR (json_type(payload, '$.blocker') = 'text' AND json_extract(payload, '$.blocker') != '')) ORDER BY occurred_at ASC, event_id ASC LIMIT ?1",
+        ).map_err(|e| format!("sqlite distill query failed: {e}"))?;
         let rows = stmt
             .query_map([MAX_DISTILL_INPUTS as i64 + 1], |row| {
                 row.get::<_, String>(0)
@@ -1442,115 +1536,167 @@ impl JournalStore {
             "SELECT occurred_at, event_id FROM events WHERE active = 1 ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
             [], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional().map_err(|e| e.to_string())?;
-
-        let shared_norm = read_regular_no_symlink_bytes(
+        let shared = read_regular_no_symlink_bytes(
             &self.repo_root.join(".oms").join("memory").join("shared.md"),
         )?
-        .map(|b| distill_normalized_text(&String::from_utf8_lossy(&b)))
         .unwrap_or_default();
-        let mut candidates = distill_candidates(&pending);
-        // Rotate before deduplication so a completed candidate can still mark the
-        // prior batch boundary. A refusal advances the scan, not completion.
-        if let Some(key) = last_attempted_candidate
-            && let Some(position) = candidates.iter().position(|candidate| candidate.key == key)
-        {
-            candidates.rotate_left(position + 1);
-        }
-        let mut fresh = Vec::new();
+        let shared_text = String::from_utf8_lossy(&shared);
+        let keyed = distill_memory_keys(&shared_text);
+        let shared_norm = distill_normalized_text(&shared_text);
+        let candidates = distill_candidates(&pending)?;
         let mut deduped = 0;
-        for candidate in candidates {
-            if completed.contains(&candidate.key) {
-                continue;
+        let mut batch = if let Some(mut batch) = prepared {
+            // Preserve the payload selected before a possibly interrupted append.
+            // Changed sources can reconcile an old append but cannot publish anew.
+            for proposal in &mut batch.proposals {
+                proposal.source_current = candidates.iter().any(|c| {
+                    c.key == proposal.key
+                        && c.source_sha256 == proposal.source_sha256
+                        && c.lesson == proposal.lesson
+                });
             }
-            if !shared_norm.is_empty()
-                && !candidate.needle.is_empty()
-                && shared_norm.contains(&candidate.needle)
+            batch
+        } else {
+            let mut candidates = candidates;
+            // A refusal advances scanning, not completion, so older refusals
+            // cannot starve the remainder of the bounded candidate set.
+            if let Some(key) = last_attempted_candidate
+                && let Some(position) = candidates.iter().position(|candidate| candidate.key == key)
             {
-                completed.insert(candidate.key);
-                deduped += 1;
-            } else {
-                fresh.push(candidate);
+                candidates.rotate_left(position + 1);
             }
-        }
-        let dropped = fresh.len().saturating_sub(MAX_DISTILL_ATTEMPTS);
-        fresh.truncate(MAX_DISTILL_ATTEMPTS);
-        if completed.len() + fresh.len() > MAX_DISTILL_RECEIPTS {
+            let mut fresh = Vec::new();
+            for candidate in candidates {
+                if completed.contains(&candidate.key) {
+                    continue;
+                }
+                if !keyed.contains(candidate.key.as_str())
+                    && !shared_norm.is_empty()
+                    && !candidate.needle.is_empty()
+                    && shared_norm.contains(&candidate.needle)
+                {
+                    completed.insert(candidate.key);
+                    deduped += 1;
+                } else {
+                    fresh.push(candidate);
+                }
+            }
+            let dropped = fresh.len().saturating_sub(MAX_DISTILL_ATTEMPTS);
+            fresh.truncate(MAX_DISTILL_ATTEMPTS);
+            let cursor = fresh.last().filter(|_| dropped > 0).map(|c| c.key.clone());
+            PreparedDistill::new(
+                &self.project.id,
+                distill_source_sha256(&pending)?,
+                sha256_hex(&shared),
+                fresh
+                    .into_iter()
+                    .map(|c| MemoryProposal {
+                        key: c.key,
+                        source_sha256: c.source_sha256,
+                        lesson: c.lesson,
+                        source_current: true,
+                    })
+                    .collect(),
+                cursor,
+                dropped,
+            )?
+        };
+        if completed.len() + batch.proposals.len() > MAX_DISTILL_RECEIPTS {
             return Err("distill candidate receipt limit exceeded; no input consumed".into());
         }
         if dry_run {
+            let lessons: Vec<_> = batch
+                .proposals
+                .into_iter()
+                .filter(|p| p.source_current)
+                .map(|p| p.lesson)
+                .collect();
             return Ok(DistillReport {
-                promoted: fresh.len(),
-                dropped,
+                promoted: lessons.len(),
+                dropped: batch.dropped,
                 deduped,
                 skipped_refused: Vec::new(),
                 dry_run: true,
-                lessons: fresh.into_iter().map(|c| c.lesson).collect(),
+                lessons,
+                warnings: Vec::new(),
             });
         }
-
-        let next_candidate_cursor = fresh
-            .last()
-            .filter(|_| dropped > 0)
-            .map(|candidate| candidate.key.clone());
         let mut promoted_lessons = Vec::new();
         let mut skipped_refused = Vec::new();
-        if !fresh.is_empty() {
+        let mut warnings = Vec::new();
+        if !batch.proposals.is_empty() {
             let append_fn = memory_append.ok_or_else(|| {
-                "native memory append adapter is not wired; parent CLI must supply MemoryAppendFn via run_with_services".to_string()
+                "native memory append adapter is not wired; parent CLI must supply a memory adapter".to_string()
             })?;
-            for candidate in fresh {
-                match append_fn(&self.repo_root, "journal", &candidate.lesson) {
-                    Ok(MemoryAppendOutcome::Appended) => {
+            let mut preparing = state
+                .as_ref()
+                .and_then(Value::as_object)
+                .map(MapExt::copy)
+                .unwrap_or_default();
+            preparing.insert("schema_version".into(), crate::json::json!(1));
+            preparing.insert(
+                "completed_candidates".into(),
+                crate::json::json!(completed.iter().collect::<Vec<_>>()),
+            );
+            preparing.insert("prepared_batch".into(), batch.value());
+            write_distill_state(&state_path, &Value::Object(preparing))?;
+            // Failure leaves the exact prepared batch for reconciliation, even
+            // when the source was published before the writer returned an error.
+            let report = append_fn(&self.repo_root, &batch.id, &batch.proposals)?;
+            if report.outcomes.len() != batch.proposals.len()
+                || report
+                    .outcomes
+                    .iter()
+                    .zip(&batch.proposals)
+                    .any(|((key, _), p)| key != &p.key)
+            {
+                return Err("memory batch returned mismatched candidate identities; retry the prepared batch".into());
+            }
+            warnings.extend(report.warnings);
+            for (candidate, (_, outcome)) in batch.proposals.drain(..).zip(report.outcomes) {
+                match outcome {
+                    MemoryBatchOutcome::Appended => {
                         completed.insert(candidate.key);
                         promoted_lessons.push(candidate.lesson);
                     }
-                    Ok(MemoryAppendOutcome::Refused(_)) | Err(_) => {
+                    MemoryBatchOutcome::AlreadyPresent => {
+                        completed.insert(candidate.key);
+                        deduped += 1;
+                    }
+                    MemoryBatchOutcome::Refused(reason) => {
+                        warnings.push(format!(
+                            "journal candidate {} refused: {}",
+                            &candidate.key[..12],
+                            sanitize_text(&reason, 300)
+                        ));
                         skipped_refused.push(candidate.lesson);
                     }
                 }
             }
         }
-
         let through_val = if let Some((occ, eid)) = latest {
-            crate::json::json!({
-                "occurred_at": occ,
-                "event_id": eid,
-            })
+            crate::json::json!({"occurred_at": occ, "event_id": eid})
         } else {
             Value::Null
         };
-
         let (_, today_str, _) = self.tz.local_date_and_week(now);
-        let mut state_obj = Map::new();
-        state_obj.insert("schema_version".into(), crate::json::json!(1));
-        state_obj.insert("through".into(), through_val);
-        state_obj.insert(
-            "completed_candidates".into(),
-            crate::json::json!(completed.into_iter().collect::<Vec<_>>()),
-        );
-        state_obj.insert(
-            "pending_candidates".into(),
-            crate::json::json!(dropped + skipped_refused.len()),
-        );
-        if let Some(key) = next_candidate_cursor {
-            state_obj.insert("last_attempted_candidate".into(), crate::json::json!(key));
+        let mut final_state = crate::json::json!({
+            "schema_version":1,"through":through_val,
+            "completed_candidates":completed.into_iter().collect::<Vec<_>>(),
+            "pending_candidates":batch.dropped + skipped_refused.len(),"last_run_date":today_str,
+        });
+        if let Some(key) = batch.cursor {
+            *final_state.at_mut("last_attempted_candidate") = crate::json::json!(key);
         }
-        state_obj.insert(
-            "last_run_date".into(),
-            Value::String(today_str.as_str().into()),
-        );
-        let bytes = pretty_json_bytes(&Value::Object(state_obj))?;
-        if read_regular_no_symlink_bytes(&state_path)?.as_deref() != Some(&bytes) {
-            atomic_write_bytes(&state_path, &bytes)?;
-        }
-
+        write_distill_state(&state_path, &final_state)?;
         Ok(DistillReport {
             promoted: promoted_lessons.len(),
-            dropped,
+            dropped: batch.dropped,
             deduped,
             skipped_refused,
             dry_run: false,
             lessons: promoted_lessons,
+            warnings,
         })
     }
 
@@ -1560,6 +1706,7 @@ impl JournalStore {
         if let Some(bytes) = read_regular_no_symlink_bytes(&state_path)?
             && let Ok(v) = crate::json::from_slice(&bytes)
             && v.get("schema_version").and_then(Value::as_i64) == Some(1)
+            && v.get("prepared_batch").is_none()
             && v.get("last_run_date").and_then(Value::as_str).as_deref() == Some(today.as_str())
         {
             return Ok(false);
@@ -1692,6 +1839,7 @@ pub struct DistillReport {
     pub skipped_refused: Vec<String>,
     pub dry_run: bool,
     pub lessons: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 type VerifiedSource = (
@@ -1954,9 +2102,165 @@ fn distill_normalized_text(text: &str) -> String {
     crate::unicode::casefold(&text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+fn distill_memory_keys(text: &str) -> BTreeSet<&str> {
+    // Presence only vetoes legacy text deduplication. It cannot establish a
+    // publication: the native memory writer still validates the complete record.
+    text.lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter_map(|(name, value)| (name.trim() == "journal_candidate").then_some(value.trim()))
+        .filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+        .collect()
+}
+
+const MAX_DISTILL_STATE: usize = 512 * 1024;
 const MAX_DISTILL_INPUTS: usize = 16_384;
 const MAX_DISTILL_RECEIPTS: usize = 4_096;
 const MAX_DISTILL_ATTEMPTS: usize = 5;
+
+struct PreparedDistill {
+    id: String,
+    project: String,
+    input_sha256: String,
+    memory_sha256: String,
+    proposals: Vec<MemoryProposal>,
+    cursor: Option<String>,
+    dropped: usize,
+}
+
+impl PreparedDistill {
+    fn new(
+        project: &str,
+        input_sha256: String,
+        memory_sha256: String,
+        proposals: Vec<MemoryProposal>,
+        cursor: Option<String>,
+        dropped: usize,
+    ) -> Result<Self, String> {
+        let mut batch = Self {
+            id: String::new(),
+            project: project.into(),
+            input_sha256,
+            memory_sha256,
+            proposals,
+            cursor,
+            dropped,
+        };
+        batch.id = sha256_hex(&canonical_json_bytes(&batch.contents())?);
+        Ok(batch)
+    }
+
+    fn contents(&self) -> Value {
+        let proposals: Vec<_> = self
+            .proposals
+            .iter()
+            .map(|p| {
+                crate::json::json!({
+                    "key":p.key,"source_sha256":p.source_sha256,"lesson":p.lesson,
+                })
+            })
+            .collect();
+        crate::json::json!({
+            "schema":1,"policy":"journal-distill-v2","project_id":self.project,
+            "input_sha256":self.input_sha256,"base_memory_sha256":self.memory_sha256,
+            "proposals":proposals,"cursor":self.cursor,"dropped":self.dropped,
+        })
+    }
+
+    fn value(&self) -> Value {
+        let mut value = self.contents();
+        *value.at_mut("id") = crate::json::json!(self.id);
+        value
+    }
+
+    fn read(value: &Value, project: &str) -> Result<Self, String> {
+        if value.as_object().is_none_or(|o| o.len() != 9)
+            || value.at("schema").as_u64() != Some(1)
+            || value.at("policy").as_str().as_deref() != Some("journal-distill-v2")
+            || value.at("project_id").as_str().as_deref() != Some(project)
+        {
+            return Err("invalid distill prepared batch scope or policy".into());
+        }
+        let rows = value
+            .at("proposals")
+            .as_array()
+            .filter(|a| !a.is_empty() && a.len() <= MAX_DISTILL_ATTEMPTS)
+            .ok_or("invalid distill prepared batch candidates")?;
+        let mut seen = BTreeSet::new();
+        let mut proposals = Vec::new();
+        for row in rows {
+            let key = distill_receipt_key(row.at("key"))?;
+            let source_sha256 = distill_receipt_key(row.at("source_sha256"))?;
+            let lesson = row
+                .at("lesson")
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 16 * 1024)
+                .ok_or("invalid distill prepared lesson")?;
+            if row.as_object().is_none_or(|o| o.len() != 3) || !seen.insert(key.clone()) {
+                return Err("invalid distill prepared candidate identity".into());
+            }
+            proposals.push(MemoryProposal {
+                key,
+                source_sha256,
+                lesson,
+                source_current: false,
+            });
+        }
+        let cursor = if value.at("cursor").is_null() {
+            None
+        } else {
+            Some(distill_receipt_key(value.at("cursor"))?)
+        };
+        let dropped = value
+            .at("dropped")
+            .as_u64()
+            .filter(|n| *n <= 2 * MAX_DISTILL_INPUTS as u64)
+            .ok_or("invalid distill deferred count")? as usize;
+        if cursor
+            != proposals
+                .last()
+                .filter(|_| dropped > 0)
+                .map(|p| p.key.clone())
+        {
+            return Err("invalid distill prepared batch cursor".into());
+        }
+        let batch = Self::new(
+            project,
+            distill_receipt_key(value.at("input_sha256"))?,
+            distill_receipt_key(value.at("base_memory_sha256"))?,
+            proposals,
+            cursor,
+            dropped,
+        )?;
+        if value.at("id").as_str().as_deref() != Some(batch.id.as_str()) {
+            return Err("distill prepared batch digest mismatch".into());
+        }
+        Ok(batch)
+    }
+}
+
+fn write_distill_state(path: &Path, state: &Value) -> Result<(), String> {
+    let bytes = pretty_json_bytes(state)?;
+    if bytes.len() > MAX_DISTILL_STATE {
+        return Err("distill receipt exceeds its bounded state limit; no input consumed".into());
+    }
+    if read_regular_no_symlink_bytes(path)?.as_deref() != Some(&bytes) {
+        atomic_write_bytes(path, &bytes)?;
+    }
+    Ok(())
+}
+
+fn distill_source_sha256<'a>(
+    events: impl IntoIterator<Item = &'a Value>,
+) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(b"journal-distill-sources-v1\0");
+    for event in events {
+        let bytes = canonical_json_bytes(event)?;
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(&bytes);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
 
 fn distill_receipt_key(value: &Value) -> Result<String, String> {
     value
@@ -1967,6 +2271,7 @@ fn distill_receipt_key(value: &Value) -> Result<String, String> {
 
 struct DistillCandidate {
     key: String,
+    source_sha256: String,
     lesson: String,
     needle: String,
 }
@@ -1976,7 +2281,7 @@ fn distill_candidate(
     claim: &str,
     lesson: String,
     events: &[&Value],
-) -> DistillCandidate {
+) -> Result<DistillCandidate, String> {
     let key = sha256_hex(
         format!(
             "journal-distill-v2\0{kind}\0{}",
@@ -1995,17 +2300,18 @@ fn distill_candidate(
     } else {
         format!("; {omitted} more source events")
     };
-    DistillCandidate {
+    Ok(DistillCandidate {
         key,
+        source_sha256: distill_source_sha256(events.iter().copied())?,
         needle: distill_normalized_text(&sanitize_text(claim, 600)),
         lesson: format!(
             "{lesson}\nsource events: {}{suffix}; recorded evidence; not independently verified",
             sources.join(", ")
         ),
-    }
+    })
 }
 
-fn distill_candidates(events: &[Value]) -> Vec<DistillCandidate> {
+fn distill_candidates(events: &[Value]) -> Result<Vec<DistillCandidate>, String> {
     let mut blockers: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     let mut candidates = Vec::new();
     let mut seen_decisions = HashSet::new();
@@ -2024,7 +2330,7 @@ fn distill_candidates(events: &[Value]) -> Vec<DistillCandidate> {
                         &dec,
                         format!("journal-distill: decision {ld}: {clean}"),
                         &[ev],
-                    ),
+                    )?,
                 ));
             }
         }
@@ -2059,14 +2365,14 @@ fn distill_candidates(events: &[Value]) -> Vec<DistillCandidate> {
         );
         candidates.push((
             position,
-            distill_candidate("blocker", &blocker, lesson, &group),
+            distill_candidate("blocker", &blocker, lesson, &group)?,
         ));
     }
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
-    candidates
+    Ok(candidates
         .into_iter()
         .map(|(_, candidate)| candidate)
-        .collect()
+        .collect())
 }
 
 pub fn period_range_hint(kind: &str, period: &str) -> String {

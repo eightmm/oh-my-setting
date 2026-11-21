@@ -28,8 +28,12 @@ use crate::notion::{NotionExporter, SyncOptions, sync_notion};
 use crate::sanitize::pretty_json_bytes;
 use crate::schema::{atomic_write_bytes, canonical_repo_root, project_id_path, work_journal_dir};
 use crate::search::run_recorded_search;
-use crate::store::{JournalStore, MemoryAppendFn};
-pub use crate::store::{MemoryAppendFn as JournalMemoryAppendFn, MemoryAppendOutcome};
+use crate::store::{JournalStore, MemoryAppendFn, MemoryBatchAppendFn};
+pub use crate::store::{
+    MemoryAppendFn as JournalMemoryAppendFn, MemoryAppendOutcome,
+    MemoryBatchAppendFn as JournalMemoryBatchAppendFn, MemoryBatchOutcome, MemoryBatchReport,
+    MemoryProposal,
+};
 use crate::tz::current_utc_now;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -68,6 +72,31 @@ pub fn run_with_services(
     cwd: &Path,
     _source_root: &Path,
     memory_append: Option<MemoryAppendFn<'_>>,
+    interrupted: &AtomicBool,
+) -> (i32, Vec<u8>, Vec<u8>) {
+    let adapter = |repo: &Path, _: &str, proposals: &[MemoryProposal]| {
+        crate::store::legacy_memory_batch(
+            repo,
+            proposals,
+            memory_append.ok_or("native memory append adapter is not wired")?,
+        )
+    };
+    run_with_batch_services(
+        args,
+        cwd,
+        _source_root,
+        memory_append.map(|_| &adapter as MemoryBatchAppendFn<'_>),
+        interrupted,
+    )
+}
+
+/// Native keyed publication route. The batch identity is durable before invoking
+/// the writer, and the writer reconciles candidate keys within its source lock.
+pub fn run_with_batch_services(
+    args: &[OsString],
+    cwd: &Path,
+    _source_root: &Path,
+    memory_append: Option<MemoryBatchAppendFn<'_>>,
     interrupted: &AtomicBool,
 ) -> (i32, Vec<u8>, Vec<u8>) {
     let cmd = match parse_command(args) {
@@ -179,7 +208,7 @@ fn try_acquire_lock(target: &Path) -> Result<TryLockResult, String> {
 fn execute_command(
     cmd: JournalCommand,
     cwd: &Path,
-    memory_append: Option<MemoryAppendFn<'_>>,
+    memory_append: Option<MemoryBatchAppendFn<'_>>,
     interrupted: &AtomicBool,
 ) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
     let now = current_utc_now();
@@ -431,14 +460,21 @@ fn execute_command(
             store.capture_head_commit(now)?;
             store.materialize()?;
             let mut out = String::new();
+            let mut warnings = Vec::new();
             if digest && let Some(value) = store.prompt_digest(now)? {
                 out.push_str(&value);
                 out.push('\n');
             }
             if autodistill
                 && let Ok(true) = store.distill_due_today(now)
-                && let Ok(report) = store.distill(false, memory_append, now)
+                && let Ok(report) = store.distill_batch(false, memory_append, now)
             {
+                warnings.extend(
+                    report
+                        .warnings
+                        .iter()
+                        .flat_map(|w| format!("warning: {w}\n").into_bytes()),
+                );
                 let mut counts = Vec::new();
                 if report.promoted > 0 {
                     counts.push(format!("{} queued for memory review", report.promoted));
@@ -464,7 +500,7 @@ fn execute_command(
             {
                 store.write_prompt_stamp(&signature, autodistill, now)?;
             }
-            Ok((0, out.into_bytes(), Vec::new()))
+            Ok((0, out.into_bytes(), warnings))
         }
 
         JournalCommand::Materialize { repo } => {
@@ -743,7 +779,12 @@ fn execute_command(
             } else {
                 JournalStore::open_for_write(&repo_root, None)?
             };
-            let report = store.distill(dry_run, memory_append, now)?;
+            let report = store.distill_batch(dry_run, memory_append, now)?;
+            let warnings = report
+                .warnings
+                .iter()
+                .flat_map(|w| format!("warning: {w}\n").into_bytes())
+                .collect();
             let mut out = String::new();
             if dry_run {
                 for lesson in &report.lessons {
@@ -780,7 +821,7 @@ fn execute_command(
                     report.dropped
                 ));
             }
-            Ok((0, out.into_bytes(), Vec::new()))
+            Ok((0, out.into_bytes(), warnings))
         }
     }
 }

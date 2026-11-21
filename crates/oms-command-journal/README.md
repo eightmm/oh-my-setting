@@ -27,7 +27,13 @@ sanitizer preserve surrogate code points; valid surrogate pairs become Unicode
 scalars. Display-only rendering escapes lone surrogates explicitly.
 
 The CLI (`run`), `MemoryAppendFn`, canonical v1 schema, and cold manifest layout
-are unchanged. Existing locks, append/recovery, atomic replacement, cold pending
+retain their compatibility entry points. The native root uses the additive
+`run_with_batch_services` adapter: `distill.json` fixes a bounded prepared batch,
+then the memory writer publishes candidate keys with the source records before
+the journal completes its receipt. Legacy callbacks keep content-based retry
+reconciliation. Source/payload collisions and changed sources cannot authorize
+new appends; automatic notes still wait for memory review. Existing locks,
+append/recovery, atomic replacement, cold pending
 seal protocol, and bounded streaming Notion transport still govern writes.
 
 `tests/lossless_json.rs` covers exact integer round-trips, numeric identities,
