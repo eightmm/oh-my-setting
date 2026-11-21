@@ -5,7 +5,7 @@ set -euo pipefail
 # workflow gate safety, and zero retired interpreter leakage — without Python.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-# shellcheck source=tests/lib/smoke-env.sh
+# shellcheck source=tests/lib/smoke-env.sh disable=SC1091
 . "$ROOT/tests/lib/smoke-env.sh"
 
 DOCS_ONLY=0
@@ -26,16 +26,23 @@ check_affected_planning() (
   check_probe="$(mktemp -d "${TMPDIR:-/tmp}/oms-affected-plan.XXXXXX")"
   trap 'rm -rf "$check_probe"' EXIT HUP INT TERM
   repo="$check_probe/repo"
-  mkdir -p "$repo/scripts/lib" "$check_probe/bin" "$check_probe/home" "$check_probe/tmp"
+  mkdir -p "$repo/scripts/lib" "$repo/tests/lib" "$check_probe/bin" "$check_probe/home" "$check_probe/tmp"
   cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
   cp "$ROOT/scripts/lib/critical-paths.sh" "$repo/scripts/lib/critical-paths.sh"
+  cp "$ROOT/tests/source-distribution-smoke.sh" "$repo/tests/source-distribution-smoke.sh"
+  cp "$ROOT/tests/lib/smoke-env.sh" "$repo/tests/lib/smoke-env.sh"
   # The planning contract must not enter maintenance or native setup at all.
-  # Ordinary execution still has to reach that gate; its sentinel stops there.
+  # Ordinary execution still has to reach that gate; its sentinel stops there
+  # unless OMS_CHECK_MAINT_ALLOW=1 lets the actual docs-only check run.
   cat > "$repo/scripts/lib/check-maintenance.sh" <<'EOF'
 printf 'maintenance-source\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
 oms_check_maintenance_begin() {
   printf 'maintenance-begin\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
+  [ "${OMS_CHECK_MAINT_ALLOW:-0}" = 1 ] && return 0
   return 97
+}
+oms_check_maintenance_end() {
+  printf 'maintenance-end\n' >> "$OMS_CHECK_FORBIDDEN_LOG"
 }
 EOF
   cat > "$repo/scripts/lib/platform.sh" <<'EOF'
@@ -55,11 +62,14 @@ EOF
   invoke_check() {
     env -i HOME="$check_probe/home" PATH="$check_probe/bin:/usr/bin:/bin" \
       TMPDIR="$check_probe/tmp" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-      OMS_CHECK_FORBIDDEN_LOG="$check_probe/forbidden.log" OMS_NATIVE_NO_AUTO_STAGE=0 \
+      OMS_CHECK_FORBIDDEN_LOG="${OMS_CHECK_FORBIDDEN_LOG:-$check_probe/forbidden.log}" \
+      OMS_CHECK_MAINT_ALLOW="${OMS_CHECK_MAINT_ALLOW:-0}" OMS_NATIVE_NO_AUTO_STAGE=0 \
       bash "$repo/scripts/check.sh" "$@"
   }
   print_plan() { invoke_check --affected --print-affected-mode "$@"; }
-  expected_ci_record() { printf 'mode=%s\nnative=%s\npython=false\noperator=\n' "$1" "$2"; }
+  expected_ci_record() {
+    printf 'mode=%s\nnative=%s\npython=false\noperator=\ndocs_only=%s\n' "$1" "$2" "$3"
+  }
   oms_smoke_make_repo "$repo"
   printf 'base\n' > "$repo/README.md"
   git -C "$repo" add .
@@ -71,7 +81,7 @@ EOF
   selected="$(print_plan --changed-from "$base" --changed-to "$docs")"
   [ "$selected" = affected ] || fail "documentation planning selected: $selected"
   print_plan --changed-from "$base" --changed-to "$docs" --ci-output "$check_probe/docs.out"
-  expected_ci_record affected false > "$check_probe/expected.out"
+  expected_ci_record affected false true > "$check_probe/expected.out"
   cmp -s "$check_probe/docs.out" "$check_probe/expected.out" || fail "documentation CI selection changed"
 
   selected="$(invoke_check --affected --list-stages --changed-from "$base" --changed-to "$docs")"
@@ -85,8 +95,27 @@ EOF
   selected="$(print_plan --changed-from "$docs" --changed-to "$native")"
   [ "$selected" = full ] || fail "native planning selected: $selected"
   print_plan --changed-from "$docs" --changed-to "$native" --ci-output "$check_probe/native.out"
-  expected_ci_record full true > "$check_probe/expected.out"
+  expected_ci_record full true false > "$check_probe/expected.out"
   cmp -s "$check_probe/native.out" "$check_probe/expected.out" || fail "native CI selection changed"
+
+  # Full --affected --ci-parity runs each unique required check once while
+  # preserving --no-lint, --quick, --lint-only, and non-parity full affected.
+  selected="$(invoke_check --affected --ci-parity --list-stages --changed-from "$docs" --changed-to "$native" 2>/dev/null)"
+  expected_stages="$(printf 'shellcheck\nskill-manifest\ndoc-references\nrust-migration-check\ninvariants-source-distribution\ncheck: ok')"
+  [ "$selected" = "$expected_stages" ] || fail "full --affected --ci-parity duplicated or changed stages: $selected"
+
+  selected="$(invoke_check --affected --ci-parity --no-lint --list-stages --changed-from "$docs" --changed-to "$native" 2>/dev/null)"
+  expected_stages="$(printf 'invariants-skill-manifest\ninvariants-doc-references\ninvariants-migration-check\ninvariants-source-distribution\ncheck: ok')"
+  [ "$selected" = "$expected_stages" ] || fail "--affected --ci-parity --no-lint lost invariants: $selected"
+
+  selected="$(invoke_check --quick --list-stages --changed-from "$docs" --changed-to "$native" 2>/dev/null)"
+  [ "$selected" = "$expected_stages" ] || fail "--quick stages changed: $selected"
+
+  selected="$(invoke_check --affected --list-stages --changed-from "$docs" --changed-to "$native" 2>/dev/null)"
+  if ! grep -Fxq 'shellcheck' <<< "$selected" || ! grep -Fxq 'source-distribution' <<< "$selected" ||
+    ! grep -Fxq 'rust-workspace-tests' <<< "$selected" || grep -Fxq 'invariants-source-distribution' <<< "$selected"; then
+    fail "full --affected (without --ci-parity) stages changed: $selected"
+  fi
 
   # The first critical path selects the reason, but later paths still contribute
   # native CI coverage even when an earlier contract file already selected full.
@@ -101,10 +130,22 @@ EOF
   grep -Fxq 'affected: full test fallback (contract-boundary:SECURITY.md)' "$check_probe/mixed.err" \
     || fail "mixed planning did not preserve the first critical reason"
 
+  mkdir -p "$repo/roles"
+  printf 'builder contract\n' > "$repo/roles/builder.md"
+  git -C "$repo" add roles/builder.md
+  git -C "$repo" commit -qm role
+  role="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$mixed" --changed-to "$role" --ci-output "$check_probe/role.out"
+  expected_ci_record affected false false > "$check_probe/expected.out"
+  cmp -s "$check_probe/role.out" "$check_probe/expected.out" || fail "scoped role planning must retain Rust setup"
+
   git -C "$repo" checkout -q --detach "$docs"
   printf 'untracked\n' > "$repo/dirty"
   selected="$(print_plan --changed-from "$base" --changed-to "$docs")"
   [ "$selected" = full ] || fail "dirty-worktree planning no longer selects full verification"
+  print_plan --changed-from "$base" --changed-to "$docs" --ci-output "$check_probe/dirty.out"
+  expected_ci_record full true false > "$check_probe/expected.out"
+  cmp -s "$check_probe/dirty.out" "$check_probe/expected.out" || fail "dirty planning allowed docs-only setup"
   rm "$repo/dirty"
 
   status=0
@@ -117,10 +158,52 @@ EOF
   [ "$status" -eq 97 ] || fail "actual affected verification bypassed the maintenance gate"
   grep -Fxq maintenance-begin "$check_probe/forbidden.log" || fail "execution omitted maintenance protection"
 
+  # --ci-output without --print-affected-mode can execute real affected checks,
+  # so it must not bypass maintenance protection.
+  status=0
+  OMS_CHECK_FORBIDDEN_LOG="$check_probe/ci-exec.log" \
+    invoke_check --affected --changed-from "$base" --changed-to "$docs" --ci-output "$check_probe/ci-exec.out" \
+    > "$check_probe/ci-exec.stdout" 2>&1 || status=$?
+  [ "$status" -eq 97 ] || fail "--ci-output execution bypassed the maintenance gate (status=$status)"
+  grep -Fxq maintenance-begin "$check_probe/ci-exec.log" || fail "--ci-output execution omitted maintenance protection"
+
+  # Clean docs-only affected execution keeps maintenance protection and runs
+  # markdown reference checks without resolving or building native binaries.
+  status=0
+  OMS_CHECK_MAINT_ALLOW=1 OMS_CHECK_FORBIDDEN_LOG="$check_probe/docs-exec.log" \
+    invoke_check --affected --changed-from "$base" --changed-to "$docs" \
+    > "$check_probe/docs-exec.out" 2>&1 || status=$?
+  [ "$status" -eq 0 ] || fail "clean docs-only affected execution failed without Cargo (status=$status): $(cat "$check_probe/docs-exec.out")"
+  grep -Fq 'ok: doc-references' "$check_probe/docs-exec.out" || fail "clean docs-only execution skipped doc-references"
+  grep -Fxq 'check: ok' "$check_probe/docs-exec.out" || fail "clean docs-only execution did not finish cleanly"
+  grep -Fxq maintenance-begin "$check_probe/docs-exec.log" || fail "clean docs-only execution omitted maintenance begin"
+  grep -Fxq maintenance-end "$check_probe/docs-exec.log" || fail "clean docs-only execution omitted maintenance end"
+  ! grep -Eq '^(platform-source|cargo|rustup)$' "$check_probe/docs-exec.log" ||
+    fail "clean docs-only execution touched native staging or Cargo: $(cat "$check_probe/docs-exec.log")"
+
+  # Dirty worktree must fall back to full verification (reaching native staging),
+  # never taking the docs-only no-Cargo fast path.
+  printf 'untracked\n' > "$repo/dirty"
+  status=0
+  OMS_CHECK_MAINT_ALLOW=1 OMS_CHECK_FORBIDDEN_LOG="$check_probe/dirty-exec.log" \
+    invoke_check --affected --changed-from "$base" --changed-to "$docs" \
+    > "$check_probe/dirty-exec.out" 2>&1 || status=$?
+  rm -f "$repo/dirty"
+  [ "$status" -ne 0 ] || fail "dirty worktree unexpectedly passed with blocked tools"
+  grep -Fq 'affected: full test fallback (workspace-differs-from-head)' "$check_probe/dirty-exec.out" ||
+    fail "dirty worktree did not fall back to full verification: $(cat "$check_probe/dirty-exec.out")"
+  grep -Fxq maintenance-begin "$check_probe/dirty-exec.log" || fail "dirty fallback omitted maintenance protection"
+  if ! grep -Fxq platform-source "$check_probe/dirty-exec.log" || ! grep -Fxq cargo "$check_probe/dirty-exec.log"; then
+    fail "dirty fallback skipped native staging: $(cat "$check_probe/dirty-exec.log")"
+  fi
+
   # Preflight readiness must match the lanes: lint runs Cargo (oms-migrate), so
   # ShellCheck alone (blocked rustup/cargo stubs above) leaves no lane runnable.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$check_probe/bin/shellcheck"
   chmod +x "$check_probe/bin/shellcheck"
+  selected="$(invoke_check --lint-only --list-stages 2>/dev/null)"
+  expected_stages="$(printf 'shellcheck\nskill-manifest\ndoc-references\nrust-migration-check\ncheck: ok')"
+  [ "$selected" = "$expected_stages" ] || fail "--lint-only stages changed: $selected"
   cp "$ROOT/rust-toolchain.toml" "$repo/rust-toolchain.toml"
   status=0
   invoke_check --preflight > "$check_probe/preflight.out" 2>&1 || status=$?
