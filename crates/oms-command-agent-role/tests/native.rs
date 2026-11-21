@@ -509,7 +509,7 @@ fn render_matches_canonical_goldens_for_both_providers_and_scopes() {
                 "subagent: true".to_string(),
                 "model: inherit".to_string(),
                 format!(
-                    "commandExecutionPolicy: {}",
+                    "commandExecutionPolicy: \"{}\"",
                     if allow_write { "sandbox" } else { "off" }
                 ),
                 "tools:".to_string(),
@@ -583,7 +583,7 @@ fn every_contract_role_writer_authority_and_surface() {
             let marker = match provider {
                 "claude" => "Edit, Write, Bash",
                 "codex" => "workspace-write",
-                _ => "commandExecutionPolicy: sandbox",
+                _ => "commandExecutionPolicy: \"sandbox\"",
             };
             assert_eq!(output.contains(marker), writable, "{provider}/{role}");
             if provider == "antigravity" {
@@ -596,7 +596,7 @@ fn every_contract_role_writer_authority_and_surface() {
                     "{role}"
                 );
                 assert_eq!(
-                    output.contains("commandExecutionPolicy: off\n"),
+                    output.contains("commandExecutionPolicy: \"off\"\n"),
                     !writable,
                     "{role}"
                 );
@@ -638,7 +638,7 @@ fn every_contract_role_writer_authority_and_surface() {
             let marker = match provider {
                 "claude" => "Edit, Write, Bash",
                 "codex" => "workspace-write",
-                _ => "commandExecutionPolicy: sandbox",
+                _ => "commandExecutionPolicy: \"sandbox\"",
             };
             let args = ["render", "--name", role, "--provider", provider];
             assert!(String::from_utf8_lossy(&f.ok(&args)).contains(marker));
@@ -646,7 +646,7 @@ fn every_contract_role_writer_authority_and_surface() {
             let global_out = String::from_utf8(f.ok(&args)).unwrap();
             assert!(!global_out.contains(marker));
             if provider == "antigravity" {
-                assert!(global_out.contains("commandExecutionPolicy: off\n"));
+                assert!(global_out.contains("commandExecutionPolicy: \"off\"\n"));
                 assert!(!global_out.contains("replace_file_content"));
                 assert!(!global_out.contains("write_to_file"));
                 assert!(!global_out.contains("run_command"));
@@ -655,7 +655,7 @@ fn every_contract_role_writer_authority_and_surface() {
             let project_out = String::from_utf8(f.ok(&args)).unwrap();
             assert!(!project_out.contains(marker));
             if provider == "antigravity" {
-                assert!(project_out.contains("commandExecutionPolicy: off\n"));
+                assert!(project_out.contains("commandExecutionPolicy: \"off\"\n"));
                 assert!(!project_out.contains("replace_file_content"));
                 assert!(!project_out.contains("write_to_file"));
                 assert!(!project_out.contains("run_command"));

@@ -107,9 +107,10 @@ pub(crate) fn render(
             "mainAgent: false".into(),
             "subagent: true".into(),
             "model: inherit".into(),
+            // YAML 1.1 parsers treat an unquoted off as a boolean.
             format!(
                 "commandExecutionPolicy: {}",
-                if writable { "sandbox" } else { "off" }
+                quoted(if writable { "sandbox" } else { "off" })
             ),
             "tools:".into(),
             "  - view_file".into(),
