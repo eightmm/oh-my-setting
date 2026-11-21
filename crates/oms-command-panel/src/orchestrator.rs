@@ -3305,12 +3305,17 @@ impl<'a> Panel<'a> {
                     .map(|proof| assignment_locator(&proof.repo, self.room))
                     .transpose()?
                     .unwrap_or_default();
+                let role_contract = if provider == "codex" {
+                    ALTERNATE_STARTUP_PROMPT
+                } else {
+                    STARTUP_PROMPT.trim()
+                };
+                let prompt = format!(
+                    "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {role_contract}{locator} Task: {task}"
+                );
                 self.send(
                     provider,
-                    &format!(
-                        "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {}{locator} Task: {task}",
-                        STARTUP_PROMPT.trim()
-                    ),
+                    &prompt,
                     Proof::Turn(turn),
                     assignment.as_ref().map(|proof| (proof, host, attempts)),
                 )?;
@@ -3390,6 +3395,12 @@ impl<'a> Panel<'a> {
         assignment: Option<(&CodexAssignment, &dyn AccountHost, &AttemptCache)>,
         bound: Option<&native_assignment::Binding>,
     ) -> Result<()> {
+        if provider == "codex" && bound.is_none() && matches!(proof, Proof::Turn(_)) {
+            require(
+                prompt.chars().count() <= CODEX_VISIBLE_PASTE_CHARS,
+                "Codex assignment is too long to verify in the composer",
+            )?;
+        }
         self.require_provider_input(provider)?;
         let lead = self
             .leads
@@ -3852,6 +3863,16 @@ fn paste_and_submit(
             return Err(uncertain(
             "task paste was not observed; Enter was not sent and a draft may remain — inspect the provider input before resending".into(),
         ));
+        }
+        if provider == "codex"
+            && matches!(proof, Proof::Turn(_))
+            && previous
+                .as_deref()
+                .is_some_and(codex_opaque_paste_placeholder)
+        {
+            return Err(uncertain(
+                "Enter was withheld after pasting; Codex collapsed the draft into an opaque placeholder — inspect the provider input before resending".into(),
+            ));
         }
         fence().map_err(|error| {
             uncertain(format!(
@@ -4484,6 +4505,72 @@ fn codex_input_state(capture: &str) -> Option<bool> {
             && line.chars().any(|c| RULES.contains(c));
     }
     Some(oms_panel_core::tick::screen_input_empty(input).0)
+}
+
+fn is_pasted_content_token(text: &str) -> bool {
+    let Some(body) = text.strip_prefix("[Pasted Content ") else {
+        return false;
+    };
+    let Some(digits) = body
+        .strip_suffix(" chars]")
+        .or_else(|| body.strip_suffix(" char]"))
+    else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn codex_opaque_paste_placeholder(capture: &str) -> bool {
+    if codex_input_state(capture) != Some(false) {
+        return false;
+    }
+    let input = codex_chrome(capture, CodexChromeUse::Composer).map_or(capture, |(area, _)| area);
+    let plain = CHAT_SGR.replace_all(input, "");
+    let mut lines = plain.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    let Some(rest) = first.strip_prefix(PROMPT_MARKERS) else {
+        return false;
+    };
+    let trimmed = rest.trim_matches([' ', '\u{a0}']);
+    let head = trimmed
+        .strip_suffix(['│', '┃', '|'])
+        .unwrap_or(trimmed)
+        .trim_matches([' ', '\u{a0}']);
+    if !head.starts_with('[') {
+        return false;
+    }
+    let mut parts = vec![head];
+    const RULES: &str = "─━═╌┄╭╮╰╯┌┐└┘├┤┬┴┼";
+    for raw_line in lines {
+        let line = raw_line.trim_matches(' ');
+        if line.is_empty() {
+            continue;
+        }
+        if line
+            .chars()
+            .all(|c| RULES.contains(c) || "│┃| ".contains(c))
+            && line.chars().any(|c| RULES.contains(c))
+        {
+            break;
+        }
+        let cell = line
+            .strip_prefix(['│', '┃', '|'])
+            .unwrap_or(line)
+            .trim_matches([' ', '\u{a0}']);
+        let cell = cell
+            .strip_suffix(['│', '┃', '|'])
+            .unwrap_or(cell)
+            .trim_matches([' ', '\u{a0}']);
+        if !cell.is_empty() {
+            if parts.len() == 4 {
+                return false;
+            }
+            parts.push(cell);
+        }
+    }
+    is_pasted_content_token(&parts.join(" ")) || is_pasted_content_token(&parts.concat())
 }
 
 fn codex_chrome_row<'a>(
@@ -5278,7 +5365,8 @@ mod tests {
     const CODEX_DISPLAY_STATUS: &str = "\n  GPT-6.2-Sol high · Context 9% left · weekly 13% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts";
     const CODEX_EMPTY: &str =
         "\x1b[1m›\x1b[0m\x1b[48;5;235m \x1b[2mAsk Codex to do anything\x1b[0m\x1b[48;5;235m\n";
-    const CODEX_DRAFT: &str = "\x1b[1m›\x1b[0m [Pasted Content 1234 chars]\n";
+    const CODEX_DRAFT: &str = "\x1b[1m›\x1b[0m Task from Overall Main. Work.\n";
+    const CODEX_OPAQUE_PASTE: &str = "\x1b[1m›\x1b[0m [Pasted Content 1234 chars]\n";
     const TURN_ID: &str = concat!("abcde01234", "56789abcde");
     const OLD_TURN_ID: &str = concat!("0123456789", "fedcba9876");
 
@@ -5614,6 +5702,30 @@ mod tests {
             fake.sent("delete-buffer"),
             [&vec!["delete-buffer".to_owned(), "-b".into(), name.clone()]]
         );
+
+        for placeholder in [
+            CODEX_OPAQUE_PASTE,
+            "\x1b[1m›\x1b[0m [Pasted Content 1560 chars]\n",
+            "\x1b[1m›\x1b[0m [Pasted Content\n  1560 chars]\n",
+        ] {
+            let mut fake = FakePane::new(&[placeholder, placeholder, CODEX_EMPTY]);
+            let (result, sleeps) = task(&mut fake);
+            let error = result.unwrap_err();
+            assert!(error.publication_uncertain);
+            assert!(error.message.contains("Enter was withheld after pasting"));
+            assert_eq!(sleeps, 1);
+            assert_eq!(fake.enters(), 0);
+            assert_eq!(fake.sent("paste-buffer").len(), 1);
+        }
+
+        let visible_long = format!(
+            "\x1b[1m›\x1b[0m Task from Overall Main. [Pasted Content 1560 chars] {}\n",
+            "x".repeat(1500)
+        );
+        let mut fake = FakePane::new(&[&visible_long, &visible_long, CODEX_EMPTY]);
+        let (result, _) = submit(&mut fake, &"x".repeat(1560), Proof::Turn(TURN_ID), 2);
+        result.unwrap();
+        assert_eq!(fake.enters(), 1);
     }
 
     #[test]
@@ -6288,7 +6400,7 @@ mod tests {
         use super::super::*;
         use super::{
             AGY_QUOTA_MISORDERED, AGY_QUOTA_VIEWPORT, CODEX_DISPLAY_STATUS, CODEX_DRAFT,
-            CODEX_EMPTY, CODEX_STATUS, TURN_ID,
+            CODEX_EMPTY, CODEX_OPAQUE_PASTE, CODEX_STATUS, TURN_ID,
         };
         use crate::orchestrator::account_binding::test_support::{FakeHost, TempDir, private_dir};
         use oms_panel_core::native::reference::process::Owner;
@@ -8235,7 +8347,7 @@ mod tests {
             assert!(composer.exact_draft(&prompt));
             composer.screen = composer.screen.replacen("Assign \n", "Assign\n", 1);
             assert!(!composer.exact_draft(&prompt));
-            composer.screen = format!("{CODEX_DRAFT}{CODEX_STATUS}");
+            composer.screen = format!("{CODEX_OPAQUE_PASTE}{CODEX_STATUS}");
             composer.cursor_y = 0;
             assert!(!composer.exact_draft(&prompt));
             composer.screen = format!("› \x1b[7mAssign\x1b[0m{CODEX_STATUS}");
@@ -9253,7 +9365,7 @@ mod tests {
                 assert!(spy.mutating_calls().is_empty());
             }
 
-            // Matching --account acct-a succeeds ("connected") and submits --task with STARTUP_PROMPT.
+            // Matching --account acct-a succeeds ("connected") and submits --task with ALTERNATE_STARTUP_PROMPT.
             let connected = spy
                 .load()
                 .execute_with_host("codex", Some("acct-a"), None, &host)
@@ -9301,7 +9413,10 @@ mod tests {
             assert_eq!(submitted["account_verification"], "verified");
             let buffers = spy.calls_named("set-buffer");
             assert_eq!(buffers.len(), 1);
-            assert!(buffers[0][5].contains(STARTUP_PROMPT.trim()));
+            assert!(buffers[0][5].contains(". You own this provider's work. "));
+            assert!(buffers[0][5].contains(ALTERNATE_STARTUP_PROMPT));
+            assert!(!buffers[0][5].contains(STARTUP_PROMPT.trim()));
+            assert!(buffers[0][5].chars().count() <= CODEX_VISIBLE_PASTE_CHARS);
             assert!(buffers[0][5].contains(&format!(
                 "oms room show --repo '{}' --id '{ROOM}' --exact --json",
                 spy.repo.display()
@@ -9523,6 +9638,334 @@ mod tests {
             assert_eq!(untagged_conn["account_verification"], "unverified");
         }
 
+        fn primary_codex_fixture(tag: &str) -> (TempDir, SpyPanel, FakeHost, PathBuf) {
+            let tmp = TempDir::new(tag);
+            let repo = private_dir(&tmp.0.join("repo"));
+            let state = private_dir(&tmp.0.join("state"));
+            let codex_a = private_dir(&tmp.0.join("codex-a"));
+            let uid = rustix::process::getuid().as_raw();
+            let mut host = FakeHost::new(state);
+            host.accounts = Some(make_accounts(vec![(
+                "codex",
+                vec![("acct-a", codex_a.clone())],
+            )]));
+            let spy = SpyPanel::new(repo);
+            host.owners
+                .insert(spy.main_pid, owner_entry(spy.main_pid, "fixture-main", uid));
+            host.owners.insert(2001, owner_entry(2001, "p2001", uid));
+            spy.allow_board_queries.set(true);
+            spy.real_events.set(true);
+            write_synthetic_ledger(&spy.repo, 0);
+            spy.load()
+                .execute_with_host("codex", Some("acct-a"), None, &host)
+                .unwrap();
+            spy.calls.borrow_mut().clear();
+            spy.room_queries.borrow_mut().clear();
+            spy.event_lists.set(0);
+            spy.assignment_events.set(0);
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            (tmp, spy, host, codex_a)
+        }
+
+        #[test]
+        fn codex_primary_task_uses_alternate_prompt_under_cap_and_preserves_guards() {
+            let (_tmp, spy, host, codex_a) = primary_codex_fixture("orch-primary-codex-short");
+            let task = "inspect crate";
+            let submitted = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(task), &host)
+                .unwrap();
+            assert_eq!(submitted["status"], "submitted");
+            assert_eq!(submitted["account"], "acct-a");
+            assert_eq!(submitted["account_pinned"], true);
+            assert_eq!(submitted["account_verification"], "verified");
+            let buffers = spy.calls_named("set-buffer");
+            assert_eq!(buffers.len(), 1);
+            let prompt = &buffers[0][5];
+            let locator = assignment_locator(&spy.repo, ROOM).unwrap();
+            let turn = prompt
+                .split_once(" Turn ")
+                .unwrap()
+                .1
+                .split_once(". ")
+                .unwrap()
+                .0;
+            assert_eq!(turn.len(), 20);
+            assert_eq!(
+                prompt,
+                &format!(
+                    "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {ALTERNATE_STARTUP_PROMPT}{locator} Task: {task}"
+                )
+            );
+            assert!(!prompt.contains(STARTUP_PROMPT.trim()));
+            assert!(prompt.chars().count() < CODEX_VISIBLE_PASTE_CHARS);
+
+            // Account mismatch refuses before Room/events checks and before any tmux write.
+            spy.calls.borrow_mut().clear();
+            spy.room_queries.borrow_mut().clear();
+            spy.event_lists.set(0);
+            let mut other_host = host.clone();
+            let codex_b = private_dir(&spy.repo.parent().unwrap().join("codex-b"));
+            other_host.accounts = Some(make_accounts(vec![(
+                "codex",
+                vec![("acct-a", codex_a), ("acct-b", codex_b)],
+            )]));
+            assert!(
+                spy.load()
+                    .execute_with_host("codex", Some("acct-b"), Some(task), &other_host)
+                    .is_err()
+            );
+            assert!(spy.room_queries.borrow().is_empty());
+            assert_eq!(spy.event_lists.get(), 0);
+            assert!(spy.mutating_calls().is_empty());
+
+            // Room guard fires in fence(true) with 0 mutating tmux calls.
+            spy.calls.borrow_mut().clear();
+            spy.room_successor.set(Some("room-successor"));
+            let room_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(task), &host)
+                .unwrap_err();
+            assert!(room_err.message.contains("Main membership"));
+            assert!(spy.mutating_calls().is_empty());
+            spy.room_successor.set(None);
+
+            // Non-live Main attempt guard fires in fence(true) with 0 mutating tmux calls.
+            spy.calls.borrow_mut().clear();
+            append_lifecycle_row(&spy.repo, &main_failed_row(4, 1));
+            let main_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(task), &host)
+                .unwrap_err();
+            assert!(main_err.message.contains("live Main attempt"));
+            assert!(spy.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn codex_primary_over_cap_task_refuses_with_zero_tmux_mutations() {
+            let (_tmp, spy, host, _codex_a) = primary_codex_fixture("orch-primary-codex-cap");
+            let locator = assignment_locator(&spy.repo, ROOM).unwrap();
+            let base_len = format!(
+                "Task from Overall Main. Work within this task and report the result here. Turn {}. You own this provider's work. {ALTERNATE_STARTUP_PROMPT}{locator} Task: ",
+                "0".repeat(20)
+            )
+            .chars()
+            .count();
+            let max_task = "x".repeat(CODEX_VISIBLE_PASTE_CHARS - base_len);
+            let ok = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(&max_task), &host)
+                .unwrap();
+            assert_eq!(ok["status"], "submitted");
+            assert_eq!(
+                spy.calls_named("set-buffer")[0][5].chars().count(),
+                CODEX_VISIBLE_PASTE_CHARS
+            );
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert_eq!(spy.calls_named("send-keys").len(), 1);
+
+            spy.calls.borrow_mut().clear();
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            let over_task = "x".repeat(CODEX_VISIBLE_PASTE_CHARS - base_len + 1);
+            let err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some(&over_task), &host)
+                .unwrap_err();
+            assert_eq!(
+                err.message,
+                "Codex assignment is too long to verify in the composer"
+            );
+            assert!(!err.publication_uncertain);
+            assert!(spy.mutating_calls().is_empty());
+            assert!(spy.calls_named("capture-pane").is_empty());
+            assert!(spy.calls_named("set-buffer").is_empty());
+            assert!(spy.calls_named("paste-buffer").is_empty());
+            assert!(spy.calls_named("send-keys").is_empty());
+
+            // Direct unbound Proof::Turn send_checked also refuses > CODEX_VISIBLE_PASTE_CHARS before input probe.
+            let over_prompt = "x".repeat(CODEX_VISIBLE_PASTE_CHARS + 1);
+            let direct_err = spy
+                .load()
+                .send("codex", &over_prompt, Proof::Turn(TURN_ID), None)
+                .unwrap_err();
+            assert_eq!(
+                direct_err.message,
+                "Codex assignment is too long to verify in the composer"
+            );
+            assert!(spy.mutating_calls().is_empty());
+            assert!(spy.calls_named("capture-pane").is_empty());
+        }
+
+        #[test]
+        fn codex_collapsed_paste_placeholder_rejects_input_and_withholds_enter() {
+            let collapsed_composer = "\x1b[1m›\x1b[0m [Pasted Content 1560 chars]\n";
+            let collapsed_screen = format!("{collapsed_composer}{CODEX_STATUS}");
+            assert_eq!(
+                super::super::codex_input_state(&collapsed_screen),
+                Some(false)
+            );
+            assert!(!input_ready("codex", &collapsed_screen));
+
+            // Existing collapsed placeholder in primary composer rejects submission with 0 mutations.
+            let (_tmp, spy, host, _codex_a) = primary_codex_fixture("orch-collapsed-paste");
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), collapsed_screen.clone());
+            let pre_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some("short task"), &host)
+                .unwrap_err();
+            assert!(pre_err.message.contains("busy or a draft is present"));
+            assert!(spy.mutating_calls().is_empty());
+
+            spy.cursor_x.set(31);
+            assert!(
+                spy.load()
+                    .execute_with_host("codex", Some("acct-a"), Some("short task"), &host)
+                    .is_err()
+            );
+            assert!(spy.mutating_calls().is_empty());
+
+            // Ordinary Proof::Turn post-paste collapsed placeholder withholds Enter.
+            spy.calls.borrow_mut().clear();
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            let primary_collapsed = format!("{collapsed_composer}{CODEX_STATUS}");
+            spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(move |spy| {
+                    spy.cursor_x.set(31);
+                    spy.screens
+                        .borrow_mut()
+                        .insert("%4".into(), primary_collapsed);
+                }),
+            )));
+            let primary_err = spy
+                .load()
+                .execute_with_host("codex", Some("acct-a"), Some("short task"), &host)
+                .unwrap_err();
+            assert!(primary_err.publication_uncertain);
+            assert!(
+                primary_err
+                    .message
+                    .contains("Enter was withheld after pasting")
+            );
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
+
+            // Alternate Codex composer rejects collapsed placeholder and paste_and_submit withholds Enter.
+            let composer = super::super::CodexComposer {
+                command: "codex".into(),
+                cursor_x: 31,
+                cursor_y: 0,
+                screen: collapsed_screen.clone(),
+            };
+            assert!(!composer.ready());
+            assert!(!composer.exact_draft("short task"));
+
+            let (_alt_tmp, alt_spy, alt_host, caller, _home) = alternate_fixture();
+            write_synthetic_ledger(&alt_spy.repo, 0);
+            alt_spy.real_events.set(true);
+            let store = Store::open(&alt_spy.repo).unwrap();
+            let tx = store
+                .transaction("panel-provider-sessions", Duration::from_secs(3))
+                .unwrap();
+            alt_spy
+                .load()
+                .launch_codex_alternate(&caller, "second", LeadLaunch::default(), &alt_host, &tx)
+                .unwrap();
+            reset_alternate_assignment(&alt_spy);
+            alt_spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(move |spy| {
+                    spy.screens
+                        .borrow_mut()
+                        .insert("%5".into(), collapsed_screen);
+                    spy.alternate_task_cursor.set((31, 0));
+                }),
+            )));
+            let err = alt_spy
+                .load()
+                .assign_codex_alternate(&caller, "second", "short task", &alt_host, &tx)
+                .unwrap_err();
+            assert!(err.publication_uncertain);
+            assert!(err.message.contains("Enter was withheld after pasting"));
+            assert_eq!(alt_spy.calls_named("paste-buffer").len(), 1);
+            assert!(alt_spy.calls_named("send-keys").is_empty());
+        }
+
+        #[test]
+        fn non_codex_primary_task_keeps_full_startup_prompt() {
+            let tmp = TempDir::new("orch-non-codex-task");
+            let repo = private_dir(&tmp.0.join("repo"));
+            let state = private_dir(&tmp.0.join("state"));
+            let claude_home = private_dir(&tmp.0.join("claude-home"));
+            let uid = rustix::process::getuid().as_raw();
+            let mut host = FakeHost::new(state);
+            host.accounts = Some(make_accounts(vec![("claude", vec![("work", claude_home)])]));
+            host.owners.insert(2001, owner_entry(2001, "p2001", uid));
+            let spy = SpyPanel::new(repo);
+            host.owners
+                .insert(spy.main_pid, owner_entry(spy.main_pid, "fixture-main", uid));
+            spy.load()
+                .execute_with_host("claude", Some("work"), None, &host)
+                .unwrap();
+            spy.leads.borrow_mut().push(FakeLead {
+                window: "@5".into(),
+                pane_id: "%5".into(),
+                pid: 2002,
+                active: false,
+                provider: "antigravity".into(),
+            });
+
+            let claude_empty = "❯\u{a0}\x1b[2mTry something\x1b[0m\n────\n";
+            let agy_empty = "\x1b[38;5;111m>\x1b[39m \x1b[38;5;109mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\x1b[39m\n────\n";
+
+            for (provider, pane, screen, account, task_text) in [
+                (
+                    "claude",
+                    "%4",
+                    claude_empty,
+                    Some("work"),
+                    "delegate claude work",
+                ),
+                ("antigravity", "%5", agy_empty, None, "delegate agy work"),
+            ] {
+                spy.calls.borrow_mut().clear();
+                spy.cursor_x.set(2);
+                spy.screens.borrow_mut().insert(pane.into(), screen.into());
+                spy.task_transition.replace(Some((
+                    "send-keys",
+                    Box::new(move |spy| {
+                        spy.screens.borrow_mut().insert(pane.into(), screen.into());
+                    }),
+                )));
+                let out = spy
+                    .load()
+                    .execute_with_host(provider, account, Some(task_text), &host)
+                    .unwrap();
+                assert_eq!(out["status"], "submitted");
+                let buffers = spy.calls_named("set-buffer");
+                assert_eq!(buffers.len(), 1);
+                let prompt = &buffers[0][5];
+                assert!(prompt.contains(STARTUP_PROMPT.trim()));
+                assert!(prompt.chars().count() > CODEX_VISIBLE_PASTE_CHARS);
+                assert!(!prompt.contains(ALTERNATE_STARTUP_PROMPT));
+                assert!(!prompt.contains("Read-only Room locator"));
+                assert!(prompt.contains(". You own this provider's work. "));
+                assert!(prompt.ends_with(&format!("Task: {task_text}")));
+            }
+        }
+
         #[test]
         fn canonical_native_assignment_preserves_claim_and_never_replays_unknown_input() {
             const CASE: &str = "OMS_TEST_NATIVE_ASSIGNMENT";
@@ -9613,6 +10056,7 @@ mod tests {
                 "native-three",
                 "native-four",
                 "native-five",
+                "native-six",
             ] {
                 plan(&[
                     "add",
@@ -9668,6 +10112,9 @@ mod tests {
             let first: Value = serde_json::from_slice(&first.1).unwrap();
             assert_eq!(first["status"], "submitted");
             assert_eq!(first["consumption"], "unconfirmed");
+            assert!(
+                spy.calls_named("set-buffer")[0][5].chars().count() <= CODEX_VISIBLE_PASTE_CHARS
+            );
             assert_eq!(spy.calls_named("send-keys").len(), 1);
             let binding: Value = serde_json::from_slice(
                 &std::fs::read(repo.join(first["binding"].as_str().unwrap())).unwrap(),
@@ -9823,6 +10270,41 @@ mod tests {
             let read: Value = serde_json::from_slice(&read).unwrap();
             assert_eq!(read["state"], "claimed");
             assert_eq!(read["lease_epoch"], 1);
+
+            // Bound Proof::Turn withholds Enter on an opaque placeholder after paste and never resends.
+            spy.calls.borrow_mut().clear();
+            spy.cursor_x.set(2);
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(|spy| {
+                    spy.cursor_x.set(31);
+                    spy.screens
+                        .borrow_mut()
+                        .insert("%4".into(), format!("{CODEX_OPAQUE_PASTE}{CODEX_STATUS}"));
+                }),
+            )));
+            let opaque = send("native-six", "sixth assignment").unwrap();
+            assert_eq!(opaque.0, 75);
+            let opaque: Value = serde_json::from_slice(&opaque.1).unwrap();
+            assert_eq!(opaque["status"], "unknown");
+            assert!(
+                opaque["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("Enter was withheld after pasting"))
+            );
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
+            spy.calls.borrow_mut().clear();
+            let opaque_retry = send("native-six", "sixth assignment").unwrap();
+            assert_eq!(opaque_retry.0, 75);
+            let opaque_retry: Value = serde_json::from_slice(&opaque_retry.1).unwrap();
+            assert_eq!(opaque_retry["status"], "unknown");
+            assert_eq!(opaque_retry["attempt_id"], opaque["attempt_id"]);
+            assert_eq!(opaque_retry["reused"], true);
+            assert!(spy.mutating_calls().is_empty());
         }
 
         #[test]
