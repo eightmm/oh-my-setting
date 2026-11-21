@@ -2,13 +2,17 @@ use crate::{
     Error, Output, Result, Services, attention,
     board_refresh::{BoardRefresh, ChatReads, RefreshKey},
     cli::Options,
-    commands, input, navigation, render,
+    commands, input, navigation,
+    orchestrator::{ChatBinding, ObservationGeneration, Observations, Panel},
+    render,
 };
 use oms_panel_core::{NativeCommand, Value, eventlog, state::Snapshot};
 use serde_json::json;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 pub fn run(
@@ -83,7 +87,7 @@ pub fn run_with_writer(
     let mut weekly = WeeklyUsage::default();
     let mut chat: Option<ChatDock> = None;
     let mut split = DockSplit::default();
-    let mut observations = crate::orchestrator::Observations::default();
+    let mut observations = Observations::default();
     let mut main_footer = MainFooter::default();
     let mut selection_changed = SelectionFence::None;
     loop {
@@ -103,6 +107,7 @@ pub fn run_with_writer(
                 )
             });
         let mut accepted_refresh = false;
+        let mut checked_agy = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
             let (live, ready) = scope_sample.take().unwrap_or_else(|| {
                 let ready = board.worker.ready();
@@ -111,8 +116,40 @@ pub fn run_with_writer(
             let checkout_changed = board.checkout_changed(&live);
             let launch = std::mem::take(&mut requested)
                 || (Instant::now() >= deadline && !board.worker.busy());
-            let (changed, result) = board.update(live, launch, ready);
+            let seed = NativeSeed {
+                target: target.clone(),
+                observations: observations.clone(),
+                footer: main_footer.clone(),
+                agy: chat.as_ref().and_then(AgyDockCheck::new),
+            };
+            let (changed, result, native) =
+                board.update_with_native(live, launch, ready, Some(seed));
             accepted_refresh = result.is_some() && board.phase == RefreshPhase::Fresh;
+            let rejected_native = native.is_none()
+                && result.is_some()
+                && board
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.main.is_some());
+            let mut native_projection = None;
+            if let Some(reading) = native {
+                native_projection = Some(reading.projection);
+                if accepted_refresh {
+                    checked_agy = reading.agy;
+                }
+                observations = reading.observations;
+                main_footer = reading.footer;
+            } else if rejected_native {
+                observations.invalidate_readings();
+                main_footer = MainFooter::default();
+                if chat.as_ref().is_some_and(|dock| dock.chat.is_some()) {
+                    chat = None;
+                    nav.notice = Some("Transcript unavailable".into());
+                }
+                if let Some(detail) = &mut weekly.detail {
+                    detail.history.clear();
+                }
+            }
             if checkout_changed && let Some(Value::Object(fields)) = &mut previous {
                 fields.remove("board_checkout");
             }
@@ -132,16 +169,25 @@ pub fn run_with_writer(
                 chat = None;
                 reset_weekly_scope(&mut weekly, true);
                 observations = Default::default();
+                main_footer = MainFooter::default();
                 nav.selected = 0;
                 nav.offset = 0;
                 nav.detail = false;
                 nav.folded.clear();
                 nav.notice = None;
             }
-            (
-                board.phase.frame_report(result, previous.take(), &room),
-                board.phase == RefreshPhase::Fresh,
-            )
+            let mut report = board.phase.frame_report(result, previous.take(), &room);
+            if rejected_native {
+                clear_rejected_native(&mut report);
+            } else if let Some(projection) = native_projection {
+                // A queued same-scope collection limits action authority. The
+                // last exact public observation can still refresh the frame.
+                replace_native_projection(&mut report, projection);
+                if !accepted_refresh {
+                    clear_private_weekly(&mut report);
+                }
+            }
+            (report, board.phase == RefreshPhase::Fresh)
         } else {
             let snapshot = commands::snapshot_with(
                 session.as_ref().expect("synchronous Watch Session"),
@@ -176,39 +222,47 @@ pub fn run_with_writer(
         if let Some(name) = repo.file_name().and_then(std::ffi::OsStr::to_str) {
             report["project_name"] = json!(name);
         }
-        if let Some(board) = &board {
+        if let Some(board) = &board
+            && (!accepted_refresh
+                || board
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.main.is_none()))
+        {
             main_footer.project(
                 board.scope.as_ref(),
                 accepted_refresh,
                 &mut report,
                 Instant::now(),
-                |scope| target.read_footer(repo, services, interrupted, scope),
+                |_| None,
             );
         }
         let pending = report["collection"]["pending"] == true;
-        if interactive
-            && board.as_ref().is_none_or(|board| board.scope.is_some())
-            && let Ok(panel) = crate::orchestrator::Panel::load(repo, &room, services, interrupted)
-        {
-            if !pending && (board.is_none() || snapshot_ok) {
+        if board.is_none() && interactive {
+            if let Ok(panel) = Panel::load(repo, &room, services, interrupted) {
                 panel.observe(&mut observations, &mut report, snapshot_ok);
-            }
-            if !observations.quota_pending()
-                && nav
-                    .notice
-                    .as_deref()
-                    .is_some_and(|s| s.starts_with(QUOTA_CHECKING))
-            {
-                nav.notice = None;
-            }
-            report["native_dock"] = serde_json::json!(panel.docked());
-        } else {
-            if board.is_some() {
-                report["native_dock"] = Value::Null;
-            }
-            if !pending {
+                report["native_dock"] = json!(panel.docked());
+            } else {
                 observations.clear_chats();
             }
+        }
+        // This action is earned by an explicit quota request. Its pane proof
+        // and dismissal run independently from passive observation and paint.
+        if snapshot_ok
+            && let Some(board) = &mut board
+            && let Some(scope) = &board.scope
+        {
+            board
+                .quota
+                .finish_usage(repo, target.clone(), scope, &mut observations);
+        }
+        if !observations.quota_pending()
+            && nav
+                .notice
+                .as_deref()
+                .is_some_and(|s| s.starts_with(QUOTA_CHECKING))
+        {
+            nav.notice = None;
         }
         if !pending && !snapshot_ok {
             observations.clear_chats();
@@ -236,18 +290,27 @@ pub fn run_with_writer(
             .and_then(|scope| scope.main.as_ref())
             .map(|main| main.owner.clone());
         let owner = owner.as_deref().or_else(|| options.get("owner"));
-        if settle_live_chat_dock(
-            &mut chat,
-            &observations,
-            &report,
-            repo,
-            &room,
-            owner,
-            board.as_ref(),
-            session.as_ref(),
-            services,
-            interrupted,
-        ) {
+        let chat_closed = if board.is_some() {
+            settle_live_chat_dock_with(&mut chat, &observations, &report, |binding, locator| {
+                checked_agy
+                    .as_ref()
+                    .is_some_and(|check| &check.binding == binding && &check.locator == locator)
+            })
+        } else {
+            settle_live_chat_dock(
+                &mut chat,
+                &observations,
+                &report,
+                repo,
+                &room,
+                owner,
+                None,
+                session.as_ref(),
+                services,
+                interrupted,
+            )
+        };
+        if chat_closed {
             nav.notice = Some("Transcript unavailable".into());
         }
         if logging {
@@ -292,8 +355,9 @@ pub fn run_with_writer(
         {
             break;
         }
-        let bounded_retry =
-            observations.quota_pending() || chat.as_ref().is_some_and(|dock| dock.chat.is_some());
+        let bounded_retry = observations.quota_pending()
+            || observations.has_usage_dismissal()
+            || chat.as_ref().is_some_and(|dock| dock.chat.is_some());
         deadline = Instant::now()
             + refresh_interval(
                 wake.is_some(),
@@ -324,7 +388,7 @@ pub fn run_with_writer(
                 };
                 if let Some(board) = &mut board {
                     collect_ready = scope.current && board.worker.ready();
-                    if collect_ready || woken {
+                    if keys.is_empty() && (collect_ready || woken) {
                         scope.observe(
                             board,
                             target.sample(repo, services, interrupted),
@@ -956,6 +1020,7 @@ struct LiveMain {
     birth: String,
 }
 
+#[derive(Clone)]
 struct BoardTarget {
     room: Option<String>,
     caller: Option<String>,
@@ -964,13 +1029,14 @@ struct BoardTarget {
 
 const FOOTER_INTERVAL: Duration = Duration::from_secs(30);
 
+#[derive(Clone)]
 struct FooterReading {
     scope: BoardScope,
     model: Option<String>,
     checked_at: Instant,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MainFooter(Option<FooterReading>);
 
 fn same_footer_scope(before: &BoardScope, after: &BoardScope) -> bool {
@@ -1214,6 +1280,143 @@ impl BoardTarget {
     }
 }
 
+struct NativeSeed {
+    target: BoardTarget,
+    observations: Observations,
+    footer: MainFooter,
+    agy: Option<AgyDockCheck>,
+}
+
+struct AgyDockCheck {
+    binding: ChatBinding,
+    locator: crate::agy_child_chat::AgyChildChatLocator,
+}
+
+impl AgyDockCheck {
+    fn new(dock: &ChatDock) -> Option<Self> {
+        Some(Self {
+            binding: dock.chat.as_ref()?.1.clone(),
+            locator: dock.agy_locator.clone()?,
+        })
+    }
+}
+
+pub(crate) struct NativeRequest {
+    scope: BoardScope,
+    seed: NativeSeed,
+}
+
+pub(crate) struct NativeReading {
+    scope: BoardScope,
+    generation: ObservationGeneration,
+    projection: NativeProjection,
+    observations: Observations,
+    footer: MainFooter,
+    agy: Option<AgyDockCheck>,
+}
+
+const NATIVE_FIELDS: [&str; 10] = [
+    "native_children",
+    "native_dock",
+    "provider_sessions",
+    "provider_models",
+    "provider_activity",
+    "provider_accounts",
+    "provider_status",
+    "claude_local_weekly",
+    "codex_weekly_account",
+    "main_model_observation",
+];
+type NativeProjection = [Option<Value>; NATIVE_FIELDS.len()];
+
+fn replace_native_projection(report: &mut Value, projection: NativeProjection) -> NativeProjection {
+    let fields = report.as_object_mut().expect("Board report is an object");
+    let mut projection = projection.into_iter();
+    NATIVE_FIELDS.map(|key| match projection.next().flatten() {
+        Some(value) => fields.insert(key.into(), value),
+        None => fields.remove(key),
+    })
+}
+
+fn clear_rejected_native(report: &mut Value) {
+    let Some(fields) = report.as_object_mut() else {
+        return;
+    };
+    for key in NATIVE_FIELDS {
+        if key == "main_model_observation" {
+            clear_footer_model(fields);
+        } else {
+            fields.remove(key);
+        }
+    }
+}
+
+impl NativeRequest {
+    pub(crate) fn observe(
+        &self,
+        snapshot: &mut Snapshot,
+        sources: &oms_panel_core::metrics::CodexQuotaSources,
+        repo: &Path,
+        attempts: &oms_panel_core::state::AttemptCache,
+        services: &dyn Services,
+        stop: &AtomicBool,
+    ) -> Option<NativeReading> {
+        let mut target = self.seed.target.clone();
+        let main = self.scope.main.as_ref()?;
+        if snapshot.status != 0
+            || snapshot.report["collection"]["ok"] != true
+            || !same_footer_scope(&target.sample(repo, services, stop).ok()?, &self.scope)
+            || stop.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        let room = &self.scope.room;
+        let panel = Panel::load(repo, room, services, stop).ok()?;
+        let generation = panel.observation_generation().ok()?;
+        let original = NATIVE_FIELDS.map(|key| snapshot.report.get(key).cloned());
+        let mut observations = self.seed.observations.clone();
+        let mut footer = self.seed.footer.clone();
+        commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
+        let report = &mut snapshot.report;
+        panel.observe_passively(&mut observations, report);
+        report["native_dock"] = json!(panel.docked());
+        footer.project(Some(&self.scope), true, report, Instant::now(), |scope| {
+            target.read_footer(repo, services, stop, scope)
+        });
+        let agy = self.seed.agy.as_ref().and_then(|check| {
+            let reads = ChatReads::new(services);
+            let scoped = Panel::load(repo, room, &reads, stop).ok()?;
+            scoped
+                .recheck_open_agy_chat(&check.binding, &check.locator, Some(&main.owner), attempts)
+                .then(|| AgyDockCheck {
+                    binding: check.binding.clone(),
+                    locator: check.locator.clone(),
+                })
+        });
+        // Keep the raw Board snapshot separate from the small pane projection.
+        let projection = replace_native_projection(report, original);
+        #[cfg(all(test, target_os = "linux"))]
+        tests::record_provider_counters();
+        let same_panes = Panel::load(repo, room, services, stop)
+            .and_then(|fresh| fresh.observation_generation())
+            .is_ok_and(|after| after == generation);
+        if !same_panes
+            || stop.load(Ordering::Acquire)
+            || !same_footer_scope(&target.sample(repo, services, stop).ok()?, &self.scope)
+        {
+            return None;
+        }
+        Some(NativeReading {
+            scope: self.scope.clone(),
+            generation,
+            projection,
+            observations,
+            footer,
+            agy,
+        })
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum RefreshPhase {
     Pending,
@@ -1257,6 +1460,7 @@ impl RefreshPhase {
                     "provider_accounts",
                     "provider_status",
                     "native_children",
+                    "native_dock",
                 ] {
                     if let Some(value) = previous.remove(key) {
                         current[key] = value;
@@ -1294,8 +1498,69 @@ impl RefreshPhase {
     }
 }
 
+// The interactive exit waits only briefly for normal process-group cleanup.
+const REFRESH_STOP_BUDGET: Duration = Duration::from_millis(750);
+
+#[derive(Default)]
+struct QuotaCompletion(Option<(Arc<AtomicBool>, Receiver<()>)>);
+
+impl QuotaCompletion {
+    fn finish_usage(
+        &mut self,
+        repo: &Path,
+        mut target: BoardTarget,
+        scope: &BoardScope,
+        observations: &mut Observations,
+    ) {
+        if self
+            .0
+            .as_ref()
+            .is_some_and(|(_, exited)| exited.try_recv() == Err(TryRecvError::Empty))
+            || !observations.has_usage_dismissal()
+        {
+            return;
+        }
+        let mut action = observations.take_usage_dismissals();
+        let repo = repo.to_owned();
+        let scope = scope.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let interrupted = stop.clone();
+        let (lifetime, exited) = mpsc::channel::<()>();
+        if std::thread::Builder::new()
+            .name("oms-quota-completion".into())
+            .spawn(move || {
+                let _lifetime = lifetime;
+                if let Ok(services) = oms_panel_core::SubcommandServices::sibling()
+                    && target
+                        .sample(&repo, &services, &interrupted)
+                        .is_ok_and(|live| same_footer_scope(&scope, &live))
+                    && let Ok(panel) = Panel::load(&repo, &scope.room, &services, &interrupted)
+                {
+                    panel.dismiss_observed_usage(&mut action);
+                }
+            })
+            .is_ok()
+        {
+            self.0 = Some((stop, exited));
+        }
+    }
+
+    fn cancel(&self) {
+        if let Some((stop, _)) = &self.0 {
+            stop.store(true, Ordering::Release);
+        }
+    }
+
+    fn wait_until(&self, deadline: Instant) {
+        if let Some((_, exited)) = &self.0 {
+            let _ = exited.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+
 struct InteractiveRefresh {
     worker: BoardRefresh,
+    quota: QuotaCompletion,
     scope: Option<BoardScope>,
     phase: RefreshPhase,
     deferred_refresh: bool,
@@ -1305,6 +1570,7 @@ impl InteractiveRefresh {
     fn start() -> Result<Self> {
         Ok(Self {
             worker: BoardRefresh::start()?,
+            quota: QuotaCompletion::default(),
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
@@ -1322,33 +1588,57 @@ impl InteractiveRefresh {
             .is_some_and(|(scope, live)| !scope.key.same_launch_path(&live.key))
     }
 
-    fn request(&mut self, scope: &BoardScope) {
-        self.phase = match self.worker.request(scope.key.clone()) {
+    fn request(&mut self, scope: &BoardScope, seed: Option<NativeSeed>) {
+        let native = seed
+            .filter(|_| scope.main.is_some())
+            .map(|seed| NativeRequest {
+                scope: scope.clone(),
+                seed,
+            });
+        self.phase = match self.worker.request_with_native(scope.key.clone(), native) {
             Ok(_) => RefreshPhase::Pending,
             Err(error) => RefreshPhase::Failed(error.message),
         };
     }
 
+    #[cfg(test)]
     fn update(
         &mut self,
         live: Result<BoardScope>,
         request: bool,
         ready: bool,
     ) -> (bool, Option<Snapshot>) {
+        let (changed, snapshot, _) = self.update_with_native(live, request, ready, None);
+        (changed, snapshot)
+    }
+
+    fn update_with_native(
+        &mut self,
+        live: Result<BoardScope>,
+        request: bool,
+        ready: bool,
+        mut seed: Option<NativeSeed>,
+    ) -> (bool, Option<Snapshot>, Option<NativeReading>) {
         let changed = !self.matches(&live);
         if changed {
+            self.quota.cancel();
             self.deferred_refresh = false;
+            if let Some(seed) = &mut seed {
+                seed.observations = Observations::default();
+                seed.agy = None;
+                seed.footer = MainFooter::default();
+            }
         }
         let scope = match live {
             Ok(scope) => scope,
             Err(error) => {
                 self.scope = None;
                 self.phase = RefreshPhase::Failed(error.message);
-                return (changed, None);
+                return (changed, None, None);
             }
         };
         if changed || (request && !self.worker.busy()) {
-            self.request(&scope);
+            self.request(&scope, seed.take());
         } else if request && !self.worker.queued() {
             // Keep the current scope's read eligible to paint even if wakes
             // arrive faster than it completes. An already queued scope change
@@ -1357,9 +1647,6 @@ impl InteractiveRefresh {
         }
         let result = ready.then(|| self.worker.poll(&scope.key)).flatten();
         let follow_up = !self.worker.busy() && std::mem::take(&mut self.deferred_refresh);
-        if follow_up {
-            self.request(&scope);
-        }
         let completed = result.and_then(|result| match result {
             Ok(snapshot)
                 if snapshot.status == 0
@@ -1394,8 +1681,30 @@ impl InteractiveRefresh {
                 None
             }
         });
+        let native = self.worker.take_native_reading().filter(|reading| {
+            completed.is_some()
+                && same_footer_scope(&reading.scope, &scope)
+                && reading.generation.processes_current()
+        });
+        let rejected_native = native.is_none() && completed.is_some() && scope.main.is_some();
+        if rejected_native {
+            self.quota.cancel();
+        }
+        if follow_up {
+            if let Some(seed) = &mut seed {
+                if let Some(reading) = &native {
+                    seed.observations = reading.observations.clone();
+                    seed.footer = reading.footer.clone();
+                } else if rejected_native {
+                    seed.observations.invalidate_readings();
+                    seed.footer = MainFooter::default();
+                    seed.agy = None;
+                }
+            }
+            self.request(&scope, seed);
+        }
         self.scope = Some(scope);
-        (changed, completed)
+        (changed, completed, native)
     }
 
     fn chat_cache(&self) -> Option<&oms_panel_core::state::AttemptCache> {
@@ -1403,6 +1712,15 @@ impl InteractiveRefresh {
             return None;
         }
         self.worker.idle_attempt_cache(&self.scope.as_ref()?.key)
+    }
+}
+
+impl Drop for InteractiveRefresh {
+    fn drop(&mut self) {
+        let deadline = Instant::now() + REFRESH_STOP_BUDGET;
+        self.quota.cancel();
+        self.worker.stop_until(deadline);
+        self.quota.wait_until(deadline);
     }
 }
 
@@ -3489,6 +3807,7 @@ mod tests {
             BoardRefresh::spawn_with(move || Ok(ScopeCollector { answer: responses })).unwrap();
         let mut board = InteractiveRefresh {
             worker,
+            quota: Default::default(),
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
@@ -3849,7 +4168,7 @@ mod tests {
 
     #[test]
     fn carried_board_report_drops_private_claude_weekly() {
-        use super::{RefreshPhase, clear_private_weekly, idle_report};
+        use super::{RefreshPhase, clear_private_weekly, clear_rejected_native, idle_report};
         use oms_panel_core::state::Snapshot;
         use serde_json::json;
 
@@ -3888,6 +4207,29 @@ mod tests {
             assert!(report.get("codex_weekly_account").is_none());
             assert_eq!(report["provider_status"]["codex"]["weekly_used"], 14);
             assert_eq!(report["provider_accounts"]["codex"]["account"], "acct-b");
+        }
+        // The follow-up remains pending after this same-scope result contradicts
+        // the previously proved account. Its carried quota must disappear.
+        let mut contradicted = RefreshPhase::Pending.frame_report(
+            Some(Snapshot {
+                status: 0,
+                report: idle_report("room-fixture"),
+            }),
+            Some(previous),
+            "room-fixture",
+        );
+        clear_rejected_native(&mut contradicted);
+        assert_eq!(contradicted["collection"]["pending"], true);
+        for key in [
+            "provider_status",
+            "provider_accounts",
+            "codex_weekly_account",
+            "claude_local_weekly",
+        ] {
+            assert!(
+                contradicted.get(key).is_none(),
+                "held {key} survived rejected proof"
+            );
         }
     }
 
@@ -4322,6 +4664,7 @@ mod tests {
         .unwrap();
         let mut board = InteractiveRefresh {
             worker,
+            quota: Default::default(),
             scope: None,
             phase: RefreshPhase::Pending,
             deferred_refresh: false,
@@ -5642,6 +5985,40 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    const WATCH_PTY: &str = "OMS_TEST_AGY_WATCH_PTY";
+
+    #[cfg(target_os = "linux")]
+    static PROVIDER_COUNTERS: std::sync::Mutex<[usize; 8]> = std::sync::Mutex::new([0; 8]);
+
+    #[cfg(target_os = "linux")]
+    fn agy_watch_counters() -> [usize; 8] {
+        use crate::agy_child_chat as agy;
+        let (custody, scans, strict_reads) = agy::test_counters();
+        let (legacy_reads, strict_check) = agy::agy_child_read_counts();
+        let (leg_custody, leg_parent, leg_cand, leg_child) = agy::legacy_agy_read_index();
+        assert_eq!(strict_reads, strict_check);
+        assert_eq!(legacy_reads, leg_child);
+        assert_eq!(agy::total_agy_child_reads(), legacy_reads + strict_reads);
+        [
+            custody,
+            scans,
+            strict_reads,
+            legacy_reads,
+            leg_custody,
+            leg_parent,
+            leg_cand,
+            leg_child,
+        ]
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn record_provider_counters() {
+        if std::env::var_os(WATCH_PTY).is_some() {
+            *PROVIDER_COUNTERS.lock().unwrap() = agy_watch_counters();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn agy_watch_real_private_fake_tmux_click_enter_escape_and_fallback() {
         use super::Options;
@@ -5656,7 +6033,6 @@ mod tests {
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
 
-        const CHILD_ENV: &str = "OMS_TEST_AGY_WATCH_PTY";
         const SEED_ENV: &str = "OMS_TEST_AGY_WATCH_SEED";
         const REPLY_ENV: &str = "OMS_TEST_WATCH_REPLY";
         const WORKER: &str = "wake-worker";
@@ -5780,7 +6156,7 @@ mod tests {
             return;
         }
 
-        if std::env::var_os(CHILD_ENV).is_some() {
+        if std::env::var_os(WATCH_PTY).is_some() {
             let repo = PathBuf::from(std::env::var_os("OMS_TEST_REPO").unwrap());
             let counters_file = PathBuf::from(std::env::var_os("OMS_TEST_COUNTERS").unwrap());
             let options = Options::parse(&commands::strings(&["--watch"])).unwrap();
@@ -5788,23 +6164,15 @@ mod tests {
             let interrupted = AtomicBool::new(false);
             crate::agy_child_chat::reset_all_agy_counters();
             let result = super::run(&repo, &options, &services, &interrupted).unwrap();
-            let (custody, scans, strict_reads) = crate::agy_child_chat::test_counters();
-            let (legacy_reads, strict_check) = crate::agy_child_chat::agy_child_read_counts();
-            let (leg_custody, leg_parent, leg_cand, leg_child) =
-                crate::agy_child_chat::legacy_agy_read_index();
-            assert_eq!(strict_reads, strict_check);
-            assert_eq!(legacy_reads, leg_child);
-            assert_eq!(
-                crate::agy_child_chat::total_agy_child_reads(),
-                legacy_reads + strict_reads
-            );
-            std::fs::write(
-                &counters_file,
-                format!(
-                    "{custody},{scans},{strict_reads},{legacy_reads},{leg_custody},{leg_parent},{leg_cand},{leg_child}\n"
-                ),
-            )
-            .unwrap();
+            let foreground = agy_watch_counters();
+            let observed = PROVIDER_COUNTERS.lock().unwrap();
+            let counts = foreground
+                .into_iter()
+                .zip(*observed)
+                .map(|(action, refresh)| (action + refresh).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            std::fs::write(&counters_file, counts).unwrap();
             assert_eq!(result.0, 0);
             return;
         }
@@ -6036,6 +6404,15 @@ mod tests {
         write_jsonl(child_c, "transcript.jsonl", &child_c_rows);
         write_jsonl(child_c, "transcript_full.jsonl", &child_c_rows);
 
+        let stall_capture = tmp.0.join("capture-stall");
+        let capture_entered = tmp.0.join("capture-entered");
+        let model = tmp.0.join("provider-model");
+        let lead_window = tmp.0.join("lead-window");
+        let quota_stage = tmp.0.join("quota-stage");
+        let set_model = |label: &str| std::fs::write(&model, label).unwrap();
+        set_model("Fixture initial");
+        std::fs::write(&lead_window, "@4").unwrap();
+
         // Private fake tmux binary logging all calls; PATH holds ONLY <tmp>/bin (with real git symlinked).
         let git_bin = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .map(|d| d.join("git"))
@@ -6044,13 +6421,22 @@ mod tests {
         std::os::unix::fs::symlink(&git_bin, bin.join("git")).unwrap();
         let fake_tmux = bin.join("tmux");
         let fake_tmux_src = r##"#!/usr/bin/python3
-import os, sys
+import os, sys, time
 args = sys.argv[1:]
 log = os.environ.get("OMS_FAKE_TMUX_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as f:
         f.write(" ".join(args) + "\n")
 ppid = os.getppid()
+quota = os.environ.get("OMS_FAKE_QUOTA_STAGE")
+def stage():
+    if quota and os.path.exists(quota):
+        with open(quota, encoding="utf-8") as source:
+            return source.read()
+    return ""
+def advance(value):
+    with open(quota, "w", encoding="utf-8") as target:
+        target.write(value)
 if args == [
     "list-panes",
     "-t",
@@ -6077,7 +6463,11 @@ elif args == [
     lead_pid = os.environ["OMS_FAKE_LEAD_PID"]
     print(f"$1\t@1\t%1\t{ppid}\t0\t1\t%1\t{attempt}\tcodex\t{attempt}\t{room}\t\t\t1\t.__")
     print(f"$1\t@1\t%2\t{ppid}\t0\t1\t%1\t{attempt}\tcodex\t{attempt}\t{room}\t\t\t0\t.__")
-    print(f"$1\t@4\t%4\t{lead_pid}\t0\t0\t\t\t\t\t{room}\tantigravity\t{attempt}\t0\t.__")
+    window = "@4"
+    if "OMS_FAKE_LEAD_WINDOW" in os.environ:
+        with open(os.environ["OMS_FAKE_LEAD_WINDOW"], encoding="utf-8") as source:
+            window = source.read()
+    print(f"$1\t{window}\t%4\t{lead_pid}\t0\t0\t\t\t\t\t{room}\tantigravity\t{attempt}\t0\t.__")
 elif args == [
     "display-message",
     "-p",
@@ -6106,12 +6496,51 @@ elif args == [
     room = os.environ["OMS_FAKE_ROOM"]
     attempt = os.environ["OMS_FAKE_ATTEMPT"]
     print(f"$1\t@1\t{ppid}\t0\t1\t0\t1\t{attempt}\t{room}\t{repo}")
+elif quota and stage() and args == ["display-message", "-p", "-t", "%4", "#{pane_in_mode}|#{cursor_x}|#{cursor_y}"]:
+    print("0|2|0")
+elif quota and stage() and args in (["capture-pane", "-p", "-t", "%4", "-S", "0", "-E", "0"], ["capture-pane", "-p", "-e", "-S", "0", "-t", "%4"]):
+    print("> /usage" if stage() == "draft" else ">")
+elif quota and stage() == "armed" and len(args) == 5 and args[:2] == ["set-buffer", "-b"] and args[3:] == ["--", "/usage"]:
+    pass
+elif quota and stage() == "armed" and len(args) == 7 and args[:4] == ["paste-buffer", "-p", "-d", "-b"] and args[5:] == ["-t", "%4"]:
+    advance("draft")
+elif quota and stage() == "draft" and args == ["send-keys", "-t", "%4", "Enter"]:
+    advance("dialog")
+elif quota and stage() == "confirm" and args == ["send-keys", "-t", "%4", "Escape"]:
+    advance("closed")
+elif quota and stage() in ("dialog", "confirm") and args == ["capture-pane", "-p", "-t", "%4"]:
+    if stage() == "dialog":
+        advance("confirm")
+    else:
+        stall = os.environ["OMS_FAKE_STALL_CAPTURE"]
+        with open(os.environ["OMS_FAKE_CAPTURE_ENTERED"], "w", encoding="utf-8") as entry:
+            entry.write(f"quota\n{os.getpid()}")
+        while os.path.exists(stall):
+            time.sleep(0.01)
+    print("└ Models & Quota\nGEMINI MODELS\nWeekly Limit Remaining\n[███] 94%\nFive Hour Limit Remaining\n[███] 86%\nCLAUDE AND GPT MODELS\nWeekly Limit Remaining\n[███] 100%")
 elif args == ["capture-pane", "-p", "-t", "%1"]:
     print("› \n\n  GPT-6.2-Sol high · Context 9% left · weekly 13% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts")
 elif args == ["capture-pane", "-p", "-t", "%4"] or args == ["capture-pane", "-p", "-J", "-S", "-100", "-t", "%4"]:
+    stall = os.environ.get("OMS_FAKE_STALL_CAPTURE")
+    if stall and args == ["capture-pane", "-p", "-t", "%4"] and os.path.exists(stall):
+        with open(stall, encoding="utf-8") as source:
+            ticket = source.read()
+        with open(os.environ["OMS_FAKE_CAPTURE_ENTERED"], "w", encoding="utf-8") as entry:
+            entry.write(f"{ticket}\n{os.getpid()}")
+        while True:
+            try:
+                with open(stall, encoding="utf-8") as source:
+                    if source.read() != ticket:
+                        break
+            except FileNotFoundError:
+                break
+            time.sleep(0.01)
     prompt_file = os.environ["OMS_FAKE_PROMPT_FILE"]
     with open(prompt_file, "r", encoding="utf-8") as pf:
         sys.stdout.write(pf.read())
+    if "OMS_FAKE_PROVIDER_MODEL" in os.environ:
+        with open(os.environ["OMS_FAKE_PROVIDER_MODEL"], encoding="utf-8") as source:
+            print(f"{source.read()} (Antigravity ) | ctx 32% | main")
 else:
     if log:
         with open(log, "a", encoding="utf-8") as f:
@@ -6265,7 +6694,16 @@ sys.exit(proc.wait())
                 &mut [String],
                 &mpsc::Receiver<Vec<u8>>,
             ) + 'a;
-        let run_pty = |drive: &mut PtyDriver<'_>| -> ([usize; 8], String) {
+        let run_pty = |first_capture_held: bool,
+                       stalled_quit: bool,
+                       drive: &mut PtyDriver<'_>|
+         -> ([usize; 8], String) {
+            let _ = std::fs::remove_file(&stall_capture);
+            let _ = std::fs::remove_file(&capture_entered);
+            let _ = std::fs::remove_file(&quota_stage);
+            if first_capture_held {
+                std::fs::write(&stall_capture, "first").unwrap();
+            }
             let _ = std::fs::remove_file(&log);
             let _ = std::fs::remove_file(&counters);
             let mut pty_cmd = Command::new("/usr/bin/python3");
@@ -6281,7 +6719,7 @@ sys.exit(proc.wait())
                 .env("XDG_STATE_HOME", &state)
                 .env("TERM", "xterm-256color")
                 .env("TMUX_PANE", "%2")
-                .env(CHILD_ENV, "1")
+                .env(WATCH_PTY, "1")
                 .env("OMS_TEST_REPO", &repo)
                 .env("OMS_TEST_EXECUTION", &wt)
                 .env("OMS_TEST_COUNTERS", &counters)
@@ -6290,6 +6728,11 @@ sys.exit(proc.wait())
                 .env("OMS_FAKE_ATTEMPT", &attempt_id)
                 .env("OMS_FAKE_LEAD_PID", lead_pid.to_string())
                 .env("OMS_FAKE_PROMPT_FILE", &prompt_file)
+                .env("OMS_FAKE_STALL_CAPTURE", &stall_capture)
+                .env("OMS_FAKE_CAPTURE_ENTERED", &capture_entered)
+                .env("OMS_FAKE_PROVIDER_MODEL", &model)
+                .env("OMS_FAKE_LEAD_WINDOW", &lead_window)
+                .env("OMS_FAKE_QUOTA_STAGE", &quota_stage)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit());
@@ -6314,9 +6757,25 @@ sys.exit(proc.wait())
             let mut stream = String::new();
             drive(&mut child_in, &mut stream, &mut screen, &rx);
 
+            let quit = Instant::now();
             child_in.write_all(b"q").unwrap();
             child_in.flush().unwrap();
             let status = child.wait().unwrap();
+            if stalled_quit {
+                let entered = std::fs::read_to_string(&capture_entered).unwrap();
+                let (_, pid) = entered.split_once('\n').unwrap();
+                let pid = pid.parse::<u32>().unwrap();
+                assert!(
+                    oms_panel_core::terminals::process(pid).is_err(),
+                    "stalled capture child {pid} was still alive after Board quit"
+                );
+                let elapsed = quit.elapsed();
+                assert!(
+                    stall_capture.exists() && elapsed < Duration::from_secs(2),
+                    "stalled capture delayed quit by {elapsed:?}"
+                );
+                eprintln!("stalled provider: quit-to-exit {elapsed:?}");
+            }
             let _ = reader_thread.join();
             assert!(status.success(), "PTY child failed: {status:?}");
 
@@ -6361,8 +6820,10 @@ sys.exit(proc.wait())
 
         // Run 1: cold Main status, input-only redraw, a quiet 5s tick, worker reply wake
         // and explicit refresh. Without a row open, no child transcript is read.
-        let (pre_click_counters, pre_click_tmux_log) =
-            run_pty(&mut |child_in, stream, screen, rx| {
+        let (pre_click_counters, pre_click_tmux_log) = run_pty(
+            false,
+            false,
+            &mut |child_in, stream, screen, rx| {
                 wait_for(stream, screen, rx, "refresh-only initial board", &mut |s| {
                     s[0].contains("OMS · repo")
                         && s.iter()
@@ -6469,15 +6930,44 @@ sys.exit(proc.wait())
                     "reply burst coalesced"
                 );
 
-                let before = count_captures();
+                let refresh_started = Instant::now();
+                std::fs::write(&stall_capture, "").unwrap();
+                set_model("Refresh resumed");
                 child_in.write_all(b"u").unwrap();
                 child_in.flush().unwrap();
-                wait_for(stream, screen, rx, "refresh-only second pass", &mut |s| {
-                    count_captures() > before
-                        && s.iter().any(|l| l.contains("2 past (Tab all)"))
-                        && !s.iter().any(|l| l.contains("Refreshing Board"))
+                wait_for(stream, screen, rx, "stalled provider capture", &mut |_| {
+                    capture_entered.exists()
                 });
-            });
+                assert!(screen.iter().any(|line| line.contains("Fixture initial")));
+                let key_started = Instant::now();
+                child_in.write_all(b"?").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "help during capture", &mut |s| {
+                    s.iter().any(|l| l.contains("Keyboard Shortcuts"))
+                });
+                let key_repaint = key_started.elapsed();
+                assert!(
+                    stall_capture.exists() && key_repaint < Duration::from_secs(2),
+                    "stalled capture delayed help by {key_repaint:?}"
+                );
+                child_in.write_all(b"\x1b").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "close help during capture", &mut |s| {
+                    s.iter().all(|line| !line.contains("Keyboard Shortcuts"))
+                        && s.iter().any(|line| line.contains("Fixture initial"))
+                });
+                std::fs::remove_file(&stall_capture).unwrap();
+                let release = Instant::now();
+                wait_for(stream, screen, rx, "fresh provider observation", &mut |s| {
+                    s.iter().any(|line| line.contains("Refresh resumed"))
+                });
+                eprintln!(
+                    "stalled provider: help key-to-repaint {key_repaint:?}, refresh-to-repaint {:?}, release-to-repaint {:?}",
+                    refresh_started.elapsed(),
+                    release.elapsed()
+                );
+            },
+        );
         assert!(!pre_click_tmux_log.contains("UNEXPECTED:"));
         let [
             pre_custody,
@@ -6511,195 +7001,207 @@ sys.exit(proc.wait())
         );
 
         // Run 2: Click -> Escape -> Enter -> Inode-swap close -> Re-click -> Live Turn-change close -> 0775 Unbound fallback & Silent Legacy Unavailable.
-        let (run2_counters, tmux_log) = run_pty(&mut |child_in, stream, screen, rx| {
-            let list_restored = |screen: &[String]| {
-                screen
-                    .last()
-                    .is_some_and(|line| line.contains("Enter Open"))
-                    && screen
-                        .iter()
-                        .all(|line| !line.contains("Select an orchestrator, worker, or council"))
-            };
-            // 1. Wait for initial fresh board, then show all tasks.
-            wait_for(stream, screen, rx, "initial fresh board", &mut |s| {
-                list_restored(s)
-                    && s.iter().any(|l| l.contains("2 past (Tab all)"))
-                    && !s.iter().any(|l| l.contains("Refreshing Board"))
-            });
-            child_in.write_all(b"\t").unwrap();
-            child_in.flush().unwrap();
-            wait_for(
-                stream,
-                screen,
-                rx,
-                "all tasks showing all 3 children",
-                &mut |s| {
+        let (run2_counters, tmux_log) =
+            run_pty(false, false, &mut |child_in, stream, screen, rx| {
+                let list_restored = |screen: &[String]| {
+                    screen
+                        .last()
+                        .is_some_and(|line| line.contains("Enter Open"))
+                        && screen.iter().all(|line| {
+                            !line.contains("Select an orchestrator, worker, or council")
+                        })
+                };
+                // 1. Wait for initial fresh board, then show all tasks.
+                wait_for(stream, screen, rx, "initial fresh board", &mut |s| {
+                    list_restored(s)
+                        && s.iter().any(|l| l.contains("2 past (Tab all)"))
+                        && !s.iter().any(|l| l.contains("Refreshing Board"))
+                });
+                child_in.write_all(b"\t").unwrap();
+                child_in.flush().unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "all tasks showing all 3 children",
+                    &mut |s| {
+                        s.iter().any(|l| l.contains("[All tasks]"))
+                            && s.iter().any(|l| l.contains("Bound Researcher"))
+                            && s.iter().any(|l| l.contains("Sibling Reviewer"))
+                            && s.iter().any(|l| l.contains("Silent Legacy"))
+                    },
+                );
+                child_in.write_all(b"\t").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "tab returns to overview", &mut |s| {
+                    s.iter().any(|l| l.contains("[Overview]"))
+                        && s.iter().any(|l| l.contains("2 past (Tab all)"))
+                });
+                child_in.write_all(b"\t").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "all tasks restored", &mut |s| {
                     s.iter().any(|l| l.contains("[All tasks]"))
                         && s.iter().any(|l| l.contains("Bound Researcher"))
-                        && s.iter().any(|l| l.contains("Sibling Reviewer"))
-                        && s.iter().any(|l| l.contains("Silent Legacy"))
-                },
-            );
-            child_in.write_all(b"\t").unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "tab returns to overview", &mut |s| {
-                s.iter().any(|l| l.contains("[Overview]"))
-                    && s.iter().any(|l| l.contains("2 past (Tab all)"))
-            });
-            child_in.write_all(b"\t").unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "all tasks restored", &mut |s| {
-                s.iter().any(|l| l.contains("[All tasks]"))
-                    && s.iter().any(|l| l.contains("Bound Researcher"))
-            });
-            let bound_row = screen
-                .iter()
-                .position(|l| l.contains("Bound Researcher"))
-                .unwrap();
+                });
+                let bound_row = screen
+                    .iter()
+                    .position(|l| l.contains("Bound Researcher"))
+                    .unwrap();
 
-            // 2. SGR mouse Click on Bound Researcher opens direct child chat (no parent summary).
-            write!(child_in, "\x1b[<0;3;{}M", bound_row + 1).unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "click child chat", &mut |s| {
-                s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
-            });
-            let clicked_text = screen.join("\n");
-            assert!(clicked_text.contains("Bound Researcher · subagent"));
-            assert!(!clicked_text.contains("PARENT_DELIVERED_SUMMARY_A"));
-            assert!(!clicked_text.contains(super::PARENT_SUMMARY));
-            assert!(!clicked_text.contains("SIBLING_NEVER_READ"));
-            assert!(!clicked_text.contains("UNPROVED_SILENT_LEGACY_REPLY"));
-            assert!(!clicked_text.contains("HIDDEN_THINKING"));
+                // 2. SGR mouse Click on Bound Researcher opens direct child chat (no parent summary).
+                write!(child_in, "\x1b[<0;3;{}M", bound_row + 1).unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "click child chat", &mut |s| {
+                    s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
+                });
+                let clicked_text = screen.join("\n");
+                assert!(clicked_text.contains("Bound Researcher · subagent"));
+                assert!(!clicked_text.contains("PARENT_DELIVERED_SUMMARY_A"));
+                assert!(!clicked_text.contains(super::PARENT_SUMMARY));
+                assert!(!clicked_text.contains("SIBLING_NEVER_READ"));
+                assert!(!clicked_text.contains("UNPROVED_SILENT_LEGACY_REPLY"));
+                assert!(!clicked_text.contains("HIDDEN_THINKING"));
 
-            // 3. Escape closes dock.
-            std::thread::sleep(Duration::from_millis(120));
-            child_in.write_all(b"\x1b").unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "escape closes click dock", &mut |s| {
-                list_restored(s) && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
-            });
+                // 3. Escape closes dock.
+                std::thread::sleep(Duration::from_millis(120));
+                child_in.write_all(b"\x1b").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "escape closes click dock", &mut |s| {
+                    list_restored(s) && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
+                });
 
-            // 4. Enter re-opens selected Bound Researcher direct child chat.
-            child_in.write_all(b"\r").unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "enter child chat", &mut |s| {
-                s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
-            });
+                // 4. Enter re-opens selected Bound Researcher direct child chat.
+                child_in.write_all(b"\r").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "enter child chat", &mut |s| {
+                    s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
+                });
 
-            // 5. While open, swap child_a transcript inode and refresh with 'u': recheck_open_agy_chat closes dock (0 child reads).
-            let before_open_inval = count_captures();
-            let child_a_full = brain
-                .join(child_a)
-                .join(".system_generated/logs/transcript_full.jsonl");
-            let swap_tmp = tmp.0.join("swap-child-a.jsonl");
-            std::fs::copy(&child_a_full, &swap_tmp).unwrap();
-            std::fs::set_permissions(&swap_tmp, std::fs::Permissions::from_mode(0o600)).unwrap();
-            std::fs::rename(&swap_tmp, &child_a_full).unwrap();
-            child_in.write_all(b"u").unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "open dock invalidation", &mut |s| {
-                count_captures() > before_open_inval
-                    && s.iter().any(|l| l.contains("Transcript unavailable"))
-                    && list_restored(s)
-                    && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
-            });
-
-            // 6. Re-open Bound Researcher by Click, then advance lead Turn while open: live refresh closes dock.
-            let rebound_row = screen
-                .iter()
-                .position(|l| l.contains("Bound Researcher"))
-                .unwrap();
-            write!(child_in, "\x1b[<0;3;{}M", rebound_row + 1).unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "reopen after swap", &mut |s| {
-                s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
-            });
-            let before_turn_inval = count_captures();
-            write_prompt(&next_prompt_line);
-            child_in.write_all(b"u").unwrap();
-            child_in.flush().unwrap();
-            wait_for(
-                stream,
-                screen,
-                rx,
-                "live turn change closes dock",
-                &mut |s| {
-                    count_captures() > before_turn_inval
+                // 5. While open, swap child_a transcript inode and refresh with 'u': recheck_open_agy_chat closes dock (0 child reads).
+                let before_open_inval = count_captures();
+                let child_a_full = brain
+                    .join(child_a)
+                    .join(".system_generated/logs/transcript_full.jsonl");
+                let swap_tmp = tmp.0.join("swap-child-a.jsonl");
+                std::fs::copy(&child_a_full, &swap_tmp).unwrap();
+                std::fs::set_permissions(&swap_tmp, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                std::fs::rename(&swap_tmp, &child_a_full).unwrap();
+                child_in.write_all(b"u").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "open dock invalidation", &mut |s| {
+                    count_captures() > before_open_inval
                         && s.iter().any(|l| l.contains("Transcript unavailable"))
                         && list_restored(s)
                         && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
-                },
-            );
-            let before_restore = count_captures();
-            write_prompt(&prompt_line);
-            child_in.write_all(b"u").unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "restore lead turn", &mut |s| {
-                count_captures() > before_restore
-                    && s.iter().any(|l| l.contains("Bound Researcher"))
-                    && s.iter().any(|l| l.contains("Silent Legacy"))
-                    && !s.iter().any(|l| l.contains("Refreshing Board"))
-            });
+                });
 
-            // 7. Chmod .git and wt to 0o775 and press 'u' to refresh into legacy mode.
-            let before_captures = count_captures();
-            std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o775))
-                .unwrap();
-            std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o775)).unwrap();
-            child_in.write_all(b"u").unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "legacy 0775 refresh", &mut |s| {
-                count_captures() > before_captures
-                    && s.iter().any(|l| l.contains("Bound Researcher"))
-                    && s.iter().any(|l| l.contains("Silent Legacy"))
-                    && !s.iter().any(|l| l.contains("Refreshing Board"))
-            });
-            let legacy_row = screen
-                .iter()
-                .position(|l| l.contains("Bound Researcher"))
-                .unwrap();
+                // 6. Re-open Bound Researcher by Click, then advance lead Turn while open: live refresh closes dock.
+                let rebound_row = screen
+                    .iter()
+                    .position(|l| l.contains("Bound Researcher"))
+                    .unwrap();
+                write!(child_in, "\x1b[<0;3;{}M", rebound_row + 1).unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "reopen after swap", &mut |s| {
+                    s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
+                });
+                let before_turn_inval = count_captures();
+                write_prompt(&next_prompt_line);
+                child_in.write_all(b"u").unwrap();
+                child_in.flush().unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "live turn change closes dock",
+                    &mut |s| {
+                        count_captures() > before_turn_inval
+                            && s.iter().any(|l| l.contains("Transcript unavailable"))
+                            && list_restored(s)
+                            && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
+                    },
+                );
+                let before_restore = count_captures();
+                write_prompt(&prompt_line);
+                set_model("Turn restored");
+                child_in.write_all(b"\tu").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "restore lead turn", &mut |s| {
+                    count_captures() > before_restore
+                        && s.iter().any(|l| l.contains("Turn restored"))
+                        && s.iter().any(|l| l.contains("[Overview]"))
+                        && !s.iter().any(|l| l.contains("Refreshing Board"))
+                });
 
-            // 7. Click on 0775 Bound Researcher opens parent-delivered summary fallback (0 child reads).
-            write!(child_in, "\x1b[<0;3;{}M", legacy_row + 1).unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "legacy fallback dock", &mut |s| {
-                s.iter().any(|l| l.contains("PARENT_DELIVERED_SUMMARY_A"))
-            });
-            let fallback_text = screen.join("\n");
-            assert!(fallback_text.contains("parent summary"));
-            assert!(fallback_text.contains(super::PARENT_SUMMARY));
-            assert!(!fallback_text.contains("OWN_CHILD_DIRECT_REPLY"));
-            assert!(!fallback_text.contains("SIBLING_NEVER_READ"));
-            assert!(!fallback_text.contains("UNPROVED_SILENT_LEGACY_REPLY"));
+                // 7. Chmod .git and wt to 0o775 and press 'u' to refresh into legacy mode.
+                let before_captures = count_captures();
+                std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o775))
+                    .unwrap();
+                std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o775)).unwrap();
+                set_model("Legacy mode");
+                child_in.write_all(b"u").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "legacy 0775 refresh", &mut |s| {
+                    count_captures() > before_captures
+                        && s.iter().any(|l| l.contains("Legacy mode"))
+                        && s.iter().any(|l| l.contains("[Overview]"))
+                        && !s.iter().any(|l| l.contains("Refreshing Board"))
+                });
+                child_in.write_all(b"\t").unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "show accepted legacy rows", &mut |s| {
+                    s.iter().any(|line| line.contains("[All tasks]"))
+                        && s.iter().any(|line| line.contains("Bound Researcher"))
+                        && s.iter().any(|line| line.contains("Silent Legacy"))
+                });
+                let legacy_row = screen
+                    .iter()
+                    .position(|l| l.contains("Bound Researcher"))
+                    .unwrap();
 
-            // 8. Escape closes dock; Click on Silent Legacy (no parent delivery) shows "Transcript unavailable" (0 child reads).
-            std::thread::sleep(Duration::from_millis(120));
-            child_in.write_all(b"\x1b").unwrap();
-            child_in.flush().unwrap();
-            wait_for(
-                stream,
-                screen,
-                rx,
-                "escape closes fallback dock",
-                &mut |s| {
-                    list_restored(s) && !s.iter().any(|l| l.contains("PARENT_DELIVERED_SUMMARY_A"))
-                },
-            );
-            let silent_row = screen
-                .iter()
-                .position(|l| l.contains("Silent Legacy"))
-                .unwrap();
-            write!(child_in, "\x1b[<0;3;{}M", silent_row + 1).unwrap();
-            child_in.flush().unwrap();
-            wait_for(stream, screen, rx, "silent legacy unavailable", &mut |s| {
-                s.iter().any(|l| l.contains("Transcript unavailable"))
+                // 7. Click on 0775 Bound Researcher opens parent-delivered summary fallback (0 child reads).
+                write!(child_in, "\x1b[<0;3;{}M", legacy_row + 1).unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "legacy fallback dock", &mut |s| {
+                    s.iter().any(|l| l.contains("PARENT_DELIVERED_SUMMARY_A"))
+                });
+                let fallback_text = screen.join("\n");
+                assert!(fallback_text.contains("parent summary"));
+                assert!(fallback_text.contains(super::PARENT_SUMMARY));
+                assert!(!fallback_text.contains("OWN_CHILD_DIRECT_REPLY"));
+                assert!(!fallback_text.contains("SIBLING_NEVER_READ"));
+                assert!(!fallback_text.contains("UNPROVED_SILENT_LEGACY_REPLY"));
+
+                // 8. Escape closes dock; Click on Silent Legacy (no parent delivery) shows "Transcript unavailable" (0 child reads).
+                std::thread::sleep(Duration::from_millis(120));
+                child_in.write_all(b"\x1b").unwrap();
+                child_in.flush().unwrap();
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "escape closes fallback dock",
+                    &mut |s| {
+                        list_restored(s)
+                            && !s.iter().any(|l| l.contains("PARENT_DELIVERED_SUMMARY_A"))
+                    },
+                );
+                let silent_row = screen
+                    .iter()
+                    .position(|l| l.contains("Silent Legacy"))
+                    .unwrap();
+                write!(child_in, "\x1b[<0;3;{}M", silent_row + 1).unwrap();
+                child_in.flush().unwrap();
+                wait_for(stream, screen, rx, "silent legacy unavailable", &mut |s| {
+                    s.iter().any(|l| l.contains("Transcript unavailable"))
+                });
+                let silent_text = screen.join("\n");
+                assert!(list_restored(screen));
+                assert!(!silent_text.contains("UNPROVED_SILENT_LEGACY_REPLY"));
+                assert!(!silent_text.contains(super::PARENT_SUMMARY));
+                assert!(!silent_text.contains("PARENT_DELIVERED_SUMMARY_A"));
             });
-            let silent_text = screen.join("\n");
-            assert!(list_restored(screen));
-            assert!(!silent_text.contains("UNPROVED_SILENT_LEGACY_REPLY"));
-            assert!(!silent_text.contains(super::PARENT_SUMMARY));
-            assert!(!silent_text.contains("PARENT_DELIVERED_SUMMARY_A"));
-        });
 
         let [
             custody,
@@ -6729,6 +7231,158 @@ sys.exit(proc.wait())
             "expected exact (legacy_reads=0, strict_reads=3, leg_cand=2, leg_child=0); custody={custody} scans={scans}"
         );
         assert_eq!(legacy_reads + strict_reads, 3);
+
+        std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let entered = |ticket: &str| {
+            std::fs::read_to_string(&capture_entered).is_ok_and(|value| {
+                value
+                    .split_once('\n')
+                    .is_some_and(|(value, _)| value == ticket)
+            })
+        };
+        let samples = || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.starts_with("list-panes -t %2 -F "))
+                .count()
+        };
+        let repeat_wakes =
+            |stream: &mut String, screen: &mut [String], rx: &mpsc::Receiver<Vec<u8>>| {
+                for _ in 0..2 {
+                    let before = samples();
+                    crate::wakeup::notify_wakeup(&repo);
+                    wait_for(stream, screen, rx, "same-scope wake sampled", &mut |_| {
+                        samples() > before
+                    });
+                }
+            };
+        let (_, stalled_log) = run_pty(false, true, &mut |child_in, stream, screen, rx| {
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "last-good frame before generation drift",
+                &mut |s| s.iter().any(|line| line.contains("Legacy mode")),
+            );
+            std::fs::write(&stall_capture, "old-pane").unwrap();
+            set_model("Discarded pane model");
+            child_in.write_all(b"u").unwrap();
+            child_in.flush().unwrap();
+            wait_for(stream, screen, rx, "old provider pane capture", &mut |_| {
+                entered("old-pane")
+            });
+            repeat_wakes(stream, screen, rx);
+            assert!(screen.iter().any(|line| line.contains("Legacy mode")));
+            std::fs::write(&lead_window, "@5").unwrap();
+            std::fs::write(&stall_capture, "new-pane").unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "old provider pane rejected while follow-up held",
+                &mut |s| {
+                    assert!(!s.iter().any(|line| line.contains("Discarded pane model")));
+                    entered("new-pane")
+                        && s[0].contains("OMS · repo")
+                        && s.iter().all(|line| !line.contains("Legacy mode"))
+                },
+            );
+            assert!(!stream.contains("Discarded pane model"));
+        });
+        assert!(!stalled_log.contains("UNEXPECTED:"));
+
+        set_model("First same-scope observation");
+        let (_, repeated_log) = run_pty(true, true, &mut |child_in, stream, screen, rx| {
+            wait_for(stream, screen, rx, "first capture held", &mut |_| {
+                entered("first")
+            });
+            repeat_wakes(stream, screen, rx);
+            // Release only the first capture. The deferred follow-up now waits
+            // for its own ticket, with Board actions still Pending.
+            std::fs::write(&stall_capture, "follow-up").unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "first accepted projection while follow-up held",
+                &mut |s| {
+                    entered("follow-up")
+                        && s.iter()
+                            .any(|line| line.contains("First same-scope observation"))
+                },
+            );
+            child_in.write_all(b"?").unwrap();
+            child_in.flush().unwrap();
+            wait_for(stream, screen, rx, "help with follow-up held", &mut |s| {
+                s.iter().any(|line| line.contains("Keyboard Shortcuts"))
+            });
+            child_in.write_all(b"\x1b").unwrap();
+            child_in.flush().unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "close help while follow-up held",
+                &mut |s| s.iter().all(|line| !line.contains("Keyboard Shortcuts")),
+            );
+        });
+        assert!(!repeated_log.contains("UNEXPECTED:"));
+
+        let (_, quota_log) = run_pty(false, true, &mut |child_in, stream, screen, rx| {
+            wait_for(stream, screen, rx, "initial quota Board", &mut |s| {
+                s.iter()
+                    .any(|line| line.contains("First same-scope observation"))
+            });
+            child_in.write_all(b"w").unwrap();
+            child_in.flush().unwrap();
+            wait_for(stream, screen, rx, "fresh Weekly overlay", &mut |s| {
+                s.iter().any(|line| line.contains("U Refresh quota"))
+            });
+            std::fs::write(&quota_stage, "armed").unwrap();
+            std::fs::write(&stall_capture, "quota").unwrap();
+            child_in.write_all(b"U").unwrap();
+            child_in.flush().unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "authorized quota completion stalled",
+                &mut |_| {
+                    std::fs::read_to_string(&capture_entered)
+                        .is_ok_and(|row| row.starts_with("quota\n"))
+                },
+            );
+            child_in.write_all(b"\x1b").unwrap();
+            child_in.flush().unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "close Weekly while completion stalled",
+                &mut |s| s[0].contains("OMS · repo"),
+            );
+            child_in.write_all(b"?").unwrap();
+            child_in.flush().unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "help while quota completion stalled",
+                &mut |s| s.iter().any(|line| line.contains("Keyboard Shortcuts")),
+            );
+            child_in.write_all(b"\x1b").unwrap();
+            child_in.flush().unwrap();
+            wait_for(stream, screen, rx, "close Help before quitting", &mut |s| {
+                s.iter().all(|line| !line.contains("Keyboard Shortcuts"))
+            });
+        });
+        assert!(quota_log.contains("send-keys -t %4 Enter"));
+        assert!(
+            !quota_log.contains("send-keys -t %4 Escape") && !quota_log.contains("UNEXPECTED:")
+        );
 
         let _ = holder.kill();
         let _ = holder.wait();

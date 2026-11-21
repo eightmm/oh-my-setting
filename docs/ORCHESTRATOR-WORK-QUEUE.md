@@ -79,7 +79,7 @@ LC-01~04는 별도 핵심 연결 작업이다. “흡수”는 동등한 기능�
 | P0-B: 명시적 native 배정 | 기존 task/lease/attempt·Room reference와 native target/turn·결과를 연결 | 일반 native 대화에는 task 생성 강제 없음; 모호한 전송 뒤 direct 재배정·자동 재전송 금지; 작업과 실행 관계가 확인될 때만 공통 카드에 연결 |
 | TM-05 / 기존 landing owner: 결과 수락 | 현재 panel acceptance → native landing parser 연결 오류를 별도 correctness diff로 수정하고 결과 근거를 기존 수락 경로로 소비 | `--panel-accept`를 무시하는 호환 처리 금지; exact owner/task/base/candidate와 검토 근거 재검증; 실제 native parser를 지나는 기존 entry fixture에서 성공·stale·복구 검사 |
 | TM-06A/B: 같은 작업 inspector | 기존 Results/Events/Diff/Transcript reader에 작업·배정·결과 연결과 지원되는 action을 표시 | P0-B의 실제 binding과 해당 action capability를 소비; native 보고·verification·acceptance·publication 구분; 같은 작업을 실행 방식별로 중복 표시하지 않음 |
-| TM-06C / PERF-02 / REL-01 | 연결된 projection의 bounded refresh와 입력·선택 보존 | 동일 snapshot 재사용; 새 모델 호출·전체 transcript 재파싱·state write 없이 열람; cold/warm I/O와 실제 terminal 동작은 별도 측정 |
+| TM-06C / PERF-02 / REL-01 | [#267](https://github.com/eightmm/oh-my-setting/issues/267) 관리형 Board의 provider 관측을 기존 갱신 워커에 통합 | 격리 PTY에서 AGY 캡처가 대기 중일 때 Help 다시 그리기와 종료를 검증하고, 캡처 해제 뒤 갱신까지 별도 측정했다. PERF-02의 전체 Plan 읽기 계약과 REL-01의 zero/unknown/partial 표시, 실제 프로바이더의 cold/warm p95는 후속 검증 범위다. |
 
 첫 행은 이 변경의 read projection과 기존 render fixture 범위다. Task-first 통합과 native
 assignment/result/control의 완료를 뜻하지 않는다. Native 배정 설계는

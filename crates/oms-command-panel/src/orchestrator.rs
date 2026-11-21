@@ -293,7 +293,7 @@ fn legacy_assignment_root(
     Some(CodexChatRoot::Ambient(home, fd))
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Observations {
     panes: BTreeMap<String, Observation>,
     chats: BTreeMap<String, ChatBinding>,
@@ -421,6 +421,88 @@ impl BoundCodexPane {
     }
 }
 
+impl Clone for Observation {
+    fn clone(&self) -> Self {
+        use crate::native_children::AgyParent;
+        Self {
+            identity: self.identity.clone(),
+            model: self.model.clone(),
+            weekly: self.weekly,
+            quota_visible: self.quota_visible,
+            pending: self.pending,
+            dismiss_pending_usage: self.dismiss_pending_usage,
+            agy_parent: match &self.agy_parent {
+                AgyParent::Unseen => AgyParent::Unseen,
+                AgyParent::Legacy(path) => AgyParent::Legacy(path.clone()),
+                AgyParent::Bounded => AgyParent::Bounded,
+            },
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct ObservationGeneration {
+    session: terminals::SessionProof,
+    main: PaneIdentity,
+    leads: BTreeMap<String, PaneIdentity>,
+    codex_chat_mark: CodexChatMark,
+    claude_quota_mark: Option<String>,
+    main_account_ready: Option<bool>,
+    main_account: Option<ObservationAccount>,
+    lead_accounts: [Option<ObservationAccount>; 2],
+}
+
+#[derive(PartialEq, Eq)]
+struct ObservationAccount {
+    binding: PersistedAccountBinding,
+    directory: (rustix::fs::Dev, u64),
+}
+
+impl ObservationAccount {
+    fn sample(host: &dyn AccountHost, binding: PersistedAccountBinding) -> Option<Self> {
+        let accounts = host.load_accounts().ok()??;
+        let alias = binding.account_id.as_deref()?;
+        let provider = binding.provider.as_str();
+        let configured = accounts.home(provider, alias).ok()?;
+        let (home, root) = crate::native_children::open_ambient_codex_root(configured)?;
+        let stat = rustix::fs::fstat(&root).ok()?;
+        if stat.st_uid != host.uid()
+            || stat.st_mode & 0o022 != 0
+            || binding.home_digest.as_deref() != Some(account_binding::path_digest(&home).as_str())
+            || accounts.home_claimed_by_other(provider, &home)
+            || (provider == "claude"
+                && !account_binding::claude_binding_still_mapped(host, &binding))
+            || (binding.has_codex_chat_home_identity()
+                && account_binding::bound_codex_home(host, &binding).is_none())
+        {
+            return None;
+        }
+        let directory = crate::native_children::codex_root_identity(&home, &root)?;
+        Some(Self { binding, directory })
+    }
+}
+
+impl ObservationGeneration {
+    pub(crate) fn processes_current(&self) -> bool {
+        let host = SystemAccountHost;
+        host.process_owner(self.session.server_pid)
+            .is_ok_and(|owner| {
+                owner.uid == host.uid()
+                    && owner.pid == self.session.server_pid
+                    && owner.birth == self.session.server_birth
+            })
+            && std::iter::once(&self.main)
+                .chain(self.leads.values())
+                .all(|pane| {
+                    host.process_owner(pane.pid).is_ok_and(|owner| {
+                        owner.uid == host.uid()
+                            && owner.pid == pane.pid
+                            && owner.birth == pane.birth
+                    })
+                })
+    }
+}
+
 impl Observations {
     pub(crate) fn chat_binding(&self, participant: &str) -> Option<&ChatBinding> {
         self.chats.get(participant)
@@ -428,6 +510,11 @@ impl Observations {
 
     pub(crate) fn clear_chats(&mut self) {
         self.chats.clear();
+    }
+
+    pub(crate) fn invalidate_readings(&mut self) {
+        self.panes.clear();
+        self.clear_chats();
     }
 
     fn accept_codex_source(&mut self, pane: &ChatPane, mark: CodexChatMark) -> bool {
@@ -448,6 +535,28 @@ impl Observations {
             self.codex_bound_generation = Some(pane.clone());
         }
         known_legacy.is_none() || (known_legacy == Some(true) && legacy)
+    }
+
+    pub(crate) fn take_usage_dismissals(&mut self) -> Self {
+        Self {
+            panes: self
+                .panes
+                .iter_mut()
+                .filter_map(|(provider, sample)| {
+                    let requested = sample.dismiss_pending_usage.take()?;
+                    let mut action = sample.clone();
+                    action.dismiss_pending_usage = Some(requested);
+                    Some((provider.clone(), action))
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn has_usage_dismissal(&self) -> bool {
+        self.panes
+            .values()
+            .any(|sample| sample.dismiss_pending_usage.is_some())
     }
 
     pub fn quota_pending(&self) -> bool {
@@ -477,6 +586,7 @@ struct Observation {
     weekly: Option<(f64, f64)>,
     quota_visible: bool,
     pending: Option<Instant>,
+    dismiss_pending_usage: Option<Instant>,
     agy_parent: crate::native_children::AgyParent,
 }
 
@@ -741,6 +851,69 @@ impl<'a> Panel<'a> {
         binding.account_id.zip(binding.home_digest)
     }
 
+    pub(crate) fn observation_generation(&self) -> Result<ObservationGeneration> {
+        self.observation_generation_with_host(&SystemAccountHost)
+    }
+
+    fn observation_generation_with_host(
+        &self,
+        host: &dyn AccountHost,
+    ) -> Result<ObservationGeneration> {
+        let main = PaneIdentity::sample_with_host(&self.main, host, true)?;
+        let leads = self
+            .leads
+            .iter()
+            .map(|(provider, pane)| {
+                Ok((
+                    provider.clone(),
+                    PaneIdentity::sample_with_host(pane, host, true)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let account = |role, provider, pane, identity: &PaneIdentity| {
+            self.binding_with_birth(role, provider, pane, &identity.birth, host)
+                .filter(|binding| binding.verification == AccountVerification::Verified)
+                .map(|binding| {
+                    ObservationAccount::sample(host, binding)
+                        .ok_or_else(|| Error::new("verified provider account mapping changed"))
+                })
+                .transpose()
+        };
+        let main_account = if matches!(self.owner.as_str(), "codex" | "claude")
+            && self.main_account_ready == Some(true)
+        {
+            account("main", &self.owner, &self.main, &main)?
+        } else {
+            None
+        };
+        let lead_account = |provider| match self.leads.get(provider).zip(leads.get(provider)) {
+            Some((pane, identity)) => account("orchestrator", provider, pane, identity),
+            None => Ok(None),
+        };
+        let lead_accounts = [lead_account("codex")?, lead_account("claude")?];
+        Ok(ObservationGeneration {
+            session: self.session_proof.clone(),
+            main,
+            leads,
+            main_account,
+            lead_accounts,
+            codex_chat_mark: self.codex_chat_mark,
+            claude_quota_mark: self.claude_quota_mark.clone(),
+            main_account_ready: self.main_account_ready,
+        })
+    }
+
+    pub(crate) fn observe_passively(&self, readings: &mut Observations, report: &mut Value) {
+        self.observe_reading(
+            readings,
+            report,
+            true,
+            &SystemAccountHost,
+            crate::claude_lead_usage::bound_claude_lead_weekly,
+            false,
+        );
+    }
+
     pub fn observe(&self, readings: &mut Observations, report: &mut Value, chat_current: bool) {
         self.observe_with_host(readings, report, chat_current, &SystemAccountHost);
     }
@@ -768,6 +941,18 @@ impl<'a> Panel<'a> {
         chat_current: bool,
         host: &dyn AccountHost,
         claude_reader: impl Fn(&Owner, &str, f64) -> Option<LeadReading>,
+    ) {
+        self.observe_reading(readings, report, chat_current, host, claude_reader, true);
+    }
+
+    fn observe_reading(
+        &self,
+        readings: &mut Observations,
+        report: &mut Value,
+        chat_current: bool,
+        host: &dyn AccountHost,
+        claude_reader: impl Fn(&Owner, &str, f64) -> Option<LeadReading>,
+        dismiss_quota: bool,
     ) {
         let quota_sources =
             commands::take_codex_quota_receipt(self.repo, self.room, &self.attempt, report);
@@ -858,17 +1043,21 @@ impl<'a> Panel<'a> {
                     if !sample.quota_visible || sample.weekly.is_none_or(|(last, _)| last != used) {
                         sample.weekly = Some((used, now));
                     }
-                    if sample
+                    let pending = sample
                         .pending
                         .take()
-                        .is_some_and(|started| started.elapsed() < Duration::from_secs(15))
-                        && !pane.active
-                        && self.reload().is_ok_and(|fresh| {
-                            fresh.leads.get(provider) == Some(pane)
-                                && fresh.require_board(None).is_ok()
-                        })
-                    {
-                        let _ = self.tmux(&["send-keys", "-t", &pane.id, "Escape"]);
+                        .filter(|started| started.elapsed() < Duration::from_secs(15));
+                    if let Some(started) = pending {
+                        if !dismiss_quota {
+                            sample.dismiss_pending_usage = Some(started);
+                        } else if !pane.active
+                            && self.reload().is_ok_and(|fresh| {
+                                fresh.leads.get(provider) == Some(pane)
+                                    && fresh.require_board(None).is_ok()
+                            })
+                        {
+                            let _ = self.tmux(&["send-keys", "-t", &pane.id, "Escape"]);
+                        }
                     }
                 }
                 sample.quota_visible = current.is_some();
@@ -1381,11 +1570,43 @@ impl<'a> Panel<'a> {
                     };
                 }
                 sample.pending = Some(Instant::now());
+                sample.dismiss_pending_usage = None;
                 sample.quota_visible = false;
                 started += 1;
             }
         }
         started
+    }
+
+    pub(crate) fn dismiss_observed_usage(&self, readings: &mut Observations) {
+        for (provider, sample) in &mut readings.panes {
+            if sample
+                .dismiss_pending_usage
+                .take()
+                .is_none_or(|started| started.elapsed() >= Duration::from_secs(15))
+                || !sample.quota_visible
+            {
+                continue;
+            }
+            let Some(pane) = self.leads.get(provider).filter(|pane| !pane.active) else {
+                continue;
+            };
+            if self.require_board(None).is_ok()
+                && self
+                    .tmux(&["capture-pane", "-p", "-t", &pane.id])
+                    .is_ok_and(|screen| weekly_from_usage(provider, &screen).is_some())
+                && self.reload().is_ok_and(|fresh| {
+                    fresh.leads.get(provider) == Some(pane)
+                        && fresh.require_board(None).is_ok()
+                        && fresh
+                            .observation_state(provider, pane, &SystemAccountHost)
+                            .0
+                            == sample.identity
+                })
+            {
+                let _ = self.tmux(&["send-keys", "-t", &pane.id, "Escape"]);
+            }
+        }
     }
 
     fn tmux(&self, args: &[&str]) -> Result<String> {
@@ -7518,7 +7739,15 @@ mod tests {
             }));
             std::fs::remove_file(&home).unwrap();
             std::fs::rename(&displaced, &home).unwrap();
+            assert!(
+                spy.load()
+                    .observation_generation_with_host(&host)
+                    .unwrap()
+                    .lead_accounts[1]
+                    .is_some()
+            );
             host.accounts = registry(&remapped);
+            assert!(spy.load().observation_generation_with_host(&host).is_err());
             suppressed(&observe(&host, &no_hud));
             host.accounts = None;
             suppressed(&observe(&host, &no_hud));
@@ -7604,6 +7833,16 @@ mod tests {
                 .join("oh-my-setting/panel-control")
                 .join(account_binding::path_digest(&repo))
                 .join("account-bindings");
+            assert!(
+                panel
+                    .observation_generation_with_host(&host)
+                    .unwrap()
+                    .main_account
+                    .is_some()
+            );
+            let mut remapped = host.clone();
+            remapped.accounts = registry(&other);
+            assert!(panel.observation_generation_with_host(&remapped).is_err());
             let record = std::fs::read_dir(directory)
                 .unwrap()
                 .flatten()
@@ -10407,7 +10646,26 @@ mod tests {
                 report["provider_status"]["codex"]["accounts"]["acct-b"]["weekly_used"],
                 14
             );
+            let published = spy.load().observation_generation_with_host(&host).unwrap();
+            assert!(published.main_account.is_some() && published.lead_accounts[0].is_some());
+            let mut remapped = host.clone();
+            remapped.accounts = Some(make_accounts(vec![(
+                "codex",
+                vec![("acct-a", codex_a.clone()), ("acct-b", moved.clone())],
+            )]));
             write_registry(&moved);
+            assert!(
+                spy.load()
+                    .observation_generation_with_host(&remapped)
+                    .is_err()
+            );
+            spy.main_account_ready.set(false);
+            assert!(
+                spy.load()
+                    .observation_generation_with_host(&remapped)
+                    .is_err()
+            );
+            spy.main_account_ready.set(true);
             spy.load()
                 .observe_with_host(&mut obs, &mut report, false, &host);
             assert_eq!(

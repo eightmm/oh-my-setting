@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RefreshKey {
@@ -133,6 +134,7 @@ impl RefreshKey {
 struct Request {
     id: u64,
     key: RefreshKey,
+    native: Option<crate::watch::NativeRequest>,
 }
 
 struct Job {
@@ -143,11 +145,13 @@ struct Job {
 struct Reply {
     job: Job,
     result: Result<(Snapshot, CodexQuotaSources)>,
+    native: Option<crate::watch::NativeReading>,
 }
 
 pub(crate) struct BoardRefresh {
     sender: Option<Sender<Job>>,
     replies: Receiver<Reply>,
+    exited: Receiver<()>,
     ready: Option<std::result::Result<Reply, TryRecvError>>,
     stop: Arc<AtomicBool>,
     idle: Option<commands::Session>,
@@ -155,6 +159,7 @@ pub(crate) struct BoardRefresh {
     accepted: bool,
     latest: u64,
     pending: Option<Request>,
+    native: Option<crate::watch::NativeReading>,
 }
 
 impl BoardRefresh {
@@ -172,23 +177,47 @@ impl BoardRefresh {
     ) -> Result<Self> {
         let (sender, jobs) = mpsc::channel::<Job>();
         let (completed, replies) = mpsc::channel();
+        let (worker_lifetime, exited) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let interrupted = stop.clone();
         std::thread::Builder::new()
             .name("oms-board-refresh".into())
             .spawn(move || {
+                let _worker_lifetime = worker_lifetime;
                 let service = factory();
                 let mut receipts = ReceiptTokensCache::default();
                 while let Ok(job) = jobs.recv() {
                     if interrupted.load(Ordering::Acquire) {
                         break;
                     }
-                    let result = match &service {
+                    let mut result = match &service {
                         Ok(service) => collect(&job, service, &interrupted, &mut receipts),
                         Err(error) => Err(error.clone()),
                     };
+                    let native = job
+                        .request
+                        .native
+                        .as_ref()
+                        .zip(result.as_mut().ok())
+                        .and_then(|(native, (snapshot, sources))| {
+                            let adapter = SubcommandServices::sibling().ok()?;
+                            native.observe(
+                                snapshot,
+                                sources,
+                                &job.request.key.repo,
+                                job.session.attempt_cache(),
+                                &adapter,
+                                &interrupted,
+                            )
+                        });
                     if interrupted.load(Ordering::Acquire)
-                        || completed.send(Reply { job, result }).is_err()
+                        || completed
+                            .send(Reply {
+                                job,
+                                result,
+                                native,
+                            })
+                            .is_err()
                     {
                         break;
                     }
@@ -198,6 +227,7 @@ impl BoardRefresh {
         Ok(Self {
             sender: Some(sender),
             replies,
+            exited,
             ready: None,
             stop,
             idle: Some(commands::Session::new()),
@@ -205,10 +235,20 @@ impl BoardRefresh {
             accepted: false,
             latest: 0,
             pending: None,
+            native: None,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn request(&mut self, key: RefreshKey) -> Result<u64> {
+        self.request_with_native(key, None)
+    }
+
+    pub(crate) fn request_with_native(
+        &mut self,
+        key: RefreshKey,
+        native: Option<crate::watch::NativeRequest>,
+    ) -> Result<u64> {
         commands::clear_codex_quota_receipt();
         require(self.sender.is_some(), "Board refresh worker unavailable")?;
         self.latest = self
@@ -219,6 +259,7 @@ impl BoardRefresh {
         let request = Request {
             id: self.latest,
             key,
+            native,
         };
         if let Some(session) = self.idle.take() {
             self.dispatch(request, session)?;
@@ -282,15 +323,19 @@ impl BoardRefresh {
     pub(crate) fn poll(&mut self, current: &RefreshKey) -> Option<Result<Snapshot>> {
         commands::clear_codex_quota_receipt();
         self.sender.as_ref()?;
-        let Reply { job, result } =
-            match self.ready.take().unwrap_or_else(|| self.replies.try_recv()) {
-                Ok(reply) => reply,
-                Err(TryRecvError::Empty) => return None,
-                Err(TryRecvError::Disconnected) => {
-                    self.cancel();
-                    return Some(Err(Error::new("Board refresh worker exited")));
-                }
-            };
+        self.native = None;
+        let Reply {
+            job,
+            result,
+            native,
+        } = match self.ready.take().unwrap_or_else(|| self.replies.try_recv()) {
+            Ok(reply) => reply,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
+                self.cancel();
+                return Some(Err(Error::new("Board refresh worker exited")));
+            }
+        };
         let current_repo = current.current_repo();
         if let Some(pending) = self.pending.take()
             && pending.key == *current
@@ -305,13 +350,14 @@ impl BoardRefresh {
         self.accepted = result.as_ref().is_ok_and(|(snapshot, _)| {
             snapshot.status == 0 && snapshot.report["collection"]["ok"] == true
         });
+        self.native = native;
         Some(result.map(|(mut snapshot, sources)| {
             if !current.same_launch_path(&job.request.key)
                 && let Some(fields) = snapshot.report.as_object_mut()
             {
                 fields.remove("board_checkout");
             }
-            if self.accepted {
+            if self.accepted && job.request.native.is_none() {
                 commands::publish_codex_quota_receipt(
                     &current.repo,
                     current.main.as_deref(),
@@ -323,6 +369,18 @@ impl BoardRefresh {
         }))
     }
 
+    pub(crate) fn take_native_reading(&mut self) -> Option<crate::watch::NativeReading> {
+        self.native.take()
+    }
+
+    pub(crate) fn stop_until(&mut self, deadline: Instant) {
+        self.cancel();
+        // Keep the CLI alive briefly so the producer can reap its tmux child.
+        let _ = self
+            .exited
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
+
     /// Cancellation signals the producer and drops queued work without waiting for it.
     pub(crate) fn cancel(&mut self) {
         commands::clear_codex_quota_receipt();
@@ -330,6 +388,7 @@ impl BoardRefresh {
         self.sender.take();
         self.pending.take();
         self.ready.take();
+        self.native.take();
         self.idle.take();
         self.accepted = false;
     }
