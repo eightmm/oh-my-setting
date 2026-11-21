@@ -4484,10 +4484,6 @@ pub fn results(report: &Value, columns: usize) -> String {
                 ),
                 columns,
             ));
-            lines.extend(wrap(
-                "  Input receipt is not consumption or acceptance.",
-                columns,
-            ));
         }
         lines.push(String::new());
     }
@@ -8351,7 +8347,7 @@ mod tests {
     }
 
     #[test]
-    fn native_assignment_result_renders_separate_facts_and_disclaimer() {
+    fn native_assignment_result_renders_separate_facts() {
         let plain = json!({"task_id":"task-plain","outcome":"accepted","title":"Plain",
             "summary":"Reviewed","calls":[{"kind":"delegate","selected_model":"m","reason_code":"ok"}]});
         let before = "OMS · Results\n────────────────────────────────────────────────────────────\n■ task-plain · accepted · Plain\nReviewed\n  ├─ delegate · m · ok\n\n";
@@ -8365,10 +8361,9 @@ mod tests {
             .position(|v| v.starts_with("■ task-native"))
             .unwrap();
         assert_eq!(
-            lines[start + 1..start + 4],
+            lines[start + 1..start + 3],
             [
                 "  ◇ Native assignment native-a · Submitted · consumption unconfirmed · decision pending",
-                "  Input receipt is not consumption or acceptance.",
                 "",
             ]
         );
@@ -8377,7 +8372,7 @@ mod tests {
                 "\n■ task-plain · accepted · Plain\nReviewed\n  ├─ delegate · m · ok\n\n"
             )
         );
-        assert_eq!(output.matches("Input receipt is not").count(), 1);
+        assert!(!output.contains("Input receipt is not"));
         let narrow = results(&json!({"rows":[native]}), 30);
         assert!(narrow.lines().all(|v| width(v) <= 30), "{narrow}");
         assert!(

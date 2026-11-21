@@ -1301,7 +1301,7 @@ pub fn results_page(
                     let valid = recorded
                         .filter(|t| ["intent", "sending", "submitted", "unknown"].contains(t));
                     let label = match valid {
-                        Some("intent") => "Intent not sent",
+                        Some("intent") => "Intent recorded",
                         Some("submitted") => "Submitted",
                         _ => "Submission unconfirmed",
                     };
@@ -2247,7 +2247,7 @@ mod tests {
         let awaiting = "await native assignment result evidence";
         let reconcile = "inspect and reconcile unconfirmed native send before any retry";
         for (recorded, transport, label, next) in [
-            (json!("intent"), "intent", "Intent not sent", unsent),
+            (json!("intent"), "intent", "Intent recorded", unsent),
             (
                 json!("sending"),
                 "sending",
