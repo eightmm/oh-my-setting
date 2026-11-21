@@ -299,9 +299,12 @@ fn agy_child_fields(l: &str) -> Option<(&str, &str, &str)> {
             !name.is_empty() && !role.is_empty() && role.bytes().all(|b| b.is_ascii_alphanumeric())
         })
         || agy_truncated_model(model);
-    (kind
-        .split('-')
-        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphabetic()))
+    // AGY can include digits in generated role slugs.
+    (kind.len() <= 64
+        && kind.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && kind
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
         && !label.trim().is_empty()
         && model_visible
         && !activity.trim().is_empty())
@@ -456,11 +459,35 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
     assert_eq!(rows[0].elapsed.as_deref(), Some("53m17s"));
     assert_eq!(rows[1].role, "Researcher");
     assert_eq!(rows[1].elapsed, None);
+
+    let generated = roster.replace(
+        "slice-builder: Team Check Builder",
+        "check270-rosters-builder: Check Live Roster",
+    );
+    let generated_rows = agy_roster(&generated);
+    assert_eq!(generated_rows.len(), 2);
+    assert_eq!(generated_rows[0].role, "Worker");
+    assert_eq!(generated_rows[0].title, "Check Live Roster");
+    assert_eq!(generated_rows[0].state, "reading");
+    assert_eq!(observe("antigravity", &generated), Some("working"));
+
+    for unsafe_kind in [
+        "2research",
+        "research--builder",
+        "research-",
+        "research_builder",
+        "research!",
+        "researché",
+        "research\t",
+        &"r".repeat(65),
+    ] {
+        let malformed = roster.replace("● Agent(research:", &format!("● Agent({unsafe_kind}:"));
+        assert!(agy_roster(&malformed).is_empty(), "{unsafe_kind:?}");
+    }
     for stale in [
         format!("{roster}\nNew output after footer"),
         roster.replace(" (Antigravity ) | ctx ", " | ctx "),
         roster.replace("prior output\n>\n", "prior output\n> user draft\n"),
-        roster.replace("● Agent(research:", "● Agent(research9:"),
     ] {
         assert!(agy_roster(&stale).is_empty(), "{stale}");
     }
@@ -889,7 +916,7 @@ Orchestrator (Carbon) (Antigravity ) | ctx 28% | main
             ("research: ", "panel--builder: "),
             ("research: ", "panel_builder: "),
             ("research: ", "panel.builder: "),
-            ("research: ", "panel1: "),
+            ("research: ", "1panel: "),
             (AGY_ROW, "  ● Explored 2 files"),
             (AGY_ROW, &after_footer),
             (AGY_ROW, &past_bound),
