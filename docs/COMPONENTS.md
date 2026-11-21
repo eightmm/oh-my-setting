@@ -1184,7 +1184,11 @@ every attempt failed; a model change between consecutive main-session hook
 telemetry rows of one session (the ledger records no effort and index rows no
 session, so effort changes are not visible); the largest hook-injected byte
 totals per session (injection ledger); and the largest `output-digest` captures
-(file sizes only). Each line names its source record and each category prints a
+(file sizes only). The first category also reports `admitted_patches`, the
+distinct admitted patch digests among delegate rows that report tokens, and
+`tokens_per_admitted_patch`, all reported delegate tokens divided by that count
+(`null` when no such patch exists); rows without tokens are in neither number.
+Each line names its source record and each category prints a
 share of its total. Values are reported, never approval evidence, and a category
 that is absent or `not recorded` means the data was not recorded, not that
 nothing was wasted. The last three ignore `--since`/`--until`.

@@ -148,8 +148,24 @@ fn unadmitted(
         descending(a, b, "tokens").then_with(|| a["source"].bytes().cmp(&b["source"].bytes()))
     });
     items.truncate(top);
+    // Distinct admitted patches among delegate rows that report tokens: the
+    // denominator must come from the same rows as `of_total`.
+    let mut patches = BTreeSet::new();
+    for d in delegates {
+        if d.measured.tokens.is_some()
+            && is_admitted(d.row, admitted)
+            && let Some(digest) = d.row["patch_sha256"].bytes()
+        {
+            patches.insert(digest);
+        }
+    }
+    let per_patch = if patches.is_empty() {
+        None
+    } else {
+        Some(rounded(ratio(&total, &V::from(patches.len()))?, 1))
+    };
     Ok(
-        obj!("status":"recorded","unit":"tokens","tokens":reported.clone(),"of_total":total.clone(),"share":share(&reported,&total)?,"rows":n,"items":items,"note":"delegate rows whose patch no later patch-admit/patch-land accepted; includes delegations still awaiting admission"),
+        obj!("status":"recorded","unit":"tokens","tokens":reported.clone(),"of_total":total.clone(),"share":share(&reported,&total)?,"rows":n,"admitted_patches":patches.len(),"tokens_per_admitted_patch":per_patch,"items":items,"note":"delegate rows whose patch no later patch-admit/patch-land accepted; includes delegations still awaiting admission"),
     )
 }
 fn repeated(
@@ -437,6 +453,18 @@ pub(crate) fn emit(r: &V) -> String {
             get("note")
         )
         .unwrap();
+        if number == 1 {
+            let per_patch = b["tokens_per_admitted_patch"]
+                .number()
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "-".into());
+            writeln!(
+                out,
+                "  admitted patches: {}; delegate tokens per admitted patch: {per_patch}",
+                get("admitted_patches")
+            )
+            .unwrap();
+        }
         for i in b["items"].array() {
             let get = |k| display(&i[k]);
             let line = match number {

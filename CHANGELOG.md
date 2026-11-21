@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms artifact-index telemetry --waste` reports `admitted_patches` and
+  `tokens_per_admitted_patch` in its first category: reported delegate tokens
+  per distinct admitted patch, from rows that already exist. Tokens stay
+  unpriced and rows without a token report are excluded from both numbers.
 - The panel reader's Files view (`f`) shows a worker's declared scope and
   changed files as a directory tree with `+N -M`, marks files outside its scope
   or shared with another live write worker, opens a file's coloured diff with
