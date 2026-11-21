@@ -97,10 +97,10 @@ Main**. Run `oms panel --reopen` in the existing window to restore its Board
 without the picker. Set `OMS_PANEL_MAIN` to preselect a harness for a fresh launch.
 [Startup and recovery](docs/TERMINAL-PANEL.md#default-main-selection)
 
-In a managed tmux panel with a swap-capable Main, press `s` on the Board,
-pick a numbered target and press `Y` to confirm. Esc cancels the selection.
-The switch requires a verified safe exit and Room ownership. Each provider
-keeps its own chat history.
+With a verified managed Codex Main, press `s` on the Board, pick an available
+target such as AGY, and press `Y` to confirm. Esc cancels the selection. To
+change from a running AGY, Claude or Pi Main, exit it normally and choose the
+next harness at startup. Each provider keeps its own chat history.
 [Main switching and requirements](docs/TERMINAL-PANEL.md#swap-the-main)
 
 In the provider overview, **Direct work** shows active calls assigned directly

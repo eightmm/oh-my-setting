@@ -47,7 +47,7 @@ finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
 
 ## Quick start
 
-1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. For a fresh Main, choose an installed harness by number or press Enter for the first choice. A new Main can open installed provider orchestrators in background windows. For a verified running Main, Enter selects **Continue current Main**. Choose **Open the Board to switch Main** to focus its Board and open the switch menu with `s`. Run `oms panel --reopen` in the existing window to restore its Board without the picker.
+1. Run `oms panel` from a Git checkout in a foreground terminal with tmux. For a fresh Main, choose an installed harness by number or press Enter for the first choice. A new Main can open installed provider orchestrators in background windows. For a verified running Main, Enter selects **Continue current Main**. Choose **Open the Board to switch Main** to focus its Board. A verified managed Codex Main can switch with `s` from there. Run `oms panel --reopen` in the existing window to restore its Board without the picker.
 2. A landscape tmux window puts the board and its docked orchestrator on the left, with Overall Main on the right. A portrait window stacks the board, docked orchestrator and Overall Main in that order. See [Layout modes and resizing](#layout-modes-and-resizing).
 3. Weekly quota left sits directly below the Room title. Click the weekly line or press `w` for provider readings, sources and reset times. A dash means the Board has no verified reading. The header shows plan progress for work linked to the current Room.
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
@@ -80,7 +80,7 @@ oms panel --repo . --room team --watch --view tree
 oms panel --repo . --launch codex --task 'Explain the parser and fix its bounded bug'
 oms panel --repo . --launch claude --resume SESSION_ID
 oms panel --repo . --launch codex --model MODEL --dry-run
-oms panel --repo . --swap-main codex [--model MODEL]
+oms panel --repo . --swap-main agy --model MODEL   # from a verified managed Codex Main
 oms panel --repo . --results               # summaries first, ordinary scrollable text
 oms panel --repo . --results --task-id ID --json
 oms panel --repo . --results --task-id ID --export result.md   # the reader's text, to a new local file
@@ -136,21 +136,23 @@ model, effort, and account require separate provider evidence.
 
 ### Swap the main
 
-On a verified managed tmux Board, press `s` to list installed alternatives
-with a resolved model. Choose a number to review the target, then press `Y`
-to confirm in a separate step. Esc cancels the selection. OMS rechecks the
-Main generation and Room selected by the Board before submitting the swap.
+With a verified managed Codex Main, press `s` on the tmux Board to list
+installed alternatives with a resolved model, including AGY when available.
+Choose a number to review the target, then press `Y` to confirm in a separate
+step. Esc cancels the selection. OMS rechecks the Main generation and Room
+selected by the Board before submitting the swap.
 
 The command form is `oms panel --swap-main HARNESS [--model MODEL]`. A swap
-requires one live, swap-capable managed Main with verifiable lifecycle
-evidence and Room ownership. An older Main launched before that evidence was
-recorded may need a fresh managed Main. Use the provider's normal exit and
-check the panel's recovery state before starting it.
+requires one live managed Codex Main at an empty, idle composer, with
+verifiable lifecycle evidence and Room ownership. An older Codex Main launched
+before that evidence was recorded may need a fresh managed Main. If the
+current Main is AGY, Claude or Pi, use its normal exit and choose the next
+harness from the [startup picker](#default-main-selection).
 [Resume and restart](#resume-and-restart)
 
 OMS prepares the replacement and a bounded handoff from recorded Room state,
-including identifiers and role summaries. It requires proof that the previous Main exited safely before replacing it in
-the same managed pane. A successful change has a verified replacement and
+including identifiers and role summaries. It requires proof that the current
+Codex Main exited safely before replacing it in the same managed pane. A successful change has a verified replacement and
 Room lineage. If the panel reports an uncertain outcome, inspect the current
 Room and attempts before trying again. Provider conversations keep their
 separate histories. Proven chats can be opened in their original sessions.
@@ -532,7 +534,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `b` / `v` | Toggle attention-only / expand or collapse the board | — |
 | `n`, then `1` / `2` / `0` | Start Claude / Pi / Codex when no main is active in a managed panel | `n` next search match |
 | `N` | — | Previous search match |
-| `s`, then a listed number, then `Y` | Select and confirm a Main switch on its managed Board. `Esc` cancels the selection | — |
+| `s`, then a listed number, then `Y` | Select and confirm a switch from a managed Codex Main. `Esc` cancels the selection | — |
 | `a` / `c` | Ask advisor / request selected call cancellation | — |
 | `w` or click Weekly | Open weekly usage details. Quota appears when the Board snapshot is fresh | — |
 | `U` | Refresh weekly quota from idle Claude or AGY sessions. Also available in weekly details | — |
@@ -703,9 +705,9 @@ with the selected Main and its Board, and records the checkout on the session.
 
 Foreground `oms panel` opens a picker when the managed tmux path is active
 and `OMS_PANEL_MAIN` is unset. For a verified live Main, choice 1 and Enter
-both select **Continue current Main**. Choice 2 focuses the existing Board
-for a possible switch with `s`. It appears as **Open the Board** when there
-are no installed alternatives. For a fresh Main, the picker offers the
+both select **Continue current Main**. Choice 2 focuses the existing Board,
+where a verified managed Codex Main can switch with `s`. It appears as
+**Open the Board** when there are no installed alternatives. For a fresh Main, the picker offers the
 installed entries below in this order. Use `--repo PATH` for the checkout
 and `--room ID` for the Room on startup.
 

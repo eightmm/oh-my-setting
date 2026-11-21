@@ -97,10 +97,10 @@ Main을 선택합니다. 실행 중인 Main이 확인되면 Enter로 **Continue 
 `oms panel --reopen`을 실행합니다. 새 Main을 미리 지정하려면
 `OMS_PANEL_MAIN`을 설정합니다. [시작과 복구](docs/TERMINAL-PANEL.md#default-main-selection)
 
-전환을 지원하는 Main이 있는 tmux 관리 패널에서 Board의 `s`를 누르고
-대상 번호를 고른 뒤 `Y`로 확정합니다. Esc로 선택을 취소할 수 있습니다.
-Main이 안전하게 종료됐는지와 Room 소유권이 확인되어야 전환되며,
-대화 기록은 provider별로 보관됩니다.
+검증된 관리 Codex Main에서 Board의 `s`를 누르고 AGY 등 사용 가능한 대상의
+번호를 고른 뒤 `Y`로 확정합니다. Esc로 선택을 취소할 수 있습니다.
+AGY, Claude 또는 Pi Main에서 바꾸려면 현재 Main을 정상 종료한 뒤 시작
+메뉴에서 다음 하네스를 고릅니다. 대화 기록은 provider별로 보관됩니다.
 [Main 전환 조건](docs/TERMINAL-PANEL.md#swap-the-main)
 
 provider별 보기의 **Direct work**에는 Main이 직접 맡긴 활성 호출이 표시됩니다.
