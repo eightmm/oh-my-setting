@@ -1,6 +1,8 @@
 //! Persistent native provider windows beneath the room's interactive main.
 #[path = "account_binding.rs"]
 pub(crate) mod account_binding;
+#[path = "native_assignment.rs"]
+mod native_assignment;
 
 use crate::claude_lead_usage::LeadReading;
 use crate::{Error, Output, Result, Services, cli::Options, commands, json, require, text};
@@ -3123,6 +3125,70 @@ impl<'a> Panel<'a> {
         proof: Proof,
         assignment: Option<(&CodexAssignment, &dyn AccountHost, &AttemptCache)>,
     ) -> Result<()> {
+        self.send_checked(provider, prompt, proof, assignment, None)
+    }
+
+    fn send_checked(
+        &self,
+        provider: &str,
+        prompt: &str,
+        proof: Proof,
+        assignment: Option<(&CodexAssignment, &dyn AccountHost, &AttemptCache)>,
+        bound: Option<&native_assignment::Binding>,
+    ) -> Result<()> {
+        self.require_provider_input(provider)?;
+        let lead = self
+            .leads
+            .get(provider)
+            .ok_or_else(|| Error::new("open the provider session before sending a task"))?;
+        let fence = |before_typing: bool| {
+            if let Some((expected, _, attempts)) = assignment {
+                self.require_codex_assignment_main(&expected.repo, attempts)?;
+            }
+            let fresh = self.reload()?;
+            require(
+                self.main == fresh.main && fresh.leads.get(provider) == Some(lead),
+                if before_typing {
+                    "provider or Main pane changed before typing"
+                } else {
+                    "provider or Main pane changed"
+                },
+            )?;
+            if let Some((expected, host, _)) = assignment {
+                require(
+                    self.session_proof == fresh.session_proof
+                        && self.attempt == fresh.attempt
+                        && self.owner == fresh.owner
+                        && self.caller == fresh.main.id,
+                    "Codex assignment Main or session changed",
+                )?;
+                let current = fresh.codex_assignment_custody(host)?;
+                require(
+                    expected.same_custody(&current),
+                    "Codex assignment custody changed",
+                )?;
+            }
+            if let Some(binding) = bound {
+                binding.revalidate(self)?;
+            }
+            Ok(())
+        };
+        fence(true)?;
+        paste_and_submit(
+            provider,
+            &lead.id,
+            prompt,
+            proof,
+            &mut |args| self.tmux(args),
+            &mut || fence(false),
+            Pace {
+                now: &mut Instant::now,
+                sleep: &mut std::thread::sleep,
+            },
+        )
+    }
+
+    fn require_provider_input(&self, provider: &str) -> Result<()> {
         let lead = self
             .leads
             .get(provider)
@@ -3152,48 +3218,6 @@ impl<'a> Panel<'a> {
         require(
             input_ready(provider, &capture),
             "provider input is busy or a draft is present; try again when ready",
-        )?;
-        let fence = |before_typing: bool| {
-            if let Some((expected, _, attempts)) = assignment {
-                self.require_codex_assignment_main(&expected.repo, attempts)?;
-            }
-            let fresh = self.reload()?;
-            require(
-                self.main == fresh.main && fresh.leads.get(provider) == Some(lead),
-                if before_typing {
-                    "provider or Main pane changed before typing"
-                } else {
-                    "provider or Main pane changed"
-                },
-            )?;
-            if let Some((expected, host, _)) = assignment {
-                require(
-                    self.session_proof == fresh.session_proof
-                        && self.attempt == fresh.attempt
-                        && self.owner == fresh.owner
-                        && self.caller == fresh.main.id,
-                    "Codex assignment Main or session changed",
-                )?;
-                let current = fresh.codex_assignment_custody(host)?;
-                require(
-                    expected.same_custody(&current),
-                    "Codex assignment custody changed",
-                )?;
-            }
-            Ok(())
-        };
-        fence(true)?;
-        paste_and_submit(
-            provider,
-            &lead.id,
-            prompt,
-            proof,
-            &mut |args| self.tmux(args),
-            &mut || fence(false),
-            Pace {
-                now: &mut Instant::now,
-                sleep: &mut std::thread::sleep,
-            },
         )
     }
 }
@@ -4484,7 +4508,9 @@ fn run_with_host(
         let attempts_cache = AttemptCache::default();
         let attempts = panel.require_main_with_cache(options.get("owner"), &attempts_cache)?;
         tx.check()?;
-        if options.has("spread-accounts")
+        if options.has("task-id") {
+            native_assignment::run(&panel, options, host, &attempts_cache, &tx)?
+        } else if options.has("spread-accounts")
             && !panel.leads.contains_key(provider)
             && !options.has("task")
         {
@@ -4501,7 +4527,12 @@ fn run_with_host(
             )?
         }
     };
-    Ok((0, json(&value)?, vec![]))
+    let code = if options.has("task-id") && value["status"] == "unknown" {
+        75
+    } else {
+        0
+    };
+    Ok((code, json(&value)?, vec![]))
 }
 
 fn claude_worker_load(attempts: &Value) -> BTreeMap<&str, usize> {
@@ -5975,6 +6006,7 @@ mod tests {
             room_queries: RefCell<Vec<bool>>,
             event_projection: RefCell<Option<Value>>,
             real_events: Cell<bool>,
+            canonical_assignment: Cell<bool>,
             event_lists: Cell<usize>,
             assignment_events: Cell<usize>,
             main_attempt: String,
@@ -6025,6 +6057,7 @@ mod tests {
                     room_queries: RefCell::new(Vec::new()),
                     event_projection: RefCell::new(None),
                     real_events: Cell::new(false),
+                    canonical_assignment: Cell::new(false),
                     event_lists: Cell::new(0),
                     assignment_events: Cell::new(0),
                     main_attempt: MAIN.into(),
@@ -6108,6 +6141,23 @@ mod tests {
 
         impl PeerExecutor for SpyPanel {
             fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                if self.canonical_assignment.get()
+                    && request.argv.first().is_some_and(|v| v == "git")
+                {
+                    let output = std::process::Command::new("git")
+                        .args(&request.argv[1..])
+                        .current_dir(&request.cwd)
+                        .output()
+                        .unwrap();
+                    return Ok(CommandOutput {
+                        code: output.status.code().unwrap_or(1),
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    });
+                }
                 let args: Vec<String> = request
                     .argv
                     .iter()
@@ -6116,6 +6166,14 @@ mod tests {
                 self.calls.borrow_mut().push(args.clone());
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 let body = match refs.as_slice() {
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        _,
+                        "#{pane_current_path}",
+                    ] if self.canonical_assignment.get() => self.repo.to_str().unwrap().into(),
                     ["tmux", "list-panes", "-s", "-t", _, "-F", PANE_FORMAT] => {
                         let mut lines = vec![format!(
                             "$1\t@1\t{}\t{}\t0\t1\t{}\t{}\t{}\t{}\t{}\t\t\t1\t.{}__",
@@ -6640,6 +6698,27 @@ mod tests {
             ) -> Result<CommandOutput> {
                 if !self.allow_board_queries.get() {
                     panic!("unexpected command {command:?}");
+                }
+                if self.canonical_assignment.get() {
+                    let (code, stdout, stderr) = match command {
+                        NativeCommand::Plan => oms_command_plan::run(args, repo, &self.stop),
+                        NativeCommand::Room => oms_command_room::run(args, repo, &self.stop),
+                        NativeCommand::Events => oms_command_operations::run(
+                            oms_command_operations::App::Events,
+                            args,
+                            repo,
+                            &self.stop,
+                        ),
+                        _ => panic!("unexpected bound assignment command {command:?}"),
+                    };
+                    return Ok(CommandOutput {
+                        code,
+                        stdout,
+                        stderr,
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    });
                 }
                 let body = match command {
                     NativeCommand::Room => {
@@ -9094,6 +9173,308 @@ mod tests {
             assert_eq!(untagged_conn["account"], Value::Null);
             assert_eq!(untagged_conn["account_pinned"], false);
             assert_eq!(untagged_conn["account_verification"], "unverified");
+        }
+
+        #[test]
+        fn canonical_native_assignment_preserves_claim_and_never_replays_unknown_input() {
+            const CASE: &str = "OMS_TEST_NATIVE_ASSIGNMENT";
+            const TEST: &str = "orchestrator::tests::account_tests::canonical_native_assignment_preserves_claim_and_never_replays_unknown_input";
+            let tmp = TempDir::new("orch-task-binding");
+            if std::env::var_os(CASE).is_none() {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env_clear()
+                    .env("HOME", &tmp.0)
+                    .env("PATH", std::env::var_os("PATH").unwrap())
+                    .env(CASE, "1")
+                    .env("TMUX_PANE", "%1")
+                    .env("OMS_PANEL_MAIN_ATTEMPT", MAIN)
+                    .env("OMS_ROOM_PARTICIPANT", MAIN)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return;
+            }
+            let repo = private_dir(&tmp.0.join("repo"));
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            };
+            git(&["init", "-q"]);
+            std::fs::write(repo.join(".gitignore"), ".oms/\n").unwrap();
+            git(&["add", ".gitignore"]);
+            git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ]);
+            write_synthetic_ledger(&repo, 0);
+            let spy = SpyPanel::new(repo.clone());
+            spy.allow_board_queries.set(true);
+            spy.real_events.set(true);
+            spy.canonical_assignment.set(true);
+            for args in [
+                commands::strings(&[
+                    "new",
+                    "--id",
+                    ROOM,
+                    "--participant",
+                    MAIN,
+                    "--topic",
+                    "Task binding fixture",
+                ]),
+                commands::strings(&[
+                    "join",
+                    "--id",
+                    ROOM,
+                    "--participant",
+                    MAIN,
+                    "--provider",
+                    "codex",
+                ]),
+            ] {
+                let output = oms_command_room::run(&args, &repo, &spy.stop);
+                assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+            }
+            let plan = |args: &[&str]| {
+                let output = oms_command_plan::run(&commands::strings(args), &repo, &spy.stop);
+                assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+                output.1
+            };
+            plan(&["init", "--goal", "Bind native work"]);
+            for task in [
+                "native-one",
+                "native-two",
+                "native-three",
+                "native-four",
+                "native-five",
+            ] {
+                plan(&[
+                    "add",
+                    "--id",
+                    task,
+                    "--title",
+                    "Fixture",
+                    "--allowed",
+                    "src",
+                    "--verify",
+                    "true",
+                ]);
+            }
+            let state = private_dir(&tmp.0.join("state"));
+            let codex_home = private_dir(&tmp.0.join("codex"));
+            let mut host = FakeHost::new(state);
+            host.accounts = Some(make_accounts(vec![("codex", vec![("acct-a", codex_home)])]));
+            let uid = rustix::process::getuid().as_raw();
+            host.owners
+                .insert(spy.main_pid, owner_entry(spy.main_pid, "fixture-main", uid));
+            host.owners.insert(2001, owner_entry(2001, "p2001", uid));
+            spy.load()
+                .execute_with_host("codex", Some("acct-a"), None, &host)
+                .unwrap();
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            let options = |id: &str, body: &str| {
+                Options::parse(&commands::strings(&[
+                    "--orchestrator",
+                    "codex",
+                    "--room",
+                    ROOM,
+                    "--task-id",
+                    id,
+                    "--task",
+                    body,
+                ]))
+                .unwrap()
+            };
+            let send = |id, body| {
+                run_with_host(&repo, "codex", &options(id, body), &spy, &spy.stop, &host)
+            };
+            spy.calls.borrow_mut().clear();
+            let first = send("native-one", "inspect assigned source").unwrap();
+            assert_eq!(
+                first.0,
+                0,
+                "{} {}",
+                String::from_utf8_lossy(&first.1),
+                String::from_utf8_lossy(&first.2)
+            );
+            let first: Value = serde_json::from_slice(&first.1).unwrap();
+            assert_eq!(first["status"], "submitted");
+            assert_eq!(first["consumption"], "unconfirmed");
+            assert_eq!(spy.calls_named("send-keys").len(), 1);
+            let binding: Value = serde_json::from_slice(
+                &std::fs::read(repo.join(first["binding"].as_str().unwrap())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(binding["attempt_id"], first["attempt_id"]);
+            assert_eq!(binding["account_verification"], "verified");
+            assert_eq!(binding["task"]["claimed_by_participant"], MAIN);
+            assert_eq!(binding["task"]["lease_epoch"], 1);
+            assert_eq!(binding["checkout"]["worktree"], repo.to_str().unwrap());
+            assert_eq!(binding["checkout"]["write_isolation"], "unmanaged");
+            spy.calls.borrow_mut().clear();
+            let repeated = send("native-one", "inspect assigned source").unwrap();
+            let repeated: Value = serde_json::from_slice(&repeated.1).unwrap();
+            assert_eq!(repeated["attempt_id"], first["attempt_id"]);
+            assert_eq!(repeated["reused"], true);
+            assert!(spy.mutating_calls().is_empty());
+            assert!(
+                send("native-one", "changed scope body")
+                    .unwrap_err()
+                    .message
+                    .contains("different start request")
+            );
+            assert!(spy.mutating_calls().is_empty());
+
+            // Enter happened, then the caller lost the ability to record a
+            // response. The durable intent survives and a retry sends nothing.
+            spy.task_transition.replace(Some((
+                "send-keys",
+                Box::new(|spy| spy.stop.store(true, Ordering::Release)),
+            )));
+            let unknown = send("native-two", "second assignment").unwrap();
+            assert_eq!(unknown.0, 75);
+            let unknown: Value = serde_json::from_slice(&unknown.1).unwrap();
+            assert_eq!(unknown["status"], "unknown");
+            spy.stop.store(false, Ordering::Release);
+            spy.calls.borrow_mut().clear();
+            let repeated = send("native-two", "second assignment").unwrap();
+            assert_eq!(repeated.0, 75);
+            let repeated: Value = serde_json::from_slice(&repeated.1).unwrap();
+            assert_eq!(repeated["attempt_id"], unknown["attempt_id"]);
+            assert!(spy.mutating_calls().is_empty());
+
+            // A canonical operation cancellation after buffering fences paste
+            // and Enter, even when the task's lease and pane are unchanged.
+            spy.task_transition.replace(Some((
+                "set-buffer",
+                Box::new(|spy| {
+                    let output = oms_command_operations::run(
+                        oms_command_operations::App::Events,
+                        &commands::strings(&["list", "--json"]),
+                        &spy.repo,
+                        &spy.stop,
+                    );
+                    assert_eq!(output.0, 0);
+                    let projection: Value = serde_json::from_slice(&output.1).unwrap();
+                    let attempt = crate::rows(&projection)
+                        .iter()
+                        .find(|a| a["task_id"] == "native-four")
+                        .unwrap();
+                    let output = oms_command_operations::run(
+                        oms_command_operations::App::Events,
+                        &commands::strings(&[
+                            "transition",
+                            "--attempt",
+                            text(attempt, "attempt_id"),
+                            "--state",
+                            "cancelled",
+                            "--idempotency-key",
+                            "fixture-cancel",
+                        ]),
+                        &spy.repo,
+                        &spy.stop,
+                    );
+                    assert_eq!(output.0, 0, "{}", String::from_utf8_lossy(&output.2));
+                }),
+            )));
+            spy.calls.borrow_mut().clear();
+            let cancelled = send("native-four", "fourth assignment").unwrap();
+            assert_eq!(cancelled.0, 75);
+            assert_eq!(spy.calls_named("set-buffer").len(), 1);
+            assert!(spy.calls_named("paste-buffer").is_empty());
+            assert!(spy.calls_named("send-keys").is_empty());
+            spy.calls.borrow_mut().clear();
+            let cancelled_retry = send("native-four", "fourth assignment").unwrap();
+            assert_eq!(cancelled_retry.0, 75);
+            assert!(spy.mutating_calls().is_empty());
+
+            // A pre-existing draft is a proven no-input prefix. Its intent
+            // remains reusable, and becoming idle submits the same claim once.
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), "› preserved draft".into());
+            assert!(
+                send("native-five", "fifth assignment")
+                    .unwrap_err()
+                    .message
+                    .contains("busy")
+            );
+            assert!(spy.mutating_calls().is_empty());
+            let prefix = oms_command_operations::run(
+                oms_command_operations::App::Events,
+                &commands::strings(&["list", "--json"]),
+                &repo,
+                &spy.stop,
+            );
+            assert_eq!(prefix.0, 0);
+            let prefix: Value = serde_json::from_slice(&prefix.1).unwrap();
+            let prefix = crate::rows(&prefix)
+                .iter()
+                .find(|a| a["task_id"] == "native-five")
+                .unwrap();
+            assert_eq!(prefix["refs"]["native_transport"], "intent");
+            spy.screens
+                .borrow_mut()
+                .insert("%4".into(), format!("{CODEX_EMPTY}{CODEX_STATUS}"));
+            let resumed = send("native-five", "fifth assignment").unwrap();
+            assert_eq!(resumed.0, 0);
+            let resumed: Value = serde_json::from_slice(&resumed.1).unwrap();
+            assert_eq!(resumed["attempt_id"], prefix["attempt_id"]);
+            assert_eq!(spy.calls_named("send-keys").len(), 1);
+            let task: Value =
+                serde_json::from_slice(&plan(&["show", "--id", "native-five"])).unwrap();
+            assert_eq!(task["lease_epoch"], 1);
+
+            // Lease changes after paste fence Enter, and a new claim cannot
+            // silently turn the unresolved old assignment into a new dispatch.
+            spy.task_transition.replace(Some((
+                "paste-buffer",
+                Box::new(|spy| {
+                    let result = oms_command_plan::run(
+                        &commands::strings(&["release", "--id", "native-three"]),
+                        &spy.repo,
+                        &spy.stop,
+                    );
+                    assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
+                }),
+            )));
+            spy.calls.borrow_mut().clear();
+            let stale = send("native-three", "third assignment").unwrap();
+            assert_eq!(stale.0, 75);
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
+            spy.calls.borrow_mut().clear();
+            assert!(
+                send("native-three", "third assignment")
+                    .unwrap_err()
+                    .message
+                    .contains("earlier native assignment")
+            );
+            assert!(spy.mutating_calls().is_empty());
+            let read = plan(&["show", "--id", "native-one"]);
+            let read: Value = serde_json::from_slice(&read).unwrap();
+            assert_eq!(read["state"], "claimed");
+            assert_eq!(read["lease_epoch"], 1);
         }
 
         #[test]
