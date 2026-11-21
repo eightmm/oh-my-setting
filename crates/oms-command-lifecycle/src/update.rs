@@ -6,6 +6,14 @@ use crate::{
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::atomic::AtomicBool, time::Duration};
 
+const APPLY_STATE_FIELDS: [(&str, &str); 5] = [
+    ("last_run", "last_apply_run"),
+    ("status", "last_apply_status"),
+    ("local", "last_apply_local"),
+    ("remote", "last_apply_remote"),
+    ("upstream", "last_apply_upstream"),
+];
+
 fn state_path(paths: &Paths) -> Result<PathBuf> {
     r::leaf(
         &std::env::var_os("OH_MY_SETTING_AUTO_UPDATE_STATE")
@@ -27,7 +35,7 @@ fn read_state(paths: &Paths) -> Result<Option<Value>> {
     let mut row = serde_json::Map::new();
     for line in text.lines() {
         if let Some((key, value)) = line.split_once('=')
-            && matches!(
+            && (matches!(
                 key,
                 "last_run"
                     | "mode"
@@ -37,12 +45,35 @@ fn read_state(paths: &Paths) -> Result<Option<Value>> {
                     | "local"
                     | "remote"
                     | "upstream"
-            )
+            ) || APPLY_STATE_FIELDS.iter().any(|(_, saved)| *saved == key))
         {
             row.entry(key).or_insert(json!(value));
         }
     }
     Ok(Some(Value::Object(row)))
+}
+fn last_apply(state: &Value) -> Option<Value> {
+    let saved = state["last_apply_status"].is_string();
+    if !saved && state["mode"] != "apply" {
+        return None;
+    }
+    Some(Value::Object(
+        APPLY_STATE_FIELDS
+            .iter()
+            .filter_map(|(field, stored)| {
+                state[if saved { *stored } else { *field }]
+                    .as_str()
+                    .or_else(|| {
+                        if !saved && *field == "last_run" {
+                            state["checked_at"].as_str()
+                        } else {
+                            None
+                        }
+                    })
+                    .map(|value| ((*field).into(), json!(value)))
+            })
+            .collect(),
+    ))
 }
 fn publish(
     paths: &Paths,
@@ -81,10 +112,28 @@ fn publish_mode(
         "skipped" => "update deferred by an admission fence",
         _ => "update available",
     };
-    let body = format!(
-        "last_run={}\nmode={mode}\nstatus={status}\nmessage={message}\nsource_root={source}\nlocal={current}\nremote={target}\nupstream={reference}\n",
-        r::now()
+    let now = r::now();
+    let apply = if mode == "apply" {
+        Some(
+            json!({"last_run":now,"status":status,"local":current,"remote":target,"upstream":reference}),
+        )
+    } else {
+        // A successful fetch says nothing about an earlier apply/tool failure.
+        read_state(paths)?.as_ref().and_then(last_apply)
+    };
+    let mut body = format!(
+        "last_run={now}\nmode={mode}\nstatus={status}\nmessage={message}\nsource_root={source}\nlocal={current}\nremote={target}\nupstream={reference}\n"
     );
+    if let Some(apply) = apply {
+        for (field, stored) in APPLY_STATE_FIELDS {
+            if let Some(value) = apply[field].as_str() {
+                if value.contains(['\r', '\n']) {
+                    return r::fail("auto-update state contains invalid apply metadata");
+                }
+                body.push_str(&format!("{stored}={value}\n"));
+            }
+        }
+    }
     r::atomic(&path, body.as_bytes())
 }
 fn wired(paths: &Paths) -> Result<(bool, bool)> {
@@ -132,19 +181,26 @@ fn attention(paths: &Paths, flag: &AtomicBool) -> Result<&'static str> {
     if status.is_empty() {
         return Ok("unknown");
     }
-    let last = state["last_run"]
-        .as_str()
-        .or_else(|| state["checked_at"].as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+    let run_time = |record: &Value| {
+        record["last_run"]
+            .as_str()
+            .or_else(|| record["checked_at"].as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    };
+    let last = run_time(&state);
     let installed = owner["installed_at"]
         .as_str()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-    let superseded = installed.zip(last).is_some_and(|(a, b)| a > b);
-    if !superseded && matches!(status, "failed" | "partial") {
-        return Ok("failed");
-    }
-    if !superseded && status == "skipped" {
-        return Ok("blocked");
+    let apply = last_apply(&state);
+    for record in std::iter::once(&state).chain(apply.as_ref()) {
+        let superseded = installed.zip(run_time(record)).is_some_and(|(a, b)| a > b);
+        if !superseded {
+            match record["status"].as_str() {
+                Some("failed" | "partial") => return Ok("failed"),
+                Some("skipped") => return Ok("blocked"),
+                _ => (),
+            }
+        }
     }
     if systemd && let Some(program) = r::find("loginctl", &paths.cwd) {
         let output = r::command(
@@ -552,6 +608,20 @@ fn run_selected(
                         .or_else(|| state["checked_at"].as_str())
                         .unwrap_or("unknown")
                 );
+                if let Some(apply) = last_apply(&state) {
+                    for (key, label) in [("status", "last apply"), ("last_run", "last apply run")] {
+                        if let Some(value) = apply[key].as_str() {
+                            out.push_str(&format!(
+                                "\n{label}: {}",
+                                value
+                                    .chars()
+                                    .filter(|c| !c.is_control())
+                                    .take(160)
+                                    .collect::<String>()
+                            ));
+                        }
+                    }
+                }
                 for key in ["upstream", "local", "remote"] {
                     if let Some(value) = state[key].as_str() {
                         out.push_str(&format!(
