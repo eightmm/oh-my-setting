@@ -538,6 +538,48 @@ fn check_lexical_reference() {
 }
 
 #[test]
+fn signatures_keep_later_ranked_files_after_a_locally_clipped_declaration() {
+    let f = Fixture::new();
+    let long_type = "Argument".repeat(300);
+    fs::write(
+        f.0.join("aaa.rs"),
+        format!("pub fn clipped(value: {long_type}) {{}}\n"),
+    )
+    .unwrap();
+    fs::write(f.0.join("zzz.rs"), "pub fn later() {}\n").unwrap();
+    f.build();
+
+    let query = |budget| {
+        let (code, report) = f.query(&[
+            "map",
+            "--signatures",
+            "--no-refresh",
+            "--entry-path",
+            "aaa.rs",
+            "--entry-path",
+            "zzz.rs",
+            "--max-files",
+            "2",
+            "--max-bytes",
+            budget,
+        ]);
+        assert_eq!(code, 0, "{report}");
+        report
+    };
+    let wide = query("4096");
+    assert_eq!(wide["truncated"], json!(["aaa.rs"]));
+    assert_eq!(wide["omitted"], json!([]));
+    assert_eq!(wide["files"][0]["path"], "aaa.rs");
+    assert_eq!(wide["files"][1]["path"], "zzz.rs");
+    assert!(wide["text"].as_str().unwrap().contains("pub fn later()"));
+
+    let narrow = query("256");
+    assert_eq!(narrow["truncated"], json!(["aaa.rs"]));
+    assert_eq!(narrow["omitted"], json!(["zzz.rs"]));
+    assert!(narrow["bytes"].as_u64().unwrap() <= 256);
+}
+
+#[test]
 fn rust_workspace_cache_and_impact() {
     let f = Fixture::new();
     for (path, contents) in [

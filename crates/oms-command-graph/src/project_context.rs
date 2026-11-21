@@ -516,7 +516,12 @@ pub fn signature_map(
     let mut files = vec![];
     let mut truncated = vec![];
     let mut omitted = vec![];
+    let mut budget_exhausted = false;
     for path in array(&pack, "files").iter().filter_map(Value::as_str) {
+        if budget_exhausted {
+            omitted.push(path.to_owned());
+            continue;
+        }
         let api = index.file_api(path, 2000)?;
         let header = format!(
             "{path}{}\n",
@@ -525,8 +530,8 @@ pub fn signature_map(
                 .map(|s| format!("  # {}", s.split_whitespace().collect::<Vec<_>>().join(" ")))
                 .unwrap_or_default()
         );
-        if !truncated.is_empty() || !omitted.is_empty() || used + header.len() > max_bytes as usize
-        {
+        if used + header.len() > max_bytes as usize {
+            budget_exhausted = true;
             omitted.push(path.to_owned());
             continue;
         }
@@ -542,6 +547,7 @@ pub fn signature_map(
                     .join(" ")
             );
             if used + block.len() + line.len() > max_bytes as usize {
+                budget_exhausted = true;
                 break;
             }
             block.push_str(&line);
