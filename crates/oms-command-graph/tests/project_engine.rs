@@ -538,6 +538,48 @@ fn check_lexical_reference() {
 }
 
 #[test]
+fn signatures_keep_later_ranked_files_after_a_locally_clipped_declaration() {
+    let f = Fixture::new();
+    let long_type = "Argument".repeat(300);
+    fs::write(
+        f.0.join("aaa.rs"),
+        format!("pub fn clipped(value: {long_type}) {{}}\n"),
+    )
+    .unwrap();
+    fs::write(f.0.join("zzz.rs"), "pub fn later() {}\n").unwrap();
+    f.build();
+
+    let query = |budget| {
+        let (code, report) = f.query(&[
+            "map",
+            "--signatures",
+            "--no-refresh",
+            "--entry-path",
+            "aaa.rs",
+            "--entry-path",
+            "zzz.rs",
+            "--max-files",
+            "2",
+            "--max-bytes",
+            budget,
+        ]);
+        assert_eq!(code, 0, "{report}");
+        report
+    };
+    let wide = query("4096");
+    assert_eq!(wide["truncated"], json!(["aaa.rs"]));
+    assert_eq!(wide["omitted"], json!([]));
+    assert_eq!(wide["files"][0]["path"], "aaa.rs");
+    assert_eq!(wide["files"][1]["path"], "zzz.rs");
+    assert!(wide["text"].as_str().unwrap().contains("pub fn later()"));
+
+    let narrow = query("256");
+    assert_eq!(narrow["truncated"], json!(["aaa.rs"]));
+    assert_eq!(narrow["omitted"], json!(["zzz.rs"]));
+    assert!(narrow["bytes"].as_u64().unwrap() <= 256);
+}
+
+#[test]
 fn rust_workspace_cache_and_impact() {
     let f = Fixture::new();
     for (path, contents) in [
@@ -548,7 +590,10 @@ fn rust_workspace_cache_and_impact() {
         ),
         ("core/Cargo.toml", "[package]\nname = \"core\"\n"),
         ("app/src/lib.rs", "pub fn app() {}\n"),
-        ("core/src/lib.rs", "pub fn core() {}\n"),
+        (
+            "core/src/lib.rs",
+            "pub fn core() {}\nimpl First { pub fn new() -> Self { Self } }\nimpl Second { pub fn new() -> Self { Self } }\n",
+        ),
         ("app/tests/check.rs", "#[test]\nfn check() {}\n"),
     ] {
         let target = f.0.join(path);
@@ -582,6 +627,21 @@ fn rust_workspace_cache_and_impact() {
             .unwrap()
             .iter()
             .any(|n| n["name"] == "check" && n["metadata"]["test"] == true)
+    );
+    let (code, api) = f.query(&["api", "core/src/lib.rs", "--no-refresh"]);
+    assert_eq!(code, 0);
+    let methods: Vec<_> = api["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["name"] == "new")
+        .collect();
+    assert_eq!(methods.len(), 2);
+    assert_ne!(methods[0]["id"], methods[1]["id"]);
+    assert!(
+        methods
+            .iter()
+            .all(|s| s["signature"].as_str().unwrap().contains("fn new()"))
     );
     let warm = f.build();
     assert!(warm["stats"]["cached"].as_u64().unwrap() > 0);

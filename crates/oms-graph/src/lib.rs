@@ -31,7 +31,7 @@ impl Selection {
             Self::Shell => Some(("shell", 8)),
             Self::Markdown => Some(("markdown", 2)),
             Self::Config => Some(("config", 1)),
-            Self::Rust => Some(("rust", 1)),
+            Self::Rust => Some(("rust", 2)),
             Self::JavaScript => Some(("javascript", 1)),
             Self::Go => Some(("go", 1)),
             Self::Cpp => Some(("cpp", 1)),

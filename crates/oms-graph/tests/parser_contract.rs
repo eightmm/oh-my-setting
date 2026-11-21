@@ -210,6 +210,28 @@ fn polyglot_tokens_are_iterative_and_extract_basic_declarations() {
             .iter()
             .any(|n| n["name"] == "deep")
     );
+    let named = format!(
+        "{}fn bottom() {{}}{}",
+        "mod nested {".repeat(1000),
+        "}".repeat(1000)
+    );
+    let graph = parse("named.rs", &named, "d", &mut Fake::default()).unwrap();
+    assert_eq!(graph.nodes.len(), 1001); // modules and bottom
+    let bottom = graph.nodes.iter().find(|n| n["name"] == "bottom").unwrap();
+    assert_eq!(bottom["metadata"]["scope_truncated"], true);
+    assert!(bottom["metadata"]["qualname"].as_str().unwrap().len() < 256);
+    let long = format!("impl {} {{ fn bounded() {{}} }}", "LongType".repeat(1000));
+    let graph = parse("long.rs", &long, "d", &mut Fake::default()).unwrap();
+    let implementation = graph.nodes.iter().find(|n| n["kind"] == "symbol").unwrap();
+    assert_eq!(implementation["metadata"]["signature_truncated"], true);
+    assert_eq!(implementation["metadata"]["scope_truncated"], true);
+    assert!(
+        implementation["metadata"]["signature"]
+            .as_str()
+            .unwrap()
+            .len()
+            < 2060
+    );
 }
 
 #[test]
@@ -249,5 +271,61 @@ fn cargo_paths_and_rust_test_attributes() {
         rust.nodes
             .iter()
             .any(|n| n["name"] == "normal" && n["metadata"].get("test").is_none())
+    );
+}
+
+#[test]
+fn rust_scopes_preserve_same_named_methods_signatures_and_body_spans() {
+    let source = r####"mod first {
+    struct Item;
+    impl Item {
+        pub async fn new<'a>(value: &'a str) -> Self {
+            let literal = r###"fn fabricated() { }"###;
+            Item
+        }
+    }
+    impl<T> Factory<T> for Item {
+        fn new() -> Self { Item }
+    }
+    trait Maker {
+        fn new() -> Self;
+    }
+}
+mod second { fn new() {} }
+fn r#type() { let brace = '}'; }
+"####;
+    let parsed = parse("src/lib.rs", source, "digest", &mut Fake::default()).unwrap();
+    let methods: Vec<_> = parsed.nodes.iter().filter(|n| n["name"] == "new").collect();
+    assert_eq!(methods.len(), 4);
+    let ids: std::collections::BTreeSet<_> =
+        methods.iter().map(|n| n["id"].as_str().unwrap()).collect();
+    let names: std::collections::BTreeSet<_> = methods
+        .iter()
+        .map(|n| n["metadata"]["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!((ids.len(), names.len()), (4, 4));
+    assert_eq!(methods[0]["metadata"]["line"], 4);
+    assert_eq!(methods[0]["metadata"]["end_line"], 7);
+    assert_eq!(methods[0]["metadata"]["span_complete"], true);
+    assert!(
+        methods[0]["metadata"]["signature"]
+            .as_str()
+            .unwrap()
+            .contains("async fn new<'a>")
+    );
+    assert!(!parsed.nodes.iter().any(|n| n["name"] == "fabricated"));
+    assert!(parsed.nodes.iter().any(|n| n["name"] == "r#type"));
+    let partial = parse(
+        "src/partial.rs",
+        "impl Broken { fn missing() {",
+        "d",
+        &mut Fake::default(),
+    )
+    .unwrap();
+    assert!(
+        partial
+            .nodes
+            .iter()
+            .any(|n| n["name"] == "missing" && n["metadata"]["span_complete"] == false)
     );
 }

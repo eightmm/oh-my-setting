@@ -2,7 +2,20 @@
 
 기준: 2026-11-18, main `f9a695ea2de90a160754252c1ee9cbaa4dd7a488`.
 [비교 분석](GRAPH-RETRIEVAL-COMPARISON.md)의 소스 근거를 구현 가능한 단위로 나눈다.
-**이 문서의 GR-01–13은 미구현 제안이다.** 현재 채택 범위와 우선순위는
+**일부 연결은 구현됐고 나머지 GR 항목은 후속 제안이다.** 현재 Rust lexical parser는
+module/impl/trait/function scope와 중복 선언 순서를 포함한 symbol identity, Rust signature,
+body 끝 줄과 `span_complete`를 제공한다. 깊은 scope와 긴 선언은 bounded label과
+source offset으로 구분하고 잘림을 표시한다. Raw string과 char literal 내부 선언은 제외하며
+parser/build version을 함께 갱신해 이전 index와 섞이지 않는다. 이는 Rust type resolution,
+macro expansion이나 완전한 syntax 검증이 아니다.
+
+일반 delegate의 graph context는 signatures JSON을 소비해 matched/no-match/partial,
+truncation/omission과 graph revision을 실제 prompt에 보존한다. 실패·malformed·과대 결과는
+bounded error 상태로 전달하고 정상 no-match 때문에 Python을 제외해 rebuild하지 않는다.
+이 정보는 parent working tree의 orientation임을 명시하며 worker snapshot에 결합됐다고
+주장하지 않는다. 명시적 context pack의 기존 snapshot 검증은 유지된다. GR-02의 module
+관계, GR-03의 일반 context snapshot binding, GR-04의 parser별 coverage 확대 등은 후속이다.
+현재 채택 범위와 우선순위는
 [통합 작업 큐](ORCHESTRATOR-WORK-QUEUE.md)를 따른다. ID는 계약과 검증 근거의 참조이며
 13개 독립 기능을 모두 구현하라는 지시가 아니다.
 

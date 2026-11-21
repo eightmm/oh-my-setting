@@ -516,7 +516,12 @@ pub fn signature_map(
     let mut files = vec![];
     let mut truncated = vec![];
     let mut omitted = vec![];
+    let mut budget_exhausted = false;
     for path in array(&pack, "files").iter().filter_map(Value::as_str) {
+        if budget_exhausted {
+            omitted.push(path.to_owned());
+            continue;
+        }
         let api = index.file_api(path, 2000)?;
         let header = format!(
             "{path}{}\n",
@@ -525,8 +530,8 @@ pub fn signature_map(
                 .map(|s| format!("  # {}", s.split_whitespace().collect::<Vec<_>>().join(" ")))
                 .unwrap_or_default()
         );
-        if !truncated.is_empty() || !omitted.is_empty() || used + header.len() > max_bytes as usize
-        {
+        if used + header.len() > max_bytes as usize {
+            budget_exhausted = true;
             omitted.push(path.to_owned());
             continue;
         }
@@ -542,12 +547,16 @@ pub fn signature_map(
                     .join(" ")
             );
             if used + block.len() + line.len() > max_bytes as usize {
+                budget_exhausted = true;
                 break;
             }
             block.push_str(&line);
             shown += 1;
         }
-        if shown < n(&api, "total_symbols") {
+        let clipped = array(&api, "symbols")
+            .iter()
+            .any(|r| r["signature_truncated"] == true || r["scope_truncated"] == true);
+        if shown < n(&api, "total_symbols") || clipped {
             truncated.push(path.to_owned());
         }
         used += block.len();
@@ -556,7 +565,11 @@ pub fn signature_map(
             .iter()
             .find(|r| s(r, "path") == path)
             .unwrap();
-        files.push(json!({"path":path,"reason":evidence["reason"],"score":evidence["score"],"symbols":api["total_symbols"],"shown":shown}));
+        let incomplete_spans = array(&api, "symbols")
+            .iter()
+            .filter(|r| r["span_complete"] == false)
+            .count();
+        files.push(json!({"path":path,"reason":evidence["reason"],"score":evidence["score"],"symbols":api["total_symbols"],"shown":shown,"incomplete_spans":incomplete_spans}));
     }
     Ok(
         json!({"schema":1,"task":task,"project_graph_revision":pack["project_graph_revision"],"content_trust":"untrusted-source-data","note":"orientation: extracted declarations only, not evidence that code behaves as named","max_bytes":max_bytes,"bytes":used,"files":files,"truncated":truncated,"omitted":omitted,"retrieval":pack["retrieval"],"text":text}),

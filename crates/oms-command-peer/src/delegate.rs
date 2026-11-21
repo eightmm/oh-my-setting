@@ -342,12 +342,68 @@ pub(crate) fn verification(args: &Args, repo: &Path, read: bool) -> Result<Optio
         fail("check.sh has no declared fast mode; give --verify CMD or --no-verify")
     }
 }
+fn graph_context_projection(code: i32, bytes: &[u8]) -> String {
+    let unavailable = |reason: &str| {
+        format!(
+            "{{\"schema\":1,\"kind\":\"oms-delegate-graph-context\",\"delivery_status\":\"error\",\"retrieval\":{{\"status\":\"error\",\"reason\":\"{reason}\"}},\"worker_snapshot_bound\":false,\"text\":\"Graph orientation unavailable; search source directly. Missing matches do not prove missing code.\"}}"
+        )
+    };
+    if code != 0 {
+        return unavailable("graph-command-failed");
+    }
+    if bytes.len() > 128 * 1024 {
+        return unavailable("graph-result-exceeds-limit");
+    }
+    let Ok(mut result) = V::parse(bytes) else {
+        return unavailable("malformed-graph-result");
+    };
+    let status = result.get("retrieval").get("status").text().unwrap_or("");
+    if result.get("schema") != &V::Num("1".into())
+        || !["matched", "no-match", "partial"].contains(&status)
+        || result.get("text").text().is_none()
+        || result
+            .get("project_graph_revision")
+            .text()
+            .is_none_or(|s| s.is_empty())
+        || !matches!(result.get("truncated"), V::Arr(_))
+        || !matches!(result.get("omitted"), V::Arr(_))
+    {
+        return unavailable("malformed-graph-result");
+    }
+    let delivery = if status == "matched"
+        && (!result.get("truncated").array().is_empty()
+            || !result.get("omitted").array().is_empty()
+            || result.get("files").array().iter().any(|file| {
+                matches!(file.get("incomplete_spans"), V::Num(n) if n.parse::<u64>().is_ok_and(|n| n > 0))
+            }))
+    {
+        "partial"
+    } else {
+        status
+    };
+    let delivery = delivery.to_owned();
+    result.set("kind", "oms-delegate-graph-context");
+    result.set("delivery_status", delivery);
+    result.set(
+        "source_scope",
+        "parent working-tree orientation; not verification or a bound worker snapshot",
+    );
+    result.set("worker_snapshot_bound", false);
+    match result.json(false) {
+        Ok(encoded) if encoded.len() <= 16 * 1024 => {
+            String::from_utf8(encoded).unwrap_or_else(|_| unavailable("malformed-graph-result"))
+        }
+        _ => unavailable("graph-projection-exceeds-limit"),
+    }
+}
+
 fn build_graph_context(
     repo: &Path,
     question: &str,
     interrupted: &std::sync::atomic::AtomicBool,
-) -> Option<String> {
+) -> Result<String> {
     use std::os::unix::fs::PermissionsExt;
+    crate::check(interrupted)?;
     let is_valid_helper = |path: &Path| {
         std::fs::symlink_metadata(path).is_ok_and(|meta| {
             meta.file_type().is_file()
@@ -367,58 +423,22 @@ fn build_graph_context(
                 .filter(|p| is_valid_helper(p))
         })
     });
-    let sig_args = |no_refresh: bool| -> Vec<OsString> {
-        let mut argv: Vec<OsString> = vec![
-            "project".into(),
-            "map".into(),
-            "--signatures".into(),
-            "--task".into(),
-            question.into(),
-            "--max-bytes".into(),
-            "12000".into(),
-            "--repo".into(),
-            repo.as_os_str().to_owned(),
-        ];
-        if no_refresh {
-            argv.push("--no-refresh".into());
-        }
-        argv
-    };
-    let (code, stdout, _) =
-        oms_command_graph::run_with_helper(&sig_args(false), repo, interrupted, helper.as_deref());
-    if code == 0 && !stdout.is_empty() {
-        return String::from_utf8(stdout).ok();
-    }
-    let build_args: Vec<OsString> = vec![
-        "project".into(),
-        "build".into(),
-        "--exclude".into(),
-        "*.py".into(),
-        "--repo".into(),
-        repo.as_os_str().to_owned(),
-    ];
-    if oms_command_graph::run_with_helper(&build_args, repo, interrupted, None).0 == 0 {
-        let (code, stdout, _) =
-            oms_command_graph::run_with_helper(&sig_args(true), repo, interrupted, None);
-        if code == 0 && !stdout.is_empty() {
-            return String::from_utf8(stdout).ok();
-        }
-    }
-    let brief_args: Vec<OsString> = vec![
+    let argv: Vec<OsString> = vec![
         "project".into(),
         "map".into(),
-        "--brief".into(),
-        "--no-refresh".into(),
+        "--signatures".into(),
+        "--json".into(),
+        "--task".into(),
+        question.into(),
+        "--max-bytes".into(),
+        "10000".into(),
         "--repo".into(),
         repo.as_os_str().to_owned(),
     ];
     let (code, stdout, _) =
-        oms_command_graph::run_with_helper(&brief_args, repo, interrupted, None);
-    if code == 0 && !stdout.is_empty() {
-        String::from_utf8(stdout).ok()
-    } else {
-        None
-    }
+        oms_command_graph::run_with_helper(&argv, repo, interrupted, helper.as_deref());
+    crate::check(interrupted)?;
+    Ok(graph_context_projection(code, &stdout))
 }
 
 static INTERACTIVE_BUFFERED: std::sync::atomic::AtomicBool =
@@ -621,12 +641,12 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     } else if args.has("graph-context")
         && !args.has("no-graph-context")
         && !args.has("context-pack")
-        && let Some(graph_text) = build_graph_context(&repo, &question, context.interrupted)
     {
+        let graph_text = build_graph_context(&repo, &question, context.interrupted)?;
         prompt.untrusted(
             "retrieved",
             "project graph",
-            "task signatures",
+            "retrieval status and source orientation",
             graph_text.as_bytes(),
         )?;
     }
@@ -1321,6 +1341,73 @@ mod tests {
         git(&dir, &["init", "-q"]);
         git(&dir, &["commit", "-q", "--allow-empty", "-m", "base"]);
         dir
+    }
+
+    #[test]
+    fn graph_context_keeps_no_match_coverage_and_does_not_change_discovery() {
+        let repo = repo("graph-context");
+        std::fs::write(
+            repo.join("lib.rs"),
+            "pub fn graph_context_probe() -> usize { 42 }\n",
+        )
+        .unwrap();
+        git(&repo, &["add", "lib.rs"]);
+        git(&repo, &["commit", "-qm", "graph fixture"]);
+        let stop = AtomicBool::new(false);
+        let matched = build_graph_context(&repo, "graph_context_probe", &stop).unwrap();
+        let parsed = V::parse(matched.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.get("delivery_status").text(),
+            Some("matched"),
+            "{matched}"
+        );
+        assert!(
+            parsed
+                .get("text")
+                .text()
+                .unwrap()
+                .contains("fn graph_context_probe")
+        );
+        assert_eq!(parsed.get("worker_snapshot_bound"), &V::Bool(false));
+        let manifest = repo.join(".oms/project-graph/manifest.json");
+        let before = std::fs::read(&manifest).unwrap();
+        let missing = build_graph_context(&repo, "unmatchedzzzzfixture", &stop).unwrap();
+        let parsed = V::parse(missing.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.get("retrieval").get("status").text(),
+            Some("no-match")
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        let partial = graph_context_projection(0, br#"{"schema":1,"project_graph_revision":"fixture","retrieval":{"status":"matched"},"text":"fn wanted()","truncated":["lib.rs"],"omitted":["more.rs"]}"#);
+        let parsed = V::parse(partial.as_bytes()).unwrap();
+        assert_eq!(parsed.get("delivery_status").text(), Some("partial"));
+        assert_eq!(parsed.get("omitted").array()[0].text(), Some("more.rs"));
+        let incomplete = graph_context_projection(0, br#"{"schema":1,"project_graph_revision":"fixture","retrieval":{"status":"matched"},"text":"fn wanted()","files":[{"path":"lib.rs","incomplete_spans":1}],"truncated":[],"omitted":[]}"#);
+        assert_eq!(
+            V::parse(incomplete.as_bytes())
+                .unwrap()
+                .get("delivery_status")
+                .text(),
+            Some("partial")
+        );
+        for (code, bytes) in [
+            (1, b"private diagnostic".as_slice()),
+            (0, b"not-json".as_slice()),
+        ] {
+            let projection = graph_context_projection(code, bytes);
+            assert_eq!(
+                V::parse(projection.as_bytes())
+                    .unwrap()
+                    .get("retrieval")
+                    .get("status")
+                    .text(),
+                Some("error")
+            );
+            assert!(!projection.contains("private diagnostic"));
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(build_graph_context(&repo, "probe", &stop).is_err());
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

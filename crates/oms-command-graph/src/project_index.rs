@@ -705,6 +705,16 @@ pub(super) trait ReadGraph {
                     row[key] = node["metadata"][key].clone();
                 }
             }
+            for key in [
+                "syntax_only",
+                "span_complete",
+                "scope_truncated",
+                "signature_truncated",
+            ] {
+                if node["metadata"][key].is_boolean() {
+                    row[key] = node["metadata"][key].clone();
+                }
+            }
             symbols.push(row);
         }
         symbols.sort_by(|a, b| {
