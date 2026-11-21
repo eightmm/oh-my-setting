@@ -296,8 +296,33 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "frozen patch changed after admission; intent left outstanding",
     )?;
     c.services.fence_landing(&request, &intent)?;
+    let mut composition_binding = None;
     if let Some(fence) = &panel_accept {
         c.services.panel_accept(&request, fence)?;
+        let snapshot = fence.get("snapshot");
+        let manifest = snapshot.get("composition");
+        if manifest.truth() {
+            let manifest_sha = string(snapshot.get("candidate"), "artifact_sha256");
+            let participant = string(snapshot.get("task"), "claimed_by_participant");
+            require(
+                oms_command_plan::json::hex(&manifest_sha, 64)
+                    && !participant.is_empty()
+                    && !policy.verify.is_empty()
+                    && admitted.record.get("verify_exit").py() == "0"
+                    && string(&admitted.record, "verification") == "command",
+                "composed landing lacks successful native integration verification",
+            )?;
+            composition_binding = Some(obj([
+                ("manifest_sha256", manifest_sha.into()),
+                ("participant", participant.into()),
+                ("tree", manifest.get("tree").clone()),
+                ("verify_sha256", digest(policy.verify.as_bytes()).into()),
+                (
+                    "admission_event_id",
+                    admitted.record.get("event_id").clone(),
+                ),
+            ]));
+        }
     }
     require(
         git.snapshot()? == before,
@@ -306,7 +331,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     git.clean()?;
     git.apply(&raw, true, false, false)?;
     git.apply(&raw, false, false, false)?;
-    let lineage = obj([
+    let mut lineage = obj([
         ("schema", 1usize.into()),
         (
             "event_id",
@@ -331,6 +356,9 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         ),
         ("base", before.head.clone().into()),
     ]);
+    if let Some(binding) = composition_binding {
+        lineage.set("panel_composition", binding);
+    }
     storage::append(
         &state,
         Path::new(".oms/artifacts/index.jsonl"),

@@ -84,6 +84,16 @@ returns a generic success boolean as completion authority.
 | `group_membership_resolver` | Fresh native account-database lookup for an observed gid. Domain checks every explicit member uid and the complete primary-member uid list; a primary gid or group membership boolean cannot prove private ownership |
 | `group_membership_before` | The same complete ownership evidence through bounded, cancellable native account probes, sharing the admission deadline |
 
+Panel review accepts both the existing schema-1 single-candidate record and a
+schema-2 composed record. The latter binds a content-addressed manifest containing
+2–16 reviewed workers for the same task, lease and full base. Plan matches each
+component to its indexed delegate and review evidence, verifies the original
+artifact and patch bytes, and checks their ordered concatenation. A successful
+native landing row binds the manifest, owning participant, tree and exact
+verifier digest to the passing admission event and report. Plan independently
+reconstructs the aggregate tree in a private index and checks the accepted
+commit's parent and tree.
+
 `Plan::team_admission_before(AdmissionRequest, deadline)` returns an opaque
 contract guard. It pins the canonical writer order, expected immutable spec,
 member generation, root creation event, exact task/criterion/base/policy and

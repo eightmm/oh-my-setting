@@ -15,6 +15,7 @@ pub mod decision;
 mod engine;
 pub mod floor;
 pub mod json;
+pub mod panel_composition;
 mod product;
 mod proposal;
 mod provenance;

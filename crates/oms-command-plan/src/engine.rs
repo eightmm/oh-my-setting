@@ -2074,6 +2074,7 @@ impl<'a> Plan<'a> {
         req: &Request,
         from_task: bool,
     ) -> Result<()> {
+        let composed = record.get("schema").is_int(2);
         json::keys(
             record,
             &[
@@ -2091,10 +2092,14 @@ impl<'a> Plan<'a> {
                 "base",
                 "review_gate",
             ],
-            &[],
+            if composed {
+                &["composition", "integration_verify"]
+            } else {
+                &[]
+            },
         )?;
         require(
-            record.get("schema").is_int(1)
+            (record.get("schema").is_int(1) || composed)
                 && record.text("task_id") == id
                 && record.get("plan_id") == plan.get("plan_id")
                 && record.get("lease_id") == t.get("lease_id")
@@ -2108,7 +2113,11 @@ impl<'a> Plan<'a> {
             gate.get("patch_sha256") == record.get("patch_sha256")
                 && gate.get("event_id").str().is_ok()
                 && gate.get("exit").is_int(0)
-                && gate.get("gate_verify_exit").is_int(0)
+                && (if composed {
+                    gate.text("kind") == "component-reviews"
+                } else {
+                    gate.get("gate_verify_exit").is_int(0)
+                })
                 && !gate.get("seat_verdicts").array()?.is_empty()
                 && gate
                     .get("seat_verdicts")
@@ -2141,6 +2150,9 @@ impl<'a> Plan<'a> {
             json::sha(&patch) == record.text("patch_sha256"),
             "panel acceptance patch digest changed",
         )?;
+        if composed {
+            crate::panel_composition::validate(self, t, record, &patch)?;
+        }
         let index = crate::repository::ProductIndex::new(&self.git())?;
         index.run(&self.git(), &["read-tree", record.text("base")], None)?;
         index.run(
