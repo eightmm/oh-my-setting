@@ -3,6 +3,7 @@
 pub(crate) mod account_binding;
 
 use crate::claude_lead_usage::LeadReading;
+use crate::native_panel::{MAIN_PERMISSIONS_REF, MainPermissions};
 use crate::{Error, Output, Result, Services, cli::Options, commands, json, require, text};
 use account_binding::{
     AccountHost, AccountSelectionReceipt, AccountVerification, AlternateLeadScope, BindingAnchor,
@@ -28,6 +29,7 @@ enum LeadAccount<'a> {
 struct LeadLaunch<'a> {
     model: Option<&'a str>,
     effort: Option<&'a str>,
+    permissions: Option<MainPermissions>,
 }
 
 impl<'a> LeadLaunch<'a> {
@@ -55,7 +57,7 @@ const REQUESTED_PROVIDER_MODEL: &str = "@oms_provider_requested_model";
 const ALTERNATE_LEAD_TAG: &str = "codex-alternate";
 const ALTERNATE_TASK_INPUT_FORMAT: &str = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}\t.\t#{window_active}\t#{pane_in_mode}\t#{cursor_x}\t#{cursor_y}\t#{pane_current_command}\t.";
 const CODEX_VISIBLE_PASTE_CHARS: usize = 1000;
-const ALTERNATE_STARTUP_PROMPT: &str = "Coordinate under Overall Main. Use oms list and oms agent-role show --name ROLE. Delegate substantive work to native children. Make only necessary integration or unblocking edits yourself. Give each child a role, disjoint scope, checks and least permissions. Research, review and verification are read-only. Builders edit assigned paths. Children may not delegate, commit, push, land, install or publish. Leave parent-only actions to Main. Verify, report evidence, blockers and uncertain permissions.";
+const ALTERNATE_STARTUP_PROMPT: &str = "Coordinate under Overall Main. Use oms list and oms agent-role show --name ROLE. Delegate substantive work to native children. Make only necessary integration or unblocking edits yourself. Give each child a role, disjoint scope and checks. Research, review and verification use native read-only controls when available. Builders edit assigned paths. Children may not delegate, commit, push, land, install or publish. Leave parent-only actions to Main. Verify and report evidence, blockers and unverified child access.";
 const PROVIDER_SPAWN_FORMAT: &str = "#{pane_id}\t#{pane_pid}";
 const ALTERNATE_SPAWN_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}";
 const ALTERNATE_PANE_FORMAT: &str =
@@ -88,6 +90,7 @@ fn orchestrator_command(
     provider: &str,
     model: &str,
     effort: Option<&str>,
+    permissions: MainPermissions,
 ) -> Result<Vec<OsString>> {
     let (program, permission_flag) = match provider {
         "codex" => ("codex", "--dangerously-bypass-approvals-and-sandbox"),
@@ -95,7 +98,10 @@ fn orchestrator_command(
         "antigravity" => ("agy", "--dangerously-skip-permissions"),
         _ => return Err(Error::new("unsupported provider orchestrator")),
     };
-    let mut command = commands::strings(&[program, "--model", model, permission_flag]);
+    let mut command = commands::strings(&[program, "--model", model]);
+    if permissions == MainPermissions::Full {
+        command.push(permission_flag.into());
+    }
     if let Some(effort) = effort {
         require(
             provider != "antigravity" || !AGY_FIXED_EFFORT_MODELS.contains(&model),
@@ -117,6 +123,20 @@ fn orchestrator_command(
         ]));
     }
     Ok(command)
+}
+
+fn lead_permissions(main: &Value) -> Result<MainPermissions> {
+    let inherited = MainPermissions::from_env()?;
+    let recorded = main["refs"]
+        .get(MAIN_PERMISSIONS_REF)
+        .map(|mode| MainPermissions::parse(mode.as_str()))
+        .transpose()?;
+    // A launch environment can tighten the owning Main's recorded mode.
+    if recorded == Some(MainPermissions::Native) {
+        Ok(MainPermissions::Native)
+    } else {
+        Ok(inherited)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2161,7 +2181,10 @@ impl<'a> Panel<'a> {
         host: &dyn AccountHost,
     ) -> Result<(String, AccountSelectionReceipt)> {
         let model = launch.model(provider)?;
-        let command = orchestrator_command(provider, model, launch.effort)?;
+        let permissions = launch
+            .permissions
+            .map_or_else(MainPermissions::from_env, Ok)?;
+        let command = orchestrator_command(provider, model, launch.effort, permissions)?;
         let env_lines = self.tmux_env_lines()?;
         let env_refs: Vec<&str> = env_lines.iter().map(String::as_str).collect();
         let receipt = match account {
@@ -2571,14 +2594,15 @@ impl<'a> Panel<'a> {
         tx: &Transaction<'_>,
     ) -> Result<Value> {
         let model = launch.model("codex")?;
-        let command = orchestrator_command("codex", model, launch.effort)?;
         let main = self.alternate_main(caller, host)?;
         require(
             self.alternate_slot()?.is_none(),
             "the Codex alternate lead slot is already occupied",
         )?;
         let primary = self.alternate_primary(&main, host)?;
-        self.require_codex_assignment_main(self.repo, &AttemptCache::default())?;
+        let record = self.require_codex_assignment_main(self.repo, &AttemptCache::default())?;
+        let permissions = lead_permissions(&record)?;
+        let command = orchestrator_command("codex", model, launch.effort, permissions)?;
         let env = self.tmux_env_lines()?;
         let env_refs: Vec<&str> = env.iter().map(String::as_str).collect();
         let receipt =
@@ -2808,10 +2832,11 @@ impl<'a> Panel<'a> {
         })
     }
 
-    fn require_codex_assignment_main(&self, repo: &Path, attempts: &AttemptCache) -> Result<()> {
+    fn require_codex_assignment_main(&self, repo: &Path, attempts: &AttemptCache) -> Result<Value> {
         let main = attempts.resolve_attempt(repo, &self.attempt, self.services, self.stop)?;
         self.require_live_codex_assignment_main(main.as_ref())?;
-        self.require_exact_main_membership(repo)
+        self.require_exact_main_membership(repo)?;
+        main.ok_or_else(|| Error::new("live Main attempt unavailable"))
     }
 
     fn require_live_codex_assignment_main(&self, main: Option<&Value>) -> Result<()> {
@@ -2953,7 +2978,10 @@ impl<'a> Panel<'a> {
             provider,
             requested_account,
             task,
-            LeadLaunch::default(),
+            LeadLaunch {
+                permissions: Some(MainPermissions::Full),
+                ..Default::default()
+            },
             host,
             &AttemptCache::default(),
         )
@@ -4449,9 +4477,10 @@ fn run_with_host(
     let tx = store.transaction("panel-provider-sessions", Duration::from_secs(3))?;
     let panel = Panel::load(repo, &room, services, stop)?;
     tx.check()?;
-    let launch = LeadLaunch {
+    let mut launch = LeadLaunch {
         model: options.get("model"),
         effort: options.get("reasoning-effort"),
+        permissions: None,
     };
     let value = if options.has("lead") {
         let caller = AlternateCaller::from_env();
@@ -4488,6 +4517,13 @@ fn run_with_host(
     } else {
         let attempts_cache = AttemptCache::default();
         let attempts = panel.require_main_with_cache(options.get("owner"), &attempts_cache)?;
+        if !panel.leads.contains_key(provider) && !options.has("task") {
+            let main = crate::rows(&attempts)
+                .iter()
+                .find(|row| row["attempt_id"] == panel.attempt)
+                .ok_or_else(|| Error::new("live Main attempt unavailable"))?;
+            launch.permissions = Some(lead_permissions(main)?);
+        }
         tx.check()?;
         if options.has("spread-accounts")
             && !panel.leads.contains_key(provider)
@@ -5378,6 +5414,7 @@ mod tests {
                 provider,
                 LeadLaunch::default().model(provider).unwrap(),
                 None,
+                super::MainPermissions::Full,
             )
             .unwrap();
             assert!(!command.iter().any(|arg| arg == STARTUP_PROMPT));
@@ -5387,6 +5424,8 @@ mod tests {
 
     #[test]
     fn provider_commands_apply_model_permissions_and_startup_role() {
+        use super::MainPermissions;
+
         for (provider, program, model, permission_flag, prompt_option) in [
             (
                 "codex",
@@ -5419,8 +5458,14 @@ mod tests {
                     provider,
                     LeadLaunch::default().model(provider).unwrap(),
                     None,
+                    MainPermissions::Full,
                 )
                 .unwrap(),
+                expected,
+            );
+            expected.remove(3);
+            assert_eq!(
+                orchestrator_command(provider, model, None, MainPermissions::Native).unwrap(),
                 expected,
             );
             for (request, effort) in [
@@ -5431,9 +5476,10 @@ mod tests {
                 let launch = LeadLaunch {
                     model: request,
                     effort,
+                    ..Default::default()
                 };
                 let chosen = launch.model(provider).unwrap();
-                let command = orchestrator_command(provider, chosen, effort);
+                let command = orchestrator_command(provider, chosen, effort, MainPermissions::Full);
                 if provider == "antigravity" && request.is_none() {
                     assert!(command.is_err());
                     continue;
@@ -5457,6 +5503,12 @@ mod tests {
                     expected.extend([prompt_option, STARTUP_PROMPT]);
                 }
                 assert_eq!(command.unwrap(), expected);
+                expected.remove(3);
+                assert_eq!(
+                    orchestrator_command(provider, chosen, effort, MainPermissions::Native)
+                        .unwrap(),
+                    expected,
+                );
             }
         }
         for (request, canonical) in [
@@ -5480,12 +5532,21 @@ mod tests {
             let launch = LeadLaunch {
                 model: options.get("model"),
                 effort: options.get("reasoning-effort"),
+                ..Default::default()
             };
             let selected = launch.model("antigravity").unwrap();
             assert_eq!(selected, canonical);
-            assert!(orchestrator_command("antigravity", selected, launch.effort).is_err());
+            assert!(
+                orchestrator_command(
+                    "antigravity",
+                    selected,
+                    launch.effort,
+                    MainPermissions::Full
+                )
+                .is_err()
+            );
             assert_eq!(
-                orchestrator_command("antigravity", selected, None).unwrap(),
+                orchestrator_command("antigravity", selected, None, MainPermissions::Full).unwrap(),
                 [
                     "agy",
                     "--model",
@@ -8077,6 +8138,21 @@ mod tests {
             let tx = store
                 .transaction("panel-provider-sessions", Duration::from_secs(3))
                 .unwrap();
+            let set_mode = |mode| {
+                spy.event_projection.borrow_mut().as_mut().unwrap()[0]["refs"]
+                    [MAIN_PERMISSIONS_REF] = json!(mode);
+            };
+            set_mode("unknown");
+            let error = spy
+                .load()
+                .launch_codex_alternate(&caller, "second", LeadLaunch::default(), &host, &tx)
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                "OMS_PANEL_MAIN_PERMISSIONS must be full or native"
+            );
+            assert!(spy.mutating_calls().is_empty());
+            set_mode("native");
             let output = spy
                 .load()
                 .launch_codex_alternate(
@@ -8085,6 +8161,7 @@ mod tests {
                     LeadLaunch {
                         model: Some("vendor/model-x"),
                         effort: Some("high"),
+                        ..Default::default()
                     },
                     &host,
                     &tx,
@@ -8110,12 +8187,11 @@ mod tests {
             }
             assert!(spawn.contains(&format!("CODEX_HOME={}", home.display())));
             assert_eq!(
-                spawn[spawn.len() - 6..],
+                spawn[spawn.len() - 5..],
                 [
                     "codex",
                     "--model",
                     "vendor/model-x",
-                    "--dangerously-bypass-approvals-and-sandbox",
                     "-c",
                     "model_reasoning_effort=\"high\"",
                 ]
@@ -8757,6 +8833,7 @@ mod tests {
             let requested = LeadLaunch {
                 model: Some("vendor/model-x"),
                 effort: Some("xhigh"),
+                permissions: Some(MainPermissions::Full),
             };
             spy.load()
                 .execute_with_host_cached(

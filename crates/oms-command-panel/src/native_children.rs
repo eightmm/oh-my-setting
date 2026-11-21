@@ -241,6 +241,7 @@ fn row(
         "alias": "↳",
         "role": "subagent",
         "native_child": true,
+        "native_access_verification": "unverified",
         "provider": provider,
         "title": safe(title, 160),
         "model": safe(model, 80),
@@ -4924,6 +4925,11 @@ mod tests {
             );
             assert_eq!(cold.rows, warm.rows);
             assert_eq!(cold.rows.len(), 3);
+            assert!(
+                cold.rows
+                    .iter()
+                    .all(|row| row["native_access_verification"] == "unverified")
+            );
 
             let current = std::fs::read(&transcript).unwrap();
             let mut long = vec![b'x'; MAX_TRANSCRIPT];

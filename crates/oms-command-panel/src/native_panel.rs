@@ -168,6 +168,8 @@ fn admission_error(error: oms_command_peer::Error) -> Error {
     }
 }
 const MAIN_STARTUP_PROMPT: &str = include_str!("main-coordination.txt");
+const MAIN_PERMISSIONS_ENV: &str = "OMS_PANEL_MAIN_PERMISSIONS";
+pub(crate) const MAIN_PERMISSIONS_REF: &str = "panel_main_permissions";
 const ENV_KEYS: &[&str] = &[
     "OMS_AGENT",
     "OMS_PANEL_REPO",
@@ -189,7 +191,6 @@ pub const PANEL_ENV_PASSTHROUGH: &[&str] = &[
     "NO_COLOR",
     "OMS_CODEX_NOTIFY",
     "OMS_CLAUDE_NOTIFY",
-    "OMS_PANEL_MAIN_PERMISSIONS",
     "CLAUDE_CONFIG_DIR",
     "OMS_QUOTA_WARN_PCT",
     "OMS_ROOM_ID",
@@ -213,16 +214,39 @@ struct MainAdmission<'a> {
     capability: &'static MainCapability,
     resolution: MainResolution,
     options: &'a Options,
-    full_permissions: bool,
+    permissions: MainPermissions,
 }
 
-fn full_main_permissions() -> Result<bool> {
-    match std::env::var("OMS_PANEL_MAIN_PERMISSIONS").as_deref() {
-        Ok("full") | Err(std::env::VarError::NotPresent) => Ok(true),
-        Ok("native") => Ok(false),
-        _ => Err(Error::new(
-            "OMS_PANEL_MAIN_PERMISSIONS must be full or native",
-        )),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MainPermissions {
+    Full,
+    Native,
+}
+
+impl MainPermissions {
+    pub(crate) fn from_env() -> Result<Self> {
+        match std::env::var(MAIN_PERMISSIONS_ENV) {
+            Ok(mode) => Self::parse(Some(&mode)),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Full),
+            Err(std::env::VarError::NotUnicode(_)) => Self::parse(None),
+        }
+    }
+
+    pub(crate) fn parse(mode: Option<&str>) -> Result<Self> {
+        match mode {
+            Some("full") => Ok(Self::Full),
+            Some("native") => Ok(Self::Native),
+            _ => Err(Error::new(
+                "OMS_PANEL_MAIN_PERMISSIONS must be full or native",
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Native => "native",
+        }
     }
 }
 
@@ -247,7 +271,7 @@ impl<'a> MainAdmission<'a> {
             capability,
             resolution: resolve_main(policy, capability, options.get("model")),
             options,
-            full_permissions: full_main_permissions()?,
+            permissions: MainPermissions::from_env()?,
         })
     }
 
@@ -676,7 +700,7 @@ fn split_panel<'a>(
             let chosen = match std::env::var_os("OMS_PANEL_MAIN") {
                 Some(raw) => environment_main(&raw)?,
                 None => {
-                    full_main_permissions()?;
+                    MainPermissions::from_env()?;
                     Some(pick_main(stop)?)
                 }
             };
@@ -1421,6 +1445,7 @@ fn run_native(
 ) -> Result<i32> {
     oms_command_peer::admission::interactive_state(repo).map_err(admission_error)?;
     let capability = main.capability;
+    let permissions = main.permissions.as_str();
     let harness = capability.harness;
     let options = main.options;
     let resolution = &main.resolution;
@@ -1548,6 +1573,8 @@ fn run_native(
         "--ref".into(),
         format!("panel_harness={harness}"),
         "--ref".into(),
+        format!("{MAIN_PERMISSIONS_REF}={permissions}"),
+        "--ref".into(),
         format!("panel_effort={}", resolution.effort),
         "--ref".into(),
         format!("panel_label={label}"),
@@ -1665,6 +1692,7 @@ fn run_native(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
+        .env(MAIN_PERMISSIONS_ENV, permissions)
         .env("OMS_PANEL_OWNER", &resolution.owner)
         .env("OMS_PANEL_HARNESS", harness)
         .env("OMS_ROOM_ID", &room_id)
@@ -1920,6 +1948,7 @@ fn run_native(
                         ])
                         .env("OMS_PANEL_MAIN_ATTEMPT", &attempt)
                         .env("OMS_ROOM_PARTICIPANT", &attempt)
+                        .env(MAIN_PERMISSIONS_ENV, permissions)
                         .env_remove("OMS_PANEL_AUTO_ORCHESTRATORS")
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
@@ -2603,6 +2632,10 @@ impl MainRelay {
         );
         parts.push(format!("OMS_STATE_REPO={state}"));
         parts.push(format!("OMS_ROOM_REPO={state}"));
+        parts.push(format!(
+            "{MAIN_PERMISSIONS_ENV}={}",
+            main.permissions.as_str()
+        ));
         for name in NATIVE_CONTEXT_ENV {
             if exclude_account_homes && MAIN_ACCOUNT_HOMES.contains(name) {
                 continue;
@@ -2796,7 +2829,7 @@ fn native_command(
     let task = main.options.get("task");
     let full_permissions = capability
         .full_permissions
-        .filter(|_| main.full_permissions);
+        .filter(|_| main.permissions == MainPermissions::Full);
     let room_inst = match (room_id, member) {
         (Some(id), Some(m)) => format!(
             "\nYou are joined to OMS room {id} as {m}. Read oms room show --id {id} first. Include --room {id} in every oms panel --orchestrator, --dispatch, or --council command."
@@ -4715,7 +4748,8 @@ exec "$OMS_PI_FIXTURE_TMUX" -L "$OMS_PI_FIXTURE_SOCKET" -f /dev/null "$@""#,
       --host) export OMS_PI_FIXTURE_REPO="$3"
               printf '%s\000' "$@" > "$OMS_PI_FIXTURE_REPO/relay-argv"
               OMS_PI_FIXTURE_STAGE=main OMS_PANEL_MAIN=unsupported-fixture exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
-      --room) OMS_PI_FIXTURE_STAGE=orchestrator OMS_PI_FIXTURE_ROOM="$5" OMS_PI_FIXTURE_PROVIDER="$7" exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
+      --room) printf '%s\n' "$OMS_PANEL_MAIN_PERMISSIONS" > "$OMS_PI_FIXTURE_REPO/auto-permissions"
+              OMS_PANEL_MAIN_PERMISSIONS=full OMS_PI_FIXTURE_STAGE=orchestrator OMS_PI_FIXTURE_ROOM="$5" OMS_PI_FIXTURE_PROVIDER="$7" exec "$OMS_PI_FIXTURE_EXE" --exact "$OMS_PI_FIXTURE_NAME" --nocapture;;
       --watch) exec /bin/sleep 30;;
     esac;;
   harness)
@@ -4730,7 +4764,7 @@ exit 2"#,
             (
                 "pi",
                 r#"printf '%s\000' "$@" > "$OMS_PI_FIXTURE_REPO/pi-argv"
-printf '%s\n' "$OMS_PANEL_OWNER" "$OMS_PANEL_HARNESS" "$OMS_ROOM_ID" "$OMS_PANEL_MAIN_ATTEMPT" > "$OMS_PI_FIXTURE_REPO/pi-custody"
+printf '%s\n' "$OMS_PANEL_OWNER" "$OMS_PANEL_HARNESS" "$OMS_ROOM_ID" "$OMS_PANEL_MAIN_ATTEMPT" "$OMS_PANEL_MAIN_PERMISSIONS" > "$OMS_PI_FIXTURE_REPO/pi-custody"
 exec /bin/sleep 30"#,
             ),
             (
@@ -4752,6 +4786,7 @@ exec /bin/sleep 30"#,
             .env("XDG_CACHE_HOME", home.0.join(".cache"))
             .env("SHELL", "/bin/sh")
             .env("TERM", "xterm")
+            .env("OMS_PANEL_MAIN_PERMISSIONS", "native")
             .env("TMUX_TMPDIR", "/tmp")
             .env("OMS_PI_FIXTURE_TMUX", fs::canonicalize(&tmux).unwrap())
             .env("OMS_PI_FIXTURE_SOCKET", &socket.name)
@@ -4789,7 +4824,8 @@ exec /bin/sleep 30"#,
             ]).output().unwrap();
             let listing = String::from_utf8_lossy(&panes.stdout);
             if let Ok(custody) = fs::read_to_string(repo.0.join("pi-custody"))
-                && let ["codex", "pi", room, main] = custody.lines().collect::<Vec<_>>().as_slice()
+                && let ["codex", "pi", room, main, "native"] =
+                    custody.lines().collect::<Vec<_>>().as_slice()
                 && listing.lines().any(|line| {
                     line.strip_prefix(&format!("pi|codex|{room}|{main}|||0|"))
                         .and_then(|tail| tail.split_once('|'))
@@ -4805,6 +4841,7 @@ exec /bin/sleep 30"#,
                 assert_eq!(attempt["provider"], "codex");
                 assert_eq!(attempt["refs"]["panel_harness"], "pi");
                 assert_eq!(attempt["refs"]["panel_room_id"], *room);
+                assert_eq!(attempt["refs"][super::MAIN_PERMISSIONS_REF], "native");
                 assert_eq!(attempt["refs"]["panel_native_scheduling"], "unmanaged");
                 assert_eq!(attempt["terminal"], false);
                 let room_state = crate::commands::query(
@@ -4852,9 +4889,15 @@ exec /bin/sleep 30"#,
                 assert!(pi[1].contains(super::MAIN_STARTUP_PROMPT.trim()));
                 assert!(pi[1].contains(&format!("room {room} as {main}")));
                 let codex = fixture_argv(&repo.0.join("codex-argv"));
+                assert_eq!(
+                    fs::read_to_string(repo.0.join("auto-permissions"))
+                        .unwrap()
+                        .trim(),
+                    "native"
+                );
                 assert_eq!(codex[0], "--model");
                 assert!(
-                    codex
+                    !codex
                         .iter()
                         .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
                 );
@@ -4875,8 +4918,13 @@ exec /bin/sleep 30"#,
                 NAME,
                 "--nocapture",
             ];
+            let clean_permissions = if stage == "bad-permissions" {
+                ""
+            } else {
+                " -u OMS_PANEL_MAIN_PERMISSIONS"
+            };
             let command = format!(
-                "exec env -u OMS_ROOM_ID -u OMS_ROOM_REPO -u OMS_STATE_REPO {}",
+                "exec env -u OMS_ROOM_ID -u OMS_ROOM_REPO -u OMS_STATE_REPO{clean_permissions} {}",
                 argv.map(crate::commands::shell_quote).join(" ")
             );
             let mut run = socket.command();
@@ -5016,6 +5064,7 @@ exec /bin/sleep 30
         let main = last_main(&alias.0, &RealCliParsers);
         assert_eq!(main["attempt_id"], *attempt);
         assert_eq!(main["refs"]["panel_harness"], "agy");
+        assert_eq!(main["refs"][super::MAIN_PERMISSIONS_REF], "full");
         assert_eq!(main["provider"], "antigravity");
     }
 
