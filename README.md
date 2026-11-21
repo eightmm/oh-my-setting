@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/hero.png" alt="Claude Code, Codex and Antigravity robots share project rules, state and review above a repository, with the oh-my-setting name and tagline" width="100%"></p>
+<p align="center"><img src="docs/assets/hero.png" alt="The central Rust OMS hub connects Codex, Claude Code and Antigravity to shared project rules, work state and review" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
@@ -13,15 +13,18 @@
 
 ---
 
-## Highlights
+## What you can do
 
-| Capability | What it gives you | Guide |
+| Task | OMS tools and behavior | Guide |
 |---|---|---|
-| **Control Panel (`oms`)** | Interactive TUI for live main, worker, and council calls, attention alerts, provider quota windows, and diff/artifact inspection | [Panel guide](docs/TERMINAL-PANEL.md) |
-| **Role-Routed Parallel Workers** | Isolated `.oms/tmp` Git worktrees, non-overlapping scope checks, warm Cargo target slots, and per-main WIP pacing (`WIP_LIMIT = 10`, override via `OMS_PANEL_WIP_LIMIT`) | [Role routing](custom-skills/oms-agent-harness/references/provider-routing.md) |
-| **Independent Councils & Gates** | Cross-family debate (`oms peer-ask --debate`), review gates (`oms peer-review --gate`), and two-phase admission (`oms patch-admit` / `oms patch-land`) | [Components](docs/COMPONENTS.md#asking-other-agents) |
-| **State, Fleet & HPC** | Unified dashboard (`oms dashboard`), Work Journal and handoffs, dataset/leakage checks, remote SSH/Slurm projections, and typed runtime contracts | [Dashboard](docs/DASHBOARD.md) · [Journal](docs/WORK-JOURNAL.md) · [Runtime](docs/OMS-RUNTIME.md) |
-| **Verified Landing** | Single-command gating, push, and CI wait via `oms land`, plus reversible install, update, and uninstall | [Release landing](docs/COMPONENTS.md#verification-and-release) |
+| **Run a project from the terminal** | `oms` opens the panel. Pick an installed Codex, Claude Code, Antigravity (Agy), or gateway-backed Pi Main. In a managed tmux panel, OMS can open native provider leads in the background and reconnect to a live Main. Board and Detail show weekly quota, token usage, and activity when provider or OMS records support them. | [Terminal panel](docs/TERMINAL-PANEL.md) |
+| **Delegate and route work** | The Overall Main assigns scoped work. Provider leads coordinate supported native workers. `oms peer-delegate` isolates builder changes. Inspect role profiles with `oms agent-role` and quota-aware routing with `oms panel --routes`. Use `oms connect-services` to register distinct Codex, Claude, and Pi account homes for routing. | [Main policy](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [Routing](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [Accounts](docs/TERMINAL-PANEL.md#provider-accounts) |
+| **Get independent advice and review** | `oms consult` asks one peer. `oms peer-ask --debate` compares provider responses. `oms peer-review` requests independent diff review. The Overall Main integrates review findings and decides acceptance. | [Peer collaboration](docs/COMPONENTS.md#asking-other-agents) |
+| **Capture project intent and find affected code** | `oms init` sets up project policy. `PROJECT.md` records the agreed scope, decisions, and verification. `oms graph project` finds symbols, dependencies, and affected paths, and `oms runtime context` builds bounded context for a task. | [Project context](docs/PROJECT-CONTEXT.md) · [Graph guide](docs/GRAPH-ENGINEERING.md#project-graph) |
+| **Plan, track, and hand off work** | `oms agent-plan` tracks dependencies and review state. `oms inbox` and `oms dashboard` surface work that needs attention. `oms agent-task`, `oms journal`, and `oms session-handoff` preserve resume notes, work history, and session summaries. | [Planning](docs/COMPONENTS.md#plans-and-bounded-autonomy) · [State and handoff](docs/COMPONENTS.md#state-memory-and-handoff) |
+| **Verify and publish changes** | `oms patch-admit` and `oms patch-land` check and apply delegated patches. `oms land` gates a committed change before an authorized push and can wait for CI. `oms draft-pr` publishes a verified HEAD as a draft PR when authorized. | [Verification and release](docs/COMPONENTS.md#verification-and-release) |
+| **Install and maintain OMS** | Choose capability profiles, inspect configuration with `oms status` and `oms doctor`, update through `oms update`, and restore managed configuration with `oms uninstall`. | [Installation and updates](docs/INSTALL.md) |
+| **Extend into optional workflows** | `oms runtime` exposes task evidence, experiments, and supported execution backends. `oms recipe` and `oms autopilot` run explicit workflows. Research and HPC tools cover dataset checks, local queues, remote SSH targets, and Slurm submission and reconciliation. `oms harness` provides an experimental Codex inference bridge for Pi and Claude Code. | [Runtime](docs/OMS-RUNTIME.md) · [Recipes](docs/RECIPES.md) · [ML and HPC](docs/COMPONENTS.md#ml-and-hpc-components) · [Alternate harnesses](docs/CODEX-HARNESSES.md) |
 
 ---
 
@@ -31,29 +34,29 @@
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-Then open Codex, Claude Code, or Antigravity inside a project directory and say: **“Start this project.”**
+In a Git repository, run `oms` to open the terminal panel. You can also open Codex, Claude Code, or Antigravity in a project directory and ask it to **“Start this project.”**
 
 | Host | Requirements |
 |---|---|
-| **Linux (glibc, Ubuntu 20.04+)** | Bash 5.0+, `curl`, `git`, `tar`, `gzip`. |
+| **Linux (glibc, Ubuntu 20.04+)** | Bash 5.0+ and `curl`. The installer can add missing `git`, `tar`, `gzip`, and `find` with root or sudo. |
 | **macOS** | Bash 5.0+ (`brew install bash`), `curl`, Command Line Tools (`xcode-select --install`). |
 | **Windows via WSL2** | A glibc Linux distro on WSL2 filesystem (native Windows Git Bash / MSYS2 is refused). |
 
-OMS compiles and runs as a self-contained native Rust CLI (`~/.local/bin/oms`); it requires no system Python setup and leaves system runtimes untouched. See [docs/INSTALL.md](docs/INSTALL.md) for installation profiles and details.
+OMS runs as a native Rust CLI at `~/.local/bin/oms`. The core commands require no system Python setup. The default `core` install provisions one coding-agent provider, and the managed panel uses tmux. [Installation guide](docs/INSTALL.md)
 
 <details>
-<summary>What the installer configures (and restores on uninstall)</summary>
+<summary>What the installer configures</summary>
 
-- **Global rules:** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, and `~/.gemini/AGENTS.md` symlink to OMS shared rules. Existing files are backed up to `<file>.backup.<timestamp>` and restored by `oms uninstall`.
-- **Provider integrations:** Installs hooks, status-line HUD, plugins, and `oms-*` skills across Claude Code, Codex, and Antigravity, and registers the native `oms` MCP server for Claude Code and Codex.
-- **Native CLI & state:** Installs the `oms` binary under `~/.local/bin` and stages local artifacts under `~/.oh-my-setting` without touching global system Python.
-- **Daily updates:** Clean checkouts fast-forward automatically when enabled (opt out with `| bash -s -- --no-auto-update`). See [migration notes](docs/MIGRATION.md#07) for release changes.
+- **Global rules** link provider files to OMS shared rules. The installer backs up existing files to `<file>.backup.<timestamp>` so `oms uninstall` can restore them.
+- **Provider integrations** set up available skills, hooks, HUDs, plugins, and MCP server registrations according to the provider and install options.
+- **Native CLI** uses the managed checkout at `~/.oh-my-setting` and the launcher under `~/.local/bin`.
+- **Scheduled updates** require successful CI for the selected SHA and preserve local checkout edits. Pass `--no-auto-update` to the installer to skip scheduling. [Update policy](docs/INSTALL.md#verification-policy)
 
 </details>
 
 ```bash
 oms doctor       # Verify harness wiring and provider readiness
-oms update       # Fast-forward clean installation and restage binary
+oms update       # Update the OMS installation through its configured ref
 oms uninstall    # Remove managed links and restore backed-up config files
 ```
 
@@ -63,10 +66,10 @@ oms uninstall    # Remove managed links and restore backed-up config files
 
 <p align="center"><img src="docs/assets/panel-graph.svg" alt="OMS panel graph showing the goal, main agent, delegated worker, verifier gate, session events and provider quota" width="100%"></p>
 
-1. **Onboard (`PROJECT.md`):** Empty folders run a concise spec interview; existing repositories are inspected first and asked only about genuine gaps; active projects resume from retained state.
-2. **Delegate in parallel:** Write tasks launch in detached `.oms/tmp` Git worktrees with non-overlapping path scopes while read-only researchers run freely without consuming write WIP slots.
-3. **Verify independently:** Candidate patches undergo automatic diff-based checks and cross-family review (`oms peer-review --gate`) plus isolated base/candidate re-verification (`oms patch-admit` -> `oms patch-land`).
-4. **Land cleanly:** `oms land` pushes committed work, waits for CI, and records journal & handoff state so the next agent starts with verified context. Nothing merges or releases without explicit user authority.
+1. **Agree on the goal.** For a new project, the agent can conduct a short requirements interview. For an existing repository, it reads project policy, source, and retained state first. Record agreed constraints and completion checks in `PROJECT.md`.
+2. **Assign work in parallel.** Give builders distinct path scopes and assign read-only investigation and review separately. Write delegates run in detached Git worktrees under `${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/worktrees` by default.
+3. **Check the result.** Run affected checks and request independent review where the change requires it. Admit a delegated patch against its scope and evidence before applying it.
+4. **Land and hand off.** Use `oms land` for the verified, authorized push. Record the delivery evidence and remaining work in the journal or handoff so the next session can resume.
 
 <details>
 <summary>Example prompts you can use</summary>
@@ -88,28 +91,20 @@ Update oh-my-setting and re-run its doctor.
 
 ## Control panel
 
-Launch `oms` (or `oms panel --watch`) to monitor live main/worker trees, unread attention items, provider quota windows, and plan progress in one flicker-free terminal view.
+Run `oms` in a foreground terminal with tmux to choose or reconnect to the project's Main. Use `oms panel --watch` for the board by itself. **Needs you** links to items that require input or review. Select a call to inspect recorded activity or results, and press `w` to see reported weekly quota, sources, and available reset times. Missing readings stay unknown. [Panel controls](docs/TERMINAL-PANEL.md#keys)
 
-`oms list` shows 13 entrypoints for daily work, collaboration, delivery and
-maintenance. Use `oms inbox --repo .` for current project attention and
-`oms status` for installation status. `agent-plan` tracks execution tasks;
-`agent-task` holds a short resume note. The journal records history, including
-recently observed blockers that may already have been resolved in live state.
-
-`oms list --all` also exposes optional automation, alternate harnesses,
-research/runtime tools and lower-level admission commands. Choose these for a
-specific workflow; ordinary coding does not require an experiment or campaign.
+`oms list` shows the everyday commands. Use `oms list --all` for the full catalog and `oms <command> --help` for flags. [Command catalog](docs/COMPONENTS.md)
 
 <p align="center"><img src="docs/assets/panel-board.svg" alt="OMS panel board with a goal, attention items, main and role calls, status and log tabs" width="100%"></p>
 
 <details>
 <summary>Results reader and dashboard previews</summary>
 
-- **Results & Diff Reader:** Inspect verified summaries, raw transcripts, files changed, and redacted diffs directly inside the panel.
+- **Results and diff reader** opens retained summaries, changed files, masked diffs, and captured transcripts where available.
 
 <p align="center"><img src="docs/assets/panel-results.svg" alt="OMS panel results with an accepted verified result and a failed verification awaiting a decision" width="100%"></p>
 
-- **Project Dashboard (`oms dashboard`):** Track goal contracts, plan readiness, recent attempts, fleet status, and suggested next commands.
+- **Project dashboard (`oms dashboard`)** shows the goal, plan readiness, recent attempts, and suggested next commands. [Dashboard guide](docs/DASHBOARD.md)
 
 <p align="center"><img src="docs/assets/dashboard.svg" alt="OMS dashboard showing goal, plan, attempts, review window and next commands" width="100%"></p>
 
@@ -133,12 +128,11 @@ specific workflow; ordinary coding does not require an experiment or campaign.
 ```
 
 See the [documentation index](docs/README.md) for detailed guides and [CONTRIBUTING.md](CONTRIBUTING.md) for local verification and contribution rules.
-Experimental [Codex harness launcher](docs/CODEX-HARNESSES.md) (`oms harness claude --model ...`) is also available for running Codex models inside alternative CLIs.
 
 ## Design principles
 
-- **Local-first & isolated:** Operates over local files and provider CLIs by default; write workers stay inside detached worktrees and declared path scopes.
-- **Outbound secret & path protection:** Built-in scrubbers keep credentials, private data, and local machine paths out of commits, reviews, and peer prompts.
-- **No silent self-approval:** Workers never mark their own patches accepted or push changes to shared branches without explicit owner/user authority.
+- **Local-first and scoped.** OMS coordinates local files and native provider CLIs. Write delegates have a detached worktree and a declared path scope.
+- **Protected outbound data.** Scrubbers check outbound text for secret patterns and mask local paths on supported surfaces. [Security boundary](docs/COMPONENTS.md#security-boundary)
+- **Explicit ownership.** Workers return changes and evidence. The owner controls patch acceptance and acts within the user's publication authority.
 
 If oh-my-setting helps your workflow, a ⭐ on [GitHub](https://github.com/eightmm/oh-my-setting) is appreciated.

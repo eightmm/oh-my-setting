@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/hero.png" alt="Claude Code, Codex, Antigravity 로봇이 저장소 위에서 프로젝트 규칙, 상태와 리뷰를 공유하고 oh-my-setting 이름과 설명이 표시된 모습" width="100%"></p>
+<p align="center"><img src="docs/assets/hero.png" alt="중앙의 Rust 기반 OMS 허브가 Codex, Claude Code, Antigravity를 공유 프로젝트 규칙, 작업 상태, 리뷰에 연결하는 모습" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
@@ -13,15 +13,18 @@
 
 ---
 
-## 주요 기능
+## OMS로 할 수 있는 일
 
-| 기능 | 제공하는 가치 | 안내 문서 |
+| 작업 | OMS 명령과 동작 | 안내 문서 |
 |---|---|---|
-| **컨트롤 패널 (`oms`)** | main·worker·council 호출 트리, 주의/대기 알림, provider 쿼터 잔량, diff·아티팩트 리더를 한 화면에서 조회 | [패널 안내](docs/TERMINAL-PANEL.md) |
-| **역할 기반 병렬 위임** | `.oms/tmp` 격리 Git worktree, 비중복 경로 scope 잠금, warm Cargo 빌드 슬롯, main당 쓰기 WIP 제어 (`WIP_LIMIT = 10`, `OMS_PANEL_WIP_LIMIT` 지원) | [역할 라우팅](custom-skills/oms-agent-harness/references/provider-routing.md) |
-| **독립 Council & 리뷰 게이트** | 다중 모델 토론 (`oms peer-ask --debate`), 타 패밀리 교차 리뷰 (`oms peer-review --gate`), 2단계 패치 검증 (`oms patch-admit` / `oms patch-land`) | [구성 요소](docs/COMPONENTS.md#asking-other-agents) |
-| **공유 상태·원격·HPC** | 통합 대시보드 (`oms dashboard`), Work Journal·인수인계, 데이터 누수 검사, 원격 SSH·Slurm 상태 투영, 타입 기반 런타임 계약 | [대시보드](docs/DASHBOARD.md) · [Journal](docs/WORK-JOURNAL.md) · [Runtime](docs/OMS-RUNTIME.md) |
-| **검증된 릴리스 착지** | `oms land` 단일 명령으로 게이트·push·CI 대기까지 수행하고, 설치·업데이트·제거를 완전히 되돌릴 수 있음 | [착지와 릴리스](docs/COMPONENTS.md#verification-and-release) |
+| **터미널에서 프로젝트 운영하기** | `oms`로 패널을 엽니다. 설치된 Codex, Claude Code, Antigravity(Agy), 또는 Codex 게이트웨이를 쓰는 Pi를 Main으로 선택할 수 있습니다. tmux 관리 패널은 별도 창에 provider 오케스트레이터를 열고, 실행 중인 Main에 다시 연결할 수 있습니다. Board와 Detail에는 provider 또는 OMS 기록으로 확인할 수 있는 주간 쿼터, 토큰 사용량, 활동이 표시됩니다. | [터미널 패널](docs/TERMINAL-PANEL.md) |
+| **작업을 위임하고 배정하기** | Overall Main은 범위를 정해 작업을 위임합니다. Provider Lead는 지원되는 네이티브 워커를 조율합니다. `oms peer-delegate`는 빌더의 수정 작업을 격리합니다. `oms agent-role`로 역할 프로필을, `oms panel --routes`로 쿼터를 고려하는 라우팅 정책을 확인합니다. `oms connect-services`로 Codex, Claude, Pi의 별도 계정 홈을 라우팅에 등록합니다. | [Main 정책](docs/TEAM-ORCHESTRATION-MAIN-POLICY.md) · [라우팅](docs/TERMINAL-PANEL.md#roles-and-automatic-allocation) · [계정](docs/TERMINAL-PANEL.md#provider-accounts) |
+| **독립 자문과 리뷰 받기** | `oms consult`로 한 에이전트에게 묻고, `oms peer-ask --debate`로 provider별 응답을 비교합니다. `oms peer-review`로 독립 diff 리뷰를 요청합니다. Overall Main은 리뷰 결과를 종합해 수락 여부를 판단합니다. | [에이전트 협업](docs/COMPONENTS.md#asking-other-agents) |
+| **프로젝트 의도를 기록하고 영향 범위 찾기** | `oms init`으로 프로젝트 정책을 구성하고, 합의한 범위·결정·검증 조건을 `PROJECT.md`에 기록합니다. `oms graph project`로 심볼·의존 관계·영향 경로를 찾고, `oms runtime context`로 필요한 작업 맥락을 제한된 분량으로 구성합니다. | [프로젝트 맥락](docs/PROJECT-CONTEXT.md) · [그래프 안내](docs/GRAPH-ENGINEERING.md#project-graph) |
+| **계획을 추적하고 인수인계하기** | `oms agent-plan`은 의존 관계와 검토 상태를 추적합니다. `oms inbox`와 `oms dashboard`에서 확인이 필요한 일을 찾고, `oms agent-task`, `oms journal`, `oms session-handoff`로 재개 메모·작업 이력·세션 요약을 남깁니다. | [계획](docs/COMPONENTS.md#plans-and-bounded-autonomy) · [상태와 인수인계](docs/COMPONENTS.md#state-memory-and-handoff) |
+| **변경을 검증하고 게시하기** | `oms patch-admit`과 `oms patch-land`로 위임 패치를 검사하고 적용합니다. `oms land`는 커밋된 변경을 검증한 뒤 승인된 push를 진행하고 CI 결과를 기다릴 수 있습니다. `oms draft-pr`는 권한이 승인되면 검증한 HEAD를 draft PR로 게시합니다. | [검증과 릴리스](docs/COMPONENTS.md#verification-and-release) |
+| **OMS 설치와 유지 관리하기** | 필요한 기능 프로필을 선택하고, `oms status`와 `oms doctor`로 구성을 점검합니다. `oms update`로 갱신하고, `oms uninstall`로 관리 대상 설정을 복원합니다. | [설치와 업데이트](docs/INSTALL.ko.md) |
+| **선택 기능으로 작업 확장하기** | `oms runtime`으로 작업 근거, 실험, 지원되는 실행 백엔드를 사용합니다. `oms recipe`와 `oms autopilot`은 명시적으로 선택한 워크플로를 실행합니다. 연구·HPC 도구는 데이터셋 검사, 로컬 큐, 원격 SSH 대상, Slurm 제출과 실행 기록 대조를 지원합니다. `oms harness`는 Pi와 Claude Code에서 Codex 추론을 사용할 수 있는 실험적 브리지를 제공합니다. | [런타임](docs/OMS-RUNTIME.md) · [레시피](docs/RECIPES.md) · [ML과 HPC](docs/COMPONENTS.md#ml-and-hpc-components) · [대체 하네스](docs/CODEX-HARNESSES.md) |
 
 ---
 
@@ -31,29 +34,29 @@
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
 
-설치 후 프로젝트 디렉터리에서 Codex, Claude Code 또는 Antigravity를 열고 **“이 프로젝트 시작해줘.”**라고 말하면 됩니다.
+Git 저장소에서 `oms`를 실행하면 터미널 패널을 열 수 있습니다. 프로젝트 디렉터리에서 Codex, Claude Code 또는 Antigravity를 열고 **“이 프로젝트 시작해줘.”**라고 요청해도 됩니다.
 
 | 호스트 | 요구 사항 |
 |---|---|
-| **Linux (glibc, Ubuntu 20.04+)** | Bash 5.0+, `curl`, `git`, `tar`, `gzip`. |
+| **Linux (glibc, Ubuntu 20.04+)** | Bash 5.0+와 `curl`. `git`, `tar`, `gzip`, `find`가 없으면 설치기가 root 또는 sudo 권한으로 추가할 수 있습니다. |
 | **macOS** | Bash 5.0+ (`brew install bash`), `curl`, Command Line Tools (`xcode-select --install`). |
 | **Windows (WSL2)** | WSL2 Linux 파일시스템 내부의 glibc 배포판 (네이티브 Git Bash / MSYS2 미지원). |
 
-OMS는 독립된 네이티브 Rust 바이너리(`~/.local/bin/oms`)로 동작하므로 별도 시스템 Python 설정이 필요하지 않으며 기존 환경을 건드리지 않습니다. 프로필 및 상세 설치 안내는 [docs/INSTALL.ko.md](docs/INSTALL.ko.md)를 참고하세요.
+OMS는 `~/.local/bin/oms`에서 네이티브 Rust CLI로 실행됩니다. 핵심 명령에는 시스템 Python 설정이 필요 없습니다. 기본 `core` 설치는 코딩 에이전트 provider 하나를 구성하며, 관리 패널은 tmux를 사용합니다. [설치 안내](docs/INSTALL.ko.md)
 
 <details>
-<summary>설치 시 구성되는 항목 (제거 시 자동 복원)</summary>
+<summary>설치 시 구성되는 항목</summary>
 
-- **전역 규칙 링크:** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/AGENTS.md`가 OMS 공유 규칙을 가리킵니다. 기존 파일은 `<파일>.backup.<타임스탬프>`로 백업되며 `oms uninstall` 시 원복됩니다.
-- **Provider 연동:** 세 CLI에 `oms-*` 스킬, 훅·HUD·플러그인을 설치하고, Claude Code와 Codex에는 네이티브 `oms` MCP 서버를 등록합니다.
-- **네이티브 CLI 및 상태:** `~/.local/bin/oms` 바이너리와 `~/.oh-my-setting` 체크아웃을 구성하며 시스템 Python을 변경하지 않습니다.
-- **자동 업데이트:** 로컬 수정이 없는 체크아웃은 매일 fast-forward됩니다(끄려면 `| bash -s -- --no-auto-update`). 버전별 변경점은 [마이그레이션 노트](docs/MIGRATION.md#07)를 확인하세요.
+- **전역 규칙**은 provider의 설정 파일을 OMS 공유 규칙에 연결합니다. 기존 파일은 `<파일>.backup.<타임스탬프>`로 백업하여 `oms uninstall`에서 복원할 수 있게 합니다.
+- **Provider 연동**은 provider와 설치 옵션에 따라 지원되는 스킬, 훅, HUD, 플러그인과 MCP 서버를 구성합니다.
+- **네이티브 CLI**는 `~/.oh-my-setting` 관리 체크아웃과 `~/.local/bin`의 실행기를 사용합니다.
+- **예약 업데이트**는 대상 SHA의 CI 성공을 요구하며 로컬 수정 사항을 보존합니다. 설치 시 `--no-auto-update`를 지정하면 일정을 등록하지 않습니다. [업데이트 정책](docs/INSTALL.md#verification-policy)
 
 </details>
 
 ```bash
 oms doctor       # 하네스 연결 상태 및 provider 점검
-oms update       # 체크아웃 최신화 및 네이티브 바이너리 재스테이징
+oms update       # 설정된 ref를 따라 OMS 설치 갱신
 oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 ```
 
@@ -63,10 +66,10 @@ oms uninstall    # 관리 링크 정리 및 백업된 기존 설정 복원
 
 <p align="center"><img src="docs/assets/panel-graph.svg" alt="목표, main agent, 위임 작업자, verifier gate, 세션 기록과 provider 사용량을 보여 주는 OMS 패널 그래프" width="100%"></p>
 
-1. **온보딩 (`PROJECT.md`):** 빈 폴더는 짧은 스펙 인터뷰로, 기존 저장소는 코드를 먼저 읽고 빈틈만 물어 `PROJECT.md` 계약을 확정합니다. 진행 중인 저장소는 직전 상태와 다음 행동부터 이어 갑니다.
-2. **병렬 위임:** 수정 작업은 경로 범위(`--scope`)가 겹치지 않는 한 독립 `.oms/tmp` Git worktree에서 동시에 실행되며, 읽기 전용 `researcher`/`advisor` 호출은 쓰기 WIP 한도를 소모하지 않습니다.
-3. **독립 검증:** 생성된 패치는 diff 기반 검증, 다른 모델 패밀리의 리뷰 게이트(`oms peer-review --gate`), 클린 샌드박스 2단계 승인(`oms patch-admit` -> `oms patch-land`)을 거칩니다.
-4. **안전한 착지:** `oms land`가 검증 게이트·push·CI 확인과 Work Journal/handoff 기록을 마무리합니다. 모든 병합·게시 권한은 사용자에게 있습니다.
+1. **목표를 합의합니다.** 새 프로젝트는 에이전트와 짧게 요구 사항을 확인할 수 있습니다. 기존 저장소에서는 프로젝트 정책, 코드, 남겨 둔 상태를 먼저 읽습니다. 합의한 제약과 완료 검사는 `PROJECT.md`에 남깁니다.
+2. **작업을 나누어 맡깁니다.** Builder별 수정 경로를 겹치지 않게 정하고, 읽기 전용 조사와 리뷰를 따로 배정합니다. 쓰기 워커는 기본적으로 `${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/worktrees` 아래 격리된 Git worktree에서 실행됩니다.
+3. **결과를 검증합니다.** 영향 범위에 맞는 검사를 돌리고 변경에 필요한 독립 리뷰를 요청합니다. 위임 패치를 적용하기 전에 배정 범위와 검증 근거에 맞는지 확인합니다.
+4. **게시하고 넘겨줍니다.** 승인된 push는 `oms land`로 검증해 진행합니다. 다음 세션이 이어받을 수 있도록 검증·반영 근거와 남은 일을 저널이나 인수인계 기록에 적습니다.
 
 <details>
 <summary>자주 쓰는 요청 예시</summary>
@@ -88,28 +91,20 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 
 ## 컨트롤 패널
 
-`oms` (또는 `oms panel --watch`)를 실행하면 main/worker/council 호출 계층, 미확인 알림, provider 쿼터, 계획 진행도를 깜빡임 없는 터미널 UI로 실시간 확인할 수 있습니다.
+tmux를 사용할 수 있는 터미널에서 `oms`를 실행해 프로젝트 Main을 선택하거나 실행 중인 Main에 다시 연결합니다. 보드만 보려면 `oms panel --watch`를 실행합니다. **Needs you**에서 입력이나 검토가 필요한 항목을 열 수 있습니다. 호출을 선택하면 기록된 활동과 결과를 확인하고, `w`를 누르면 확인된 주간 쿼터, 출처, 보고된 리셋 시각을 확인할 수 있습니다. 확인 근거가 없는 사용량은 미확인으로 표시합니다. [패널 조작법](docs/TERMINAL-PANEL.md#keys)
 
-`oms list`에는 일상 작업·협업·반영·설치 관리에 쓰는 명령 13개를 표시합니다.
-현재 프로젝트에서 확인할 일은 `oms inbox --repo .`, 설치 상태는 `oms status`로
-확인합니다. `agent-plan`은 실행 작업과 검토 상태를 관리하고, `agent-task`는
-작업을 이어 갈 때 읽는 짧은 메모를 보관합니다. 저널은 과거 기록이므로 최근
-관찰한 장애가 현재 작업에서는 이미 해결됐을 수 있습니다.
-
-`oms list --all`에서 선택적 자동화, 대체 하네스, 연구·런타임 도구와 세부 반영
-명령을 볼 수 있습니다. 각 기능은 해당 작업에 필요할 때 사용하며, 일반적인
-코딩에 실험 등록이나 캠페인 실행이 필수인 것은 아닙니다.
+`oms list`는 일상 명령을 표시합니다. 전체 목록은 `oms list --all`, 옵션은 `oms <명령> --help`에서 확인합니다. [명령 목록](docs/COMPONENTS.md)
 
 <p align="center"><img src="docs/assets/panel-board.svg" alt="목표, attention 항목, main과 역할 호출, 상태와 로그 탭을 보여 주는 OMS 패널 보드" width="100%"></p>
 
 <details>
 <summary>결과 리더 및 대시보드 미리보기</summary>
 
-- **결과·Diff 리더:** 검증된 요약, 원문 로그, 변경 파일 목록, 마스킹된 diff를 패널 안에서 바로 탐색합니다.
+- **결과·diff 리더**에서 보관한 요약, 변경 파일, 마스킹된 diff와 캡처가 있는 대화 기록을 엽니다.
 
 <p align="center"><img src="docs/assets/panel-results.svg" alt="검증을 통과한 결과와 검증 실패 후 결정 대기 중인 결과를 보여 주는 OMS 패널" width="100%"></p>
 
-- **프로젝트 대시보드 (`oms dashboard`):** 목표 계약, 작업 준비 상태, 최근 시도, 원격/Slurm 상태, 다음 권장 명령을 출력합니다.
+- **프로젝트 대시보드 (`oms dashboard`)**에서 목표, 계획 준비 상태, 최근 시도, 다음 명령을 확인합니다. [대시보드 안내](docs/DASHBOARD.md)
 
 <p align="center"><img src="docs/assets/dashboard.svg" alt="목표, 계획, 시도, 리뷰 기간과 다음 명령을 보여 주는 OMS 대시보드" width="100%"></p>
 
@@ -133,12 +128,11 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 ```
 
 상세 가이드는 [문서 지도](docs/README.md), 기여 및 로컬 검증 규칙은 [CONTRIBUTING.md](CONTRIBUTING.md)에서 확인할 수 있습니다.
-다른 CLI UI에서 Codex 구독 모델을 실행하는 실험적 [Codex 하네스 실행기](docs/CODEX-HARNESSES.md)(`oms harness claude --model ...`)도 함께 제공합니다.
 
 ## 설계 원칙
 
-- **로컬 우선 · 격리 실행:** 기본은 로컬 파일과 CLI이며, 쓰기 워커는 분리된 worktree와 허용 경로 안에서만 수정합니다.
-- **아웃바운드 비밀·경로 차단:** 내장 스크러버가 토큰, 개인 데이터, 로컬 절대 경로가 커밋이나 외부 프롬프트로 나가지 않도록 차단합니다.
-- **자가 승인 금지:** 워커는 자신의 패치를 스스로 승인하거나 사용자 허가 없이 공유 브랜치에 push하지 않습니다.
+- **로컬 실행과 작업 격리.** OMS는 로컬 파일과 네이티브 provider CLI를 연결합니다. 쓰기 워커에는 분리된 worktree와 수정 경로가 주어집니다.
+- **외부로 나가는 데이터 보호.** 스크러버는 외부 전송 텍스트의 비밀 패턴을 검사하고 지원되는 화면과 출력에서 로컬 경로를 마스킹합니다. [보안 경계](docs/COMPONENTS.md#security-boundary)
+- **명확한 승인 권한.** 워커는 변경과 근거를 반환합니다. 소유자가 패치를 검토해 수락하고, 사용자에게 받은 권한 범위에서 게시합니다.
 
 작업 흐름에 도움이 됐다면 [GitHub](https://github.com/eightmm/oh-my-setting)에 ⭐ 하나 남겨 주세요!
