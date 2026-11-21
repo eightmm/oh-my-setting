@@ -3664,6 +3664,78 @@ mod tests {
                 "Root locator cannot override child/depth guards"
             );
         }
+        let call_as = |values: &[&str], attempt: &str, participant: &str, room_id: &str| {
+            let request = Request::parse(&osv(values)).unwrap();
+            let mut context = Context::from_environment(&request, repo.as_path()).unwrap();
+            context.execution_repo = repo.as_path().into();
+            context.state_repo = repo.as_path().into();
+            context.plan_file = repo.as_path().join(".oms/plan/tasks.json");
+            context.panel_main_attempt = attempt.into();
+            context.room_id = room_id.into();
+            context.participant = participant.into();
+            Plan::open(context, &control, &stop)
+                .unwrap()
+                .execute(&request)
+        };
+        let call = |values: &[&str]| call_as(values, &owner, &owner, "room-team");
+        call(&["init", "--goal", "bounded fixture"]).unwrap();
+        call(&[
+            "add",
+            "--id",
+            "task-a",
+            "--title",
+            "native team fixture",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ])
+        .unwrap();
+        let plan =
+            json::parse(&std::fs::read(repo.as_path().join(".oms/plan/tasks.json")).unwrap())
+                .unwrap();
+        let task = plan.get("tasks").get("task-a");
+        let mut spec: Value = serde_json::from_slice(include_bytes!(
+            "../../oms-command-plan/tests/fixtures/team-spec.json"
+        ))
+        .unwrap();
+        spec["plan_id"] = plan.text("plan_id").into();
+        spec["task_sha256"] = json::hash(task).unwrap().into();
+        spec["objective_sha256"] = json::sha(b"bounded fixture").into();
+        spec["criterion_sha256"] = oms_command_plan::team::criterion_digest(&plan, task)
+            .unwrap()
+            .into();
+        spec["base_sha"] = git(repo.as_path(), &["rev-parse", "HEAD"]).into();
+        let policy = json::sha(&policy_bytes);
+        spec["policy_sha256"] = policy.clone().into();
+        for member in spec["members"].as_array_mut().unwrap() {
+            member["route"]["policy_sha256"] = policy.clone().into();
+            if member["role"] == "worker" {
+                member["access"] = "write".into();
+                // The interactive launcher supplies no per-call effort override.
+                member["route"]["requested_effort"] = Value::Null;
+            }
+        }
+        let bind_team_owner = |spec: &mut Value, attempt: &str, room_id: &str| {
+            let (events, _) = oms_command_operations::load_projection(repo.as_path()).unwrap();
+            let created = events
+                .iter()
+                .find(|event| {
+                    event.get("attempt_id").text() == Some(attempt)
+                        && event.get("event_type").text() == Some("attempt.created")
+                })
+                .unwrap();
+            spec["room_id"] = room_id.into();
+            spec["root_owner"] = attempt.into();
+            spec["root_owner_generation"] = created.get("event_id").text().unwrap().into();
+            for member in spec["members"].as_array_mut().unwrap() {
+                member["root_owner"] = attempt.into();
+                if member["role"] == "lead" {
+                    member["logical_parent"] = attempt.into();
+                }
+            }
+        };
+        bind_team_owner(&mut spec, &owner, "room-team");
         for has_lineage in [true, false] {
             let id = room
                 .create(None, "Native swap fixture", None, None, None)
@@ -3757,13 +3829,13 @@ mod tests {
                             assert_eq!(contract.resource.unwrap().root_owner, replacement);
                             Err(oms_command_peer::Error::new(
                                 75,
-                                "fixture reached registration",
+                                "fixture reached physical root registration",
                             ))
                         }),
                     )
                     .unwrap_err();
                 let expected = if accepted {
-                    "fixture reached registration"
+                    "fixture reached physical root registration"
                 } else if participant == &member {
                     "canonical Room lineage"
                 } else {
@@ -3772,6 +3844,25 @@ mod tests {
                 assert!(error.message.contains(expected), "{error:?}");
             }
             if has_lineage {
+                let mut swapped_spec = spec.clone();
+                bind_team_owner(&mut swapped_spec, &replacement, &id);
+                std::fs::write(
+                    repo.join("team-swapped.json"),
+                    serde_json::to_vec(&swapped_spec).unwrap(),
+                )
+                .unwrap();
+                let error = call_as(
+                    &["team-register", "--team-spec", "team-swapped.json"],
+                    &replacement,
+                    &member,
+                    &id,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.message,
+                    "team root owner is not enrolled in the current room"
+                );
+
                 let next = room.rollover(&id, Some(&member)).unwrap();
                 let before = room.records(&next).unwrap();
                 let error = room
@@ -3781,71 +3872,6 @@ mod tests {
                 assert_eq!(room.records(&next).unwrap(), before);
             }
             advance(&replacement, &["cancelled"]);
-        }
-        let call = |values: &[&str]| {
-            let request = Request::parse(&osv(values)).unwrap();
-            let mut context = Context::from_environment(&request, repo.as_path()).unwrap();
-            context.execution_repo = repo.as_path().into();
-            context.state_repo = repo.as_path().into();
-            context.plan_file = repo.as_path().join(".oms/plan/tasks.json");
-            context.panel_main_attempt = owner.clone();
-            context.room_id = "room-team".into();
-            context.participant = owner.clone();
-            Plan::open(context, &control, &stop)
-                .unwrap()
-                .execute(&request)
-        };
-        call(&["init", "--goal", "bounded fixture"]).unwrap();
-        call(&[
-            "add",
-            "--id",
-            "task-a",
-            "--title",
-            "native team fixture",
-            "--allowed",
-            "src",
-            "--verify",
-            "true",
-        ])
-        .unwrap();
-        let plan =
-            json::parse(&std::fs::read(repo.as_path().join(".oms/plan/tasks.json")).unwrap())
-                .unwrap();
-        let task = plan.get("tasks").get("task-a");
-        let (events, _) = oms_command_operations::load_projection(repo.as_path()).unwrap();
-        let created = events
-            .iter()
-            .find(|e| {
-                e.get("attempt_id").text() == Some(&owner)
-                    && e.get("event_type").text() == Some("attempt.created")
-            })
-            .unwrap();
-        let mut spec: Value = serde_json::from_slice(include_bytes!(
-            "../../oms-command-plan/tests/fixtures/team-spec.json"
-        ))
-        .unwrap();
-        spec["root_owner"] = owner.clone().into();
-        spec["root_owner_generation"] = created.get("event_id").text().unwrap().into();
-        spec["plan_id"] = plan.text("plan_id").into();
-        spec["task_sha256"] = json::hash(task).unwrap().into();
-        spec["objective_sha256"] = json::sha(b"bounded fixture").into();
-        spec["criterion_sha256"] = oms_command_plan::team::criterion_digest(&plan, task)
-            .unwrap()
-            .into();
-        spec["base_sha"] = git(repo.as_path(), &["rev-parse", "HEAD"]).into();
-        let policy = json::sha(&policy_bytes);
-        spec["policy_sha256"] = policy.clone().into();
-        for member in spec["members"].as_array_mut().unwrap() {
-            member["root_owner"] = owner.clone().into();
-            if member["role"] == "lead" {
-                member["logical_parent"] = owner.clone().into();
-            }
-            member["route"]["policy_sha256"] = policy.clone().into();
-            if member["role"] == "worker" {
-                member["access"] = "write".into();
-                // The interactive launcher supplies no per-call effort override.
-                member["route"]["requested_effort"] = Value::Null;
-            }
         }
         std::fs::write(
             repo.as_path().join("team.json"),

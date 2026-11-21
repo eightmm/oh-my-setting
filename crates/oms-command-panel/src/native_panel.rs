@@ -2097,9 +2097,9 @@ fn restore_swap_pane_policy(
 ) -> Result<bool> {
     require(
         terminals::provider_session_proof(services, repo, &pane.session, stop)? == record.session,
-        "Replacement Main tmux session changed",
+        "Main swap tmux session changed",
     )?;
-    // A live setting changed after respawn belongs to the current owner.
+    // Preserve a policy that changed while the swap was in flight.
     if pane_remain_on_exit(repo, &pane.pane, services, stop)?.as_deref() != Some("on") {
         return Ok(false);
     }
@@ -2428,29 +2428,69 @@ fn perform_main_swap(
         record.stage = SwapStage::DraftConfirmed;
     }
     write_swap_record(&store, &record, prior.is_none())?;
-    require(
-        guarded_swap_tmux(
-            repo,
-            services,
-            stop,
-            &pane,
-            false,
-            false,
-            &["set-option", "-p", "-t", &pane.pane, "remain-on-exit", "on"],
-        )?,
-        GENERATION_CHANGED,
-    )?;
-    fresh_swap_source(repo, &pane, &record, main, services, stop)?;
-    require(
-        swap_composer(repo, &pane.pane, services, stop)? == first,
-        "Main composer changed before exit draft",
-    )?;
-    let draft = if reuse_draft {
-        first
-    } else {
-        // Write ahead of the first keystroke. A host crash or ambiguous tmux
-        // response leaves a stage that can never be replayed automatically.
-        record.stage = SwapStage::PastePending;
+    let submitted = (|| {
+        require(
+            guarded_swap_tmux(
+                repo,
+                services,
+                stop,
+                &pane,
+                false,
+                false,
+                &["set-option", "-p", "-t", &pane.pane, "remain-on-exit", "on"],
+            )?,
+            GENERATION_CHANGED,
+        )?;
+        fresh_swap_source(repo, &pane, &record, main, services, stop)?;
+        require(
+            swap_composer(repo, &pane.pane, services, stop)? == first,
+            "Main composer changed before exit draft",
+        )?;
+        let draft = if reuse_draft {
+            first
+        } else {
+            // Write ahead of the first keystroke. A host crash or ambiguous tmux
+            // response leaves a stage that can never be replayed automatically.
+            record.stage = SwapStage::PastePending;
+            write_swap_record(&store, &record, false)?;
+            if !guarded_swap_tmux(
+                repo,
+                services,
+                stop,
+                &pane,
+                false,
+                false,
+                &["send-keys", "-t", &pane.pane, "-l", EXIT],
+            )? {
+                record.stage = SwapStage::BeforeDraft;
+                write_swap_record(&store, &record, false)?;
+                return Err(Error::new(GENERATION_CHANGED));
+            }
+            let draft_deadline = Instant::now() + Duration::from_secs(2);
+            let mut previous = None;
+            let draft = loop {
+                let current = swap_composer(repo, &pane.pane, services, stop)?;
+                if current.exact_draft(EXIT) && previous.as_ref() == Some(&current) {
+                    break current;
+                }
+                previous = current.exact_draft(EXIT).then_some(current);
+                require(
+                    Instant::now() < draft_deadline,
+                    "Main exit draft unconfirmed; inspect the original pane",
+                )?;
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            record.stage = SwapStage::DraftConfirmed;
+            write_swap_record(&store, &record, false)?;
+            draft
+        };
+        services.check_main_swap_source(repo, main, stop)?;
+        fresh_swap_source(repo, &pane, &record, main, services, stop)?;
+        require(
+            swap_composer(repo, &pane.pane, services, stop)? == draft,
+            "Main composer changed before submitting exit",
+        )?;
+        record.stage = SwapStage::SubmitPending;
         write_swap_record(&store, &record, false)?;
         if !guarded_swap_tmux(
             repo,
@@ -2459,53 +2499,34 @@ fn perform_main_swap(
             &pane,
             false,
             false,
-            &["send-keys", "-t", &pane.pane, "-l", EXIT],
+            &["send-keys", "-t", &pane.pane, "Enter"],
         )? {
-            record.stage = SwapStage::BeforeDraft;
+            record.stage = SwapStage::DraftConfirmed;
             write_swap_record(&store, &record, false)?;
             return Err(Error::new(GENERATION_CHANGED));
         }
-        let draft_deadline = Instant::now() + Duration::from_secs(2);
-        let mut previous = None;
-        let draft = loop {
-            let current = swap_composer(repo, &pane.pane, services, stop)?;
-            if current.exact_draft(EXIT) && previous.as_ref() == Some(&current) {
-                break current;
-            }
-            previous = current.exact_draft(EXIT).then_some(current);
-            require(
-                Instant::now() < draft_deadline,
-                "Main exit draft unconfirmed; inspect the original pane",
-            )?;
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        record.stage = SwapStage::DraftConfirmed;
-        write_swap_record(&store, &record, false)?;
-        draft
-    };
-    services.check_main_swap_source(repo, main, stop)?;
-    fresh_swap_source(repo, &pane, &record, main, services, stop)?;
-    require(
-        swap_composer(repo, &pane.pane, services, stop)? == draft,
-        "Main composer changed before submitting exit",
-    )?;
-    record.stage = SwapStage::SubmitPending;
-    write_swap_record(&store, &record, false)?;
-    if !guarded_swap_tmux(
-        repo,
-        services,
-        stop,
-        &pane,
-        false,
-        false,
-        &["send-keys", "-t", &pane.pane, "Enter"],
-    )? {
-        record.stage = SwapStage::DraftConfirmed;
-        write_swap_record(&store, &record, false)?;
-        return Err(Error::new(GENERATION_CHANGED));
+        record.stage = SwapStage::ExitSent;
+        write_swap_record(&store, &record, false)
+    })();
+    if submitted.is_err()
+        && matches!(
+            record.stage,
+            SwapStage::BeforeDraft | SwapStage::DraftConfirmed
+        )
+        && swap_record(&store, &record.old_attempt).is_ok_and(|saved| {
+            saved.is_some_and(|saved| {
+                saved.stage == record.stage
+                    && saved.controller_pid == record.controller_pid
+                    && saved.controller_birth == record.controller_birth
+            })
+        })
+        && terminals::process(pane.pid)
+            .is_ok_and(|process| process.uid == uid && process.birth == record.old_birth)
+    {
+        let settling = AtomicBool::new(false);
+        let _ = restore_swap_pane_policy(repo, &pane, &record, services, &settling);
     }
-    record.stage = SwapStage::ExitSent;
-    write_swap_record(&store, &record, false)?;
+    submitted?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         require(
@@ -5357,8 +5378,8 @@ mod native_lifecycle_contract {
                         let expected = if self.respawned.get() { NEW } else { OLD };
                         assert!(fence.contains(expected));
                         if command.contains("remain-on-exit") {
-                            let value = if self.respawned.get() {
-                                assert!(fence.contains("#{==:#{remain-on-exit},on}"));
+                            let value = if fence.contains("#{==:#{remain-on-exit},on}") {
+                                assert!(self.respawned.get() || !self.dead.get());
                                 if command.contains("'-pu'") {
                                     ""
                                 } else {
@@ -5524,7 +5545,12 @@ mod native_lifecycle_contract {
                 room_successor: false.into(),
                 preflights: 0.into(),
                 pastes: 0.into(),
-                remain: if mode == "success" { "failed" } else { "" }.into(),
+                remain: if matches!(mode, "success" | "paste-fence") {
+                    "failed"
+                } else {
+                    ""
+                }
+                .into(),
             };
             let target = MainSwapRequest {
                 attempt_id: OLD.into(),
@@ -5554,6 +5580,7 @@ mod native_lifecycle_contract {
                 assert_eq!(mock.sent.get(), 0);
                 assert_eq!(mock.launched.get(), 0);
                 assert!(!mock.dead.get());
+                assert_eq!(mock.remain.get(), "");
                 assert!(
                     swap_record(&Store::open(&repo.0).unwrap(), OLD)
                         .unwrap()
@@ -5628,14 +5655,15 @@ mod native_lifecycle_contract {
                     assert!(result.is_err() && receipt.stage == SwapStage::ExitSent)
                 }
                 mode => {
-                    let expected = match mode {
-                        "fence" => SwapStage::DraftConfirmed,
-                        "uncertain" => SwapStage::SubmitPending,
-                        "paste-fence" => SwapStage::BeforeDraft,
-                        "paste-unknown" => SwapStage::PastePending,
+                    let (stage, policy) = match mode {
+                        "fence" => (SwapStage::DraftConfirmed, ""),
+                        "uncertain" => (SwapStage::SubmitPending, "on"),
+                        "paste-fence" => (SwapStage::BeforeDraft, "failed"),
+                        "paste-unknown" => (SwapStage::PastePending, "on"),
                         _ => unreachable!(),
                     };
-                    assert!(result.is_err() && !mock.dead.get() && receipt.stage == expected);
+                    assert!(result.is_err() && !mock.dead.get() && receipt.stage == stage);
+                    assert_eq!(mock.remain.get(), policy);
                 }
             }
         }

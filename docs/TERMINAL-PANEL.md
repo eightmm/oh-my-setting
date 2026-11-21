@@ -162,8 +162,11 @@ OMS refuses to send `/exit` while the current Main attempt owns an unsettled
 Plan Team contract in its Room. An active resource domain also blocks the
 switch if it lists an active Team or pending execution or candidate work for
 that attempt. Settle those contracts and reconcile retained work under the
-current Main before switching. Team ownership stays with its original attempt.
-A switched Main cannot register a new Team with its retained Room participant.
+current Main before switching. A replacement can launch as Main in an active
+resource domain using its retained Room participant and verified swap history.
+Plan Team registration and operation require a Room participant with the same
+ID as the current Main attempt. After a swap, those IDs differ, so the new Main
+cannot register a Team or take ownership of one from the previous attempt.
 
 The replacement keeps the same Room participant, so ordinary Room worker
 results remain available in the [Results reader](#results-reader).
