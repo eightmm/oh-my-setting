@@ -1801,6 +1801,7 @@ fn main_swap_workflow() {
     fake.attempts.borrow_mut()[0]["refs"]["panel_host"] = "tmux".into();
     fake.attempts.borrow_mut()[0]["refs"]["panel_harness"] = "codex".into();
     fake.attempts.borrow_mut()[0]["refs"]["panel_model"] = "previous-model".into();
+    fake.room.borrow_mut()["id"] = "room-1".into();
     fake.room.borrow_mut()["participants"][0]["provider"] = "codex".into();
     let mut request = oms_panel_core::release::MainSwapRequest {
         attempt_id: "main-1".into(),
@@ -1812,11 +1813,29 @@ fn main_swap_workflow() {
     request.model = routing::Policy::bundled().unwrap().main["claude"]
         .model
         .clone();
+    assert!(
+        oms_panel_core::release::swap_main_in_room(
+            &repo,
+            &request,
+            Some("foreign-room"),
+            &fake,
+            &STOP
+        )
+        .unwrap_err()
+        .message
+        .contains("different Room")
+    );
+    let session_guard = Store::open(&repo).unwrap();
+    let session_guard = session_guard
+        .transaction("panel-main-session", Duration::from_millis(100))
+        .unwrap();
     assert_eq!(
-        oms_panel_core::release::swap_main(&repo, &request, &fake, &STOP).unwrap()["provider"],
+        oms_panel_core::release::swap_main_in_room(&repo, &request, Some("room-1"), &fake, &STOP)
+            .unwrap()["provider"],
         "claude"
     );
     assert!(oms_panel_core::release::swap_main(&repo, &request, &fake, &STOP).is_err());
+    session_guard.check().unwrap();
 }
 
 fn live_reader_fence() {

@@ -23,6 +23,32 @@ fn before(stop: &AtomicBool, deadline: Instant) -> Result<()> {
 fn plan_error(error: oms_command_plan::Error) -> Error {
     Error::new(error.code, error.message)
 }
+pub(super) fn physical_domain_before(
+    state: &Path,
+    deadline: Instant,
+    stop: &AtomicBool,
+) -> Result<Option<resources::Summary>> {
+    before(stop, deadline)?;
+    let Some(domain) = resources::summary(state, stop)
+        .map_err(|error| Error::new(error.exit_code(), error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    if !domain.active {
+        return Err(Error::new(75, "resource domain is held"));
+    }
+    let host = crate::services_runtime::observed_host_generation_before(deadline, stop)
+        .map_err(plan_error)?;
+    if host != domain.policy.host_generation_sha256 {
+        return Err(Error::new(
+            75,
+            "resource host generation changed; reconcile the epoch",
+        ));
+    }
+    before(stop, deadline)?;
+    Ok(Some(domain))
+}
+
 impl super::CollabServices<'_> {
     pub(super) fn physical_contract(
         &self,
@@ -31,10 +57,7 @@ impl super::CollabServices<'_> {
         stop: &AtomicBool,
         register: RegisterPhysical<'_>,
     ) -> Result<()> {
-        before(stop, deadline)?;
-        let domain = resources::summary(attempt.state_root, stop)
-            .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
-        let Some(domain) = domain else {
+        let Some(domain) = physical_domain_before(attempt.state_root, deadline, stop)? else {
             if attempt.team.is_some() {
                 return Err(Error::new(
                     75,
@@ -43,17 +66,7 @@ impl super::CollabServices<'_> {
             }
             return register(PhysicalContract::default()).map(|_| ());
         };
-        if !domain.active {
-            return Err(Error::new(75, "resource domain is held"));
-        }
-        let host = crate::services_runtime::observed_host_generation_before(deadline, stop)
-            .map_err(plan_error)?;
-        if host != domain.policy.host_generation_sha256 {
-            return Err(Error::new(
-                75,
-                "resource host generation changed; reconcile the epoch",
-            ));
-        }
+        let host = &domain.policy.host_generation_sha256;
         let cwd = std::env::current_dir()?;
         let mut context = Context::from_environment_before(
             &Request::new(Action::Status),
@@ -74,9 +87,9 @@ impl super::CollabServices<'_> {
             // Native Main just created and joined this locator. The guard
             // proves its creation generation from canonical lifecycle/Room;
             // inherited child/depth guards remain untouched.
-            context.panel_main_attempt = root.owner.into();
+            context.panel_main_attempt = root.attempt.into();
             context.room_id = root.room_id.into();
-            context.participant = root.owner.into();
+            context.participant = root.participant.into();
         }
         let plan = Plan::open(context, &self.control, stop).map_err(plan_error)?;
         let guard = match attempt.team {
@@ -203,7 +216,7 @@ impl super::CollabServices<'_> {
         check_execution()?;
         if crate::services_runtime::observed_host_generation_before(deadline, stop)
             .map_err(plan_error)?
-            != host
+            != *host
         {
             return Err(Error::new(75, "physical host generation changed"));
         }

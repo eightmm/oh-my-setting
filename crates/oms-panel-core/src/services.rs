@@ -202,7 +202,9 @@ pub trait Services: PeerExecutor {
     /// operations read guard, and start the replacement in that same pane.
     /// The adapter owns interrupted-host reconciliation and must never replay
     /// an unconfirmed input/launch. Core independently checks lifecycle/room proof.
-    /// Called with the panel main start/session locks held; do not reacquire them.
+    /// Called with the panel startup reservation held. The source wrapper owns
+    /// the lifetime session lock until exit, and the replacement acquires it
+    /// during normal startup.
     fn swap_main_host(
         &self,
         _repo: &Path,
@@ -211,6 +213,28 @@ pub trait Services: PeerExecutor {
         _stop: &AtomicBool,
     ) -> Result<Value> {
         Err(Error::new("native main swap host adapter unavailable"))
+    }
+    /// Read-only check for source-owned contracts and current host admission.
+    fn check_main_swap_source(
+        &self,
+        _repo: &Path,
+        _main: &Value,
+        _stop: &AtomicBool,
+    ) -> Result<()> {
+        Err(Error::new("native main swap source preflight unavailable"))
+    }
+    /// Append the canonical Room swap after positively proving source exit.
+    /// Keep lifecycle read authority inside the real Room producer.
+    fn commit_main_swap(
+        &self,
+        _repo: &Path,
+        _room: &str,
+        _participant: &str,
+        _request: &crate::release::MainSwapRequest,
+        _deadline: std::time::Instant,
+        _stop: &AtomicBool,
+    ) -> Result<Value> {
+        Err(Error::new("native main swap Room writer unavailable"))
     }
     /// Lossless Unicode normalization/transliteration inspection belongs to the
     /// native encoding producer. ASCII patches need no Unicode adapter.

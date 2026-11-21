@@ -1733,6 +1733,904 @@ fn attach_session(session: &str) -> Result<()> {
     require(status.success(), "tmux attach failed")
 }
 
+const SWAP_SOURCE_ENV: &str = "OMS_PANEL_MAIN_SWAP_SOURCE";
+const SWAP_RECEIPT_MAX: usize = 16 * 1024;
+const SWAP_PANE: &str = "#{session_name}\t#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@oms_panel_main_watch}\t#{@oms_panel_native_pane}\t#{@oms_panel_main_attempt}\t#{@oms_panel_room_participant}\t#{@oms_panel_room}\t#{@oms_panel_owner}\t#{@oms_panel_harness}\t#{@oms_panel_repo}\t#{?#{m/r:[[:cntrl:]],#{pane_start_path}},,#{pane_start_path}}\t.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SwapPane {
+    name: String,
+    session: String,
+    window: String,
+    pane: String,
+    pid: u32,
+    dead: bool,
+    board: bool,
+    native: String,
+    attempt: String,
+    member: String,
+    room: String,
+    owner: String,
+    harness: String,
+    repo: String,
+    execution: String,
+}
+
+impl SwapPane {
+    fn parse(raw: &str) -> Option<Self> {
+        let fields: Vec<_> = raw.split('\t').collect();
+        let [
+            name,
+            session,
+            window,
+            pane,
+            pid,
+            dead,
+            board,
+            native,
+            attempt,
+            member,
+            room,
+            owner,
+            harness,
+            repo,
+            execution,
+            ".",
+        ] = fields.as_slice()
+        else {
+            return None;
+        };
+        if !valid_panel_session(name)
+            || !crate::commands::valid_target(session, '$')
+            || !crate::commands::valid_target(window, '@')
+            || !crate::commands::valid_target(pane, '%')
+            || !matches!(*dead, "0" | "1")
+        {
+            return None;
+        }
+        Some(Self {
+            name: (*name).into(),
+            session: (*session).into(),
+            window: (*window).into(),
+            pane: (*pane).into(),
+            pid: pid.parse().ok()?,
+            dead: *dead == "1",
+            board: *board == "1",
+            native: (*native).into(),
+            attempt: (*attempt).into(),
+            member: (*member).into(),
+            room: (*room).into(),
+            owner: (*owner).into(),
+            harness: (*harness).into(),
+            repo: (*repo).into(),
+            execution: (*execution).into(),
+        })
+    }
+
+    fn same_slot(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.session == other.session
+            && self.window == other.window
+            && self.pane == other.pane
+            && self.repo == other.repo
+            && !other.board
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SwapStage {
+    Prepared,
+    ExitSent,
+    RoomCommitted,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct SwapRecord {
+    schema: u64,
+    stage: SwapStage,
+    old_attempt: String,
+    room: String,
+    member: String,
+    provider: String,
+    harness: String,
+    model: String,
+    permissions: String,
+    session: terminals::SessionProof,
+    session_name: String,
+    window: String,
+    pane: String,
+    old_pid: u32,
+    old_birth: String,
+    controller_pid: u32,
+    controller_birth: String,
+    execution: PathBuf,
+    handoff: String,
+}
+
+fn swap_record_path(attempt: &str) -> Result<PathBuf> {
+    crate::identifier(attempt)?;
+    Ok(PathBuf::from(format!(
+        ".oms/handoffs/main-swap-{attempt}.json"
+    )))
+}
+
+fn swap_record(store: &Store, attempt: &str) -> Result<Option<SwapRecord>> {
+    store
+        .json(&swap_record_path(attempt)?, SWAP_RECEIPT_MAX, true)?
+        .map(|v| serde_json::from_value(v).map_err(Error::new))
+        .transpose()
+}
+
+fn write_swap_record(store: &Store, record: &SwapRecord, first: bool) -> Result<()> {
+    store
+        .transaction("panel-main-swap-record", Duration::from_secs(2))?
+        .write_json(
+            &swap_record_path(&record.old_attempt)?,
+            &serde_json::to_value(record).map_err(Error::new)?,
+            first,
+            SWAP_RECEIPT_MAX,
+        )?;
+    Ok(())
+}
+
+fn swap_tmux(
+    repo: &Path,
+    services: &dyn Services,
+    stop: &AtomicBool,
+    args: &[&str],
+) -> Result<String> {
+    // Use the existing supervised tmux command boundary and output limits.
+    terminals::tmux(services, repo, &crate::commands::strings(args), stop)
+}
+
+fn read_swap_pane(
+    repo: &Path,
+    pane: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<SwapPane> {
+    require(
+        crate::commands::valid_target(pane, '%'),
+        "invalid Main swap pane",
+    )?;
+    let row = swap_tmux(
+        repo,
+        services,
+        stop,
+        &["display-message", "-p", "-t", pane, SWAP_PANE],
+    )?;
+    SwapPane::parse(&row)
+        .filter(|row| row.pane == pane)
+        .ok_or_else(|| Error::new("managed Main pane generation unavailable"))
+}
+
+fn find_swap_source(
+    repo: &Path,
+    main: &Value,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<SwapPane> {
+    let canonical = repo
+        .to_str()
+        .ok_or_else(|| Error::new("Main swap repository must be UTF-8"))?;
+    require(
+        !canonical.chars().any(char::is_control),
+        "invalid Main swap repository",
+    )?;
+    let refs = &main["refs"];
+    let inventory = swap_tmux(repo, services, stop, &["list-panes", "-a", "-F", SWAP_PANE])?;
+    let mut matches = inventory
+        .lines()
+        .filter_map(SwapPane::parse)
+        .filter(|pane| {
+            !pane.dead
+                && !pane.board
+                && pane.native == pane.pane
+                && pane.repo == canonical
+                && pane.attempt == main["attempt_id"]
+                && pane.room == refs["panel_room_id"]
+                && pane.member == refs["panel_room_participant"]
+                && pane.owner == main["provider"]
+                && pane.harness == refs["panel_harness"]
+        });
+    let pane = matches
+        .next()
+        .ok_or_else(|| Error::new("Main swap source pane unavailable"))?;
+    require(
+        matches.next().is_none(),
+        "Main swap source pane is ambiguous",
+    )?;
+    if let Ok(caller) = std::env::var("TMUX_PANE") {
+        let current = read_swap_pane(repo, &caller, services, stop)?;
+        require(
+            !current.dead
+                && current.session == pane.session
+                && current.window == pane.window
+                && current.repo == pane.repo
+                && current.attempt == pane.attempt
+                && (current.pane == pane.pane || current.board),
+            "Main swap caller is outside the owning panel",
+        )?;
+    }
+    Ok(pane)
+}
+
+fn guarded_swap_tmux(
+    repo: &Path,
+    services: &dyn Services,
+    stop: &AtomicBool,
+    expected: &SwapPane,
+    dead: bool,
+    command: &[&str],
+) -> Result<()> {
+    // Condition and action execute within one tmux command queue. The preceding
+    // native process and Room checks remain independent of this local fence.
+    let wanted = format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}",
+        expected.session,
+        expected.window,
+        expected.pane,
+        expected.pid,
+        u8::from(dead),
+        expected.attempt,
+        expected.member,
+        expected.room
+    );
+    let condition = format!(
+        "#{{==:#{{session_id}}:#{{window_id}}:#{{pane_id}}:#{{pane_pid}}:#{{pane_dead}}:#{{@oms_panel_main_attempt}}:#{{@oms_panel_room_participant}}:#{{@oms_panel_room}},{wanted}}}"
+    );
+    let command = command
+        .iter()
+        .map(|part| crate::commands::shell_quote(part))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let output = swap_tmux(
+        repo,
+        services,
+        stop,
+        &[
+            "if-shell",
+            "-F",
+            "-t",
+            &expected.pane,
+            &condition,
+            &command,
+            "display-message -p OMS_MAIN_SWAP_FENCE_CHANGED",
+        ],
+    )?;
+    require(
+        output.is_empty(),
+        "Main pane generation changed before tmux operation",
+    )
+}
+
+fn swap_room(
+    repo: &Path,
+    room: &str,
+    member: &str,
+    provider: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    let value = crate::commands::query(
+        services,
+        NativeCommand::Room,
+        repo,
+        &["show", "--id", room, "--exact", "--json"],
+        stop,
+    )?;
+    let mut mains = rows(&value["participants"])
+        .iter()
+        .filter(|r| r["joined"] == true && r["role"] == "main");
+    require(
+        value["id"] == room
+            && value["closed"] == false
+            && value["successor"].is_null()
+            && mains.next().is_some_and(|r| {
+                r["participant"] == member
+                    && r["provider"] == provider
+                    && (r["parent"].is_null() || r["parent"] == "")
+            })
+            && mains.next().is_none(),
+        "Main swap Room or membership changed",
+    )?;
+    Ok(value)
+}
+
+fn fresh_swap_source(
+    repo: &Path,
+    pane: &SwapPane,
+    record: &SwapRecord,
+    main: &Value,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let live = read_swap_pane(repo, &pane.pane, services, stop)?;
+    let process = terminals::process(live.pid)?;
+    let source = crate::commands::query(
+        services,
+        NativeCommand::Events,
+        repo,
+        &["show", "--attempt", &record.old_attempt, "--json"],
+        stop,
+    )?;
+    require(
+        live == *pane
+            && !live.dead
+            && process.pid == record.old_pid
+            && process.uid == rustix::process::getuid().as_raw()
+            && process.birth == record.old_birth
+            && terminals::provider_session_proof(services, repo, &pane.session, stop)?
+                == record.session
+            && source["attempt_id"] == record.old_attempt
+            && source["tool"] == "panel-main"
+            && source["state"] == "working"
+            && source["terminal"] == false
+            && source["refs"] == main["refs"]
+            && refs_alive(&source["refs"], "native"),
+        "Main swap source generation or lifecycle changed",
+    )?;
+    swap_room(repo, &pane.room, &pane.member, &pane.owner, services, stop)?;
+    require(!stop.load(Ordering::Acquire), "Main swap interrupted")
+}
+
+const SWAP_COMPOSER: &str =
+    "#{pane_dead}\t#{pane_in_mode}\t#{cursor_x}\t#{cursor_y}\t#{pane_current_command}\t.";
+
+fn swap_composer(
+    repo: &Path,
+    pane: &str,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<crate::orchestrator::CodexComposer> {
+    crate::orchestrator::CodexComposer::for_main(&swap_tmux(
+        repo,
+        services,
+        stop,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            SWAP_COMPOSER,
+            ";",
+            "capture-pane",
+            "-p",
+            "-e",
+            "-S",
+            "0",
+            "-t",
+            pane,
+        ],
+    )?)
+}
+
+fn bounded_swap_handoff(room: &Value, old: &SwapPane) -> String {
+    let mut result = format!(
+        "OMS Room {}\nSource Main {} · {}\nCheck the Room, open tasks, and existing publication receipts before acting. Preserve workers and claims.",
+        old.room, old.attempt, old.harness
+    );
+    for participant in rows(&room["participants"])
+        .iter()
+        .filter(|v| v["joined"] == true && v["role"] != "main")
+        .take(16)
+    {
+        let id = text(participant, "participant");
+        let role = text(participant, "role");
+        if crate::identifier(id).is_ok() && crate::identifier(role).is_ok() {
+            let line = format!("\n{role} {id}");
+            if result.len() + line.len() > 3000 {
+                break;
+            }
+            result.push_str(&line);
+        }
+    }
+    result
+}
+
+/// Owns the physical transition while the outer release core reserves Main startup.
+pub fn swap_main_host(
+    repo: &Path,
+    request: &oms_panel_core::release::MainSwapRequest,
+    main: &Value,
+    source: &Path,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::parent_only()?;
+    let repo = std::fs::canonicalize(repo).map_err(Error::new)?;
+    let capability = required_main_capability(&request.harness)?;
+    require(
+        capability.owner == request.provider
+            && capability.installed()
+            && !request.model.starts_with('-')
+            && !request.model.chars().any(char::is_control),
+        "Main swap target is not installed or invalid",
+    )?;
+    perform_main_swap(&repo, request, main, services, stop, |record| {
+        let args = [
+            "--host",
+            "inline",
+            "--launch",
+            &request.harness,
+            "--model",
+            &request.model,
+            "--task",
+            &record.handoff,
+        ];
+        let options = Options::parse(&crate::commands::strings(&args))?;
+        let policy = load_policy(source)?;
+        if policy
+            .main
+            .get(&request.provider)
+            .is_none_or(|preset| preset.model != request.model)
+        {
+            let catalog =
+                oms_panel_core::health::provider_catalog(&repo, &request.provider, services, stop)?;
+            require(
+                rows(&catalog["providers"]).iter().any(|row| {
+                    row["provider"] == request.provider
+                        && row["installed"] == true
+                        && row["usable"] != false
+                        && rows(row.get("catalog_models").unwrap_or(&row["models"]))
+                            .iter()
+                            .any(|model| model == &request.model)
+                }),
+                "Main swap model is not in the installed provider catalog",
+            )?;
+        }
+        let mut target = MainAdmission::admit(capability, &policy, &options)?;
+        require(
+            target.resolution.model.as_deref() == Some(&request.model),
+            "Main swap target model is not exact",
+        )?;
+        target.permissions = MainPermissions::parse(Some(&record.permissions))?;
+        let mut relay = MainRelay::admit(&repo, &entry_prefix(source)?, &target)?;
+        relay.execution = record.execution.clone();
+        let execution = record
+            .execution
+            .to_str()
+            .ok_or_else(|| Error::new("Main swap checkout must be UTF-8"))?;
+        relay.environment.extend([
+            format!("{SWAP_SOURCE_ENV}={}", record.old_attempt),
+            format!("OMS_PANEL_EXECUTION_ROOT={execution}"),
+        ]);
+        Ok(relay.command(&record.session_name, Some(&record.room)))
+    })
+}
+
+fn perform_main_swap(
+    repo: &Path,
+    request: &oms_panel_core::release::MainSwapRequest,
+    main: &Value,
+    services: &dyn Services,
+    stop: &AtomicBool,
+    admitted_command: impl FnOnce(&SwapRecord) -> Result<String>,
+) -> Result<Value> {
+    let store = Store::open(repo)?;
+    let pane = find_swap_source(repo, main, services, stop)?;
+    require(
+        pane.harness == "codex",
+        "safe automatic exit currently requires a Codex Main composer",
+    )?;
+    let refs = &main["refs"];
+    let wrapper = terminals::process(pane.pid)?;
+    let native_pid = text(refs, "panel_native_pid")
+        .parse::<u32>()
+        .map_err(Error::new)?;
+    let native = terminals::process(native_pid)?;
+    let uid = rustix::process::getuid().as_raw();
+    require(
+        text(refs, "panel_wrapper_pid").parse::<u32>().ok() == Some(pane.pid)
+            && wrapper.uid == uid
+            && wrapper.birth == refs["panel_wrapper_identity"]
+            && native.uid == uid
+            && native.birth == refs["panel_native_identity"]
+            && native.pid != wrapper.pid,
+        "Main swap source predates verified native custody; reopen it before switching",
+    )?;
+    require(
+        swap_record(&store, &request.attempt_id)?.is_none(),
+        "Main swap already has retained recovery evidence; inspect the panel before retrying",
+    )?;
+    let permissions = MainPermissions::parse(refs[MAIN_PERMISSIONS_REF].as_str())?;
+    let permissions = if MainPermissions::from_env()? == MainPermissions::Native {
+        MainPermissions::Native
+    } else {
+        permissions
+    };
+    let room = swap_room(repo, &pane.room, &pane.member, &pane.owner, services, stop)?;
+    let session = terminals::provider_session_proof(services, repo, &pane.session, stop)?;
+    let old_execution = Path::new(&pane.execution);
+    require(
+        old_execution.is_absolute() && !pane.execution.chars().any(char::is_control),
+        "Main swap source checkout unavailable",
+    )?;
+    let execution = state::native_repository(repo, Some(old_execution))?;
+    let controller = terminals::process(std::process::id())?;
+    let mut record = SwapRecord {
+        schema: 1,
+        stage: SwapStage::Prepared,
+        old_attempt: request.attempt_id.clone(),
+        room: pane.room.clone(),
+        member: pane.member.clone(),
+        provider: request.provider.clone(),
+        harness: request.harness.clone(),
+        model: request.model.clone(),
+        permissions: permissions.as_str().into(),
+        session,
+        session_name: pane.name.clone(),
+        window: pane.window.clone(),
+        pane: pane.pane.clone(),
+        old_pid: wrapper.pid,
+        old_birth: wrapper.birth,
+        controller_pid: controller.pid,
+        controller_birth: controller.birth,
+        execution,
+        handoff: bounded_swap_handoff(&room, &pane),
+    };
+    let entry = admitted_command(&record)?;
+    services.check_main_swap_source(repo, main, stop)?;
+    fresh_swap_source(repo, &pane, &record, main, services, stop)?;
+    let empty = swap_composer(repo, &pane.pane, services, stop)?;
+    require(
+        empty.ready(),
+        "Main must be at an empty idle Codex composer before switching",
+    )?;
+    write_swap_record(&store, &record, true)?;
+    guarded_swap_tmux(
+        repo,
+        services,
+        stop,
+        &pane,
+        false,
+        &["set-option", "-p", "-t", &pane.pane, "remain-on-exit", "on"],
+    )?;
+    fresh_swap_source(repo, &pane, &record, main, services, stop)?;
+    require(
+        swap_composer(repo, &pane.pane, services, stop)? == empty,
+        "Main composer changed before exit draft",
+    )?;
+    let exit = "/exit";
+    guarded_swap_tmux(
+        repo,
+        services,
+        stop,
+        &pane,
+        false,
+        &["send-keys", "-t", &pane.pane, "-l", exit],
+    )?;
+    let draft_deadline = Instant::now() + Duration::from_secs(2);
+    let mut previous = None;
+    let draft = loop {
+        let current = swap_composer(repo, &pane.pane, services, stop)?;
+        if current.exact_draft(exit) && previous.as_ref() == Some(&current) {
+            break current;
+        }
+        previous = current.exact_draft(exit).then_some(current);
+        require(
+            Instant::now() < draft_deadline,
+            "Main exit draft unconfirmed; inspect the original pane",
+        )?;
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    services.check_main_swap_source(repo, main, stop)?;
+    fresh_swap_source(repo, &pane, &record, main, services, stop)?;
+    require(
+        swap_composer(repo, &pane.pane, services, stop)? == draft,
+        "Main composer changed before submitting exit",
+    )?;
+    guarded_swap_tmux(
+        repo,
+        services,
+        stop,
+        &pane,
+        false,
+        &["send-keys", "-t", &pane.pane, "Enter"],
+    )?;
+    record.stage = SwapStage::ExitSent;
+    write_swap_record(&store, &record, false)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        require(
+            !stop.load(Ordering::Acquire) && Instant::now() < deadline,
+            "Old Main exit unconfirmed; original pane and handoff retained",
+        )?;
+        let current = read_swap_pane(repo, &pane.pane, services, stop)?;
+        require(
+            pane.same_slot(&current) && current.pid == pane.pid && current.attempt == pane.attempt,
+            "Main pane changed while waiting for exit",
+        )?;
+        if current.dead {
+            let row = crate::commands::query(
+                services,
+                NativeCommand::Events,
+                repo,
+                &["show", "--attempt", &record.old_attempt, "--json"],
+                stop,
+            )?;
+            require(
+                row["state"] == "abandoned"
+                    && row["terminal"] == true
+                    && row["reason_code"] == "main_swapped"
+                    && row["refs"]["panel_wrapper_identity"] == record.old_birth
+                    && row["refs"]["panel_native_exit"] == "confirmed"
+                    && row["refs"]["panel_native_exit_code"] == "0",
+                "Old Main exit lacks the exact swap acknowledgement",
+            )?;
+            oms_panel_core::release::prove_native_absent(&row)?;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let prove_dead = || -> Result<()> {
+        let current = read_swap_pane(repo, &pane.pane, services, stop)?;
+        require(
+            current.dead
+                && pane.same_slot(&current)
+                && current.pid == pane.pid
+                && current.attempt == pane.attempt
+                && terminals::provider_session_proof(services, repo, &pane.session, stop)?
+                    == record.session,
+            "Dead Main pane changed; handoff retained for recovery",
+        )
+    };
+    prove_dead()?;
+    let room =
+        services.commit_main_swap(repo, &pane.room, &pane.member, request, deadline, stop)?;
+    require(
+        room["room"] == pane.room
+            && room["participant"] == pane.member
+            && room["attempt"] == pane.attempt,
+        "Canonical Room swap receipt differs; no replacement started",
+    )?;
+    record.stage = SwapStage::RoomCommitted;
+    write_swap_record(&store, &record, false)?;
+    prove_dead()?;
+    let execution = record
+        .execution
+        .to_str()
+        .ok_or_else(|| Error::new("Main swap checkout must be UTF-8"))?;
+    guarded_swap_tmux(
+        repo,
+        services,
+        stop,
+        &pane,
+        true,
+        &["respawn-pane", "-t", &pane.pane, "-c", execution, &entry],
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        require(
+            !stop.load(Ordering::Acquire) && Instant::now() < deadline,
+            "Replacement Main not confirmed; preserve the Room and recover from its retained handoff",
+        )?;
+        let current = read_swap_pane(repo, &pane.pane, services, stop)?;
+        require(
+            !current.dead && pane.same_slot(&current),
+            "Replacement Main pane stopped or moved; handoff retained",
+        )?;
+        if current.attempt != pane.attempt
+            && current.member == pane.member
+            && current.owner == request.provider
+            && current.harness == request.harness
+            && current.room == pane.room
+        {
+            let row = crate::commands::query(
+                services,
+                NativeCommand::Events,
+                repo,
+                &["show", "--attempt", &current.attempt, "--json"],
+                stop,
+            )?;
+            if row["terminal"] == false
+                && row["state"] == "working"
+                && row["provider"] == request.provider
+                && row["refs"]["panel_room_participant"] == pane.member
+                && row["refs"]["panel_model"] == request.model
+                && refs_alive(&row["refs"], "native")
+                && refs_alive(&row["refs"], "wrapper")
+                && text(&row["refs"], "panel_wrapper_pid").parse::<u32>().ok() == Some(current.pid)
+            {
+                return Ok(
+                    json!({"status":"swapped","room":pane.room,"participant":pane.member,
+                    "old_attempt":pane.attempt,"attempt":current.attempt,"provider":request.provider,
+                    "harness":request.harness,"model":request.model}),
+                );
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn refs_alive(refs: &Value, kind: &str) -> bool {
+    text(refs, &format!("panel_{kind}_pid"))
+        .parse::<u32>()
+        .ok()
+        .and_then(|pid| terminals::process(pid).ok())
+        .is_some_and(|owner| {
+            owner.uid == rustix::process::getuid().as_raw()
+                && !owner.birth.is_empty()
+                && refs[format!("panel_{kind}_identity")] == owner.birth
+        })
+}
+
+fn replacement_member(
+    repo: &Path,
+    store: &Store,
+    main: &MainAdmission<'_>,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Option<SwapRecord>> {
+    let Some(source) = std::env::var_os(SWAP_SOURCE_ENV) else {
+        return Ok(None);
+    };
+    let source = source
+        .into_string()
+        .map_err(|_| Error::new("invalid Main swap source"))?;
+    let record =
+        swap_record(store, &source)?.ok_or_else(|| Error::new("Main swap handoff unavailable"))?;
+    let self_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    let pane = read_swap_pane(repo, &self_pane, services, stop)?;
+    require(
+        managed_session()
+            && record.schema == 1
+            && record.stage == SwapStage::RoomCommitted
+            && terminals::process(record.controller_pid).is_ok_and(|host| {
+                host.uid == rustix::process::getuid().as_raw()
+                    && host.birth == record.controller_birth
+            })
+            && record.old_attempt == source
+            && pane.pane == record.pane
+            && pane.window == record.window
+            && pane.pid == std::process::id()
+            && pane.pid != record.old_pid
+            && !pane.dead
+            && !pane.board
+            && pane.native == pane.pane
+            && pane.attempt == source
+            && pane.member == record.member
+            && pane.room == record.room
+            && pane.repo == repo.to_str().unwrap_or_default()
+            && pane.name == record.session_name
+            && std::fs::canonicalize(&pane.execution).is_ok_and(|path| path == record.execution)
+            && state::native_repository(repo, None)? == record.execution
+            && terminals::provider_session_proof(services, repo, &pane.session, stop)?
+                == record.session
+            && record.provider == main.resolution.owner
+            && record.harness == main.capability.harness
+            && main.resolution.model.as_deref() == Some(&record.model)
+            && record.permissions == main.permissions.as_str()
+            && crate::commands::room(main.options).as_deref() == Some(&record.room)
+            && main.options.get("task") == Some(record.handoff.as_str())
+            && record.handoff.len() <= 3000,
+        "Replacement Main is outside its committed pane and Room custody",
+    )?;
+    let old = crate::commands::query(
+        services,
+        NativeCommand::Events,
+        repo,
+        &["show", "--attempt", &source, "--json"],
+        stop,
+    )?;
+    require(
+        old["state"] == "abandoned"
+            && old["reason_code"] == "main_swapped"
+            && old["terminal"] == true
+            && old["refs"]["panel_wrapper_identity"] == record.old_birth,
+        "Replacement Main source exit proof unavailable",
+    )?;
+    oms_panel_core::release::prove_native_absent(&old)?;
+    prove_replacement_room(repo, &record, services, stop)?;
+    Ok(Some(record))
+}
+
+fn prove_replacement_room(
+    repo: &Path,
+    record: &SwapRecord,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let room = swap_room(
+        repo,
+        &record.room,
+        &record.member,
+        &record.provider,
+        services,
+        stop,
+    )?;
+    require(
+        rows(&room["swaps"]).last().is_some_and(|r| {
+            r["attempt"] == record.old_attempt
+                && r["participant"] == record.member
+                && r["to"] == record.provider
+                && r["model"] == record.model
+                && r["harness"] == record.harness
+        }),
+        "Replacement Main lacks canonical Room swap lineage",
+    )
+}
+
+fn prove_replacement_custody(
+    repo: &Path,
+    record: &SwapRecord,
+    attempt: &str,
+    wrapper_pid: u32,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    prove_replacement_room(repo, record, services, stop)?;
+    let pane = read_swap_pane(repo, &record.pane, services, stop)?;
+    require(
+        pane.name == record.session_name
+            && pane.window == record.window
+            && pane.pid == wrapper_pid
+            && !pane.dead
+            && !pane.board
+            && pane.native == pane.pane
+            && pane.attempt == attempt
+            && pane.member == record.member
+            && pane.room == record.room
+            && pane.owner == record.provider
+            && pane.harness == record.harness
+            && pane.repo == repo.to_str().unwrap_or_default()
+            && std::fs::canonicalize(&pane.execution).is_ok_and(|path| path == record.execution)
+            && terminals::provider_session_proof(services, repo, &pane.session, stop)?
+                == record.session
+            && terminals::process(record.controller_pid).is_ok_and(|host| {
+                host.uid == rustix::process::getuid().as_raw()
+                    && host.birth == record.controller_birth
+            })
+            && !stop.load(Ordering::Acquire),
+        "Replacement Main pane changed before native launch",
+    )
+}
+
+fn record_main_refs(
+    repo: &Path,
+    attempt: &str,
+    refs: &[String],
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let mut args =
+        crate::commands::strings(&["usage", "--attempt", attempt, "--actor", "panel-main"]);
+    for item in refs {
+        args.extend(["--ref".into(), item.into()]);
+    }
+    services
+        .command(NativeCommand::Events, repo, &args, stop)?
+        .success()
+}
+
+fn swap_exit_dispatched(store: &Store, attempt: &str, room: &str, member: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let Ok(Some(record)) = swap_record(store, attempt) else {
+            return false;
+        };
+        if record.schema != 1
+            || record.old_attempt != attempt
+            || record.room != room
+            || record.member != member
+            || record.old_pid != std::process::id()
+            || !terminals::process(record.old_pid)
+                .is_ok_and(|owner| owner.birth == record.old_birth)
+        {
+            return false;
+        }
+        if record.stage == SwapStage::ExitSent {
+            return true;
+        }
+        if record.stage != SwapStage::Prepared || Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn run_native(
     repo: &Path,
     main: &MainAdmission<'_>,
@@ -1756,10 +2654,12 @@ fn run_native(
     }
     let execution = state::native_repository(repo, None)?;
     let store = Store::open(repo)?;
-    // The outer launcher owns this lock until the new pane and its metadata
-    // exist. Keep the same lock through binding so reuse cannot see a partial launch.
-    let account_lock = requested_account
-        .map(|_| store.transaction("panel-main-start", MAIN_ACCOUNT_START_TIMEOUT))
+    let replacement = replacement_member(repo, &store, main, services, stop)?;
+    // Ordinary startup cannot race the released-to-replacement interval. Only
+    // the proved replacement uses its controller's already-held reservation.
+    let start_lock = replacement
+        .is_none()
+        .then(|| store.transaction("panel-main-start", MAIN_ACCOUNT_START_TIMEOUT))
         .transpose()?;
     let receipt = requested_account
         .map(|alias| {
@@ -1777,7 +2677,7 @@ fn run_native(
     let resume = options.get("resume");
     let chosen_room = crate::commands::room(options);
     let mut pending_account = None;
-    if account_lock.is_some() {
+    if requested_account.is_some() {
         let pane = std::env::var("TMUX_PANE").unwrap_or_default();
         let identity = main_account_pane(
             repo,
@@ -1816,7 +2716,9 @@ fn run_native(
         session_lock.check()?;
     }
 
-    let (room_id, replaces) = if let Some(pending) = &pending_account {
+    let (room_id, replaces) = if let Some(replacement) = &replacement {
+        (replacement.room.clone(), None)
+    } else if let Some(pending) = &pending_account {
         (pending.room.clone(), None)
     } else if let Some(res) = resume {
         let bound_rooms = native_resume_binding(&resolution.owner, repo, res, services, stop)?;
@@ -1905,9 +2807,29 @@ fn run_native(
             format!("panel_session_digest={}", &digest[..32]),
         ]);
     }
+    let wrapper = terminals::process(std::process::id()).ok();
+    if let Some(wrapper) = &wrapper {
+        let host = if managed_session() { "tmux" } else { "inline" };
+        for item in [
+            format!("panel_host={host}"),
+            format!("panel_wrapper_pid={}", wrapper.pid),
+            format!("panel_wrapper_identity={}", wrapper.birth),
+        ] {
+            start_args.extend(["--ref".into(), item]);
+        }
+    }
+    if let Some(replacement) = &replacement {
+        start_args.extend([
+            "--ref".into(),
+            format!("panel_room_participant={}", replacement.member),
+        ]);
+    }
     session_lock.check()?;
     let attempt = event_id(repo, &start_args, services, stop)?;
-    let member = attempt.clone();
+    let member = replacement
+        .as_ref()
+        .map_or(attempt.as_str(), |record| record.member.as_str())
+        .to_owned();
 
     let mut join_args = vec![
         "join",
@@ -1932,14 +2854,15 @@ fn run_native(
         join_args.extend(["--replaces", previous]);
     }
     join_args.push("--json");
-    if let Err(err) = services
-        .command(
-            NativeCommand::Room,
-            repo,
-            &crate::commands::strings(&join_args),
-            stop,
-        )
-        .and_then(|out| out.success())
+    if replacement.is_none()
+        && let Err(err) = services
+            .command(
+                NativeCommand::Room,
+                repo,
+                &crate::commands::strings(&join_args),
+                stop,
+            )
+            .and_then(|out| out.success())
     {
         let _ = transition_attempt(
             repo,
@@ -1960,19 +2883,40 @@ fn run_native(
             .unwrap_or_else(|_| repo.to_path_buf())
             .to_string_lossy()
             .into_owned();
-        for (opt, val) in [
+        let mut tags = vec![
             ("@oms_panel_main_attempt", attempt.as_str()),
             ("@oms_panel_room", room_id.as_str()),
             ("@oms_panel_native_pane", pane.as_str()),
             ("@oms_panel_room_participant", member.as_str()),
             ("@oms_panel_repo", canon.as_str()),
-        ] {
-            let _ = terminals::tmux(
+        ];
+        if replacement.is_some() {
+            tags.extend([
+                ("@oms_panel_owner", resolution.owner.as_str()),
+                ("@oms_panel_harness", harness),
+                (MAIN_ACCOUNT_READY, ""),
+            ]);
+        }
+        for (opt, val) in tags {
+            let result = terminals::tmux(
                 services,
                 repo,
                 &crate::commands::strings(&["set-option", "-w", "-t", &pane, opt, val]),
                 stop,
             );
+            if replacement.is_some()
+                && let Err(error) = result
+            {
+                let _ = transition_attempt(
+                    repo,
+                    &attempt,
+                    &["failed"],
+                    Some("native_swap_custody_lost"),
+                    services,
+                    &AtomicBool::new(false),
+                );
+                return Err(error);
+            }
         }
     }
 
@@ -1997,7 +2941,8 @@ fn run_native(
         .env("OMS_ROOM_REPO", repo)
         .env("OMS_PANEL_MAIN_ATTEMPT", &attempt)
         .env("OMS_PANEL_RESULTS", "1");
-    cmd.env_remove("OMS_PANEL_AUTO_ORCHESTRATORS");
+    cmd.env_remove("OMS_PANEL_AUTO_ORCHESTRATORS")
+        .env_remove(SWAP_SOURCE_ENV);
     apply_main_model_env(&mut cmd, harness, resolution.model.as_deref());
     if matches!(capability.transport, MainTransport::Native(_)) {
         cmd.env("OMS_HOOK_AGENT", &resolution.owner);
@@ -2027,7 +2972,7 @@ fn run_native(
 
     let admission = (|| -> Result<_> {
         let bound = if let (Some(receipt), Some(pending), Some(lock)) =
-            (&receipt, &pending_account, &account_lock)
+            (&receipt, &pending_account, &start_lock)
         {
             lock.check()?;
             let current = main_account_pane(
@@ -2067,7 +3012,8 @@ fn run_native(
                 contract_repo: &execution,
                 execution_repo: &execution,
                 root: Some(oms_command_peer::process::RootLocator {
-                    owner: &attempt,
+                    attempt: &attempt,
+                    participant: &member,
                     room_id: &room_id,
                 }),
                 team: None,
@@ -2129,6 +3075,10 @@ fn run_native(
             )?;
             prove_joined_main(repo, expected, harness, services, stop)?;
             require(!stop.load(Ordering::Acquire), "native launch cancelled")?;
+        }
+        if let Some(record) = &replacement {
+            session_lock.check()?;
+            prove_replacement_custody(repo, record, &attempt, std::process::id(), services, stop)?;
         }
         cmd.spawn()
             .map_err(|err| Error::new(format!("native launch failed: {err}")))
@@ -2192,8 +3142,38 @@ fn run_native(
             child.id(),
         );
     }
-    drop(account_lock);
+    let native = terminals::process(child.id());
+    let recorded = native.and_then(|child| {
+        record_main_refs(
+            repo,
+            &attempt,
+            &[
+                format!("panel_room_participant={member}"),
+                format!("panel_native_pid={}", child.pid),
+                format!("panel_native_identity={}", child.birth),
+            ],
+            services,
+            stop,
+        )
+    });
+    if replacement.is_some()
+        && let Err(error) = recorded
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = call.finish(None, None);
+        let _ = transition_attempt(
+            repo,
+            &attempt,
+            &["failed"],
+            Some("native_swap_custody_lost"),
+            services,
+            &AtomicBool::new(false),
+        );
+        return Err(error);
+    }
 
+    drop(start_lock);
     let finished = std::sync::Arc::new(AtomicBool::new(false));
     let background = if managed_session()
         && std::env::var_os("OMS_PANEL_AUTO_ORCHESTRATORS").as_deref()
@@ -2267,12 +3247,40 @@ fn run_native(
         let _ = background.join();
     }
     let accounting = call.finish(None, None).map_err(admission_error);
+    let settling = AtomicBool::new(false);
+    let confirmed_exit = child.try_wait().ok().flatten().is_some();
+    if confirmed_exit {
+        let _ = record_main_refs(
+            repo,
+            &attempt,
+            &[
+                "panel_native_exit=confirmed".into(),
+                format!("panel_native_exit_code={status_code}"),
+            ],
+            services,
+            &settling,
+        );
+    }
+    if confirmed_exit
+        && status_code == 0
+        && accounting.is_ok()
+        && swap_exit_dispatched(&store, &attempt, &room_id, &member)
+    {
+        transition_attempt(
+            repo,
+            &attempt,
+            &["blocked", "abandoned"],
+            Some("main_swapped"),
+            services,
+            &settling,
+        )?;
+        return Ok(status_code);
+    }
     let final_states: &[&str] = match status_code {
         0 => &["verifying", "review", "done"],
         129 | 130 | 143 => &["cancelled"],
         _ => &["failed"],
     };
-    let settling = AtomicBool::new(false);
     let _ = transition_attempt(
         repo,
         &attempt,
@@ -2913,6 +3921,7 @@ impl MainRelay {
             "OMS_STATE_REPO",
             "OMS_ROOM_REPO",
             "OMS_ROOM_ID",
+            SWAP_SOURCE_ENV,
             "OMS_PANEL_AUTO_ORCHESTRATORS",
         ]
         .iter()
@@ -4002,6 +5011,404 @@ mod native_lifecycle_contract {
     impl Drop for TempRepo {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn main_swap_exact_room_native_exit_and_same_pane_with_mock_host() {
+        use super::{
+            SWAP_COMPOSER, SWAP_PANE, SwapStage, perform_main_swap, swap_record, terminals,
+        };
+        use oms_panel_core::{Error, Store, release::MainSwapRequest};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::process::{Child, Command};
+        use std::time::Instant;
+
+        const CHILD_ENV: &str = "OMS_PANEL_MAIN_SWAP_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let home = TempRepo::new();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.env_clear();
+            for key in ["PATH", "TMPDIR", "LANG", "LC_ALL", "TZ"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            let output = command
+                .args([
+                    "--exact",
+                    "native_panel::native_lifecycle_contract::main_swap_exact_room_native_exit_and_same_pane_with_mock_host",
+                    "--nocapture",
+                ])
+                .env("HOME", &home.0)
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains("1 passed;"), "{stdout}");
+            return;
+        }
+
+        const OLD: &str = "att_11111111111111111111111111111111";
+        const NEW: &str = "att_22222222222222222222222222222222";
+        const MEMBER: &str = "att_33333333333333333333333333333333";
+        const ROOM: &str = "room-swap-fixture";
+        const MODEL: &str = "fixture-agy-model";
+        static STOP: AtomicBool = AtomicBool::new(false);
+
+        struct Mock {
+            old_wrapper: RefCell<Child>,
+            old_native: RefCell<Child>,
+            new_wrapper: RefCell<Child>,
+            new_native: RefCell<Child>,
+            old: Value,
+            new: Value,
+            draft: Cell<bool>,
+            dead: Cell<bool>,
+            committed: Cell<bool>,
+            respawned: Cell<bool>,
+            sent: Cell<usize>,
+            launched: Cell<usize>,
+            mode: &'static str,
+            room_successor: Cell<bool>,
+            preflights: Cell<usize>,
+        }
+        fn stop_child(child: &mut Child) {
+            let _ = child.kill();
+            child.wait().unwrap();
+        }
+        impl Drop for Mock {
+            fn drop(&mut self) {
+                for child in [
+                    &mut self.old_wrapper,
+                    &mut self.old_native,
+                    &mut self.new_wrapper,
+                    &mut self.new_native,
+                ] {
+                    stop_child(child.get_mut());
+                }
+            }
+        }
+        fn out(text: impl Into<Vec<u8>>) -> CommandOutput {
+            CommandOutput {
+                stdout: text.into(),
+                cleanup_complete: true,
+                output_complete: true,
+                ..Default::default()
+            }
+        }
+        impl Mock {
+            fn row(&self, repo: &Path) -> String {
+                let (pid, dead, attempt, owner, harness) = if self.respawned.get() {
+                    (self.new_wrapper.borrow().id(), 0, NEW, "antigravity", "agy")
+                } else {
+                    (
+                        self.old_wrapper.borrow().id(),
+                        u8::from(self.dead.get()),
+                        OLD,
+                        "codex",
+                        "codex",
+                    )
+                };
+                format!(
+                    "oms-fixture\t$1\t@1\t%1\t{pid}\t{dead}\t\t%1\t{attempt}\t{MEMBER}\t{ROOM}\t{owner}\t{harness}\t{}\t{}\t.",
+                    repo.display(),
+                    repo.display()
+                )
+            }
+        }
+        impl PeerExecutor for Mock {
+            fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
+                let args: Vec<_> = request.argv.iter().map(|a| a.to_str().unwrap()).collect();
+                let repo = &request.cwd;
+                match args.as_slice() {
+                    ["tmux", "list-panes", "-a", "-F", SWAP_PANE]
+                    | ["tmux", "display-message", "-p", "-t", "%1", SWAP_PANE] => {
+                        Ok(out(self.row(repo)))
+                    }
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        "$1",
+                        terminals::PROVIDER_SESSION_IDENTITY_FORMAT,
+                        ";",
+                        "show-options",
+                        "-v",
+                        "-t",
+                        "$1",
+                        "@oms_panel_repo",
+                    ] => Ok(out(format!(
+                        "$1\t{}\tfixture.sock\t.\n{}\n",
+                        std::process::id(),
+                        repo.display()
+                    ))),
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        "%1",
+                        SWAP_COMPOSER,
+                        ";",
+                        "capture-pane",
+                        "-p",
+                        "-e",
+                        "-S",
+                        "0",
+                        "-t",
+                        "%1",
+                    ] => {
+                        let (cursor_x, cursor_y, input) = match (self.mode, self.draft.get()) {
+                            ("busy", false) => (2, 1, "• Working (2s • esc to interrupt)\n›"),
+                            ("attachment", false) => (2, 0, "›\n[Image attached]"),
+                            (_, true) => (7, 0, "› /exit"),
+                            _ => (2, 0, "›"),
+                        };
+                        Ok(out(format!(
+                            "0\t0\t{cursor_x}\t{cursor_y}\tcodex\t.\n{input}\n\n  GPT-6.2-Sol high · Context 9% left · weekly 13% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts"
+                        )))
+                    }
+                    ["tmux", "if-shell", "-F", "-t", "%1", fence, command, _] => {
+                        assert!(
+                            fence.contains(OLD) && fence.contains(MEMBER) && fence.contains(ROOM)
+                        );
+                        if command.contains("remain-on-exit") {
+                            assert!(!self.dead.get());
+                        } else if command.contains("'/exit'") {
+                            assert!(!self.draft.replace(true));
+                        } else if command.contains("'Enter'") {
+                            assert!(self.draft.get());
+                            self.sent.set(self.sent.get() + 1);
+                            if self.mode == "fence" {
+                                return Ok(out("OMS_MAIN_SWAP_FENCE_CHANGED"));
+                            }
+                            if self.mode == "uncertain" {
+                                return Err(Error::new("send outcome unknown"));
+                            }
+                            stop_child(&mut self.old_wrapper.borrow_mut());
+                            stop_child(&mut self.old_native.borrow_mut());
+                            self.dead.set(true);
+                        } else if command.contains("'respawn-pane'") {
+                            assert!(
+                                self.committed.get()
+                                    && self.dead.get()
+                                    && !command.contains("'-k'")
+                            );
+                            self.launched.set(self.launched.get() + 1);
+                            if self.mode == "startup" {
+                                return Err(Error::new("native startup uncertain"));
+                            }
+                            self.respawned.set(true);
+                        } else {
+                            panic!("unexpected mutation {command}");
+                        }
+                        Ok(out(""))
+                    }
+                    _ => panic!("unexpected fake tmux {args:?}"),
+                }
+            }
+        }
+        impl Services for Mock {
+            fn command(
+                &self,
+                command: NativeCommand,
+                repo: &Path,
+                args: &[OsString],
+                _: &AtomicBool,
+            ) -> Result<CommandOutput> {
+                let value = match command {
+                    NativeCommand::Room => {
+                        let provider = if self.committed.get() {
+                            "antigravity"
+                        } else {
+                            "codex"
+                        };
+                        let swaps = self.committed.get().then(|| json!({"attempt":OLD,"participant":MEMBER,"to":"antigravity","model":MODEL,"harness":"agy"}));
+                        json!({"id":ROOM,"closed":false,"successor":self.room_successor.get().then_some("room-successor"),
+                            "participants":[{"participant":MEMBER,"provider":provider,"joined":true,"role":"main"}],"swaps":swaps.into_iter().collect::<Vec<_>>()})
+                    }
+                    NativeCommand::Events => {
+                        let mut row = if args[2] == NEW {
+                            self.new.clone()
+                        } else {
+                            self.old.clone()
+                        };
+                        if args[2] == OLD && self.dead.get() {
+                            let receipt = swap_record(&Store::open(repo)?, OLD)?.unwrap();
+                            assert!(receipt.stage == SwapStage::ExitSent);
+                            row["terminal"] = true.into();
+                            row["state"] = "abandoned".into();
+                            row["refs"]["panel_native_exit"] = "confirmed".into();
+                            row["refs"]["panel_native_exit_code"] =
+                                if self.mode == "crash" { "130" } else { "0" }.into();
+                            row["reason_code"] = if self.mode == "unacked" {
+                                "native_exit"
+                            } else {
+                                "main_swapped"
+                            }
+                            .into();
+                        }
+                        row
+                    }
+                    _ => panic!("unexpected fake command {command:?}"),
+                };
+                Ok(out(serde_json::to_vec(&value).unwrap()))
+            }
+            fn check_main_swap_source(&self, _: &Path, _: &Value, _: &AtomicBool) -> Result<()> {
+                let check = self.preflights.get() + 1;
+                self.preflights.set(check);
+                crate::require(self.mode != "team" || check == 1, "active Team contracts")
+            }
+            fn commit_main_swap(
+                &self,
+                _: &Path,
+                room: &str,
+                member: &str,
+                request: &MainSwapRequest,
+                _: Instant,
+                _: &AtomicBool,
+            ) -> Result<Value> {
+                assert!(self.dead.get() && !self.committed.replace(true));
+                assert_eq!(
+                    (room, member, request.attempt_id.as_str()),
+                    (ROOM, MEMBER, OLD)
+                );
+                Ok(json!({"room":room,"participant":member,"attempt":request.attempt_id}))
+            }
+        }
+        let child = || Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let lifecycle = |wrapper: &Child, native: &Child, attempt, provider, harness| {
+            json!({"tool":"panel-main","attempt_id":attempt,"provider":provider,"state":"working","terminal":false,
+                "refs":{"panel_room_id":ROOM,"panel_room_participant":MEMBER,"panel_harness":harness,"panel_model":MODEL,
+                    (super::MAIN_PERMISSIONS_REF):"native", "panel_host":"tmux", "panel_wrapper_pid":wrapper.id().to_string(),
+                    "panel_wrapper_identity":terminals::process(wrapper.id()).unwrap().birth,
+                    "panel_native_pid":native.id().to_string(),"panel_native_identity":terminals::process(native.id()).unwrap().birth}})
+        };
+        for mode in [
+            "success",
+            "fence",
+            "uncertain",
+            "unacked",
+            "crash",
+            "startup",
+            "busy",
+            "attachment",
+            "team",
+        ] {
+            let repo = TempRepo::new();
+            let old_wrapper = child();
+            let old_native = child();
+            let new_wrapper = child();
+            let new_native = child();
+            let old = lifecycle(&old_wrapper, &old_native, OLD, "codex", "codex");
+            let new = lifecycle(&new_wrapper, &new_native, NEW, "antigravity", "agy");
+            let mock = Mock {
+                old_wrapper: old_wrapper.into(),
+                old_native: old_native.into(),
+                new_wrapper: new_wrapper.into(),
+                new_native: new_native.into(),
+                old,
+                new,
+                draft: false.into(),
+                dead: false.into(),
+                committed: false.into(),
+                respawned: false.into(),
+                sent: 0.into(),
+                launched: 0.into(),
+                mode,
+                room_successor: false.into(),
+                preflights: 0.into(),
+            };
+            let target = MainSwapRequest {
+                attempt_id: OLD.into(),
+                provider: "antigravity".into(),
+                harness: "agy".into(),
+                model: MODEL.into(),
+            };
+            let result = perform_main_swap(&repo.0, &target, &mock.old, &mock, &STOP, |record| {
+                assert_eq!(record.permissions, "native");
+                assert!(record.handoff.len() <= 3000 && record.handoff.contains(ROOM));
+                Ok("exec /approved/test-command".into())
+            });
+            if matches!(mode, "busy" | "attachment") {
+                assert!(result.unwrap_err().message.contains("empty idle Codex"));
+                assert_eq!(mock.sent.get(), 0);
+                assert_eq!(mock.launched.get(), 0);
+                assert!(
+                    swap_record(&Store::open(&repo.0).unwrap(), OLD)
+                        .unwrap()
+                        .is_none()
+                );
+                continue;
+            }
+            if mode == "team" {
+                assert!(result.unwrap_err().message.contains("active Team"));
+                assert_eq!(mock.preflights.get(), 2);
+                assert_eq!(mock.sent.get(), 0);
+                assert_eq!(mock.launched.get(), 0);
+                assert!(!mock.dead.get());
+                assert!(
+                    swap_record(&Store::open(&repo.0).unwrap(), OLD)
+                        .unwrap()
+                        .is_some_and(|record| record.stage == SwapStage::Prepared)
+                );
+                continue;
+            }
+            assert_eq!(mock.sent.get(), 1, "{mode}");
+            assert_eq!(
+                mock.launched.get(),
+                usize::from(matches!(mode, "success" | "startup")),
+                "{mode}"
+            );
+            let receipt = swap_record(&Store::open(&repo.0).unwrap(), OLD)
+                .unwrap()
+                .unwrap();
+            match mode {
+                "success" => {
+                    let output = result.unwrap();
+                    assert_eq!(output["participant"], MEMBER);
+                    assert_eq!(output["attempt"], NEW);
+                    assert!(receipt.stage == SwapStage::RoomCommitted);
+                    let pid = mock.new_wrapper.borrow().id();
+                    super::prove_replacement_custody(&repo.0, &receipt, NEW, pid, &mock, &STOP)
+                        .unwrap();
+                    assert!(
+                        super::prove_replacement_custody(
+                            &repo.0,
+                            &receipt,
+                            NEW,
+                            mock.old_wrapper.borrow().id(),
+                            &mock,
+                            &STOP,
+                        )
+                        .unwrap_err()
+                        .message
+                        .contains("pane changed")
+                    );
+                    mock.room_successor.set(true);
+                    assert!(super::prove_replacement_custody(
+                        &repo.0, &receipt, NEW, pid, &mock, &STOP,
+                    ).unwrap_err().message.contains("Room"));
+                }
+                "startup" => {
+                    assert!(result.is_err() && receipt.stage == SwapStage::RoomCommitted);
+                }
+                "unacked" | "crash" => {
+                    assert!(result.is_err() && receipt.stage == SwapStage::ExitSent)
+                }
+                _ => assert!(
+                    result.is_err() && !mock.dead.get() && receipt.stage == SwapStage::Prepared
+                ),
+            }
         }
     }
 

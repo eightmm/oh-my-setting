@@ -877,7 +877,7 @@ pub(crate) fn run_mode(
                     .and_then(|p| p.main.get(&provider).map(|v| v.model.clone()))
             })
             .ok_or_else(|| Error::new("swap target model unavailable"))?;
-        return output(release::swap_main(
+        return output(release::swap_main_in_room(
             &repo,
             &release::MainSwapRequest {
                 attempt_id: main_attempt(&repo, options, services, stop)?,
@@ -885,6 +885,7 @@ pub(crate) fn run_mode(
                 model,
                 harness,
             },
+            room(options).as_deref(),
             services,
             stop,
         )?);

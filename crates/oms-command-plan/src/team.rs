@@ -745,6 +745,9 @@ impl<'a, 'p> Bindings<'a, 'p> {
             .map_err(Clone::clone)
     }
     fn owner(&mut self, spec: &Value) -> Result<()> {
+        self.owner_member(spec, spec.text("root_owner"))
+    }
+    fn owner_member(&mut self, spec: &Value, participant: &str) -> Result<()> {
         let plan = self.plan;
         let (attempts, events) = self
             .lifecycle
@@ -802,7 +805,7 @@ impl<'a, 'p> Bindings<'a, 'p> {
         require(
             room.get("closed") == &Value::Bool(false)
                 && room.get("participants").array()?.iter().any(|p| {
-                    p.text("participant") == spec.text("root_owner")
+                    p.text("participant") == participant
                         && p.text("role") == "main"
                         && p.get("joined") == &Value::Bool(true)
                 }),
@@ -816,7 +819,7 @@ impl<'a, 'p> Bindings<'a, 'p> {
             receipt_id(&plan.context.panel_main_attempt, 160),
             "root admission requires a current Main locator",
         )?;
-        let (_, events) = self
+        let (attempts, events) = self
             .lifecycle
             .get_or_insert_with(|| {
                 let raw = plan.store.read(".oms/lifecycle/events.jsonl", MAX_STREAM)?;
@@ -838,12 +841,23 @@ impl<'a, 'p> Bindings<'a, 'p> {
             created.len() == 1,
             "root creation generation is ambiguous or missing",
         )?;
-        let binding = object([
+        let root = attempts.get(&plan.context.panel_main_attempt);
+        let participant = crate::provenance::participant(root)?.to_owned();
+        let provider = root.text("provider").to_owned();
+        let mut binding = object([
             ("root_owner", string(&plan.context.panel_main_attempt)),
             ("root_owner_generation", created[0].get("event_id").clone()),
             ("room_id", string(&plan.context.room_id)),
         ]);
-        self.owner(&binding)?;
+        self.owner_member(&binding, &participant)?;
+        if participant != plan.context.panel_main_attempt {
+            require(
+                participant == plan.context.participant,
+                "swapped Main participant differs from the caller",
+            )?;
+            crate::provenance::swapped_root(plan, &plan.context.room_id, &participant, &provider)?;
+            binding.set("root_participant", string(participant))?;
+        }
         Ok(binding)
     }
 }

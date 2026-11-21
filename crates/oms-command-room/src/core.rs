@@ -931,8 +931,10 @@ impl<'a> Room<'a> {
             ("attempt", attempt.into()),
             ("harness", harness.into()),
         ]);
-        let (_, target) = self.append(id, &e, &format!("Main swapped to {model}"))?;
-        e.set("room", target);
+        // The panel's process proof is for this exact Room generation. The
+        // locked validator refuses a superseded Room before publishing.
+        self.append_at(id, &e, &format!("Main swapped to {model}"), Carry::No)?;
+        e.set("room", id);
         Ok(e)
     }
     pub fn send(&self, id: &str, send: Send<'_>) -> Result<Value> {

@@ -158,6 +158,17 @@ Room and attempts before trying again. Provider conversations keep their
 separate histories. Proven chats can be opened in their original sessions.
 [Original chats and recovery](#original-chats-and-recovery)
 
+OMS refuses to send `/exit` while the current Main attempt owns an unsettled
+Plan Team contract in its Room. An active resource domain also blocks the
+switch if it lists an active Team or pending execution or candidate work for
+that attempt. Settle those contracts and reconcile retained work under the
+current Main before switching. Team ownership stays with its original attempt.
+A switched Main cannot register a new Team with its retained Room participant.
+
+The replacement keeps the same Room participant, so ordinary Room worker
+results remain available in the [Results reader](#results-reader).
+Existing provider lead sessions stay open under their original Main attempt.
+
 #### Quota and switching
 
 Use Weekly to compare available quota readings before selecting a target.

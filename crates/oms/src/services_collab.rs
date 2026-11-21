@@ -9,7 +9,7 @@
 //! cancellation, and argv is never shell-parsed.
 //!
 //! Known gaps, reported by the methods themselves rather than hidden:
-//! `swap_main_host` keeps its fail-closed default; `tick_maintenance` reports the Codex plugin cache as
+//! `tick_maintenance` reports the Codex plugin cache as
 //! `skipped` (no native producer refreshes it); `refresh_catalogs` ages only
 //! catalogs already on disk (a never-probed provider has none to age);
 //! `install --star` has no native producer and is refused; and
@@ -1133,6 +1133,102 @@ impl oms_command_room::Services for CollabServices<'_> {
 }
 
 impl PanelServices for CollabServices<'_> {
+    fn swap_main_host(
+        &self,
+        repo: &Path,
+        request: &oms_panel_core::release::MainSwapRequest,
+        main: &Value,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<Value> {
+        self.check(stop).map_err(panel_error)?;
+        oms_command_panel::native_panel::swap_main_host(
+            repo,
+            request,
+            main,
+            &self.source,
+            self,
+            stop,
+        )
+    }
+
+    fn check_main_swap_source(
+        &self,
+        repo: &Path,
+        main: &Value,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<()> {
+        self.check(stop).map_err(panel_error)?;
+        if main["refs"]["panel_native_scheduling"] == "campaign" {
+            return Err(panel_error(
+                "Main swap is unavailable during a managed campaign",
+            ));
+        }
+        let attempt = main["attempt_id"]
+            .as_str()
+            .ok_or_else(|| panel_error("Main swap source attempt unavailable"))?;
+        let room = &main["refs"]["panel_room_id"];
+        let teams = self.team_contracts(repo, repo, stop)?;
+        teams.success()?;
+        let teams: Vec<Value> = serde_json::from_slice(&teams.stdout).map_err(panel_error)?;
+        if teams.iter().any(|team| {
+            team["spec"]["root_owner"] == attempt
+                && &team["spec"]["room_id"] == room
+                && team["phase"] != "settled"
+        }) {
+            return Err(panel_error(
+                "Main swap requires settling its active Team contracts",
+            ));
+        }
+        if let Some(domain) =
+            physical::physical_domain_before(repo, Instant::now() + Duration::from_secs(5), stop)
+                .map_err(panel_error)?
+        {
+            let resources = oms_command_telemetry::store::resources::snapshot(repo, stop)
+                .map_err(panel_error)?
+                .filter(|view| view.active && view.policy == domain.policy)
+                .ok_or_else(|| panel_error("Main swap resource domain changed"))?;
+            if resources.teams.iter().any(|team| {
+                team.root_owner == attempt
+                    && (team.active || team.execution_pending || team.candidate_pending)
+            }) {
+                return Err(panel_error(
+                    "Main swap requires reconciling its retained Team custody",
+                ));
+            }
+        }
+        self.check(stop).map_err(panel_error)
+    }
+
+    fn commit_main_swap(
+        &self,
+        repo: &Path,
+        room: &str,
+        participant: &str,
+        request: &oms_panel_core::release::MainSwapRequest,
+        deadline: Instant,
+        stop: &AtomicBool,
+    ) -> oms_panel_core::Result<Value> {
+        self.check(stop).map_err(panel_error)?;
+        let session = oms_command_room::Session::from_env();
+        let writer = oms_command_room::Room::open(repo, session, self, stop, false, false)
+            .map_err(panel_error)?
+            .with_deadline(deadline);
+        let event = writer
+            .swap_main(
+                room,
+                participant,
+                &request.provider,
+                &request.model,
+                &request.attempt_id,
+                &request.harness,
+            )
+            .map_err(panel_error)?;
+        serde_json::from_slice(
+            &oms_command_room::value::encode(&event, false, true).map_err(panel_error)?,
+        )
+        .map_err(panel_error)
+    }
+
     fn team_contracts(
         &self,
         execution: &Path,

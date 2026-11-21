@@ -21,6 +21,16 @@ pub fn swap_main(
     service: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Value> {
+    swap_main_in_room(repo, request, None, service, stop)
+}
+
+pub fn swap_main_in_room(
+    repo: &Path,
+    request: &MainSwapRequest,
+    expected_room: Option<&str>,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
     crate::parent_only()?;
     crate::identifier(&request.attempt_id)?;
     require(
@@ -36,8 +46,10 @@ pub fn swap_main(
         "invalid main swap target",
     )?;
     let store = Store::open(repo)?;
+    // The live wrapper holds panel-main-session for its full lifetime. The
+    // startup reservation serializes swaps without waiting for that lock before
+    // asking the source to leave.
     let start = store.transaction("panel-main-start", Duration::from_secs(3))?;
-    let session = store.transaction("panel-main-session", Duration::from_secs(3))?;
     let attempts = query(
         service,
         NativeCommand::Events,
@@ -52,6 +64,10 @@ pub fn swap_main(
         .ok_or_else(|| Error::new("main swap source unavailable"))?;
     let member = crate::value::text(&main["refs"], "panel_room_participant");
     let room = crate::value::text(&main["refs"], "panel_room_id");
+    require(
+        expected_room.is_none_or(|expected| expected == room),
+        "Main swap source belongs to a different Room",
+    )?;
     require(
         main["tool"] == "panel-main"
             && main["terminal"] == false
@@ -76,11 +92,13 @@ pub fn swap_main(
         service,
         NativeCommand::Room,
         repo,
-        &["show", "--id", &room, "--json"],
+        &["show", "--id", &room, "--exact", "--json"],
         stop,
     )?;
     require(
-        before["closed"] == false
+        before["id"] == room
+            && before["closed"] == false
+            && before["successor"].is_null()
             && crate::value::array(&before["participants"])
                 .iter()
                 .any(|v| {
@@ -92,7 +110,6 @@ pub fn swap_main(
         "main swap room ownership changed",
     )?;
     start.check()?;
-    session.check()?;
     let receipt = service
         .swap_main_host(repo, request, main, stop)
         .map_err(|e| Error {
@@ -100,6 +117,7 @@ pub fn swap_main(
             ..e
         })?;
     (|| -> Result<Value> {
+        start.check()?;
         let attempts = query(
             service,
             NativeCommand::Events,

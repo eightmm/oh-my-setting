@@ -593,6 +593,30 @@ fn membership(
         "actual parent room provider differs from declared owner",
     )
 }
+pub(crate) fn swapped_root(plan: &Plan<'_>, room: &str, who: &str, provider: &str) -> Result<()> {
+    let history = live_history(plan, room)?;
+    require(
+        history.room.get("successor") == &Value::Null,
+        "swapped Main Room was superseded",
+    )?;
+    let (swap, _) = swaps(&[&history.room_rows], who)?;
+    let prior = history
+        .room_rows
+        .iter()
+        .rev()
+        .map(|row| row.get("room_event"))
+        .find(|event| event.text("kind") == "main-swap" && event.text("participant") == who)
+        .ok_or_else(|| error("swapped Main lacks canonical Room lineage"))?;
+    let related = bindings(&history.events, who, provider, room, &swap)?;
+    require(
+        prior.text("provider") == provider
+            && related.iter().any(|attempt| {
+                attempt.text("attempt_id") == prior.text("attempt") && released(attempt, &swap)
+            }),
+        "swapped Main lacks verified predecessor release",
+    )?;
+    membership(plan, &history, who, provider, None, false)
+}
 pub(crate) fn owner(
     plan: &Plan<'_>,
     bundle: &Value,

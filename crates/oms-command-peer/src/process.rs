@@ -190,14 +190,15 @@ pub struct PhysicalAttempt<'a> {
 }
 #[derive(Clone, Copy)]
 pub struct RootLocator<'a> {
-    pub owner: &'a str,
+    pub attempt: &'a str,
+    pub participant: &'a str,
     pub room_id: &'a str,
 }
 pub(crate) struct OwnedPhysicalAttempt {
     state: PathBuf,
     contract: PathBuf,
     execution: PathBuf,
-    root: Option<(String, String)>,
+    root: Option<(String, String, String)>,
     team: Option<TeamLocator>,
     provider: String,
     account: Option<String>,
@@ -213,9 +214,13 @@ impl PhysicalAttempt<'_> {
             state: self.state_root.into(),
             contract: self.contract_repo.into(),
             execution: self.execution_repo.into(),
-            root: self
-                .root
-                .map(|root| (root.owner.into(), root.room_id.into())),
+            root: self.root.map(|root| {
+                (
+                    root.attempt.into(),
+                    root.participant.into(),
+                    root.room_id.into(),
+                )
+            }),
             team: self.team.cloned(),
             provider: self.provider.into(),
             account: self.account.map(str::to_owned),
@@ -236,7 +241,11 @@ impl OwnedPhysicalAttempt {
             root: self
                 .root
                 .as_ref()
-                .map(|(owner, room_id)| RootLocator { owner, room_id }),
+                .map(|(attempt, participant, room_id)| RootLocator {
+                    attempt,
+                    participant,
+                    room_id,
+                }),
             team: self.team.as_ref(),
             provider: &self.provider,
             account: self.account.as_deref(),

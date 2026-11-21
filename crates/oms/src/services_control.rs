@@ -3478,7 +3478,8 @@ mod tests {
                 execution_repo: repo.as_path(),
                 team: None,
                 root: Some(RootLocator {
-                    owner: selected,
+                    attempt: selected,
+                    participant: selected,
                     room_id: "room-team",
                 }),
                 provider: "codex",
@@ -3559,7 +3560,8 @@ mod tests {
         )
         .unwrap();
         let root = RootLocator {
-            owner: &owner,
+            attempt: &owner,
+            participant: &owner,
             room_id: "room-team",
         };
         let run_local = |call: oms_command_peer::admission::InteractiveCall| {
@@ -3662,6 +3664,124 @@ mod tests {
                 "Root locator cannot override child/depth guards"
             );
         }
+        for has_lineage in [true, false] {
+            let id = room
+                .create(None, "Native swap fixture", None, None, None)
+                .unwrap();
+            let start = |provider: &str, member: Option<&str>| {
+                let mut refs = obj([
+                    ("panel_room_id", id.as_str().into()),
+                    ("panel_role", "main".into()),
+                    ("panel_owner", provider.into()),
+                ]);
+                if let Some(member) = member {
+                    refs.set("panel_room_participant", member);
+                }
+                create_attempt(
+                    repo.as_path(),
+                    &StartRequest {
+                        provider: provider.into(),
+                        tool: "panel-main".into(),
+                        refs,
+                        ..Default::default()
+                    },
+                    &stop,
+                )
+                .unwrap()
+            };
+            let advance = |attempt: &str, states: &[&str]| {
+                for state in states {
+                    let mut change = obj([("to_state", (*state).into())]);
+                    if *state == "abandoned" {
+                        change.set("reason_code", "main_swapped");
+                    }
+                    let event =
+                        new_event(attempt, 0usize.into(), "attempt.state_changed", change).unwrap();
+                    append_lifecycle(repo.as_path(), event, &stop).unwrap();
+                }
+            };
+            let member = start("codex", None);
+            room.join(&id, oms_command_room::Join::new(&member, "codex"))
+                .unwrap();
+            advance(&member, &["starting", "working", "blocked", "abandoned"]);
+            let (provider, harness) = if has_lineage {
+                let request = oms_panel_core::release::MainSwapRequest {
+                    attempt_id: member.clone(),
+                    provider: "antigravity".into(),
+                    model: "fixture-model".into(),
+                    harness: "agy".into(),
+                };
+                let event = oms_panel_core::Services::commit_main_swap(
+                    &collab,
+                    repo.as_path(),
+                    &id,
+                    &member,
+                    &request,
+                    Instant::now() + Duration::from_secs(5),
+                    &stop,
+                )
+                .unwrap();
+                assert_eq!(event["room"], id);
+                ("antigravity", "agy")
+            } else {
+                ("codex", "codex")
+            };
+            let replacement = start(provider, Some(&member));
+            advance(&replacement, &["starting", "working"]);
+            for (participant, accepted) in [(&member, has_lineage), (&replacement, false)] {
+                let attempt = PhysicalAttempt {
+                    state_root: repo.as_path(),
+                    contract_repo: repo.as_path(),
+                    execution_repo: repo.as_path(),
+                    root: Some(RootLocator {
+                        attempt: &replacement,
+                        participant,
+                        room_id: &id,
+                    }),
+                    team: None,
+                    provider,
+                    account: None,
+                    selected_model: None,
+                    selected_effort: None,
+                    task_id: None,
+                    write: true,
+                    persistent_session: false,
+                };
+                let error = collab
+                    .with_physical_contract(
+                        &attempt,
+                        Instant::now() + Duration::from_secs(5),
+                        &stop,
+                        Box::new(|contract| {
+                            assert!(accepted);
+                            assert_eq!(contract.resource.unwrap().root_owner, replacement);
+                            Err(oms_command_peer::Error::new(
+                                75,
+                                "fixture reached registration",
+                            ))
+                        }),
+                    )
+                    .unwrap_err();
+                let expected = if accepted {
+                    "fixture reached registration"
+                } else if participant == &member {
+                    "canonical Room lineage"
+                } else {
+                    "participant differs"
+                };
+                assert!(error.message.contains(expected), "{error:?}");
+            }
+            if has_lineage {
+                let next = room.rollover(&id, Some(&member)).unwrap();
+                let before = room.records(&next).unwrap();
+                let error = room
+                    .swap_main(&id, &member, provider, "fixture-model", &member, harness)
+                    .unwrap_err();
+                assert!(error.message.contains("room continues as"), "{error:?}");
+                assert_eq!(room.records(&next).unwrap(), before);
+            }
+            advance(&replacement, &["cancelled"]);
+        }
         let call = |values: &[&str]| {
             let request = Request::parse(&osv(values)).unwrap();
             let mut context = Context::from_environment(&request, repo.as_path()).unwrap();
@@ -3734,6 +3854,28 @@ mod tests {
         .unwrap();
         let before = std::fs::read(oms_command_operations::event_path(repo.as_path())).unwrap();
         call(&["team-register", "--team-spec", "team.json"]).unwrap();
+        let source =
+            serde_json::json!({"attempt_id": owner, "refs": {"panel_room_id": "room-team"}});
+        let refusal = oms_panel_core::Services::check_main_swap_source(
+            &collab,
+            repo.as_path(),
+            &source,
+            &stop,
+        )
+        .unwrap_err();
+        assert!(
+            refusal.message.contains("active Team contracts"),
+            "{refusal:?}"
+        );
+        let mut unrelated = source;
+        unrelated["attempt_id"] = "unrelated-attempt".into();
+        oms_panel_core::Services::check_main_swap_source(
+            &collab,
+            repo.as_path(),
+            &unrelated,
+            &stop,
+        )
+        .unwrap();
         let view: Value =
             serde_json::from_slice(&call(&["team-show", "--id", "team-a"]).unwrap().stdout)
                 .unwrap();
@@ -3928,7 +4070,8 @@ mod tests {
         reject(
             &team,
             RootLocator {
-                owner: "foreign-main",
+                attempt: "foreign-main",
+                participant: "foreign-main",
                 room_id: "room-team",
             },
             "other-account",

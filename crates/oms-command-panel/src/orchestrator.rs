@@ -154,6 +154,7 @@ pub struct Panel<'a> {
     main: Pane,
     main_account_ready: Option<bool>,
     attempt: String,
+    participant: String,
     owner: String,
     room: &'a str,
     leads: BTreeMap<String, Pane>,
@@ -634,9 +635,9 @@ impl<'a> Panel<'a> {
             f.len() == 15
                 && f[4] == "0"
                 && f[6] == f[2]
-                && f[7] == f[9]
                 && f[10] == room
                 && valid_attempt(f[7])
+                && valid_attempt(f[9])
                 && PROVIDERS.contains(&f[8])
         });
         let main = mains
@@ -726,6 +727,7 @@ impl<'a> Panel<'a> {
                 _ => Some(false),
             },
             attempt: main[7].into(),
+            participant: main[9].into(),
             owner: main[8].into(),
             room,
             leads,
@@ -836,7 +838,7 @@ impl<'a> Panel<'a> {
             || refs["panel_harness"] != "codex"
             || refs
                 .get("panel_room_participant")
-                .is_some_and(|member| member != &self.attempt)
+                .is_some_and(|member| member != &self.participant)
         {
             return None;
         }
@@ -1329,7 +1331,7 @@ impl<'a> Panel<'a> {
             || !self.is_live_main(main)
             || main["refs"]
                 .get("panel_room_participant")
-                .is_some_and(|member| member != &self.attempt)
+                .is_some_and(|member| member != &self.participant)
             || !account_binding::claude_binding_still_mapped(host, binding)
         {
             return None;
@@ -1414,7 +1416,7 @@ impl<'a> Panel<'a> {
             || !self.is_live_main(main)
             || main["refs"]
                 .get("panel_room_participant")
-                .is_some_and(|member| member != &self.attempt)
+                .is_some_and(|member| member != &self.participant)
         {
             return None;
         }
@@ -1476,7 +1478,7 @@ impl<'a> Panel<'a> {
             || refs["panel_harness"] != "claude"
             || refs
                 .get("panel_room_participant")
-                .is_some_and(|member| member != &self.attempt)
+                .is_some_and(|member| member != &self.participant)
         {
             return None;
         }
@@ -1753,7 +1755,7 @@ impl<'a> Panel<'a> {
             && self.is_live_main(main)
             && !main["refs"]
                 .get("panel_room_participant")
-                .is_some_and(|member| member != &self.attempt)
+                .is_some_and(|member| member != &self.participant)
     }
 
     fn observe_codex_children(
@@ -1860,13 +1862,14 @@ impl<'a> Panel<'a> {
 
     fn has_live_main_membership(&self, room: &Value) -> bool {
         let mut mains = crate::rows(&room["participants"]).iter().filter(|row| {
-            row["participant"] == self.attempt || (row["role"] == "main" && row["joined"] == true)
+            row["participant"] == self.participant
+                || (row["role"] == "main" && row["joined"] == true)
         });
         room["id"] == self.room
             && room["closed"] == false
             && room["successor"].is_null()
             && mains.next().is_some_and(|row| {
-                row["participant"] == self.attempt
+                row["participant"] == self.participant
                     && row["role"] == "main"
                     && row["provider"] == self.owner
                     && row["joined"] == true
@@ -1885,6 +1888,7 @@ impl<'a> Panel<'a> {
             && main["tool"] == "panel-main"
             && main["refs"]["panel_role"] == "main"
             && main["refs"]["panel_room_id"] == self.room
+            && oms_panel_core::state::main_participant(main) == self.participant
             && main["terminal"] == false
             && main["state"]
                 .as_str()
@@ -2177,7 +2181,7 @@ impl<'a> Panel<'a> {
         require(
             self.caller == self.main.id
                 && std::env::var("OMS_PANEL_MAIN_ATTEMPT").as_deref() == Ok(&self.attempt)
-                && std::env::var("OMS_ROOM_PARTICIPANT").as_deref() == Ok(&self.attempt)
+                && std::env::var("OMS_ROOM_PARTICIPANT").as_deref() == Ok(&self.participant)
                 && owner.is_none_or(|owner| owner == self.owner),
             "provider sessions are managed by the room's Main",
         )?;
@@ -2190,6 +2194,7 @@ impl<'a> Panel<'a> {
                         && row["tool"] == "panel-main"
                         && row["terminal"] == false
                         && row["refs"]["panel_room_id"] == self.room
+                        && oms_panel_core::state::main_participant(row) == self.participant
                         && row["refs"]["panel_native_scheduling"] == "unmanaged"
                 }),
             "native provider scheduling requires a verified Main outside a managed campaign",
@@ -2625,7 +2630,7 @@ impl<'a> Panel<'a> {
                 && caller.room == self.room
                 && caller.owner == self.owner
                 && caller.attempt == self.attempt
-                && caller.participant == self.attempt
+                && caller.participant == self.participant
                 && caller.repo.is_absolute()
                 && caller.repo.canonicalize().map_err(Error::new)?
                     == self.repo.canonicalize().map_err(Error::new)?,
@@ -3064,7 +3069,7 @@ impl<'a> Panel<'a> {
                     && main["refs"]["panel_native_scheduling"] == "unmanaged"
                     && main["refs"]
                         .get("panel_room_participant")
-                        .is_none_or(|member| member == &self.attempt)
+                        .is_none_or(|member| member == &self.participant)
             }),
             "live Main attempt could not be verified for Codex assignment",
         )
@@ -3155,7 +3160,7 @@ impl<'a> Panel<'a> {
         };
         fence()?;
         self.require_exact_main_membership(&repo)?;
-        let first = AlternateComposer::capture(&mut tmux, &target, &signature)?;
+        let first = CodexComposer::capture(&mut tmux, &target, &signature)?;
         require(first.ready(), ALTERNATE_INPUT_UNAVAILABLE)?;
         stable_main()?;
         // Check the exact Room after the last composer read at each mutation fence.
@@ -3489,14 +3494,33 @@ const ALTERNATE_INPUT_UNAVAILABLE: &str =
     "the Codex alternate composer is unavailable, busy, selected, or holds a draft";
 
 #[derive(PartialEq, Eq)]
-struct AlternateComposer {
+pub(crate) struct CodexComposer {
     command: String,
     cursor_x: u32,
     cursor_y: usize,
     screen: String,
 }
 
-impl AlternateComposer {
+impl CodexComposer {
+    pub(crate) fn for_main(frame: &str) -> Result<Self> {
+        let unavailable = || Error::new("Main composer is unavailable, busy, or has a draft");
+        let (identity, screen) = frame.split_once('\n').ok_or_else(unavailable)?;
+        let fields: Vec<_> = identity.split('\t').collect();
+        let ["0", "0", x, y, command, "."] = fields.as_slice() else {
+            return Err(unavailable());
+        };
+        require(
+            !command.is_empty() && command.len() <= 128 && !command.chars().any(char::is_control),
+            "Main composer command is unverified",
+        )?;
+        Ok(Self {
+            command: (*command).into(),
+            cursor_x: x.parse().map_err(|_| unavailable())?,
+            cursor_y: y.parse().map_err(|_| unavailable())?,
+            screen: screen.into(),
+        })
+    }
+
     fn capture(
         tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
         pane: &str,
@@ -3610,7 +3634,7 @@ impl AlternateComposer {
             })
     }
 
-    fn ready(&self) -> bool {
+    pub(crate) fn ready(&self) -> bool {
         self.empty() && !self.busy()
     }
 
@@ -3623,7 +3647,7 @@ impl AlternateComposer {
         })
     }
 
-    fn exact_draft(&self, expected: &str) -> bool {
+    pub(crate) fn exact_draft(&self, expected: &str) -> bool {
         if self.busy() {
             return false;
         }
@@ -3689,8 +3713,8 @@ impl AlternateTurn<'_> {
         &self,
         tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
         pane: &str,
-    ) -> Result<AlternateComposer> {
-        let capture = AlternateComposer::capture(tmux, pane, self.signature)?;
+    ) -> Result<CodexComposer> {
+        let capture = CodexComposer::capture(tmux, pane, self.signature)?;
         require(
             capture.command == self.command,
             "the Codex alternate pane command changed",
@@ -5866,7 +5890,7 @@ mod tests {
                 "{suffix}"
             );
             assert!(!input_ready("codex", &screen));
-            let mut alternate = super::AlternateComposer {
+            let mut alternate = super::CodexComposer {
                 screen,
                 cursor_x: 2,
                 cursor_y: 0,
@@ -5964,7 +5988,7 @@ mod tests {
         ));
         let branch = custom.replace("48% left", "48% left · feature/work");
         assert!(input_ready("codex", &format!("{prompt}{branch}{warning}")));
-        let alternate = |screen, cursor_x| super::AlternateComposer {
+        let alternate = |screen, cursor_x| super::CodexComposer {
             screen,
             cursor_x,
             cursor_y: 0,
@@ -8202,7 +8226,7 @@ mod tests {
         fn codex_alternate_draft_and_receipt_require_visible_exact_text() {
             let prompt = format!("Assign {}", "x".repeat(90));
             let (screen, (x, y)) = alternate_draft(&prompt);
-            let mut composer = AlternateComposer {
+            let mut composer = CodexComposer {
                 command: "codex".into(),
                 screen,
                 cursor_x: x as u32,
