@@ -78,6 +78,11 @@ pub trait Services {
     fn landing_review(&self, _request: &LandingRequest<'_>) -> Result<V> {
         Err(Error::unavailable("main reviewer and peer landing review"))
     }
+    /// Revalidate the exact panel task, candidate and current owner. The JSON
+    /// supplied by a caller is a comparison target, never an authority grant.
+    fn panel_accept(&self, _request: &LandingRequest<'_>, _fence: &V) -> Result<()> {
+        Err(Error::unavailable("panel acceptance authority"))
+    }
     fn fence_landing(&self, _request: &LandingRequest<'_>, _intent: &V) -> Result<()> {
         Err(Error::unavailable(
             "landing lease and approval compare-and-set",

@@ -207,6 +207,62 @@ impl Services for Fake {
                 .ok_or_else(|| Error::new("unexpected council execution")),
             NativeCommand::Room => Ok(output(self.room.borrow().clone())),
             NativeCommand::Land => {
+                let at = args.iter().position(|v| v == "--panel-accept").unwrap();
+                let fence: Value = serde_json::from_str(args[at + 1].to_str().unwrap()).unwrap();
+                results::verify_accept_fence(repo, repo, &fence, self, &STOP)?;
+                for key in ["owner", "main_attempt_id", "task_id", "base", "verify"] {
+                    let mut stale = fence.clone();
+                    stale[key] = "changed".into();
+                    assert!(results::verify_accept_fence(repo, repo, &stale, self, &STOP).is_err());
+                }
+                let mut stale = fence.clone();
+                stale["snapshot"]["review_gate"]["exit"] = 1.into();
+                assert!(results::verify_accept_fence(repo, repo, &stale, self, &STOP).is_err());
+                let artifact_index = Path::new(".oms/artifacts/index.jsonl");
+                let raw = std::fs::read(repo.join(artifact_index)).unwrap();
+                for (task, base, already_applied) in [
+                    (&fence["task_id"], Value::Null, true),
+                    (&json!(""), fence["base"].clone(), true),
+                    (&json!(""), json!("0".repeat(40)), false),
+                ] {
+                    let mut with_landing = raw.clone();
+                    with_landing.extend(
+                        serde_json::to_vec(&json!({
+                            "kind": "patch-land",
+                            "task_id": task,
+                            "patch_sha256": fence["snapshot"]["candidate"]["patch_sha256"],
+                            "base": base,
+                            "exit": 0
+                        }))
+                        .unwrap(),
+                    );
+                    with_landing.push(b'\n');
+                    store_file(repo, artifact_index, &with_landing);
+                    let result = results::verify_accept_fence(repo, repo, &fence, self, &STOP);
+                    store_file(repo, artifact_index, &raw);
+                    if already_applied {
+                        assert!(result.unwrap_err().message.contains("already applied"));
+                    } else {
+                        result.unwrap();
+                    }
+                }
+
+                let plan_path = Path::new(".oms/plan/tasks.json");
+                let plan_raw = std::fs::read(repo.join(plan_path)).unwrap();
+                let mut plan: Value = serde_json::from_slice(&plan_raw).unwrap();
+                let task_id = fence["task_id"].as_str().unwrap();
+                for state in ["review", "done"] {
+                    plan["tasks"][task_id]["state"] = state.into();
+                    store_file(repo, plan_path, &serde_json::to_vec(&plan).unwrap());
+                    let mut historical = fence.clone();
+                    historical["snapshot"]["task"]["state"] = state.into();
+                    let err = results::verify_accept_fence(repo, repo, &historical, self, &STOP);
+                    store_file(repo, plan_path, &plan_raw);
+                    assert!(
+                        err.unwrap_err().message.contains("claimed/running"),
+                        "{state}"
+                    );
+                }
                 let position = args.iter().position(|v| v == "--patch").unwrap();
                 let status = Command::new("git")
                     .args([

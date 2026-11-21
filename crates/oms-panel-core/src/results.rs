@@ -1305,6 +1305,18 @@ pub fn accept_native<S: Services + ?Sized>(
     validate_accept(request)?;
     crate::acceptance::run(repo, request, service, stop)
 }
+/// Re-read native task, owner, candidate and review evidence at the landing
+/// boundary. The caller must also match the patch and admission policy to the
+/// fence; the supplied snapshot does not authorize a different landing.
+pub fn verify_accept_fence<S: Services + ?Sized>(
+    repo: &Path,
+    execution: &Path,
+    fence: &Value,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    crate::acceptance::verify_landing_fence(repo, execution, fence, service, stop)
+}
 /// Checks Git content against the parent acceptance. The native caller must
 /// authenticate publication receipts separately; these arguments grant no authority.
 pub fn verify_publication_contents<S: Services + ?Sized>(

@@ -806,6 +806,43 @@ impl<'a> Plan<'a> {
                 && (!marker_typed(m) || marker_alive(m))
         }))
     }
+    /// Fence a native panel application against the same lease expiry used by
+    /// the plan's review mutation, including running tasks and live markers.
+    pub fn verify_panel_review_lease(&self, expected: &Value) -> Result<()> {
+        let id = expected.text("id");
+        require(
+            self.context.canonical()
+                && valid_id(id)
+                && lineage(expected.text("plan_id"), "plan_")
+                && lineage(expected.text("lease_id"), "lease_")
+                && !expected.text("claimed_by_participant").is_empty(),
+            "invalid canonical panel acceptance lease",
+        )?;
+        let mut snapshot = self.load()?;
+        let task = snapshot.task(id)?.clone();
+        require(
+            snapshot.plan.get("plan_id") == expected.get("plan_id")
+                && ["claimed", "running"].contains(&task.text("state"))
+                && [
+                    "id",
+                    "state",
+                    "lease_id",
+                    "claimed_by_participant",
+                    "provider",
+                    "verify",
+                    "claimed_at",
+                    "updated",
+                    "ttl",
+                ]
+                .iter()
+                .all(|&field| task.get(field) == expected.get(field)),
+            "canonical panel acceptance task or lease changed",
+        )?;
+        require(
+            !self.expired(&mut snapshot, &task, true)?,
+            "canonical panel acceptance task lease expired",
+        )
+    }
     pub(crate) fn actionable(&self, s: &mut Snapshot, t: &Value) -> Result<bool> {
         if !crate::contracts::stale(&s.registry, t)?.is_empty()
             || t.get("executor_id").truth()
