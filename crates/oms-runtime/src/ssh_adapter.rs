@@ -604,19 +604,24 @@ fn validate_snapshot(repo: &Path, digest: &str) -> Result<crate::value::Value> {
     Ok(value)
 }
 
-/// Validate the existing target and exact checkout before reserving a remote
-/// experiment. Execution rechecks these same inputs at its durable front door.
-pub(crate) fn experiment_preflight(
+/// Resolve the retained target and snapshot identity for execution or replay.
+pub(crate) fn experiment_snapshot(
     repo: &Path,
     target: &str,
     host: &str,
     remote: &str,
     snapshot: &str,
-) -> Result<()> {
+) -> Result<crate::value::Value> {
     validate_target(repo, target, host, remote)?;
-    let snap = validate_snapshot(repo, snapshot)?;
-    verify_snapshot_checkouts(repo, &snap)?;
-    Ok(())
+    validate_snapshot(repo, snapshot)
+}
+
+/// Only a new experiment needs a matching live checkout.
+pub(crate) fn verify_experiment_checkout(
+    repo: &Path,
+    snapshot: &crate::value::Value,
+) -> Result<()> {
+    verify_snapshot_checkouts(repo, snapshot).map(|_| ())
 }
 
 struct SnapshotPins {
@@ -1156,6 +1161,34 @@ fn request_matches(
         && record.get("command_sha256").and_then(|v| v.as_str()) == Some(command_sha256)
 }
 
+/// Only an exact, locally retained SSH receipt can resolve experiment custody.
+pub(crate) fn experiment_receipt(
+    repo: &Path,
+    run: &crate::value::Value,
+) -> Result<Option<crate::value::Value>> {
+    let op_id = run.text("run_id");
+    validate_op_id(op_id)?;
+    let Some(receipt) =
+        read_remote_op(repo, op_id).map_err(|_| error("cannot verify remote operation receipt"))?
+    else {
+        return Ok(None);
+    };
+    require(
+        receipt.get("port").is_some_and(serde_json::Value::is_null)
+            && request_matches(
+                &receipt,
+                run.text("host"),
+                None,
+                run.text("remote_dir"),
+                Some(run.text("target")),
+                Some(run.text("snapshot")),
+                run.text("command_sha256"),
+            ),
+        "remote operation receipt does not match the experiment identity",
+    )?;
+    crate::value::from_serde(&receipt).map(Some)
+}
+
 fn parse_meta_part(parts: &BTreeMap<String, Vec<u8>>) -> Option<serde_json::Value> {
     parts
         .get("meta")
@@ -1428,12 +1461,11 @@ fi
             return json_response(75, &record, req.pretty);
         }
     };
-    if parsed
-        .markers
-        .iter()
-        .any(|(kind, _)| kind == "SNAPSHOT_DRIFT")
+    if parsed.parts.is_empty()
+        && matches!(parsed.markers.as_slice(), [(kind, payload)] if kind == "SNAPSHOT_DRIFT" && payload == "1")
     {
         record["state"] = "failed".into();
+        record["failure_kind"] = "snapshot_drift".into();
         record["exit_code"] = 2.into();
         let ts = now()?;
         record["updated_at"] = ts.clone().into();

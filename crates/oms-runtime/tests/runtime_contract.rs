@@ -1196,7 +1196,7 @@ exec sh -c "$last"
         serde_json::to_vec(&registry).unwrap(),
     )
     .unwrap();
-    let contract = r#"{"schema":2,"question":"q","hypothesis":"h","prediction":"p","baseline":{"channel":"local"},"treatment":{"independent_change":"channel"},"controlled_variables":{"data":"fixture"},"metrics":{"primary":{"name":"score","direction":"maximize"}},"seeds":[0,1],"success":{"min_improvement":0},"budget":{"runs":3}}"#;
+    let contract = r#"{"schema":2,"question":"q","hypothesis":"h","prediction":"p","baseline":{"channel":"local"},"treatment":{"independent_change":"channel"},"controlled_variables":{"data":"fixture"},"metrics":{"primary":{"name":"score","direction":"maximize"}},"seeds":[0,1],"success":{"min_improvement":0},"budget":{"runs":4}}"#;
     std::fs::write(f.0.join(".oms/contract.json"), contract).unwrap();
     let registered = f.run(
         &[
@@ -1254,11 +1254,32 @@ exec sh -c "$last"
     let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
     assert_eq!(first["state"], "unknown");
     let calls = std::fs::read(root.join("calls")).unwrap();
+    let ledger = f.0.join(".oms/experiments/runs.jsonl");
+    let pending = std::fs::read(&ledger).unwrap();
     assert_eq!(run("experiment-run-first", command).code, 75);
+    assert_eq!(std::fs::read(&ledger).unwrap(), pending);
     assert_eq!(std::fs::read(root.join("calls")).unwrap(), calls);
     assert_eq!(run("experiment-run-first", "true").code, 2);
     assert_eq!(std::fs::read(root.join("calls")).unwrap(), calls);
     let reconcile = |name| f.run(&["experiment", "reconcile", "--run-id", name], false);
+    let receipt = f.0.join(first["execution_receipt"].as_str().unwrap());
+    let saved = root.join("saved-operation-receipt");
+    std::fs::rename(&receipt, &saved).unwrap();
+    for result in [
+        run("experiment-run-first", command),
+        reconcile("experiment-run-first"),
+        reconcile("experiment-run-first"),
+    ] {
+        assert_eq!(result.code, 75);
+        let result: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(result["state"], "unknown");
+        assert_eq!(result["reconcile_required"], true);
+        assert_eq!(result["reconcile_error"], "missing_operation_receipt");
+    }
+    assert_eq!(std::fs::read(&ledger).unwrap(), pending);
+    assert_eq!(std::fs::read(root.join("calls")).unwrap(), calls);
+    assert!(!receipt.exists());
+    std::fs::rename(saved, receipt).unwrap();
     assert_eq!(
         f.run(&["backend", "target", "revoke", "node"], false).code,
         0
@@ -1285,11 +1306,14 @@ exec sh -c "$last"
     assert_eq!(row["metrics_valid"], true);
     assert_eq!(row["execution_operation_id"], "experiment-run-first");
     assert_eq!(row["result_bundle_sha256"].as_str().unwrap().len(), 64);
-    std::fs::write(f.0.join(".gitignore"), ".oms/\n").unwrap();
     let calls = std::fs::read(root.join("calls")).unwrap();
+    let terminal = std::fs::read(&ledger).unwrap();
     assert_eq!(reconcile("experiment-run-first").code, 0);
     assert_eq!(run("experiment-run-first", command).code, 0);
+    assert_eq!(run("experiment-run-first", "true").code, 2);
+    assert_eq!(std::fs::read(&ledger).unwrap(), terminal);
     assert_eq!(std::fs::read(root.join("calls")).unwrap(), calls);
+    std::fs::write(f.0.join(".gitignore"), ".oms/\n").unwrap();
     assert_eq!(
         std::fs::read_to_string(remote.join(".git/executions")).unwrap(),
         "ran\n"
@@ -1320,6 +1344,35 @@ exec sh -c "$last"
     let calls = std::fs::read(root.join("calls")).unwrap();
     assert_ne!(run("experiment-run-missing", "true").code, 0);
     assert_eq!(std::fs::read(root.join("calls")).unwrap(), calls);
+
+    std::fs::write(
+        remote.join(".gitignore"),
+        ".oms/\n# remote snapshot drift\n",
+    )
+    .unwrap();
+    let drift = run("experiment-run-drift", command);
+    assert_eq!(drift.code, 2, "{}", String::from_utf8_lossy(&drift.stderr));
+    let drift: serde_json::Value = serde_json::from_slice(&drift.stdout).unwrap();
+    assert_eq!(drift["state"], "failed");
+    assert_eq!(drift["failure_kind"], "snapshot_drift");
+    assert_eq!(drift["reconcile_required"], false);
+    assert!(drift.get("command_exit").is_none());
+    let durable: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(f.0.join(drift["execution_receipt"].as_str().unwrap())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(durable["failure_kind"], "snapshot_drift");
+    assert!(durable["remote_meta"].is_null());
+    let calls = std::fs::read(root.join("calls")).unwrap();
+    let terminal = std::fs::read(&ledger).unwrap();
+    assert_eq!(run("experiment-run-drift", command).code, 2);
+    assert_eq!(reconcile("experiment-run-drift").code, 2);
+    assert_eq!(std::fs::read(root.join("calls")).unwrap(), calls);
+    assert_eq!(std::fs::read(&ledger).unwrap(), terminal);
+    assert_eq!(
+        std::fs::read_to_string(remote.join(".git/executions")).unwrap(),
+        "ran\nran\n"
+    );
     let exhausted = run("experiment-run-extra", command);
     assert_eq!(exhausted.code, 2);
     assert!(String::from_utf8_lossy(&exhausted.stderr).contains("run budget spent"));
@@ -1327,6 +1380,6 @@ exec sh -c "$last"
     let summary = f.run(&["experiment", "summarize", "--id", "trial"], false);
     assert_eq!(summary.code, 0);
     let summary: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
-    assert_eq!(summary["budget"]["runs"]["used"], 3);
+    assert_eq!(summary["budget"]["runs"]["used"], 4);
     assert_eq!(summary["verdict"], "inconclusive");
 }

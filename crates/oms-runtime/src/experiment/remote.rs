@@ -41,6 +41,25 @@ fn terminal(row: &Value) -> bool {
     )
 }
 
+fn same_run(actual: &Value, expected: &Value) -> bool {
+    IDENTITY_FIELDS
+        .iter()
+        .copied()
+        .chain([
+            "schema",
+            "profile",
+            "target",
+            "target_fingerprint",
+            "host",
+            "remote_dir",
+            "request_sha256",
+            "command_sha256",
+            "execution_operation_id",
+            "execution_receipt",
+        ])
+        .all(|name| actual.get(name) == expected.get(name))
+}
+
 fn outcome(row: Value) -> (Value, i32) {
     let code = row.get("exit").int().ok().unwrap_or(75) as i32;
     (row, code)
@@ -114,26 +133,42 @@ fn transport_args(rt: &Runtime<'_>, row: &Value, action: &str) -> Vec<OsString> 
     ]
 }
 
-fn finish(
-    rt: &Runtime<'_>,
-    initial: &Value,
-    response: crate::router::Response,
-) -> Result<(Value, i32)> {
-    let observation = parse(&response.stdout).unwrap_or(Value::Null);
-    let mut row = initial.clone();
-    row.set("updated_at", string(&rt.now))?;
+fn finish(rt: &Runtime<'_>, initial: &Value, transport_exit: Option<i32>) -> Result<(Value, i32)> {
+    let guard = rt.lock(Path::new(RUNS))?;
+    let current = latest(rt, initial.text("run_id"))?
+        .ok_or_else(|| error("remote experiment launch intent disappeared"))?;
+    require(
+        same_run(&current, initial),
+        "remote experiment identity changed during reconciliation",
+    )?;
+    if terminal(&current) {
+        return Ok(outcome(current));
+    }
+    let observation = crate::ssh_adapter::experiment_receipt(&rt.repo, &current)?;
+    let mut row = current.clone();
     row.set("state", string("unknown"))?;
     row.set("exit", number(75))?;
     row.set("metrics_valid", b(false))?;
     row.set("reconcile_required", b(true))?;
-    row.set("transport_exit", number(response.code))?;
-    let bound = observation.text("op_id") == row.text("run_id")
-        && observation.text("command_sha256") == row.text("command_sha256")
-        && ["target", "host", "remote_dir", "snapshot"]
-            .iter()
-            .all(|name| observation.get(name) == row.get(name));
-    if bound {
-        row.set("remote_state", string(observation.text("state")))?;
+    if let Some(code) = transport_exit {
+        row.set("transport_exit", number(code))?;
+    }
+    if let Some(observation) = observation {
+        let state = observation.text("state");
+        require(
+            [
+                "intent",
+                "unknown",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "lost",
+            ]
+            .contains(&state),
+            "invalid remote operation receipt state",
+        )?;
+        row.set("remote_state", string(state))?;
         match observation.text("state") {
             "succeeded" => {
                 let meta = observation.get("remote_meta");
@@ -222,25 +257,29 @@ fn finish(
             state @ ("failed" | "cancelled" | "lost") => {
                 row.set("state", string(state))?;
                 let exit = observation.get("exit_code").int().unwrap_or(1);
-                row.set("command_exit", number(exit))?;
+                if observation.text("failure_kind") == "snapshot_drift" {
+                    require(
+                        state == "failed" && exit == 2,
+                        "invalid snapshot drift receipt",
+                    )?;
+                    row.set("failure_kind", string("snapshot_drift"))?;
+                } else {
+                    row.set("command_exit", number(exit))?;
+                }
                 row.set("exit", number(if exit == 0 { 1 } else { exit }))?;
                 row.set("reconcile_required", b(false))?;
             }
             "running" => row.set("state", string("running"))?,
             _ => {}
         }
+    } else {
+        row.set("reconcile_error", string("missing_operation_receipt"))?;
+        return Ok(outcome(row));
     }
-    let guard = rt.lock(Path::new(RUNS))?;
-    let current = latest(rt, row.text("run_id"))?
-        .ok_or_else(|| error("remote experiment launch intent disappeared"))?;
-    require(
-        current.get("request_sha256") == row.get("request_sha256"),
-        "remote experiment identity changed during reconciliation",
-    )?;
-    // A slower observation cannot overwrite a completed run from another caller.
-    if terminal(&current) {
+    if row == current {
         return Ok(outcome(current));
     }
+    row.set("updated_at", string(&rt.now))?;
     rt.append_locked(Path::new(RUNS), &row, &guard)?;
     Ok(outcome(row))
 }
@@ -289,7 +328,7 @@ pub(super) fn run(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
         crate::targets::approved(route)?,
         "target execution is not approved",
     )?;
-    crate::ssh_adapter::experiment_preflight(
+    let retained_snapshot = crate::ssh_adapter::experiment_snapshot(
         &rt.repo,
         target,
         route.text("ssh_alias"),
@@ -356,20 +395,20 @@ pub(super) fn run(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
         "command_sha256",
         string(crate::ssh_adapter::command_digest(&command)?),
     )?;
-    {
+    let launch = {
         let guard = rt.lock(Path::new(RUNS))?;
         if let Some(existing) = latest(rt, run_id)? {
             require(
-                existing.text("profile") == "remote"
-                    && existing.get("request_sha256") == row.get("request_sha256")
-                    && existing.get("command_sha256") == row.get("command_sha256"),
+                same_run(&existing, &row),
                 "conflicting reuse of remote experiment --run-id",
             )?;
             if terminal(&existing) {
                 return Ok(outcome(existing));
             }
             row = existing;
+            false
         } else {
+            crate::ssh_adapter::verify_experiment_checkout(&rt.repo, &retained_snapshot)?;
             let (reserved, reason) =
                 reserve(rt, &contract, name, run_id, r.text("reason", "")?, "remote")?;
             if !reason.is_empty() {
@@ -387,15 +426,18 @@ pub(super) fn run(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
                     "remote launch intent recorded",
                 )?;
             }
+            true
         }
+    };
+    if !launch {
+        return finish(rt, &row, None);
     }
     let mut args = transport_args(rt, &row, "exec");
     args.extend(["--snapshot".into(), snapshot.into(), "--".into()]);
     args.extend(command);
-    // The existing SSH owner writes its intent before any remote effect. An
-    // existing unknown/running op is reported, never automatically launched again.
+    // Only the caller that recorded the initial experiment intent reaches exec.
     let response = crate::ssh_adapter::run(&args, &rt.repo, rt.interrupted);
-    finish(rt, &row, response)
+    finish(rt, &row, Some(response.code))
 }
 
 pub(super) fn reconcile(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
@@ -418,10 +460,17 @@ pub(super) fn reconcile(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
     let route = registry.get("targets").get(row.text("target"));
     require(
         crate::targets::approved(route)?
-            && route.get("approved_fingerprint") == row.get("target_fingerprint"),
+            && route.get("approved_fingerprint") == row.get("target_fingerprint")
+            && route.get("ssh_alias") == row.get("host")
+            && route.get("workdir") == row.get("remote_dir"),
         "remote target identity or execution approval changed",
     )?;
-    let args = transport_args(rt, &row, "reconcile");
-    let response = crate::ssh_adapter::run(&args, &rt.repo, rt.interrupted);
-    finish(rt, &row, response)
+    let receipt = crate::ssh_adapter::experiment_receipt(&rt.repo, &row)?;
+    let transport_exit = receipt
+        .is_some_and(|receipt| matches!(receipt.text("state"), "intent" | "running" | "unknown"))
+        .then(|| {
+            let args = transport_args(rt, &row, "reconcile");
+            crate::ssh_adapter::run(&args, &rt.repo, rt.interrupted).code
+        });
+    finish(rt, &row, transport_exit)
 }
