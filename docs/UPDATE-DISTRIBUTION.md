@@ -14,7 +14,10 @@ oms update --apply-prepared
 ```
 
 `--prepare` resolves the selected ref once, validates the incoming source and
-payload, and records their identities. It may fetch Git objects and build
+payload, and records their identities. Without `--ref`, it reads the saved ref
+from the install receipt while holding the lifecycle and receipt locks.
+Preparation rejects group- or world-writable directories from the install
+checkout root through the staged payload. It may fetch Git objects and build
 dependencies, but leaves the current checkout, installation receipt, managed
 configuration, frontdoor and provider versions unchanged. Active workers may
 continue while preparation runs. Lifecycle mutations remain serialized.
@@ -22,9 +25,9 @@ continue while preparation runs. Lifecycle mutations remain serialized.
 `--apply-prepared` selects the saved commit without fetching a new ref or
 resolving it again. It rejects a changed base commit, replaced source directory, changed
 installation receipt, missing payload or changed payload bytes. It rechecks
-the existing worker/call fences immediately before activation, then runs the
-normal incoming installer and doctor. Provider refresh remains a separate phase
-after core commit; `--no-tools` suppresses that phase.
+the existing worker/call fences after snapshots and before the live checkout,
+then runs the normal incoming installer and doctor. Provider refresh remains a
+separate phase after core commit; `--no-tools` suppresses that phase.
 
 A busy apply preserves the candidate for explicit retry. `prepared` describes
 verified payload availability, not permission to activate while workers run.

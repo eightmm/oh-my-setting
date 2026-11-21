@@ -245,6 +245,17 @@ pub(crate) fn validate_reference(reference: &str) -> Result<()> {
     Ok(())
 }
 
+fn selected_reference<'a>(
+    explicit: Option<&'a str>,
+    receipt: Option<&'a Value>,
+) -> Result<&'a str> {
+    let reference = explicit
+        .or_else(|| receipt.and_then(|row| row["ref"].as_str()))
+        .unwrap_or("edge");
+    validate_reference(reference)?;
+    Ok(reference)
+}
+
 fn fetch_lock(paths: &Paths, flag: &AtomicBool) -> Result<oms_lock::Guard> {
     let common = PathBuf::from(r::git(
         &paths.source,
@@ -306,7 +317,6 @@ fn prepare_update(
     options: &Options,
     flag: &AtomicBool,
     services: &dyn crate::Services,
-    reference: &str,
 ) -> Result<crate::Output> {
     r::child_guard()?;
     if borrowed(paths).unwrap_or(false) {
@@ -327,6 +337,7 @@ fn prepare_update(
     let old = paths
         .require_owner()?
         .ok_or_else(|| r::Error(2, "update requires an install receipt".into()))?;
+    let reference = selected_reference(options.get("--ref"), Some(&old))?;
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
     let receipt_digest = r::hash(&r::read(&paths.receipt, r::LIMIT)?);
     if !r::git(
@@ -578,17 +589,16 @@ fn run_selected(
         }
         return crate::agy_surface::probe(paths, flag);
     }
+    if options.has("--prepare") && !options.preview() {
+        return prepare_update(paths, options, flag, services);
+    }
     let old = paths.require_owner()?;
-    let reference = reviewed
-        .map(|r| r.reference)
-        .or_else(|| options.get("--ref"))
-        .map(str::to_owned)
-        .or_else(|| {
-            old.as_ref()
-                .and_then(|r| r["ref"].as_str().map(str::to_owned))
-        })
-        .unwrap_or_else(|| "edge".into());
-    validate_reference(&reference)?;
+    let reference = selected_reference(
+        reviewed
+            .map(|r| r.reference)
+            .or_else(|| options.get("--ref")),
+        old.as_ref(),
+    )?;
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
     if options.preview() {
         return r::json(
@@ -596,13 +606,10 @@ fn run_selected(
         );
     }
     r::child_guard()?;
-    if options.has("--prepare") {
-        return prepare_update(paths, options, flag, services, &reference);
-    }
     let check = options.has("--check")
         || options.tool == "auto-update" && options.action != "apply" && !options.has("--apply");
     if !check {
-        let result = apply_update(paths, options, flag, services, &reference, reviewed);
+        let result = apply_update(paths, options, flag, services, reference, reviewed);
         if options.tool == "auto-update"
             && let Err(error) = &result
         {
@@ -615,7 +622,7 @@ fn run_selected(
                 },
                 &current,
                 "",
-                &reference,
+                reference,
                 "apply",
             )?;
         }
@@ -623,16 +630,16 @@ fn run_selected(
     }
     let _fetch_guard = fetch_lock(paths, flag)?;
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
-    let (target, reference) =
-        match fetch(paths, &reference, options.has("--fallback-to-edge"), flag) {
-            Ok(target) => target,
-            Err(error) => {
-                if options.tool == "auto-update" {
-                    publish(paths, "failed", &current, "", &reference)?;
-                }
-                return Err(error);
+    let (target, reference) = match fetch(paths, reference, options.has("--fallback-to-edge"), flag)
+    {
+        Ok(target) => target,
+        Err(error) => {
+            if options.tool == "auto-update" {
+                publish(paths, "failed", &current, "", reference)?;
             }
-        };
+            return Err(error);
+        }
+    };
     if target.len() != 40 || !target.bytes().all(|b| b.is_ascii_hexdigit()) {
         return r::fail("invalid fetched update commit");
     }
@@ -963,6 +970,8 @@ fn apply_update(
     fences(paths, flag)?;
     let _operation = crate::lifecycle_lock::acquire(paths, flag)?;
     let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    // Roll back the transaction before deciding whether to remove its lease.
+    let _lease;
     let mut tx = Transaction::begin_update(paths)?;
     let old = paths
         .require_owner()?
@@ -1091,9 +1100,7 @@ fn apply_update(
         &target,
         &old,
     )?;
-    // A worker may have started while preparation or its self-check ran.
-    // Repeat the registry check immediately before live publication. This
-    // does not claim atomic admission across independent worker producers.
+    // Defer before taking snapshots if a worker started during preparation.
     fences(paths, flag)?;
     if let Some(row) = &prepared {
         row.require_current(paths, &current)?;
@@ -1141,13 +1148,16 @@ fn apply_update(
     };
     let original_targets = managed_paths(paths, &old)?;
     let start = tx.prepare_external(&original_targets)?;
+    _lease = Lease::new(paths, flag)?;
+    // Snapshotting provider state can take time. Fence again before scheduling
+    // the checkout in the journal, so a deferral does not need Git rollback.
+    fences(paths, flag)?;
     tx.effect(crate::effects::Effect::GitCheckout {
         source: paths.source.clone(),
         before: current.clone(),
         after: target.clone(),
         branch: branch.clone(),
     })?;
-    let _lease = Lease::new(paths, flag)?;
     let result = (|| -> Result<Value> {
         r::git(&paths.source, &["checkout", "--detach", &target], flag)?;
         let mut known = managed_paths(paths, &old)?;

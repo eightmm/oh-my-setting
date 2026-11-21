@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::AtomicBool,
+    time::{Duration, Instant},
 };
 
 struct Fixture(PathBuf);
@@ -337,7 +338,7 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
         .root
         .join("config/oh-my-setting/native-preparation/prepared.json");
     let cache = source.join("target/oms-native").join(target);
-    let unchanged = || {
+    let unchanged = |prior: &[u8]| {
         assert_eq!(fs::read(host.receipt()).unwrap(), prior);
         assert_eq!(fs::read(host.frontdoor()).unwrap(), b"prior frontdoor");
         assert_eq!(
@@ -379,7 +380,7 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
             assert_eq!(call("update", args, &source, host).0, 2, "{args:?}");
         }
         assert_eq!(status()["status"], "none");
-        unchanged();
+        unchanged(prior);
         assert!(!preparation.exists());
         assert!(!host.root.join("flow").exists());
         assert!(host.phases.borrow().is_empty());
@@ -387,8 +388,42 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
     if host.fail == "prepared-live" {
         host.mark_worker();
     }
-    let prepared = call("update", &["--prepare", "--ref", "edge"], &source, host);
-    unchanged();
+    let (prepared, selected_receipt) = if host.fail == "prepared-locked-ref" {
+        let mut receipt = read(&host.receipt());
+        receipt["ref"] = json!(target);
+        let selected = serde_json::to_vec(&receipt).unwrap();
+        let mut settings = oms_lock::Settings::from_env().unwrap();
+        settings.cwd = source.clone();
+        let lock = oms_lock::Lock::for_file(&host.receipt(), settings).unwrap();
+        let guard = lock.acquire(None).unwrap();
+        let lifecycle_owner = host.root.join("locks/install-lifecycle.lock.d/owner");
+        let prepared = std::thread::scope(|scope| {
+            let receipt_path = host.receipt();
+            let change = scope.spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !lifecycle_owner.is_file() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "prepare never acquired lifecycle lock"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                write(&receipt_path, &receipt);
+                drop(guard);
+            });
+            let result = call("update", &["--prepare"], &source, host);
+            change.join().unwrap();
+            result
+        });
+        (prepared, Some(selected))
+    } else {
+        (
+            call("update", &["--prepare", "--ref", "edge"], &source, host),
+            None,
+        )
+    };
+    let prior = selected_receipt.as_deref().unwrap_or(prior);
+    unchanged(prior);
     assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
     if host.fail == "prepared-cancel" {
         assert_eq!(prepared.0, 130);
@@ -405,7 +440,7 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
         };
         success(call("update", &["--prepare"], &source, &retry));
         assert_eq!(status()["status"], "prepared");
-        unchanged();
+        unchanged(prior);
         return;
     }
     success(prepared);
@@ -419,9 +454,14 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
     assert_eq!(report["status"], "prepared");
     assert_eq!(report["current_commit"], host.before);
     assert_eq!(report["target_commit"], target);
-    assert_eq!(report["ref"], "edge");
+    let expected_ref = if host.fail == "prepared-locked-ref" {
+        target
+    } else {
+        "edge"
+    };
+    assert_eq!(report["ref"], expected_ref);
     assert_eq!(fs::read(&preparation).unwrap(), receipt);
-    unchanged();
+    unchanged(prior);
     if host.fail == "prepared-live" {
         let out = call("update", &["--apply-prepared", "--no-tools"], &source, host);
         assert_eq!(
@@ -429,8 +469,64 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
             "an active worker defers activation, not preparation"
         );
         assert_eq!(fs::read(&preparation).unwrap(), receipt);
-        unchanged();
+        unchanged(prior);
         fs::remove_file(host.worker_marker()).unwrap();
+    }
+    if host.fail == "prepared-cutover-worker" {
+        let marker = host.worker_marker();
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let arm = host.root.join("start-cutover-worker");
+        fs::write(
+            &arm,
+            format!("{}\n{}\n", std::process::id(), marker.display()),
+        )
+        .unwrap();
+        let git = host.root.join("bin/git");
+        let actual = host.root.join("bin/actual");
+        fs::create_dir(&actual).unwrap();
+        fs::rename(&git, actual.join("git")).unwrap();
+        fs::write(
+            &git,
+            br#"#!/bin/sh
+set -eu
+root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
+arm="$root/start-cutover-worker"
+if [ -f "$arm" ]; then
+    case "$*" in
+        *" symbolic-ref --quiet HEAD")
+            { read -r worker; read -r marker; } < "$arm"
+            printf 'kind=oh-my-setting-temp\npid=%s\n' "$worker" > "$marker"
+            ;;
+        *" checkout --detach "*) printf 'checkout attempted\n' >> "$root/cutover-checkouts" ;;
+    esac
+fi
+exec "$root/bin/actual/git" "$@"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+        let out = call("update", &["--apply-prepared", "--no-tools"], &source, host);
+        assert!(
+            marker.exists(),
+            "worker starts during cutover validation: {}",
+            String::from_utf8_lossy(&out.2)
+        );
+        assert_eq!(out.0, 76, "{}", String::from_utf8_lossy(&out.2));
+        assert!(String::from_utf8_lossy(&out.2).contains("live worker"));
+        assert!(!host.root.join("cutover-checkouts").exists());
+        let update = host.root.join("config/oh-my-setting/native-update");
+        assert!(!update.join("transaction.json").exists());
+        assert!(!update.join("lease.json").exists());
+        assert_eq!(
+            host.phases.borrow().as_slice(),
+            [IncomingPhase::Preflight; 2]
+        );
+        assert_eq!(fs::read(&preparation).unwrap(), receipt);
+        assert_eq!(status()["status"], "prepared");
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+        unchanged(prior);
+        fs::remove_file(arm).unwrap();
+        fs::remove_file(marker).unwrap();
     }
     if host.fail == "prepared-stale" {
         host.git(
@@ -447,7 +543,7 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
         assert_eq!(*host.phases.borrow(), phases);
         assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), changed);
         assert_eq!(fs::read(&preparation).unwrap(), receipt);
-        unchanged();
+        unchanged(prior);
         host.git(&source, &["reset", "--hard", &host.before]);
         let mut changed_receipt = read(&host.receipt());
         changed_receipt["ref"] = json!("new-selection");
@@ -474,7 +570,7 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
         );
         assert_eq!(*host.phases.borrow(), phases, "invalid bytes never execute");
         assert_eq!(fs::read(&preparation).unwrap(), receipt);
-        unchanged();
+        unchanged(prior);
         return;
     }
     let remote = host.root.join("origin.git");
@@ -548,7 +644,7 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
             "build\nproof\n",
             "a rejected archive never builds or executes its payload"
         );
-        unchanged();
+        unchanged(prior);
         success(prepare_bundle(&digest));
         assert_eq!(
             host.phases.borrow().as_slice(),
@@ -558,17 +654,19 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
         assert_eq!(status()["ref"], target);
         assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
         assert!(cache.join("oms").is_file());
-        unchanged();
+        unchanged(prior);
     } else {
-        let tree = host.git(&source, &["rev-parse", &format!("{target}^{{tree}}")]);
-        let advanced = host.git(
-            &source,
-            &["commit-tree", &tree, "-p", target, "-m", "upstream advance"],
-        );
-        host.git(
-            &source,
-            &["push", "origin", &format!("{advanced}:refs/heads/main")],
-        );
+        if host.fail != "prepared-locked-ref" {
+            let tree = host.git(&source, &["rev-parse", &format!("{target}^{{tree}}")]);
+            let advanced = host.git(
+                &source,
+                &["commit-tree", &tree, "-p", target, "-m", "upstream advance"],
+            );
+            host.git(
+                &source,
+                &["push", "origin", &format!("{advanced}:refs/heads/main")],
+            );
+        }
         fs::rename(&remote, host.root.join("offline-origin.git")).unwrap();
     }
     let args = if host.fail == "prepared-refresh" {
@@ -590,7 +688,10 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
     assert_eq!(read(&host.receipt())["previous_commit"], host.before);
     assert_eq!(
         read(&host.receipt())["ref"],
-        if host.fail == "prepared-bundle" {
+        if matches!(
+            host.fail.as_str(),
+            "prepared-bundle" | "prepared-locked-ref"
+        ) {
             target
         } else {
             "edge"
@@ -628,6 +729,8 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
             "crash",
             "foreign",
             "late-worker",
+            "prepared-locked-ref",
+            "prepared-cutover-worker",
             "prepared-live",
             "prepared-stale",
             "prepared-tamper",
@@ -987,7 +1090,7 @@ exit 23
         );
         return;
     }
-    fs::create_dir(&source).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&source).unwrap();
     host.git(&source, &["init", "-q", "--initial-branch=main"]);
     host.git(
         &source,
@@ -1025,6 +1128,9 @@ exit 23
     .unwrap();
     host.git(&source, &["commit", "-qam", "incoming"]);
     let target = host.git(&source, &["rev-parse", "HEAD"]);
+    if host.fail == "prepared-locked-ref" {
+        host.git(&source, &["commit", "--allow-empty", "-qm", "edge moved"]);
+    }
     if host.fail == "release-custom" {
         host.git(&source, &["branch", "development"]);
         host.git(&source, &["tag", "development", &host.before]);
@@ -1083,6 +1189,8 @@ exit 23
         );
     } else if host.fail == "fallback" {
         receipt["ref"] = json!("removed-upstream-branch");
+    } else if host.fail == "prepared-live" {
+        receipt["ref"] = json!("saved-pin");
     }
     write(&host.receipt(), &receipt);
     let prior = fs::read(host.receipt()).unwrap();
