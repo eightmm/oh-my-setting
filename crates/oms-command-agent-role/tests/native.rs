@@ -256,16 +256,19 @@ fn classifier_help_errors_and_interruption() {
     for (args, message) in [
         (vec!["--bad"], "unknown argument: --bad"),
         (vec!["--repo"], "--repo requires a path"),
-        (vec!["--provider"], "--provider requires claude or codex"),
+        (
+            vec!["--provider"],
+            "--provider requires claude or codex or antigravity",
+        ),
         (vec!["--name"], "--name requires a value"),
         (vec!["show"], "show requires --name"),
         (
             vec!["render", "--name", "builder"],
-            "render requires --provider claude|codex",
+            "render requires --provider claude|codex|antigravity",
         ),
         (
             vec!["render", "--name", "builder", "--provider", "other"],
-            "render requires --provider claude|codex",
+            "render requires --provider claude|codex|antigravity",
         ),
         (
             vec!["path", "--repo", "absent", "--name", "x"],
@@ -491,8 +494,71 @@ fn render_matches_canonical_goldens_for_both_providers_and_scopes() {
             );
             fs::remove_file(f.0.join(format!("project/.oms/roles/{role}.md"))).unwrap();
         }
+        let claude_bundled = case["claude-bundled"].as_str().unwrap();
+        let desc_line = claude_bundled
+            .lines()
+            .find(|line| line.starts_with("description: "))
+            .unwrap();
+        let writable = matches!(role, "builder" | "implementation-worker");
+        let antigravity_expected = |allow_write: bool| {
+            let mut lines = vec![
+                "---".to_string(),
+                format!("name: oms-{role}"),
+                desc_line.to_string(),
+                "mainAgent: false".to_string(),
+                "subagent: true".to_string(),
+                "model: inherit".to_string(),
+                format!(
+                    "commandExecutionPolicy: {}",
+                    if allow_write { "sandbox" } else { "off" }
+                ),
+                "tools:".to_string(),
+                "  - view_file".to_string(),
+                "  - grep_search".to_string(),
+            ];
+            if allow_write {
+                lines.extend([
+                    "  - replace_file_content".to_string(),
+                    "  - write_to_file".to_string(),
+                    "  - run_command".to_string(),
+                ]);
+            }
+            lines.extend([
+                "---".to_string(),
+                String::new(),
+                text.trim_end_matches('\n').to_string() + "\n",
+            ]);
+            lines.join("\n")
+        };
+        assert_eq!(
+            f.ok(&["render", "--name", role, "--provider", "antigravity"]),
+            antigravity_expected(writable).as_bytes()
+        );
+        f.write(&format!("global/{role}.md"), text);
+        assert_eq!(
+            f.ok(&[
+                "render",
+                "--name",
+                role,
+                "--provider",
+                "antigravity",
+                "--global"
+            ]),
+            antigravity_expected(false).as_bytes()
+        );
+        fs::remove_file(f.0.join(format!("global/{role}.md"))).unwrap();
+        f.write(&format!("project/.oms/roles/{role}.md"), text);
+        assert_eq!(
+            f.ok(&["render", "--name", role, "--provider", "antigravity"]),
+            antigravity_expected(false).as_bytes()
+        );
+        fs::remove_file(f.0.join(format!("project/.oms/roles/{role}.md"))).unwrap();
     }
-    assert!(!f.0.join("project/.codex").exists() && !f.0.join("project/.claude").exists());
+    assert!(
+        !f.0.join("project/.codex").exists()
+            && !f.0.join("project/.claude").exists()
+            && !f.0.join("project/.agents").exists()
+    );
 }
 
 #[test]
@@ -500,7 +566,7 @@ fn every_contract_role_writer_authority_and_surface() {
     let f = Fixture::new();
     let roles: Value = serde_json::from_slice(include_bytes!("data/role-contracts.json")).unwrap();
     for role in roles["roles"].as_object().unwrap().keys() {
-        for provider in ["claude", "codex"] {
+        for provider in ["claude", "codex", "antigravity"] {
             let output =
                 String::from_utf8(f.ok(&["render", "--name", role, "--provider", provider]))
                     .unwrap();
@@ -514,15 +580,45 @@ fn every_contract_role_writer_authority_and_surface() {
                     | "performance-engineer"
                     | "implementation-worker"
             );
-            assert_eq!(
-                output.contains(if provider == "claude" {
-                    "Edit, Write, Bash"
-                } else {
-                    "workspace-write"
-                }),
-                writable,
-                "{role}"
-            );
+            let marker = match provider {
+                "claude" => "Edit, Write, Bash",
+                "codex" => "workspace-write",
+                _ => "commandExecutionPolicy: sandbox",
+            };
+            assert_eq!(output.contains(marker), writable, "{provider}/{role}");
+            if provider == "antigravity" {
+                assert!(
+                    output.contains("mainAgent: false\nsubagent: true\nmodel: inherit\n"),
+                    "{role}"
+                );
+                assert!(
+                    output.contains("tools:\n  - view_file\n  - grep_search\n"),
+                    "{role}"
+                );
+                assert_eq!(
+                    output.contains("commandExecutionPolicy: off\n"),
+                    !writable,
+                    "{role}"
+                );
+                for write_tool in [
+                    "  - replace_file_content\n",
+                    "  - write_to_file\n",
+                    "  - run_command\n",
+                ] {
+                    assert_eq!(output.contains(write_tool), writable, "{role}/{write_tool}");
+                }
+                for forbidden in [
+                    "effort:",
+                    "invoke_subagent",
+                    "define_subagent",
+                    "manage_subagents",
+                    "send_message",
+                    "swarm",
+                    "run_workflow",
+                ] {
+                    assert!(!output.contains(forbidden), "{role}/{forbidden}");
+                }
+            }
         }
     }
     for role in [
@@ -538,18 +634,32 @@ fn every_contract_role_writer_authority_and_surface() {
             &format!("source/roles/{role}.md"),
             "## Mandate\n\nWrite assigned paths.\n",
         );
-        for provider in ["claude", "codex"] {
-            let marker = if provider == "claude" {
-                "Edit, Write, Bash"
-            } else {
-                "workspace-write"
+        for provider in ["claude", "codex", "antigravity"] {
+            let marker = match provider {
+                "claude" => "Edit, Write, Bash",
+                "codex" => "workspace-write",
+                _ => "commandExecutionPolicy: sandbox",
             };
             let args = ["render", "--name", role, "--provider", provider];
             assert!(String::from_utf8_lossy(&f.ok(&args)).contains(marker));
             f.write(&format!("global/{role}.md"), "Override.\n");
-            assert!(!String::from_utf8_lossy(&f.ok(&args)).contains(marker));
+            let global_out = String::from_utf8(f.ok(&args)).unwrap();
+            assert!(!global_out.contains(marker));
+            if provider == "antigravity" {
+                assert!(global_out.contains("commandExecutionPolicy: off\n"));
+                assert!(!global_out.contains("replace_file_content"));
+                assert!(!global_out.contains("write_to_file"));
+                assert!(!global_out.contains("run_command"));
+            }
             f.write(&format!("project/.oms/roles/{role}.md"), "Override.\n");
-            assert!(!String::from_utf8_lossy(&f.ok(&args)).contains(marker));
+            let project_out = String::from_utf8(f.ok(&args)).unwrap();
+            assert!(!project_out.contains(marker));
+            if provider == "antigravity" {
+                assert!(project_out.contains("commandExecutionPolicy: off\n"));
+                assert!(!project_out.contains("replace_file_content"));
+                assert!(!project_out.contains("write_to_file"));
+                assert!(!project_out.contains("run_command"));
+            }
             fs::remove_file(f.0.join(format!("global/{role}.md"))).unwrap();
             fs::remove_file(f.0.join(format!("project/.oms/roles/{role}.md"))).unwrap();
         }

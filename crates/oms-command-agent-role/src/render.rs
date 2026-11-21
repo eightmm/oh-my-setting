@@ -99,6 +99,32 @@ pub(crate) fn render(
         lines.extend(["---".into(), String::new(), body]);
         return Ok(lines.join("\n"));
     }
+    if provider == "antigravity" {
+        let mut lines = vec![
+            "---".into(),
+            format!("name: {name}"),
+            format!("description: {}", quoted(&desc)),
+            "mainAgent: false".into(),
+            "subagent: true".into(),
+            "model: inherit".into(),
+            format!(
+                "commandExecutionPolicy: {}",
+                if writable { "sandbox" } else { "off" }
+            ),
+            "tools:".into(),
+            "  - view_file".into(),
+            "  - grep_search".into(),
+        ];
+        if writable {
+            lines.extend([
+                "  - replace_file_content".into(),
+                "  - write_to_file".into(),
+                "  - run_command".into(),
+            ]);
+        }
+        lines.extend(["---".into(), String::new(), body]);
+        return Ok(lines.join("\n"));
+    }
     if body
         .chars()
         .any(|c| matches!(c, '\0'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'))
