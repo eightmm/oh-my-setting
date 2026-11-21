@@ -321,11 +321,115 @@ pub(crate) struct AgyRosterRow {
 
 pub(crate) const AGY_ROSTER_LIMIT: usize = 3;
 
+const AGY_PLACEHOLDER: &str =
+    "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
+
+fn agy_divider(line: &str) -> bool {
+    let line = line.trim_end();
+    line.len() >= "───".len() && line.chars().all(|c| c == '─')
+}
+
+fn agy_ctx_field(field: &str) -> bool {
+    field
+        .strip_prefix("ctx ")
+        .and_then(|rest| rest.strip_suffix('%'))
+        .is_some_and(|digits| {
+            !digits.is_empty()
+                && digits.len() <= 3
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && (digits.len() == 1 || !digits.starts_with('0'))
+                && digits.parse::<u8>().is_ok_and(|pct| pct <= 100)
+        })
+}
+
+fn agy_hud_fields(hud: &str) -> Option<Vec<&str>> {
+    if hud.len() > 512
+        || hud.chars().any(char::is_control)
+        || hud.ends_with(" |")
+        || hud.starts_with("| ")
+    {
+        return None;
+    }
+    let fields: Vec<_> = hud.split(" | ").collect();
+    if fields.len() < 2 || fields.iter().any(|field| field.trim().is_empty()) {
+        return None;
+    }
+    let head_ok = fields[0]
+        .split_once(" (Antigravity")
+        .is_some_and(|(model, tier)| !model.is_empty() && tier.ends_with(')'));
+    (head_ok && agy_ctx_field(fields[1])).then_some(fields)
+}
+
+fn agy_prompt_chrome(lines: &[String]) -> Option<(&[String], &str)> {
+    let newest = lines.iter().rposition(|line| line.starts_with('>'))?;
+    if !matches!(lines[newest].trim_end(), ">" | AGY_PLACEHOLDER) {
+        return None;
+    }
+    let (middle, hud) = match &lines[newest + 1..] {
+        [bottom, hud] if agy_divider(bottom) => (&[][..], hud.trim_end()),
+        [top, middle @ .., bottom, hud]
+            if !middle.is_empty()
+                && middle.len() <= 8
+                && agy_divider(top)
+                && agy_divider(bottom) =>
+        {
+            (middle, hud.trim_end())
+        }
+        _ => return None,
+    };
+    agy_hud_fields(hud)?;
+    Some((middle, hud))
+}
+
+pub(crate) fn valid_agy_footer_remaining(value: &str) -> bool {
+    matches!(value, "0%" | "<1%" | ">99%" | "100%")
+        || value.strip_suffix('%').is_some_and(|digits| {
+            (1..=2).contains(&digits.len())
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && !digits.starts_with('0')
+                && digits
+                    .parse::<u8>()
+                    .is_ok_and(|pct| (1..=99).contains(&pct))
+        })
+}
+
+/// Read the bounded `Gemini weekly <remaining> left` field from AGY's final
+/// intact OMS statusline footer. Display-only: age and reset are unknown.
+pub(crate) fn agy_footer_weekly(screen: &str) -> Option<String> {
+    if screen.len() > 128 * 1024 {
+        return None;
+    }
+    let lines: Vec<_> = screen
+        .lines()
+        .map(strip_sgr)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let (middle, hud) = agy_prompt_chrome(&lines)?;
+    if !middle.iter().all(|line| {
+        let line = line.trim_end();
+        agy_timer(line) || agy_clipped_running_job(line) || agy_child_fields(line).is_some()
+    }) {
+        return None;
+    }
+    let fields = agy_hud_fields(hud)?;
+    let weekly = fields.get(2)?;
+    let remaining = weekly
+        .strip_prefix("Gemini weekly ")?
+        .strip_suffix(" left")?;
+    if !valid_agy_footer_remaining(remaining)
+        || fields
+            .iter()
+            .enumerate()
+            .any(|(i, field)| i != 2 && field.contains("Gemini weekly"))
+    {
+        return None;
+    }
+    Some(remaining.to_owned())
+}
+
 /// The current pane's child chrome supplies display text only. A row has no
 /// conversation identity and never supplies transcript or action authority.
 pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
-    const PLACEHOLDER: &str =
-        "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
     if screen.len() > 128 * 1024 {
         return vec![];
     }
@@ -334,25 +438,10 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
         .map(strip_sgr)
         .filter(|line| !line.trim().is_empty())
         .collect();
-    let newest = lines.iter().rposition(|line| line.starts_with('>'));
-    let Some([top, middle @ .., bottom, hud]) = newest.and_then(|index| {
-        matches!(lines[index].trim_end(), ">" | PLACEHOLDER).then(|| &lines[index + 1..])
-    }) else {
+    let Some((middle, _)) = agy_prompt_chrome(&lines) else {
         return vec![];
     };
-    let divider = |line: &str| {
-        let line = line.trim_end();
-        line.len() >= "───".len() && line.chars().all(|c| c == '─')
-    };
-    let hud_live = hud
-        .split_once(" (Antigravity")
-        .is_some_and(|(head, suffix)| {
-            !head.is_empty() && suffix.contains(") | ctx ") && !hud.chars().any(char::is_control)
-        });
-    if !divider(top) || !divider(bottom) || !hud_live {
-        return vec![];
-    }
-    if middle.len() > 8 {
+    if middle.is_empty() {
         return vec![];
     }
     let rows = middle
@@ -490,6 +579,73 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
         roster.replace("prior output\n>\n", "prior output\n> user draft\n"),
     ] {
         assert!(agy_roster(&stale).is_empty(), "{stale}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn agy_footer_weekly_reads_only_final_intact_oms_footer() {
+    let rule = "────────────────────────";
+    let base = |weekly: &str| {
+        format!(
+            "prior output\n{rule}\n>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | {weekly} | main | oms F1\n"
+        )
+    };
+    for expected in ["0%", "<1%", "1%", "99%", ">99%", "100%"] {
+        let screen = base(&format!("Gemini weekly {expected} left"));
+        assert_eq!(
+            agy_footer_weekly(&screen).as_deref(),
+            Some(expected),
+            "{screen}"
+        );
+    }
+    let placeholder = base("Gemini weekly 99% left").replace(
+        "\n>\n",
+        "\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n",
+    );
+    assert_eq!(agy_footer_weekly(&placeholder).as_deref(), Some("99%"));
+    let sgr = format!(
+        "{rule}\n>\n{rule}\n\x1b[2mOrchestrator (Carbon) (Antigravity ) | ctx 31% | Gemini weekly <1% left | main\x1b[0m\n"
+    );
+    assert_eq!(agy_footer_weekly(&sgr).as_deref(), Some("<1%"));
+    let with_tray = format!(
+        "prior\n>\n{rule}\n  ● [12:03:44] 4m timer running\n  ● Agent(research: Check) · Gemini 4 Hydrogen (Orchestrator)  Reading · 12s\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 42% | Gemini weekly >99% left | main\n"
+    );
+    assert_eq!(agy_footer_weekly(&with_tray).as_deref(), Some(">99%"));
+
+    let ok = base("Gemini weekly 99% left");
+    for bad in [
+        format!("{ok}New output after footer\n"),
+        format!("{ok}>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | main\n"),
+        format!(
+            "Gemini weekly 99% left\n{rule}\n>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | main\n"
+        ),
+        ok.replace("\n>\n", "\n> Gemini weekly 99% left\n"),
+        ok.replace(
+            "| main | oms F1",
+            "| Gemini weekly 50% left | main | oms F1",
+        ),
+        ok.replace("oms F1", "oms T1 Gemini weekly 50% left"),
+        base("Gemini weekly 00% left"),
+        base("Gemini weekly 09% left"),
+        base("Gemini weekly 101% left"),
+        base("Gemini weekly -1% left"),
+        base("Gemini weekly +1% left"),
+        base("Gemini weekly 99.5% left"),
+        base("Gemini weekly <2% left"),
+        base("Gemini weekly >98% left"),
+        base("Gemini weekly 99% used"),
+        base("Gemini weekly 99% lef"),
+        ok.replace(" (Antigravity ) | ctx 31%", " | ctx 31%"),
+        ok.replace(" | ctx 31%", ""),
+        ok.replace("ctx 31%", "ctx 105%"),
+        format!("{ok}\x07"),
+        ok.replace("oms F1\n", "oms F1 | \n"),
+        format!(
+            "prior\n>\n{rule}\nfake prose between dividers\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 42% | Gemini weekly 99% left\n"
+        ),
+    ] {
+        assert_eq!(agy_footer_weekly(&bad), None, "{bad:?}");
     }
 }
 
