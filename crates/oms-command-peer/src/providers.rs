@@ -239,6 +239,9 @@ pub struct Route {
     pub account: String,
     /// True only when the caller asked for the account (`--account`/`:account=`).
     pub account_pinned: bool,
+    /// Public native search/fetch for an explicitly selected read-only research role.
+    /// This does not enable connector apps, file writes, or permission bypasses.
+    pub public_research: bool,
 }
 pub(crate) fn route(
     context: &Context<'_>,
@@ -322,6 +325,7 @@ fn route_with_source(
         explicit,
         account: target.account.clone(),
         account_pinned: !target.account.is_empty(),
+        public_research: false,
     })
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1386,7 +1390,16 @@ fn transport(
             }
             cmd.args(&["--json"]);
             if !write {
-                cmd.args(&["-c", "web_search=\"disabled\"", "-c", "features.apps=false"]);
+                cmd.args(&[
+                    "-c",
+                    if route.public_research {
+                        "web_search=\"live\""
+                    } else {
+                        "web_search=\"disabled\""
+                    },
+                    "-c",
+                    "features.apps=false",
+                ]);
             }
             cmd.args(&[
                 "--sandbox",
@@ -1420,7 +1433,11 @@ fn transport(
                     "--setting-sources",
                     "",
                     "--tools",
-                    "Read,Grep,Glob,Bash",
+                    if route.public_research {
+                        "Read,Grep,Glob,Bash,WebSearch,WebFetch"
+                    } else {
+                        "Read,Grep,Glob,Bash"
+                    },
                 ]);
                 let plans = format!(
                     "{{\"plansDirectory\":\".oms/tmp/claude-plans-{}\"}}",
@@ -2798,6 +2815,7 @@ mod bridge_route_tests {
                         explicit: true,
                         account: String::new(),
                         account_pinned: false,
+                        public_research: false,
                     };
                     let extra = vec![
                         ("OMS_STATE_REPO".into(), state.as_os_str().into()),
@@ -2996,6 +3014,7 @@ mod bridge_route_tests {
                     explicit: false,
                     account: String::new(),
                     account_pinned: false,
+                    public_research: false,
                 };
                 let stop = AtomicBool::new(false);
                 for (i, (code, (complete, decoded_complete), raw, stdout, tokens)) in
@@ -3146,6 +3165,7 @@ mod bridge_route_tests {
                     explicit: true,
                     account: String::new(),
                     account_pinned: false,
+                    public_research: false,
                 };
                 let extra = vec![
                     ("OMS_STATE_REPO".into(), state.as_os_str().to_owned()),
@@ -3450,6 +3470,7 @@ mod bridge_route_tests {
             explicit: true,
             account: String::new(),
             account_pinned: false,
+            public_research: false,
         };
         let declare = |schema: u8| {
             std::fs::write(&manifest,format!("{{\"schema\":{schema},\"protocol\":\"oms-team-request-v1\",\"binary_sha256\":\"{}\"}}",storage::hash(b"fixture adapter bytes"))).unwrap();
@@ -3598,6 +3619,7 @@ mod bridge_route_tests {
                             explicit: true,
                             account: String::new(),
                             account_pinned: false,
+                            public_research: false,
                         };
                         let capture = Capture::default();
                         assert_eq!(
@@ -3687,6 +3709,7 @@ mod bridge_route_tests {
                         explicit: true,
                         account: String::new(),
                         account_pinned: false,
+                        public_research: false,
                     };
                     let capture = Capture::default();
                     assert!(
@@ -3703,6 +3726,7 @@ mod bridge_route_tests {
                         explicit: false,
                         account: String::new(),
                         account_pinned: false,
+                        public_research: false,
                     };
                     let capture = Capture::default();
                     assert!(direct(&route, b"inspect", false, repo, repo, &capture).is_err());
@@ -3719,6 +3743,7 @@ mod bridge_route_tests {
                         explicit: false,
                         account: String::new(),
                         account_pinned: false,
+                        public_research: false,
                     };
                     let capture = Capture::default();
                     std::thread::scope(|scope| {
@@ -3773,6 +3798,7 @@ mod bridge_route_tests {
                         explicit: false,
                         account: String::new(),
                         account_pinned: false,
+                        public_research: false,
                     };
                     for prompt in [
                         vec![],
@@ -3797,6 +3823,7 @@ mod bridge_route_tests {
                     explicit: false,
                     account: String::new(),
                     account_pinned: false,
+                    public_research: false,
                 };
                 for size in [0, 120000, 120001] {
                     let capture = Capture::default();
@@ -4022,6 +4049,7 @@ mod bridge_route_tests {
                 explicit: false,
                 account: String::new(),
                 account_pinned: false,
+                public_research: false,
             };
             let capture = Capture::default();
             let err = direct(&route, b"probe", true, &dir, &dir, &capture).unwrap_err();

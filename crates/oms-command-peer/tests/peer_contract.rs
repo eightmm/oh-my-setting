@@ -473,6 +473,88 @@ fn council_seat_publication_stops_after_thread_append_failure() {
 }
 
 #[test]
+fn delegate_research_roles_expose_public_tools_without_file_write_authority() {
+    assert_delegate_research_tools(
+        "delegate_research_roles_expose_public_tools_without_file_write_authority",
+        false,
+    );
+}
+
+#[test]
+fn delegate_research_roles_honor_panel_no_web() {
+    assert_delegate_research_tools("delegate_research_roles_honor_panel_no_web", true);
+}
+
+fn assert_delegate_research_tools(test: &str, no_web: bool) {
+    provider_isolated_with_env(
+        test,
+        "private",
+        &[("OMS_PANEL_NO_WEB", if no_web { "1" } else { "0" })],
+        || {
+            let repo = provider_repo();
+            for provider in ["codex", "claude"] {
+                for role in ["", "repo-auditor", "researcher", "scholar"] {
+                    let public = !no_web && matches!(role, "researcher" | "scholar");
+                    let mut values = args(&[
+                        "--to",
+                        provider,
+                        "--read-only",
+                        "--model",
+                        "fixture",
+                        "--no-task",
+                        "--no-memory",
+                        "--no-ml-context",
+                        "--no-graph-context",
+                    ]);
+                    if !role.is_empty() {
+                        values.extend(args(&["--role", role]));
+                    }
+                    values.push("Inspect relevant sources and cite the evidence".into());
+                    let probe = ProviderProbe::default();
+                    let output = oms_command_peer::run_with_executor(
+                        "peer-delegate",
+                        &values,
+                        &repo.0,
+                        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                        &STOP,
+                        &probe,
+                    );
+                    assert_eq!(output.0, 0, "{provider}/{role}: {}", message(&output));
+                    let calls = probe.calls.lock().unwrap();
+                    assert_eq!(calls.len(), 1);
+                    let argv = &calls[0].request.argv;
+                    assert_ne!(calls[0].request.cwd, repo.0);
+                    assert!(!argv.iter().any(|a| a == "--dangerously-skip-permissions" || a == "--allowedTools"));
+                    if provider == "codex" {
+                        assert_eq!(option_value(argv, "--sandbox").unwrap(), "read-only");
+                        assert!(argv.iter().any(|a| a == "features.apps=false"));
+                        let search = if public {
+                            "web_search=\"live\""
+                        } else {
+                            "web_search=\"disabled\""
+                        };
+                        assert!(
+                            argv.iter().any(|a| a == search),
+                            "{provider}/{role}: {argv:?}"
+                        );
+                    } else {
+                        assert_eq!(option_value(argv, "--permission-mode").unwrap(), "plan");
+                        let tools = option_value(argv, "--tools").unwrap().to_str().unwrap();
+                        let expected = if public {
+                            "Read,Grep,Glob,Bash,WebSearch,WebFetch"
+                        } else {
+                            "Read,Grep,Glob,Bash"
+                        };
+                        assert_eq!(tools, expected, "{provider}/{role}");
+                        assert!(argv.iter().any(|a| a == "--strict-mcp-config"));
+                    }
+                }
+            }
+        },
+    );
+}
+
+#[test]
 fn provider_native_transports_match_shell_contract() {
     provider_isolated(
         "provider_native_transports_match_shell_contract",

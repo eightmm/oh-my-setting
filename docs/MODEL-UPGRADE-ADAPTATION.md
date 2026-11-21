@@ -113,10 +113,19 @@ REL-01의 전체 native child coverage 작업이나 별도 model state DB를 복
 **기존 owner: TM-07~09 adapter permission + MR-B.** 같은 `providers.rs`를 수정하는
 REL-02/CC-01 작업과 writer를 조정한다.
 
-현재 Codex read 경로는 read-only sandbox와 `web_search="disabled"`를 함께 적용하고,
-Claude read 경로는 plan mode와 `Read,Grep,Glob,Bash` tool 목록을 함께 적용한다.
-모든 읽기 작업의 결함이라는 뜻은 아니다. 파일 쓰기는 허용하지 않으면서 공개 자료를
-조사해야 하는 작업에 맞는 실행 profile이 필요하다는 의미다.
+일반 read 경로는 기존 제한을 유지한다. `peer-delegate --role researcher` 또는
+`--role scholar`의 읽기 전용 실행은 공개 조사 profile을 선택한다. Codex는
+read-only sandbox와 `web_search="live"`, `features.apps=false`를 함께 사용하고,
+Claude는 plan mode와 `Read,Grep,Glob,Bash,WebSearch,WebFetch`를 사용한다.
+명시적인 연구 역할 없이 `--read-only`만 준 요청과 repo-auditor는 기존 도구 목록을
+유지한다. 쓰기 실행이나 다른 provider에 공개 검색 지원을 추정하지 않는다.
+
+이는 caller가 선택한 연구 역할의 source/network 범위를 실행 도구에 연결한다.
+검색 결과는 신뢰되지 않은 자료이며, task의 출처 제한과 native/managed 권한은 계속
+적용된다. Claude의 `--tools`는 도구 노출이며 무승인 실행을 주는 `--allowedTools`를
+추가하지 않는다. 파일 쓰기·private connector·upload 권한을 새로 부여하지 않는다.
+공식 flag 근거: [Codex configuration](https://developers.openai.com/codex/config-reference/),
+[Claude CLI reference](https://code.claude.com/docs/en/cli-reference).
 
 기존 task/route 권한에서 filesystem read/write와 public search/fetch 허용 여부를
 분리한다. Private connector, upload, 외부 쓰기는 각자의 authority를 계속 따른다.
@@ -125,8 +134,10 @@ Claude read 경로는 plan mode와 `Read,Grep,Glob,Bash` tool 목록을 함께 �
 
 1. Local review는 현재 제한을 유지한다. 허가된 public research는 read-only filesystem과
    지원되는 native search/fetch를 함께 사용한다.
-2. 기존 `provider_native_transports_match_shell_contract`에서 두 profile의 argv와
-   tool 설정을 검증한다. AGY의 실제 isolation 제약도 유지한다.
+2. 기존 `provider_native_transports_match_shell_contract`에서 일반 경로를 보존하고,
+   같은 fixture의 `delegate_research_roles_expose_public_tools_without_file_write_authority`가
+   실제 delegate entry에서 역할별 argv·tool·sandbox를 검증한다. 실제 유료 provider
+   호출의 호환성 증거는 별개다. AGY의 기존 isolation 제약도 유지한다.
 3. 미지원 provider를 web enabled로 표시하지 않는다. Read 권한을 이유로 모든
    connector·upload·쓰기 제한을 해제하지 않는다.
 4. 이미 부여된 task authority를 소비하며 반복적인 추가 승인 절차를 만들지 않는다.
