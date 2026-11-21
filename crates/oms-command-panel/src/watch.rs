@@ -266,7 +266,7 @@ pub fn run_with_writer(
                 size,
                 &read,
                 colored,
-                interactive.then(|| split.rows(size.1)),
+                interactive.then_some(&mut split),
                 chat.as_mut(),
                 weekly.overlay(weekly_phase),
             );
@@ -349,6 +349,9 @@ pub fn run_with_writer(
                     if weekly.detail.is_none()
                         && !weekly.repaint
                         && report["native_dock"].is_null()
+                        && chat
+                            .as_ref()
+                            .is_some_and(|dock| !private_chat_hidden(&report, dock))
                         && matches!(
                             key,
                             input::Key::Click(..) | input::Key::Drag(_) | input::Key::Release(_)
@@ -439,24 +442,27 @@ pub fn run_with_writer(
                         break;
                     }
                     if !nav.editing
-                        && pending
                         && matches!(key, input::Key::Escape)
-                        && chat.as_ref().is_some_and(|dock| dock.chat.is_some())
+                        && chat
+                            .as_ref()
+                            .is_some_and(|dock| private_chat_hidden(&report, dock))
                     {
                         chat = None;
                         continue;
                     }
                     if let Some(dock) = &mut chat
                         && !nav.editing
-                        && (!pending || dock.chat.is_none())
+                        && !private_chat_hidden(&report, dock)
                     {
                         match key {
-                            input::Key::Escape | input::Key::Char('q') => {
+                            input::Key::Escape | input::Key::Char('q')
+                                if key == input::Key::Escape || split.painted_rows > 0 =>
+                            {
                                 chat = None;
                                 continue;
                             }
-                            _ if dock
-                                .scroll(&key, dock_page(split.rows(last_size.1), last_size.0)) =>
+                            _ if split.painted_rows > 0
+                                && dock.scroll(&key, split.painted_rows.saturating_sub(2)) =>
                             {
                                 continue;
                             }
@@ -534,7 +540,7 @@ pub fn run_with_writer(
                         &report,
                         &nav,
                         last_size,
-                        interactive.then(|| split.rows(last_size.1)),
+                        interactive.then_some(split.painted_rows),
                         &read,
                     );
                     let action = if let input::Key::Click(x, y) = key {
@@ -777,7 +783,7 @@ pub fn run_with_writer(
                         size,
                         &read,
                         colored,
-                        interactive.then(|| split.rows(size.1)),
+                        interactive.then_some(&mut split),
                         chat.as_mut(),
                         weekly.overlay(weekly_phase.awaiting(refresh || collect_ready)),
                     );
@@ -806,7 +812,7 @@ pub fn run_with_writer(
                         last_size,
                         &read,
                         colored,
-                        interactive.then(|| split.rows(last_size.1)),
+                        interactive.then_some(&mut split),
                         chat.as_mut(),
                         weekly.overlay(weekly_phase.awaiting(refresh || collect_ready)),
                     );
@@ -840,7 +846,7 @@ pub fn run_with_writer(
                         size,
                         &read,
                         colored,
-                        interactive.then(|| split.rows(size.1)),
+                        interactive.then_some(&mut split),
                         chat.as_mut(),
                         weekly.overlay(weekly_phase),
                     );
@@ -2126,6 +2132,7 @@ impl ChatDock {
 struct DockSplit {
     preferred: Option<usize>,
     drag_size: Option<(usize, usize)>,
+    painted_rows: usize,
 }
 
 impl DockSplit {
@@ -2141,6 +2148,14 @@ impl DockSplit {
         }
     }
 
+    fn paint(&mut self, height: usize, visible: bool) -> usize {
+        self.painted_rows = if visible { self.rows(height) } else { 0 };
+        if self.painted_rows == 0 {
+            self.drag_size = None;
+        }
+        self.painted_rows
+    }
+
     /// A gesture starts on the painted divider. A concurrent terminal resize
     /// invalidates the coordinates until the next mouse press.
     fn mouse(
@@ -2150,16 +2165,17 @@ impl DockSplit {
         actual: (usize, usize),
     ) -> Option<bool> {
         use input::Key;
+        if self.painted_rows == 0 {
+            return None;
+        }
         let (columns, height) = actual;
-        let rows = self.rows(height);
         match *key {
             Key::Click(x, y) => {
                 self.drag_size = None;
                 if painted == actual
-                    && rows != 0
                     && x > 0
                     && usize::from(x) <= columns
-                    && usize::from(y) == height - rows + 1
+                    && usize::from(y) == height - self.painted_rows + 1
                 {
                     self.drag_size = Some(actual);
                     return Some(false);
@@ -2167,6 +2183,7 @@ impl DockSplit {
                 None
             }
             Key::Drag(y) | Key::Release(y) => {
+                let rows = self.rows(height);
                 let can_resize = self.drag_size == Some(actual) && painted == actual;
                 if matches!(key, Key::Release(_)) || !can_resize {
                     self.drag_size = None;
@@ -2195,11 +2212,18 @@ fn frame(
     size: (usize, usize),
     read: &std::collections::BTreeMap<String, String>,
     colored: bool,
-    dock_rows: Option<usize>,
+    split: Option<&mut DockSplit>,
     chat: Option<&mut ChatDock>,
     weekly: Option<(&mut ChatDock, WeeklyPhase)>,
 ) -> render::BoardFrame {
     let (columns, height) = size;
+    let chat = chat.filter(|dock| !private_chat_hidden(report, dock));
+    let dock_rows = split.map(|split| {
+        split.paint(
+            height,
+            weekly.is_none() && chat.is_some() && report["native_dock"].is_null(),
+        )
+    });
     if let Some((weekly, phase)) = weekly {
         let message = match phase {
             WeeklyPhase::Fresh => None,
@@ -2218,7 +2242,8 @@ fn frame(
                 columns,
                 height,
                 colored,
-                Some(placeholder.as_mut().unwrap_or(weekly)),
+                placeholder.as_mut().unwrap_or(weekly),
+                true,
             );
             let hint = match (phase, nav.notice.as_deref()) {
                 (WeeklyPhase::Unavailable, _) => "u Retry Board · Esc Close",
@@ -2249,30 +2274,7 @@ fn frame(
     }
     let (nav, board_height) = board_viewport(report, nav, height, dock_rows);
     let nav = nav.as_ref();
-    let chat = chat.filter(|dock| !private_chat_hidden(report, dock));
     let interactive = dock_rows.is_some();
-    if interactive && let Some(provider) = report["native_dock"].as_str() {
-        let mut board = render::board_frame(
-            report,
-            nav,
-            columns,
-            board_height,
-            read,
-            colored,
-            interactive,
-        );
-        board.lines.resize(board_height, String::new());
-        board.lines.push(render::native_dock_bar(
-            provider,
-            CLOSE_NATIVE,
-            columns,
-            colored,
-        ));
-        return board;
-    }
-    if board_height == height {
-        return render::board_frame(report, nav, columns, height, read, colored, interactive);
-    }
     let mut board = render::board_frame(
         report,
         nav,
@@ -2282,18 +2284,33 @@ fn frame(
         colored,
         interactive,
     );
-    let top = board_height;
-    board.lines.resize(top, String::new());
-    for hit in &mut board.provider_rows {
-        if hit.is_some_and(|row| row >= top) {
-            *hit = None;
+    if interactive && let Some(provider) = report["native_dock"].as_str() {
+        board.lines.resize(board_height, String::new());
+        board.lines.push(render::native_dock_bar(
+            provider,
+            CLOSE_NATIVE,
+            columns,
+            colored,
+        ));
+    } else if board_height < height
+        && let Some(chat) = chat
+    {
+        board.lines.resize(board_height, String::new());
+        for hit in &mut board.provider_rows {
+            if hit.is_some_and(|row| row >= board_height) {
+                *hit = None;
+            }
         }
+        board.worker_rows.retain(|row, _| *row < board_height);
+        board.weekly_usage = board.weekly_usage.filter(|hit| hit.row < board_height);
+        board.lines.extend(dock_lines(
+            columns,
+            height - board_height,
+            colored,
+            chat,
+            false,
+        ));
     }
-    board.worker_rows.retain(|row, _| *row < top);
-    board.weekly_usage = board.weekly_usage.filter(|hit| hit.row < top);
-    board
-        .lines
-        .extend(dock_lines(columns, height - top, colored, chat));
     board
 }
 
@@ -2346,36 +2363,30 @@ fn dock_lines(
     columns: usize,
     dock: usize,
     colored: bool,
-    chat: Option<&mut ChatDock>,
+    chat: &mut ChatDock,
+    weekly: bool,
 ) -> Vec<String> {
-    let boxed = columns >= 44 && dock >= 4;
+    let boxed = weekly && columns >= 44 && dock >= 4;
     let inner = if boxed { columns - 4 } else { columns };
-    let page = dock_page(dock, columns);
-    let (title, visible, hint) = if let Some(chat) = chat {
-        let lines = history_rows(&chat.history, inner.max(1), colored);
-        let latest = lines.len().saturating_sub(page);
-        chat.back = chat.back.min(latest);
-        (
-            chat.title.as_str(),
-            lines
-                .into_iter()
-                .skip(latest - chat.back)
-                .take(page)
-                .collect::<Vec<_>>(),
-            "↑↓ Scroll · Esc Close",
-        )
+    let page = if weekly {
+        dock_page(dock, columns)
     } else {
-        (
-            "Details",
-            vec![render::clip(
-                "Select an orchestrator, worker, or council",
-                inner,
-            )],
-            "",
-        )
+        dock.saturating_sub(2)
     };
-    let mut lines = vec![render::dock_top(title, columns, colored)];
-    let mut visible = visible;
+    let history = history_rows(&chat.history, inner.max(1), colored);
+    let latest = history.len().saturating_sub(page);
+    chat.back = chat.back.min(latest);
+    let title = if weekly {
+        render::dock_top(&chat.title, columns, colored)
+    } else {
+        render::clip(&format!("↕ {}", chat.title), columns)
+    };
+    let mut lines = vec![title];
+    let mut visible = history
+        .into_iter()
+        .skip(latest - chat.back)
+        .take(page)
+        .collect::<Vec<_>>();
     visible.resize(page, String::new());
     lines.extend(visible.into_iter().map(|line| {
         if boxed {
@@ -2387,7 +2398,7 @@ fn dock_lines(
     if boxed {
         lines.push(render::dock_bottom(columns, colored));
     }
-    lines.push(render::clip(hint, columns));
+    lines.push(render::clip("↑↓ Scroll · Esc Close", columns));
     lines
 }
 
@@ -2611,7 +2622,7 @@ fn draw(
 
 #[cfg(test)]
 mod tests {
-    use super::{draw, history_rows, provider_at_row};
+    use super::{DockSplit, draw, history_rows, provider_at_row};
     struct Counting(Vec<u8>, usize);
     impl std::io::Write for Counting {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -2670,7 +2681,7 @@ mod tests {
             (100, 36),
             &Default::default(),
             true,
-            Some(12),
+            Some(&mut DockSplit::default()),
             Some(&mut dock),
             None,
         );
@@ -2692,7 +2703,7 @@ mod tests {
             (100, 36),
             &Default::default(),
             false,
-            Some(12),
+            Some(&mut DockSplit::default()),
             Some(&mut dock),
             None,
         );
@@ -2733,41 +2744,56 @@ mod tests {
             ..Default::default()
         };
         let read = Default::default();
-        for (report, nav, size, dock) in [
+        let mut chat = super::ChatDock {
+            title: "Worker result".into(),
+            history: "Result".into(),
+            back: 0,
+            chat: None,
+            agy_locator: None,
+        };
+        for (report, nav, size, show_reader) in [
             (
                 report(Some("claude"), None),
                 Navigation::default(),
                 (100, 36),
-                Some(12),
+                false,
             ),
             (
                 report(Some("claude"), None),
                 detail.clone(),
                 (100, 40),
-                Some(12),
+                false,
             ),
             (
                 report(Some("claude"), None),
                 Navigation::default(),
                 (100, 12),
-                Some(0),
+                true,
             ),
-            (report(None, None), detail, (100, 36), Some(12)),
-            (
-                report(None, None),
-                Navigation::default(),
-                (100, 12),
-                Some(0),
-            ),
+            (report(None, None), detail, (100, 36), true),
+            (report(None, None), Navigation::default(), (100, 12), false),
+            (report(None, None), Navigation::default(), (100, 12), true),
+            (report(None, None), Navigation::default(), (100, 10), true),
             (
                 report(None, Some("boom")),
                 Navigation::default(),
                 (100, 36),
-                Some(12),
+                false,
             ),
-            (report(None, Some("boom")), noticed, (100, 30), Some(0)),
+            (report(None, Some("boom")), noticed, (100, 30), false),
         ] {
-            let painted = super::frame(&report, &nav, size, &read, false, dock, None, None);
+            let mut split = DockSplit::default();
+            let painted = super::frame(
+                &report,
+                &nav,
+                size,
+                &read,
+                false,
+                Some(&mut split),
+                show_reader.then_some(&mut chat),
+                None,
+            );
+            let dock = Some(split.painted_rows);
             let page = super::key_page(&report, &nav, size, dock, &read);
             assert_eq!(painted.lines.len(), size.1, "{size:?} {dock:?}");
             assert!(page < 60, "{size:?} {dock:?}");
@@ -2801,7 +2827,7 @@ mod tests {
                 size,
                 &Default::default(),
                 true,
-                Some(4),
+                Some(&mut DockSplit::default()),
                 None,
                 detail,
             )
@@ -3082,7 +3108,7 @@ mod tests {
     }
 
     #[test]
-    fn weekly_usage_fits_above_the_default_details_dock_at_thirteen_rows() {
+    fn weekly_usage_and_call_clicks_use_the_full_idle_board() {
         use super::{DockSplit, WeeklyKey, WeeklyPaint, WeeklyPhase, WeeklyUsage, frame};
         use crate::{input::Key, render};
         use serde_json::json;
@@ -3110,35 +3136,29 @@ mod tests {
             notice: Some(format!("First {}Second notice", "a".repeat(72))),
             ..Default::default()
         };
-        let split = DockSplit::default();
         for height in [12, 13] {
             let size = (80, height);
-            let dock = split.rows(height);
-            assert_eq!(dock, 4);
-            let divider = height - dock;
             let board = frame(
                 &report,
                 &nav,
                 size,
                 &Default::default(),
                 true,
-                Some(dock),
+                Some(&mut DockSplit::default()),
                 None,
                 None,
             );
             assert_eq!(board.lines.len(), height);
-            assert!(board.lines[divider].contains("Details"));
-            assert!(board.lines[divider - 1].contains("Enter"));
             assert!(
-                board.lines[..divider]
+                board
+                    .lines
                     .iter()
-                    .all(|line| !line.contains("proof-tree"))
+                    .all(|line| !line.contains("Select an orchestrator"))
             );
+            assert!(board.lines[height - 1].contains("Enter"));
             for text in ["Filter /Review", "First", "Goal: Keep Board usable"] {
                 assert!(
-                    board.lines[..divider]
-                        .iter()
-                        .any(|line| line.contains(text)),
+                    board.lines.iter().any(|line| line.contains(text)),
                     "{height} rows, missing {text}: {:?}",
                     board.lines
                 );
@@ -3151,7 +3171,7 @@ mod tests {
                 .unwrap();
             assert_eq!(main_hit.0, "main");
             assert!(main_row < row && board.lines[main_row].contains("▸"));
-            assert!(row < divider - 1 && board.lines[row].contains("Review terminal layout"));
+            assert!(row < height - 1 && board.lines[row].contains("Review terminal layout"));
 
             let calls = render::visible(&report, &nav);
             let mut focus = nav.clone();
@@ -3182,16 +3202,10 @@ mod tests {
             assert!(focus.detail && fence == super::SelectionFence::None);
             assert_eq!(super::call_identity(&calls[focus.selected]), *main_hit);
 
-            if height == 12 {
-                assert!(board.weekly_usage.is_none());
-                assert!(board.lines.iter().all(|line| !line.contains("Weekly left")));
-                continue;
-            }
-            let hit = board
-                .weekly_usage
-                .expect("Weekly fits above Details at 80x13");
+            let hit = board.weekly_usage.expect("Weekly fits on the full Board");
             assert!(
-                board.lines[..divider]
+                board
+                    .lines
                     .iter()
                     .any(|line| line.contains("Second notice"))
             );
@@ -3229,7 +3243,7 @@ mod tests {
                     size,
                     &Default::default(),
                     true,
-                    Some(dock),
+                    Some(&mut DockSplit::default()),
                     None,
                     weekly
                         .detail
@@ -3300,7 +3314,6 @@ mod tests {
         }
 
         let size = (80, 13);
-        let dock = split.rows(13);
         let now_f = now as f64;
         let accounts_report = json!({
             "collection":{"ok":true},
@@ -3332,7 +3345,7 @@ mod tests {
             size,
             &Default::default(),
             true,
-            Some(dock),
+            Some(&mut DockSplit::default()),
             None,
             None,
         );
@@ -3375,7 +3388,7 @@ mod tests {
                 size,
                 &Default::default(),
                 true,
-                Some(dock),
+                Some(&mut DockSplit::default()),
                 None,
                 weekly.overlay(WeeklyPhase::Fresh),
             );
@@ -3424,7 +3437,7 @@ mod tests {
                 size,
                 &Default::default(),
                 true,
-                Some(dock),
+                Some(&mut DockSplit::default()),
                 None,
                 weekly.overlay(WeeklyPhase::Fresh),
             );
@@ -3457,7 +3470,7 @@ mod tests {
                 size,
                 &Default::default(),
                 true,
-                Some(dock),
+                Some(&mut DockSplit::default()),
                 None,
                 weekly.overlay(WeeklyPhase::Fresh),
             );
@@ -3517,7 +3530,7 @@ mod tests {
             size,
             &Default::default(),
             true,
-            Some(dock),
+            Some(&mut DockSplit::default()),
             None,
             weekly.overlay(WeeklyPhase::Fresh),
         );
@@ -3558,7 +3571,7 @@ mod tests {
             size,
             &Default::default(),
             true,
-            Some(dock),
+            Some(&mut DockSplit::default()),
             None,
             None,
         );
@@ -3573,7 +3586,7 @@ mod tests {
             size,
             &Default::default(),
             true,
-            Some(dock),
+            Some(&mut DockSplit::default()),
             None,
             weekly.overlay(WeeklyPhase::Pending),
         );
@@ -3592,7 +3605,7 @@ mod tests {
     }
 
     #[test]
-    fn divider_keeps_its_row_when_switching_content_at_short_heights() {
+    fn reader_only_uses_board_rows_when_open() {
         let report = serde_json::json!({"collection": {"ok": true}});
         let nav = Default::default();
         let read = Default::default();
@@ -3603,24 +3616,50 @@ mod tests {
             chat: None,
             agy_locator: None,
         };
-        let split = super::DockSplit::default();
+        let mut split = DockSplit::default();
         for size @ (columns, height) in [(38, 12), (80, 17), (80, 23), (140, 90)] {
             let rows = split.rows(height);
             let divider = height - rows;
-            let idle = super::frame(&report, &nav, size, &read, true, Some(rows), None, None);
+            let idle = super::frame(
+                &report,
+                &nav,
+                size,
+                &read,
+                true,
+                Some(&mut split),
+                None,
+                None,
+            );
+            assert_eq!(split.painted_rows, 0);
+            assert_eq!(
+                split.mouse(
+                    &crate::input::Key::Click(1, (divider + 1) as u16),
+                    size,
+                    size
+                ),
+                None
+            );
             let opened = super::frame(
                 &report,
                 &nav,
                 size,
                 &read,
                 true,
-                Some(rows),
+                Some(&mut split),
                 Some(&mut chat),
                 None,
             );
-            assert_eq!(&idle.lines[..divider], &opened.lines[..divider]);
-            assert!(idle.lines[divider].contains("Details"));
+            assert!(idle.lines.iter().all(|row| !row.contains("Details")
+                && !row.contains("Select an orchestrator")
+                && !row.contains("AGY · Recent chat")));
+            assert_eq!(split.painted_rows, rows);
             assert!(opened.lines[divider].contains("AGY · Recent chat"));
+            assert!(opened.lines[divider + 1].contains("한글"));
+            assert!(
+                opened.lines[divider..]
+                    .iter()
+                    .all(|row| { !row.contains(['│', '╭', '╮', '╰', '╯']) })
+            );
             assert_eq!(opened.lines.len(), height);
             assert!(
                 opened.lines.iter().all(|row| {
@@ -3639,6 +3678,7 @@ mod tests {
         use crate::input::Key;
         let mut split = super::DockSplit::default();
         let size = (100, 36);
+        assert_eq!(split.paint(36, true), 12);
         assert_eq!(split.mouse(&Key::Drag(18), size, size), Some(false));
         assert_eq!(split.mouse(&Key::Click(6, 24), size, size), None);
         assert_eq!(split.mouse(&Key::Click(6, 25), size, size), Some(false));
@@ -3648,6 +3688,7 @@ mod tests {
         assert_eq!(split.rows(36), 20);
         assert_eq!(split.mouse(&Key::Release(36), size, size), Some(true));
         assert_eq!(split.rows(36), 4);
+        assert_eq!(split.paint(36, true), 4);
         assert_eq!(split.mouse(&Key::Drag(20), size, size), Some(false));
         assert_eq!(split.mouse(&Key::Click(6, 33), size, size), Some(false));
         assert_eq!(split.mouse(&Key::Drag(20), size, (100, 34)), Some(false));
@@ -3686,7 +3727,7 @@ mod tests {
             (160, 45),
             &Default::default(),
             false,
-            Some(12),
+            Some(&mut DockSplit::default()),
             None,
             None,
         );
@@ -4401,7 +4442,7 @@ mod tests {
                 (120, 40),
                 &Default::default(),
                 false,
-                Some(12),
+                Some(&mut DockSplit::default()),
                 dock,
                 None,
             )
@@ -4409,6 +4450,7 @@ mod tests {
             .join("\n")
         };
         let pending_paint = paint(&held, &nav, dock.as_mut());
+        assert_eq!(pending_paint, paint(&held, &nav, None));
         assert!(!pending_paint.contains("Refreshing Board"));
         assert!(!pending_paint.contains("scoped transcript"));
         assert!(!pending_paint.contains("refresh failed"));
@@ -4703,7 +4745,7 @@ mod tests {
             (160, 45),
             &Default::default(),
             false,
-            Some(12),
+            Some(&mut DockSplit::default()),
             None,
             None,
         );
@@ -5096,15 +5138,13 @@ mod tests {
         );
         assert!(nav.detail);
         let height = 13;
-        let dock = super::DockSplit::default().rows(height);
-        assert_eq!(dock, 4);
         let frame = super::frame(
             &report,
             &nav,
             (80, height),
             &Default::default(),
             false,
-            Some(dock),
+            Some(&mut DockSplit::default()),
             None,
             None,
         );
@@ -5237,7 +5277,7 @@ mod tests {
             (160, 45),
             &Default::default(),
             false,
-            Some(12),
+            Some(&mut DockSplit::default()),
             None,
             None,
         );
@@ -6472,9 +6512,18 @@ sys.exit(proc.wait())
 
         // Run 2: Click -> Escape -> Enter -> Inode-swap close -> Re-click -> Live Turn-change close -> 0775 Unbound fallback & Silent Legacy Unavailable.
         let (run2_counters, tmux_log) = run_pty(&mut |child_in, stream, screen, rx| {
+            let list_restored = |screen: &[String]| {
+                screen
+                    .last()
+                    .is_some_and(|line| line.contains("Enter Open"))
+                    && screen
+                        .iter()
+                        .all(|line| !line.contains("Select an orchestrator, worker, or council"))
+            };
             // 1. Wait for initial fresh board, then show all tasks.
             wait_for(stream, screen, rx, "initial fresh board", &mut |s| {
-                s.iter().any(|l| l.contains("2 past (Tab all)"))
+                list_restored(s)
+                    && s.iter().any(|l| l.contains("2 past (Tab all)"))
                     && !s.iter().any(|l| l.contains("Refreshing Board"))
             });
             child_in.write_all(b"\t").unwrap();
@@ -6527,9 +6576,7 @@ sys.exit(proc.wait())
             child_in.write_all(b"\x1b").unwrap();
             child_in.flush().unwrap();
             wait_for(stream, screen, rx, "escape closes click dock", &mut |s| {
-                s.iter()
-                    .any(|l| l.contains("Select an orchestrator, worker, or council"))
-                    && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
+                list_restored(s) && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
             });
 
             // 4. Enter re-opens selected Bound Researcher direct child chat.
@@ -6553,8 +6600,7 @@ sys.exit(proc.wait())
             wait_for(stream, screen, rx, "open dock invalidation", &mut |s| {
                 count_captures() > before_open_inval
                     && s.iter().any(|l| l.contains("Transcript unavailable"))
-                    && s.iter()
-                        .any(|l| l.contains("Select an orchestrator, worker, or council"))
+                    && list_restored(s)
                     && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
             });
 
@@ -6580,8 +6626,7 @@ sys.exit(proc.wait())
                 &mut |s| {
                     count_captures() > before_turn_inval
                         && s.iter().any(|l| l.contains("Transcript unavailable"))
-                        && s.iter()
-                            .any(|l| l.contains("Select an orchestrator, worker, or council"))
+                        && list_restored(s)
                         && !s.iter().any(|l| l.contains("OWN_CHILD_DIRECT_REPLY"))
                 },
             );
@@ -6637,9 +6682,7 @@ sys.exit(proc.wait())
                 rx,
                 "escape closes fallback dock",
                 &mut |s| {
-                    s.iter()
-                        .any(|l| l.contains("Select an orchestrator, worker, or council"))
-                        && !s.iter().any(|l| l.contains("PARENT_DELIVERED_SUMMARY_A"))
+                    list_restored(s) && !s.iter().any(|l| l.contains("PARENT_DELIVERED_SUMMARY_A"))
                 },
             );
             let silent_row = screen
@@ -6652,7 +6695,7 @@ sys.exit(proc.wait())
                 s.iter().any(|l| l.contains("Transcript unavailable"))
             });
             let silent_text = screen.join("\n");
-            assert!(silent_text.contains("Select an orchestrator, worker, or council"));
+            assert!(list_restored(screen));
             assert!(!silent_text.contains("UNPROVED_SILENT_LEGACY_REPLY"));
             assert!(!silent_text.contains(super::PARENT_SUMMARY));
             assert!(!silent_text.contains("PARENT_DELIVERED_SUMMARY_A"));
