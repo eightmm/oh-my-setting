@@ -321,7 +321,10 @@ impl Services for ColdUpdateHost {
             return (if self.fail == "verify" { 7 } else { 0 }, vec![], vec![]);
         }
         if phase == IncomingPhase::RefreshTools {
-            assert_eq!(self.fail, "prepared-refresh");
+            assert!(matches!(
+                self.fail.as_str(),
+                "prepared-refresh" | "auto-refresh" | "auto-refresh-ok"
+            ));
             assert_eq!(read(&self.receipt())["commit"], revision);
             assert!(
                 !self
@@ -330,7 +333,15 @@ impl Services for ColdUpdateHost {
                     .exists(),
                 "tool refresh follows the committed core transaction"
             );
-            return (9, vec![], b"provider refresh unavailable\n".to_vec());
+            return (
+                if self.fail == "auto-refresh-ok" { 0 } else { 9 },
+                vec![],
+                if self.fail == "auto-refresh-ok" {
+                    vec![]
+                } else {
+                    b"provider refresh unavailable\n".to_vec()
+                },
+            );
         }
         assert_eq!(phase, IncomingPhase::Reconcile);
         assert_eq!(self.git(source, &["rev-parse", "HEAD"]), revision);
@@ -716,13 +727,18 @@ exec "$root/bin/actual/git" "$@"
         fs::rename(&remote, host.root.join("offline-origin.git")).unwrap();
     }
     let args = if host.fail == "prepared-refresh" {
-        vec!["--apply-prepared"]
+        vec!["--apply-prepared", "--json"]
     } else {
         vec!["--apply-prepared", "--no-tools"]
     };
     let out = call("update", &args, &source, host);
     if host.fail == "prepared-refresh" {
         assert_eq!(out.0, 9);
+        let outcome: Value = serde_json::from_slice(&out.1).unwrap();
+        assert_eq!(outcome["status"], "partial");
+        assert_eq!(outcome["core"], "updated");
+        assert_eq!(outcome["tools"], "failed");
+        assert_eq!(outcome["current_commit"], target);
         assert!(String::from_utf8_lossy(&out.2).contains("core update succeeded"));
         assert!(host.phases.borrow().contains(&IncomingPhase::RefreshTools));
     } else {
@@ -757,6 +773,159 @@ exec "$root/bin/actual/git" "$@"
     );
 }
 
+fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
+    let source = host.source();
+    let state = host.root.join("auto-update.status");
+    let units = host.root.join("config/systemd/user");
+    fs::create_dir_all(units.join("timers.target.wants")).unwrap();
+    fs::write(units.join("oh-my-setting-autoupdate.timer"), b"fixture\n").unwrap();
+    symlink(
+        "../oh-my-setting-autoupdate.timer",
+        units.join("timers.target.wants/oh-my-setting-autoupdate.timer"),
+    )
+    .unwrap();
+    let status = || -> Value {
+        serde_json::from_slice(&success(call(
+            "auto-update",
+            &["status", "--json"],
+            &source,
+            host,
+        )))
+        .unwrap()
+    };
+    let attention = || -> Value {
+        serde_json::from_slice(&success(call(
+            "auto-update",
+            &["attention", "--json"],
+            &source,
+            host,
+        )))
+        .unwrap()
+    };
+    let check = || {
+        success(call("auto-update", &["check", "--json"], &source, host));
+    };
+    let out = call("auto-update", &["apply", "--json"], &source, host);
+    assert_eq!(out.0, 9);
+    let outcome: Value = serde_json::from_slice(&out.1).unwrap();
+    assert_eq!(outcome["status"], "partial");
+    assert_eq!(outcome["core"], "updated");
+    assert_eq!(outcome["tools"], "failed");
+    assert_eq!(outcome["current_commit"], target);
+    assert_eq!(read(&host.receipt())["commit"], target);
+    let partial = status();
+    let saved = fs::read(&state).unwrap();
+    assert_eq!(partial["status"], "partial");
+    assert_eq!(partial["last_apply_status"], "partial");
+    assert_eq!(partial["last_apply_run"], partial["last_run"]);
+    assert_eq!(partial["last_apply_local"], host.before);
+    assert_eq!(partial["last_apply_remote"], target);
+    assert_eq!(attention()["attention"], "failed");
+    assert_eq!(fs::read(&state).unwrap(), saved, "status stays read-only");
+    let phases = host.phases.borrow().clone();
+    let receipt = fs::read(host.receipt()).unwrap();
+    for _ in 0..2 {
+        check();
+        let checked = status();
+        assert_eq!(checked["mode"], "check");
+        assert_eq!(checked["status"], "up_to_date");
+        assert_eq!(checked["last_apply_status"], "partial");
+        assert_eq!(checked["last_apply_run"], partial["last_run"]);
+        assert_eq!(checked["last_apply_remote"], target);
+        assert_eq!(attention()["attention"], "failed");
+    }
+    let text = success(call("auto-update", &["status"], &source, host));
+    assert!(String::from_utf8_lossy(&text).contains("last apply: partial"));
+    assert_eq!(*host.phases.borrow(), phases, "a check cannot retry tools");
+    assert_eq!(fs::read(host.receipt()).unwrap(), receipt);
+
+    // Both historical state formats retain their apply result on the first check.
+    let legacy_text = String::from_utf8(saved)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with("last_apply_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut legacy_json = partial.clone();
+    legacy_json
+        .as_object_mut()
+        .unwrap()
+        .retain(|key, _| !key.starts_with("last_apply_"));
+    legacy_json["checked_at"] = legacy_json
+        .as_object_mut()
+        .unwrap()
+        .remove("last_run")
+        .unwrap();
+    for legacy in [
+        legacy_text.into_bytes(),
+        serde_json::to_vec(&legacy_json).unwrap(),
+    ] {
+        fs::write(&state, legacy).unwrap();
+        check();
+        assert_eq!(status()["last_apply_status"], "partial");
+        assert_eq!(status()["last_apply_run"], partial["last_run"]);
+        assert_eq!(attention()["attention"], "failed");
+    }
+    let mut invalid = partial.clone();
+    invalid["last_apply_upstream"] = json!("edge\nlast_apply_status=up_to_date");
+    write(&state, &invalid);
+    let invalid_bytes = fs::read(&state).unwrap();
+    assert_eq!(call("auto-update", &["check"], &source, host).0, 2);
+    assert_eq!(fs::read(&state).unwrap(), invalid_bytes);
+    write(&state, &partial);
+
+    let mut installed = read(&host.receipt());
+    let original_time = installed["installed_at"].clone();
+    let after_apply = chrono::DateTime::parse_from_rfc3339(partial["last_run"].as_str().unwrap())
+        .unwrap()
+        + chrono::Duration::seconds(1);
+    installed["installed_at"] = json!(after_apply.to_rfc3339());
+    write(&host.receipt(), &installed);
+    check();
+    assert_eq!(status()["last_apply_status"], "partial");
+    assert_eq!(
+        attention()["attention"],
+        "ok",
+        "a later installation supersedes the alert"
+    );
+    installed["installed_at"] = original_time;
+    write(&host.receipt(), &installed);
+
+    // Failures before core commit also remain visible after a successful check.
+    fs::write(source.join("dirty"), b"untracked\n").unwrap();
+    assert_ne!(call("auto-update", &["apply"], &source, host).0, 0);
+    fs::remove_file(source.join("dirty")).unwrap();
+    check();
+    assert_eq!(status()["status"], "up_to_date");
+    assert_eq!(status()["last_apply_status"], "failed");
+    assert_eq!(attention()["attention"], "failed");
+
+    host.mark_worker();
+    assert_eq!(call("auto-update", &["apply"], &source, host).0, 76);
+    fs::remove_file(host.worker_marker()).unwrap();
+    check();
+    assert_eq!(status()["last_apply_status"], "skipped");
+    assert_eq!(attention()["attention"], "blocked");
+
+    let retry = ColdUpdateHost {
+        root: host.root.clone(),
+        before: host.before.clone(),
+        fail: "auto-refresh-ok".into(),
+        phases: RefCell::new(vec![]),
+    };
+    success(call("auto-update", &["apply", "--json"], &source, &retry));
+    check();
+    assert_eq!(status()["last_apply_status"], "up_to_date");
+    assert_eq!(status()["last_apply_local"], target);
+    assert_eq!(status()["last_apply_remote"], target);
+    assert_eq!(attention()["attention"], "ok");
+    assert_eq!(read(&host.receipt())["previous_commit"], host.before);
+    assert_eq!(
+        fs::read_to_string(host.root.join("flow")).unwrap(),
+        "build\nproof\n"
+    );
+}
+
 #[test]
 fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
@@ -781,6 +950,7 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
             "prepared-stale",
             "prepared-tamper",
             "prepared-refresh",
+            "auto-refresh",
             "prepared-cancel",
             "prepared-bundle",
             "prepared-crash",
@@ -1237,6 +1407,8 @@ exit 23
         receipt["ref"] = json!("removed-upstream-branch");
     } else if host.fail == "prepared-live" {
         receipt["ref"] = json!("saved-pin");
+    } else if host.fail == "auto-refresh" {
+        receipt["components"]["auto_update"] = json!(true);
     }
     write(&host.receipt(), &receipt);
     let prior = fs::read(host.receipt()).unwrap();
@@ -1339,6 +1511,10 @@ echo build >> "$root/flow"
                 .join("config/oh-my-setting/native-update/transaction.json")
                 .exists()
         );
+        return;
+    }
+    if host.fail == "auto-refresh" {
+        auto_update_outcome_case(&host, &target);
         return;
     }
     let release_channel = match host.fail.as_str() {

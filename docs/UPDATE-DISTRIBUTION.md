@@ -143,6 +143,25 @@ code and, with `--json`, reports `partial`: `core=updated`, `tools=failed`. Core
 installed, and its consumed preparation cannot trigger a duplicate apply.
 Scheduled updates also preserve this distinction in their status record.
 
+`oms auto-update status [--json]` reports the latest scheduled check or apply and
+keeps the last apply result separately. The optional `last_apply_run`,
+`last_apply_status`, `last_apply_local`, `last_apply_remote` and
+`last_apply_upstream` fields record that attempt's time, outcome, commits and
+selected ref. A later check may report `up_to_date` while the last apply remains
+`partial` or `failed`: fetching the current commit does not retry provider tools.
+`auto-update attention` continues to report that failure until a later apply
+replaces the result or a newer installation supersedes it. Legacy status files
+remain readable and retain their apply result on the next check.
+
+After a partial result, retry the existing tool refresh for the installation's
+capability selection with `oms install-profile --reapply --upgrade`; include the
+same `--receipt PATH` when using an explicitly selected capability receipt. An
+older installation with no default capability receipt uses
+`oms install-tools --upgrade`. Do not replace a missing explicit receipt with a
+broader tool selection. These commands leave the committed core and the saved
+auto-update history in place; `last_apply_*` describes the recorded apply, not
+a live provider health probe. A consumed preparation is not a tool-retry token.
+
 A regular update can install the same target independently. The old preparation
 then becomes `stale` and remains available for inspection until replaced by a
 new preparation. There is no separate preparation garbage-collection command.
