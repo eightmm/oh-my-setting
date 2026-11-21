@@ -2065,6 +2065,155 @@ impl<'a> Plan<'a> {
         }
         Ok(())
     }
+    /// Reopens a saved acceptance and its original candidates. Resource
+    /// producers call this while retaining the canonical root/Plan guards;
+    /// neither a caller record nor an indexed patch alone is a disposition.
+    pub fn accepted_panel_candidates(&self, expected: &Value, owner: &str) -> Result<Vec<Value>> {
+        self.context.parent()?;
+        require(
+            self.context.canonical(),
+            "acceptance requires the canonical plan",
+        )?;
+        let snapshot = self.load()?;
+        let task = snapshot.task(expected.text("task_id"))?;
+        require(
+            ["review", "done"].contains(&task.text("state"))
+                && task.get("panel_accept") == expected
+                && !task.text("lease_id").is_empty()
+                && task.get("review_lease_id") == task.get("lease_id")
+                && task.text("claimed_by_participant") == self.context.participant
+                && self.context.participant == self.context.panel_main_attempt,
+            "accepted candidate task, owner or reviewed lease changed",
+        )?;
+        self.panel_accept_record(
+            task.text("id"),
+            task,
+            &snapshot.plan,
+            expected,
+            &Request::new(Action::Status),
+            true,
+        )?;
+        let lifecycle = crate::provenance::lifecycle_projection(
+            self,
+            &self
+                .store
+                .read(".oms/lifecycle/events.jsonl", storage::MAX_STREAM)?,
+        )?;
+        require(
+            lifecycle
+                .get(&self.context.panel_main_attempt)
+                .text("provider")
+                == owner,
+            "accepted candidate provider owner changed",
+        )?;
+        let rows = self.store.rows(".oms/artifacts/index.jsonl", false)?;
+        let indexed = |id: &str, kind: &str| -> Result<&Value> {
+            let mut found = rows.iter().filter(|row| row.text("event_id") == id);
+            let row = found
+                .next()
+                .ok_or_else(|| error("accepted candidate evidence is missing"))?;
+            require(
+                row.text("kind") == kind && found.next().is_none(),
+                "accepted candidate evidence is ambiguous",
+            )?;
+            Ok(row)
+        };
+        let components = if expected.get("schema").is_int(2) {
+            json::parse(&self.evidence_read(expected.text("artifact"), MAX_JSON)?)?
+                .get("components")
+                .array()?
+                .iter()
+                .map(|component| {
+                    (
+                        component.get("candidate").clone(),
+                        component.get("review_gate").clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![(
+                indexed(expected.text("candidate_event_id"), "delegate")?.clone(),
+                expected.get("review_gate").clone(),
+            )]
+        };
+        let mut result = Vec::new();
+        for (candidate, gate) in components {
+            let attempt = candidate.text("attempt_id");
+            let worker = lifecycle.get(attempt);
+            require(
+                indexed(candidate.text("event_id"), "delegate")? == &candidate
+                    && candidate.get("exit").is_int(0)
+                    && candidate.get("plan_id") == expected.get("plan_id")
+                    && candidate.get("task_id") == expected.get("task_id")
+                    && candidate.text("base_sha") == expected.text("base")
+                    && worker.get("task_id") == expected.get("task_id")
+                    && worker.text("parent_attempt_id") == self.context.panel_main_attempt
+                    && worker.get("refs").get("panel_lease_id") == expected.get("lease_id")
+                    && worker.get("refs").text("panel_role") == "worker"
+                    && worker.get("refs").text("panel_access") == "write"
+                    && (worker.get("terminal") == &Value::Bool(true)
+                        || worker.text("state") == "review"),
+                "accepted candidate worker, task or lease differs from its canonical evidence",
+            )?;
+            if expected.get("schema").is_int(1) {
+                require(
+                    candidate.text("attempt_id") == expected.text("candidate_attempt_id")
+                        && ["patch", "patch_sha256", "artifact"]
+                            .iter()
+                            .all(|key| candidate.get(key) == expected.get(key)),
+                    "accepted candidate differs from the saved acceptance",
+                )?;
+            }
+            for (field, hash) in [("artifact", "artifact_sha256"), ("patch", "patch_sha256")] {
+                let path = candidate.text(field);
+                require(
+                    path.starts_with(".oms/artifacts/")
+                        && clean_path(path)? == path
+                        && json::sha(self.evidence_read(
+                            path,
+                            if field == "patch" {
+                                MAX_PATCH
+                            } else {
+                                MAX_JSON
+                            },
+                        )?) == candidate.text(hash),
+                    "accepted candidate artifact changed",
+                )?;
+            }
+            let review = indexed(gate.text("event_id"), "review-outcome")?;
+            let seats = review.get("review").get("seats").array()?;
+            require(
+                review.get("task_id") == expected.get("task_id")
+                    && review.get("exit").is_int(0)
+                    && review.get("review").get("gate_verify_exit").is_int(0)
+                    && review.get("review").get("candidate").get("patch_sha256")
+                        == candidate.get("patch_sha256")
+                    && !seats.is_empty()
+                    && seats.iter().all(|seat| seat.text("verdict") == "pass")
+                    && gate.get("seat_verdicts").strings()?
+                        == seats
+                            .iter()
+                            .map(|seat| seat.text("verdict"))
+                            .collect::<Vec<_>>(),
+                "accepted candidate review evidence changed",
+            )?;
+            require(
+                rows.iter().any(|row| {
+                    row.text("kind") == "panel-accept"
+                        && row.get("task_id") == expected.get("task_id")
+                        && row.get("plan_id") == expected.get("plan_id")
+                        && row.text("attempt_id") == attempt
+                        && row.get("patch_sha256") == candidate.get("patch_sha256")
+                        && row.text("base_sha") == expected.text("commit")
+                        && row.get("exit").is_int(0)
+                }),
+                "accepted candidate registration is missing",
+            )?;
+            result.push(candidate);
+        }
+        Ok(result)
+    }
+
     fn panel_accept_record(
         &self,
         id: &str,

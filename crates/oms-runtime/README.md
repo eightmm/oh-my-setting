@@ -76,6 +76,19 @@ Active member cancellation still belongs to the original Supervisor/transport.
 `team-cancel` withdraws admission and does not promise to kill processes or
 produce cleanup evidence. After the owning execution producer supplies sealed
 cleanup, use the native release flow for remaining candidate/Team custody.
-Automatic accepted-candidate retirement, lost-owner/host recovery and persistent
+Panel acceptance now reconciles accepted write WIP through its native service
+after canonical review and component registration. The service revalidates the
+saved acceptance, original operation/attempt/task binding and current owner/host;
+sealed execution cleanup remains required. Its optional `resource_retirement`
+observation distinguishes pending or unknown custody from the already accepted
+commit. For a recorded acceptance, repeat `oms panel --accept TASK` with its
+original `--repo`, `--owner`, `--message`, `--verify` and exact
+`--expected-patch-sha256`. The CLI prints that retry command for pending or unknown
+custody. It revalidates canonical acceptance and current commit/tree/landing
+evidence, then retries only settlement; incomplete acceptance still refuses.
+See the [panel acceptance contract](../oms-panel-core/README.md#composed-acceptance)
+for the complete command and composition digest. It also retries withdrawn Team
+retirement after releasing its guards;
+active contracts retain their slots. Lost-owner/host recovery and persistent
 session settlement remain unsupported until those producers expose exact owned
 bindings; this API never accepts caller-supplied done/cleanup Booleans.

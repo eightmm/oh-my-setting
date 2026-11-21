@@ -137,6 +137,39 @@ can find all component admissions; partial registration can be completed by the
 existing explicit recovery path. This path does not resolve overlapping edits,
 compose across tasks, or provide new cancellation or publication authority.
 
+After canonical Plan review and all component registrations, the native host
+reconciles accepted write custody. It reopens the exact saved acceptance, original
+candidate and review evidence, and matches the candidate's operation to physical
+attempt/task and current Main/host generations. Each original component is
+settled independently; the composed candidate is never treated as a physical
+writer. Sealed execution cleanup remains a prerequisite. Patches, artifacts and
+usage liabilities are preserved, and an active Team contract keeps its slot.
+
+When a resource domain is configured, acceptance can return an optional
+`resource_retirement` observation with `retired`, `pending`, `not_reserved` or
+`unknown` status. A custody writer failure leaves the accepted commit and Plan
+review intact. Once the acceptance receipt is `recorded`, repeat the existing
+accept command with the same repository, owner, message, verifier and exact
+patch digest to retry settlement:
+
+```sh
+oms panel --accept TASK --repo PATH --owner OWNER \
+  --message 'original commit message' --verify 'original verification command' \
+  --expected-patch-sha256 SHA256
+```
+
+For a composition, use its combined patch digest. The CLI shows the accepted SHA,
+custody status and this exact retry command for `pending` or `unknown` custody.
+The receipt becomes `recorded` before settlement starts, so interruption of the
+custody writer remains retryable. This narrow retry requires the canonical Plan
+acceptance, current commit/tree, native landing proof and all component evidence
+to match; it neither reruns the verifier or review nor reapplies the patch.
+Completed component retirements replay the same immutable decision. An incomplete
+acceptance receipt, changed digest/base or changed evidence still refuses; this
+does not expose the broader library `recover_accept` path as a CLI operation.
+Do not infer task finish, publication or native child cleanup from this resource
+observation. Old-owner or old-host custody still requires its own supported recovery.
+
 ## Route identity snapshots
 
 Routing policy remains schema 2 and rejects unsupported fields, versions and

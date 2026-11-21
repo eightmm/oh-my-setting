@@ -39,6 +39,9 @@ struct Fake {
     publication: RefCell<Vec<u8>>,
     publication_calls: std::cell::Cell<usize>,
     replace_artifacts_on_publication: std::cell::Cell<usize>,
+    retirement_calls: std::cell::Cell<usize>,
+    fail_retirement: std::cell::Cell<bool>,
+    land_calls: std::cell::Cell<usize>,
 }
 impl PeerExecutor for Fake {
     fn execute(&self, request: &ExecutionRequest, _: &AtomicBool) -> Result<CommandOutput> {
@@ -117,6 +120,43 @@ impl PeerExecutor for Fake {
     }
 }
 impl Services for Fake {
+    fn accepted_writes(
+        &self,
+        repo: &Path,
+        request: &results::AcceptRequest,
+        record: &Value,
+        _: &AtomicBool,
+    ) -> Result<Option<Value>> {
+        self.retirement_calls.set(self.retirement_calls.get() + 1);
+        let plan: Value =
+            serde_json::from_slice(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
+                .unwrap();
+        assert_eq!(plan["tasks"][&request.task_id]["panel_accept"], *record);
+        let saved: Value = serde_json::from_slice(
+            &std::fs::read(repo.join(format!(
+                ".oms/panel/acceptances/{}-{}.json",
+                request.task_id,
+                record["patch_sha256"].as_str().unwrap()
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["stage"], "recorded",
+            "settlement must already be retryable"
+        );
+        let rows = results::index_rows(repo)?;
+        assert!(
+            rows.iter().any(|row| row["kind"] == "panel-accept"
+                && row["patch_sha256"] == record["patch_sha256"])
+        );
+        if self.fail_retirement.get() {
+            return Err(Error::new(
+                "fixture custody writer interrupted after acceptance",
+            ));
+        }
+        Ok(Some(json!({"status":"retired"})))
+    }
     fn command(
         &self,
         command: NativeCommand,
@@ -207,6 +247,7 @@ impl Services for Fake {
                 .ok_or_else(|| Error::new("unexpected council execution")),
             NativeCommand::Room => Ok(output(self.room.borrow().clone())),
             NativeCommand::Land => {
+                self.land_calls.set(self.land_calls.get() + 1);
                 let at = args.iter().position(|v| v == "--panel-accept").unwrap();
                 let fence: Value = serde_json::from_str(args[at + 1].to_str().unwrap()).unwrap();
                 results::verify_accept_fence(repo, repo, &fence, self, &STOP)?;
@@ -281,33 +322,31 @@ impl Services for Fake {
                     .current_dir(repo)
                     .status()
                     .unwrap();
-                if status.success()
-                    && let Some(manifest) = fence["snapshot"].get("composition")
-                {
+                if status.success() {
                     let mut rows = results::index_rows(repo)?;
-                    rows.push(json!({
-                        "kind": "patch-admit",
-                        "event_id": "integration-admit",
-                        "exit": 0,
-                        "verify_exit": 0,
-                        "verification": "command",
-                        "base": fence["base"],
-                        "patch_sha256": manifest["patch_sha256"]
-                    }));
-                    rows.push(json!({
-                        "kind": "patch-land",
-                        "exit": 0,
-                        "base": fence["base"],
-                        "task_id": "",
-                        "patch_sha256": manifest["patch_sha256"],
-                        "panel_composition": {
-                            "manifest_sha256": fence["snapshot"]["candidate"]["artifact_sha256"],
-                            "participant": fence["snapshot"]["task"]["claimed_by_participant"],
-                            "tree": manifest["tree"],
-                            "verify_sha256": oms_panel_core::digest(args[verify + 1].as_encoded_bytes()),
-                            "admission_event_id": "integration-admit"
-                        }
-                    }));
+                    let mut landing = json!({
+                        "kind": "patch-land", "exit": 0, "base": fence["base"],
+                        "task_id": "", "patch_sha256": fence["snapshot"]["candidate"]["patch_sha256"]
+                    });
+                    if let Some(manifest) = fence["snapshot"].get("composition") {
+                        rows.push(json!({
+                            "kind": "patch-admit",
+                            "event_id": "integration-admit",
+                            "exit": 0,
+                            "verify_exit": 0,
+                            "verification": "command",
+                            "base": fence["base"],
+                            "patch_sha256": manifest["patch_sha256"]
+                        }));
+                        landing["panel_composition"] = json!({
+                                "manifest_sha256": fence["snapshot"]["candidate"]["artifact_sha256"],
+                                "participant": fence["snapshot"]["task"]["claimed_by_participant"],
+                                "tree": manifest["tree"],
+                                "verify_sha256": oms_panel_core::digest(args[verify + 1].as_encoded_bytes()),
+                                "admission_event_id": "integration-admit"
+                        });
+                    }
+                    rows.push(landing);
                     index(repo, &rows);
                 }
                 Ok(CommandOutput {
@@ -1309,7 +1348,18 @@ fn composed_acceptance() {
         assert!(error.publication_uncertain, "{error}");
         let head = git(&repo, &["rev-parse", "HEAD"], b"");
         *fake.fail_plan.borrow_mut() = false;
+        let plans = fake.plans.borrow().len();
+        let landings = fake.land_calls.get();
+        assert!(
+            results::accept(&repo, &request, &fake, &STOP)
+                .unwrap_err()
+                .message
+                .contains("requires recorded acceptance")
+        );
+        assert_eq!(fake.plans.borrow().len(), plans);
+        assert_eq!(fake.land_calls.get(), landings);
         if !combined_passes {
+            assert_eq!(fake.retirement_calls.get(), 0);
             assert_eq!(head, base, "failed integration verification cannot commit");
             git(&repo, &["add", "product-a", "product-b"], b"");
             assert!(
@@ -1342,9 +1392,24 @@ fn composed_acceptance() {
             continue;
         }
         assert_ne!(head, base);
+        fake.fail_retirement.set(true);
+        let accepted = results::recover_accept(&repo, &request, &fake, &STOP).unwrap();
+        assert_eq!(accepted["sha"], head);
+        assert_eq!(accepted["resource_retirement"]["status"], "unknown");
+        assert_eq!(fake.retirement_calls.get(), 1);
+        let indexed_acceptance = std::fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap();
+        fake.fail_retirement.set(false);
+        let plans = fake.plans.borrow().len();
+        let recovered = results::accept(&repo, &request, &fake, &STOP).unwrap();
+        assert_eq!(recovered["settlement_only"], true);
+        assert_eq!(recovered["resource_retirement"]["status"], "retired");
+        assert_eq!(recovered["sha"], head);
+        assert_eq!(fake.retirement_calls.get(), 2);
+        assert_eq!(fake.plans.borrow().len(), plans);
+        assert_eq!(fake.land_calls.get(), landings);
         assert_eq!(
-            results::recover_accept(&repo, &request, &fake, &STOP).unwrap()["sha"],
-            head
+            indexed_acceptance,
+            std::fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap()
         );
         let accepted =
             serde_json::from_slice::<Value>(&std::fs::read(&plan_path).unwrap()).unwrap();
@@ -1374,6 +1439,14 @@ fn composed_acceptance() {
             .filter(|row| !(row["kind"] == "panel-accept" && row["attempt_id"] == "worker-b"))
             .collect::<Vec<_>>();
         index(&repo, &incomplete);
+        let settlements = fake.retirement_calls.get();
+        assert!(
+            results::accept(&repo, &request, &fake, &STOP)
+                .unwrap_err()
+                .message
+                .contains("incomplete candidate registration")
+        );
+        assert_eq!(fake.retirement_calls.get(), settlements);
         results::recover_accept(&repo, &request, &fake, &STOP).unwrap();
         assert_eq!(
             results::index_rows(&repo)
@@ -1390,6 +1463,7 @@ fn composed_acceptance() {
             std::fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap()
         );
         std::fs::write(&manifest_path, b"changed manifest").unwrap();
+        assert!(results::accept(&repo, &request, &fake, &STOP).is_err());
         assert!(results::recover_accept(&repo, &request, &fake, &STOP).is_err());
         std::fs::write(&manifest_path, &manifest_raw).unwrap();
         let mut finalize = finalize_request(&repo);
@@ -1457,21 +1531,66 @@ fn acceptance_recovery() {
     let head = git(&repo, &["rev-parse", "HEAD"], b"");
     assert_ne!(head, base, "{failed}");
     *fake.fail_plan.borrow_mut() = false;
-    assert_eq!(
-        results::recover_accept(&repo, &request, &fake, &STOP).unwrap()["sha"],
-        head
+    assert!(
+        results::accept(&repo, &request, &fake, &STOP)
+            .unwrap_err()
+            .message
+            .contains("requires recorded acceptance")
     );
     assert_eq!(
         results::recover_accept(&repo, &request, &fake, &STOP).unwrap()["sha"],
         head
     );
+    let plans = fake.plans.borrow().len();
+    let landings = fake.land_calls.get();
+    let recovered = results::accept(&repo, &request, &fake, &STOP).unwrap();
+    assert_eq!(recovered["sha"], head);
+    assert_eq!(recovered["settlement_only"], true);
+    assert_eq!(fake.plans.borrow().len(), plans);
+    assert_eq!(fake.land_calls.get(), landings);
     assert_eq!(git(&repo, &["rev-parse", "HEAD"], b""), head);
     let mut wrong = request.clone();
     wrong.verify = "false".into();
+    assert!(results::accept(&repo, &wrong, &fake, &STOP).is_err());
     assert!(results::recover_accept(&repo, &wrong, &fake, &STOP).is_err());
     wrong = request.clone();
+    wrong.expected_patch_sha256 = Some("0".repeat(64));
+    assert!(results::accept(&repo, &wrong, &fake, &STOP).is_err());
     wrong.expected_patch_sha256 = None;
+    assert!(results::accept(&repo, &wrong, &fake, &STOP).is_err());
     assert!(results::recover_accept(&repo, &wrong, &fake, &STOP).is_err());
+    let recovery_path = PathBuf::from(format!(
+        ".oms/panel/acceptances/{}-{}.json",
+        request.task_id,
+        request.expected_patch_sha256.as_deref().unwrap()
+    ));
+    let saved = std::fs::read(repo.join(&recovery_path)).unwrap();
+    let mut changed: Value = serde_json::from_slice(&saved).unwrap();
+    changed["base"] = head.clone().into();
+    store_file(
+        &repo,
+        &recovery_path,
+        &serde_json::to_vec(&changed).unwrap(),
+    );
+    assert!(results::accept(&repo, &request, &fake, &STOP).is_err());
+    store_file(&repo, &recovery_path, &saved);
+    let index_path = Path::new(".oms/artifacts/index.jsonl");
+    let indexed = std::fs::read(repo.join(index_path)).unwrap();
+    let without_landing = results::index_rows(&repo)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row["kind"] != "patch-land")
+        .collect::<Vec<_>>();
+    index(&repo, &without_landing);
+    assert!(
+        results::accept(&repo, &request, &fake, &STOP)
+            .unwrap_err()
+            .message
+            .contains("unique native landing evidence")
+    );
+    store_file(&repo, index_path, &indexed);
+    assert_eq!(fake.plans.borrow().len(), plans);
+    assert_eq!(fake.land_calls.get(), landings);
     let mut finalize = finalize_request(&repo);
     finalize.outcome = "accepted".into();
     finalize.verify = Some("true".into());

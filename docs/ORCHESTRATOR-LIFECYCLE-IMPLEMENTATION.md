@@ -20,6 +20,13 @@ guard만 검사하며, writer 종료 후 full owner/base 증명을 다시 검사
   write discard 후에도 같은 반환을 재시도한다. `pending`/`unknown`은 그대로 남는다.
 - `reconcile`은 exact held/drained snapshot에서 같은 domain의 새 epoch만 시작한다.
   과거 policy/claim/decision/usage는 지우지 않는다.
+- Panel acceptance는 canonical Plan review와 모든 component 등록 뒤 원본 candidate의
+  operation/attempt/task와 현재 Main/host generation을 다시 검증해 WIP 반환을 시도한다.
+  composition도 각 원본 operation을 독립 처리하며 sealed execution cleanup을 요구한다.
+  반환 실패는 이미 저장된 acceptance를 되돌리지 않는다. `resource_retirement`의
+  pending/unknown을 보존하고 `recorded` receipt의 동일 `--accept` + exact patch digest로
+  정산만 재시도한다. canonical acceptance·현재 commit/tree·landing·component 증거가
+  모두 일치해야 하며 patch/review를 재실행하거나 incomplete acceptance를 자동 확정하지 않는다.
 
 공개 명령·재시도 계약은 [resource CLI](../crates/oms-runtime/README.md)에 있다.
 기존 native resource fixture를 확장하여 public CLI → live Main/Room → native
@@ -27,8 +34,8 @@ decision → checked store를 검증한다. 로컬 child의 sealed cleanup, pend
 candidate/unknown usage 보존, decision replay/conflict, 작은 capacity 재사용과
 held epoch 재개를 포함한다.
 
-**남은 범위:** active member cancel 전달, accepted-candidate 자동 WIP 반환,
-old Main/host-loss unknown claim 복구, persistent session idle/close producer는
+**남은 범위:** active member cancel 전달, old Main/host-loss unknown claim 복구,
+persistent session idle/close producer는
 아직 연결하지 않았다. 기존 `team-cancel`의 `settled`는 계약 철회이며 실제
 process cleanup 완료가 아니다. 아래 기준 source 표는 구현 전 분석 기록이다.
 

@@ -933,12 +933,7 @@ pub(crate) fn run_mode(
             allow_floor_change: options.get("allow-floor-change").map(str::to_owned),
         };
         let accepted = results::accept(&repo, &request, services, stop)?;
-        return plain(format!(
-            "committed locally; publication pending: {}\nNext: oms land --repo {}\nThen: oms panel --finalize --repo {} --landed-commit <full head SHA that oms land pushed>\n",
-            text(&accepted, "sha"),
-            shell_quote(&execution.to_string_lossy()),
-            shell_quote(&execution.to_string_lossy())
-        ));
+        return plain(acceptance_output(&request, &accepted));
     }
     if options.has("finalize") {
         let summary = PathBuf::from(options.required("summary-file")?);
@@ -1874,6 +1869,32 @@ fn salvage_command(
 }
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn acceptance_output(request: &results::AcceptRequest, accepted: &Value) -> String {
+    let execution = shell_quote(&request.execution_repo.to_string_lossy());
+    let heading = if accepted["settlement_only"] == true {
+        "accepted commit confirmed; publication pending"
+    } else {
+        "committed locally; publication pending"
+    };
+    let mut result = format!("{heading}: {}\n", text(accepted, "sha"));
+    if let Some(retirement) = accepted.get("resource_retirement") {
+        let status = text(retirement, "status");
+        result.push_str(&format!("Accepted write custody: {status}\n"));
+        let reason = crate::render::clean(text(retirement, "reason"), 240);
+        if status == "unknown" && !reason.is_empty() {
+            result.push_str(&format!("Reason: {reason}\n"));
+        }
+        if ["pending", "unknown"].contains(&status) {
+            result.push_str(&format!("Retry settlement: oms panel --accept {} --repo {execution} --owner {} --message {} --verify {} --expected-patch-sha256 {}\n",
+                shell_quote(&request.task_id), shell_quote(&request.owner),
+                shell_quote(&request.message), shell_quote(&request.verify),
+                shell_quote(text(accepted, "patch_sha256"))));
+        }
+    }
+    result.push_str(&format!("Next: oms land --repo {execution}\nThen: oms panel --finalize --repo {execution} --landed-commit <full head SHA that oms land pushed>\n"));
+    result
 }
 
 fn mail(
@@ -2935,10 +2956,10 @@ fn next_attention(
 }
 #[cfg(test)]
 mod tests {
-    use super::{Session, snapshot_with};
+    use super::{Session, acceptance_output, snapshot_with};
     use crate::{Result, Services, cli::Options};
     use oms_panel_core::{
-        NativeCommand, Store,
+        NativeCommand, Store, results,
         services::{CommandOutput, ExecutionRequest, PeerExecutor},
     };
     use serde_json::json;
@@ -2990,6 +3011,84 @@ mod tests {
             .unwrap()
             .write(Path::new(path), bytes, false, 1024 * 1024)
             .unwrap();
+    }
+
+    #[test]
+    fn acceptance_custody_output_preserves_exact_retry_arguments() {
+        let request = results::AcceptRequest {
+            owner: "claude".into(),
+            task_id: "task-1".into(),
+            main_attempt_id: "main-1".into(),
+            message: "fix: owner's $(false) change".into(),
+            verify: "test \"$status\" = 'ready'".into(),
+            execution_repo: PathBuf::from("/tmp/owner's repo"),
+            expected_patch_sha256: None,
+            allow_verifier_change: false,
+            allow_floor_change: None,
+        };
+        let digest = "ab".repeat(32);
+        let mut accepted =
+            json!({"sha":"accepted-commit", "patch_sha256":digest, "settlement_only":true});
+        assert!(!acceptance_output(&request, &accepted).contains("Accepted write custody"));
+        for status in ["pending", "unknown", "retired", "not_reserved"] {
+            accepted["resource_retirement"] = json!({"status":status});
+            if status == "unknown" {
+                accepted["resource_retirement"]["reason"] =
+                    "custody changed\n \u{1b}[31mstop\u{1b}[0m".into();
+            }
+            let shown = acceptance_output(&request, &accepted);
+            assert!(
+                shown.contains("accepted commit confirmed; publication pending: accepted-commit")
+            );
+            assert!(shown.contains(&format!("Accepted write custody: {status}")));
+            if status == "unknown" {
+                assert!(shown.contains("Reason: custody changed stop\n"));
+                assert!(!shown.contains('\u{1b}'));
+            }
+            let retry = shown
+                .lines()
+                .find_map(|line| line.strip_prefix("Retry settlement: "));
+            if ["pending", "unknown"].contains(&status) {
+                assert!(shown.find("Retry settlement:") < shown.find("Next: oms land"));
+                // Parse the displayed command without invoking oms. Embedded
+                // substitutions and quotes must remain literal argv bytes.
+                let parsed = std::process::Command::new("sh")
+                    .args([
+                        "-c",
+                        &format!("set -- {}; printf '%s\\0' \"$@\"", retry.unwrap()),
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(parsed.status.success());
+                let words = parsed
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|word| !word.is_empty())
+                    .map(|word| std::str::from_utf8(word).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    words,
+                    [
+                        "oms",
+                        "panel",
+                        "--accept",
+                        "task-1",
+                        "--repo",
+                        "/tmp/owner's repo",
+                        "--owner",
+                        "claude",
+                        "--message",
+                        &request.message,
+                        "--verify",
+                        &request.verify,
+                        "--expected-patch-sha256",
+                        &digest
+                    ]
+                );
+            } else {
+                assert!(retry.is_none());
+            }
+        }
     }
 
     #[test]
