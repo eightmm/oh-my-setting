@@ -146,8 +146,12 @@ The managed Main can open provider orchestrators with
 `--task TEXT` to submit a one-line assignment to an idle, connected provider.
 The assignments give the Main and provider orchestrators responsibility for
 review and verification, with substantive implementation delegated to scoped
-workers. Native provider permission controls determine which restrictions
-are enforced. The board can dock that provider's existing native input pane without restarting
+workers. Research, review and verification use the provider's read-only
+controls where available. Native child records report effective access as
+unverified. Set `OMS_PANEL_MAIN_PERMISSIONS=native` for new Main and
+orchestrator launches to use provider permission settings without OMS adding
+bypass flags. This includes automatic leads and Codex's alternate lead.
+The board can dock that provider's existing native input pane without restarting
 the conversation. Only live panes from the selected repository and Room can
 receive board usage refreshes. Native provider scheduling is outside OMS campaign
 accounting and requires an Overall Main recorded outside a managed campaign.

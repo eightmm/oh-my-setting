@@ -473,11 +473,15 @@ under the active `antigravity` main attempt so `render` surfaces `[agy:...]` row
 `PostToolUse` cancellations/errors or `Stop` transitions settle them in the panel state. Native
 tracking always returns an allow decision on `PreToolUse` and is skipped when
 `OH_MY_SETTING_AGY_HOOKS=0` or inside OMS worker subprocesses (`OMS_HARNESS_CHILD=1`).
-By default, Claude and Agy mains use `--dangerously-skip-permissions`, and Codex
-mains use `--dangerously-bypass-approvals-and-sandbox`. Set
-`OMS_PANEL_MAIN_PERMISSIONS=native` to use provider permission settings instead;
-`full` selects the default. Pi uses the gateway transport's permission handling.
-OMS command guards and hooks remain active.
+By default, new Claude and Agy Mains and orchestrators use
+`--dangerously-skip-permissions`, and new Codex Mains and orchestrators use
+`--dangerously-bypass-approvals-and-sandbox`. Set
+`OMS_PANEL_MAIN_PERMISSIONS=native` to use the providers' own permission
+settings for new launches, including automatic orchestrators and the Codex
+alternate lead. A Main started in `native` mode carries that choice into
+its lead launches. Each existing session keeps its launch settings.
+`full` selects the default. Pi's Main uses the gateway transport's
+permission handling. OMS command guards and hooks remain active.
 Agy has owner `antigravity`; both `--launch agy` and `--launch antigravity` select
 the same `agy` harness and CLI. A dry run shows the actual fresh-launch argv.
 Agy `--resume` is refused before launch or enrollment: its native session ownership
