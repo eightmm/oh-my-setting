@@ -526,6 +526,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A panel Overall Main now manages only. Its startup contract and the
+  `oms-panel-orchestrator` skill no longer allow "integration and unblocking"
+  edits: every repository change goes to a worker or Provider Lead, fixes
+  return to their writer with `--continue`, conflicts go to an `integrator`,
+  and Main edits only on the user's explicit instruction, recorded in the Room.
+  The Provider Lead contract names it a team lead for one assignment and lists
+  what returns to Main. `coordination-layers.md` holds the Main, Lead and
+  Worker duty table. This is a prompt and skill contract; no runtime guard
+  refuses a Main edit. Solo sessions without a team still work locally.
 - Managed tool upgrades resolve current upstream releases instead of a checked-in
   `tools.lock.json`: Node follows the newest LTS, uv/gh use their latest stable
   GitHub release, npm tools follow `latest`, and Antigravity uses its current-host
