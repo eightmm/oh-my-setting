@@ -100,4 +100,30 @@ if printf '%s' "$out" | grep >/dev/null -E '^dry-run: antigravity '; then
   fail "environment preference leaked into an explicit consult: $out"
 fi
 
+# Council verbs read their default seats from OMS_PEER_PROVIDERS. Without it
+# the stable council is unchanged, and an explicit --providers list wins.
+seats() {  # seats ENV_ASSIGNMENTS... -- ARGS... -> providers the dry run seated
+  local -a assignments=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    assignments+=("$1")
+    shift
+  done
+  shift
+  (
+    cd "$TMP/repo" &&
+      env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX \
+        -u OMS_PEER_PROVIDERS "${assignments[@]}" \
+        bash "$ROOT/scripts/peer-ask.sh" --prompt "seat default probe" \
+        --no-memory --no-task --no-ml-context --dry-run "$@"
+  ) | sed -n 's/^dry-run: \([a-z]*\) .*/\1/p' | tr '\n' ' '
+}
+[ "$(seats --)" = "codex claude antigravity " ] ||
+  fail "the stable council must stay the default without OMS_PEER_PROVIDERS"
+[ "$(seats OMS_PEER_PROVIDERS=codex,claude --)" = "codex claude " ] ||
+  fail "OMS_PEER_PROVIDERS did not replace the default council seats"
+[ "$(seats OMS_PEER_PROVIDERS=codex -- --providers claude)" = "claude " ] ||
+  fail "explicit --providers did not override OMS_PEER_PROVIDERS"
+[ "$(seats 'OMS_PEER_PROVIDERS= ' --)" = "codex claude antigravity " ] ||
+  fail "a blank OMS_PEER_PROVIDERS must fall back to the stable council"
+
 echo "advisor-routing-smoke: ok"

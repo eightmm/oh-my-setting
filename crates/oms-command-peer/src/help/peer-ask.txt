@@ -13,7 +13,8 @@ Options:
                        planned experiment as the prompt (--prompt or positional).
                        Use before expensive runs.
   --repo PATH          Git repo for optional context. Default: current directory.
-  --providers LIST     Comma list of registered targets. Default: the stable
+  --providers LIST     Comma list of registered targets. Default:
+                       OMS_PEER_PROVIDERS, else the stable
                        Codex/Claude/Antigravity council; optional agents are
                        available when explicitly named.
                        An entry may carry a model (codex:model=NAME) to pin it.
@@ -74,6 +75,8 @@ Options:
 
 Environment:
   OH_MY_SETTING_ASK_DRY_RUN=1   Same as --dry-run.
+  OMS_PEER_PROVIDERS     Default seats when --providers is absent (comma
+                         list; same checks as an explicit list).
   OMS_PEER_TIMEOUT       Per-provider wall-clock timeout (default: 15m).
   OMS_PEER_PRINT_TIMEOUT Timeout for print mode wait (agy); tracks the verb
                          wall default unless set.

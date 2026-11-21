@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `OMS_PEER_PROVIDERS` sets the default `peer-ask`/`peer-review` seats for an
+  install that uses other transports. `--providers` still wins, the stable
+  Codex/Claude/Antigravity council stays the default without it, and listed
+  seats pass the same discovery, read-mode and model-family checks.
 - The panel reader's Files view (`f`) shows a worker's declared scope and
   changed files as a directory tree with `+N -M`, marks files outside its scope
   or shared with another live write worker, opens a file's coloured diff with

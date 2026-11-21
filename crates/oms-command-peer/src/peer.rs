@@ -1096,11 +1096,20 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             }
         }
     } else {
-        args.value("providers", "codex,claude,antigravity")
-            .split(',')
-            .map(str::trim)
-            .map(Target::parse)
-            .collect::<Result<Vec<_>>>()?
+        // Default seats: an explicit list wins, then the install's stated
+        // preference, then the stable council. Every seat still passes the
+        // discovery, read-capability and model-family checks below.
+        let preferred = std::env::var("OMS_PEER_PROVIDERS")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        args.value(
+            "providers",
+            preferred.as_deref().unwrap_or("codex,claude,antigravity"),
+        )
+        .split(',')
+        .map(str::trim)
+        .map(Target::parse)
+        .collect::<Result<Vec<_>>>()?
     };
     if tool == "peer-review" && args.has("writer") && !args.has("providers") {
         let writer = providers::normalize(args.get("writer"))?;

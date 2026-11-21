@@ -59,7 +59,9 @@ Use `--providers all` only for diagnostics that should also show absent
 built-ins. The default `peer-ask` and `peer-review` council remains the stable
 Codex/Claude/Antigravity set, so installing another CLI never causes surprise
 fan-out or spend. Name optional seats explicitly; `consult --all` is also an
-explicit fan-out request.
+explicit fan-out request. `OMS_PEER_PROVIDERS` (a comma list) replaces that
+default for an install that states it; `--providers` still wins, and the listed
+seats pass the same discovery, read-mode and model-family checks.
 
 Exact model names stay attached to their carrier (`opencode` in the GLM
 example and `aider` in the DeepSeek-model example). `deepseek` by itself is the
