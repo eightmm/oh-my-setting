@@ -9,12 +9,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+#[derive(Clone, Copy)]
+enum Application<'a> {
+    BeforeApply { base: &'a str },
+    AfterApply,
+}
+
 fn preflight<S: Services + ?Sized>(
     repo: &Path,
     request: &AcceptRequest,
     service: &S,
     stop: &AtomicBool,
-    applied: bool,
+    application: Application<'_>,
 ) -> Result<Value> {
     let store = Store::open(repo)?;
     let attempts = query(
@@ -98,7 +104,8 @@ fn preflight<S: Services + ?Sized>(
     )?;
     require(
         ["claimed", "running"].contains(&text(&task, "state").as_str())
-            || (applied && ["review", "done"].contains(&text(&task, "state").as_str())),
+            || (matches!(application, Application::AfterApply)
+                && ["review", "done"].contains(&text(&task, "state").as_str())),
         "accept requires a claimed/running task; reconcile prior acceptance before retry",
     )?;
     require(
@@ -167,13 +174,20 @@ fn preflight<S: Services + ?Sized>(
                 .is_none_or(|v| candidate["patch_sha256"] == *v),
         "candidate does not match current plan/digest",
     )?;
-    if !applied {
+    if let Application::BeforeApply { base } = application {
         require(
             !rows.iter().any(|v| {
-                ["patch-land", "panel-accept"].contains(&text(v, "kind").as_str())
-                    && v["task_id"] == request.task_id
-                    && v["patch_sha256"] == candidate["patch_sha256"]
+                v["patch_sha256"] == candidate["patch_sha256"]
                     && v["exit"] == 0
+                    && match v["kind"].as_str() {
+                        Some("panel-accept") => v["task_id"] == request.task_id,
+                        // Native panel patch-land does not transition the plan.
+                        Some("patch-land") => {
+                            v["task_id"] == request.task_id
+                                || (v["task_id"] == "" && v["base"] == base)
+                        }
+                        _ => false,
+                    }
             }),
             "candidate already applied; never reapply blindly",
         )?;
@@ -265,7 +279,7 @@ fn preflight<S: Services + ?Sized>(
         serde_json::json!({"task":task,"candidate":candidate,"worker":{"attempt_id":worker["attempt_id"],"task_id":worker["task_id"],"parent_attempt_id":worker["parent_attempt_id"],"refs":worker["refs"]},"review_gate":gate,"allowed_paths":allowed,"superseded_attempts":selection.superseded}),
     )
 }
-fn recheck<S: Services + ?Sized>(
+fn recheck_applied<S: Services + ?Sized>(
     repo: &Path,
     request: &AcceptRequest,
     baseline: &Value,
@@ -273,7 +287,7 @@ fn recheck<S: Services + ?Sized>(
     stop: &AtomicBool,
 ) -> Result<()> {
     require(
-        preflight(repo, request, service, stop, true)? == *baseline,
+        preflight(repo, request, service, stop, Application::AfterApply)? == *baseline,
         "candidate, digest, lease, task or review gate changed",
     )
 }
@@ -327,7 +341,17 @@ pub(crate) fn verify_landing_fence<S: Services + ?Sized>(
         request.expected_patch_sha256.is_some(),
         "panel acceptance candidate digest unavailable",
     )?;
-    recheck(repo, &request, &fence.snapshot, service, stop)
+    let current = preflight(
+        repo,
+        &request,
+        service,
+        stop,
+        Application::BeforeApply { base: &fence.base },
+    )?;
+    require(
+        current == fence.snapshot,
+        "panel acceptance authority changed before application",
+    )
 }
 struct IndexLock(PathBuf);
 impl Drop for IndexLock {
@@ -456,7 +480,7 @@ fn exact_commit<S: Services + ?Sized>(
         expected.strip_suffix(b"\n").unwrap_or(&expected) == tree.as_bytes(),
         "locked Git index differs from reviewed tree",
     )?;
-    recheck(repo, request, baseline, service, stop)?;
+    recheck_applied(repo, request, baseline, service, stop)?;
     let commit = crate::git::text(
         service,
         execution,
@@ -479,7 +503,7 @@ fn exact_commit<S: Services + ?Sized>(
             )? == base,
         "created commit differs from reviewed tree/parent",
     )?;
-    recheck(repo, request, baseline, service, stop)?;
+    recheck_applied(repo, request, baseline, service, stop)?;
     require(
         read()? == original
             && std::fs::read(&lock_path).map_err(Error::new)? == original
@@ -573,7 +597,13 @@ pub(crate) fn run<S: Services + ?Sized>(
         .is_empty(),
         "dirty integration tree; accept refused before application",
     )?;
-    let snapshot = preflight(repo, request, service, stop, false)?;
+    let snapshot = preflight(
+        repo,
+        request,
+        service,
+        stop,
+        Application::BeforeApply { base: &base },
+    )?;
     let candidate = &snapshot["candidate"];
     let patch = verified_patch(&store, candidate)?;
     let scratch = crate::git::Scratch::new()?;
@@ -641,7 +671,7 @@ pub(crate) fn run<S: Services + ?Sized>(
         service
             .command(NativeCommand::Land, &execution, &argv, stop)?
             .success()?;
-        recheck(repo, request, &snapshot, service, stop)?;
+        recheck_applied(repo, request, &snapshot, service, stop)?;
         require(
             crate::git::text(service, &execution, &["rev-parse", "HEAD"], stop)? == base,
             "HEAD changed after application",
@@ -697,7 +727,7 @@ pub(crate) fn run<S: Services + ?Sized>(
                 .is_empty(),
             "committed tree or HEAD differs from reviewed application",
         )?;
-        recheck(repo, request, &snapshot, service, stop)?;
+        recheck_applied(repo, request, &snapshot, service, stop)?;
         tx.check()?;
         complete(
             repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
@@ -865,7 +895,7 @@ pub(crate) fn recover<S: Services + ?Sized>(
             && saved["verify"] == request.verify,
         "acceptance recovery request differs from saved intent",
     )?;
-    let snapshot = preflight(repo, request, service, stop, true)?;
+    let snapshot = preflight(repo, request, service, stop, Application::AfterApply)?;
     for field in [
         "candidate",
         "worker",
@@ -975,7 +1005,7 @@ pub(crate) fn recover<S: Services + ?Sized>(
     saved["commit"] = commit.clone().into();
     saved["stage"] = "plan review".into();
     tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
-    recheck(repo, request, &snapshot, service, stop)?;
+    recheck_applied(repo, request, &snapshot, service, stop)?;
     tx.check()?;
     complete(
         repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
@@ -1106,7 +1136,7 @@ pub(crate) fn validate_landed<S: Services + ?Sized>(
         allow_verifier_change: false,
         allow_floor_change: None,
     };
-    let snapshot = preflight(repo, &accept, service, stop, true)?;
+    let snapshot = preflight(repo, &accept, service, stop, Application::AfterApply)?;
     let task = &snapshot["task"];
     let candidate = &snapshot["candidate"];
     let execution = std::fs::canonicalize(&request.execution_repo).map_err(Error::new)?;
@@ -1470,7 +1500,17 @@ mod tests {
             allow_floor_change: None,
         };
         let stop = AtomicBool::new(false);
-        let check = |service: &Authority| preflight(repo, &request, service, &stop, false);
+        let check = |service: &Authority| {
+            preflight(
+                repo,
+                &request,
+                service,
+                &stop,
+                Application::BeforeApply {
+                    base: &"1".repeat(40),
+                },
+            )
+        };
         crate::control::tests::launch_bindings();
         let snapshot = check(&service).unwrap();
         assert_eq!(crate::control::tests::launch_bindings(), [json!(MAIN)]);
