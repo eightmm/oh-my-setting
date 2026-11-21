@@ -723,6 +723,130 @@ fn clean_materialize_and_distill_leave_files_unchanged() {
 }
 
 #[test]
+fn distill_retries_overflow_refused_and_late_evidence_across_daily_passes() {
+    use oms_command_journal::MemoryAppendOutcome;
+    use std::cell::RefCell;
+    let scratch = Scratch::new();
+    let now = parse_rfc3339_utc("2026-07-31T03:00:00Z").unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    for n in 0..7 {
+        store.record_event(&parse(&format!(r#"{{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T00:00:0{n}Z","source":{{"type":"manual","id":"lesson-{n}"}},"decision":"Keep distinct lesson {n}"}}"#)), now).unwrap();
+    }
+    let proposed = RefCell::new(Vec::new());
+    let refuse_first = |_: &std::path::Path, _: &str, lesson: &str| {
+        if lesson.contains("lesson 0") {
+            return Ok(MemoryAppendOutcome::Refused("fixture refusal".into()));
+        }
+        proposed.borrow_mut().push(lesson.to_owned());
+        Ok(MemoryAppendOutcome::Appended)
+    };
+    let first = store.distill(false, Some(&refuse_first), now).unwrap();
+    assert_eq!(
+        (first.promoted, first.dropped, first.skipped_refused.len()),
+        (4, 2, 1)
+    );
+    let accept = |_: &std::path::Path, _: &str, lesson: &str| {
+        proposed.borrow_mut().push(lesson.to_owned());
+        Ok(MemoryAppendOutcome::Appended)
+    };
+    let retry = store.distill(false, Some(&accept), now).unwrap();
+    assert_eq!(retry.promoted, 3);
+    assert_eq!(proposed.borrow().len(), 7);
+    assert!(
+        proposed
+            .borrow()
+            .iter()
+            .all(|s| s.contains("source events: wj_")
+                && s.contains("recorded evidence; not independently verified"))
+    );
+    assert_eq!(store.distill(true, None, now).unwrap().promoted, 0);
+
+    // A late-arriving event has an older occurrence timestamp than the cursor.
+    store.record_event(&parse(r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-01T00:00:00Z","source":{"type":"manual","id":"late"},"decision":"Preserve delayed observations"}"#), now).unwrap();
+    assert_eq!(
+        store.distill(false, Some(&accept), now).unwrap().promoted,
+        1
+    );
+
+    store.record_event(&parse(r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-30T00:00:00Z","source":{"type":"manual","id":"blocker-one"},"blocker":"Repeated fixture blocker"}"#), now).unwrap();
+    assert_eq!(
+        store.distill(false, Some(&accept), now).unwrap().promoted,
+        0
+    );
+    store.record_event(&parse(r#"{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T00:00:00Z","source":{"type":"manual","id":"blocker-two"},"blocker":"Repeated fixture blocker"}"#), now).unwrap();
+    let repeated = store.distill(false, Some(&accept), now).unwrap();
+    assert_eq!(repeated.promoted, 1);
+    assert!(repeated.lessons[0].contains("blocker seen 2d"));
+    assert_eq!(store.distill(true, None, now).unwrap().promoted, 0);
+}
+
+#[test]
+fn distill_rotates_past_five_refused_candidates_without_consuming_them() {
+    use oms_command_journal::MemoryAppendOutcome::{Appended, Refused};
+    let scratch = Scratch::new();
+    let now = parse_rfc3339_utc("2026-07-31T03:00:00Z").unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    for n in 0..8 {
+        store.record_event(&parse(&format!(r#"{{"event_type":"run","verification_status":"not_verified","occurred_at":"2026-07-31T00:00:0{n}Z","source":{{"type":"manual","id":"fairness-{n}"}},"decision":"Fairness lesson {n}"}}"#)), now).unwrap();
+    }
+    let receipt = store.root.join("distill.json");
+    fs::write(
+        &receipt,
+        br#"{"schema_version":1,"through":null,"last_run_date":"2026-07-30"}"#,
+    )
+    .unwrap();
+    let accept = |_: &std::path::Path, _: &str, _: &str| Ok(Appended);
+    let refuse_old = |_: &std::path::Path, _: &str, lesson: &str| {
+        if (0..5).any(|n| lesson.contains(&format!("Fairness lesson {n}"))) {
+            return Ok(Refused("fixture refusal".into()));
+        }
+        Ok(Appended)
+    };
+    let first = store.distill(false, Some(&refuse_old), now).unwrap();
+    assert_eq!(
+        (first.promoted, first.dropped, first.skipped_refused.len()),
+        (0, 3, 5)
+    );
+    let prior = fs::read(&receipt).unwrap();
+    drop(store);
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    let preview = store.distill(true, None, now).unwrap();
+    assert!(preview.lessons[0].contains("Fairness lesson 5"));
+    assert_eq!(fs::read(&receipt).unwrap(), prior);
+    let second = store.distill(false, Some(&refuse_old), now).unwrap();
+    assert_eq!(
+        (
+            second.promoted,
+            second.dropped,
+            second.skipped_refused.len()
+        ),
+        (3, 3, 2)
+    );
+    for (n, lesson) in (5..8).zip(second.lessons) {
+        assert!(lesson.contains(&format!("Fairness lesson {n}")));
+    }
+    let recovered = store.distill(false, Some(&accept), now).unwrap();
+    assert_eq!(recovered.promoted, 5);
+    assert!(
+        recovered
+            .lessons
+            .iter()
+            .all(|lesson| (0..5).any(|n| lesson.contains(&format!("Fairness lesson {n}"))))
+    );
+    assert_eq!(store.distill(true, None, now).unwrap().promoted, 0);
+
+    let malformed = br#"{"schema_version":1,"last_attempted_candidate":"invalid"}"#;
+    fs::write(&receipt, malformed).unwrap();
+    assert!(
+        store
+            .distill(false, Some(&accept), now)
+            .unwrap_err()
+            .contains("invalid distill candidate identity")
+    );
+    assert_eq!(fs::read(&receipt).unwrap(), malformed);
+}
+
+#[test]
 fn cached_cold_archives_are_not_read_until_their_stat_stamp_changes() {
     use std::os::unix::fs::MetadataExt;
     use std::time::{Duration, SystemTime};
