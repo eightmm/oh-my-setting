@@ -170,17 +170,17 @@ repository. The task, lease, operation, checkout and native target are checked
 again before buffering, pasting and Enter. It uses the existing Plan, Room and
 lifecycle writers; it does not create another assignment database.
 
-An exact repeat reuses the attempt and Room message without claiming or sending
-again. Reusing that request with a changed body or binding is refused. Once the
-durable send boundary is recorded, interrupted or unconfirmed delivery returns
-`status: "unknown"` and exit 75; a retry reports the same attempt without more
-input. A prefix that stopped before that boundary can resume its remaining
-steps. Inspect `oms events show --attempt ATTEMPT --json`, the returned private
-binding and Room message, and the existing provider pane when reconciling an
-unknown send. Resolve the old attempt through the existing lifecycle recovery
-workflow before dispatching a new lease or Main; changing a lease alone does not
-authorize another send. The bridge does not infer that a native job stopped
-from a terminal lifecycle record.
+An exact repeat with the same unexpired claim reuses the attempt and Room
+message without claiming or sending again. Once the durable send boundary is
+recorded, interrupted or unconfirmed delivery returns `status: "unknown"` and
+exit 75. An exact retry under that claim reports the saved attempt. A prefix
+that stopped before that boundary can resume its remaining steps.
+
+If the claim expires, is released, or changes, inspect the saved attempt with
+`oms agent-events show --attempt ATTEMPT --json`, the private binding and Room
+message, and the existing provider pane. Reconcile the old attempt before
+dispatching under a new claim or Main. Confirm the native job's state in its
+provider session even when its OMS lifecycle record is terminal.
 
 `submitted` means the exact Turn appeared in a submitted user message. Provider
 consumption and task completion remain `unconfirmed`; the canonical task is
