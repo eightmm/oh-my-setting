@@ -377,7 +377,6 @@ fn agy_prompt_chrome(lines: &[String]) -> Option<(&[String], &str)> {
         }
         _ => return None,
     };
-    agy_hud_fields(hud)?;
     Some((middle, hud))
 }
 
@@ -438,10 +437,15 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
         .map(strip_sgr)
         .filter(|line| !line.trim().is_empty())
         .collect();
-    let Some((middle, _)) = agy_prompt_chrome(&lines) else {
+    let Some((middle, hud)) = agy_prompt_chrome(&lines) else {
         return vec![];
     };
-    if middle.is_empty() {
+    let hud_live = hud
+        .split_once(" (Antigravity")
+        .is_some_and(|(head, suffix)| {
+            !head.is_empty() && suffix.contains(") | ctx ") && !hud.chars().any(char::is_control)
+        });
+    if middle.is_empty() || !hud_live {
         return vec![];
     }
     let rows = middle
@@ -527,6 +531,7 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
     );
     let rows = agy_roster(&roster);
     assert_eq!(rows.len(), 2);
+    assert_eq!(agy_roster(&roster.replace("ctx 42%", "ctx …")), rows);
     let mixed = roster.replace(
         "4m timer running\n",
         "4m timer running\n  ● [14:48:20] ( foreground command... running\n",
