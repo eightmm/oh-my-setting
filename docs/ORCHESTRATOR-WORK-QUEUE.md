@@ -14,6 +14,11 @@
 기록한다. 공개 handoff prompt 연결, 소유권과 최신성의 진단 구분, 기존 skill-manifest
 검증 강화이며, 아래 lifecycle/Main 인계/실제 모델 평가 과제의 완료를 뜻하지 않는다.
 
+2026-11-21 [Agent harness 패킷](AGENT-HARNESS-WORK-PACKETS.md)은 임의 에이전트 연결과
+협업 표면의 공백을 AH-01~13으로 기록한다: 유지 6개, 기존 owner에 흡수 2개, 조건부 5개.
+명세 전용이며 아래 40개 ID의 분류와 LC 우선순위를 바꾸지 않는다. AH-04는 RF-02,
+AH-02는 TM-07/08/09와 REL-01, AH-13은 CP-15의 owner를 따른다.
+
 ## 1. PR 지도
 
 | PR / 작업 | 실제 변경 | 구현 상태 / 다음 행동 |
