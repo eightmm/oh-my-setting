@@ -5,7 +5,7 @@ use oms_command_task::services::{
     FailureObservation, JournalObservation, MemoryOutcome, ReferenceOperation, ReferenceWrite,
     Services, VerifyObservation,
 };
-use oms_command_task::{Result, owns, run, run_with_services, usage};
+use oms_command_task::{Result, owns, packet, run, run_with_services, usage};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,9 +42,32 @@ impl Drop for Repo {
     }
 }
 
-struct Op;
+#[derive(Clone, Copy, Debug)]
+enum VerifyRace {
+    Rotation,
+    Contract,
+    Repository,
+    Publication,
+}
+
+struct Op {
+    interfere: bool,
+}
 impl ReferenceOperation for Op {
-    fn validate(&mut self, _: &ReferenceWrite<'_>) -> Result<()> {
+    fn validate(&mut self, request: &ReferenceWrite<'_>) -> Result<()> {
+        if self.interfere {
+            assert_eq!(
+                packet::metadata(request.proposed, "status"),
+                Some(b"verified".as_slice())
+            );
+            // Change bytes after the writer's initial comparison but before its
+            // atomic compare-and-swap, without a sleep or a second process.
+            std::fs::write(
+                request.target,
+                [request.before, b"\nconcurrent packet note\n"].concat(),
+            )
+            .unwrap();
+        }
         Ok(())
     }
     fn finish(&mut self, _: i32) -> Result<()> {
@@ -56,13 +79,42 @@ impl ReferenceOperation for Op {
 struct Fake {
     journal: Vec<&'static str>,
     memory: usize,
+    failure_calls: Vec<i32>,
+    resolve_saw_receipt: Vec<bool>,
+    references: usize,
+    verify_race: Option<VerifyRace>,
 }
 impl Services for Fake {
     fn state_repository(&mut self, work: &Path, _: &AtomicBool) -> Result<PathBuf> {
         Ok(work.to_path_buf())
     }
-    fn begin_reference(&mut self, _: &Path, _: &Path) -> Result<Box<dyn ReferenceOperation>> {
-        Ok(Box::new(Op))
+    fn begin_reference(
+        &mut self,
+        repo: &Path,
+        target: &Path,
+    ) -> Result<Box<dyn ReferenceOperation>> {
+        self.references += 1;
+        let race = self.verify_race.filter(|_| self.references == 3);
+        // Verify publishes its active snapshot and outcome before starting the
+        // final receipt operation. Simulate a concurrent change at that seam.
+        match race {
+            Some(VerifyRace::Rotation | VerifyRace::Contract) => {
+                let raw = std::fs::read(target).unwrap();
+                let changed = if matches!(race, Some(VerifyRace::Rotation)) {
+                    packet::set_metadata(&raw, "task_id", b"task-successor")
+                } else {
+                    packet::replace(&raw, "Verify", b"false")
+                };
+                std::fs::write(target, changed).unwrap();
+            }
+            Some(VerifyRace::Repository) => {
+                std::fs::write(repo.join("concurrent-change"), b"new work\n").unwrap();
+            }
+            _ => {}
+        }
+        Ok(Box::new(Op {
+            interfere: matches!(race, Some(VerifyRace::Publication)),
+        }))
     }
     fn observe_journal(&mut self, request: JournalObservation<'_>) -> Result<()> {
         self.journal.push(request.operation.as_str());
@@ -72,7 +124,17 @@ impl Services for Fake {
         self.memory += 1;
         Ok(())
     }
-    fn observe_failure(&mut self, _: FailureObservation<'_>) -> Result<Vec<u8>> {
+    fn observe_failure(&mut self, request: FailureObservation<'_>) -> Result<Vec<u8>> {
+        self.failure_calls.push(request.exit);
+        if request.exit == 0 {
+            let raw = std::fs::read(request.repo.join(".oms/task/current.md")).unwrap();
+            self.resolve_saw_receipt.push(
+                packet::metadata(&raw, "status") == Some(b"verified".as_slice())
+                    && ["verified_state", "verified_cmd_sha"].iter().all(|key| {
+                        packet::metadata(&raw, key).is_some_and(|value| !value.is_empty())
+                    }),
+            );
+        }
         Ok(Vec::new())
     }
     fn observe_verify(&mut self, _: &Path, _: &[u8]) -> Result<VerifyObservation> {
@@ -200,16 +262,102 @@ fn lifecycle_init_update_append_verify_close() {
     assert_eq!(code, 0);
     assert!(out.contains("lifecycle"), "{out}");
 
-    let (code, _, err) = call(&repo, &mut svc, &["verify"]);
+    let (code, _, err) = call(&repo, &mut svc, &["verify", "--verify", "exit 7"]);
+    assert_eq!(code, 7, "{err}");
+    assert_eq!(svc.failure_calls, [7]);
+    assert!(svc.resolve_saw_receipt.is_empty());
+    let body = std::fs::read(&packet).unwrap();
+    assert_eq!(
+        packet::metadata(&body, "status"),
+        Some(b"active".as_slice())
+    );
+    assert!(String::from_utf8_lossy(&packet::section(&body, "Verification")).contains("exit: 7"));
+
+    let (code, out, err) = call(
+        &repo,
+        &mut svc,
+        &["verify", "--skip-verify-run", "fixture skip"],
+    );
     assert_eq!(code, 0, "{err}");
+    assert!(out.contains("verification skipped; task remains active"));
+    assert_eq!(svc.failure_calls, [7]);
+
+    let (code, _, err) = call(&repo, &mut svc, &["verify", "--verify", "true"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(svc.failure_calls, [7, 0]);
+    assert_eq!(svc.resolve_saw_receipt, [true]);
     let (code, _, err) = call(&repo, &mut svc, &["close"]);
     assert_eq!(code, 0, "{err}");
     assert!(!packet.exists());
     assert!(repo.path().join(".oms/task/archive").is_dir());
-    assert_eq!(svc.journal, ["update", "verify", "close"]);
+    assert_eq!(
+        svc.journal,
+        ["update", "verify", "verify", "verify", "close"]
+    );
     assert_eq!(
         svc.memory,
         usize::from(std::env::var("OMS_AGENT_TASK_CLOSE_MEMORY").as_deref() == Ok("1"))
+    );
+}
+
+#[test]
+fn rejected_verification_receipts_do_not_resolve_failures() {
+    if !isolated(
+        "rejected_verification_receipts_do_not_resolve_failures",
+        &[],
+    ) {
+        return;
+    }
+    let mut premature = Vec::new();
+    for (race, expected_code, diagnostic) in [
+        (VerifyRace::Rotation, 4, "task rotated during verification"),
+        (
+            VerifyRace::Contract,
+            4,
+            "Verify contract changed during verification",
+        ),
+        (
+            VerifyRace::Repository,
+            4,
+            "repository changed before verification receipt",
+        ),
+        (
+            VerifyRace::Publication,
+            1,
+            "task packet changed during publication",
+        ),
+    ] {
+        let repo = Repo::new();
+        let mut svc = Fake::default();
+        let (code, _, err) = call(
+            &repo,
+            &mut svc,
+            &[
+                "init",
+                "--goal",
+                "preserve unresolved failure",
+                "--verify",
+                "true",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        svc.references = 0;
+        svc.verify_race = Some(race);
+        let (code, out, err) = call(&repo, &mut svc, &["verify"]);
+        assert_eq!(code, expected_code, "{race:?}: {err}");
+        assert!(err.contains(diagnostic), "{race:?}: {err}");
+        assert!(!out.contains("task: verified"), "{race:?}: {out}");
+        let raw = std::fs::read(repo.path().join(".oms/task/current.md")).unwrap();
+        assert_eq!(packet::metadata(&raw, "status"), Some(b"active".as_slice()));
+        assert!(packet::metadata(&raw, "verified_state").is_none());
+        assert!(packet::metadata(&raw, "verified_cmd_sha").is_none());
+        if !svc.failure_calls.is_empty() {
+            premature.push(race);
+        }
+    }
+    assert!(
+        premature.is_empty(),
+        "resolved before receipt acceptance: {premature:?}"
     );
 }
 
