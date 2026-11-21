@@ -10,9 +10,9 @@ signatures below retain the original design and migration context.
 
 For the current native implementation, use the
 [graph crate map](../crates/oms-command-graph/README.md) and
-[retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md). The Python module layout
-and retired Python test names below are historical references; they are not
-evidence that those paths remain runnable or that native parity was measured.
+[retrieval comparison](GRAPH-RETRIEVAL-COMPARISON.md). The
+[archived guide at 20b775f6](https://github.com/eightmm/oh-my-setting/blob/20b775f6/docs/GRAPH-ENGINEERING.md)
+retains the Python layout and test inventory for migration history.
 The native retrieval benchmark entrypoint is `oms graph project benchmark`.
 Language-specific extraction and resolution limits must be checked before
 treating a sparse graph as complete.
@@ -33,11 +33,11 @@ Common commands build or check the Project Graph, inspect a bounded map, and
 validate or inspect an Execution Graph:
 
 ```bash
-bash scripts/graph.sh project ensure
-bash scripts/graph.sh project map --limit 40 --depth 1
-bash scripts/graph.sh project context --task "TASK_DESCRIPTION"
-bash scripts/graph.sh exec validate config/graphs/coding-change.json
-bash scripts/graph.sh exec status
+oms graph project ensure
+oms graph project map --limit 40 --depth 1
+oms graph project context --task "TASK_DESCRIPTION"
+oms graph exec validate config/graphs/coding-change.json
+oms graph exec status
 ```
 
 The full command syntax and output options are in the [CLI reference](#cli).
@@ -130,29 +130,27 @@ framework:
 
 ## Ownership boundaries
 
-Audited on `main` at `3d1f5a1`. The graph layer calls these owners; it never
-re-implements them and never keeps a second copy of their state.
+The native graph uses existing control-plane owners for lifecycle, admission,
+and evidence.
 
 | Invariant | Owner | Read surface for the graph layer |
 |---|---|---|
-| Task DAG, dependencies, lifecycle FSM | `scripts/agent-plan.sh` (`.oms/plan/tasks.json`, schema 3) | `agent-plan --repo R status --json`, `show --id ID`, `evidence-snapshot --id ID` |
-| Lease / heartbeat / TTL reclaim | `agent-plan` (`claim`, `next --claim`, `touch`, `reclaim`, `recover-*`) | `show` view carries `claim_expired`, `claim_age_s` |
-| `allowed_paths` / `forbidden_paths` | declared in the plan task; enforced by `patch-admit` gate 2 through `scripts/lib/path_scope.py` — never at claim | `show --id` |
-| Verify command, verifier floor | `patch-admit` ladder (`apply, secrets, scope, structure, syntax, tests, verifier, verify, verify-floor`) | admission rows in `.oms/artifacts/index.jsonl` (`kind: patch-admit`, `exit`) |
-| Landing (serialized, CAS-fenced) | `scripts/patch-land.sh` holding the `.oms/landings.jsonl` lock; refuses, never rebases; exit 75 when another landing holds the lock | `.oms/landings.jsonl`, index rows `kind: patch-land` |
-| Plan acceptance | `agent-plan accept` → `.oms/plan/progress.jsonl` rows `kind: acceptance`, `status: pass\|fail\|error`, exit 0/3/2 | `progress.jsonl` |
-| Lifecycle events | `scripts/lib/agent-events.py` (`.oms/lifecycle/events.jsonl`, four event types) | `agent-events list` |
-| Failure ledger | `scripts/fail-ledger.sh` (`.oms/failures.jsonl`) | `fail-ledger list --unresolved --json` |
-| Typed projection / evidence coverage | `scripts/lib/oms_runtime/{projection,evidence}.py` | `oms runtime envelope show`, `evidence show`, `next` |
-| Bounded context bundles | `scripts/lib/oms_runtime/context.py` (`oms runtime context`) | `plan_context()` |
-| Atomic writes, locks, JSONL | `scripts/lib/oms_runtime/common.py` (`atomic_write_*`, `append_jsonl`, `file_lock` over `file-lock.sh`), `scripts/lib/durable-jsonl.py` | import |
+| Task DAG, dependencies, lifecycle | [Native Plan](../crates/oms-command-plan/README.md) | `agent-plan status --json`, `show --id ID`, `evidence-snapshot --id ID` |
+| Lease, heartbeat and expiry | `agent-plan` claim, touch and recovery actions | `show` includes `claim_expired` and `claim_age_s` |
+| `allowed_paths` and `forbidden_paths` | Task record and native [admission scope](../crates/oms-command-landing/src/admission.rs) | `agent-plan show --id ID` |
+| Verify command and verifier floor | [Native patch admission](../crates/oms-command-landing/src/admission.rs) | `patch-admit` rows in `.oms/artifacts/index.jsonl` |
+| Serialized landing and receipts | [Native patch landing](../crates/oms-command-landing/src/landing.rs) | `.oms/landings.jsonl` and indexed `patch-land` rows |
+| Plan acceptance | `agent-plan accept` | `acceptance` rows in `.oms/plan/progress.jsonl` |
+| Lifecycle events | [Operations crate](../crates/oms-command-operations/src/events.rs) | `agent-events list` |
+| Failure ledger | [Failure command](../crates/oms-command-failure/src/lib.rs) | `fail-ledger list --unresolved --json` |
+| Typed projection and evidence | [Runtime guide](OMS-RUNTIME.md) | `oms runtime envelope show`, `evidence show` and `next` |
+| Bounded context bundles | [Native runtime context](../crates/oms-runtime/src/context.rs) | `oms runtime context` |
+| Locks and atomic file writes | [Native locks](../crates/oms-lock/src/lib.rs) and [safe file operations](../crates/oms-safe-fs/src/lib.rs) | Owning command's storage API |
 
-Adapter rules that follow from the audit (do not relearn these the hard way):
+Adapter rules
 
-- **Front doors are `plan-run` and `patch-land`.** `agent-plan land`/`finish`
-  are CAS-fenced with six `--expected-review-*` values and a
-  `plan-receipt.py` digest that only `patch-land` can compute. The graph layer
-  has no code path that calls `land` or `finish`.
+- **Front doors are `plan-run` and `patch-land`.** The native Plan and landing
+  owners check lease, review and receipt bindings before authority transitions.
 - `plan-run` has no `--json`; read the task afterwards with `agent-plan show`.
   `agent-plan next --json` is FIFO by `created`; a concurrent scheduler selects
   by `--id`.
@@ -171,10 +169,8 @@ Adapter rules that follow from the audit (do not relearn these the hard way):
   The explicitly written `.oms/graph/shadow.jsonl` is ambient too; the rest of
   `.oms/graph/` (runs, events, projections) is **not**. Every test still
   writes into a temporary `--repo`.
-- Every durable writer into `.oms` is under the durable-writers contract:
-  secret-shaped values are refused and absolute home paths never persist.
-  Free text goes through `oms_runtime.common.bounded_line` and is refused
-  when `sensitive_text()` matches.
+- Graph records are ordinary private OMS state. The graph uses the shared
+  [outbound scanner](../crates/oms-scrub/src/lib.rs) and native file protections.
 
 ## Execution lifecycle vs semantic outcome
 
@@ -191,56 +187,14 @@ process died is `unverified`.
 
 ## Package layout
 
-```text
-scripts/lib/oms_graph/
-    __init__.py            constants (schemas, vocabularies)
-    errors.py              GraphError(CoreError)
-    predicates.py          fact predicate grammar (pure)
-    spec.py                load/normalize/digest GraphSpec, bundled specs
-    validate.py            deterministic validator
-    facts.py               fact collectors (plan, receipts, git) -> flat dict
-    route.py               pure route evaluator + fixture runner
-    events.py              run store: events.jsonl, projection, resume
-    scheduler.py           eligibility + write-scope conflicts
-    runner.py              `exec run` step loop, gates, tool nodes, caching
-    render.py              text / Mermaid / bounded interactive HTML renderers
-    child_policy.py        harness-child allowlist
-    cli.py                 argparse front door (`oms graph ...`)
-    adapters/
-        __init__.py
-        plan.py            agent node <-> plan-run adapter
-    project/
-        __init__.py
-        model.py           node/edge shapes, ids, sort order
-        extract.py         file discovery, safety, per-file extraction
-        cache.py           content-addressed extraction cache
-        build.py           incremental build, cross-file resolution, freshness
-        query.py           Graph index, find/neighbors/trace/map
-        analytics.py       evidence degrees, structural assurance
-        blast.py           changed paths -> transitive dependents
-        context.py         task-specific context pack (+ optional bundle)
-        parsers/
-            __init__.py    registry
-            base.py        Parser protocol, ParseResult
-            python.py      ast-based
-            shell.py       regex-based
-            markdown.py    documents + path references
-            config.py      json/yaml/toml nodes
-            notebook.py    .ipynb code cells through the Python extractor
-scripts/lib/oms_graph_core.py   thin entrypoint (mirrors oms_core.py)
-scripts/graph.sh                front door: exec python3 .../oms_graph_core.py
-config/graphs/*.json            bundled GraphSpecs
-tests/test_oms_graph_*.py       unittest modules
-tests/fixtures/graph-routes/    route fixtures (no model calls)
-tests/graph-smoke.sh            focused suite registered in scripts/check.sh
-```
+| Source | Responsibility |
+|---|---|
+| [Native graph command](../crates/oms-command-graph/README.md) | CLI, project build/cache/index/context, execution validation/routing/scheduling, records and rendering |
+| [Graph extraction](../crates/oms-graph/src/lib.rs), [Python helper](../crates/oms-graph-python/src/lib.rs), [shell extraction](../crates/oms-graph-shell/src/lib.rs), [resolver](../crates/oms-graph-resolve/src/lib.rs) | Per-language extraction and relationship resolution |
+| [Bundled GraphSpecs](../config/graphs) | Explicit coding and goal-drive examples |
 
-Python 3.11 syntax, standard library only (the gate compiles with
-`feature_version=11`; no third-party imports). Reuse `oms_runtime.common`
-for hashing, JSON, atomic writes, locks, `run_json`, `install_root`, `repo_root`, `relative_path`,
-`bounded_line`, `sensitive_text`, `parse_path_list`, `safe_id`. Reuse
-`path_scope` for scope predicates. Reuse `oms_runtime.evidence.artifact_rows`
-for receipt rows and `oms_runtime.context.plan_context` for bundles.
+The [native crate map](../crates/oms-command-graph/README.md) describes the
+buffered entrypoints and host service adapters.
 
 ## Execution GraphSpec (schema 1)
 
@@ -569,11 +523,10 @@ write tool that died is `blocked` (`resumed-write-tool-uncertain`) — rerunning
 it blindly could repeat a side effect, so that decision is the operator's.
 Conversation memory is never an input.
 
-Work Journal: `run_finished` is mirrored best-effort through the journal's
-own observer (`work_journal_observe` in `scripts/lib/work-journal.sh`, event
-type `phase_outcome`, source `projection.json`); the journal keys one row per
-(source type, source id), so gate decisions are not mirrored separately and
-the events file stays the only authoritative record.
+The execution runner mirrors a finished run to Work Journal as a best-effort
+`phase_outcome` event. The native journal owns event validation and materialized
+views. The graph's events retain the execution record.
+[Native graph runner](../crates/oms-command-graph/src/execution_runner.rs)
 
 ## Plan adapter
 
@@ -637,20 +590,13 @@ keeps it that way.
 
 ### Waves and real concurrency
 
-`--jobs N` is real fan-out. Each loop iteration is one wave: route → resolve
-tasks → scheduler → `node_started` for every eligible node (coordinator
-thread, in order, `wave_id`/`wave_index` recorded) → the nodes' subprocesses
-on a `concurrent.futures.ThreadPoolExecutor` (stdlib; agent work is a
-subprocess, so threads suffice) → one `node_outcome` per node appended by the
-coordinator as each finishes. Threads run subprocesses only; every
-`events.jsonl` write, every proof check against post-run facts, and every
-cache write happens on the coordinator. A wave that cannot even launch a node
-records that node as `unverified` (`runner-error: ...`) rather than leaving it
-active. Two disjoint explicit tasks may share a wave; the same task, an
-overlapping or unknown scope, a landing, a write tool, and a second selector
-never do. `tests/test_oms_graph_runtime.py` proves overlap with a barrier
-worker, not a wall clock: under `--jobs 2` both workers pass, under
-`--jobs 1` the first times out.
+`--jobs N` bounds the number of concurrent jobs in a wave. The coordinator
+records `node_started` with `wave_id` and `wave_index` before launching the
+eligible jobs on scoped Rust threads. It records outcomes as jobs finish
+and owns the event writes and post-run proof checks. The scheduler checks
+task identity, scope overlap and mutation eligibility when forming a wave.
+[Native scheduler](../crates/oms-command-graph/src/execution_scheduler.rs) ·
+[Wave runner](../crates/oms-command-graph/src/execution_runner.rs)
 
 Tool nodes see the run in their environment: `OMS_GRAPH_RUN_ID`,
 `OMS_GRAPH_NODE`, `OMS_GRAPH_ATTEMPT`, `OMS_GRAPH_GOAL`, and one
@@ -724,8 +670,8 @@ deterministic, regenerable, and needs no model, key, or network.
 Node:
 
 ```json
-{"id": "symbol:scripts/lib/oms_runtime/common.py::append_jsonl", "kind": "function",
- "name": "append_jsonl", "path": "scripts/lib/oms_runtime/common.py", "language": "python",
+{"id": "symbol:src/storage.py::append_jsonl", "kind": "function",
+ "name": "append_jsonl", "path": "src/storage.py", "language": "python",
  "source_digest": "<sha256 of the file>", "summary": null, "crux": null,
  "metadata": {"line": 288, "qualname": "append_jsonl"}}
 ```
@@ -1028,8 +974,8 @@ has no graph-build/runtime dependency on JavaScript.
 
 ## CLI
 
-`oms graph` is one public verb (`scripts/graph.sh` → `oms_graph_core.py`
-→ `oms_graph.cli.main`). Text is the default output; `--json` is available
+`oms graph` is the public entrypoint for the
+[native graph command](../crates/oms-command-graph/README.md). Text is the default output; `--json` is available
 everywhere; `--mermaid` on `exec render`/`exec status`. The selected
 readers also accept `--html-fragment ABSOLUTE_PATH`; the explicit file write
 is parent-owned and produces an inline agent-UI fragment, not a standalone
@@ -1134,9 +1080,9 @@ with exit 2.
 `SessionStart` intentionally does no graph work. Project-graph readers call
 `ensure` lazily; `project ensure` is also available explicitly. Session hooks
 never run an execution-graph comparison. The regenerable `.oms/project-graph/`
-cache and historical `.oms/graph/shadow.jsonl` ledger stay ambient to the check
-gate (`scripts/lib/oms-state-inventory.py`); every other
-`.oms/graph/` entry (runs, events, projections) remains covered.
+cache and historical `.oms/graph/shadow.jsonl` ledger are ambient to the
+[native state inventory](../crates/oms-command-state/src/inventory.rs). Graph
+runs, events and projections remain in the state inventory.
 
 ## Retired comparison diagnostic
 
@@ -1146,9 +1092,9 @@ comparison rows are preserved, not treated as authority or regenerated.
 
 ## MCP
 
-Read-only, argv-only tools appended to `TOOLS` in `scripts/oms-mcp-server.py`
-**after** `oms_peer_operations` (the tool order is pinned by
-`tests/state-surfaces-smoke.sh`, which is updated in the same change):
+The [MCP tool registry](../crates/oms-mcp-server/src/tools.json) advertises
+bounded graph readers. The [native discovery and argv fixtures](../crates/oms-mcp-server/tests/native.rs)
+check the descriptors and the graph viewer resource.
 
 The default `core` discovery profile lists graph render, query, trace, and
 affected alongside shared-state, peer and output-reader tools (13 total). Configure the MCP
@@ -1157,16 +1103,16 @@ server environment with `OMS_MCP_TOOL_PROFILE=full` and reconnect to list all
 every registered tool; only discovery is filtered, with unchanged input/output
 contracts and viewer resources. Invalid profiles fail at startup.
 
-| tool | argv |
+| Tool | Equivalent OMS command or response |
 |---|---|
-| `oms_project_graph_map` | `bash scripts/graph.sh project map --json` |
+| `oms_project_graph_map` | `oms graph project map --json` |
 | `oms_project_graph_render` | bounded `project map|context --ui-model`; returns `structuredContent.graph` and links `ui://oms/project-graph/v1.html` |
-| `oms_project_graph_query` | `bash scripts/graph.sh project find --json --limit 40` + positional `query` |
-| `oms_project_graph_trace` | `bash scripts/graph.sh project trace --json --depth 2 --direction out` + positional `node` |
-| `oms_project_graph_blast` | `bash scripts/graph.sh project blast --json --limit 120` |
-| `oms_execution_graph_status` | `bash scripts/graph.sh exec status --json` |
-| `oms_execution_graph_route` | `bash scripts/graph.sh exec route --json --run` + positional `run` |
-| `oms_execution_graph_events` | `bash scripts/graph.sh exec events --json --limit 40 --run` + positional `run` |
+| `oms_project_graph_query` | `oms graph project find --json --limit 40` + positional `query` |
+| `oms_project_graph_trace` | `oms graph project trace --json --depth 2 --direction out` + positional `node` |
+| `oms_project_graph_blast` | `oms graph project blast --json --limit 120` |
+| `oms_execution_graph_status` | `oms graph exec status --json` |
+| `oms_execution_graph_route` | `oms graph exec route --json --run` + positional `run` |
+| `oms_execution_graph_events` | `oms graph exec events --json --limit 40 --run` + positional `run` |
 
 The project-graph tools wrap readers, so a call against a stale or absent
 graph refreshes the regenerable cache first (summary on stderr, JSON on
@@ -1185,74 +1131,20 @@ a value may never start with `-`. Output stays under the server's
 
 ## Tests
 
-- `tests/autonomy-plan-run-smoke.sh --only test_context_pack` checks the
-  existing pack/worker boundary without running unrelated plan lifecycle cases.
-  The default still runs both groups; the affected gate can select either from
-  positive graph evidence. No additional CI job is required.
-- `tests/test_oms_graph_exec.py`: validator (every error code), evaluator
-  (initial, completed, failed, unverified, partial/repeat, budget exhaustion,
-  unknown node, unreachable, cycle without stop policy, terminal correctness,
-  join all/any, subgraph, recursion rejection, missing fact, fact-backed
-  completion, claimed completion without receipt → unverified), events
-  (resume from events, crash between execution and append, duplicate event
-  idempotency, authority/gate preservation), fixture runner over
-  `tests/fixtures/graph-routes/`.
-- `tests/test_oms_graph_project.py`: same source → same bytes; single edit →
-  incremental rebuild with cache hits; unchanged file → cache reuse; new/
-  deleted symbol; import, call, cross-file resolution; test relation; blast
-  radius; cycle detection; stale detection; symlink rejection; binary skip;
-  large-file limit; untrusted source text stays inert; secret-shaped name
-  skipped; `ensure` absent → built, stale → refreshed through the cache,
-  current → no write at all (graph.json mtime), the first-build file bound
-  refused and an existing graph's refresh never refused, and a refresh that
-  keeps the discovery options the graph was built with.
-- `tests/test_oms_graph_analytics.py`: evidence degrees, structural assurance,
-  renderers.
-- `tests/test_oms_graph_parsers.py`: what a call can and cannot be linked to —
-  shell command words never reach Python functions, attribute calls on
-  parameters/locals/module variables yield no edge, builtin names resolve
-  in-file only, a bare name never resolves to a method while an inherited
-  `self.` call still does, `from pkg import submodule` binds the module file,
-  a binding without the member stays unresolved, `Class.method()` resolves to
-  the method, a local shadowing a same-file function yields no edge; notebook
-  code cells become symbols anchored to their cell and `.ipynb` line, outputs
-  and Markdown cells never do, magic/non-Python cells are counted as skipped,
-  and notebooks leave parser coverage's unparsed list and stay out of search,
-context ranking and the test-path scan, whose raw lines include outputs.
-- `tests/test_oms_graph_integration.py`: fake `codex` provider on PATH (the
-  `autonomy-plan-run-smoke.sh` pattern) driving `exec run` through
-  `plan-run`; regression guards: no lease/scope/admission/review/acceptance
-  bypass, no fake landing receipt, no `done` from prose; sequential landing
-  of two patches from different bases; exit 75 → `partial`.
-- `tests/test_oms_graph_runtime.py`: the bundled `goal-drive` on a real
-  two-task plan through an `oms` shim (evidence A: implement bound `t1`,
-  the plan's `next` became `t2`, resume landed `t1`, the next cycle rebound
-  `t2`, both landed and committed exactly); a selection race (t1 claimed by
-  another session after the peek → recorded against `t1`, `t2` untouched);
-  the barrier fan-out proof (evidence B) and the same-task / landing /
-  selector exclusions; workspace-aware cache hits and misses (unstaged,
-  staged, untracked, unsafe → no cache); every resume reconciliation case
-  (review, done+receipt, blocked, live lease → waiting, expired lease →
-  unverified, dead write tool → blocked, binding preserved); the exact
-  commit step's refusals.
-- `tests/test_oms_graph_workspace.py`: the fingerprint's relations (clean,
-  modified, staged blobs with unchanged bytes, untracked, ignored, `.oms/`,
-  deleted, renamed) and its fail-closed reasons.
-- `tests/test_oms_graph_history.py`: the coupling measure, thresholds and
-  focus, structural annotation from path pairs, and a real repository where
-  config-to-code coupling is `structural: false` while an import is `true`,
-  a bulk commit is skipped and counted, and a deleted path never appears; the
-  impact brief's join, its per-list `omitted` counts and CODEOWNERS last-match rules.
-- `tests/graph-smoke.sh`: unittest discovery of `test_oms_graph_*.py`, CLI
-  smoke through `scripts/oms`, dogfood build of this repository from a
-  `git archive` copy (revision stable across two builds; `--include`/
-  `--exclude` honored), MCP tool calls, child-policy refusals, auto-build on
-  a graph-less fixture (summary on stderr, stdout clean), `--no-refresh` and
-  `OMS_GRAPH_AUTOBUILD=0`, the `--max-files` bound, and a graph-neutral
-  session-start hook.
-  Registered in `scripts/check.sh` as `stage graph`.
-- Every test uses a temporary repository; nothing writes into this
-  checkout's `.oms`.
+| Area | Current fixtures |
+|---|---|
+| Project discovery, cache, query, impact and evidence projections | [Project engine](../crates/oms-command-graph/tests/project_engine.rs) |
+| CLI service bindings, bundled graph loading and plan dispatch | [Host adapter](../crates/oms-command-graph/tests/host_adapter.rs) |
+| Python, shell and cross-language resolution | [Python graph contract](../crates/oms-graph-python/tests/graph_contract.rs), [shell graph contract](../crates/oms-graph-shell/tests/graph_contract.rs) and [resolver contract](../crates/oms-graph-resolve/tests/resolve_contract.rs) |
+| Native MCP discovery, argv and resources | [Native MCP suite](../crates/oms-mcp-server/tests/native.rs) |
+| Context pack and write-worker boundary | [Native entry contract](../crates/oms/tests/native_entry_contract.rs) |
+
+```bash
+cargo +1.99.1 test --locked -p oms-command-graph
+```
+
+Fixtures exercise local repositories and service adapters. The archived
+test inventory records checks from the retired Python engine.
 
 ## Non-goals (v1)
 

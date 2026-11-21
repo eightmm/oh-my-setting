@@ -273,7 +273,11 @@ impl CapabilityFreshness {
     }
 }
 impl ProviderEvidence {
-    fn applicable_efforts(&self, model: &str, account: Option<&str>) -> Option<&[String]> {
+    pub(crate) fn applicable_efforts(
+        &self,
+        model: &str,
+        account: Option<&str>,
+    ) -> Option<&[String]> {
         if let Some(scope) = &self.capability_evidence {
             // Native routes do not yet bind an endpoint. Preserve scoped source
             // evidence in snapshots, but do not apply it to an unproved target.
@@ -799,8 +803,73 @@ pub fn allocate(
         .map(|(route, _)| route)
 }
 
-/// The preview rank comes from the same comparison that selects the proposed
-/// account. It stays outside the persisted route and selection snapshot.
+/// Sanitized evidence produced while allocating a route, outside the durable snapshot.
+#[derive(Default, Serialize)]
+pub struct AllocationEvidence {
+    pub candidates: Vec<CandidateEvidence>,
+    native_order: Option<&'static str>,
+    order_adjustments: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+pub struct CandidateEvidence {
+    pub provider: String,
+    configured_model: String,
+    resolved_model: Option<String>,
+    resolved_effort: Option<String>,
+    catalog_count: Option<usize>,
+    resolved_in_catalog: Option<bool>,
+    excluded_by: Option<&'static str>,
+    rank: Option<usize>,
+    provider_quota: QuotaFreshness,
+    account_quota: QuotaFreshness,
+    registered_quota: Option<QuotaCounts>,
+    ranking_quota_scope: Option<&'static str>,
+    ranking_used_bucket: Option<u8>,
+}
+
+impl CandidateEvidence {
+    fn new(candidate: &Candidate) -> Self {
+        Self {
+            provider: candidate.provider.clone(),
+            configured_model: candidate.model.clone(),
+            resolved_model: None,
+            resolved_effort: None,
+            catalog_count: None,
+            resolved_in_catalog: None,
+            excluded_by: None,
+            rank: None,
+            provider_quota: QuotaFreshness::Unavailable,
+            account_quota: QuotaFreshness::Unavailable,
+            registered_quota: None,
+            ranking_quota_scope: None,
+            ranking_used_bucket: None,
+        }
+    }
+}
+
+pub fn allocate_preview(
+    policy: &Policy,
+    owner: &str,
+    role: &str,
+    access: &str,
+    inputs: &RoutingInputs,
+    evidence: &mut AllocationEvidence,
+) -> Result<(Route, Option<AccountRank>)> {
+    *evidence = AllocationEvidence::default();
+    allocate_ranked(
+        policy,
+        owner,
+        role,
+        None,
+        access,
+        None,
+        inputs,
+        Some(evidence),
+    )
+}
+
+/// Return the winning route and the comparator evidence for its proposed account.
 pub fn allocate_with_account_rank(
     policy: &Policy,
     owner: &str,
@@ -809,6 +878,20 @@ pub fn allocate_with_account_rank(
     access: &str,
     purpose: Option<&str>,
     inputs: &RoutingInputs,
+) -> Result<(Route, Option<AccountRank>)> {
+    allocate_ranked(policy, owner, role, tier, access, purpose, inputs, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn allocate_ranked(
+    policy: &Policy,
+    owner: &str,
+    role: &str,
+    tier: Option<&str>,
+    access: &str,
+    purpose: Option<&str>,
+    inputs: &RoutingInputs,
+    mut evidence: Option<&mut AllocationEvidence>,
 ) -> Result<(Route, Option<AccountRank>)> {
     crate::identifier(owner)?;
     let board_kind = kind(role)?;
@@ -890,13 +973,23 @@ pub fn allocate_with_account_rank(
         );
     }
     let configured = candidates.clone();
+    let now = crate::timestamp();
+    if let Some(trace) = evidence.as_deref_mut() {
+        trace.candidates = configured.iter().map(CandidateEvidence::new).collect();
+        for row in &mut trace.candidates {
+            row.provider_quota =
+                provider_weekly_reading(&inputs.status, &row.provider, now).freshness;
+            row.catalog_count = inputs.catalogs.get(&row.provider).map(Vec::len);
+        }
+    }
+    let mut candidates: Vec<_> = candidates.into_iter().enumerate().collect();
     if let Some(effort) = &inputs.requested_effort {
-        for candidate in &mut candidates {
+        for (_, candidate) in &mut candidates {
             candidate.effort = native_model::normalized_effort(effort).into();
         }
     }
     if let Some(req) = &inputs.requested_model {
-        for c in &mut candidates {
+        for (_, c) in &mut candidates {
             c.model.clone_from(req);
             if inputs.requested_effort.is_none()
                 && native_model::fixed_effort_model(&c.provider, req).is_some()
@@ -907,39 +1000,69 @@ pub fn allocate_with_account_rank(
             }
         }
         if let Some(pref) = &inputs.preferred
-            && let Some(c) = candidates.iter().find(|c| &c.provider == pref)
+            && let Some((_, c)) = candidates.iter().find(|(_, c)| &c.provider == pref)
         {
             valid_route(c)?;
         }
-        candidates.retain(|c| valid_route(c).is_ok());
     }
-    candidates.retain(|c| {
-        (!inputs.explicit_target || inputs.preferred.as_ref().is_none_or(|p| &c.provider == p))
-            && (inputs.explicit_target
-                || role == "security-auditor"
-                || c.model != "claude-fable-5-1")
-            && (access != "write" || c.access.as_deref() != Some("read"))
-            && (!(independent || board_kind == "advisor")
-                || ["codex", "claude", "antigravity"].contains(&c.provider.as_str()))
-            && (role != "researcher"
-                || route_family(&c.provider, &c.model)
-                    .is_some_and(|f| ["luna", "haiku"].contains(&f.0.as_str())))
-            && (inputs.explicit_target
-                || judged_family
-                    .as_deref()
-                    .is_none_or(|f| model_family(&c.provider, &c.model).ok() != Some(f)))
-            && inputs
-                .installed
-                .as_ref()
-                .is_none_or(|v| v.contains(&c.provider))
-            && (!c.public_only || inputs.public_repository)
-            && !(access == "write" && c.provider == "codex" && inputs.codex_sandbox_blocked)
-            && !daily_capped(&inputs.status, c)
+    candidates.retain(|(index, c)| {
+        let excluded_by = if inputs.requested_model.is_some() && valid_route(c).is_err() {
+            Some("requested_model_incompatible")
+        } else if inputs.explicit_target
+            && inputs.preferred.as_ref().is_some_and(|p| &c.provider != p)
+        {
+            Some("provider_pin")
+        } else if !inputs.explicit_target
+            && role != "security-auditor"
+            && c.model == "claude-fable-5-1"
+        {
+            Some("explicit_model_required")
+        } else if access == "write" && c.access.as_deref() == Some("read") {
+            Some("read_only_route")
+        } else if (independent || board_kind == "advisor")
+            && !["codex", "claude", "antigravity"].contains(&c.provider.as_str())
+        {
+            Some("independent_native_provider_required")
+        } else if role == "researcher"
+            && !route_family(&c.provider, &c.model)
+                .is_some_and(|f| ["luna", "haiku"].contains(&f.0.as_str()))
+        {
+            Some("research_model_required")
+        } else if !inputs.explicit_target
+            && judged_family
+                .as_deref()
+                .is_some_and(|f| model_family(&c.provider, &c.model).ok() == Some(f))
+        {
+            Some("judged_family")
+        } else if inputs
+            .installed
+            .as_ref()
+            .is_some_and(|v| !v.contains(&c.provider))
+        {
+            Some("provider_unavailable")
+        } else if c.public_only && !inputs.public_repository {
+            Some("public_repository_required")
+        } else if access == "write" && c.provider == "codex" && inputs.codex_sandbox_blocked {
+            Some("write_sandbox_unavailable")
+        } else if daily_capped(&inputs.status, c) {
+            Some("model_daily_cap")
+        } else {
+            None
+        };
+        if let Some(trace) = evidence.as_deref_mut() {
+            trace.candidates[*index].excluded_by = excluded_by;
+        }
+        excluded_by.is_none()
     });
     let alternatives = candidates.len() > 1 || judged_family.is_some();
     let mut eligible = Vec::new();
-    let now = crate::timestamp();
-    for mut c in candidates {
+    for (index, mut c) in candidates {
+        let mut trace = evidence.as_deref_mut().map(|e| &mut e.candidates[index]);
+        let mut exclude = |reason| {
+            if let Some(row) = trace.as_deref_mut() {
+                row.excluded_by = Some(reason);
+            }
+        };
         if inputs.requested_model.is_none() {
             let catalog = inputs
                 .catalogs
@@ -947,11 +1070,17 @@ pub fn allocate_with_account_rank(
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             let Ok(model) = routable_route_model(&c.provider, &c.model, catalog) else {
+                exclude("routable_model_unavailable");
                 continue;
             };
             c.model = model;
         }
-        if valid_route(&c).is_err() || daily_capped(&inputs.status, &c) {
+        if valid_route(&c).is_err() {
+            exclude("resolved_model_or_effort_incompatible");
+            continue;
+        }
+        if daily_capped(&inputs.status, &c) {
+            exclude("model_daily_cap");
             continue;
         }
         // Apply eligibility to the resolved identity as well. A new catalog
@@ -960,10 +1089,19 @@ pub fn allocate_with_account_rank(
             && route_family(&c.provider, &c.model)
                 .is_some_and(|f| c.provider == "claude" && f.0 == "fable")
         {
+            exclude("explicit_model_required");
             continue;
         }
         if role == "researcher" {
             c.effort = "low".into();
+        }
+        if let Some(row) = trace.as_deref_mut() {
+            row.resolved_model = Some(c.model.clone());
+            row.resolved_effort = Some(c.effort.clone());
+            row.resolved_in_catalog = inputs
+                .catalogs
+                .get(&c.provider)
+                .map(|v| v.contains(&c.model));
         }
         let effort_allowed = |account: Option<&str>| {
             native_model::effort_support(
@@ -986,12 +1124,22 @@ pub fn allocate_with_account_rank(
                 .as_ref()
                 .is_some_and(|a| a.provider(&c.provider).is_some())
         {
+            if let Some(row) = trace.as_deref_mut() {
+                row.excluded_by = Some("provider_accounts_unconfigured");
+            }
             continue;
         }
         if let Some(accounts) = &inputs.accounts
-            && accounts.provider(&c.provider).is_some()
+            && let Some(config) = accounts.provider(&c.provider)
         {
             let readings = account_readings(&inputs.status, &c.provider, accounts, now);
+            if let Some(row) = trace.as_deref_mut() {
+                let mut counts = QuotaCounts::default();
+                for entry in &config.accounts {
+                    counts.record(account_weekly_reading(&readings[&entry.id], now).freshness);
+                }
+                row.registered_quota = Some(counts);
+            }
             match accounts.select_ranked(
                 &c.provider,
                 &c.model,
@@ -1003,21 +1151,48 @@ pub fn allocate_with_account_rank(
                 |id| effort_allowed(Some(id)),
             ) {
                 Ok((entry, reason, rank)) => {
-                    used = account_weekly_used(&readings[&entry.id], now);
+                    let reading = account_weekly_reading(&readings[&entry.id], now);
+                    used = reading.used;
+                    if let Some(row) = trace.as_deref_mut() {
+                        row.account_quota = reading.freshness;
+                    }
                     account = Some(entry.id);
                     account_reason = Some(reason);
                     account_rank = rank;
                 }
-                Err(_) => continue,
+                Err(_) => {
+                    if let Some(row) = trace.as_deref_mut() {
+                        row.excluded_by = Some("no_eligible_account");
+                    }
+                    continue;
+                }
             }
-        } else if !effort_allowed(None)
-            || inputs.accounts.as_ref().is_some_and(|accounts| {
+        } else {
+            let reason = if !effort_allowed(None) {
+                Some("exact_effort_unsupported")
+            } else if inputs.accounts.as_ref().is_some_and(|accounts| {
                 ACCOUNT_PROVIDERS.contains(&c.provider.as_str())
                     && active_account_home(&c.provider)
                         .is_some_and(|home| accounts.home_claimed_by_other(&c.provider, &home))
-            })
-        {
-            continue;
+            }) {
+                Some("account_home_conflict")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                if let Some(row) = trace.as_deref_mut() {
+                    row.excluded_by = Some(reason);
+                }
+                continue;
+            }
+        }
+        if let Some(row) = trace.as_deref_mut() {
+            row.ranking_quota_scope = Some(if account.is_some() {
+                "account"
+            } else {
+                "provider"
+            });
+            row.ranking_used_bucket = used.map(|v| v / 10 * 10);
         }
         if alternatives
             && !inputs.explicit_target
@@ -1025,9 +1200,12 @@ pub fn allocate_with_account_rank(
             && !["pi", "opencode", "antigravity"].contains(&c.provider.as_str())
             && used.is_some_and(|v| v >= 90)
         {
+            if let Some(row) = trace {
+                row.excluded_by = Some("weekly_cap");
+            }
             continue;
         }
-        eligible.push((c, used, account, account_reason, account_rank));
+        eligible.push((c, used, account, account_reason, account_rank, index));
     }
     require(
         !eligible.is_empty(),
@@ -1037,19 +1215,21 @@ pub fn allocate_with_account_rank(
             "no eligible installed provider for tier"
         },
     )?;
-    let kept: Vec<_> = eligible
-        .iter()
-        .filter(|(c, _, _, _, _)| {
-            c.provider != "pi" || inputs.status["pi"]["cooldown"].get(&c.model).is_none()
-        })
-        .cloned()
-        .collect();
-    if !kept.is_empty() {
-        eligible = kept;
+    let not_cooling_down = |c: &Candidate| {
+        c.provider != "pi" || inputs.status["pi"]["cooldown"].get(&c.model).is_none()
+    };
+    if eligible.iter().any(|v| not_cooling_down(&v.0)) {
+        eligible.retain(|(c, _, _, _, _, index)| {
+            let keep = not_cooling_down(c);
+            if !keep && let Some(trace) = evidence.as_deref_mut() {
+                trace.candidates[*index].excluded_by = Some("model_cooldown");
+            }
+            keep
+        });
     }
     let readings: Vec<_> = eligible
         .iter()
-        .filter(|(c, _, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
+        .filter(|(c, _, _, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
         .map(|v| v.1)
         .collect();
     let all_known = readings.iter().all(Option::is_some);
@@ -1063,10 +1243,21 @@ pub fn allocate_with_account_rank(
     let tied = spread < policy.tie_band.gap;
     let mut native: Vec<_> = eligible
         .iter()
-        .filter(|(c, _, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
+        .filter(|(c, _, _, _, _, _)| ["codex", "claude"].contains(&c.provider.as_str()))
         .cloned()
         .collect();
-    native.sort_by_key(|(c, used, _, _, _)| {
+    if let Some(trace) = evidence.as_deref_mut() {
+        trace.native_order = Some(if native.len() < 2 {
+            "policy_order"
+        } else if all_known && !tied {
+            "weekly_used"
+        } else if all_known {
+            "activity_within_weekly_tie_band"
+        } else {
+            "activity_missing_weekly_evidence"
+        });
+    }
+    native.sort_by_key(|(c, used, _, _, _, _)| {
         if all_known && !tied {
             (usize::from(used.unwrap_or(100)), 0, false)
         } else {
@@ -1087,14 +1278,29 @@ pub fn allocate_with_account_rank(
         let entry = eligible.remove(index);
         let after_known = eligible
             .iter()
-            .rposition(|(c, u, _, _, _)| {
+            .rposition(|(c, u, _, _, _, _)| {
                 ["codex", "claude"].contains(&c.provider.as_str()) && u.is_some()
             })
             .map(|v| v + 1)
             .unwrap_or(0);
-        eligible.insert(index.max(after_known).min(eligible.len()), entry);
+        let position = index.max(after_known).min(eligible.len());
+        eligible.insert(position, entry);
+        if position != index
+            && let Some(trace) = evidence.as_deref_mut()
+        {
+            trace
+                .order_adjustments
+                .push("antigravity_after_known_weekly_use");
+        }
     }
     if access == "write" {
+        if eligible
+            .iter()
+            .any(|v| ["pi", "opencode"].contains(&v.0.provider.as_str()))
+            && let Some(trace) = evidence.as_deref_mut()
+        {
+            trace.order_adjustments.push("native_write_priority");
+        }
         eligible.sort_by_key(|v| ["pi", "opencode"].contains(&v.0.provider.as_str()));
     }
     if role == "worker"
@@ -1102,19 +1308,42 @@ pub fn allocate_with_account_rank(
         && purpose == "investigate"
         && eligible.iter().any(|v| v.0.provider != "pi")
     {
-        eligible.retain(|v| v.0.provider != "pi");
+        eligible.retain(|v| {
+            let keep = v.0.provider != "pi";
+            if !keep && let Some(trace) = evidence.as_deref_mut() {
+                trace.candidates[v.5].excluded_by = Some("native_investigation_preferred");
+            }
+            keep
+        });
     }
     if independent
         && judged_family
             .as_deref()
             .is_some_and(|v| ["openai", "anthropic"].contains(&v))
     {
+        if eligible.iter().any(|v| v.0.provider == "antigravity")
+            && let Some(trace) = evidence.as_deref_mut()
+        {
+            trace
+                .order_adjustments
+                .push("antigravity_independent_priority");
+        }
         eligible.sort_by_key(|v| v.0.provider != "antigravity");
     }
     if !independent && let Some(preferred) = &inputs.preferred {
+        if eligible.iter().any(|v| &v.0.provider == preferred)
+            && let Some(trace) = evidence.as_deref_mut()
+        {
+            trace.order_adjustments.push("preferred_provider");
+        }
         eligible.sort_by_key(|v| &v.0.provider != preferred);
     }
-    let (candidate, _, account, account_reason, account_rank) = eligible.remove(0);
+    if let Some(trace) = evidence {
+        for (rank, entry) in eligible.iter().enumerate() {
+            trace.candidates[entry.5].rank = Some(rank + 1);
+        }
+    }
+    let (candidate, _, account, account_reason, account_rank, _) = eligible.remove(0);
     let judge_note = if independent
         && inputs.explicit_target
         && model_family(&candidate.provider, &candidate.model).ok() == judged_family.as_deref()
@@ -1184,6 +1413,10 @@ pub fn weekly_used(status: &Value, provider: &str) -> Option<u8> {
 }
 
 fn weekly_used_at(status: &Value, provider: &str, now: u64) -> Option<u8> {
+    provider_weekly_reading(status, provider, now).used
+}
+
+fn provider_weekly_reading(status: &Value, provider: &str, now: u64) -> QuotaReading {
     let row = &status[provider];
     let max_age = if matches!(provider, "claude" | "antigravity") {
         crate::metrics::READING_FRESH_SECONDS
@@ -1198,7 +1431,7 @@ fn weekly_used_at(status: &Value, provider: &str, now: u64) -> Option<u8> {
     ]
     .into_iter()
     .find_map(|key| row.get(key).filter(|value| !value.is_null()));
-    checked_weekly_used(row, now, max_age, observed)
+    weekly_reading(row, now, max_age, observed)
 }
 fn daily_capped(status: &Value, c: &Candidate) -> bool {
     status[&c.provider]["daily_cap"][&c.model]
@@ -1613,35 +1846,87 @@ fn weekly_reset(row: &Value) -> Option<&Value> {
         .find_map(|key| row.get(key).filter(|value| !value.is_null()))
 }
 
-fn checked_weekly_used(
-    row: &Value,
-    now: u64,
-    max_age: f64,
-    observed: Option<&Value>,
-) -> Option<u8> {
-    let now = now as f64;
-    if row["source"] == "cache stale"
-        || weekly_reset(row)
-            .is_some_and(|reset| crate::metrics::stamp(reset).is_none_or(|reset| reset <= now))
-    {
-        return None;
-    }
-    if let Some(observed) = observed {
-        let stamp = crate::metrics::stamp(observed)?;
-        if stamp < 0.0 || stamp > now || now - stamp > max_age {
-            return None;
-        }
-    }
-    crate::metrics::percent(&row["weekly_used"])
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum QuotaFreshness {
+    Fresh,
+    Stale,
+    Unavailable,
+    Unverified,
 }
 
-pub fn account_weekly_used(row: &Value, now: u64) -> Option<u8> {
-    checked_weekly_used(
+#[derive(Default, Serialize)]
+struct QuotaCounts {
+    fresh: usize,
+    stale: usize,
+    unavailable: usize,
+    unverified: usize,
+}
+impl QuotaCounts {
+    fn record(&mut self, state: QuotaFreshness) {
+        match state {
+            QuotaFreshness::Fresh => self.fresh += 1,
+            QuotaFreshness::Stale => self.stale += 1,
+            QuotaFreshness::Unavailable => self.unavailable += 1,
+            QuotaFreshness::Unverified => self.unverified += 1,
+        }
+    }
+}
+
+struct QuotaReading {
+    used: Option<u8>,
+    freshness: QuotaFreshness,
+}
+
+fn weekly_reading(row: &Value, now: u64, max_age: f64, observed: Option<&Value>) -> QuotaReading {
+    use QuotaFreshness::{Fresh, Stale, Unavailable, Unverified};
+
+    let now = now as f64;
+    let used = crate::metrics::percent(&row["weekly_used"]);
+    let unavailable = |freshness| QuotaReading {
+        used: None,
+        freshness,
+    };
+    if used.is_none() {
+        return unavailable(Unavailable);
+    }
+    if row["source"] == "cache stale" {
+        return unavailable(Stale);
+    }
+    if let Some(reset) = weekly_reset(row) {
+        match crate::metrics::stamp(reset) {
+            None => return unavailable(Unavailable),
+            Some(reset) if reset <= now => return unavailable(Stale),
+            Some(_) => {}
+        }
+    }
+    let freshness = if let Some(observed) = observed {
+        match crate::metrics::stamp(observed) {
+            Some(stamp) if (0.0..=now).contains(&stamp) => {
+                if now - stamp > max_age {
+                    return unavailable(Stale);
+                }
+                Fresh
+            }
+            _ => return unavailable(Unavailable),
+        }
+    } else {
+        Unverified
+    };
+    QuotaReading { used, freshness }
+}
+
+fn account_weekly_reading(row: &Value, now: u64) -> QuotaReading {
+    weekly_reading(
         row,
         now,
         ACCOUNT_QUOTA_MAX_AGE,
         row.get("observed_at").or_else(|| row.get("timestamp")),
     )
+}
+
+pub fn account_weekly_used(row: &Value, now: u64) -> Option<u8> {
+    account_weekly_reading(row, now).used
 }
 
 #[cfg(test)]
@@ -1765,6 +2050,49 @@ mod tests {
         let rank = rank.unwrap();
         assert_eq!(rank.eligible_accounts, 3);
         assert_eq!(rank.decided_by, "working_attempts");
+
+        let now = crate::timestamp();
+        let mut preview_inputs = inputs.clone();
+        preview_inputs.status["claude"]["weekly_used"] = json!(20);
+        preview_inputs.status["claude"]["observed_at"] = json!(now - 10);
+        preview_inputs.status["claude"]["accounts"]["limited"]["observed_at"] = json!(now - 10);
+        preview_inputs.status["claude"]["accounts"]["spare"]["resets_at"] = json!(now - 1);
+        preview_inputs.status["claude"]["accounts"]["busy"] = Value::Null;
+        preview_inputs.running_accounts.clear();
+        let mut evidence = AllocationEvidence::default();
+        let (route, _) = allocate_preview(
+            &policy,
+            "codex",
+            "worker",
+            "read",
+            &preview_inputs,
+            &mut evidence,
+        )
+        .unwrap();
+        assert_eq!(route.account.as_deref(), Some("busy"));
+        assert!(route.snapshot.unwrap().served_account.is_none());
+        let report = serde_json::to_value(evidence).unwrap();
+        let claude = report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["provider"] == "claude")
+            .unwrap();
+        assert_eq!(claude["rank"], 1);
+        assert_eq!(claude["provider_quota"], "fresh");
+        assert_eq!(claude["account_quota"], "unavailable");
+        assert_eq!(claude["ranking_quota_scope"], "account");
+        assert!(claude["ranking_used_bucket"].is_null());
+        assert_eq!(
+            claude["registered_quota"],
+            json!({
+                "fresh": 1, "stale": 1, "unavailable": 2, "unverified": 0,
+            })
+        );
+        let json = report.to_string();
+        for alias in ["limited", "busy", "spare", "unobserved"] {
+            assert!(!json.contains(alias));
+        }
 
         inputs.status["claude"]["accounts"]["busy"]["weekly_used"] = json!(97);
         inputs.status["claude"]["accounts"]["spare"]["weekly_used"] = json!(95);

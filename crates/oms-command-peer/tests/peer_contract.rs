@@ -377,11 +377,26 @@ fn council_seat_publication_stops_after_thread_append_failure() {
         || {
             struct CouncilProbe<'a> {
                 provider: ProviderProbe,
+                selected: Mutex<Vec<(String, Option<String>)>>,
                 repo: &'a Repo,
                 close_thread: bool,
                 incomplete: bool,
             }
             impl Executor for CouncilProbe<'_> {
+                fn with_physical_contract(
+                    &self,
+                    attempt: &oms_command_peer::process::PhysicalAttempt<'_>,
+                    deadline: std::time::Instant,
+                    stop: &AtomicBool,
+                    register: oms_command_peer::process::RegisterPhysical<'_>,
+                ) -> oms_command_peer::Result<()> {
+                    self.selected.lock().unwrap().push((
+                        attempt.selected_model.unwrap_or_default().into(),
+                        attempt.selected_effort.map(str::to_owned),
+                    ));
+                    self.provider
+                        .with_physical_contract(attempt, deadline, stop, register)
+                }
                 fn execute(
                     &self,
                     request: Invocation,
@@ -407,21 +422,30 @@ fn council_seat_publication_stops_after_thread_append_failure() {
             }
             for (close_thread, incomplete, expected_code, expected_calls) in [
                 (true, false, 2, 1),
-                (false, false, 0, 4),
+                (false, false, 0, 6),
                 (false, true, 1, 2),
             ] {
                 let repo = provider_repo();
                 let probe = CouncilProbe {
                     provider: ProviderProbe::default(),
+                    selected: Mutex::new(Vec::new()),
                     repo: &repo,
                     close_thread,
                     incomplete,
+                };
+                let mixed = !close_thread && !incomplete;
+                let targets = if mixed {
+                    "agy:effort=auto:model=gemini-pro-orchestrator-argon,codex:effort=medium:model=gpt-6.2-terra,claude:model=claude-sonnet-5-5"
+                } else {
+                    "agy,codex"
                 };
                 let output = oms_command_peer::run_with_executor(
                     "peer-ask",
                     &args(&[
                         "--providers",
-                        "agy,codex",
+                        targets,
+                        "--reasoning-effort",
+                        "high",
                         "--debate",
                         "1",
                         "--deliberation",
@@ -440,6 +464,40 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 );
                 assert_eq!(output.0, expected_code, "{}", message(&output));
                 assert_eq!(probe.provider.calls.lock().unwrap().len(), expected_calls);
+                if mixed {
+                    let selected = [
+                        ("gemini-pro-orchestrator-argon", None),
+                        ("gpt-6.2-terra", Some("medium")),
+                        ("claude-sonnet-5-5", Some("high")),
+                    ];
+                    let physical = probe.selected.lock().unwrap();
+                    // The peer checks the same route at registration and again at launch.
+                    let expected = selected
+                        .into_iter()
+                        .cycle()
+                        .take(expected_calls)
+                        .flat_map(|seat| [seat, seat]);
+                    assert!(
+                        physical
+                            .iter()
+                            .map(|(model, effort)| (model.as_str(), effort.as_deref()))
+                            .eq(expected),
+                        "{physical:?}"
+                    );
+                    let receipts = oms_command_telemetry::store::usage::load(&repo.0).unwrap();
+                    for (model, _) in selected {
+                        assert_eq!(
+                            receipts
+                                .calls
+                                .iter()
+                                .filter(|call| {
+                                    call.receipt.identity.selected_model.as_deref() == Some(model)
+                                })
+                                .count(),
+                            2
+                        );
+                    }
+                }
                 let rows = oms_command_peer::storage::load(
                     &repo.0,
                     Path::new(".oms/artifacts/index.jsonl"),
@@ -464,7 +522,7 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                         b"error: council seat antigravity round 0: thread append failed; reconcile before retrying\n",
                     );
                 } else {
-                    let usable = if incomplete { "1/2" } else { "2/2" };
+                    let usable = if incomplete { "1/2" } else { "3/3" };
                     assert!(message(&output).contains(&format!("{usable} target(s) answered")));
                 }
             }

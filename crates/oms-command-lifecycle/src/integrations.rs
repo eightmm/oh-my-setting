@@ -774,12 +774,12 @@ fn huds_with(
     (codex_home, codex_config): (&Path, &Path),
 ) -> Result<()> {
     if remove {
-        crate::settings::codex(tx, codex_config, true)?;
+        crate::settings::codex(paths, tx, codex_config, true)?;
         return crate::plugins::agy_statusline(paths, tx, true);
     }
     if codex
         && r::exists(codex_home)
-        && let Err(e) = crate::settings::codex(tx, codex_config, false)
+        && let Err(e) = crate::settings::codex(paths, tx, codex_config, false)
     {
         tx.warn(&format!("Codex HUD not installed: {}", e.1));
     }

@@ -29,6 +29,23 @@ pub fn fixed_effort_model(provider: &str, model: &str) -> Option<&'static str> {
         .find(|candidate| candidate.eq_ignore_ascii_case(model))
 }
 
+/// Exact AGY model selector from a bare ID or an ID followed by a display label.
+pub fn agy_catalog_selector(row: &str) -> Option<&str> {
+    let id = if let Some((id, label)) = row.split_once('\t') {
+        if label.trim().is_empty() || label.chars().any(char::is_control) {
+            return None;
+        }
+        id
+    } else {
+        row
+    };
+    (!id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._/:".contains(&byte)))
+    .then_some(id)
+}
+
 /// Validate the existing native transport vocabulary without inventing a model
 /// capability list. Unknown model IDs remain usable by explicit native callers;
 /// managed role routes separately require a known family or exact adapter ID.

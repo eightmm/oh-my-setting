@@ -565,14 +565,14 @@ fn council_catalog_shapes() {
     let catalog = json!({"providers":[
         {"provider":"pi", "present":true, "catalog_probe":"ok", "routable":[]},
         {"provider":"claude", "present":true, "catalog_probe":"unsupported", "catalog_models":[]},
-        {"provider":"codex", "present":true, "catalog_models":["gpt-6.1-terra", "gpt-6.2-terra"]},
+        {"provider":"codex", "present":true, "catalog_models":["gpt-6.1-terra", "gpt-6.2-terra"], "catalog_probe":"failed", "catalog_age_seconds":86401, "snapshot_age_seconds":172801, "model_effort_scales":{"gpt-6.1-terra":["low"],"gpt-6.2-terra":["medium"]}},
         {"provider":"antigravity", "present":true, "routable":["gemini-4-carbon-high\tGemini Carbon High"]}
     ]});
     *fake.catalog.borrow_mut() = Some(catalog.clone());
     let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
     assert_eq!(
         plan["argv"][1],
-        "claude:model=claude-sonnet-5-5,codex:model=gpt-6.2-terra,antigravity:model=gemini-4-carbon-high"
+        "claude:effort=medium:model=claude-sonnet-5-5,codex:effort=medium:model=gpt-6.2-terra,antigravity:effort=high:model=gemini-4-carbon-high"
     );
     assert_eq!(plan["families"], 3);
     assert_eq!(plan["primary_calls"], 6);
@@ -583,6 +583,89 @@ fn council_catalog_shapes() {
         plan["skipped"][0]["reason"],
         "council requires private routes"
     );
+    assert_eq!(plan["catalog_evidence"][0]["catalog_status"], "unsupported");
+    assert_eq!(plan["catalog_evidence"][0]["model_selection"], "configured");
+    assert_eq!(plan["catalog_evidence"][1]["reported_probe"], "failed");
+    assert_eq!(plan["catalog_evidence"][1]["catalog_age_seconds"], 86401);
+    assert_eq!(plan["catalog_evidence"][1]["probe_age_seconds"], 172801);
+    assert_eq!(
+        plan["catalog_evidence"][1]["effort_support"],
+        "reported_supported"
+    );
+
+    let mut fixed = policy.clone();
+    fixed.council.extra[0].model = "gemini-pro-orchestrator-argon".into();
+    fixed.council.extra[0].effort.clear();
+    let mut mixed = catalog.clone();
+    mixed["providers"][3]["routable"] = json!([
+        "gemini-4-carbon-high\tGemini Carbon High",
+        "gemini-pro-orchestrator-argon\tOrchestrator Argon"
+    ]);
+    *fake.catalog.borrow_mut() = Some(mixed);
+    let plan = review::council_plan(Path::new("."), &request, &fixed, &fake, &STOP).unwrap();
+    assert_eq!(
+        plan["argv"][1],
+        "claude:effort=medium:model=claude-sonnet-5-5,codex:effort=medium:model=gpt-6.2-terra,antigravity:effort=auto:model=gemini-pro-orchestrator-argon"
+    );
+    assert_eq!(plan["seat_routes"][0]["effort"], "medium");
+    assert_eq!(plan["seat_routes"][2]["effort"], "");
+    assert_eq!(plan["catalog_evidence"][2]["effort_support"], "fixed");
+    assert!(plan["catalog_evidence"][2]["requested_effort"].is_null());
+
+    let mut expired = catalog.clone();
+    expired["providers"][2]["model_effort_scales"]["gpt-6.2-terra"] = json!(["low"]);
+    expired["providers"][2]["capability_evidence"] =
+        json!({"schema":1,"source":"fixture","observed_at":1,"expires_at":2});
+    *fake.catalog.borrow_mut() = Some(expired);
+    let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
+    assert_eq!(plan["catalog_evidence"][1]["effort_support"], "unknown");
+
+    let mut unsupported = catalog.clone();
+    unsupported["providers"][2]["model_effort_scales"]["gpt-6.2-terra"] = json!(["low"]);
+    *fake.catalog.borrow_mut() = Some(unsupported);
+    request.dry_run = false;
+    assert_eq!(
+        review::council_execute(Path::new("."), &request, &policy, &fake, &STOP)
+            .unwrap_err()
+            .message,
+        "council: codex seat unavailable: resolved model does not report support for council reasoning effort"
+    );
+    request.dry_run = true;
+    request.allow_partial = true;
+    let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
+    assert_eq!(
+        plan["catalog_evidence"][1]["effort_support"],
+        "reported_unsupported"
+    );
+    assert_eq!(plan["skipped"][1]["provider"], "codex");
+    assert_eq!(plan["families"], 2);
+    let mut missing_exact = catalog.clone();
+    missing_exact["providers"][2]["catalog_models"] = json!(["gpt-6.0-terra"]);
+    *fake.catalog.borrow_mut() = Some(missing_exact);
+    let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
+    assert_eq!(plan["catalog_evidence"][1]["catalog_status"], "available");
+    assert_eq!(plan["skipped"][1]["provider"], "codex");
+    assert_eq!(
+        plan["skipped"][1]["reason"],
+        "resolved model absent from routable catalog"
+    );
+    for (models, status, reason) in [
+        (Some(json!([])), "empty", "empty model catalog"),
+        (None, "unavailable", "model catalog unavailable"),
+    ] {
+        let mut changed = catalog.clone();
+        let row = changed["providers"][3].as_object_mut().unwrap();
+        if let Some(models) = models {
+            row.insert("routable".into(), models);
+        } else {
+            row.remove("routable");
+        }
+        *fake.catalog.borrow_mut() = Some(changed);
+        let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
+        assert_eq!(plan["catalog_evidence"][2]["catalog_status"], status);
+        assert_eq!(plan["skipped"][1]["reason"], reason);
+    }
+    request.allow_partial = false;
     for bad in [
         json!([]),
         json!([42]),

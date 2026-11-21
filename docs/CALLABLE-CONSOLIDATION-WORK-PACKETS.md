@@ -58,7 +58,8 @@ Builtin/alias 목록과 custom ID/discovery가 중복이며 models의 첫 글자
 **Canonical fixtures:** `oms-command-peer/tests/peer_contract.rs`의
 `provider_adapter_discovery_requires_marker`, `provider_native_transports_match_shell_contract`;
 `oms-mcp-server/src/peer.rs`의 `canonical_provider_aliases_and_cursor_bytes`,
-`tests/provider-aliases.json`, `tests/native.rs::peer_argv_goldens`.
+[MCP alias fixture](../crates/oms-mcp-server/tests/provider-aliases.json),
+[peer argv goldens](../crates/oms-mcp-server/tests/native.rs)의 `peer_argv_goldens`.
 
 **완료:** 모든 기존 alias, malformed leading character, `..`, relative directory, missing/nonexecuting
 adapter, `opencode2` fallback을 세 consumer에서 대조한다. Discovery는 adapter 실행·인증·지원
@@ -298,7 +299,8 @@ private peer owner, schema/argv golden의 독립성. 이름 목록을 합쳐 새
 **Canonical fixtures:** `registry.rs::embedded_registry_covers_public_and_frontdoor_without_scripts`;
 `oms/tests/native_entry_contract.rs::frontdoor_routes_navigation_and_native_commands_without_python`;
 MCP `tests/native.rs::{discovery_protocols,fixed_argv,executor_injection}`와
-`tests/definitions.json`, `tests/fixed-argv.json`.
+[MCP tool definitions](../crates/oms-mcp-server/tests/definitions.json)과
+[고정 argv fixture](../crates/oms-mcp-server/tests/fixed-argv.json).
 
 **완료:** 현재 inventory인 83 public 이름·고정 argv 23개·동적 handler 8개를 참조하되,
 변경하는 caller의 owner·필수 인자·bounded 진입을 기존 fixture로 확인한다. 등록 목록과 전체

@@ -2425,6 +2425,50 @@ esac
     assert!(fs::read_to_string(&codex_config).unwrap().contains(custom));
     success(call("install-codex-plugin", &["--remove"], &source, &host));
     assert_eq!(fs::read_to_string(&codex_config).unwrap(), custom);
+    let notify_begin = "# >>> oh-my-setting managed Codex usage (notify) >>>";
+    let notify_end = "# <<< oh-my-setting managed Codex usage (notify) <<<";
+    let retired = source.join("scripts/lib/codex_turn_notify.py");
+    let legacy_notify = format!(
+        "notify = [{}, {}]",
+        json!("/usr/bin/python3"),
+        json!(retired)
+    );
+    let legacy = format!("{notify_begin}\r\n{legacy_notify}\r\n{notify_end}\r\n{custom}");
+    let native_notify = format!(
+        "notify = {}",
+        json!([home.join(".local/bin/oms"), "codex-turn-notify"])
+    );
+    fs::write(&codex_config, &legacy).unwrap();
+    success(call("install-codex-plugin", &[], &source, &host));
+    let migrated = fs::read_to_string(&codex_config).unwrap();
+    assert!(migrated.contains(&legacy.replace(&legacy_notify, &native_notify)));
+    success(call("install-codex-plugin", &[], &source, &host));
+    assert_eq!(fs::read_to_string(&codex_config).unwrap(), migrated);
+    success(call("install-codex-plugin", &["--remove"], &source, &host));
+    assert_eq!(fs::read_to_string(&codex_config).unwrap(), custom);
+    fs::write(&codex_config, &legacy).unwrap();
+    success(call("install-codex-plugin", &["--remove"], &source, &host));
+    assert_eq!(fs::read_to_string(&codex_config).unwrap(), custom);
+    for override_config in [
+        format!("{legacy_notify}\n{custom}"),
+        format!("{notify_begin}\n{legacy_notify} # customized\n{notify_end}\n{custom}"),
+        format!(
+            "{notify_begin}\nnotify = [{}, {}]\n{notify_end}\n{custom}",
+            json!("/usr/bin/python3"),
+            json!(root.join("other/scripts/lib/codex_turn_notify.py"))
+        ),
+    ] {
+        fs::write(&codex_config, &override_config).unwrap();
+        success(call("install-codex-plugin", &[], &source, &host));
+        assert!(
+            fs::read_to_string(&codex_config)
+                .unwrap()
+                .contains(&override_config)
+        );
+        success(call("install-codex-plugin", &["--remove"], &source, &host));
+        assert_eq!(fs::read_to_string(&codex_config).unwrap(), override_config);
+    }
+    fs::write(&codex_config, custom).unwrap();
     let manifest: Value = serde_json::from_slice(&success(call(
         "install-claude-hooks",
         &["--print-expected"],

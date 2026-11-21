@@ -1405,7 +1405,7 @@ fn frame_with_capacity(
 
     let mut lines = Vec::new();
     lines.push(header_line(
-        project_title(report),
+        report,
         &calls,
         review,
         &attention,
@@ -2276,7 +2276,7 @@ fn room_goal<'a>(report: &'a Value, calls: &[Value]) -> Option<&'a str> {
 }
 
 fn header_line(
-    title: &str,
+    report: &Value,
     calls: &[TreeEntry<'_>],
     review: usize,
     attention: &[attention::Item],
@@ -2284,62 +2284,82 @@ fn header_line(
     columns: usize,
     colored: bool,
 ) -> String {
-    if columns < 44 {
-        return render_lr(
+    let project = project_title(report);
+    let (mut left, right) = if columns < 44 {
+        let left = vec![Span::raw(
+            format!("OMS · {project}"),
+            columns,
+            Some(SGR_AMBER_BOLD),
+        )];
+        let right = if attention.is_empty() {
+            vec![]
+        } else {
             vec![Span::raw(
-                format!("OMS · {title}"),
+                format!("!{}", attention.len()),
                 columns,
                 Some(SGR_AMBER_BOLD),
-            )],
-            if attention.is_empty() {
-                vec![]
-            } else {
-                vec![Span::raw(
-                    format!("!{}", attention.len()),
-                    columns,
-                    Some(SGR_AMBER_BOLD),
-                )]
-            },
-            columns,
-            false,
-            None,
-            colored,
-        );
-    }
-    let running = calls
-        .iter()
-        .filter(|entry| {
-            matches!(
-                text(entry.call, "state"),
-                "working" | "running" | "starting" | "queued" | "verifying"
-            )
-        })
-        .count();
-    let mut parts = Vec::new();
-    if running > 0 {
-        parts.push(format!("{running} running"));
-    }
-    if review > 0 {
-        parts.push(format!("{review} review"));
-    }
-    if !attention.is_empty() {
-        parts.push(format!("{} attention", attention.len()));
-    }
-    let summary = if parts.is_empty() {
-        format!("{} calls", calls.len())
+            )]
+        };
+        (left, right)
     } else {
-        parts.join(" · ")
+        let running = calls
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    text(entry.call, "state"),
+                    "working" | "running" | "starting" | "queued" | "verifying"
+                )
+            })
+            .count();
+        let mut parts = Vec::new();
+        if running > 0 {
+            parts.push(format!("{running} running"));
+        }
+        if review > 0 {
+            parts.push(format!("{review} review"));
+        }
+        if !attention.is_empty() {
+            parts.push(format!("{} attention", attention.len()));
+        }
+        let summary = if parts.is_empty() {
+            format!("{} calls", calls.len())
+        } else {
+            parts.join(" · ")
+        };
+        let left = vec![
+            Span::literal("OMS", Some(SGR_AMBER_BOLD)),
+            Span::literal(" · ", Some(SGR_MUTED)),
+            Span::raw(project, columns / 2, Some(SGR_BOLD)),
+        ];
+        let right = vec![
+            Span::raw(summary, columns / 2, Some(SGR_CYAN)),
+            Span::literal("  ", None),
+            Span::raw(format!("[{}]", view_label(view)), 16, Some(SGR_MUTED)),
+        ];
+        (left, right)
     };
-    let left = vec![
-        Span::literal("OMS", Some(SGR_AMBER_BOLD)),
-        Span::literal(" · ", Some(SGR_MUTED)),
-        Span::raw(title, columns / 2, Some(SGR_BOLD)),
-    ];
-    let right = vec![
-        Span::raw(summary, columns / 2, Some(SGR_CYAN)),
-        Span::literal("  ", None),
-        Span::raw(format!("[{}]", view_label(view)), 16, Some(SGR_MUTED)),
-    ];
+
+    // Give the project and status their existing budgets before adding the Room.
+    const SEPARATOR: &str = " · ";
+    let available = left_budget(columns, spans_width(&right))
+        .saturating_sub(spans_width(&left) + width(SEPARATOR))
+        .min(28);
+    let room = &report["room"];
+    if available >= 8
+        && report["collection"]["ok"] == true
+        && report["capacity_stale"] != true
+        && !text(room, "id").is_empty()
+    {
+        let title = clean(text(room, "title"), 160);
+        let title = title.trim();
+        if !title.is_empty() && title != "Shared work" && title != project {
+            left.push(Span::literal(SEPARATOR, Some(SGR_MUTED)));
+            left.push(Span {
+                plain: clip(title, available),
+                sgr: Some(SGR_MUTED),
+            });
+        }
+    }
     render_lr(left, right, columns, false, None, colored)
 }
 
@@ -3688,7 +3708,7 @@ fn receipt_token_details(
         let budget = left_budget(inner_width, width(label));
         (width(&value) <= budget).then(|| {
             card_row_lr(
-                vec![Span::raw(label, 14, Some(SGR_MUTED))],
+                vec![Span::raw(label, inner_width, Some(SGR_MUTED))],
                 vec![Span::raw(value, budget, Some(SGR_TEXT))],
                 columns,
                 use_cards,
@@ -3707,52 +3727,103 @@ fn receipt_token_details(
     } else {
         ""
     };
+    let grouped = providers
+        .values()
+        .any(|row| !rows(&row["launch_accounts"]).is_empty());
+    let heading = if grouped {
+        "Launch receipts"
+    } else {
+        "Receipts"
+    };
     let Some(coverage) = line(
-        "Receipts",
+        heading,
         format!("{reported}/{calls} call totals{overflow}{retained}"),
-    ) else {
+    )
+    .or_else(|| {
+        grouped
+            .then(|| {
+                let last = if retained.is_empty() { "" } else { " last" };
+                line(heading, format!("{reported}/{calls} totals{last}"))
+            })
+            .flatten()
+    }) else {
         return Vec::new();
     };
-    std::iter::once(coverage)
-        .chain(providers.iter().filter_map(|(provider, components)| {
-            let provider = match provider.as_str() {
-                "codex" => "Codex",
-                "claude" => "Claude",
-                "antigravity" | "agy" => "AGY",
-                other => other,
-            };
-            let provider_calls = components["calls"].as_u64();
-            let count = |field: &str, partial: Option<&str>| {
-                if let Some(n) = components[field].as_u64() {
-                    return n.to_string();
-                }
-                match (
-                    components["reported"][field].as_u64(),
-                    provider_calls,
-                    partial,
-                ) {
-                    (Some(n), Some(m), Some(prefix)) if n > 0 && n < m => {
-                        format!("{prefix}{n}/{m}")
-                    }
-                    _ => "?".into(),
-                }
-            };
+    let count = |components: &Value, field: &str, partial: Option<&str>| {
+        if let Some(n) = components[field].as_u64() {
+            return n.to_string();
+        }
+        match (
+            components["reported"][field].as_u64(),
+            components["calls"].as_u64(),
+            partial,
+        ) {
+            (Some(n), Some(m), Some(prefix)) if n > 0 && n < m => format!("{prefix}{n}/{m}"),
+            _ => "?".into(),
+        }
+    };
+    let mut out = vec![coverage];
+    for (provider, components) in providers {
+        let provider = match provider.as_str() {
+            "codex" => "Codex",
+            "claude" => "Claude",
+            "antigravity" | "agy" => "AGY",
+            other => other,
+        };
+        let accounts = rows(&components["launch_accounts"]);
+        if accounts.is_empty() {
             let row = |partial, compact| {
                 let [input, output, read, write] = ["input", "output", "cache_read", "cache_write"]
-                    .map(|field| count(field, partial));
+                    .map(|field| count(components, field, partial));
                 if compact {
                     format!("In {input} Out {output} Read {read} Write {write}")
                 } else {
                     format!("In {input} · Out {output} · Cache read {read} · Write {write}")
                 }
             };
-            line(provider, row(Some("partial "), false))
-                .or_else(|| line(provider, row(Some("p"), false)))
-                .or_else(|| line(provider, row(Some("p"), true)))
-                // Keep known components when the coverage fractions cannot fit.
-                .or_else(|| line(provider, row(None, true)))
-        }))
-        .collect()
+            out.extend(
+                line(provider, row(Some("partial "), false))
+                    .or_else(|| line(provider, row(Some("p"), false)))
+                    .or_else(|| line(provider, row(Some("p"), true)))
+                    .or_else(|| line(provider, row(None, true))),
+            );
+            continue;
+        }
+        for account in accounts {
+            let alias = account["alias"]
+                .as_str()
+                .filter(|id| crate::cli::valid_account_id(id));
+            let label = format!("{provider} @{}", alias.unwrap_or("?"));
+            let fields = [
+                "input",
+                "output",
+                "cache_read",
+                "cache_write",
+                "reasoning",
+                "total",
+            ];
+            let [input, output, read, write, reasoning, total] =
+                fields.map(|field| count(account, field, Some("p")));
+            let full = format!(
+                "In {input} · Out {output} · Cache {read}/{write} · Rsn {reasoning} · Total {total}"
+            );
+            if let Some(row) = line(&label, full.clone()) {
+                out.push(row);
+                continue;
+            }
+            let compact =
+                format!("In {input} Out {output} R{read} W{write} Rsn{reasoning} T{total}");
+            if let Some(row) = line(&label, compact.clone()) {
+                out.push(row);
+                continue;
+            }
+            // Keep the exact alias and counter names when both cannot fit one line.
+            for row in wrap(&format!("{label} · {full}"), inner_width.max(1)) {
+                out.extend(line(&row, String::new()));
+            }
+        }
+    }
+    out
 }
 
 fn render_summary_rows(
@@ -3981,6 +4052,53 @@ pub fn routes(report: &Value, columns: usize) -> String {
                         .unwrap_or(&report["roles"][role]["tier"])
                 )
             ));
+            let allocation = &preview["allocation"];
+            let comparison = match allocation["native_order"].as_str() {
+                Some("weekly_used") => Some("lower weekly use"),
+                Some("activity_within_weekly_tie_band") => {
+                    Some("in-flight, recent, owner tie-break (weekly use within tie band)")
+                }
+                Some("activity_missing_weekly_evidence") => {
+                    Some("in-flight, recent, owner tie-break (weekly evidence incomplete)")
+                }
+                Some("policy_order") => Some("policy order"),
+                _ => None,
+            };
+            if let Some(comparison) = comparison {
+                lines.push(format!("Provider ranking: {comparison}"));
+            }
+            if let Some(adjustments) = allocation["order_adjustments"].as_array()
+                && !adjustments.is_empty()
+            {
+                lines.push(format!(
+                    "Priority adjustments: {}",
+                    values(&allocation["order_adjustments"]).replace('_', " ")
+                ));
+            }
+            for candidate in rows(&allocation["candidates"]) {
+                let provider = value(&candidate["provider"]);
+                let disposition = candidate["rank"].as_u64().map_or_else(
+                    || value(&candidate["excluded_by"]).replace('_', " "),
+                    |rank| format!("rank {rank}"),
+                );
+                lines.push(format!(
+                    "  {provider} · {disposition} · provider quota {} · account quota {} · in-flight {} · recent {}",
+                    value(&candidate["provider_quota"]),
+                    value(&candidate["account_quota"]),
+                    value(&candidate["in_flight"]),
+                    value(&candidate["non_main_attempts"])
+                ));
+                let accounts = &candidate["registered_quota"];
+                if accounts.is_object() {
+                    lines.push(format!(
+                        "    Registered quota: {} fresh · {} stale · {} unavailable · {} unverified",
+                        value(&accounts["fresh"]),
+                        value(&accounts["stale"]),
+                        value(&accounts["unavailable"]),
+                        value(&accounts["unverified"])
+                    ));
+                }
+            }
             if let Some(error) = choice["error"].as_str() {
                 lines.push(format!("Unavailable: {error}"));
                 continue;
@@ -6641,8 +6759,36 @@ mod tests {
         }
         let mut titled = bound.clone();
         titled["room"]["title"] = json!("Release prep");
+        for (columns, height, show_room) in [(24, 13, false), (40, 24, true), (80, 13, true)] {
+            let before = board_frame(&bound, &nav, columns, height, &read, false, true);
+            let after = board_frame(&titled, &nav, columns, height, &read, false, true);
+            assert!(after.lines[0].starts_with("OMS · canonical"));
+            assert_eq!(after.lines[0].contains("Release prep"), show_room);
+            assert_eq!(after.lines[1..], before.lines[1..]);
+            assert_eq!(after.provider_rows, before.provider_rows);
+            assert_eq!(after.worker_rows, before.worker_rows);
+            let hit = |frame: &BoardFrame| frame.weekly_usage.map(|hit| (hit.row, hit.columns));
+            assert_eq!(hit(&after), hit(&before));
+        }
         titled["room"]["id"] = json!("room-unrelated");
         assert!(frame(&titled, &nav, 80, 24, &read)[0].starts_with("OMS · canonical"));
+        let neutral_header = &frame(&bound, &nav, 80, 24, &read)[0];
+        for title in [Value::Null, json!("   "), json!("  Shared work  ")] {
+            let mut neutral = bound.clone();
+            neutral["room"]["title"] = title;
+            assert_eq!(&frame(&neutral, &nav, 80, 24, &read)[0], neutral_header);
+        }
+        let mut unavailable = titled.clone();
+        unavailable["room"]["id"] = Value::Null;
+        assert!(!frame(&unavailable, &nav, 80, 24, &read)[0].contains("Release prep"));
+        unavailable = titled.clone();
+        unavailable["collection"]["ok"] = false.into();
+        assert!(!frame(&unavailable, &nav, 80, 24, &read)[0].contains("Release prep"));
+        titled["room"]["title"] = json!(format!("\x1b[31m{}\x1b[0m", "릴리스 작업 ".repeat(20)));
+        let wide = &frame(&titled, &nav, 80, 24, &read)[0];
+        assert!(wide.starts_with("OMS · canonical · 릴리스 작업"));
+        assert!(wide.contains('…') && !wide.contains('\x1b'));
+        assert!(wide.ends_with("[Overview]") && width(wide) == 80);
         let mut idle = bound.clone();
         idle["room"]["participants"][0]["state"] = json!("done");
         assert!(frame(&idle, &nav, 80, 24, &read)[0].starts_with("OMS · canonical"));
@@ -7535,6 +7681,41 @@ mod tests {
 
         report["collection"] = json!({"ok":true});
         report["capacity_stale"] = json!(false);
+        report["board_receipt_tokens"]["cmp-1"]["providers"] = json!({
+            "codex":{"launch_accounts":[
+                {"alias":"seat-a", "calls":1, "input":0, "output":0, "cache_read":0,
+                    "cache_write":null, "reasoning":null, "total":0},
+                {"alias":null, "calls":2, "input":null, "output":5, "cache_read":null,
+                    "cache_write":null, "reasoning":null, "total":null,
+                    "reported":{"input":1,"total":1}}
+            ]}
+        });
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        for label in [
+            "Launch receipts",
+            "Codex @seat-a",
+            "In 0 · Out 0 · Cache 0/? · Rsn ? · Total 0",
+            "Codex @?",
+            "In p1/2 · Out 5",
+            "Total p1/2",
+        ] {
+            assert!(detail.contains(label), "{label}: {detail}");
+        }
+        let narrow = frame(&report, &nav, 43, 13, &read);
+        assert!(
+            narrow.iter().any(
+                |row| row.contains("Codex @seat-a") && row.contains("In 0 Out 0 R0 W? Rsn? T0")
+            ),
+            "{narrow:?}"
+        );
+        assert!(
+            narrow
+                .iter()
+                .any(|row| row.contains("Codex @?")
+                    && row.contains("In p1/2 Out 5 R? W? Rsn? Tp1/2")),
+            "{narrow:?}"
+        );
+        assert!(narrow.iter().all(|row| width(row) <= 43));
         report["board_receipt_tokens"]["cmp-1"]["total"] = json!(0);
         let detail = frame(&report, &nav, 80, 13, &read).join("\n");
         assert!(detail.contains("0 · Receipts"), "{detail}");
@@ -7623,8 +7804,21 @@ mod tests {
             1
         );
 
-        report["board_receipt_tokens"]["cmp-1"] = json!({"total":59,"calls":1,"reported":1});
+        report["board_receipt_tokens"]["cmp-1"] = json!({"total":59,"calls":1,"reported":1,
+            "providers":{"codex":{"launch_accounts":[{"alias":"isolated","total":59,"calls":1}]}}});
+        report["board_receipt_tokens"]["foreign-room"] = json!({"total":999,"calls":1,"reported":1,
+            "providers":{"codex":{"launch_accounts":[{"alias":"foreign","total":999,"calls":1}]}}});
         assert!(detail(&report, "W1").contains("59 · Receipts"));
+        let call_rows = calls(&report);
+        let own = call_rows
+            .iter()
+            .find(|row| row["participant"] == "W1")
+            .unwrap();
+        assert_eq!(
+            own["receipt_tokens"]["providers"]["codex"]["launch_accounts"][0]["alias"],
+            "isolated"
+        );
+        assert!(!json!(call_rows).to_string().contains("foreign"));
         assert!(detail(&report, "W2").contains("unreported"));
         assert!(detail(&report, "native-worker").contains("unreported"));
 

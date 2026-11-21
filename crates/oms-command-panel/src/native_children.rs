@@ -1184,6 +1184,7 @@ struct CodexResponseUsage {
     output: i64,
     cache_read: i64,
     cache_write: i64,
+    reasoning: i64,
     total: i64,
 }
 
@@ -1201,19 +1202,19 @@ impl CodexResponseUsage {
 
     fn from_counters(usage: &Value) -> Option<Self> {
         let count = |name| usage[name].as_i64().filter(|count| *count >= 0);
-        count("reasoning_output_tokens")?;
         Some(Self {
             input: count("input_tokens")?,
             output: count("output_tokens")?,
             cache_read: count("cached_input_tokens")?,
             cache_write: count("cache_write_input_tokens")?,
+            reasoning: count("reasoning_output_tokens")?,
             total: count("total_tokens")?,
         })
     }
 
     fn line(&self) -> String {
-        // Codex normalizes omitted cache details to zero.
-        let cache = |count: i64| {
+        // Codex maps omitted input and output token detail to zeros.
+        let detail = |count: i64| {
             if count == 0 {
                 "?".to_owned()
             } else {
@@ -1221,11 +1222,12 @@ impl CodexResponseUsage {
             }
         };
         format!(
-            "Codex recorded response usage · in {} · out {} · cache {}/{} · total {}",
+            "Codex recorded response usage · in {} · out {} · cache {}/{} · reasoning {} · total {}",
             self.input,
             self.output,
-            cache(self.cache_read),
-            cache(self.cache_write),
+            detail(self.cache_read),
+            detail(self.cache_write),
+            detail(self.reasoning),
             self.total
         )
     }
@@ -3050,7 +3052,7 @@ mod tests {
         let output = |header: &Value, records: &[Value]| {
             fixture.chat(&terminal, &ready(header, records)).unwrap()
         };
-        let usage = "Ordinary owned reply\n\nCodex recorded response usage · in 14 · out 5 · cache 7/3 · total 19";
+        let usage = "Ordinary owned reply\n\nCodex recorded response usage · in 14 · out 5 · cache 7/3 · reasoning 2 · total 19";
         assert_eq!(
             output(
                 &child,
@@ -3114,7 +3116,7 @@ mod tests {
         let zero = record("response-zero", counters(0, 0, 0, 0, 0, 0));
         assert_eq!(
             output(&child, &[zero]),
-            "Ordinary owned reply\n\nCodex recorded response usage · in 0 · out 0 · cache ?/? · total 0"
+            "Ordinary owned reply\n\nCodex recorded response usage · in 0 · out 0 · cache ?/? · reasoning ? · total 0"
         );
         let mut legacy_header = child.clone();
         legacy_header["payload"]

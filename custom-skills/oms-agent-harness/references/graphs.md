@@ -14,13 +14,13 @@ run. Design and schemas: `docs/GRAPH-ENGINEERING.md`.
 ```bash
 oms graph project map            # counts, hubs, module groups
 oms graph project find lease     # name/path/qualname search
-oms graph project api scripts/lib/oms_graph/cli.py  # signatures/summaries, no bodies
+oms graph project api crates/oms-command-graph/src/cli.rs  # signatures/summaries, no bodies
 oms graph project search candidate_count            # exhaustive literal hits by symbol
 oms graph project search --ranked "lease recovery retry"   # blocks about these words, ranked (not a literal)
 oms graph project symbol select_context             # definition, extracted callers/tests, inferred edges, text-only matches
-oms graph project trace symbol:scripts/plan-run.sh::main --direction in --depth 2
+oms graph project trace NODE_ID --direction in --depth 2
 oms graph project blast --base origin/main   # --limit N bounds the JSON lists
-oms graph project coupling --path scripts/plan-run.sh   # co-change pairs from Git history; structural=no = the parsers cannot see it
+oms graph project coupling --path crates/oms-command-autonomy/src/goal.rs   # co-change pairs from Git history; structural=no = the parsers cannot see it
 oms graph project affected --base origin/main --head HEAD --json
 oms graph project impact --base origin/main   # one brief: tests, dependents, usual co-change partners left out, CODEOWNERS; orientation, not evidence
 oms graph project map --signatures --task "lease recovery" --max-bytes 4096   # ranked files as signatures, no bodies
@@ -50,9 +50,9 @@ source occurrences, not every ambiguous candidate edge. Use the reason and
 signals fields as orientation across every provider.
 
 `project affected` turns an exact Git range into a test plan. It selects only
-existing tests reached through positive graph evidence and includes exact
-`tests/scripts-smoke.sh` or Python unittest cases where extraction supports
-them. The default follows the complete reverse-dependency closure of
+existing tests reached through positive graph evidence. The supported selectors
+and conservative fallbacks are implemented in
+[the native affected-test reader](../../../crates/oms-command-graph/src/project_affected.rs). The default follows the complete reverse-dependency closure of
 `EXTRACTED` edges (`--depth 0`);
 an explicitly bounded traversal that finds more dependents falls back to
 `mode: full`. An unmatched path, dirty workspace, deletion/rename, boundary file,

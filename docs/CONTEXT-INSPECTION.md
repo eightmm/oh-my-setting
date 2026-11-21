@@ -311,26 +311,17 @@ configuration, not in its reference; OMS does not write it.
 
 ## Verification
 
-`tests/test_context_inspect.py` exercises the actual stdlib implementation using
-synthetic manifests and real temporary files (including symlink/hardlink/FIFO,
-malformed JSON, concurrent change, list caps and metadata-only comparison).
-The existing `tests/context-core-smoke.sh` invokes it with `--cli`, adding an
-end-to-end compiler → saved manifest → inspector/compare test through
-`scripts/runtime.sh`. That test removes the listed source and bundle before
-inspection and checks repository bytes remain unchanged. It also checks the
-child boundary and invalid-limit exit. Text/report assertions extend this same
-suite: ordering, subset counts, bounded lists, Unicode/control handling, unknown
-identity and delta direction. The CLI case also compares default/explicit JSON,
-text inspection/source verification/comparison, child access and invalid format
-combinations without changing repository bytes.
-
-Run the nearest registered suite, not a new CI lane:
+The [native context manifest tests](../crates/oms/tests/context_manifest_contract.rs)
+exercise inspection, source rechecks and comparison through `oms runtime
+context-inspect`. They cover saved manifests with missing or changed sources,
+text and JSON output, invalid option combinations and the child boundary.
+The [source-acquisition tests](../crates/oms-context-source/tests/acquisition_contract.rs)
+cover unsafe inputs and changes during reads. The [report tests](../crates/oms-context-report/tests/report_contract.rs)
+compare rendered output against frozen reference fixtures.
 
 ```bash
-bash tests/context-core-smoke.sh
+cargo +1.99.1 test --locked -p oms --test context_manifest_contract
+cargo +1.99.1 test --locked -p oms-context-source -p oms-context-report
 ```
 
-The standalone Python invocation tests the module only; it is not the full
-runtime integration test. No real model, provider login, GPU or Slurm job is
-needed by either path. Roll back the scoped commit to remove the command; no
-stored records need migration.
+These fixtures use local repositories and synthetic observations.

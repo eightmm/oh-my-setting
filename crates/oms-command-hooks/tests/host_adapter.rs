@@ -685,6 +685,89 @@ fn codex_precompact_rejects_explicit_unsafe_hints_without_fallback() {
 const CODEX_TRACE: &str = ".oms/hooks/codex-trace.jsonl";
 
 #[test]
+fn codex_hook_trace_marks_receipt_while_callback_stdin_is_pending() {
+    const TEST: &str = "codex_hook_trace_marks_receipt_while_callback_stdin_is_pending";
+    const CHILD: &str = "OMS_TEST_TRACE_STDIN_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            oms_command_hooks::run_with_source(
+                "harness-hook",
+                &argv(&["telemetry-hook"]),
+                &cwd,
+                &cwd,
+                &AtomicBool::new(false),
+            ),
+            (0, vec![], vec![]),
+        );
+        return;
+    }
+
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let tmp = TempDir::new("trace-stdin");
+    let repo = git_repo(&tmp);
+    fs::create_dir_all(repo.join(".oms")).unwrap();
+    strip_group_world_write(tmp.path());
+    let path = repo.join(CODEX_TRACE);
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--test-threads=1"])
+        .current_dir(&repo)
+        .env_clear()
+        .env(CHILD, "1")
+        .env("HOME", tmp.path())
+        .env("OMS_CODEX_HOOK_TRACE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let pending = loop {
+        if let Ok(data) = fs::read_to_string(&path)
+            && data.ends_with('\n')
+        {
+            break data;
+        }
+        if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+            break String::new();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let sent = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"SessionEnd","session_id":"private-stdin-marker"}"#);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    sent.unwrap();
+
+    let receipt: serde_json::Value = serde_json::from_str(&pending)
+        .expect("one receipt should be recorded before the stdin read completes");
+    let data = fs::read_to_string(path).unwrap();
+    assert!(!data.contains("private-stdin-marker"));
+    let rows: Vec<serde_json::Value> = data
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let [received, entry, exit] = rows.as_slice() else {
+        panic!("expected receipt, entry and exit");
+    };
+    assert_eq!(received, &receipt);
+    assert_eq!(received["phase"], "received");
+    assert_eq!(received["event"], "unknown");
+    assert_eq!(entry["phase"], "entry");
+    assert_eq!(entry["event"], "SessionEnd");
+    assert_eq!(exit["phase"], "exit");
+    assert_eq!(exit["outcome"], "returned");
+    assert_eq!(received["nonce"], entry["nonce"]);
+    assert_eq!(received["nonce"], exit["nonce"]);
+}
+
+#[test]
 fn codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output() {
     if !clean_env_child(
         "codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output",
@@ -769,6 +852,9 @@ fn codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output() 
         invoke(&["telemetry-hook"], &vec![b'x'; 8 * 1024 * 1024 + 1]),
         (0, vec![], vec![])
     );
+    oms_command_hooks::trace_runtime_unavailable("harness-hook", &argv(&["resume-hook"]), &repo);
+    oms_command_hooks::trace_runtime_unavailable("harness-hook", &argv(&["relay"]), &repo);
+    oms_command_hooks::trace_runtime_unavailable("resume-hook", &[], &repo);
     assert!(!foreign.join(CODEX_TRACE).exists());
 
     let path = repo.join(CODEX_TRACE);
@@ -803,25 +889,40 @@ fn codex_hook_trace_correlates_only_metadata_and_preserves_masked_stop_output() 
         ("telemetry-hook", "unknown", "returned"),
         ("telemetry-hook", "unknown", "returned"),
         ("telemetry-hook", "unknown", "input_oversize"),
+        ("resume-hook", "unknown", "runtime_unavailable"),
     ];
-    assert_eq!(rows.len(), expected.len() * 2);
     let mut nonces = std::collections::BTreeSet::new();
-    for ([entry, exit], (handler, event, outcome)) in rows.as_chunks::<2>().0.iter().zip(expected) {
-        let nonce = entry["nonce"].as_str().unwrap();
+    let mut rows = rows.iter();
+    for (handler, event, outcome) in expected {
+        let received = rows.next().unwrap();
+        let nonce = received["nonce"].as_str().unwrap();
         assert!(nonces.insert(nonce));
         assert!(nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let received_at = received["received_at"].as_str().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(received_at).is_ok());
         assert_eq!(
-            entry,
-            &json!({"schema":1,"phase":"entry","handler":handler,"event":event,"nonce":nonce})
+            received,
+            &json!({"schema":1,"phase":"received","handler":handler,"event":"unknown",
+                "nonce":nonce,"received_at":received_at})
         );
+        let entered = matches!(outcome, "internal_failure" | "returned");
+        if entered {
+            assert_eq!(
+                rows.next().unwrap(),
+                &json!({"schema":1,"phase":"entry","handler":handler,"event":event,
+                    "nonce":nonce,"received_at":received_at})
+            );
+        }
+        let exit = rows.next().unwrap();
         let elapsed = exit["elapsed_us"].as_u64().unwrap();
         let mut expected_exit = json!({"schema":1,"phase":"exit","handler":handler,"event":event,
-            "nonce":nonce,"elapsed_us":elapsed,"outcome":outcome});
-        if outcome != "input_oversize" {
+            "nonce":nonce,"received_at":received_at,"elapsed_us":elapsed,"outcome":outcome});
+        if entered {
             expected_exit["inner_exit"] = json!(0);
         }
         assert_eq!(exit, &expected_exit);
     }
+    assert!(rows.next().is_none());
 }
 
 #[test]
@@ -846,6 +947,7 @@ fn codex_hook_trace_is_opt_in() {
         ),
         (0, vec![], vec![]),
     );
+    oms_command_hooks::trace_runtime_unavailable("harness-hook", &argv(&["telemetry-hook"]), &repo);
     assert!(!repo.join(CODEX_TRACE).exists());
 }
 

@@ -1028,29 +1028,13 @@ separates parent judgment from bounded execution and defines decision-point
 reviews. Generic role prompts do not select a model or grant delegation authority. Native
 subagents remain outside the shell router.
 
-`config/role-contracts.json` records, per bundled `roles/*.md` file, `read_only`, the
-`writes` scope, literal `returns` lines the role text must contain, and `may_delegate`
-(always false). It restates what the prose already says; tiers stay in
-`config/panel-routing.json`. Nothing enforces it at runtime yet. `python3
-scripts/lib/role_contracts.py` lints it (every role has an entry and vice versa, valid
-enums, read-only roles absent from the panel `WRITERS`) and runs inside the
-role-injection invariant. It also requires every role file to have an entry in
-`config/panel-routing.json` `roles` or an entry in the `ROUTING_ALIASES` table of
-`role_contracts.py` (for example `implementation-worker` and `analysis-worker` dispatch
-through the `worker` key, which has no file of its own; `test-designer` and
-`decision-advisor` through `advisor`). Aliased roles take the tier of their target key.
-The lint also fails when a read-only role resolves to a belt with
-write or spawn tools (Write, Edit, MultiEdit, NotebookEdit, Agent, Task) or when the `--tools`
-belts in `scripts/lib/peer-common.sh` drift from its table; Bash stays in the read belt and is
-bounded by plan mode and the sandbox, not by the belt. `oms agent-role surface [--json]` prints,
-per role, `read_only`, belt, tool count and MCP on/off. Read-only roles resolve to the 4-tool
-belt without MCP (`researcher`: 6 tools). `peer-delegate.sh --role NAME` launches a bundled
-role whose contract says `read_only: true` with read access exactly as `--read-only` would, and
-prints one stderr line naming the override, when no access flag was given. `--apply`,
-`--interactive`, panel dispatch and `OMS_DELEGATE_ROLE_WRITE=1` (there is no write flag) keep the
-old write default; project or global role files with the bundled name, roles missing from the
-contract and no `--role` are unchanged; an unreadable contract warns once and keeps write.
-The `delegate-default` column shows that access (`read` or `write`).
+[Role contracts](../config/role-contracts.json) record access, return requirements
+and delegation limits for bundled roles. [Panel routing](../config/panel-routing.json)
+owns capability tiers. The native role command validates policy and reports
+access, tool profiles and MCP settings with `oms agent-role surface [--json]`.
+The peer delegate reads the bundled role contract when choosing its default
+access. The launcher and provider govern effective permissions.
+[Role policy](../crates/oms-command-agent-role/src/policy.rs) · [Delegation](../crates/oms-command-peer/src/delegate.rs) · [Role tests](../crates/oms-command-agent-role/tests/native.rs)
 
 ### Collaboration visibility
 
@@ -1135,8 +1119,8 @@ evidence. Long reviews keep their opening findings; unterminated final lines
 remain readable. The operator brief still passes the strict outbound guard.
 Quoted provider output also has invisible Unicode (tag characters, bidi
 controls, zero-width characters) replaced by visible `<U+XXXX>` markers
-(`scripts/lib/hidden_text.py`). This is a marker, not a defence: it does not
-claim to catch every hiding technique.
+for inspection. The marker covers the Unicode categories selected by the
+[peer output sanitizer](../crates/oms-command-peer/src/safety.rs).
 
 Explicit `--verify` and plan-task checks win. Otherwise writes default only to
 an implemented `scripts/check.sh fast`; ML project detection does not select a
@@ -1148,13 +1132,9 @@ full-suite fallback or no-verify override; choose an explicit command when
 Read-only reports do not auto-run tests. Missing or blocked providers skip
 verification with a non-success result, rather than test unchanged code.
 
-When the recorded `--verify` check fails (worker exit 0, verify non-zero other
-than the 125 boundary stop), the result prints an `escalate:` line with the exact
-command to run the same brief one `--reasoning-effort` step higher, limited to
-what the selected model accepts; at the top of that scale a `--workload routine`
-call steps to `standard`, and an exact `--model` stops there. It is a printed
-suggestion with its reason and is never run. The ladder lives in
-`scripts/lib/effort_ladder.py` so other verbs can share it.
+The delegate records verification outcomes and returns the patch or its
+diagnostics according to the result.
+[Delegate verifier and retry handling](../crates/oms-command-peer/src/delegate.rs)
 
 With `--repair 2|3`, compact candidate/diagnostic hashes and exit codes go into
 the existing artifact-index `repair_replay` field. Replay compares the requested
@@ -1291,39 +1271,10 @@ rule; only designated landing readers validate native anchors. The private gener
 directory is a cooperating-OMS ownership boundary, not an OS isolation boundary against
 hostile code running as the same user.
 
-`peer-delegate` also lints the text on both sides of a delegation, mechanically
-and without a model call (`scripts/lib/delegation_lint.py`). A caller brief of
-240 bytes or more prints `warning: brief:` lines when it lacks a goal, scope or
-out-of-scope, expected output, stop condition or file path pointers, or is a
-script of more than seven numbered steps with no goal; `--strict-brief` makes
-those warnings refuse the run (exit 2) before any worker starts. A returned
-result that lacks a short summary, an explicit unresolved line, `path:line` on
-its findings, or (writers) a changed-files list prints `warning: result:` and
-records the codes as `result_lint` on the delegate row of the artifact index.
-The lint checks shape only: a clean result is never verification evidence, and
-no `result_lint` field means clean or not linted.
-
-The result lint also compares the worker's closing lines with this attempt's verify
-receipt (`--verify=none|pass|fail`: no verify ran, passed, failed). A closing "all tests
-pass" (writers also a bare "done") with no receipt records `claim-without-receipt`; with a
-failing one, `claim-failing-receipt`. The phrase lists are the small `CLAIM_*` tuples in
-`delegation_lint.py`, matched on the last eight non-empty lines, skipping lines that also
-negate; it is a heuristic warning and never changes admission. A "tests pass" claim is
-also recorded as `worker_claim: pass` on the delegate row. `oms panel --metrics` then
-prints, per role/provider/model, `claim ...: claimed_pass=N rerun=M disagreed=K`: delegate
-rows with that claim joined by patch digest to the `patch-admit` rows that re-ran verify
-(`scripts/lib/route_stats.py` `claim_check`). A count, not a verdict; claims without a
-re-run are not counted as agreement.
-
-The same lint reads each gate seat's final answer in `peer-review` (`delegation_lint.py
-review`) and adds only what the gate does not already check: prose findings with no
-fenced `findings` block (`findings-not-trackable`, plus `finding-without-pointer` when an
-item has no `path:line`), a `GATE: pass` beside a blocking finding in the block
-(`pass-with-blocking`), and an answer over 6000 bytes with no summary or recommendation
-line (`long-answer-no-summary`). The GATE and SECURITY lines, answer quality and block
-validation keep their own checks. Warnings print as one `lint (advisory, not evidence)`
-line under the seat's verdict and are recorded as `result_lint` on that seat in the
-`review-outcome` row; they never change a verdict.
+`oms peer-delegate --strict-brief` checks briefs of at least 240 bytes for
+goal, scope, output, stop condition and file pointers. A failing brief exits
+before a worker starts. The check examines the shape of the brief.
+[Native delegation](../crates/oms-command-peer/src/delegate.rs)
 
 ```bash
 oms peer-delegate --to codex --prompt "Implement the bounded change."
@@ -1366,23 +1317,10 @@ ordinary provider/verifier shell can leave a background process. On POSIX,
 `agent-supervisor` owns and closes one process group; a process that deliberately
 starts a new session can escape it. The boundary is not an OS sandbox.
 
-`OMS_WORKER_SECRET_GUARD=1` (off by default) narrows what a provider child is
-handed. A Claude read seat or write worker gets per-call inline settings that
-deny its Read tool the secret paths the prompt bundle already excludes
-(`**/.env*`, `**/.npmrc`, `**/*.pem`, `**/id_rsa*`, the SSH and AWS directories
-under home, and the rest of `MA_SECRET_READ_DENY` in `scripts/lib/peer-common.sh`); the
-person's settings files are not edited. A Claude, Codex or Antigravity child
-also starts without the owner's credential-shaped variables: `AWS_*` and names
-ending in `_TOKEN`, `_SECRET`, `_SECRET_KEY`, `_API_KEY`, `_APIKEY`,
-`_ACCESS_KEY`, `_ACCESS_KEY_ID`, `_PRIVATE_KEY`, `_PASSWORD`, `_PASSWD` or
-`_CREDENTIALS`. Kept are the provider's own login variables (`ANTHROPIC_*` and
-`CLAUDE_*`; `OPENAI_*`, `CODEX_*` and `AZURE_OPENAI_*`; `GEMINI_*`, `GOOGLE_*`
-and `ANTIGRAVITY_*`; `AWS_*` or `GOOGLE_*` for Claude on Bedrock or Vertex),
-every `OMS_*` variable, and the names listed in `OMS_WORKER_ENV_ALLOW` (spaces
-or commas) for a verifier that needs one. Other providers keep their
-environment, because their key can have any name. This is a seatbelt too: a
-deny rule stops the Read tool, not `cat`, `grep -r` or a script the worker runs,
-and Codex and Antigravity get no read rule from it.
+The provider launcher checks account ownership and authentication overrides
+before launching an isolated account. The outbound checks and worker worktree
+controls remain part of the same delegation boundary.
+[Provider launch policy](../crates/oms-command-peer/src/providers.rs)
 
 Treat a clean worker result as “no monitored repository surface moved,” not
 “the process was harmless.” Stronger guarantees require OS/container isolation.
@@ -2059,20 +1997,10 @@ finding that a later run reports again reads `open`. Every status is a record
 of what was said, never approval or verification evidence, and a refused
 action exits 2.
 
-Verify receipts carry two advisory observations beside the exit code
-(`scripts/lib/verify_observe.py`, no model, no network). Rows written with a
-`verify_exit` (the gate's `review-verify`, `patch-admit`, delegate) gain an
-optional `verify_env`: OS and machine, the version of `python3`, `bash`, `git`
-and of the tool behind each runner the output named, and, when lock or
-requirements files sit at the repo root, their names and one digest, never
-paths, users or contents. `oms agent-task verify` writes the same as an `env:`
-line in its note. When a recognised runner summary (pytest, unittest, go test,
-cargo test, jest, vitest, this repo's smoke runners) says zero tests ran under
-exit 0, the receipt names the runner in `verify_zero_tests` (the gate and
-admission artifacts) or a `tests:` note line (the task), and the gate and task
-print a `warning:` line. Output no recogniser understands makes no claim. A
-warning is not a failure and a clean result is no stronger than the receipt was:
-the exit code stays the only verdict.
+`oms agent-task verify` records the command's exit and can attach advisory
+runner observations, including recognized zero-test output and an environment
+fingerprint. Use the receipt's command and result when deciding what work it
+verified. [Native verification observer](../crates/oms-command-task/src/observe.rs)
 
 Dispositions end a review loop: `fix` is accept, `dismiss` is reject (the
 finding is wrong) and `findings out-of-scope ID --reason TEXT` records a
@@ -2607,9 +2535,10 @@ commands; keep one flow under one authority.
 
 The ML template records the scientific contract in PROJECT.md; optional
 reference docs require `--full-docs` and never overwrite existing files.
-The ML scaffold also copies `scripts/ml_resume_smoke.py` (stdlib only, CPU, seconds;
-`bash scripts/check.sh ml-smoke` runs it after `ml_smoke.py`, and it does not count as the
-configured ML smoke). It runs a toy training twice through the project's `build`/`step`/
+The ML scaffold copies the [resume smoke template](../templates/ml_resume_smoke.py)
+into the generated project's `scripts/` directory. In that project, the
+generated `bash scripts/check.sh ml-smoke` runs the resume smoke after the
+ordinary ML smoke. It runs a toy training twice through the project's `build`/`step`/
 `save`/`load`/`parts` plug-ins: straight through, and interrupted at step K with an atomic
 `latest` write, discarded state and a reload. It proves the two runs agree on every loss and
 the final state digest, that step counter, optimizer, scheduler and RNG continued rather than
@@ -3054,24 +2983,13 @@ adds a hint to prefer narrow `permissions.allow` rules or the sandbox over
 `bypassPermissions`. These rows are not part of the drift fingerprint and
 nothing here edits a permission.
 
-`oms doctor --security --residue [--json]` is a separate, operator-invoked scan
-of provider state for secrets the CLIs left behind. It reads only locations
-that exist, from a small table in `scripts/lib/doctor-security.py`
-(`RESIDUE_LOCATIONS`; the paths are third-party claims about each CLI, not a
-contract): Claude `projects/` and `shell-snapshots/` under `CLAUDE_CONFIG_DIR`
-or `~/.claude`, Codex `sessions/`, `shell_snapshots/` and `history.jsonl` under
-`CODEX_HOME` or `~/.codex`. Each regular file (symlinks are not followed) is run
-through the existing secret-tier scanner, `agent_memory_sensitive_report` in
-`scripts/lib/agent-memory-common.sh`, so the pattern list is not duplicated; the
-machine tier (home paths) is ignored because provider state is full of them. A
-hit prints the file, line number and pattern class (`github-token`,
-`token-assignment`, ...), never the matched text. The scan is bounded and says
-so: the newest 200 files, each at most 4 MiB, modified within 30 days, 90
-seconds in all; skipped and `truncated` counts are printed, and a directory's
-mode is shown. Nothing is deleted, rewritten or recorded (no fingerprint is
-written), and the exit status stays 0. Antigravity state is not scanned because
-no stable location is documented. A clean result means the scanner found
-nothing in that window, not that the state is free of secrets.
+`oms doctor --security --residue [--json]` scans Claude project and shell
+snapshot directories under the user's home and session, shell snapshot and
+history paths in the selected Codex home. It skips symlinks and reports
+the file, line and pattern class for each hit. The native scanner limits
+inspection to 1,000 files, 1 MiB per file, 64 levels and five seconds, with
+cancellation checks during traversal. Reports omit matched values.
+[Native doctor](../crates/oms-command-lifecycle/src/doctor.rs) · [Shared scanner](../crates/oms-scrub/src/lib.rs)
 
 `oms doctor --sandbox [--probe] [--json]` is a standalone read-only report of whether this
 host could sandbox at all; OMS sandboxes nothing itself. On Linux it reads whether `bwrap` is
@@ -3144,8 +3062,8 @@ server runs under a hard timeout (`OMS_MCP_PROBE_TIMEOUT` seconds, default 15, r
 1-120), with a minimal environment plus the variables its own configuration names, its
 stderr discarded, and its process group is always terminated. A failed probe exits 1 and
 records nothing. Limits: the server is not sandboxed and may use the network itself, and
-a changed server binary that lists identical tools is not detected. Code:
-`scripts/lib/doctor-mcp-probe.py`.
+a changed server binary that lists identical tools is not detected.
+[Native MCP probe](../crates/oms-command-lifecycle/src/mcp_probe.rs).
 
 `oms doctor --providers [--json]` is a standalone read-only matrix of what OMS supports
 per provider and per function (launch a main, worker call, observe, resume, send,
@@ -3153,9 +3071,10 @@ stop, approval relay, usage, handoff), read from `config/provider-capabilities.j
 Each cell is `supported`, `partial` (with its limit), `unsupported` or `unknown`, and
 `fixture` (exercised by fake CLIs only) or `live`; no cell is `live` today. Every
 supported or partial cell names its implementation and test, and
-`tests/provider-registry-smoke.sh` fails when a named symbol or test is missing or a
-registry provider has no row. Nothing runs and nothing is contacted. Custom adapters are
-not rows.
+`oms doctor --providers --check` validates the configured implementation and
+test references without running providers. The
+[native lifecycle fixture](../crates/oms-command-lifecycle/tests/native_lifecycle.rs)
+exercises this check.
 
 
 #### Optional hints and budgets
@@ -3329,29 +3248,19 @@ service or proof of measured CI savings.
 
 ### Local development checks
 
-`bash scripts/check.sh` is the repository gate: shell lint, Python 3.11 grammar, skill
-validation, focused suites, and sharded smoke tests. The entry point requires Bash 5.0 or
-newer; the Bash 3.2 parse check has been retired. Development uses affected tests and
-static checks, not this full gate per edit. Before landing a
-bundle, run `bash scripts/check.sh invariants` for the fast repository-wide
-allowlist/review-state, skill and provider registry, documentation reference and
-changed-source syntax checks; this lane is intentionally limited to these invariants and
-does not replace affected checks or the full landing gate.
+`bash scripts/check.sh` runs the repository gate. It includes shell lint,
+skill validation, the native migration inventory check, focused shell
+fixtures and Rust workspace tests. Use Bash 5.0 or later. During development,
+run the nearest affected tests. Use `bash scripts/check.sh --preflight` to
+inspect available tools and dependencies, or `bash scripts/check.sh --list-stages`
+to see the selected stages. [Check runner](../scripts/check.sh)
 
-For committed ranges, `--affected --changed-from BASE --changed-to HEAD` checks ordinary
-README/docs changes directly, otherwise selects existing tests from positive graph
-evidence. Skill/template Markdown uses the direct skill validator (including project
-skill templates and their local references); `roles/*.md` relies on the repo invariants'
-role-injection check; neither runs runtime prompt/GC/lifecycle suites. A document
-(README, CHANGELOG, CONTRIBUTING, `docs/*.md`) never widens a selection and never adds
-uncertainty, alone or beside code: it gets the documentation reference checks only.
-A change that touches only tests runs only those tests: a smoke file runs itself, an
-`tests/operator/SECTION.py` runs that operator section, and for `tests/scripts-smoke.sh`
-(too large for the graph to index) the changed `test_*` functions are derived from the diff
-and run through `tests/run-smoke-shard.sh --only`; a changed shared helper or top-level
-line, or a diff that cannot be read, runs that file whole, never the global full
-selection. In a mixed change the test part contributes only its own tests and the source
-part keeps its graph classification. Full coverage is retained for the paths in
+For committed ranges, use `--affected --changed-from BASE --changed-to HEAD`.
+Ordinary documentation uses reference checks. Skill and template changes
+use the skill-manifest checks. Code and tests use the selected verification
+lanes, with conservative fallbacks when evidence is incomplete.
+
+Full coverage is retained for the paths in
 `scripts/lib/critical-paths.sh`: install/update/uninstall/link/repair lifecycle scripts
 and libraries, hook and guard scripts, permission/sandbox policy, the outbound scrubber,
 durable-state writers, `rules/`, `config/`, executable templates, workflows, and
@@ -3380,20 +3289,11 @@ pushes. Native platform checks reuse the lifecycle matrix's macOS runner.
 lets later checks report failures after an earlier failure without continuing
 a cancelled run.
 
-CI selects once and runs affected tests plus changed-file lint in that same job for PRs
-and main pushes. Full selections fan out to the existing Linux lint, four focused lanes
-(which skip operator-tools through `check.sh --without-operator-tools`, keeping every
-other stage in its lane), four smoke shards, four `operator-tools (I/4)` shards
-(`check.sh --operator-only --shard I/4`, weights in `tests/operator/runner.py`; its
-`--self-check` fails unless the shards run every section exactly once) and copy
-lifecycle runner. `ci-query.py` counts the operator shards as full-selection
-evidence and `gate` requires them. The selector also emits
-`native=true|false`: install/lifecycle, shell portability, Python compatibility, shared
-runtime/configuration and workflow changes require macOS lifecycle with Homebrew Bash 5
-and BSD userland fixtures, plus real Python 3.11 compatibility. Weekly/manual runs and
-unavailable-base fallbacks require all native jobs. The install matrix omits native hosts only on an explicit
-`native=false` plan; the stable `gate` rejects missing, failed or cancelled required
-results and accepts only planned skips.
+PR and main pushes select affected or full verification. Full runs use Linux
+lint and focused Bash checks, the Ubuntu and macOS Rust matrix, and a Linux
+copy-install lifecycle fixture. The lifecycle matrix adds macOS when the
+selector requires native platform checks. The stable `gate` checks the
+selected jobs and their planned skips. [CI workflow](../.github/workflows/test.yml)
 
 Require it in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
@@ -3435,8 +3335,9 @@ PR comment packet for the PR number the CI row recorded, the `draft-pr merged`
 observation for the branch and the open blocking peer-review findings, and prints per
 matched event the evidence (which record, when), a command for a person to run and, for
 rules that have one, `waiting 42m, over the 30m line: tell the owner`. The rules are data
-in `config/ci-suggestions.json` (each names the record fields it reads; a test checks
-they exist); the condition each tests is code in `scripts/lib/ci_suggest.py`. Rules cover
+in [the CI suggestion policy](../config/ci-suggestions.json). The
+[native suggestion evaluator](../crates/oms-command-landing/src/suggestions.rs)
+checks the recorded facts. Rules cover
 no CI recorded for the tip, a pending run, red CI (a regression candidate or only jobs
 also red on the base, which needs `--refresh`; otherwise the base comparison is
 `unknown`), red then green on one commit (re-check, not a fix), current review

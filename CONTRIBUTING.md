@@ -2,12 +2,9 @@
 
 ## Verify and publish
 
-During development, run the nearest affected tests and static checks. The
-smoke runner accepts repeatable selectors:
-
-```bash
-bash tests/run-smoke-shard.sh --only TEST_NAME
-```
+During development, run the nearest affected tests and static checks. Use
+Cargo package and test selectors for Rust fixtures. Use
+`bash scripts/check.sh --focused-only` for the repository's shell suites.
 
 For a committed range, use `bash scripts/check.sh --affected --changed-from BASE --changed-to HEAD`.
 Ordinary docs use reference checks; critical changes or
@@ -20,40 +17,22 @@ update. Do not run a duplicate full gate first. See
 [verification and release](docs/COMPONENTS.md#verification-and-release) for CI
 scope, installation proof and direct-push requirements.
 
-### Harness evaluation scenarios
+### Harness regression tests
 
-`bash tests/harness-eval-smoke.sh [--json] [--only NAME]` asks whether the
-harness as a whole keeps five promises across a realistic sequence: a resumed
-drive repeats no work, verification or landing; a reworded criterion makes its
-evidence stale; an unrelated verification receipt does not verify a review
-finding; the panel shows what the lifecycle records say (and does not show an
-unreadable source as live); and the note a task needs fits a bounded
-session-start block with its source id. Each scenario runs real `oms` commands
-in a temp repository with fake provider CLIs, no model call and no network, then
-asserts on recorded state. It is a regression instrument for harness behavior,
-not a benchmark of model quality. A scenario for a known defect is listed in
-`xfail_branch` with the branch that fixes it and prints `xfail(BRANCH)`; once
-that fix lands it reports `unexpected-pass` and the suite fails until the entry
-is removed. A scenario the environment cannot run exits 77 and prints
-`skip(REASON)`.
+Choose the native fixture that covers the behavior under change. The fixtures
+use temporary repositories and local services or stubbed providers.
 
-The `hook-*` scenarios check the registered Claude Code guards (the
-`PreToolUse` rows of `scripts/install-claude-hooks.sh --print-expected`:
-`command-guard-hook.sh` and `git-move-guard-hook.sh`) by driving each script
-with the JSON payload the provider sends. A refused payload exits 2 with one
-reason line on stderr; an allowed one exits 0 with nothing on stderr; the
-registered matcher equals the tool the script's payload check expects (a grep
-over the source); and removing or altering a guard row in a fixture
-`settings.json` is reported by `oms doctor` in both modes. For a degraded
-environment (no `python3` on PATH, Bash older than 5, a truncated payload, the
-helper library missing) the property is that a guard never passes a payload it
-would refuse without a diagnostic on stderr. Fail-open with a diagnostic holds;
-silent fail-open does not. Both guards keep the exit code and print exactly one
-`<guard>: cannot evaluate this command (<reason>); allowing it unchecked.` line
-from shell builtins (no `python3`), and the scenarios assert that line. The suite ends with a
-hook-by-condition matrix (`blocks`, `passes+diagnostic`, `passes silently`; also
-under `hook_matrix` with `--json`). A new `PreToolUse` row fails the matcher
-scenario until it has conformance scenarios of its own.
+| Behavior | Suite |
+|---|---|
+| Plan leases, evidence and completion | [Plan CLI tests](crates/oms-command-plan/tests/cli.rs) and [completion tests](crates/oms-command-plan/tests/completion_gc.rs) |
+| Apply, verification and exact landing receipts | [Landing contract tests](crates/oms-command-landing/tests/landing_contract.rs) |
+| Panel lifecycle and result projections | [Panel parity tests](crates/oms-command-panel/tests/panel_parity.rs) |
+| Context manifest inspection and comparison | [Native context manifest tests](crates/oms/tests/context_manifest_contract.rs) |
+| Managed hook callbacks and provider wiring | [Hook adapter tests](crates/oms-command-hooks/tests/host_adapter.rs) and [native lifecycle tests](crates/oms-command-lifecycle/tests/native_lifecycle.rs) |
+
+For example, `cargo +1.99.1 test --locked -p oms-command-hooks --test host_adapter`
+runs the callback suite. Use the same package and test-target selection for the
+other native fixtures.
 
 ## Style
 
@@ -79,8 +58,8 @@ hygiene check; passing it does not establish a Python-free runtime.
   Bash 3.2, so macOS's system Bash can find a newer Bash or print the hint.
 - Keep changes task-scoped; match the surrounding script's conventions.
 - Extend the canonical test or fixture; add a new test only for an uncovered
-  path, and look for coverage it supersedes. The smoke runner discovers every
-  `test_*` definition automatically. Prefer behavior/interface tests.
+  path, and look for coverage it supersedes. Prefer tests of behavior and
+  public interfaces.
 - No secrets in code, tests, commits, or fixtures — the suite self-scans its own
   sources; split secret-shaped literals (e.g. `'aws_secret_access_''key=...'`).
 - Fail closed: a check that cannot run is an error, not a pass.

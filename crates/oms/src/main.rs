@@ -1621,7 +1621,10 @@ fn dispatch_owned(
                     interrupted,
                     &runtime_svc,
                 ),
-                Err(e) => err_output(e),
+                Err(e) => {
+                    oms_command_hooks::trace_runtime_unavailable(tool, local, &cwd);
+                    err_output(e)
+                }
             }
         }
         _ if oms_command_autonomy::owns(tool, local) => {

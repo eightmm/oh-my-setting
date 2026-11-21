@@ -111,10 +111,7 @@ pub fn run_with_source_and_services(
     interrupted: &AtomicBool,
     host: &dyn HostServices,
 ) -> Output {
-    if !owns_hook(name, args) {
-        return (75, vec![], vec![]);
-    }
-    if [
+    let input = if [
         "codex-hud-config",
         "codex-usage-config",
         "codex-app-notify",
@@ -126,18 +123,11 @@ pub fn run_with_source_and_services(
         || name == "command-guard-hook" && args.first().is_some_and(|a| a == "--audit")
         || name == "pre-push-check" && args.first().is_some_and(|a| a == "--pre-merge")
     {
-        return run_with_services(name, args, &[], cwd, source, interrupted, host);
-    }
-    let mut input = Vec::new();
-    if std::io::stdin()
-        .lock()
-        .take((common::INPUT_MAX + 1) as u64)
-        .read_to_end(&mut input)
-        .is_err()
-    {
-        return reject_input(name, args, cwd, trace::Rejection::Unreadable);
-    }
-    run_with_services(name, args, &input, cwd, source, interrupted, host)
+        HookInput::Bytes(&[])
+    } else {
+        HookInput::Stdin
+    };
+    run_input(name, args, input, cwd, source, interrupted, host)
 }
 
 /// Execute from supplied bytes, with no implicit stdin read. Unknown names
@@ -163,11 +153,60 @@ pub fn run_with_services(
     interrupted: &AtomicBool,
     host: &dyn HostServices,
 ) -> Output {
+    run_input(
+        name,
+        args,
+        HookInput::Bytes(stdin),
+        cwd,
+        source,
+        interrupted,
+        host,
+    )
+}
+
+/// Record that the native adapter could not construct its host services.
+/// The caller retains its original exit and output.
+pub fn trace_runtime_unavailable(name: &str, args: &[OsString], cwd: &Path) {
+    if let Some(trace) = trace::Trace::receive(name, args, cwd) {
+        trace.rejected(trace::Rejection::RuntimeUnavailable);
+    }
+}
+
+enum HookInput<'a> {
+    Stdin,
+    Bytes(&'a [u8]),
+}
+
+fn run_input(
+    name: &str,
+    args: &[OsString],
+    input: HookInput<'_>,
+    cwd: &Path,
+    source: &Path,
+    interrupted: &AtomicBool,
+    host: &dyn HostServices,
+) -> Output {
     if !owns_hook(name, args) {
         return (75, vec![], vec![]);
     }
+    let trace = trace::Trace::receive(name, args, cwd);
+    let mut bytes = Vec::new();
+    let stdin = match input {
+        HookInput::Stdin => {
+            if std::io::stdin()
+                .lock()
+                .take((common::INPUT_MAX + 1) as u64)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                return reject_input(name, trace, trace::Rejection::Unreadable);
+            }
+            &bytes
+        }
+        HookInput::Bytes(stdin) => stdin,
+    };
     if stdin.len() > common::INPUT_MAX {
-        return reject_input(name, args, cwd, trace::Rejection::Oversize);
+        return reject_input(name, trace, trace::Rejection::Oversize);
     }
     let snapshot = common::Snapshot::default();
     let ctx = common::Context {
@@ -178,15 +217,11 @@ pub fn run_with_services(
         provider: None,
         host,
     };
-    dispatch(name, args, stdin, &ctx)
+    dispatch(name, args, stdin, &ctx, trace)
 }
 
-fn reject_input(name: &str, args: &[OsString], cwd: &Path, reason: trace::Rejection) -> Output {
-    if name == "harness-hook"
-        && let Some((tool, tail)) = args.split_first()
-        && let Some(callback) = tool.to_str().and_then(trace::callback)
-        && let Some(trace) = trace::Trace::start(callback, tail, None, cwd)
-    {
+fn reject_input(name: &str, trace: Option<trace::Trace>, reason: trace::Rejection) -> Output {
+    if let Some(trace) = trace {
         trace.rejected(reason);
     }
     common::input_error(name)
@@ -273,7 +308,13 @@ fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
         common::out(text)
     }
 }
-fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'_>) -> Output {
+fn dispatch(
+    name: &str,
+    args: &[OsString],
+    stdin: &[u8],
+    ctx: &common::Context<'_>,
+    mut trace: Option<trace::Trace>,
+) -> Output {
     match name {
         "command-guard-hook" => guards::command(args, stdin, ctx),
         "git-move-guard-hook" => guards::git_move(stdin, ctx),
@@ -306,14 +347,16 @@ fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'
                 snapshot: ctx.snapshot,
                 host: ctx.host,
             };
-            let trace = trace::Trace::start(callback, &args[1..], Some(stdin), ctx.cwd);
+            if let Some(trace) = trace.as_mut() {
+                trace.enter(callback, &args[1..], stdin);
+            }
             let failure = trace.as_ref().map(|_| {
                 selected
                     .snapshot
                     .dispatch_failure
                     .get_or_init(|| AtomicBool::new(false))
             });
-            let mut out = dispatch(callback.handler, &args[1..], stdin, &selected);
+            let mut out = dispatch(callback.handler, &args[1..], stdin, &selected, None);
             if let Some(trace) = trace {
                 trace.dispatched(
                     out.0,

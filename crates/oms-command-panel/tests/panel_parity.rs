@@ -2084,6 +2084,28 @@ fn spread_routes_by_panel_room_id() {
         json!({"scope":"room","non_main_attempts":0,"window_seconds":21600,"in_flight":0})
     );
     assert_eq!(evidence["account_rank"]["repo_working_attempts"], 0);
+    let allocation = &evidence["allocation"];
+    let candidates = allocation["candidates"].as_array().unwrap();
+    let claude = candidates
+        .iter()
+        .find(|row| row["provider"] == "claude")
+        .unwrap();
+    let codex = candidates
+        .iter()
+        .find(|row| row["provider"] == "codex")
+        .unwrap();
+    assert_eq!(claude["rank"], 1);
+    assert_eq!(claude["resolved_model"], zero["chosen"]["builder"]["model"]);
+    assert_eq!(claude["registered_quota"]["unavailable"], 2);
+    assert_eq!(claude["account_quota"], "unavailable");
+    assert_eq!(claude["non_main_attempts"], 0);
+    assert_eq!(claude["in_flight"], 0);
+    assert_eq!(codex["excluded_by"], "provider_unavailable");
+    assert!(codex["rank"].is_null());
+    assert!(codex["catalog_count"].is_null());
+    assert_eq!(allocation["native_order"], "policy_order");
+    assert!(!allocation.to_string().contains("seat-a"));
+    assert!(!allocation.to_string().contains("seat-b"));
 
     services.attempts.borrow_mut().push(json!({
         "attempt_id":"att-queued-seat", "provider":"claude", "tool":"peer-delegate",
@@ -2130,6 +2152,9 @@ fn spread_routes_by_panel_room_id() {
         "Harness/provider proposal: claude",
         "Account: requested unknown · proposed seat-a · pinned false · served unknown",
         "Account ranking: spread · eligible 2 · decided by registry order",
+        "claude · rank 1 · provider quota unavailable · account quota unavailable",
+        "codex · provider unavailable",
+        "Registered quota: 0 fresh · 0 stale · 2 unavailable · 0 unverified",
         "Repo working/running attempts: proposed 0 · next 0",
         "headless adapter may reselect",
     ] {
@@ -2241,9 +2266,49 @@ fn spread_routes_by_panel_room_id() {
         assert!(evidence["recent"]["non_main_attempts"].is_null());
         assert!(evidence["account_rank"]["repo_working_attempts"].is_null());
         assert!(evidence["account_rank"]["next_repo_working_attempts"].is_null());
+        for candidate in evidence["allocation"]["candidates"].as_array().unwrap() {
+            assert!(candidate["non_main_attempts"].is_null());
+            assert!(candidate["in_flight"].is_null());
+        }
         let page = render::routes(report, 150);
         assert!(page.contains("Repo working/running attempts: proposed unknown · next unknown"));
     }
+
+    // With two native candidates and no comparable weekly inputs, the preview
+    // resolves the same room-local activity tie-break as dispatch.
+    services.attempts.borrow_mut().pop();
+    let mut catalog = services.catalog_override.borrow_mut();
+    catalog
+        .as_mut()
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "provider":"codex","installed":true,"models":["gpt-6.2-terra"]
+        }));
+    drop(catalog);
+    let report = preview(true);
+    let builder = &report["chosen"]["builder"];
+    let allocation = &builder["evidence"]["allocation"];
+    assert_eq!(
+        allocation["native_order"],
+        "activity_missing_weekly_evidence"
+    );
+    assert_eq!(builder["provider"], "codex");
+    let candidates = allocation["candidates"].as_array().unwrap();
+    let codex = candidates
+        .iter()
+        .find(|row| row["provider"] == "codex")
+        .unwrap();
+    let claude = candidates
+        .iter()
+        .find(|row| row["provider"] == "claude")
+        .unwrap();
+    assert_eq!(codex["rank"], 1);
+    assert_eq!(codex["in_flight"], 0);
+    assert_eq!(claude["rank"], 2);
+    assert_eq!(claude["in_flight"], 1);
+    assert_eq!(dispatch(&[])["route"]["provider"], "codex");
 }
 
 fn usage_sessions_compare_and_routes_parity() {

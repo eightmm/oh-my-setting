@@ -98,10 +98,61 @@ impl ReceiptSum {
 }
 
 #[derive(Default)]
-struct ReceiptProvider {
+struct ReceiptComponents {
     calls: usize,
     input_basis: Option<bool>,
-    components: [ReceiptSum; 4],
+    counters: [ReceiptSum; 4],
+}
+
+impl ReceiptComponents {
+    fn observe(&mut self, attributed: usage::AttributedUsage, input_basis: Option<bool>) {
+        if attributed.input_tokens.is_some() {
+            // A missing input affects coverage but introduces no competing basis.
+            self.input_basis = if self.counters[0].reported == 0 || self.input_basis == input_basis
+            {
+                input_basis
+            } else {
+                None
+            };
+        }
+        self.calls += 1;
+        for (sum, tokens) in self.counters.iter_mut().zip([
+            attributed.input_tokens,
+            attributed.output_tokens,
+            attributed.cache_read_tokens,
+            attributed.cache_write_tokens,
+        ]) {
+            sum.observe(tokens);
+        }
+    }
+
+    fn snapshot(&self) -> Value {
+        let [input, output, read, write] = &self.counters;
+        let complete = |sum: &ReceiptSum| sum.complete(self.calls);
+        let comparable = self.calls == 1 || self.input_basis.is_some();
+        let input_reported = if comparable { input.reported } else { 0 };
+        json!({
+            "input": comparable.then(|| complete(input)).flatten(),
+            "output": complete(output), "cache_read": complete(read),
+            "cache_write": complete(write), "calls": self.calls,
+            "reported": {"input": input_reported, "output": output.reported,
+                "cache_read": read.reported, "cache_write": write.reported},
+        })
+    }
+}
+
+#[derive(Default)]
+struct ReceiptAccount {
+    components: ReceiptComponents,
+    total: ReceiptSum,
+}
+
+#[derive(Default)]
+struct ReceiptProvider {
+    components: ReceiptComponents,
+    // Aliases describe isolated launch routes of recorded calls. Receipts carry
+    // neither current home generations nor provider-reported served identities.
+    launch_accounts: BTreeMap<Option<String>, ReceiptAccount>,
 }
 
 #[derive(Default)]
@@ -117,19 +168,24 @@ impl ReceiptAttempt {
             .providers
             .iter()
             .map(|(name, provider)| {
-                let [input, output, read, write] = &provider.components;
-                let complete = |sum: &ReceiptSum| sum.complete(provider.calls);
-                let comparable = provider.calls == 1 || provider.input_basis.is_some();
-                let input_reported = if comparable { input.reported } else { 0 };
-                let input = comparable.then(|| complete(input)).flatten();
-                (
-                    name.clone(),
-                    json!({"input":input,"output":complete(output),
-                        "cache_read":complete(read),"cache_write":complete(write),
-                        "calls":provider.calls,
-                        "reported":{"input":input_reported,"output":output.reported,
-                            "cache_read":read.reported,"cache_write":write.reported}}),
-                )
+                let mut components = provider.components.snapshot();
+                components["launch_accounts"] = Value::Array(
+                    provider
+                        .launch_accounts
+                        .iter()
+                        .map(|(alias, account)| {
+                            let mut group = account.components.snapshot();
+                            group["alias"] = json!(alias);
+                            group["total"] =
+                                json!(account.total.complete(account.components.calls));
+                            group["reported"]["total"] = json!(account.total.reported);
+                            // This durable receipt version does not record reasoning.
+                            group["reasoning"] = Value::Null;
+                            group
+                        })
+                        .collect(),
+                );
+                (name.clone(), components)
             })
             .collect();
         json!({"total":self.total.complete(self.calls),"reported":self.total.reported,
@@ -188,27 +244,19 @@ impl ReceiptTokensCache {
                         .providers
                         .entry(call.provider.to_owned())
                         .or_default();
-                    if call.usage.input_tokens.is_some() {
-                        let basis = receipt.usage.cache_in_input;
-                        // Calls with no attributable input affect coverage but
-                        // do not introduce a competing count basis.
-                        provider.input_basis = if provider.components[0].reported == 0
-                            || provider.input_basis == basis
-                        {
-                            basis
-                        } else {
-                            None
-                        };
-                    }
-                    provider.calls += 1;
-                    for (sum, tokens) in provider.components.iter_mut().zip([
-                        call.usage.input_tokens,
-                        call.usage.output_tokens,
-                        call.usage.cache_read_tokens,
-                        call.usage.cache_write_tokens,
-                    ]) {
-                        sum.observe(tokens);
-                    }
+                    let basis = receipt.usage.cache_in_input;
+                    provider.components.observe(call.usage, basis);
+                    let alias = receipt.identity.account.as_deref().filter(|alias| {
+                        crate::routing::ACCOUNT_PROVIDERS.contains(&call.provider)
+                            && *alias != "default"
+                            && oms_command_peer::providers::account_id(alias).is_ok()
+                    });
+                    let account = provider
+                        .launch_accounts
+                        .entry(alias.map(str::to_owned))
+                        .or_default();
+                    account.components.observe(call.usage, basis);
+                    account.total.observe(call.usage.total_tokens);
                 }
                 if bound.next().is_some() {
                     return None;
@@ -1179,6 +1227,18 @@ mod receipt_token_tests {
         session: Option<(&str, bool)>,
         usage: Option<Usage>,
     ) {
+        write_with_alias(repo, call, attempt, provider, Some("seat"), session, usage);
+    }
+
+    fn write_with_alias(
+        repo: &Path,
+        call: &str,
+        attempt: &str,
+        provider: &str,
+        alias: Option<&str>,
+        session: Option<(&str, bool)>,
+        usage: Option<Usage>,
+    ) {
         let stop = AtomicBool::new(false);
         let mut receipt = usage::begin(
             repo,
@@ -1186,7 +1246,7 @@ mod receipt_token_tests {
                 call_id: call.into(),
                 operation_id: format!("op-{call}"),
                 provider: provider.into(),
-                account: Some("seat".into()),
+                account: alias.map(str::to_owned),
                 attempt_id: Some(attempt.into()),
                 ..Identity::default()
             },
@@ -1290,7 +1350,7 @@ mod receipt_token_tests {
             ),
             ("zero", "zero", "antigravity", None, Some(explicit(0))),
             ("inclusive", "basis", "codex", None, Some(codex(4, 2, 1))),
-            ("exclusive", "basis", "codex", None, Some(claude)),
+            ("exclusive", "basis", "codex", None, Some(claude.clone())),
             (
                 "known-input",
                 "unknown-basis",
@@ -1324,6 +1384,44 @@ mod receipt_token_tests {
         ] {
             write(path, call, attempt, provider, session, usage);
         }
+        for (call, alias, measurement) in [
+            ("a-first", Some("seat-a"), Some(codex(4, 2, 1))),
+            ("a-missing", Some("seat-a"), None),
+            ("b-zero", Some("seat-b"), Some(codex(0, 0, 0))),
+            ("ambient", None, Some(codex(2, 1, 0))),
+            ("bad-alias", Some("claude:seat"), Some(codex(1, 1, 0))),
+        ] {
+            write_with_alias(path, call, "accounts", "codex", alias, None, measurement);
+        }
+        for (call, alias, session, baseline_unknown) in [
+            ("bound-baseline", "seat-a", "named-session", false),
+            ("different-account", "seat-b", "named-session", true),
+            ("changed-session", "seat-a", "different-session", true),
+        ] {
+            let attempt = if baseline_unknown {
+                "changed-generation"
+            } else {
+                "baseline"
+            };
+            write_with_alias(
+                path,
+                call,
+                attempt,
+                "codex",
+                Some(alias),
+                Some((session, baseline_unknown)),
+                Some(codex(20, 10, 5)),
+            );
+        }
+        write_with_alias(
+            path,
+            "unrequested",
+            "other-room",
+            "codex",
+            Some("outside"),
+            None,
+            Some(explicit(9999)),
+        );
         let attempts = [
             "mixed",
             "incomplete",
@@ -1333,14 +1431,29 @@ mod receipt_token_tests {
             "basis",
             "unknown-basis",
             "partial",
+            "accounts",
+            "changed-generation",
             "foreign",
         ];
         let observed = ReceiptTokensCache::default()
             .for_attempts(path, attempts, &AtomicBool::new(false))
             .unwrap();
         assert!(!observed.contains_key("foreign"));
+        assert!(!observed.contains_key("other-room"));
+        let mixed = &observed["mixed"];
+        let mut provider_only = mixed.clone();
+        for components in provider_only["providers"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            components
+                .as_object_mut()
+                .unwrap()
+                .remove("launch_accounts");
+        }
         assert_eq!(
-            observed["mixed"],
+            provider_only,
             json!({
                 "total":166,"reported":4,"calls":4,
                 "providers": {
@@ -1353,6 +1466,41 @@ mod receipt_token_tests {
                 }
             })
         );
+        for (provider, alias, total) in [
+            ("codex", json!("seat"), 85),
+            ("claude", json!("seat"), 71),
+            ("antigravity", Value::Null, 10),
+        ] {
+            let account = &mixed["providers"][provider]["launch_accounts"][0];
+            assert_eq!(account["alias"], alias);
+            assert_eq!(account["total"], total);
+            assert!(account["reasoning"].is_null());
+        }
+        let accounts = observed["accounts"]["providers"]["codex"]["launch_accounts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(accounts.len(), 3);
+        assert!(accounts[0]["alias"].is_null());
+        assert_eq!(accounts[0]["calls"], 2);
+        assert_eq!(accounts[0]["total"], 5);
+        assert_eq!(accounts[1]["alias"], "seat-a");
+        assert_eq!(accounts[1]["calls"], 2);
+        assert!(accounts[1]["total"].is_null());
+        assert_eq!(accounts[1]["reported"]["total"], 1);
+        assert_eq!(accounts[2]["alias"], "seat-b");
+        assert_eq!(accounts[2]["input"], 0);
+        assert_eq!(accounts[2]["total"], 0);
+        let changed = &observed["changed-generation"];
+        assert_eq!(changed["calls"], 2);
+        assert_eq!(changed["reported"], 0);
+        for account in changed["providers"]["codex"]["launch_accounts"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(account["calls"], 1);
+            assert!(account["input"].is_null());
+            assert!(account["total"].is_null());
+        }
         assert_eq!(observed["incomplete"]["reported"], 0);
         assert_eq!(observed["incomplete"]["calls"], 2);
         assert!(observed["incomplete"]["total"].is_null());

@@ -1724,6 +1724,8 @@ bucket, then by repository-wide working and running attempts under the spread
 policy, then by registry order. The provider spread input counts non-Main
 attempts in the selected Room, or across the repository when no Room is selected.
 An unavailable Events read leaves those counts unknown in the preview.
+The preview shows each candidate's order or exclusion reason. It reports
+provider-level and account-level quota freshness separately.
 Dispatch forwards an explicit account pin to the headless adapter.
 For an unpinned account, the adapter can select another seat at launch using its
 current eligibility, quota, health and broader active-attempt counts, including
@@ -2007,7 +2009,9 @@ name is absent, routing may select the newest generation of another Gemini name
 at the same level only when exactly one name is routable there. An installed
 Claude CLI that reports catalog probing as unsupported keeps its configured model.
 Other empty model catalogs are unavailable. Council skips routes marked
-`public_only` and records the reason in its dry-run plan.
+`public_only` and records the reason in its dry-run plan. The plan records
+catalog status and the effort for each seat. Opening calls and rebuttals use
+that seat's effort. AGY fixed-effort models use the provider default.
 
 
 Installation and catalog lookup checks still apply to every seat. When `codex`,
@@ -3038,9 +3042,10 @@ empties them. Only the participant itself may declare (the inherited
 repo-relative scopes; advisors and reviewers own none. A write dispatch takes repeatable
 `--scope PATH`; omitted scope uses the plan task’s allowed paths or the whole repository (`.`), and the worker records its task id with its scopes.
 
-Two scopes overlap when one equals the other or is a path-component prefix of it
-(`scripts/lib` overlaps `scripts/lib/room.py`, not `scripts/li`; `.` overlaps
-everything; globs compare literally).
+Two scopes overlap when one equals the other or is a path-component prefix of it.
+For example, `crates/oms-command-room` overlaps `crates/oms-command-room/src/lib.rs`.
+The prefix `crates/oms-command-ro` is a different path component. The scope
+`.` overlaps everything, and globs compare literally.
 Write dispatches, including `--dry-run` (also from a rebound main whose environment lost its room id), refuse overlaps with a joined main's declaration or with a call's joined write declaration until the controller records that call's structured call result or its parent main reads the call's result handoff; a same-task `--continue` waits the same way.
 An unread handoff is not delivery. A rollover carries exactly the calls still holding a declaration, so the successor room's participants are the whole lock. A call whose parent main left holds nothing, because nobody remains to integrate it. Liveness is read from joined state, never from join order: a superseded main that never left, and its calls, keep their declarations (an over-lock, never an under-lock). Once its process has stopped, a stale declaration clears with `OMS_ROOM_PARTICIPANT= oms room scope --repo PATH --id ROOM --participant ID --clear`; the refusal prints that exact command. A finished write call's id is single-use: rejoining it with a declaration is refused, so old delivery evidence never releases a new declaration.
 Delivery releases the declaration even while the result awaits the owner's decision: the WIP limit, not the lock, paces undecided results.
@@ -3092,10 +3097,17 @@ Navigation success is a request, not evidence that an app window appeared.
 
 The selected Codex child reader can show **Codex recorded response usage** below
 verified replies when the same bounded read includes a recent, unambiguous
-response usage record. Its input, output and total apply to that response.
-Cache is shown as read/write, with `?` for zeros that may mean missing cache
-details. The sample can come from an incomplete response or compaction. The
-reader leaves usage unreported when it cannot verify a record.
+response usage record. Input, output, reasoning and total apply to that
+response. The reasoning count is part of output. Cache read/write and
+reasoning use `?` when zero may represent omitted details. The sample can
+come from an incomplete response or compaction. The reader leaves usage
+unreported when it cannot verify a record.
+
+The selected call's **Launch receipts** list groups measured counters by
+provider and recorded launch account. `@?` marks an unknown account. The
+recorded alias describes launch history. Current account home and served
+account require separate evidence. The receipt format leaves headless
+reasoning unreported.
 
 On explicit selected open, the Antigravity (`agy`) native child reader prepends
 a **Recorded AGY setup (OS/shell access unverified)** header above verified
@@ -3496,24 +3508,19 @@ The health screen makes no model calls and changes no native permissions.
 
 `oms panel --repo . --sessions [--room ID] [--json]` prints one normalized status per
 recorded session or call, for notifiers and outside scripts. Text mode is one line each:
-`ID PROVIDER/ROLE STATE waiting=WHO raw=RAW since=TS source=SRC [stale]`. `--json` is
+`ID PROVIDER ROLE STATE WAITING_FOR`. `--json` is
 schema 1, kind `oms-sessions`: top-level `stale`, `stale_reason` and `sessions`, each row
-carrying `id` (the attempt id, else the room participant), `attempt`, `participant`,
+carrying `id` (the attempt ID), `attempt`, `participant`,
 `provider`, `role`, `state` (`working | waiting | blocked | done | failed | unknown`),
 `waiting_for` (`input | approval | review | owner | none | unknown`), `raw_state` (the OMS
 state it came from), `since`, `since_basis`, `source` and `stale`. The view is a projection
-of the board's own report with one mapping table (`STATE_MAP` in
-`scripts/lib/session_status.py`); a raw state without a row reads `unknown`. `quiet`,
-`presence unknown` and `orphaned` stay `unknown` (the evidence does not say), `idle` is
-`waiting` for `none`, and `cancelled` is `done`; use `raw_state` to tell them apart.
-`since` is set only where a record gives it (a main's native activity, or the end of a
-finished call, whose `since_basis` says `ended` or `last event`); a running call has no
-state-change time recorded, so it reads null. `stale` is true when the read was held, the
-refresh failed or the attempts source was unreadable; an empty `sessions` with a true
-top-level `stale` means unknown, not none. Exit status follows the board's snapshot. It
-calls no provider CLI and no model; provider-native inputs such as `claude agents --json`
-are a named but unimplemented extension point in the mapping table's docstring.
-Observation is not approval or verification evidence.
+of the board's own report and makes no provider or model call. Unknown raw
+states map to `unknown`, `idle` maps to `waiting`, and `cancelled` maps to
+`done`. Keep `raw_state` when these distinctions matter. Ended calls can
+carry their last event time in `since` with `since_basis` set to `last event`.
+Running calls show a null `since`. Treat an empty `sessions` array with
+`stale: true` as incomplete observation.
+[Native sessions projection](../crates/oms-command-panel/src/commands.rs)
 
 `--sessions` takes read-only filters that narrow the same projection: `--state STATE`,
 `--provider NAME`, `--role ROLE` and `--min-age DURATION` (`30m`, `2h`, `7d`; counted from

@@ -77,15 +77,14 @@ added. Full ExperimentContract/holdout/claims integration is separate work.
 
 ## Tests
 
-`tests/test_oms_runtime_run_identity.py` is discovered by the existing
-`runtime-core-smoke.sh`. Pure tests cover stable fingerprints, incomplete and
-malformed records, data/config separation, prefix collisions, captured contract,
-ambiguous seed, latest rerun and scope-aware grouping. Shell tests use the real
-capsule/ledger scripts and helper, with isolated stubs only for environment
-probes, lock/privacy/journal adapters and unchanged bootstrap calculation.
-They verify pre-command capture despite source changes, single execution,
-invalid handoff refusal, legacy behavior and both ranking directions.
+The [native run fixtures](../crates/oms-command-runs/src/tests.rs) cover
+seed selection, scope-aware rerun grouping, input capture and identity hashes.
+They exercise native run and ledger paths with local inputs, including changed
+sources and malformed or incomplete identity records.
 
-These fixtures do not validate the stubbed adapters, native provider execution,
-statistical calibration or live research data. The canonical integration suite
-and platform CI must also pass before adoption.
+```bash
+cargo +1.99.1 test --locked -p oms-command-runs
+```
+
+These fixtures do not establish live-provider behavior or statistical
+comparability of real research runs.

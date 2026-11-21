@@ -85,16 +85,14 @@ publication return exit 2. Existing draft transport/validation failures retain
 their exit behavior. A successful metadata query does not mean that a contract
 was created or that a requirement was verified.
 
-`tests/test_intent_source.py` covers the real reader, hash/identity checks,
-resource bounds and a private fake-gh process. Its front-door cases run the
-actual shell entrypoint/helper with unrelated library helpers and provider
-transport stubbed, checking preview, draft, drift, child refusal and unchanged
-goal-only routing. These are not full installed-provider tests.
-
-The existing `tests/context-core-smoke.sh` registers the tests with `--cli`.
-That adds a preview through the real repository shell libraries and a private
-HOME, asserting no repository/HOME content changes. No new CI lane is added.
-Full draft/adopt regression coverage remains in the existing intent fixtures.
+The [native intent reader](../crates/oms-command-autonomy/src/intent.rs) validates
+repository-local files and exact GitHub issue URLs, checks a pinned digest,
+and rereads the source before publishing a candidate. The
+[native autonomy fixtures](../crates/oms-command-autonomy/tests/autonomy_contract.rs)
+cover command parsing, contract validation and unavailable-service handling.
+The retired Python source-intake suite was a historical check of the shell
+entrypoint. The current native suite does not establish live GitHub or
+installed-provider coverage for this workflow.
 
 Rollback reverts this scoped change. Existing candidates and PROJECT.md need
 no migration; existing readers ignore the additional provenance bullet.

@@ -86,52 +86,52 @@ pub(crate) struct Trace {
 pub(crate) enum Rejection {
     Unreadable,
     Oversize,
+    RuntimeUnavailable,
 }
 
 impl Trace {
-    pub(crate) fn start(
-        callback: &Callback,
-        args: &[OsString],
-        input: Option<&[u8]>,
-        cwd: &Path,
-    ) -> Option<Self> {
-        if !std::env::var_os(FLAG).is_some_and(|value| value == "1") {
+    pub(crate) fn receive(name: &str, args: &[OsString], cwd: &Path) -> Option<Self> {
+        if name != "harness-hook" || !std::env::var_os(FLAG).is_some_and(|value| value == "1") {
             return None;
         }
+        let callback = callback(args.first()?.to_str()?)?;
         let repo = common::root(Path::new("."), cwd).filter(|repo| common::adopted(repo))?;
-        // Only inspect the typed event header; serde skips all other payload fields.
-        let header = input.and_then(|bytes| {
-            if bytes.len() > common::INPUT_MAX
-                || bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{')
-            {
-                return None;
-            }
-            serde_json::from_slice::<Header>(bytes).ok()
-        });
-        let configured_args = if callback.handler == "precompact-handoff" {
-            args == ["codex"]
-        } else {
-            args.is_empty()
-        };
-        let event = header
-            .and_then(|header| header.hook_event_name)
-            .filter(|event| configured_args && callback.events.contains(event))
-            .unwrap_or(Event::Unknown);
         let path = repo.join(".oms/hooks/codex-trace.jsonl");
         let row = json!({
             "schema": 1,
-            "phase": "entry",
+            "phase": "received",
             "handler": callback.handler,
-            "event": event.name(),
+            "event": Event::Unknown.name(),
             "nonce": &common::hash(common::random::<16>().ok()?)[..32],
+            "received_at": common::now(),
         });
         common::append_private_diagnostic(&path, &row).ok()?;
-        // Time the dispatch rather than the diagnostic entry append.
         Some(Self {
             path,
             row,
             started: Instant::now(),
         })
+    }
+
+    pub(crate) fn enter(&mut self, callback: &Callback, args: &[OsString], input: &[u8]) {
+        let configured_args = if callback.handler == "precompact-handoff" {
+            args == ["codex"]
+        } else {
+            args.is_empty()
+        };
+        // Only inspect the typed event header; serde skips all other payload fields.
+        let event = (configured_args
+            && input.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{'))
+        .then(|| serde_json::from_slice::<Header>(input).ok())
+        .flatten()
+        .and_then(|header| header.hook_event_name)
+        .filter(|event| callback.events.contains(event))
+        .unwrap_or(Event::Unknown);
+        self.row["phase"] = json!("entry");
+        self.row["event"] = json!(event.name());
+        let _ = common::append_private_diagnostic(&self.path, &self.row);
+        // Time the dispatch rather than the diagnostic append.
+        self.started = Instant::now();
     }
 
     pub(crate) fn dispatched(self, exit: i32, internal_failure: bool) {
@@ -150,6 +150,7 @@ impl Trace {
             match reason {
                 Rejection::Unreadable => "input_unreadable",
                 Rejection::Oversize => "input_oversize",
+                Rejection::RuntimeUnavailable => "runtime_unavailable",
             },
             None,
         );

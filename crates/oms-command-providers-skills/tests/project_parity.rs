@@ -371,6 +371,8 @@ fn models_preview_preserves_full_catalog_routability() {
         "gemini-4-neon-high\tNeon High".into(),
         "gemini-4-neon-high\tAlternate label".into(),
         "gemini-4-oxygen-low".into(),
+        "gemini-pro-orchestrator\tOrchestrator".into(),
+        "gemini-pro-orchestrator-argon\tOrchestrator Argon".into(),
         "gemini-4-bogus-high\twrong\tlabel".into(),
         "gemini-4-malformed-high\t".into(),
     ]);
@@ -398,6 +400,8 @@ fn models_preview_preserves_full_catalog_routability() {
                 "gemini-4-carbon-high",
                 "gemini-4-neon-high",
                 "gemini-4-oxygen-low",
+                "gemini-pro-orchestrator",
+                "gemini-pro-orchestrator-argon",
             ]
             .map(str::to_owned),
         )
@@ -408,7 +412,9 @@ fn models_preview_preserves_full_catalog_routability() {
         serde_json::json!([
             "gemini-4-carbon-high",
             "gemini-4-neon-high",
-            "gemini-4-oxygen-low"
+            "gemini-4-oxygen-low",
+            "gemini-pro-orchestrator",
+            "gemini-pro-orchestrator-argon"
         ])
     );
     assert_eq!(

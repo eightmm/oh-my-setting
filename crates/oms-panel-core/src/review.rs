@@ -1,5 +1,6 @@
 //! Review/council metadata and resumable settlement claims.
 use crate::{Error, Result, Store, Value, require};
+use oms_command_peer::native_model::{self, EffortSupport};
 use std::path::Path;
 use std::time::Duration;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -371,20 +372,34 @@ pub fn council_plan(
     let allow_partial = request.allow_partial
         || std::env::var_os("OMS_COUNCIL_ALLOW_PARTIAL").is_some_and(|v| v == "1");
     let mut kept = Vec::new();
+    let mut catalog_evidence = Vec::new();
     for mut seat in seats {
-        let resolve = || -> Result<String> {
+        let mut evidence = serde_json::json!({
+            "provider": seat.provider,
+            "configured_model": seat.model,
+            "catalog_status": "missing",
+        });
+        let resolution = (|| -> Result<(String, String)> {
             let row = rows
                 .iter()
                 .find(|v| v["provider"] == seat.provider)
                 .ok_or_else(|| Error::new("catalog lookup failed"))?;
+            evidence["catalog_status"] = "unavailable".into();
+            let report = crate::routing::ProviderEvidence::from_catalog_row(row)?;
+            evidence["reported_probe"] = serde_json::json!(report.reported_probe);
+            evidence["catalog_age_seconds"] = serde_json::json!(report.catalog_age_seconds);
+            evidence["probe_age_seconds"] = serde_json::json!(report.probe_age_seconds);
             require(
                 row["installed"] == true || row["present"] == true,
                 "provider is not installed",
             )?;
+            require(row["usable"] != false, "provider is reported unusable")?;
             let (field, models) = ["routable", "catalog_models", "models"]
                 .into_iter()
                 .find_map(|field| row.get(field).map(|models| (field, models)))
                 .ok_or_else(|| Error::new("model catalog unavailable"))?;
+            evidence["model_source"] = field.into();
+            evidence["catalog_status"] = "malformed".into();
             let models = models
                 .as_array()
                 .ok_or_else(|| Error::new("malformed model catalog"))?
@@ -393,42 +408,76 @@ pub fn council_plan(
                     let value = v
                         .as_str()
                         .ok_or_else(|| Error::new("malformed model catalog"))?;
-                    let id = if seat.provider == "antigravity" && field == "routable" {
-                        if let Some((id, label)) = value.split_once('\t') {
-                            require(
-                                !label.is_empty() && !label.chars().any(char::is_control),
-                                "malformed model catalog",
-                            )?;
-                            id
-                        } else {
-                            value
-                        }
-                    } else {
-                        value
-                    };
+                    if seat.provider == "antigravity" {
+                        return native_model::agy_catalog_selector(value)
+                            .map(str::to_owned)
+                            .ok_or_else(|| Error::new("malformed model catalog"));
+                    }
                     require(
-                        !id.is_empty()
-                            && id
+                        !value.is_empty()
+                            && value
                                 .bytes()
                                 .all(|c| c.is_ascii_alphanumeric() || b"-._/:".contains(&c)),
                         "malformed model catalog",
                     )?;
-                    Ok(id.to_owned())
+                    Ok(value.to_owned())
                 })
                 .collect::<Result<Vec<_>>>()?;
-            if models.is_empty()
+            let fallback = models.is_empty()
                 && seat.provider == "claude"
-                && row["catalog_probe"] == "unsupported"
-            {
-                crate::routing::valid_route(&seat)?;
-                return Ok(seat.model.clone());
+                && report.reported_probe.as_deref() == Some("unsupported");
+            evidence["catalog_status"] = if fallback {
+                "unsupported"
+            } else if models.is_empty() {
+                "empty"
+            } else {
+                "available"
             }
-            require(!models.is_empty(), "empty model catalog")?;
-            crate::routing::routable_route_model(&seat.provider, &seat.model, &models)
-        };
-        match resolve() {
-            Ok(model) => {
+            .into();
+            let model = if fallback {
+                crate::routing::valid_route(&seat)?;
+                seat.model.clone()
+            } else {
+                require(!models.is_empty(), "empty model catalog")?;
+                let model =
+                    crate::routing::routable_route_model(&seat.provider, &seat.model, &models)?;
+                require(
+                    models.contains(&model),
+                    "resolved model absent from routable catalog",
+                )?;
+                model
+            };
+            evidence["resolved_model"] = serde_json::json!(model);
+            evidence["model_selection"] = if fallback { "configured" } else { "catalog" }.into();
+            let effort = native_model::normalized_effort(&seat.effort);
+            native_model::validate_effort(&seat.provider, &model, effort).map_err(Error::new)?;
+            evidence["requested_effort"] =
+                serde_json::json!((!effort.is_empty()).then_some(effort));
+            let support = native_model::effort_support(
+                &seat.provider,
+                &model,
+                effort,
+                report.applicable_efforts(&model, None),
+            );
+            evidence["effort_support"] = match support {
+                EffortSupport::Fixed => "fixed",
+                EffortSupport::ProviderDefault => "provider_default",
+                EffortSupport::ReportedSupported => "reported_supported",
+                EffortSupport::ReportedUnsupported => "reported_unsupported",
+                EffortSupport::Unknown => "unknown",
+            }
+            .into();
+            require(
+                support != EffortSupport::ReportedUnsupported,
+                "resolved model does not report support for council reasoning effort",
+            )?;
+            Ok((model, effort.into()))
+        })();
+        catalog_evidence.push(evidence);
+        match resolution {
+            Ok((model, effort)) => {
                 seat.model = model;
+                seat.effort = effort;
                 kept.push(seat);
             }
             Err(e) if allow_partial => skipped.push(
@@ -476,7 +525,14 @@ pub fn council_plan(
     };
     let targets = seats
         .iter()
-        .map(|v| format!("{}:model={}", v.provider, v.model))
+        .map(|v| {
+            let effort = if v.effort.is_empty() {
+                "auto"
+            } else {
+                &v.effort
+            };
+            format!("{}:effort={effort}:model={}", v.provider, v.model)
+        })
         .collect::<Vec<_>>()
         .join(",");
     let mut argv = vec!["--providers".to_owned(), targets];
@@ -494,8 +550,6 @@ pub fn council_plan(
         "--require-complete".into(),
         "--no-task".into(),
         "--no-memory".into(),
-        "--reasoning-effort".into(),
-        "high".into(),
         "--prompt".into(),
         request.prompt.clone(),
         "--thread".into(),
@@ -503,7 +557,7 @@ pub fn council_plan(
     ]);
     let primary = seats.len() * (rounds + 1);
     Ok(
-        serde_json::json!({"schema":1,"kind":"oms-panel-council-plan","argv":argv,"thread":thread,"seats":seats.len(),"seat_routes":seats,"families":seats.iter().map(|v| &v.provider).collect::<std::collections::BTreeSet<_>>().len(),"primary_calls":primary,"max_format_repairs":primary,"max_calls":primary*2,"skipped":skipped,"executes":false}),
+        serde_json::json!({"schema":1,"kind":"oms-panel-council-plan","argv":argv,"thread":thread,"seats":seats.len(),"seat_routes":seats,"catalog_evidence":catalog_evidence,"families":seats.iter().map(|v| &v.provider).collect::<std::collections::BTreeSet<_>>().len(),"primary_calls":primary,"max_format_repairs":primary,"max_calls":primary*2,"skipped":skipped,"executes":false}),
     )
 }
 

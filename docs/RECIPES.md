@@ -42,9 +42,9 @@ steps. Steps refer to commands instead of carrying shell fragments:
   },
   "commands": {
     "check": {
-      "argv": ["python3", "scripts/check.py", "--suite", "${input.suite}",
+      "argv": ["python3", "tools/check-suite.py", "--suite", "${input.suite}",
                "--repeats", "${input.repeats}", "--output", "${input.output}"],
-      "depends": ["scripts/check.py"],
+      "depends": ["tools/check-suite.py"],
       "cwd": ".",
       "timeout_seconds": 300,
       "max_output_bytes": 1048576
@@ -57,7 +57,7 @@ steps. Steps refer to commands instead of carrying shell fragments:
 }
 ```
 
-The project owns `scripts/check.py` and its behavior. Commands must already be
+This example assumes the destination project provides `tools/check-suite.py`. Commands must already be
 available; there is no implicit install, model call, dependency resolution or
 network fetch. Executables are either a PATH command, an executable relative to
 the selected cwd, or an explicitly selected executable pack resource. Cwd must
@@ -326,14 +326,11 @@ scope does not silently prune receipts or implement automatic archival.
 Expanded plan signatures are capped at 512 KiB and receipt growth stops before
 the runtime's 8 MiB state-file ceiling; collection scans are capped at 32 MiB.
 
-`tests/test_recipes.py` covers this new feature family using isolated temporary
-repositories, homes and lock directories with harmless local Python commands.
-Coverage includes real execution/resume/failure/interruption, argv injection
-resistance, output freshness/drift, changed definitions/dependencies, overlays,
-environment filtering, local companion cleanup, selective packs and renderers,
-immutable versions, workset spec drift, due/event idempotency and child guards.
+The [native recipe and GC fixtures](../crates/oms-command-state/tests/recipe_and_gc.rs)
+use temporary repositories to exercise recipe execution, resume, output and
+dependency checks, companions and trigger requests. They also check that a
+harness child can plan a recipe and is refused on mutation.
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_recipes.py -v
-bash -n scripts/recipe.sh
+cargo +1.99.1 test --locked -p oms-command-state --test recipe_and_gc
 ```

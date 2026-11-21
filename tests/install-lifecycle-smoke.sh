@@ -228,9 +228,39 @@ EOF
       fail "broken native cache entry was not quarantined ($mode)"
     rm -f "$case_dir/bin/cargo"
 
-    # Update check against clean remote, then clean uninstall.
     "$HOME/.local/bin/oms" update --check >/dev/null || fail "oms update --check failed ($mode)"
+    if [ "$mode" = copy ]; then
+      notify_config="$HOME/.codex/config.toml"
+      mkdir -p "${notify_config%/*}"
+      printf '%s\n' '# >>> oh-my-setting managed Codex usage (notify) >>>' \
+        "notify = [\"/usr/bin/python3\", \"$case_dir/checkout/scripts/lib/codex_turn_notify.py\"]" \
+        '# <<< oh-my-setting managed Codex usage (notify) <<<' \
+        '[tui]' 'status_line = ["model", "git-branch"]' > "$notify_config"
+      rev2="$(git -C "$case_dir/remote" rev-parse main)"
+      oms_smoke_stage_native "$case_dir/checkout/target/oms-native/$rev2" "$build_dir" ||
+        fail "failed staging notifier migration payload ($mode)"
+      OH_MY_SETTING_CODEX_PLUGIN=auto "$HOME/.local/bin/oms" update --ref main --no-tools ||
+        fail "update with legacy Codex notifier failed ($mode)"
+      jq -e --arg rev "$rev2" '.commit == $rev' "$receipt" >/dev/null ||
+        fail "notifier migration did not reach the incoming revision ($mode)"
+      native_notify="$(jq -cn --arg launcher "$HOME/.local/bin/oms" '[$launcher,"codex-turn-notify"]')"
+      grep -Fqx "notify = $native_notify" "$notify_config" ||
+        fail "update did not migrate the owned legacy Codex notifier ($mode)"
+      cp "$notify_config" "$case_dir/migrated-codex.toml"
+      OH_MY_SETTING_CODEX_PLUGIN=auto "$HOME/.local/bin/oms" update --rollback --no-tools ||
+        fail "rollback after notifier migration failed ($mode)"
+      jq -e --arg rev "$rev1" '.commit == $rev' "$receipt" >/dev/null ||
+        fail "notifier rollback did not restore the previous revision ($mode)"
+      cmp -s "$case_dir/migrated-codex.toml" "$notify_config" ||
+        fail "rollback changed the migrated Codex settings ($mode)"
+      OMS_TERMINAL_NOTIFY=0 "$HOME/.local/bin/oms" codex-turn-notify '{}' ||
+        fail "previous native revision cannot serve the stable notifier invocation ($mode)"
+    fi
     "$HOME/.local/bin/oms" uninstall --yes >/dev/null || fail "oms uninstall failed ($mode)"
+    if [ "$mode" = copy ]; then
+      printf '%s\n' '[tui]' 'status_line = ["model", "git-branch"]' | cmp -s - "$notify_config" ||
+        fail "uninstall changed user settings or kept the managed notifier ($mode)"
+    fi
     [ ! -e "$HOME/.local/bin/oms" ] || fail "uninstall left ~/.local/bin/oms behind ($mode)"
   )
 done

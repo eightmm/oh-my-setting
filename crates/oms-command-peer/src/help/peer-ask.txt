@@ -17,6 +17,8 @@ Options:
                        Codex/Claude/Antigravity council; optional agents are
                        available when explicitly named.
                        An entry may carry a model (codex:model=NAME) to pin it.
+                       Before :model=, :effort=E sets that seat's effort. Use
+                       :effort=auto for the model's default, including fixed-effort models.
                        Append :optional to tolerate a failed seat; at least one seat must be required.
                        Answers from one provider share a model family, which
                        the reported family count makes explicit.

@@ -1189,9 +1189,23 @@ fn routes_output(
         } else {
             "read"
         };
-        match routing::allocate_with_account_rank(
-            &policy, &owner, role, None, access, None, &inputs,
-        ) {
+        let mut trace = routing::AllocationEvidence::default();
+        let selected =
+            routing::allocate_preview(&policy, &owner, role, access, &inputs, &mut trace);
+        let mut allocation = serde_json::to_value(&trace).map_err(Error::new)?;
+        if let Some(candidates) = allocation["candidates"].as_array_mut() {
+            for (candidate, traced) in candidates.iter_mut().zip(&trace.candidates) {
+                let provider = &traced.provider;
+                candidate["owner_provider"] = json!(provider == &owner);
+                candidate["non_main_attempts"] = json!(
+                    events_observed.then(|| inputs.recent.get(provider).copied().unwrap_or(0))
+                );
+                candidate["in_flight"] = json!(
+                    events_observed.then(|| inputs.in_flight.get(provider).copied().unwrap_or(0))
+                );
+            }
+        }
+        match selected {
             Ok((alloc, rank)) => {
                 let provider = &alloc.candidate.provider;
                 let launch_account = if routing::ACCOUNT_PROVIDERS.contains(&provider.as_str()) {
@@ -1229,12 +1243,19 @@ fn routes_output(
                             "account_reason": alloc.account_reason,
                             "launch_account": launch_account,
                             "account_rank": account_rank,
+                            "allocation": allocation,
                         },
                     }),
                 );
             }
             Err(err) => {
-                chosen.insert(role.clone(), json!({"error": err.message}));
+                chosen.insert(
+                    role.clone(),
+                    json!({
+                        "error": err.message,
+                        "evidence": {"events_source": events_source, "allocation": allocation},
+                    }),
+                );
             }
         }
     }

@@ -1,5 +1,6 @@
 use crate::{
     config,
+    receipt::Paths,
     runtime::{self as r, Result},
     transaction::Transaction,
 };
@@ -105,9 +106,33 @@ fn header(lines: &[String], table: &str) -> Option<usize> {
             == table
     })
 }
+fn retired_turn_notifier(paths: &Paths, value: &serde_json::Value, line: &str) -> bool {
+    let Some([program, script]) = value.as_array().map(Vec::as_slice) else {
+        return false;
+    };
+    let (Some(program), Some(script)) = (program.as_str(), script.as_str()) else {
+        return false;
+    };
+    let program_path = Path::new(program);
+    let python = program_path.file_name().and_then(|name| name.to_str());
+    program_path.is_absolute()
+        && python.is_some_and(|name| {
+            name == "python3"
+                || name.strip_prefix("python3.").is_some_and(|version| {
+                    !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+        && paths
+            .source
+            .join("scripts/lib/codex_turn_notify.py")
+            .to_str()
+            == Some(script)
+        && line == format!("notify = [{}, {}]", json!(program), json!(script))
+}
+
 /// Only exact managed blocks are removed; customized and user values survive.
 /// Parsing the candidate catches dotted/inline-table conflicts before writing.
-pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<()> {
+pub(crate) fn codex(paths: &Paths, tx: &mut Transaction, file: &Path, remove: bool) -> Result<()> {
     if remove && !r::exists(file) {
         return Ok(());
     }
@@ -135,6 +160,29 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
         "multi_agent_v2",
         "min_wait_timeout_ms = 120000\ndefault_wait_timeout_ms = 300000",
     );
+    let launcher = paths.home.join(".local/bin/oms");
+    let notify = Block::usage("notify", "");
+    // The shell installer wrote one JSON-encoded notify line at the TOML root.
+    // Partial or edited blocks preserve the user's existing value.
+    if let Some((a, b)) = notify.span(&lines).ok().flatten()
+        && b == a + 2
+        && !lines[..a]
+            .iter()
+            .any(|line| line.trim_start().starts_with('['))
+        && let Some(launcher) = launcher.to_str()
+    {
+        let turn_command = json!([launcher, "codex-turn-notify"]);
+        let turn_line = format!("notify = {turn_command}");
+        let line = lines[a + 1].trim_end_matches(['\r', '\n']);
+        let legacy = retired_turn_notifier(paths, &value["notify"], line);
+        if remove && (legacy || value["notify"] == turn_command && line == turn_line) {
+            lines.drain(a..=b);
+            expected.as_object_mut().unwrap().remove("notify");
+        } else if !remove && legacy {
+            lines[a + 1] = format!("{turn_line}{newline}");
+            expected["notify"] = turn_command;
+        }
+    }
     if remove {
         let mut spans = Vec::new();
         let mut restore = Vec::new();

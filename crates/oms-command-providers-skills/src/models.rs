@@ -1,4 +1,5 @@
 use crate::common::*;
+use oms_command_agent_role::native_model::{agy_catalog_selector, fixed_effort_model};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,22 +172,6 @@ fn age(path: &std::path::Path) -> Option<u64> {
         .ok()
         .map(|d| d.as_secs())
 }
-fn agy_catalog_selector(row: &str) -> Option<&str> {
-    let id = if let Some((id, label)) = row.split_once('\t') {
-        if label.trim().is_empty() || label.chars().any(char::is_control) {
-            return None;
-        }
-        id
-    } else {
-        row
-    };
-    (!id.is_empty()
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-._/:".contains(&byte)))
-    .then_some(id)
-}
-
 fn generations(models: &[String], provider: &str) -> Vec<String> {
     let role = Regex::new(r"^gpt-([0-9]+)(?:\.([0-9]+))?-(astra|sol|terra|luna)$")
         .expect("static Codex family pattern");
@@ -280,11 +265,12 @@ fn generations(models: &[String], provider: &str) -> Vec<String> {
     }
     candidates
         .into_iter()
-        .filter(|(_, family, version)| {
-            newest
-                .get(family)
-                .is_none_or(|latest| version.as_ref() == Some(latest))
-                && (!tiered || version.is_some_and(|v| v.0 == major))
+        .filter(|(model, family, version)| {
+            fixed_effort_model(provider, model).is_some()
+                || (newest
+                    .get(family)
+                    .is_none_or(|latest| version.as_ref() == Some(latest))
+                    && (!tiered || version.is_some_and(|v| v.0 == major)))
         })
         .map(|(m, _, _)| m.clone())
         .collect()

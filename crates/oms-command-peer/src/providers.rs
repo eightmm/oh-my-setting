@@ -25,6 +25,8 @@ pub struct Target {
     pub model: String,
     pub account: String,
     pub optional: bool,
+    /// Explicit seat-level effort for an exact model, including provider default.
+    effort: Option<&'static str>,
 }
 impl Target {
     pub fn parse(raw: &str) -> Result<Self> {
@@ -39,7 +41,18 @@ impl Target {
         let (mut model, mut account) = ("", "");
         let mut seen_model = false;
         // `:model=` may contain `:`, so it owns the text up to a later `:account=`.
-        let mut rest = rest;
+        let (effort, mut rest) = if let Some(tail) = rest.strip_prefix(":effort=") {
+            let end = tail
+                .find(":model=")
+                .ok_or_else(|| Error::new(2, "seat effort override requires an exact model"))?;
+            let effort = std::iter::once("auto")
+                .chain(crate::native_model::EFFORTS.iter().copied())
+                .find(|effort| *effort == &tail[..end])
+                .ok_or_else(|| Error::new(2, "invalid seat reasoning effort"))?;
+            (Some(effort), &tail[end..])
+        } else {
+            (None, rest)
+        };
         while !rest.is_empty() {
             if let Some(tail) = rest.strip_prefix(":account=") {
                 if !account.is_empty() {
@@ -67,11 +80,16 @@ impl Target {
         if !model.is_empty() {
             model_name(model)?;
         }
+        if let Some(effort) = effort {
+            crate::native_model::validate_effort(&provider, model, effort)
+                .map_err(|message| Error::new(2, message))?;
+        }
         Ok(Self {
             provider,
             model: model.into(),
             account: account.into(),
             optional,
+            effort,
         })
     }
 }
@@ -274,7 +292,19 @@ fn route_with_source(
         target.model.clone()
     };
     let explicit = !selected.is_empty();
-    let mut resolved = crate::native_model::normalized_effort(effort).to_owned();
+    let requested = crate::native_model::normalized_effort(effort);
+    let effort = if let Some(effort) = target.effort {
+        if selected != target.model {
+            return fail("seat effort override requires its exact model");
+        }
+        if !requested.is_empty() && !crate::native_model::EFFORTS.contains(&requested) {
+            return fail("invalid reasoning effort");
+        }
+        crate::native_model::normalized_effort(effort)
+    } else {
+        requested
+    };
+    let mut resolved = effort.to_owned();
     if selected.is_empty() {
         let policy = config_from(source, "panel-routing.json")?;
         let tier = policy
@@ -3864,6 +3894,12 @@ mod bridge_route_tests {
             assert!(!command.argv.iter().any(|arg| arg == "--effort"));
             assert_eq!(command.selected_effort, None);
             assert!(resolve_route(source, "agy", model, "high", "worker").is_err());
+            let seat = format!("agy:effort=auto:model={model}");
+            let override_route = resolve_route(source, &seat, "", "high", "worker").unwrap();
+            assert_eq!(override_route.model, model);
+            assert!(override_route.effort.is_empty());
+            assert!(resolve_route(source, &seat, "", "bad", "worker").is_err());
+            assert!(resolve_route(source, &seat, "other", "high", "worker").is_err());
             let mut invalid = fixed;
             invalid.effort = "high".into();
             assert!(transport(&invalid, b"inspect", source, false, 30).is_err());
@@ -4006,6 +4042,17 @@ mod bridge_route_tests {
         );
         let t = Target::parse("claude:model=m:1:account=a_1").unwrap();
         assert_eq!((t.account.as_str(), t.model.as_str()), ("a_1", "m:1"));
+        let t = Target::parse("codex:model=namespace:effort=auto").unwrap();
+        assert_eq!(t.model, "namespace:effort=auto");
+        assert_eq!(t.effort, None);
+        assert_eq!(
+            Target::parse("codex:effort=medium:model=gpt-x")
+                .unwrap()
+                .effort,
+            Some("medium")
+        );
+        assert!(Target::parse("codex:effort=bad:model=gpt-x").is_err());
+        assert!(Target::parse("codex:effort=medium").is_err());
         let t = Target::parse("pi:account=x").unwrap();
         assert_eq!((t.provider.as_str(), t.model.as_str()), ("pi", ""));
         for bad in [

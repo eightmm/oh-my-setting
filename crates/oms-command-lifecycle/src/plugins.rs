@@ -234,7 +234,7 @@ fn apply_codex(
 ) -> Result<()> {
     let remove = options.has("--remove");
     if remove {
-        crate::settings::codex(tx, &paths.codex_config()?, true)?;
+        crate::settings::codex(paths, tx, &paths.codex_config()?, true)?;
     }
     if r::find("codex", &paths.cwd).is_none() {
         return Ok(());
@@ -368,7 +368,7 @@ fn apply_codex(
         format!("{expected}\n").as_bytes(),
         0o600,
     )?;
-    crate::settings::codex(tx, &paths.codex_config()?, false)
+    crate::settings::codex(paths, tx, &paths.codex_config()?, false)
 }
 fn owned_agy_statusline(command: &str) -> bool {
     crate::integrations::command_words(command).is_some_and(|words| {
