@@ -130,7 +130,10 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
             .all(|v| descends(v, array(&attempts), &parents)),
         "task includes attempts owned by another main",
     )?;
+    const MAX_FINALIZE_BLOCKERS: usize = 4;
     let mut launch_attempts = None;
+    let mut blockers = Vec::new();
+    let mut more = false;
     for attempt in &related {
         if attempt["terminal"] == true
             || (attempt["state"] == "review"
@@ -144,9 +147,16 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
         {
             continue;
         }
+        if blockers.len() == MAX_FINALIZE_BLOCKERS {
+            more = true;
+            break;
+        }
         let id = attempt["attempt_id"]
             .as_str()
-            .filter(|id| crate::native::operations::projection::id(id))
+            .filter(|id| {
+                crate::native::operations::projection::id(id)
+                    && crate::outbound(id.as_bytes()).is_ok()
+            })
             .unwrap_or("unreported");
         let scope = if attempt["task_id"] == request.task_id {
             "task"
@@ -160,8 +170,15 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
             }
             _ => Cow::Borrowed("lifecycle state unknown"),
         };
+        blockers.push(format!("{scope} attempt {id}, {reason}"));
+    }
+    if !blockers.is_empty() {
+        if more {
+            blockers.push("more remain".into());
+        }
         return Err(Error::new(format!(
-            "task has live or unconfirmed attempts ({scope} attempt {id}, {reason})"
+            "task has live or unconfirmed attempts ({})",
+            blockers.join(" · ")
         )));
     }
     let store = Store::open(repo)?;
@@ -2072,7 +2089,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_names_only_the_first_proven_blocker_without_writing() {
+    fn finalization_names_bounded_proven_blockers_without_writing() {
         let repo = crate::git::Scratch::new().unwrap();
         let request = finalization_request(&repo.0);
         let ack_path = repo.0.join(format!(
@@ -2088,17 +2105,52 @@ mod tests {
         }))
         .unwrap();
         std::fs::write(&ack_path, &ack).unwrap();
-        let refusal = |attempts, expected| {
-            assert_eq!(
-                finalize_snapshot(
-                    &repo.0,
-                    &request,
-                    &ClaimedTask(attempts),
-                    &AtomicBool::new(false)
-                )
-                .unwrap_err(),
-                Error::new(expected)
-            );
+        let plan_file = repo.0.join(".oms/plan/tasks.json");
+        std::fs::create_dir_all(plan_file.parent().unwrap()).unwrap();
+        let plan = json!({
+            "plan_id": format!("plan_{}", "1".repeat(32)),
+            "tasks": {(TASK): {
+                "id": TASK, "state": "running", "provider": "codex", "owner": MAIN,
+                "claimed_by_participant": MAIN, "lease_id": format!("lease_{}", "2".repeat(32))
+            }}
+        });
+        let plan_bytes = serde_json::to_vec(&plan).unwrap();
+        std::fs::write(&plan_file, &plan_bytes).unwrap();
+        fn snapshot_tree(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    snapshot_tree(root, &path, out);
+                } else {
+                    out.push((
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        std::fs::read(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        let snapshot = || {
+            let mut files = Vec::new();
+            snapshot_tree(&repo.0, &repo.0, &mut files);
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            files
+        };
+        let initial_snapshot = snapshot();
+        let refusal = |attempts, expected: String| {
+            let err = finalize_snapshot(
+                &repo.0,
+                &request,
+                &ClaimedTask(attempts),
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::new(expected));
+            err
         };
         let read = worker(WORKER, "read", "working");
         let review_id = "call-finalization:review";
@@ -2107,15 +2159,15 @@ mod tests {
         let later = worker("call-later", "write", "running");
         let done = worker("call-done", "write", "done");
         refusal(
-            vec![done, read.clone(), later],
+            vec![done.clone(), read.clone(), later.clone()],
             format!(
-                "task has live or unconfirmed attempts (task attempt {WORKER}, lifecycle state working)"
+                "task has live or unconfirmed attempts (task attempt {WORKER}, lifecycle state working · task attempt call-later, lifecycle state running)"
             ),
         );
         // A zero exit with complete output and cleanup in the public process
         // acknowledgement cannot substitute for protected whole-tree evidence.
         refusal(
-            vec![review],
+            vec![review.clone()],
             format!(
                 "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup)"
             ),
@@ -2123,11 +2175,58 @@ mod tests {
         let mut taskless = worker(WORKER, "write", "waiting_approval");
         taskless["task_id"] = Value::Null;
         refusal(
-            vec![taskless],
+            vec![taskless.clone()],
             format!(
                 "task has live or unconfirmed attempts (inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
             ),
         );
+        let taskless_review_id = "call-taskless-review";
+        let mut taskless_review = worker(taskless_review_id, "write", "review");
+        taskless_review["task_id"] = "".into();
+        taskless_review["refs"]["panel_room_participant"] = WORKER.into();
+        refusal(
+            vec![
+                done.clone(),
+                review.clone(),
+                taskless_review.clone(),
+                taskless.clone(),
+            ],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
+            ),
+        );
+        let exact_cap_err = refusal(
+            vec![
+                done.clone(),
+                read.clone(),
+                review.clone(),
+                taskless_review.clone(),
+                taskless.clone(),
+            ],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {WORKER}, lifecycle state working · task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
+            ),
+        );
+        assert!(!exact_cap_err.message.contains("more remain"));
+        let mut fifth = worker("call-fifth", "write", "blocked");
+        fifth["task_id"] = Value::Null;
+        let sixth = worker("call-sixth", "write", "verifying");
+        let overflow_err = refusal(
+            vec![
+                done,
+                review,
+                taskless_review,
+                read.clone(),
+                later,
+                fifth,
+                sixth,
+            ],
+            format!(
+                "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · task attempt {WORKER}, lifecycle state working · task attempt call-later, lifecycle state running · more remain)"
+            ),
+        );
+        assert!(!overflow_err.message.contains("call-fifth"));
+        assert!(!overflow_err.message.contains("call-sixth"));
         let mut foreign = worker("call-foreign", "write", "working");
         foreign["parent_attempt_id"] = "foreign-main".into();
         refusal(
@@ -2136,22 +2235,21 @@ mod tests {
         );
         refusal(
             vec![worker("/untrusted/attempt", "read", "/untrusted/state")],
-            "task has live or unconfirmed attempts (task attempt unreported, lifecycle state unknown)".to_owned(),
+            "task has live or unconfirmed attempts (task attempt unreported, lifecycle state unknown)"
+                .to_owned(),
         );
+        let secret_id = concat!("gh", "p_12345678901234567890abcd");
+        assert!(crate::native::operations::projection::id(secret_id));
+        let secret_err = refusal(
+            vec![worker(secret_id, "read", "working")],
+            "task has live or unconfirmed attempts (task attempt unreported, lifecycle state working)"
+                .to_owned(),
+        );
+        assert!(crate::outbound(secret_err.message.as_bytes()).is_ok());
+        assert_eq!(std::fs::read(&plan_file).unwrap(), plan_bytes);
         assert_eq!(std::fs::read(&ack_path).unwrap(), ack);
-        assert_eq!(std::fs::read_dir(&repo.0).unwrap().count(), 1);
-        assert_eq!(std::fs::read_dir(repo.0.join(".oms")).unwrap().count(), 1);
-        assert_eq!(
-            std::fs::read_dir(repo.0.join(".oms/artifacts"))
-                .unwrap()
-                .count(),
-            1
-        );
-        assert_eq!(
-            std::fs::read_dir(ack_path.parent().unwrap())
-                .unwrap()
-                .count(),
-            1
-        );
+        assert!(!repo.0.join(".oms/artifacts/panel-results").exists());
+        assert!(!repo.0.join(".oms/lifecycle").exists());
+        assert_eq!(snapshot(), initial_snapshot);
     }
 }
