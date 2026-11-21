@@ -906,7 +906,22 @@ impl oms_command_landing::Services for ControlServices<'_> {
             &collab,
             self.interrupted,
         )
-        .map_err(|e| oms_command_landing::Error::new(e.code, e.message))
+        .map_err(|e| oms_command_landing::Error::new(e.code, e.message))?;
+        let expected = oms_command_plan::json::parse(
+            &serde_json::to_vec(&fence["snapshot"]["task"])
+                .map_err(|_| refuse("malformed panel acceptance task"))?,
+        )?;
+        let context = oms_command_plan::Context::from_selected_state_before(
+            &oms_command_plan::Request::new(oms_command_plan::Action::EvidenceSnapshot),
+            request.execution_repo,
+            request.execution_repo,
+            request.state_repo,
+            self.interrupted,
+            Instant::now() + Duration::from_secs(10),
+        )?;
+        oms_command_plan::Plan::open(context, self, self.interrupted)?
+            .verify_panel_review_lease(&expected)?;
+        Ok(())
     }
     fn landing_approval(
         &self,

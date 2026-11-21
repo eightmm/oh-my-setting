@@ -78,8 +78,8 @@ in this crate.
   tree, actual index/worktree and HEAD. It never reapplies the patch. It can
   finish the exact staged tree or an already-created exact commit, then record
   plan review and telemetry idempotently. A changed authority or tree refuses.
-  Composed recovery also requires the saved successful integration verifier
-  acknowledgement; staging component bytes cannot substitute for that check.
+  Composed recovery also requires the saved acknowledgement and its indexed
+  native landing and verifier evidence.
 * `--finalize --landed-commit` is represented by `FinalizeRequest.landed_commit`.
   It validates a private native plan-finish proof before canonical review/finish,
   checks the selected publication receipt digest and push base, and requires
@@ -122,13 +122,13 @@ The ordinary landing service applies and verifies that exact combined tree
 before the acceptance owner commits it. Component reviews and the integration
 verifier are recorded separately: individually passing patches are insufficient
 when the combined verifier fails. Schema-2 acceptance records bind the manifest
-and the successful integration command/tree, while schema-1 single-candidate
-records and behavior remain unchanged. Native Plan validates every retained
-component and independently reconstructs the accepted tree before review.
-Older consumers that only support schema 1 refuse composed records.
+and the successful integration command/tree. Before committing, the panel
+checks the indexed native landing proof and its linked admission event. Native
+Plan validates the owning participant, verifier report, and every indexed
+component before independently reconstructing the accepted tree for review.
 
 Recovery never reapplies the combined patch. It requires the same component
-evidence and a durable successful integration verifier acknowledgement, then
+evidence and the durable acknowledgement with its linked native proof, then
 checks the exact index/worktree or already-created commit. A failure or kill
 before that acknowledgement retains the artifacts and recovery record but does
 not authorize recovery to complete acceptance. After commit, registration is

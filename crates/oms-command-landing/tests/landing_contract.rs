@@ -646,6 +646,13 @@ fn services_gated_commands_fail_closed() {
 fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
     let iso = Isolated::new();
     let repo = iso.repo("frozen");
+    fs::write(
+        repo.join("verify-product.sh"),
+        b"test \"$(<a.txt)\" = $'one\\ntwo'\n",
+    )
+    .unwrap();
+    iso.git(&repo, &["add", "verify-product.sh"]);
+    iso.git(&repo, &["commit", "-qm", "fixture verifier"]);
     let patch = real_patch(&iso, &repo);
     fs::write(repo.join(".git/info/exclude"), "change.patch\n.oms/\n").unwrap();
     let log = iso.tmp.join("services.log");
@@ -663,12 +670,39 @@ fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
         .output()
         .unwrap();
     let base = String::from_utf8(base.stdout).unwrap();
+    let verify = "bash verify-product.sh";
+    iso.git(&repo, &["apply", "--cached", patch]);
+    let tree = iso.command(&repo).arg("write-tree").output().unwrap();
+    assert!(tree.status.success());
+    let tree = String::from_utf8(tree.stdout).unwrap();
+    iso.git(&repo, &["reset", "-q", "HEAD", "--", "a.txt"]);
+    let patch_sha = oms_command_plan::json::sha(fs::read(repo.join(patch)).unwrap());
+    let verify_sha = oms_command_plan::json::sha(verify.as_bytes());
+    let manifest = obj([
+        ("base_sha", base.trim().into()),
+        ("patch_sha256", patch_sha.as_str().into()),
+        ("tree", tree.trim().into()),
+        ("verify_sha256", verify_sha.into()),
+    ]);
+    let manifest_raw = manifest.json(false).unwrap();
+    let manifest_sha = oms_command_plan::json::sha(&manifest_raw);
     let panel = obj([
         ("schema", 1usize.into()),
         ("base", base.trim().into()),
+        ("patch_sha256", patch_sha.into()),
         (
-            "patch_sha256",
-            oms_command_plan::json::sha(fs::read(repo.join(patch)).unwrap()).into(),
+            "snapshot",
+            obj([
+                ("composition", manifest),
+                (
+                    "candidate",
+                    obj([("artifact_sha256", manifest_sha.as_str().into())]),
+                ),
+                (
+                    "task",
+                    obj([("claimed_by_participant", "fixture-main".into())]),
+                ),
+            ]),
         ),
     ]);
     let mut stale = panel.clone();
@@ -693,6 +727,8 @@ fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
             "--allow-verifier-change",
             "--panel-accept",
             &panel,
+            "--verify",
+            verify,
         ],
         &log_env,
     );
@@ -726,6 +762,20 @@ fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
     assert_eq!(calls.len(), 6, "{calls:?}");
     assert!(Path::new(&frozen).is_file());
     assert!(intent.get("verifier_change_consent").truth());
+    let rows = fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap();
+    let rows = oms_command_plan::storage::rows(&rows).unwrap();
+    let proof = oms_command_plan::panel_composition::verify_landing(
+        &rows,
+        &oms_command_plan::json::parse(&manifest_raw).unwrap(),
+        &manifest_sha,
+        "fixture-main",
+    )
+    .unwrap();
+    let report = fs::read(repo.join(proof.text("artifact"))).unwrap();
+    assert_eq!(
+        oms_command_plan::json::sha(report),
+        proof.text("artifact_sha256")
+    );
 }
 
 #[test]

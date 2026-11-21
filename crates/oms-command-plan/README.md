@@ -86,15 +86,13 @@ returns a generic success boolean as completion authority.
 
 Panel review accepts both the existing schema-1 single-candidate record and a
 schema-2 composed record. The latter binds a content-addressed manifest containing
-2–16 reviewed workers for the same task, lease and full base. Plan re-reads each
-component's original artifact and patch, verifies its bindings and passing gate,
-and requires their ordered bytes to equal the aggregate patch. It separately
-requires the exact task verifier and combined tree in the successful integration
-record. The ordinary private-index reconstruction and commit-parent/tree checks
-then verify the aggregate product. A component review is not an integration
-verifier result, and a caller-provided tree or success flag alone grants no
-completion or publication authority. Single-candidate records keep schema 1;
-older consumers must refuse schema-2 records instead of selecting one component.
+2–16 reviewed workers for the same task, lease and full base. Plan matches each
+component to its indexed delegate and review evidence, verifies the original
+artifact and patch bytes, and checks their ordered concatenation. A successful
+native landing row binds the manifest, owning participant, tree and exact
+verifier digest to the passing admission event and report. Plan independently
+reconstructs the aggregate tree in a private index and checks the accepted
+commit's parent and tree.
 
 `Plan::team_admission_before(AdmissionRequest, deadline)` returns an opaque
 contract guard. It pins the canonical writer order, expected immutable spec,

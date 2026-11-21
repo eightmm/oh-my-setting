@@ -218,6 +218,51 @@ impl Services for Fake {
                 let mut stale = fence.clone();
                 stale["snapshot"]["review_gate"]["exit"] = 1.into();
                 assert!(results::verify_accept_fence(repo, repo, &stale, self, &STOP).is_err());
+                let artifact_index = Path::new(".oms/artifacts/index.jsonl");
+                let raw = std::fs::read(repo.join(artifact_index)).unwrap();
+                for (task, base, already_applied) in [
+                    (&fence["task_id"], Value::Null, true),
+                    (&json!(""), fence["base"].clone(), true),
+                    (&json!(""), json!("0".repeat(40)), false),
+                ] {
+                    let mut with_landing = raw.clone();
+                    with_landing.extend(
+                        serde_json::to_vec(&json!({
+                            "kind": "patch-land",
+                            "task_id": task,
+                            "patch_sha256": fence["snapshot"]["candidate"]["patch_sha256"],
+                            "base": base,
+                            "exit": 0
+                        }))
+                        .unwrap(),
+                    );
+                    with_landing.push(b'\n');
+                    store_file(repo, artifact_index, &with_landing);
+                    let result = results::verify_accept_fence(repo, repo, &fence, self, &STOP);
+                    store_file(repo, artifact_index, &raw);
+                    if already_applied {
+                        assert!(result.unwrap_err().message.contains("already applied"));
+                    } else {
+                        result.unwrap();
+                    }
+                }
+
+                let plan_path = Path::new(".oms/plan/tasks.json");
+                let plan_raw = std::fs::read(repo.join(plan_path)).unwrap();
+                let mut plan: Value = serde_json::from_slice(&plan_raw).unwrap();
+                let task_id = fence["task_id"].as_str().unwrap();
+                for state in ["review", "done"] {
+                    plan["tasks"][task_id]["state"] = state.into();
+                    store_file(repo, plan_path, &serde_json::to_vec(&plan).unwrap());
+                    let mut historical = fence.clone();
+                    historical["snapshot"]["task"]["state"] = state.into();
+                    let err = results::verify_accept_fence(repo, repo, &historical, self, &STOP);
+                    store_file(repo, plan_path, &plan_raw);
+                    assert!(
+                        err.unwrap_err().message.contains("claimed/running"),
+                        "{state}"
+                    );
+                }
                 let position = args.iter().position(|v| v == "--patch").unwrap();
                 let status = Command::new("git")
                     .args([
@@ -236,6 +281,35 @@ impl Services for Fake {
                     .current_dir(repo)
                     .status()
                     .unwrap();
+                if status.success()
+                    && let Some(manifest) = fence["snapshot"].get("composition")
+                {
+                    let mut rows = results::index_rows(repo)?;
+                    rows.push(json!({
+                        "kind": "patch-admit",
+                        "event_id": "integration-admit",
+                        "exit": 0,
+                        "verify_exit": 0,
+                        "verification": "command",
+                        "base": fence["base"],
+                        "patch_sha256": manifest["patch_sha256"]
+                    }));
+                    rows.push(json!({
+                        "kind": "patch-land",
+                        "exit": 0,
+                        "base": fence["base"],
+                        "task_id": "",
+                        "patch_sha256": manifest["patch_sha256"],
+                        "panel_composition": {
+                            "manifest_sha256": fence["snapshot"]["candidate"]["artifact_sha256"],
+                            "participant": fence["snapshot"]["task"]["claimed_by_participant"],
+                            "tree": manifest["tree"],
+                            "verify_sha256": oms_panel_core::digest(args[verify + 1].as_encoded_bytes()),
+                            "admission_event_id": "integration-admit"
+                        }
+                    }));
+                    index(repo, &rows);
+                }
                 Ok(CommandOutput {
                     code: status.code().unwrap_or(1),
                     ..output(Value::Null)
@@ -1160,6 +1234,21 @@ fn composed_acceptance() {
                     .unwrap_err()
                     .message
                     .contains("integration verifier")
+            );
+            let recovery_path = PathBuf::from(format!(
+                ".oms/panel/acceptances/{}-{}.json",
+                request.task_id,
+                request.expected_patch_sha256.as_deref().unwrap(),
+            ));
+            let mut forged: Value =
+                serde_json::from_slice(&std::fs::read(repo.join(&recovery_path)).unwrap()).unwrap();
+            forged["integration_verified"] = true.into();
+            store_file(&repo, &recovery_path, &serde_json::to_vec(&forged).unwrap());
+            assert!(
+                results::recover_accept(&repo, &request, &fake, &STOP)
+                    .unwrap_err()
+                    .message
+                    .contains("lacks native integration verifier evidence")
             );
             assert_eq!(git(&repo, &["rev-parse", "HEAD"], b""), base);
             assert_eq!(

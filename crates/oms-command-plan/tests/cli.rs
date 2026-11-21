@@ -922,6 +922,66 @@ fn merged_dependencies_scheduling_and_late_results() {
 }
 
 #[test]
+fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
+    if isolated("panel_acceptance_checks_canonical_claimed_and_running_expiry") {
+        return;
+    }
+    use oms_command_plan::{Action, Context, Plan, Request, json};
+    let tmp = Tmp::new();
+    let repo = repo(&tmp);
+    assert_eq!(go(&repo, &["init", "--goal", "g"]).0, 0);
+    assert_eq!(go(&repo, &["add", "--id", "a", "--title", "a"]).0, 0);
+    let stop = AtomicBool::new(false);
+    let claim = Request::new(Action::Claim)
+        .with("id", "a")
+        .with("provider", "codex")
+        .with("ttl", "1");
+    let mut context = Context::from_environment_at(&claim, &repo, &repo, None).unwrap();
+    context.panel_main_attempt = format!("att_{}", "1".repeat(32));
+    context.participant = "main-fixture".into();
+    context.ts = "2026-11-21T00:00:00Z".into();
+    let active = Plan::open(context.clone(), &Host, &stop).unwrap();
+    active.execute(&claim).unwrap();
+    context.ts = "2026-11-21T00:00:01Z".into();
+    let expired = Plan::open(context, &Host, &stop).unwrap();
+    for state in ["claimed", "running"] {
+        if state == "running" {
+            active
+                .execute(&Request::new(Action::Start).with("id", "a"))
+                .unwrap();
+        }
+        let snapshot = active.load().unwrap();
+        let mut expected = snapshot.task("a").unwrap().clone();
+        assert_eq!(expected.text("state"), state);
+        expected
+            .set("plan_id", snapshot.plan.get("plan_id").clone())
+            .unwrap();
+        active.verify_panel_review_lease(&expected).unwrap();
+        assert!(
+            expired
+                .verify_panel_review_lease(&expected)
+                .unwrap_err()
+                .message
+                .contains("expired")
+        );
+        expected
+            .set(
+                "lease_id",
+                json::string(format!("lease_{}", "2".repeat(32))),
+            )
+            .unwrap();
+        assert!(
+            active
+                .verify_panel_review_lease(&expected)
+                .unwrap_err()
+                .message
+                .contains("lease changed")
+        );
+    }
+    assert!(!repo.join(".oms/plan/late-results.jsonl").exists());
+}
+
+#[test]
 fn versioned_contracts_gate_scheduling() {
     if isolated("versioned_contracts_gate_scheduling") {
         return;

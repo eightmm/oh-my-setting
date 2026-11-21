@@ -2,8 +2,74 @@
 use crate::engine::{clean_path, receipt_id};
 use crate::json::{self, Value};
 use crate::storage::{MAX_JSON, MAX_PATCH};
-use crate::{Plan, Result, require};
+use crate::{Plan, Result, error, require};
 use std::collections::BTreeSet;
+
+fn indexed<'a>(rows: &'a [Value], event: &str, kind: &str) -> Result<&'a Value> {
+    require(receipt_id(event, 160), "invalid composition evidence event")?;
+    let mut matches = rows.iter().filter(|row| row.text("event_id") == event);
+    let row = matches
+        .next()
+        .ok_or_else(|| error("indexed composition evidence unavailable"))?;
+    require(
+        row.text("kind") == kind && matches.next().is_none(),
+        "indexed composition evidence is ambiguous or has the wrong type",
+    )?;
+    Ok(row)
+}
+
+/// The native landing row binds the panel's exact validated manifest and lease
+/// owner to the verifier result produced during admission of the same patch.
+pub fn verify_landing<'a>(
+    rows: &'a [Value],
+    manifest: &Value,
+    manifest_sha256: &str,
+    participant: &str,
+) -> Result<&'a Value> {
+    require(
+        receipt_id(participant, 160) && json::hex(manifest_sha256, 64),
+        "invalid composed acceptance landing identity",
+    )?;
+    let mut matches = rows.iter().filter(|row| {
+        row.text("kind") == "patch-land"
+            && row.get("exit").is_int(0)
+            && row.get("patch_sha256") == manifest.get("patch_sha256")
+            && row.get("base") == manifest.get("base_sha")
+            && row.get("panel_composition").text("manifest_sha256") == manifest_sha256
+    });
+    let landed = matches
+        .next()
+        .ok_or_else(|| error("composed acceptance lacks native integration verifier evidence"))?;
+    let binding = landed.get("panel_composition");
+    json::keys(
+        binding,
+        &[
+            "manifest_sha256",
+            "participant",
+            "tree",
+            "verify_sha256",
+            "admission_event_id",
+        ],
+        &[],
+    )?;
+    require(
+        matches.next().is_none()
+            && binding.text("participant") == participant
+            && binding.get("tree") == manifest.get("tree")
+            && binding.get("verify_sha256") == manifest.get("verify_sha256"),
+        "composed landing evidence differs from the integration owner, tree or verification",
+    )?;
+    let admission = indexed(rows, binding.text("admission_event_id"), "patch-admit")?;
+    require(
+        admission.get("exit").is_int(0)
+            && admission.get("verify_exit").is_int(0)
+            && admission.text("verification") == "command"
+            && admission.get("patch_sha256") == landed.get("patch_sha256")
+            && admission.get("base") == landed.get("base"),
+        "native integration verifier did not pass for the composed patch and base",
+    )?;
+    Ok(admission)
+}
 
 pub(crate) fn validate(plan: &Plan<'_>, task: &Value, record: &Value, patch: &[u8]) -> Result<()> {
     let reference = record.get("composition");
@@ -63,6 +129,21 @@ pub(crate) fn validate(plan: &Plan<'_>, task: &Value, record: &Value, patch: &[u
             && json::sha(verify.text("command").as_bytes()) == manifest.text("verify_sha256"),
         "composed acceptance lacks exact integration verification",
     )?;
+    let rows = plan.store.rows(".oms/artifacts/index.jsonl", false)?;
+    let admission = verify_landing(
+        &rows,
+        &manifest,
+        digest,
+        task.text("claimed_by_participant"),
+    )?;
+    let report = admission.text("artifact");
+    require(
+        report.starts_with(".oms/artifacts/admit/")
+            && clean_path(report)? == report
+            && json::sha(plan.evidence_read(report, MAX_JSON)?)
+                == admission.text("artifact_sha256"),
+        "native integration verifier report changed",
+    )?;
     let components = manifest.get("components").array()?;
     require(
         (2..=16).contains(&components.len()),
@@ -95,6 +176,10 @@ pub(crate) fn validate(plan: &Plan<'_>, task: &Value, record: &Value, patch: &[u
             "composed component binding changed",
         )?;
         previous = attempt;
+        require(
+            indexed(&rows, candidate.text("event_id"), "delegate")? == candidate,
+            "composed candidate differs from indexed delegate evidence",
+        )?;
         for field in ["artifact", "patch"] {
             let value = candidate.text(field);
             require(
@@ -121,13 +206,27 @@ pub(crate) fn validate(plan: &Plan<'_>, task: &Value, record: &Value, patch: &[u
         joined.extend(bytes);
         let gate = component.get("review_gate");
         let verdicts = gate.get("seat_verdicts").strings()?;
+        let reviewed = indexed(&rows, gate.text("event_id"), "review-outcome")?;
+        let indexed_review = reviewed.get("review");
+        let indexed_verdicts = indexed_review
+            .get("seats")
+            .array()?
+            .iter()
+            .map(|seat| seat.get("verdict").str())
+            .collect::<Result<Vec<_>>>()?;
         require(
             gate.get("patch_sha256") == candidate.get("patch_sha256")
                 && receipt_id(gate.text("event_id"), 160)
                 && gate.get("exit").is_int(0)
                 && gate.get("gate_verify_exit").is_int(0)
                 && !verdicts.is_empty()
-                && verdicts.iter().all(|verdict| *verdict == "pass"),
+                && verdicts.iter().all(|verdict| *verdict == "pass")
+                && reviewed.get("task_id") == record.get("task_id")
+                && reviewed.get("exit").is_int(0)
+                && indexed_review.get("gate_verify_exit").is_int(0)
+                && indexed_review.get("candidate").get("patch_sha256")
+                    == candidate.get("patch_sha256")
+                && indexed_verdicts == verdicts,
             "composed component review failed",
         )?;
         seats.extend(verdicts);
@@ -206,6 +305,7 @@ mod tests {
                     "candidate",
                     object([
                         ("kind", string("delegate")),
+                        ("event_id", string(format!("delegate-{name}"))),
                         ("attempt_id", string(name)),
                         ("exit", number(0)),
                         ("task_id", string("task-a")),
@@ -298,8 +398,110 @@ mod tests {
             ])
         };
         let record = record_for(&manifest);
-        let task = object([("verify", string("true"))]);
+        let task = object([
+            ("verify", string("true")),
+            ("claimed_by_participant", string("main-participant")),
+        ]);
+        assert!(
+            validate(&plan, &task, &record, &patch).is_err(),
+            "a caller's manifest, passing booleans and file hashes cannot replace native evidence"
+        );
+        let index = ".oms/artifacts/index.jsonl";
+        for component in manifest.get("components").array().unwrap() {
+            let candidate = component.get("candidate");
+            let gate = component.get("review_gate");
+            plan.store.append(index, candidate).unwrap();
+            plan.store
+                .append(
+                    index,
+                    &object([
+                        ("kind", string("review-outcome")),
+                        ("event_id", gate.get("event_id").clone()),
+                        ("task_id", candidate.get("task_id").clone()),
+                        ("exit", number(0)),
+                        (
+                            "review",
+                            object([
+                                (
+                                    "candidate",
+                                    object([(
+                                        "patch_sha256",
+                                        candidate.get("patch_sha256").clone(),
+                                    )]),
+                                ),
+                                ("gate_verify_exit", number(0)),
+                                (
+                                    "seats",
+                                    Value::Array(vec![object([("verdict", string("pass"))])]),
+                                ),
+                            ]),
+                        ),
+                    ]),
+                )
+                .unwrap();
+        }
+        let (report, _) = plan
+            .store
+            .immutable(
+                ".oms/artifacts/admit",
+                b"native integration result\n",
+                ".md",
+                MAX_JSON,
+            )
+            .unwrap();
+        plan.store
+            .append(
+                index,
+                &object([
+                    ("kind", string("patch-admit")),
+                    ("event_id", string("integration-admit")),
+                    ("exit", number(0)),
+                    ("verify_exit", number(0)),
+                    ("verification", string("command")),
+                    ("base", record.get("base").clone()),
+                    ("patch_sha256", record.get("patch_sha256").clone()),
+                    ("artifact", report.get("path").clone()),
+                    ("artifact_sha256", report.get("sha256").clone()),
+                ]),
+            )
+            .unwrap();
+        assert!(
+            validate(&plan, &task, &record, &patch).is_err(),
+            "ordinary admission does not bind a panel owner"
+        );
+        plan.store
+            .append(
+                index,
+                &object([
+                    ("kind", string("patch-land")),
+                    ("exit", number(0)),
+                    ("base", record.get("base").clone()),
+                    ("patch_sha256", record.get("patch_sha256").clone()),
+                    (
+                        "panel_composition",
+                        object([
+                            (
+                                "manifest_sha256",
+                                record.get("composition").get("sha256").clone(),
+                            ),
+                            ("participant", task.get("claimed_by_participant").clone()),
+                            ("tree", record.get("tree").clone()),
+                            ("verify_sha256", manifest.get("verify_sha256").clone()),
+                            ("admission_event_id", string("integration-admit")),
+                        ]),
+                    ),
+                ]),
+            )
+            .unwrap();
         validate(&plan, &task, &record, &patch).unwrap();
+        let mut forged_owner = manifest.clone();
+        forged_owner.set("owner", string("invented-owner")).unwrap();
+        assert!(validate(&plan, &task, &record_for(&forged_owner), &patch).is_err());
+        let mut stale_task = task.clone();
+        stale_task
+            .set("claimed_by_participant", string("different-main"))
+            .unwrap();
+        assert!(validate(&plan, &stale_task, &record, &patch).is_err());
         let mut missing = manifest.clone();
         missing
             .set(

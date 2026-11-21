@@ -145,3 +145,19 @@ pub(super) fn verify_retained(store: &Store, snapshot: &Value) -> Result<()> {
     verified_patch(store, candidate)?;
     Ok(())
 }
+
+pub(super) fn verify_integration(repo: &Path, snapshot: &Value) -> Result<()> {
+    let raw = oms_command_telemetry::store::read_index(repo, None, false)
+        .map_err(crate::services::telemetry_error)?;
+    let rows = oms_command_plan::storage::rows(&raw).map_err(Error::new)?;
+    let manifest = oms_command_plan::json::parse(&crate::value::encoded(&snapshot["composition"])?)
+        .map_err(Error::new)?;
+    oms_command_plan::panel_composition::verify_landing(
+        &rows,
+        &manifest,
+        &text(&snapshot["candidate"], "artifact_sha256"),
+        &text(&snapshot["task"], "claimed_by_participant"),
+    )
+    .map(|_| ())
+    .map_err(Error::new)
+}
