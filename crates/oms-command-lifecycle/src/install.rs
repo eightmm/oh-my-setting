@@ -203,10 +203,10 @@ pub(crate) fn targets(paths: &Paths, executable: &Path) -> Result<Vec<(PathBuf, 
 }
 pub(crate) fn link(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
     paths.load()?;
-    let payload = payload::verify(paths, flag)?;
-    let pairs = targets(paths, &payload.frontdoor(paths))?;
-    let mode = receipt::link_mode()?;
     if options.preview() {
+        let payload = payload::verify(paths, flag)?;
+        let pairs = targets(paths, &payload.frontdoor(paths))?;
+        let mode = receipt::link_mode()?;
         return Ok(r::text(
             pairs
                 .iter()
@@ -217,6 +217,8 @@ pub(crate) fn link(paths: &Paths, options: &Options, flag: &AtomicBool) -> Resul
     }
     r::child_guard()?;
     let _guard = r::receipt_lock(paths, flag)?;
+    crate::prepared::recover(paths)?;
+    let payload = payload::verify(paths, flag)?;
     let old = paths.load()?;
     let mut tx = Transaction::begin(paths)?;
     let row = apply(paths, old.as_ref(), &payload, &mut tx, flag)?;
@@ -607,6 +609,7 @@ fn install(
     };
     let options = &prepared;
     let _guard = r::receipt_lock(paths, flag)?;
+    crate::prepared::recover(paths)?;
     let fresh = paths.load()?;
     if fresh != old {
         return Err(r::Error(

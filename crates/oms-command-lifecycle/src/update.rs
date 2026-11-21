@@ -77,6 +77,7 @@ fn publish_mode(
         "up_to_date" => "already up to date",
         "failed" => "update failed",
         "updated" => "update applied",
+        "partial" => "core updated; provider/tool refresh failed",
         "skipped" => "update deferred by an admission fence",
         _ => "update available",
     };
@@ -139,7 +140,7 @@ fn attention(paths: &Paths, flag: &AtomicBool) -> Result<&'static str> {
         .as_str()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
     let superseded = installed.zip(last).is_some_and(|(a, b)| a > b);
-    if !superseded && status == "failed" {
+    if !superseded && matches!(status, "failed" | "partial") {
         return Ok("failed");
     }
     if !superseded && status == "skipped" {
@@ -227,6 +228,220 @@ pub(crate) fn run(
     run_selected(paths, options, flag, services, None)
 }
 
+pub(crate) fn validate_reference(reference: &str) -> Result<()> {
+    if reference.is_empty()
+        || reference.starts_with(['-', '/', '.'])
+        || reference.ends_with(['/', '.'])
+        || reference.contains("..")
+        || reference.contains("//")
+        || reference.contains("/.")
+        || reference.split('/').any(|s| s.ends_with(".lock"))
+        || !reference
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+    {
+        return r::fail("invalid update ref");
+    }
+    Ok(())
+}
+
+fn selected_reference<'a>(
+    explicit: Option<&'a str>,
+    receipt: Option<&'a Value>,
+) -> Result<&'a str> {
+    let reference = explicit
+        .or_else(|| receipt.and_then(|row| row["ref"].as_str()))
+        .unwrap_or("edge");
+    validate_reference(reference)?;
+    Ok(reference)
+}
+
+fn fetch_lock(paths: &Paths, flag: &AtomicBool) -> Result<oms_lock::Guard> {
+    let common = PathBuf::from(r::git(
+        &paths.source,
+        &["rev-parse", "--git-common-dir"],
+        flag,
+    )?);
+    let common = if common.is_absolute() {
+        common
+    } else {
+        paths.source.join(common)
+    };
+    r::lock(&common.join("FETCH_HEAD"), &paths.cwd)
+}
+
+fn edge_branch(paths: &Paths, flag: &AtomicBool) -> Result<String> {
+    let remote = r::git(
+        &paths.source,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        flag,
+    )?;
+    let suffix = remote
+        .strip_prefix("refs/remotes/origin/")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| r::Error(2, "invalid origin default branch".into()))?;
+    Ok(format!("refs/heads/{suffix}"))
+}
+
+fn preparation_status(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+) -> Result<crate::Output> {
+    paths.require_owner()?;
+    let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
+    let state = crate::prepared::status(paths, &current)?;
+    if options.has("--json") {
+        return r::json(&state);
+    }
+    let mut message = format!(
+        "update preparation: {}\ncurrent: {current}",
+        state["status"].as_str().unwrap_or("unknown")
+    );
+    for key in [
+        "target_commit",
+        "ref",
+        "prepared_at",
+        "reason",
+        "apply_command",
+    ] {
+        if let Some(value) = state[key].as_str() {
+            message.push_str(&format!("\n{key}: {value}"));
+        }
+    }
+    Ok(r::text(message))
+}
+
+fn prepare_update(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<crate::Output> {
+    r::child_guard()?;
+    if borrowed(paths).unwrap_or(false) {
+        return r::fail("an incoming gate cannot prepare an update");
+    }
+    // Preparation changes only the incoming cache and its own receipt. Worker
+    // fences belong to activation, not this potentially long build/download.
+    let _operation = crate::lifecycle_lock::acquire(paths, flag)?;
+    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    if r::exists(&paths.config.join("native-update/transaction.json"))
+        || r::exists(&paths.config.join("native-update/lease.json"))
+    {
+        return Err(r::Error(
+            75,
+            "interrupted update requires recovery before preparing another update".into(),
+        ));
+    }
+    let old = paths
+        .require_owner()?
+        .ok_or_else(|| r::Error(2, "update requires an install receipt".into()))?;
+    let reference = selected_reference(options.get("--ref"), Some(&old))?;
+    let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
+    let receipt_digest = r::hash(&r::read(&paths.receipt, r::LIMIT)?);
+    if !r::git(
+        &paths.source,
+        &["status", "--porcelain", "--untracked-files=normal"],
+        flag,
+    )?
+    .is_empty()
+    {
+        return r::fail("refusing preparation from a dirty install checkout");
+    }
+    let _fetch = fetch_lock(paths, flag)?;
+    let mut tx = crate::prepared::transaction(paths)?;
+    let (target, reference) = if options.has("--from")
+        && reference.len() == 40
+        && reference
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        let target = r::git(
+            &paths.source,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{reference}^{{commit}}"),
+            ],
+            flag,
+        )
+        .map_err(|error| {
+            if error.0 == 130 {
+                error
+            } else {
+                r::Error(
+                    2,
+                    "offline bundle preparation requires the selected commit in the local checkout"
+                        .into(),
+                )
+            }
+        })?;
+        (target, reference)
+    } else {
+        fetch(paths, reference, options.has("--fallback-to-edge"), flag)?
+    };
+    if target.len() != 40
+        || !target
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return r::fail("invalid fetched update commit");
+    }
+    let branch = if reference == "edge" {
+        r::git(
+            &paths.source,
+            &["merge-base", "--is-ancestor", &current, &target],
+            flag,
+        )?;
+        Some(edge_branch(paths, flag)?)
+    } else {
+        None
+    };
+    let bundle = options.path("--from", &paths.cwd)?;
+    let bundle = bundle.as_deref().zip(options.get("--sha256"));
+    crate::payload::prepare_incoming_with_bundle(paths, &target, &mut tx, services, flag, bundle)?;
+    let digest = crate::payload::prepared_digest(paths, &target)?;
+    gate(
+        paths,
+        options,
+        flag,
+        services,
+        crate::IncomingPhase::Preflight,
+        &target,
+        &old,
+    )?;
+    if r::git(&paths.source, &["rev-parse", "HEAD"], flag)? != current
+        || !r::git(
+            &paths.source,
+            &["status", "--porcelain", "--untracked-files=normal"],
+            flag,
+        )?
+        .is_empty()
+        || r::hash(&r::read(&paths.receipt, r::LIMIT)?) != receipt_digest
+    {
+        return Err(r::Error(
+            75,
+            "installation changed during preparation; prepare again".into(),
+        ));
+    }
+    let row = crate::prepared::Prepared::capture(paths, &current, &target, reference, branch)?;
+    if row.manifest_sha256 != digest {
+        return r::fail("incoming payload changed during preparation");
+    }
+    r::check(flag)?;
+    row.write(paths, &mut tx)?;
+    tx.commit()?;
+    if options.has("--json") {
+        r::json(&row.projection("prepared", None))
+    } else {
+        Ok(r::text(format!(
+            "prepared: {current} -> {target}\ninstallation unchanged; apply with oms update --apply-prepared"
+        )))
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ReviewedRelease<'a> {
     channel: crate::ReleaseChannel,
@@ -307,6 +522,9 @@ fn run_selected(
     services: &dyn crate::Services,
     reviewed: Option<ReviewedRelease<'_>>,
 ) -> Result<crate::Output> {
+    if options.tool == "update" && options.has("--status") {
+        return preparation_status(paths, options, flag);
+    }
     if options.tool == "auto-update" {
         match options.action.as_str() {
             "install" | "remove" => {
@@ -371,29 +589,16 @@ fn run_selected(
         }
         return crate::agy_surface::probe(paths, flag);
     }
-    let old = paths.require_owner()?;
-    let reference = reviewed
-        .map(|r| r.reference)
-        .or_else(|| options.get("--ref"))
-        .map(str::to_owned)
-        .or_else(|| {
-            old.as_ref()
-                .and_then(|r| r["ref"].as_str().map(str::to_owned))
-        })
-        .unwrap_or_else(|| "edge".into());
-    if reference.is_empty()
-        || reference.starts_with(['-', '/', '.'])
-        || reference.ends_with(['/', '.'])
-        || reference.contains("..")
-        || reference.contains("//")
-        || reference.contains("/.")
-        || reference.split('/').any(|s| s.ends_with(".lock"))
-        || !reference
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
-    {
-        return r::fail("invalid update ref");
+    if options.has("--prepare") && !options.preview() {
+        return prepare_update(paths, options, flag, services);
     }
+    let old = paths.require_owner()?;
+    let reference = selected_reference(
+        reviewed
+            .map(|r| r.reference)
+            .or_else(|| options.get("--ref")),
+        old.as_ref(),
+    )?;
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
     if options.preview() {
         return r::json(
@@ -404,7 +609,7 @@ fn run_selected(
     let check = options.has("--check")
         || options.tool == "auto-update" && options.action != "apply" && !options.has("--apply");
     if !check {
-        let result = apply_update(paths, options, flag, services, &reference, reviewed);
+        let result = apply_update(paths, options, flag, services, reference, reviewed);
         if options.tool == "auto-update"
             && let Err(error) = &result
         {
@@ -417,32 +622,24 @@ fn run_selected(
                 },
                 &current,
                 "",
-                &reference,
+                reference,
                 "apply",
             )?;
         }
         return result;
     }
-    let raw = r::git(&paths.source, &["rev-parse", "--git-common-dir"], flag)?;
-    let raw = PathBuf::from(raw);
-    let file = if raw.is_absolute() {
-        raw
-    } else {
-        paths.source.join(raw)
-    };
-    let file = file.join("FETCH_HEAD");
-    let _fetch_guard = r::lock(&file, &paths.cwd)?;
+    let _fetch_guard = fetch_lock(paths, flag)?;
     let current = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
-    let (target, reference) =
-        match fetch(paths, &reference, options.has("--fallback-to-edge"), flag) {
-            Ok(target) => target,
-            Err(error) => {
-                if options.tool == "auto-update" {
-                    publish(paths, "failed", &current, "", &reference)?;
-                }
-                return Err(error);
+    let (target, reference) = match fetch(paths, reference, options.has("--fallback-to-edge"), flag)
+    {
+        Ok(target) => target,
+        Err(error) => {
+            if options.tool == "auto-update" {
+                publish(paths, "failed", &current, "", reference)?;
             }
-        };
+            return Err(error);
+        }
+    };
     if target.len() != 40 || !target.bytes().all(|b| b.is_ascii_hexdigit()) {
         return r::fail("invalid fetched update commit");
     }
@@ -773,6 +970,8 @@ fn apply_update(
     fences(paths, flag)?;
     let _operation = crate::lifecycle_lock::acquire(paths, flag)?;
     let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    // Roll back the transaction before deciding whether to remove its lease.
+    let _lease;
     let mut tx = Transaction::begin_update(paths)?;
     let old = paths
         .require_owner()?
@@ -792,18 +991,30 @@ fn apply_update(
     {
         return r::fail("refusing update or rollback from a dirty install checkout");
     }
-    let common = PathBuf::from(r::git(
-        &paths.source,
-        &["rev-parse", "--git-common-dir"],
-        flag,
-    )?);
-    let common = if common.is_absolute() {
-        common
+    let _fetch = fetch_lock(paths, flag)?;
+    // Even a regular update can reuse the cache left by an interrupted
+    // preparation. Recover it before adoption so later recovery cannot remove
+    // a payload that has already become the live installation.
+    crate::prepared::recover(paths)?;
+    let prepared = if options.has("--apply-prepared") {
+        // An interrupted preparation must be recovered before a receipt can
+        // authorize activation; otherwise later recovery could remove its cache.
+        Some(crate::prepared::load(paths)?.ok_or_else(|| {
+            r::Error(
+                2,
+                "no prepared update; run oms update --prepare first".into(),
+            )
+        })?)
     } else {
-        paths.source.join(common)
+        None
     };
-    let _fetch = r::lock(&common.join("FETCH_HEAD"), &paths.cwd)?;
-    let (target, reference) = if options.has("--rollback") {
+    if let Some(row) = &prepared {
+        row.require_current(paths, &current)?;
+        row.verify_payload(paths)?;
+    }
+    let (target, reference) = if let Some(row) = &prepared {
+        (row.target_commit.clone(), row.reference.as_str())
+    } else if options.has("--rollback") {
         let target = old["previous_commit"]
             .as_str()
             .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -832,7 +1043,11 @@ fn apply_update(
     }
     let mut target = target;
     if let Ok(selected) = std::env::var("OH_MY_SETTING_UPDATE_TARGET_COMMIT") {
-        if reviewed.is_some_and(|r| r.target != selected) {
+        if reviewed.is_some_and(|r| r.target != selected)
+            || prepared
+                .as_ref()
+                .is_some_and(|r| r.target_commit != selected)
+        {
             return Err(r::Error(
                 75,
                 "selected update target differs from reviewed release".into(),
@@ -871,8 +1086,11 @@ fn apply_update(
             flag,
         )?;
     }
-    let staged_incoming =
-        crate::payload::prepare_incoming(paths, &target, &mut tx, services, flag)?;
+    let staged_incoming = if prepared.is_some() {
+        false
+    } else {
+        crate::payload::prepare_incoming(paths, &target, &mut tx, services, flag)?
+    };
     gate(
         paths,
         options,
@@ -882,18 +1100,34 @@ fn apply_update(
         &target,
         &old,
     )?;
+    // Defer before taking snapshots if a worker started during preparation.
+    fences(paths, flag)?;
+    if let Some(row) = &prepared {
+        row.require_current(paths, &current)?;
+        row.verify_payload(paths)?;
+    }
+    if r::git(&paths.source, &["rev-parse", "HEAD"], flag)? != current
+        || !r::git(
+            &paths.source,
+            &["status", "--porcelain", "--untracked-files=normal"],
+            flag,
+        )?
+        .is_empty()
+    {
+        return Err(r::Error(
+            75,
+            "installation changed before update activation".into(),
+        ));
+    }
     let branch = r::git(&paths.source, &["symbolic-ref", "--quiet", "HEAD"], flag).ok();
     let edge_branch = if reference == "edge" && !options.has("--rollback") {
-        let remote = r::git(
-            &paths.source,
-            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-            flag,
-        )?;
-        let suffix = remote
-            .strip_prefix("refs/remotes/origin/")
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| r::Error(2, "invalid origin default branch".into()))?;
-        let name = format!("refs/heads/{suffix}");
+        let name = match &prepared {
+            Some(row) => row
+                .edge_branch
+                .clone()
+                .ok_or_else(|| r::Error(2, "prepared edge update has no branch".into()))?,
+            None => edge_branch(paths, flag)?,
+        };
         let before = r::git(&paths.source, &["rev-parse", "--verify", &name], flag).ok();
         if let Some(tip) = &before {
             r::git(
@@ -914,13 +1148,16 @@ fn apply_update(
     };
     let original_targets = managed_paths(paths, &old)?;
     let start = tx.prepare_external(&original_targets)?;
+    _lease = Lease::new(paths, flag)?;
+    // Snapshotting provider state can take time. Fence again before scheduling
+    // the checkout in the journal, so a deferral does not need Git rollback.
+    fences(paths, flag)?;
     tx.effect(crate::effects::Effect::GitCheckout {
         source: paths.source.clone(),
         before: current.clone(),
         after: target.clone(),
         branch: branch.clone(),
     })?;
-    let _lease = Lease::new(paths, flag)?;
     let result = (|| -> Result<Value> {
         r::git(&paths.source, &["checkout", "--detach", &target], flag)?;
         let mut known = managed_paths(paths, &old)?;
@@ -1016,6 +1253,9 @@ fn apply_update(
         .unwrap_or_else(|_| "detached".into())
     );
     tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
+    if prepared.is_some() {
+        tx.remove(&crate::prepared::path(paths))?;
+    }
     tx.commit()?;
     if !options.has("--no-tools")
         && !options.has("--rollback")
@@ -1029,10 +1269,22 @@ fn apply_update(
             &row,
         )
     {
-        return Err(r::Error(
-            error.0,
-            "core update succeeded; provider/tool refresh failed and was not rolled back".into(),
-        ));
+        if options.tool == "auto-update" {
+            publish_mode(paths, "partial", &current, &target, reference, "apply")?;
+        }
+        let message = "core update succeeded; provider/tool refresh failed and was not rolled back";
+        let stdout = if options.has("--json") {
+            r::bytes(&json!({
+                "schema": 1, "status": "partial", "current_commit": target,
+                "previous_commit": current, "target_commit": target,
+                "ref": reference, "core": "updated", "tools": "failed",
+            }))?
+        } else {
+            Vec::new()
+        };
+        // Preserve the failing tool's status without relabeling the committed
+        // core update as a failed transaction in the scheduled caller.
+        return Ok((error.0, stdout, format!("error: {message}\n").into_bytes()));
     }
     if options.tool == "auto-update" {
         publish_mode(
@@ -1048,9 +1300,18 @@ fn apply_update(
             "apply",
         )?;
     }
-    Ok(r::text(format!(
-        "updated: {current} -> {target}\nupdate: ok"
-    )))
+    if options.has("--json") {
+        r::json(&json!({
+            "schema": 1, "status": if current == target { "up_to_date" } else { "updated" },
+            "current_commit": target, "previous_commit": current, "target_commit": target,
+            "ref": reference, "core": "updated",
+            "tools": if options.has("--no-tools") || options.has("--rollback") { "skipped" } else { "updated" },
+        }))
+    } else {
+        Ok(r::text(format!(
+            "updated: {current} -> {target}\nupdate: ok"
+        )))
+    }
 }
 
 struct Lease {

@@ -462,7 +462,7 @@ fn untar(raw: &[u8], dest: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn extract(
+pub(crate) fn extract(
     paths: &Paths,
     archive: &Path,
     format: &str,

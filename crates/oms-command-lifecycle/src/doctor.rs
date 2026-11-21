@@ -1440,7 +1440,11 @@ pub(crate) fn run(
                 );
             }
         }
-        crate::payload::repair_cache(&repair_paths, flag)?;
+        if !options.preview() {
+            let _guard = r::receipt_lock(&repair_paths, flag)?;
+            crate::prepared::recover(&repair_paths)?;
+            crate::payload::repair_cache(&repair_paths, flag)?;
+        }
         let mut repair = options.clone();
         repair.tool = "install".into();
         repair.flags.remove("--repair");

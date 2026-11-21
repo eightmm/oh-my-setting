@@ -156,6 +156,9 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
             &[
                 "--check",
                 "--plan",
+                "--prepare",
+                "--apply-prepared",
+                "--status",
                 "--rollback",
                 "--fallback-to-edge",
                 "--tools",
@@ -164,7 +167,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
                 "--probe-agy-surfaces",
                 "--json",
             ],
-            &["--ref"],
+            &["--ref", "--from", "--sha256"],
         ),
         "agy-hook" => (&[], &[]),
         "auto-update" => (
@@ -197,7 +200,7 @@ fn usage(tool: &str) -> String {
         "tick" => " [run|register|unregister|install|uninstall|status|schedule|refresh-catalogs]",
         _ => "",
     };
-    format!(
+    let mut help = format!(
         "Usage: oms {tool}{actions} [options]\n\n{}\n  -h, --help\n\nNative lifecycle adapter. Unsupported operations return a nonzero result.\n",
         flags
             .iter()
@@ -205,7 +208,17 @@ fn usage(tool: &str) -> String {
             .chain(values.iter().map(|s| format!("  {s} VALUE")))
             .collect::<Vec<_>>()
             .join("\n")
-    )
+    );
+    if tool == "update" {
+        help.push_str(
+            "\n--prepare builds or imports a payload without changing the active installation.\n\
+             --apply-prepared applies the saved exact target without fetching a newer ref.\n\
+             --status reports preparation and installation state without changing it.\n\
+             --from ARCHIVE --sha256 DIGEST imports an explicitly trusted local bundle;\n\
+             both options require --prepare. The digest is not a publisher signature.\n",
+        );
+    }
+    help
 }
 pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
     let (flags, values) = spec(tool);
@@ -251,6 +264,7 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
                     | "--ownership-receipt"
                     | "--receipt"
                     | "--compare"
+                    | "--from"
             ) {
                 let entries = out.paths.entry(s.into()).or_default();
                 if !entries.is_empty() && s != "--repo" {
@@ -305,6 +319,55 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         return r::fail(
             "--plan cannot be combined with --check, --rollback or --probe-agy-surfaces",
         );
+    }
+    if tool == "update" {
+        let modes = [
+            "--check",
+            "--plan",
+            "--rollback",
+            "--probe-agy-surfaces",
+            "--prepare",
+            "--apply-prepared",
+            "--status",
+        ];
+        if modes.iter().filter(|s| out.has(s)).count() > 1 {
+            return r::fail("update modes are exclusive");
+        }
+        if out.has("--status")
+            && (out.flags.iter().any(|s| s != "--status" && s != "--json")
+                || !out.values.is_empty()
+                || !out.paths.is_empty())
+        {
+            return r::fail("--status accepts only --json");
+        }
+        if out.has("--apply-prepared")
+            && ["--ref", "--fallback-to-edge", "--from", "--sha256"]
+                .iter()
+                .any(|s| out.has(s))
+        {
+            return r::fail("--apply-prepared uses the saved target and accepts no ref or bundle");
+        }
+        if out.has("--prepare")
+            && ["--tools", "--no-tools", "--no-doctor"]
+                .iter()
+                .any(|s| out.has(s))
+        {
+            return r::fail("--prepare does not refresh tools or run the installation doctor");
+        }
+        if out.has("--from") != out.has("--sha256") {
+            return r::fail("--from and --sha256 must be supplied together");
+        }
+        if out.has("--from") && !out.has("--prepare") {
+            return r::fail("--from and --sha256 require --prepare");
+        }
+        if let Some(digest) = out.get("--sha256")
+            && (digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        {
+            return r::fail("--sha256 requires a lowercase SHA-256 digest");
+        }
     }
     if tool == "doctor" {
         let modes = [

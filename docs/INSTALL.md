@@ -236,36 +236,57 @@ account's user services, so OMS does not silently enable it by default.
 The daily updater applies clean fast-forwards by default and skips dirty or
 diverged checkouts.
 
-### Previewing an install or update
+### Preparing an exact update before applying it
 
-`install.sh --plan` and `oms update --plan` print what the run would change and
-change nothing: no clone or fetch, no lifecycle lock, no link, backup move,
-settings edit or registration. Each line reads `STEP: STATUS: detail`, with
-status `change`, `current`, `skip`, `not-previewed` or `note`:
-
-```text
-links: change: move your existing ~/.codex/AGENTS.md to ~/.codex/AGENTS.md.backup.<timestamp>; it would no longer be in effect
-links: change: link ~/.local/bin/oms -> ~/.oh-my-setting/scripts/oms
-claude-hooks: change: register SessionStart hook resume-hook.sh
-mcp: not-previewed: install-mcp.sh registers the harness MCP server through the claude and codex CLIs
-plan: 38 change(s), 0 already current, 6 step part(s) not previewed; nothing was written
+```bash
+oms update --prepare --ref edge
+oms update --status --json
+oms update --apply-prepared
 ```
 
-A step is previewed by its own code where that code has a write-free mode
-(links and backups, the capability profile, Claude hook rows, Antigravity
-permission rules, the auto-update trigger). Everything else is named
-`not-previewed` rather than described from a second copy of its logic: the
-clone or fetch, the native payload build, tool installers and any PATH line they add,
-service logins, the Codex plugin and its `config.toml` block, MCP and
-Antigravity plugin registration, and the Claude `statusLine`, `modelSettings`
-and `attribution` keys. The plan reads the checkout as it is on disk, so an
-update plan describes relinking the current commit, not the one a fetch would
-bring; with no checkout yet (the curl form before a first install) it says so
-and stops.
+Preparation resolves the target once and prepares its native payload in an
+isolated source checkout. Active workers do not prevent preparation. It keeps
+the live checkout, installation receipt, provider configuration and provider
+versions unchanged; it may fetch Git objects and download build dependencies.
+A private preparation receipt records the installed base, source identity,
+selected ref, exact target and payload manifest digest. Its recovery journal is
+separate from the live installation journal.
+
+`--apply-prepared` does not fetch or follow a ref that has moved since preparation.
+It verifies the saved installation and payload identities, checks the existing
+worker/call fences again immediately before activation, then uses the normal
+installation transaction and doctor. A changed installation makes preparation
+stale; prepare again instead of applying it to a different base. A busy apply
+preserves the preparation for an explicit retry. It does not kill workers or
+register an automatic retry. The daily updater keeps its existing policy and
+does not implicitly consume a manually prepared candidate.
+
+`--status` is read-only and reports `none`, `incomplete`, `prepared`, `stale`,
+`missing_payload` or `invalid_payload`; it never recovers a journal or fetches.
+Malformed or unsafe preparation metadata returns an error. A preparation receipt
+is consumed with a successful core commit, including when later provider refresh
+fails. That failure must not reapply a completed core update.
+
+To prepare a payload built on another machine, pass a locally available bundle
+and its independently trusted SHA-256 with `--prepare --from FILE --sha256 HASH`.
+The archive must match the selected commit and host. The receiver still needs
+the source checkout; it does not need Cargo for bundle preparation. See
+[Native update distribution](UPDATE-DISTRIBUTION.md) for packaging, trust and
+compatibility boundaries.
+
+### Previewing an install or update
+
+`install.sh --plan` and `oms update --plan` do not clone, fetch, build, acquire
+lifecycle locks or change installed files. The native installation plan reports
+its proposed receipt, capability selection and action list as JSON. The native
+update plan reports the current commit, selected ref, action list and operations
+that were not previewed, including fetch and provider refresh. Neither plan is
+a file-by-file diff against an unfetched target.
 
 An existing checkout needs a verified native payload to produce the detailed
-install plan. If that payload has not been prepared, `install.sh --plan`
-reports it unavailable without building binaries or downloading dependencies.
+install plan. If it is unavailable, `install.sh --plan` reports that limitation
+without building or downloading. With no checkout, it reports that there is no
+local installation from which to derive the plan.
 
 ### Verification policy
 
@@ -276,31 +297,17 @@ does not by itself mean that the full test selection ran.
 |---|---|
 | Fresh installation | Installs the selected ref, defaulting to `edge` (the remote default branch), then runs the selected installation checks. CI success is not a prerequisite. |
 | Manual `oms update` | Applies the selected ref through the update transaction and runs link/doctor checks unless explicitly skipped. This is the same manual edge exception; it does not query or claim CI success. |
-| Scheduled auto-update | Requires a successful `test.yml` push run for the exact selected SHA. Both full and affected selections are accepted. If scope cannot be read, the confirmed workflow success remains sufficient and the state says `scope=unknown; ...; workflow success only`. |
+| Scheduled auto-update | Uses the native updater, clean fast-forward checks, payload validation and incoming doctor. This path does not query GitHub Actions and does not claim CI success. |
+| `--prepare` / `--apply-prepared` | Preparation binds the exact installed base and payload; apply rechecks those identities and uses the normal installation/doctor transaction. Bundle import additionally requires the caller's trusted archive digest. Neither operation is a CI attestation. |
 | `oms land` installation | Requires CI success for the pushed SHA plus full proof. Default: a CI run for exactly that SHA on the target whose jobs executed the full selection, either the push run or a dispatched `test.yml` run (`gh workflow run test.yml --ref TARGET`; `oms land --ci-full` dispatches it once, otherwise land checks for an existing run). Option: a full local gate. A pending run or requested receipt handoff blocks until proof is complete. Affected-only or unreadable CI scope, a run for another SHA, and a cancelled or failed run supply no full proof. Skipped or failed CI never authorizes installation. |
 
-Auto-update and land use the same exact-SHA CI query and scope classifier.
-Auto-update's existing `message` records the selected SHA, CI success, and
-`scope=full`, `scope=affected`, or `scope=unknown`; land records its proof in the
-existing `ci.scope` and `update.authority` fields. Neither a missing query result
-nor an unknown scope is labeled full verification. Fresh and manual edge installs
-remain deliberate exceptions; the installer default and receipt schemas are unchanged.
-
-The core capability profile does not require GitHub login or install `gh`.
-CI queries prefer `gh`; when it cannot start or authenticate, the public
-`eightmm/oh-my-setting` repository can use an unauthenticated, read-only GitHub
-API fallback for `test.yml`. Other repositories, private remotes, enterprise
-hosts, and credential-bearing URLs require a working `gh` configuration.
-Fallback requests use the fixed HTTPS API host, reject redirects, and are bounded
-to 30 seconds per query attempt and 1 MiB per response. Scope requires the exact
-run attempt and a complete job list of at most 100 jobs; incomplete evidence is
-reported as unknown, never full.
-
-Pending, failed, cancelled, missing, and unavailable CI evidence remain distinct.
-If the target has no confirmed success, auto-update searches at most 20 commits
-on its first-parent history for a successful descendant of the installed commit.
-Without one it records a normal skip, with an unavailable query distinguished
-from a failed workflow. Rate limits and network errors do not authorize an update.
+CI proof belongs to the `oms land` workflow and remains separate from native
+payload integrity. A built binary, matching checksum, preparation receipt or
+successful doctor does not prove that repository tests ran. The current native
+auto-update route does not perform the historical exact-SHA CI query or the
+20-ancestor fallback search. Earlier descriptions of those checks were stale.
+This documentation correction does not change scheduler defaults or weaken
+`oms land`'s existing publication/installation gates.
 
 Updates run the incoming installation's doctor before committing the core
 receipt, unless `--no-doctor` is selected. A failed doctor check keeps the core

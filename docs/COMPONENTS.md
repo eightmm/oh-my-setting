@@ -320,40 +320,28 @@ clean fast-forwards and skips dirty or diverged checkouts. Set
 ref when reproducibility matters. A missing pinned ref fails closed unless the
 operator explicitly chooses `--fallback-to-edge`.
 
-Scheduled apply requires successful push CI for the exact SHA; missing, pending,
-failed or unreadable CI defers the update. GitHub CLI must be authenticated.
+Scheduled apply uses the native updater's fast-forward, payload and doctor
+checks. It does not query GitHub Actions or attest test-suite success. The CI
+proof required by `oms land` is a separate contract.
+
+`oms update --prepare` prepares an exact payload while leaving the active
+installation unchanged; `--status [--json]` reports it, and `--apply-prepared`
+activates that exact target without fetching. Busy activation preserves the
+candidate for explicit retry. `--prepare --from FILE --sha256 HASH` imports a
+locally supplied, independently trusted native bundle without receiver-side
+Cargo compilation. See [Native update distribution](UPDATE-DISTRIBUTION.md).
 
 <details>
-<summary>Scheduled updates: transaction, runtime, timer persistence and cron ownership</summary>
+<summary>Scheduled updates: native transaction, timer persistence and cron ownership</summary>
 
-Scheduled `auto-update` is the unattended policy and status wrapper, not a
-second updater. Receipt-owned schema-1 and schema-2 installs both preflight and
-apply through `update.sh`, which remains the canonical rollback-capable install
-transaction. Only receipt-less legacy checkouts retain the configured-upstream
-compatibility path until a successful update creates an install receipt.
-
-
-#### CI proof for scheduled updates
-
-Before applying a new commit, both paths require successful `test.yml` push CI
-for that exact SHA. Missing, pending, failed, or unreadable CI defers to the next
-scheduled run; `gh` must be available and authenticated. Legacy updates merge
-the checked SHA, without a second pull that could fetch an unchecked tip.
-
-
-#### Runtime and rollback
-
-New cron/systemd triggers set `OMS_AUTO_UPDATE_MANAGED=1`: the wrapper selects
-the checkout's exact private uv Python before reading receipts or running the
-transaction. Runtime setup failures write a failed updater state instead of
-leaving an old success visible. New installs provision the runtime before
-provider configuration. Internal `scripts/python-runtime.sh` shares
-versioned environments and launchers under the user's private OMS data folder;
-system Python is used only to bootstrap the pinned uv download/lock parser.
-Provisioning is locked, existing broken/unowned environments are preserved,
-and rollback selects the old checkout's retained Python version. These runtime
-files are outside the checkout and retained on uninstall for safe recovery.
-
+Scheduled `auto-update` calls the same Rust lifecycle implementation as manual
+updates. It resolves the installation's saved ref, prepares a cold native payload
+in an isolated checkout, and applies the incoming installer with transaction
+recovery. It does not provision Python or require an authenticated GitHub CLI.
+A failed core verification retains rollback evidence; provider refresh occurs
+only after core commit and has its own result. Check-only schedules remain
+check-only. Manually prepared candidates are not an implicit scheduled apply
+request.
 
 #### Timer persistence
 

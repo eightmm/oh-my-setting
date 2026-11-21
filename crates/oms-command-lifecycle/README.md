@@ -14,6 +14,18 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   gate, verifies its receipt/doctor, and publishes the final receipt last. Gate
   failure restores payloads and Git state if their recorded identities still
   match; concurrent changes retain recovery evidence. Preview precedes probing.
+- `update --prepare`, `--status`, and `--apply-prepared` separate payload
+  preparation from activation. Preparation uses its own journal, records the
+  installation/source identity and payload manifest digest, and never recovers
+  an interrupted live installation transaction. Applying a prepared update
+  performs no fetch, rejects stale base or changed payload, and consumes the
+  preparation receipt with core commit. The existing worker/call fences are
+  rechecked before activation; this does not add atomic admission across all
+  provider sessions. Scheduled updates retain their existing selection policy.
+  `--prepare --from FILE --sha256 HASH` imports a bounded local native bundle
+  tied to the selected source revision and host. The caller-provided digest is
+  a trust input, not a publisher signature or CI proof. The incoming source
+  self-validation remains mandatory before publication and Cargo is not used.
 - `install`, `link`, `unlink`, and `uninstall --purge`: converge recorded
   components, manage native launchers/skills, remove only recorded provider
   account effects, retire owned interpreter trees, and optionally remove the

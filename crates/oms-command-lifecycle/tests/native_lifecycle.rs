@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::AtomicBool,
+    time::{Duration, Instant},
 };
 
 struct Fixture(PathBuf);
@@ -220,6 +221,20 @@ impl ColdUpdateHost {
     fn frontdoor(&self) -> PathBuf {
         self.root.join("home/.local/bin/oms")
     }
+    fn worker_marker(&self) -> PathBuf {
+        self.root.join(
+            "cache/oh-my-setting/worktrees/oh-my-setting-delegate.preparation/.oh-my-setting-tmp",
+        )
+    }
+    fn mark_worker(&self) {
+        let worker = self.worker_marker();
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::write(
+            worker,
+            format!("kind=oh-my-setting-temp\npid={}\n", std::process::id()),
+        )
+        .unwrap();
+    }
 }
 struct ColdLease<'a>(&'a ColdUpdateHost, PathBuf);
 impl IncomingSourceLease for ColdLease<'_> {
@@ -247,7 +262,7 @@ impl Services for ColdUpdateHost {
         &self,
         source: &Path,
         revision: &str,
-        _: &AtomicBool,
+        interrupted: &AtomicBool,
     ) -> Result<Box<dyn IncomingSourceLease + '_>, Output> {
         assert_eq!(self.git(source, &["rev-parse", "HEAD"]), self.before);
         assert_eq!(fs::read(self.frontdoor()).unwrap(), b"prior frontdoor");
@@ -262,6 +277,9 @@ impl Services for ColdUpdateHost {
                 revision,
             ],
         );
+        if self.fail == "prepared-cancel" {
+            interrupted.store(true, std::sync::atomic::Ordering::Release);
+        }
         Ok(Box::new(ColdLease(self, incoming)))
     }
     fn incoming_lifecycle(
@@ -289,13 +307,30 @@ impl Services for ColdUpdateHost {
                 !self.root.join("incoming").exists(),
                 "lease closes before live handoff"
             );
-            if matches!(self.fail.as_str(), "crash" | "foreign") {
+            if matches!(self.fail.as_str(), "crash" | "foreign")
+                || self.fail.starts_with("prepared-crash")
+            {
                 std::process::exit(91);
+            }
+            if self.fail == "late-worker" {
+                self.mark_worker();
             }
             return (0, vec![], vec![]);
         }
         if phase == IncomingPhase::Verify {
             return (if self.fail == "verify" { 7 } else { 0 }, vec![], vec![]);
+        }
+        if phase == IncomingPhase::RefreshTools {
+            assert_eq!(self.fail, "prepared-refresh");
+            assert_eq!(read(&self.receipt())["commit"], revision);
+            assert!(
+                !self
+                    .root
+                    .join("config/oh-my-setting/native-update/transaction.json")
+                    .exists(),
+                "tool refresh follows the committed core transaction"
+            );
+            return (9, vec![], b"provider refresh unavailable\n".to_vec());
         }
         assert_eq!(phase, IncomingPhase::Reconcile);
         assert_eq!(self.git(source, &["rev-parse", "HEAD"]), revision);
@@ -343,6 +378,385 @@ impl Services for ColdUpdateHost {
     }
 }
 
+fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
+    let source = host.source();
+    let preparation = host
+        .root
+        .join("config/oh-my-setting/native-preparation/prepared.json");
+    let cache = source.join("target/oms-native").join(target);
+    let unchanged = |prior: &[u8]| {
+        assert_eq!(fs::read(host.receipt()).unwrap(), prior);
+        assert_eq!(fs::read(host.frontdoor()).unwrap(), b"prior frontdoor");
+        assert_eq!(
+            fs::read(
+                source
+                    .join("target/oms-native")
+                    .join(&host.before)
+                    .join("sentinel")
+            )
+            .unwrap(),
+            b"prior cache"
+        );
+        assert!(
+            !host
+                .root
+                .join("data/oh-my-setting/libexec")
+                .join(target)
+                .exists()
+        );
+    };
+    let status = || -> Value {
+        serde_json::from_slice(&success(call(
+            "update",
+            &["--status", "--json"],
+            &source,
+            host,
+        )))
+        .unwrap()
+    };
+    if host.fail == "prepared-live" {
+        for args in [
+            &["--prepare", "--apply-prepared"][..],
+            &["--prepare", "--check"][..],
+            &["--apply-prepared", "--ref", "edge"][..],
+            &["--status", "--rollback"][..],
+            &["--from", "unused-bundle.tar.gz"][..],
+            &["--prepare", "--from", "unused-bundle.tar.gz"][..],
+        ] {
+            assert_eq!(call("update", args, &source, host).0, 2, "{args:?}");
+        }
+        assert_eq!(status()["status"], "none");
+        unchanged(prior);
+        assert!(!preparation.exists());
+        assert!(!host.root.join("flow").exists());
+        assert!(host.phases.borrow().is_empty());
+    }
+    if host.fail == "prepared-live" {
+        host.mark_worker();
+    }
+    let (prepared, selected_receipt) = if host.fail == "prepared-locked-ref" {
+        let mut receipt = read(&host.receipt());
+        receipt["ref"] = json!(target);
+        let selected = serde_json::to_vec(&receipt).unwrap();
+        let mut settings = oms_lock::Settings::from_env().unwrap();
+        settings.cwd = source.clone();
+        let lock = oms_lock::Lock::for_file(&host.receipt(), settings).unwrap();
+        let guard = lock.acquire(None).unwrap();
+        let lifecycle_owner = host.root.join("locks/install-lifecycle.lock.d/owner");
+        let prepared = std::thread::scope(|scope| {
+            let receipt_path = host.receipt();
+            let change = scope.spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !lifecycle_owner.is_file() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "prepare never acquired lifecycle lock"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                write(&receipt_path, &receipt);
+                drop(guard);
+            });
+            let result = call("update", &["--prepare"], &source, host);
+            change.join().unwrap();
+            result
+        });
+        (prepared, Some(selected))
+    } else {
+        (
+            call("update", &["--prepare", "--ref", "edge"], &source, host),
+            None,
+        )
+    };
+    let prior = selected_receipt.as_deref().unwrap_or(prior);
+    unchanged(prior);
+    assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+    if host.fail == "prepared-cancel" {
+        assert_eq!(prepared.0, 130);
+        assert!(!preparation.exists());
+        assert!(!cache.exists());
+        assert!(!host.root.join("incoming").exists());
+        assert!(!host.root.join("flow").exists());
+        assert!(host.phases.borrow().is_empty());
+        let retry = ColdUpdateHost {
+            root: host.root.clone(),
+            before: host.before.clone(),
+            fail: "prepared-retry".into(),
+            phases: RefCell::new(vec![]),
+        };
+        success(call("update", &["--prepare"], &source, &retry));
+        assert_eq!(status()["status"], "prepared");
+        unchanged(prior);
+        return;
+    }
+    success(prepared);
+    assert_eq!(host.phases.borrow().as_slice(), [IncomingPhase::Preflight]);
+    assert_eq!(
+        fs::read_to_string(host.root.join("flow")).unwrap(),
+        "build\nproof\n"
+    );
+    let receipt = fs::read(&preparation).unwrap();
+    let report = status();
+    assert_eq!(report["status"], "prepared");
+    assert_eq!(report["current_commit"], host.before);
+    assert_eq!(report["target_commit"], target);
+    let expected_ref = if host.fail == "prepared-locked-ref" {
+        target
+    } else {
+        "edge"
+    };
+    assert_eq!(report["ref"], expected_ref);
+    assert_eq!(fs::read(&preparation).unwrap(), receipt);
+    unchanged(prior);
+    if host.fail == "prepared-live" {
+        let out = call("update", &["--apply-prepared", "--no-tools"], &source, host);
+        assert_eq!(
+            out.0, 76,
+            "an active worker defers activation, not preparation"
+        );
+        assert_eq!(fs::read(&preparation).unwrap(), receipt);
+        unchanged(prior);
+        fs::remove_file(host.worker_marker()).unwrap();
+    }
+    if host.fail == "prepared-cutover-worker" {
+        let marker = host.worker_marker();
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let arm = host.root.join("start-cutover-worker");
+        fs::write(
+            &arm,
+            format!("{}\n{}\n", std::process::id(), marker.display()),
+        )
+        .unwrap();
+        let git = host.root.join("bin/git");
+        let actual = host.root.join("bin/actual");
+        fs::create_dir(&actual).unwrap();
+        fs::rename(&git, actual.join("git")).unwrap();
+        fs::write(
+            &git,
+            br#"#!/bin/sh
+set -eu
+root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
+arm="$root/start-cutover-worker"
+if [ -f "$arm" ]; then
+    case "$*" in
+        *" symbolic-ref --quiet HEAD")
+            { read -r worker; read -r marker; } < "$arm"
+            printf 'kind=oh-my-setting-temp\npid=%s\n' "$worker" > "$marker"
+            ;;
+        *" checkout --detach "*) printf 'checkout attempted\n' >> "$root/cutover-checkouts" ;;
+    esac
+fi
+exec "$root/bin/actual/git" "$@"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+        let out = call("update", &["--apply-prepared", "--no-tools"], &source, host);
+        assert!(
+            marker.exists(),
+            "worker starts during cutover validation: {}",
+            String::from_utf8_lossy(&out.2)
+        );
+        assert_eq!(out.0, 76, "{}", String::from_utf8_lossy(&out.2));
+        assert!(String::from_utf8_lossy(&out.2).contains("live worker"));
+        assert!(!host.root.join("cutover-checkouts").exists());
+        let update = host.root.join("config/oh-my-setting/native-update");
+        assert!(!update.join("transaction.json").exists());
+        assert!(!update.join("lease.json").exists());
+        assert_eq!(
+            host.phases.borrow().as_slice(),
+            [IncomingPhase::Preflight; 2]
+        );
+        assert_eq!(fs::read(&preparation).unwrap(), receipt);
+        assert_eq!(status()["status"], "prepared");
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+        unchanged(prior);
+        fs::remove_file(arm).unwrap();
+        fs::remove_file(marker).unwrap();
+    }
+    if host.fail == "prepared-stale" {
+        host.git(
+            &source,
+            &["commit", "--allow-empty", "-qm", "local advance"],
+        );
+        let changed = host.git(&source, &["rev-parse", "HEAD"]);
+        assert_eq!(status()["status"], "stale");
+        let phases = host.phases.borrow().clone();
+        assert_ne!(
+            call("update", &["--apply-prepared", "--no-tools"], &source, host).0,
+            0
+        );
+        assert_eq!(*host.phases.borrow(), phases);
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), changed);
+        assert_eq!(fs::read(&preparation).unwrap(), receipt);
+        unchanged(prior);
+        host.git(&source, &["reset", "--hard", &host.before]);
+        let mut changed_receipt = read(&host.receipt());
+        changed_receipt["ref"] = json!("new-selection");
+        write(&host.receipt(), &changed_receipt);
+        let selected = fs::read(host.receipt()).unwrap();
+        assert_eq!(status()["status"], "stale");
+        assert_ne!(
+            call("update", &["--apply-prepared", "--no-tools"], &source, host).0,
+            0,
+            "changed installation choices invalidate a preparation even at the same commit"
+        );
+        assert_eq!(*host.phases.borrow(), phases);
+        assert_eq!(fs::read(host.receipt()).unwrap(), selected);
+        assert_eq!(fs::read(&preparation).unwrap(), receipt);
+        return;
+    }
+    if host.fail == "prepared-tamper" {
+        fs::write(cache.join("oms"), b"changed after preparation").unwrap();
+        assert_eq!(status()["status"], "invalid_payload");
+        let phases = host.phases.borrow().clone();
+        assert_ne!(
+            call("update", &["--apply-prepared", "--no-tools"], &source, host).0,
+            0
+        );
+        assert_eq!(*host.phases.borrow(), phases, "invalid bytes never execute");
+        assert_eq!(fs::read(&preparation).unwrap(), receipt);
+        unchanged(prior);
+        return;
+    }
+    let remote = host.root.join("origin.git");
+    if host.fail == "prepared-bundle" {
+        let package = host.root.join("bundle-package");
+        fs::create_dir(&package).unwrap();
+        fs::rename(&cache, package.join("payload")).unwrap();
+        let os = match std::env::consts::OS {
+            "linux" => "linux",
+            "macos" => "darwin",
+            other => panic!("unsupported bundle host: {other}"),
+        };
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => panic!("unsupported bundle architecture: {other}"),
+        };
+        write(
+            &package.join("bundle.json"),
+            &json!({
+                "schema": 1,
+                "kind": "oms-native-payload",
+                "source_commit": target,
+                "platform": format!("{os}-{arch}"),
+            }),
+        );
+        let archive = host.root.join("native-bundle.tar.gz");
+        assert!(
+            Command::new("tar")
+                .args(["--format=ustar", "-czf"])
+                .arg(&archive)
+                .arg("-C")
+                .arg(&package)
+                .args(["bundle.json", "payload"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let digest = format!("{:x}", sha2::Sha256::digest(fs::read(&archive).unwrap()));
+        fs::rename(&remote, host.root.join("offline-origin.git")).unwrap();
+        fs::write(
+            host.root.join("bin/cargo"),
+            b"#!/bin/sh\necho unexpected-build >> \"$OMS_LIFECYCLE_UPDATE_FIXTURE/flow\"\nexit 97\n",
+        )
+        .unwrap();
+        let phases = host.phases.borrow().clone();
+        let prepare_bundle = |checksum: &str| {
+            call(
+                "update",
+                &[
+                    "--prepare",
+                    "--from",
+                    archive.to_str().unwrap(),
+                    "--sha256",
+                    checksum,
+                    "--ref",
+                    target,
+                ],
+                &source,
+                host,
+            )
+        };
+        let rejected = prepare_bundle(&"0".repeat(64));
+        assert_ne!(rejected.0, 0);
+        assert!(String::from_utf8_lossy(&rejected.2).contains("SHA-256 mismatch"));
+        assert_eq!(*host.phases.borrow(), phases);
+        assert_eq!(fs::read(&preparation).unwrap(), receipt);
+        assert!(!cache.exists());
+        assert_eq!(
+            fs::read_to_string(host.root.join("flow")).unwrap(),
+            "build\nproof\n",
+            "a rejected archive never builds or executes its payload"
+        );
+        unchanged(prior);
+        success(prepare_bundle(&digest));
+        assert_eq!(
+            host.phases.borrow().as_slice(),
+            [IncomingPhase::Preflight, IncomingPhase::Preflight]
+        );
+        assert_eq!(status()["status"], "prepared");
+        assert_eq!(status()["ref"], target);
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+        assert!(cache.join("oms").is_file());
+        unchanged(prior);
+    } else {
+        if host.fail != "prepared-locked-ref" {
+            let tree = host.git(&source, &["rev-parse", &format!("{target}^{{tree}}")]);
+            let advanced = host.git(
+                &source,
+                &["commit-tree", &tree, "-p", target, "-m", "upstream advance"],
+            );
+            host.git(
+                &source,
+                &["push", "origin", &format!("{advanced}:refs/heads/main")],
+            );
+        }
+        fs::rename(&remote, host.root.join("offline-origin.git")).unwrap();
+    }
+    let args = if host.fail == "prepared-refresh" {
+        vec!["--apply-prepared"]
+    } else {
+        vec!["--apply-prepared", "--no-tools"]
+    };
+    let out = call("update", &args, &source, host);
+    if host.fail == "prepared-refresh" {
+        assert_eq!(out.0, 9);
+        assert!(String::from_utf8_lossy(&out.2).contains("core update succeeded"));
+        assert!(host.phases.borrow().contains(&IncomingPhase::RefreshTools));
+    } else {
+        success(out);
+        assert!(!host.phases.borrow().contains(&IncomingPhase::RefreshTools));
+    }
+    assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), target);
+    assert_eq!(read(&host.receipt())["commit"], target);
+    assert_eq!(read(&host.receipt())["previous_commit"], host.before);
+    assert_eq!(
+        read(&host.receipt())["ref"],
+        if matches!(
+            host.fail.as_str(),
+            "prepared-bundle" | "prepared-locked-ref"
+        ) {
+            target
+        } else {
+            "edge"
+        }
+    );
+    assert_eq!(fs::read(host.frontdoor()).unwrap(), b"incoming frontdoor");
+    assert!(!preparation.exists());
+    assert_eq!(status()["status"], "none");
+    assert_eq!(
+        fs::read_to_string(host.root.join("flow")).unwrap(),
+        if host.fail == "prepared-bundle" {
+            "build\nproof\nproof\n"
+        } else {
+            "build\nproof\n"
+        },
+        "activation reuses the prepared target without fetching or rebuilding"
+    );
+}
+
 #[test]
 fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
@@ -360,6 +774,18 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
             "cleanup",
             "crash",
             "foreign",
+            "late-worker",
+            "prepared-locked-ref",
+            "prepared-cutover-worker",
+            "prepared-live",
+            "prepared-stale",
+            "prepared-tamper",
+            "prepared-refresh",
+            "prepared-cancel",
+            "prepared-bundle",
+            "prepared-crash",
+            "prepared-crash-install",
+            "prepared-crash-repair",
         ] {
             let root =
                 std::env::temp_dir().join(format!("oms-cold-update-{}-{case}", std::process::id()));
@@ -371,7 +797,7 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                     .create(f.0.join(name))
                     .unwrap();
             }
-            for name in ["git", "mkdir", "cp", "chmod", "ps"] {
+            for name in ["git", "mkdir", "cp", "chmod", "ps", "tar", "gzip"] {
                 let path = std::env::split_paths(&std::env::var_os("PATH").unwrap())
                     .map(|p| p.join(name))
                     .find(|p| p.is_file())
@@ -417,7 +843,7 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                     .env("OH_MY_SETTING_REF", "reviewed-tag");
             }
             let out = command.output().unwrap();
-            if matches!(case, "crash" | "foreign") {
+            if matches!(case, "crash" | "foreign") || case.starts_with("prepared-crash") {
                 assert_eq!(
                     out.status.code(),
                     Some(91),
@@ -433,15 +859,48 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                     b"prior frontdoor"
                 );
                 assert!(!f.0.join("incoming").exists());
-                let journal = fs::read_to_string(
-                    f.0.join("config/oh-my-setting/native-update/transaction.json"),
-                )
+                let journal = fs::read_to_string(f.0.join(if case.starts_with("prepared-crash") {
+                    "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
+                } else {
+                    "config/oh-my-setting/native-update/transaction.json"
+                }))
                 .unwrap();
                 assert!(!journal.contains(&format!("{}/incoming", f.0.display())));
                 let cache = f.0.join("source/target/oms-native").join(target);
                 assert!(cache.join("oms").is_file());
                 if case == "foreign" {
                     fs::write(cache.join("oms"), b"foreign bytes").unwrap();
+                }
+                if case == "prepared-crash-repair" {
+                    let payload = fs::read(cache.join("oms")).unwrap();
+                    let prior = fs::read(&receipt).unwrap();
+                    let flow = fs::read(f.0.join("flow")).unwrap();
+                    let out = command
+                        .env("OMS_COLD_CASE", "repair-preview")
+                        .env("OH_MY_SETTING_DRY_RUN", "1")
+                        .output()
+                        .unwrap();
+                    assert!(
+                        out.status.success(),
+                        "{}\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    command.env_remove("OH_MY_SETTING_DRY_RUN");
+                    assert_eq!(
+                        fs::read_to_string(f.0.join(
+                            "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
+                        ))
+                        .unwrap(),
+                        journal
+                    );
+                    assert_eq!(fs::read(cache.join("oms")).unwrap(), payload);
+                    assert_eq!(fs::read(&receipt).unwrap(), prior);
+                    assert_eq!(fs::read(f.0.join("flow")).unwrap(), flow);
+                    assert_eq!(
+                        fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
+                        b"prior frontdoor"
+                    );
                 }
                 let out = command.env("OMS_COLD_CASE", "recover").output().unwrap();
                 assert!(
@@ -481,6 +940,16 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         phases: RefCell::new(vec![]),
     };
     let source = host.source();
+    if host.fail == "repair-preview" {
+        let out = call("doctor", &["--repair", "--no-model-doctor"], &source, &host);
+        assert!(
+            matches!(out.0, 0 | 1),
+            "{}",
+            String::from_utf8_lossy(&out.2)
+        );
+        assert!(host.phases.borrow().is_empty());
+        return;
+    }
     if let Ok(mode) = std::env::var("OMS_COLD_INSTALL_PROBE") {
         let receipt = fs::read(host.receipt()).unwrap();
         let capabilities = PathBuf::from(std::env::var_os("OMS_CAPABILITY_RECEIPT").unwrap());
@@ -529,6 +998,78 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         host.before = state["before"].as_str().unwrap().into();
         let target = state["target"].as_str().unwrap();
         let foreign = state["case"] == "foreign";
+        let case = state["case"].as_str().unwrap();
+        let preparation_crash = case.starts_with("prepared-crash");
+        let preparation_journal = host
+            .root
+            .join("config/oh-my-setting/native-preparation/native-lifecycle/transaction.json");
+        let pending_journal = if preparation_crash {
+            preparation_journal.clone()
+        } else {
+            host.root
+                .join("config/oh-my-setting/native-update/transaction.json")
+        };
+        let journal = fs::read(&pending_journal).unwrap();
+        let status: Value = serde_json::from_slice(&success(call(
+            "update",
+            &["--status", "--json"],
+            &source,
+            &host,
+        )))
+        .unwrap();
+        assert_eq!(
+            status["status"],
+            if preparation_crash {
+                "incomplete"
+            } else {
+                "none"
+            }
+        );
+        assert_eq!(fs::read(&pending_journal).unwrap(), journal);
+        assert!(
+            source
+                .join("target/oms-native")
+                .join(target)
+                .join("oms")
+                .is_file()
+        );
+        assert!(
+            host.phases.borrow().is_empty(),
+            "status never recovers or executes"
+        );
+        let repair_adoption = matches!(case, "prepared-crash-install" | "prepared-crash-repair");
+        if repair_adoption {
+            let cargo = host.root.join("bin/cargo");
+            let original_cargo = fs::read(&cargo).unwrap();
+            let original_receipt = fs::read(host.receipt()).unwrap();
+            fs::write(host.root.join("recovery-target"), target).unwrap();
+            fs::write(
+                &cargo,
+                br##"#!/bin/sh
+set -eu
+root="$OMS_LIFECYCLE_UPDATE_FIXTURE"
+read target < "$root/recovery-target" || :
+[ "$3" = "$root/source/Cargo.toml" ]
+[ ! -e "$root/source/target/oms-native/$target" ]
+echo recovery-build >> "$root/flow"
+exit 23
+"##,
+            )
+            .unwrap();
+            host.git(&source, &["checkout", "--detach", target]);
+            let out = if case == "prepared-crash-install" {
+                call("install", &[], &source, &host)
+            } else {
+                call("doctor", &["--repair"], &source, &host)
+            };
+            assert_eq!(out.0, 23, "{}", String::from_utf8_lossy(&out.2));
+            assert!(!preparation_journal.exists());
+            assert!(!source.join("target/oms-native").join(target).exists());
+            assert_eq!(fs::read(host.receipt()).unwrap(), original_receipt);
+            assert_eq!(fs::read(host.frontdoor()).unwrap(), b"prior frontdoor");
+            fs::write(cargo, original_cargo).unwrap();
+            host.git(&source, &["checkout", "main"]);
+        }
         let out = call("update", &["--ref", target, "--no-tools"], &source, &host);
         if foreign {
             assert_ne!(out.0, 0);
@@ -561,9 +1102,27 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
             );
             assert_eq!(
                 fs::read_to_string(host.root.join("flow")).unwrap(),
-                "build\nproof\nbuild\nproof\n",
+                if repair_adoption {
+                    "build\nproof\nrecovery-build\nbuild\nproof\n"
+                } else {
+                    "build\nproof\nbuild\nproof\n"
+                },
                 "recovery rolls back the prior cache then prepares anew"
             );
+            if preparation_crash {
+                assert!(!preparation_journal.exists());
+                let active = source.join("target/oms-native").join(target).join("oms");
+                let bytes = fs::read(&active).unwrap();
+                success(call(
+                    "update",
+                    &["--prepare", "--ref", target],
+                    &source,
+                    &host,
+                ));
+                assert_eq!(fs::read(active).unwrap(), bytes);
+                assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), target);
+                assert_eq!(read(&host.receipt())["commit"], target);
+            }
         }
         assert_eq!(
             fs::read(
@@ -577,7 +1136,7 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         );
         return;
     }
-    fs::create_dir(&source).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&source).unwrap();
     host.git(&source, &["init", "-q", "--initial-branch=main"]);
     host.git(
         &source,
@@ -592,6 +1151,10 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     )
     .unwrap();
     fs::write(source.join("skills.manifest.json"), b"{\"skills\":[]}\n").unwrap();
+    if host.fail.starts_with("prepared-crash") {
+        fs::create_dir(source.join("rules")).unwrap();
+        fs::write(source.join("rules/global-AGENTS.md"), b"fixture rules\n").unwrap();
+    }
     if host.fail == "ok" {
         fs::create_dir(source.join("config")).unwrap();
         fs::copy(
@@ -611,6 +1174,9 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     .unwrap();
     host.git(&source, &["commit", "-qam", "incoming"]);
     let target = host.git(&source, &["rev-parse", "HEAD"]);
+    if host.fail == "prepared-locked-ref" {
+        host.git(&source, &["commit", "--allow-empty", "-qm", "edge moved"]);
+    }
     if host.fail == "release-custom" {
         host.git(&source, &["branch", "development"]);
         host.git(&source, &["tag", "development", &host.before]);
@@ -669,6 +1235,8 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
         );
     } else if host.fail == "fallback" {
         receipt["ref"] = json!("removed-upstream-branch");
+    } else if host.fail == "prepared-live" {
+        receipt["ref"] = json!("saved-pin");
     }
     write(&host.receipt(), &receipt);
     let prior = fs::read(host.receipt()).unwrap();
@@ -763,6 +1331,16 @@ echo build >> "$root/flow"
         fs::Permissions::from_mode(0o700),
     )
     .unwrap();
+    if host.fail.starts_with("prepared-") {
+        prepared_update_case(&host, &target, &prior);
+        assert!(
+            !host
+                .root
+                .join("config/oh-my-setting/native-update/transaction.json")
+                .exists()
+        );
+        return;
+    }
     let release_channel = match host.fail.as_str() {
         "release-edge" | "release-custom" => Some(ReleaseChannel::Edge),
         "release-stable" => Some(ReleaseChannel::Stable),
@@ -940,6 +1518,7 @@ echo build >> "$root/flow"
             match host.fail.as_str() {
                 "verify" => 7,
                 "cleanup" => 75,
+                "late-worker" => 76,
                 _ => 2,
             },
             "{}",
