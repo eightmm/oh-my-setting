@@ -318,9 +318,20 @@ impl Services for ColdUpdateHost {
             return (0, vec![], vec![]);
         }
         if phase == IncomingPhase::Verify {
-            return (if self.fail == "verify" { 7 } else { 0 }, vec![], vec![]);
+            return (
+                if matches!(self.fail.as_str(), "verify" | "apply-locked-verify") {
+                    7
+                } else {
+                    0
+                },
+                vec![],
+                vec![],
+            );
         }
         if phase == IncomingPhase::RefreshTools {
+            if self.fail == "apply-locked-auto" {
+                return (0, vec![], vec![]);
+            }
             assert_eq!(self.fail, "prepared-refresh");
             assert_eq!(read(&self.receipt())["commit"], revision);
             assert!(
@@ -376,6 +387,40 @@ impl Services for ColdUpdateHost {
         write(&self.receipt(), &row);
         (0, serde_json::to_vec(&row).unwrap(), vec![])
     }
+}
+
+fn with_locked_receipt_ref(
+    host: &ColdUpdateHost,
+    reference: &str,
+    operation: impl FnOnce() -> Output,
+) -> (Output, Vec<u8>) {
+    let mut receipt = read(&host.receipt());
+    receipt["ref"] = json!(reference);
+    let selected = serde_json::to_vec(&receipt).unwrap();
+    let mut settings = oms_lock::Settings::from_env().unwrap();
+    settings.cwd = host.source();
+    let lock = oms_lock::Lock::for_file(&host.receipt(), settings).unwrap();
+    let guard = lock.acquire(None).unwrap();
+    let lifecycle_owner = host.root.join("locks/install-lifecycle.lock.d/owner");
+    let result = std::thread::scope(|scope| {
+        let receipt_path = host.receipt();
+        let change = scope.spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !lifecycle_owner.is_file() {
+                assert!(
+                    Instant::now() < deadline,
+                    "update never acquired lifecycle lock"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            write(&receipt_path, &receipt);
+            drop(guard);
+        });
+        let result = operation();
+        change.join().unwrap();
+        result
+    });
+    (result, selected)
 }
 
 fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
@@ -435,31 +480,8 @@ fn prepared_update_case(host: &ColdUpdateHost, target: &str, prior: &[u8]) {
         host.mark_worker();
     }
     let (prepared, selected_receipt) = if host.fail == "prepared-locked-ref" {
-        let mut receipt = read(&host.receipt());
-        receipt["ref"] = json!(target);
-        let selected = serde_json::to_vec(&receipt).unwrap();
-        let mut settings = oms_lock::Settings::from_env().unwrap();
-        settings.cwd = source.clone();
-        let lock = oms_lock::Lock::for_file(&host.receipt(), settings).unwrap();
-        let guard = lock.acquire(None).unwrap();
-        let lifecycle_owner = host.root.join("locks/install-lifecycle.lock.d/owner");
-        let prepared = std::thread::scope(|scope| {
-            let receipt_path = host.receipt();
-            let change = scope.spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while !lifecycle_owner.is_file() {
-                    assert!(
-                        Instant::now() < deadline,
-                        "prepare never acquired lifecycle lock"
-                    );
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                write(&receipt_path, &receipt);
-                drop(guard);
-            });
-            let result = call("update", &["--prepare"], &source, host);
-            change.join().unwrap();
-            result
+        let (prepared, selected) = with_locked_receipt_ref(host, target, || {
+            call("update", &["--prepare"], &source, host)
         });
         (prepared, Some(selected))
     } else {
@@ -776,6 +798,11 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
             "foreign",
             "late-worker",
             "prepared-locked-ref",
+            "apply-locked-ref",
+            "apply-locked-explicit",
+            "apply-locked-auto",
+            "apply-locked-verify",
+            "apply-locked-release",
             "prepared-cutover-worker",
             "prepared-live",
             "prepared-stale",
@@ -1174,7 +1201,7 @@ exit 23
     .unwrap();
     host.git(&source, &["commit", "-qam", "incoming"]);
     let target = host.git(&source, &["rev-parse", "HEAD"]);
-    if host.fail == "prepared-locked-ref" {
+    if host.fail == "prepared-locked-ref" || host.fail.starts_with("apply-locked-") {
         host.git(&source, &["commit", "--allow-empty", "-qm", "edge moved"]);
     }
     if host.fail == "release-custom" {
@@ -1333,6 +1360,76 @@ echo build >> "$root/flow"
     .unwrap();
     if host.fail.starts_with("prepared-") {
         prepared_update_case(&host, &target, &prior);
+        assert!(
+            !host
+                .root
+                .join("config/oh-my-setting/native-update/transaction.json")
+                .exists()
+        );
+        return;
+    }
+    if host.fail.starts_with("apply-locked-") {
+        let explicit = matches!(
+            host.fail.as_str(),
+            "apply-locked-explicit" | "apply-locked-release"
+        );
+        let (out, _) =
+            with_locked_receipt_ref(&host, if explicit { &host.before } else { &target }, || {
+                match host.fail.as_str() {
+                    "apply-locked-auto" | "apply-locked-verify" => {
+                        call("auto-update", &["apply"], &source, &host)
+                    }
+                    "apply-locked-explicit" => {
+                        call("update", &["--ref", &target, "--no-tools"], &source, &host)
+                    }
+                    "apply-locked-release" => apply_release_with_services(
+                        ReleaseChannel::Stable,
+                        &target,
+                        "origin/HEAD",
+                        &source,
+                        true,
+                        &AtomicBool::new(false),
+                        &host,
+                    ),
+                    _ => call("update", &["--no-tools"], &source, &host),
+                }
+            });
+        if host.fail == "apply-locked-verify" {
+            assert_eq!(out.0, 7, "{}", String::from_utf8_lossy(&out.2));
+            let status: Value = serde_json::from_slice(&success(call(
+                "auto-update",
+                &["status", "--json"],
+                &source,
+                &host,
+            )))
+            .unwrap();
+            assert_eq!(status["status"], "failed");
+            assert_eq!(status["upstream"], target);
+            assert_eq!(status["local"], host.before);
+            assert_eq!(status["remote"], target);
+            assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
+            assert_eq!(read(&host.receipt())["commit"], host.before);
+            assert_eq!(read(&host.receipt())["ref"], target);
+            assert_eq!(fs::read(host.frontdoor()).unwrap(), b"prior frontdoor");
+            assert!(
+                !host
+                    .root
+                    .join("config/oh-my-setting/native-update/transaction.json")
+                    .exists()
+            );
+            return;
+        }
+        success(out);
+        assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), target);
+        let installed = read(&host.receipt());
+        assert_eq!(installed["commit"], target);
+        assert_eq!(installed["ref"], target);
+        assert_eq!(installed["previous_commit"], host.before);
+        assert_eq!(
+            fs::read_to_string(host.root.join("flow")).unwrap(),
+            "build\nproof\n"
+        );
+        assert!(!host.root.join("incoming").exists());
         assert!(
             !host
                 .root
