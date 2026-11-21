@@ -2,12 +2,14 @@
 //! installation root; it never derives executable authority from memory records.
 #![forbid(unsafe_code)]
 mod adapter;
+mod batch;
 mod carry;
 mod cli;
 mod os;
 pub use adapter::{
     append_project_note, provider_context, run_database, run_review, run_review_with_stdin,
 };
+pub use batch::{JournalBatchReport, JournalProposal, JournalPublication, append_journal_batch};
 mod conflicts;
 mod db;
 mod diagnostics;

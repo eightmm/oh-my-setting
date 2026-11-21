@@ -218,6 +218,23 @@ fn review_controls_context_without_hiding_source_notes() {
                 assert_eq!(std::fs::read(&shared).unwrap(), before);
                 return id;
             }
+            if *kind == "distill" {
+                let result = oms_command_memory::append_journal_batch(
+                    repo,
+                    &"b".repeat(64),
+                    &[oms_command_memory::JournalProposal {
+                        key: &"c".repeat(64),
+                        source_sha256: &"d".repeat(64),
+                        body,
+                        source_current: true,
+                    }],
+                    &interrupted,
+                ).unwrap();
+                let oms_command_memory::JournalPublication::Appended(id) = &result.outcomes[0] else {
+                    panic!("journal proposal was not published: {:?}", result.outcomes);
+                };
+                return id.clone();
+            }
             output(oms_command_memory::append_project_note(
                 repo,
                 agent,
@@ -339,4 +356,175 @@ fn review_controls_context_without_hiding_source_notes() {
         context.contains("journal-distill: failureonly remains visible"),
         "{context}"
     );
+}
+
+#[test]
+fn journal_batches_reconcile_keys_refuse_collisions_and_repair_derived_outputs() {
+    use oms_command_memory::{JournalProposal, JournalPublication, append_journal_batch};
+    if std::env::var_os("OMS_MEMORY_BATCH_TEST").is_none() {
+        let isolated = TempDir::new("oms-memory-batch-env");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "journal_batches_reconcile_keys_refuse_collisions_and_repair_derived_outputs",
+            "--nocapture",
+        ]);
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(|key| key.starts_with("OMS_")) {
+                command.env_remove(key);
+            }
+        }
+        let result = command
+            .env("OMS_MEMORY_BATCH_TEST", "1")
+            .env("OMS_LOCK_DIR", isolated.0.join("locks"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let dir = TempDir::new("oms-memory-batch-test");
+    let repo = &dir.0;
+    let flag = AtomicBool::new(false);
+    let batch = "a".repeat(64);
+    let source_digest = "b".repeat(64);
+    let candidate_ids: Vec<_> = ["c", "d", "e", "f"]
+        .map(|s| s.repeat(64))
+        .into_iter()
+        .collect();
+    let proposals = [
+        JournalProposal {
+            key: &candidate_ids[0],
+            source_sha256: &source_digest,
+            body: "journal-distill: stable first record",
+            source_current: true,
+        },
+        JournalProposal {
+            key: &candidate_ids[1],
+            source_sha256: &source_digest,
+            body: "journal-distill: stable second record",
+            source_current: true,
+        },
+        JournalProposal {
+            key: &candidate_ids[2],
+            source_sha256: &source_digest,
+            body: "<!-- oms-memory\nreserved framing",
+            source_current: true,
+        },
+        JournalProposal {
+            key: &candidate_ids[3],
+            source_sha256: &source_digest,
+            body: "journal-distill: source changed before append",
+            source_current: false,
+        },
+    ];
+    let result = append_journal_batch(repo, &batch, &proposals[..1], &flag).unwrap();
+    let JournalPublication::Appended(first_id) = &result.outcomes[0] else {
+        panic!("missing first append")
+    };
+    let first_id = first_id.clone();
+    let shared = repo.join(".oms/memory/shared.md");
+    let before = std::fs::read(&shared).unwrap();
+    let reports = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            append_journal_batch(repo, &batch, &proposals, &AtomicBool::new(false)).unwrap()
+        });
+        let second = scope.spawn(|| {
+            append_journal_batch(repo, &batch, &proposals, &AtomicBool::new(false)).unwrap()
+        });
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(
+        reports
+            .iter()
+            .flat_map(|r| &r.outcomes)
+            .filter(|o| matches!(o, JournalPublication::Appended(_)))
+            .count(),
+        1
+    );
+    for result in &reports {
+        assert_eq!(
+            result.outcomes[0],
+            JournalPublication::AlreadyPresent(first_id.clone())
+        );
+        assert!(matches!(result.outcomes[2], JournalPublication::Refused(_)));
+        assert!(matches!(result.outcomes[3], JournalPublication::Refused(_)));
+    }
+    let published = std::fs::read(&shared).unwrap();
+    assert!(published.starts_with(&before));
+    assert_eq!(
+        String::from_utf8_lossy(&published)
+            .matches("journal_candidate:")
+            .count(),
+        2
+    );
+    for collision in [
+        JournalProposal {
+            body: "changed payload under the same identity",
+            ..proposals[0]
+        },
+        JournalProposal {
+            source_sha256: &"0".repeat(64),
+            ..proposals[0]
+        },
+    ] {
+        let report = append_journal_batch(repo, &batch, &[collision], &flag).unwrap();
+        assert!(matches!(report.outcomes[0], JournalPublication::Refused(_)));
+        assert_eq!(std::fs::read(&shared).unwrap(), published);
+    }
+    assert!(append_journal_batch(repo, &batch, &[proposals[0], proposals[0]], &flag).is_err());
+    assert!(append_journal_batch(repo, "invalid", &proposals, &flag).is_err());
+    assert!(append_journal_batch(repo, &batch, &proposals, &AtomicBool::new(true)).is_err());
+    assert_eq!(std::fs::read(&shared).unwrap(), published);
+
+    let run = |args: &[&str]| {
+        let args: Vec<_> = args.iter().map(OsString::from).collect();
+        let (code, output, error) = oms_command_memory::run_with_source(&args, repo, repo, &flag);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+        String::from_utf8(output).unwrap()
+    };
+    assert!(!run(&["context"]).contains("stable first record"));
+    run(&["review", "--accept", &first_id]);
+    assert!(run(&["context"]).contains("stable first record"));
+    run(&["redact", "--id", &first_id, "--apply"]);
+    let redacted = std::fs::read(&shared).unwrap();
+    let report = append_journal_batch(repo, &batch, &proposals, &flag).unwrap();
+    assert_eq!(
+        report.outcomes[0],
+        JournalPublication::AlreadyPresent(first_id)
+    );
+    assert_eq!(
+        std::fs::read(&shared).unwrap(),
+        redacted,
+        "retry must not resurrect redacted text"
+    );
+    assert!(!run(&["context"]).contains("stable first record"));
+
+    let summary = repo.join(".oms/memory/summary.md");
+    let database = repo.join(".oms/memory/memory.sqlite3");
+    for path in [&summary, &database] {
+        std::fs::remove_file(path).unwrap();
+        std::fs::create_dir(path).unwrap();
+    }
+    let failed_refresh = append_journal_batch(repo, &batch, &proposals, &flag).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&failed_refresh.warnings)
+            .lines()
+            .count(),
+        2,
+        "one compact and one index warning per batch"
+    );
+    assert_eq!(std::fs::read(&shared).unwrap(), redacted);
+    for path in [&summary, &database] {
+        std::fs::remove_dir(path).unwrap();
+    }
+    let repaired = append_journal_batch(repo, &batch, &proposals, &flag).unwrap();
+    assert!(repaired.warnings.is_empty());
+    assert!(summary.is_file() && database.is_file());
+    assert_eq!(std::fs::read(&shared).unwrap(), redacted);
+    assert!(run(&["search", "stable second record"]).contains("stable second record"));
 }
