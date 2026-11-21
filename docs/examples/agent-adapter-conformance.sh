@@ -37,6 +37,7 @@ SELF_DIR=""
 PROBE_BOUND=10
 RUN_BOUND=300
 ADAPTER=""
+bound=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --run) RUN=1 ;;
@@ -45,9 +46,15 @@ while [ "$#" -gt 0 ]; do
     --probe-bound | --run-bound)
       [ "$#" -ge 2 ] || { usage >&2; exit 2; }
       case "$2" in
-        '' | *[!0-9]* | 0) echo "error: $1 needs a positive integer" >&2; exit 2 ;;
+        '' | *[!0-9]*) echo "error: $1 needs a positive decimal integer" >&2; exit 2 ;;
       esac
-      if [ "$1" = --probe-bound ]; then PROBE_BOUND="$2"; else RUN_BOUND="$2"; fi
+      # Decimal, not Bash octal: 08 is 8. Cap at 86400 s (and 6 digits) first.
+      bound="${2#"${2%%[!0]*}"}"
+      if [ -z "$bound" ] || [ "${#bound}" -gt 5 ] || [ "$bound" -gt 86400 ]; then
+        echo "error: $1 must be 1..86400" >&2
+        exit 2
+      fi
+      if [ "$1" = --probe-bound ]; then PROBE_BOUND="$bound"; else RUN_BOUND="$bound"; fi
       shift
       ;;
     -h | --help) usage; exit 0 ;;
@@ -76,6 +83,7 @@ report() { # report STATUS NAME DETAIL
 # leaves that group and is not seen.
 RUN_STATUS=0
 RUN_LEFTOVER=0
+RUN_DIR="" # when set, the command starts with this working directory
 run_bounded() {
   local bound="$1" out="$2" err="$3" pid ticks=0 limit
   shift 3
@@ -83,7 +91,10 @@ run_bounded() {
   RUN_STATUS=0
   RUN_LEFTOVER=0
   set -m
-  "$@" < /dev/null > "$out" 2> "$err" &
+  (
+    if [ -n "$RUN_DIR" ]; then cd "$RUN_DIR" || exit 126; fi
+    exec "$@"
+  ) < /dev/null > "$out" 2> "$err" &
   pid=$!
   set +m
   while kill -0 "$pid" 2> /dev/null; do
@@ -143,13 +154,18 @@ new_repo() { # new_repo DIRECTORY
 }
 
 check_run() { # check_run read|write
-  local access="$1" repo="$WORK/repo-$1" prompt="$WORK/prompt-$1" base
+  local access="$1" repo="$WORK/repo-$1" prompt="$WORK/prompt-$1" base exe
   new_repo "$repo"
   base="$(git -C "$repo" rev-parse HEAD)"
   printf 'Reply with the single word: ready\n' > "$prompt"
   cp "$prompt" "$prompt.orig"
+  # OMS starts the adapter inside the workdir; keep the pathname as given, made
+  # absolute so the change of directory cannot break a relative one.
+  case "$ADAPTER" in /*) exe="$ADAPTER" ;; *) exe="$PWD/$ADAPTER" ;; esac
+  RUN_DIR="$repo"
   run_bounded "$RUN_BOUND" "$WORK/run.out" "$WORK/run.err" \
-    "$ADAPTER" run --access "$access" --workdir "$repo" --prompt-file "$prompt"
+    "$exe" run --access "$access" --workdir "$repo" --prompt-file "$prompt"
+  RUN_DIR=""
   if [ "$RUN_STATUS" = 124 ]; then
     report fail "$access-exit" "no exit within ${RUN_BOUND}s"
     return
@@ -195,7 +211,7 @@ check_run() { # check_run read|write
 
 self_test() {
   local dir self status out run_args
-  self="${BASH_SOURCE[0]}"
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
   SELF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-adapter-conformance.XXXXXX")"
   trap 'rm -rf "$SELF_DIR"' EXIT HUP INT TERM
   dir="$SELF_DIR"
@@ -208,6 +224,9 @@ self_test() {
   run_args='workdir=.; while [ "$#" -gt 0 ]; do case "$1" in --workdir) workdir="$2"; shift ;; esac; shift; done'
   stub oms-agent-adapter-good \
     "case \"\${1:-}\" in --version | --help) exit 0 ;; esac; $run_args; : \"\$workdir\"; echo ready"
+  # shellcheck disable=SC2016
+  stub oms-agent-adapter-cwd \
+    "case \"\${1:-}\" in --version | --help) exit 0 ;; esac; $run_args; [ \"\$(pwd -P)\" = \"\$(cd \"\$workdir\" && pwd -P)\" ] || exit 7; echo ready"
   # shellcheck disable=SC2016
   stub oms-agent-adapter-slow \
     'case "${1:-}" in --version) sleep 30 ;; --help) exit 0 ;; esac'
@@ -232,6 +251,11 @@ self_test() {
     fi
   }
   expect good 0 '^ok +read-clean ' -- --run --write "$dir/oms-agent-adapter-good"
+  expect cwd 0 '^ok +read-exit ' -- --run "$dir/oms-agent-adapter-cwd"
+  (cd "$dir" && expect cwd-relative 0 '^ok +read-exit ' -- --run ./oms-agent-adapter-cwd)
+  expect octal-bound 0 '^ok +version-probe ' -- --probe-bound 08 "$dir/oms-agent-adapter-good"
+  expect zero-bound 2 'positive|1\.\.86400' -- --run-bound 00 "$dir/oms-agent-adapter-good"
+  expect huge-bound 2 '1\.\.86400' -- --probe-bound 99999999999999999999 "$dir/oms-agent-adapter-good"
   expect slow 1 '^fail +version-probe ' -- --probe-bound 1 "$dir/oms-agent-adapter-slow"
   expect writer 1 '^fail +read-clean ' -- --run "$dir/oms-agent-adapter-writer"
   expect daemon 1 '^fail +read-background ' -- --run "$dir/oms-agent-adapter-daemon"
