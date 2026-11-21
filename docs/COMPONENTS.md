@@ -3075,6 +3075,11 @@ supported or partial cell names its implementation and test, and
 test references without running providers. The
 [native lifecycle fixture](../crates/oms-command-lifecycle/tests/native_lifecycle.rs)
 exercises this check.
+A custom adapter author can check the one-shot contract directly with the
+[reference conformance script](examples/agent-adapter-conformance.sh): name,
+executable and bounded probes by default, and with `--run` a read call (plus
+`--write`) in a throwaway repository. It calls the adapter, not OMS, records
+nothing, and a pass is not sandbox, live-provider or admission evidence.
 
 
 #### Optional hints and budgets
