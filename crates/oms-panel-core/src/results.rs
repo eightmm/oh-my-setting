@@ -1287,6 +1287,44 @@ pub fn results_page(
         {
             projected["round_delta"] = delta;
         }
+        if request.task_id.is_some() {
+            // Input transport is the only recorded fact. No canonical writer
+            // acknowledges consumption, and acceptance is the Main's decision.
+            projected["native_assignment"] = metadata_attempts
+                .iter()
+                .rfind(|v| {
+                    v["tool"] == "panel-native-assignment"
+                        && v["refs"]["native_assignment_schema"] == "1"
+                })
+                .map_or(Value::Null, |v| {
+                    let recorded = v["refs"]["native_transport"].as_str();
+                    let valid = recorded
+                        .filter(|t| ["intent", "sending", "submitted", "unknown"].contains(t));
+                    let label = match valid {
+                        Some("intent") => "Intent not sent",
+                        Some("submitted") => "Submitted",
+                        _ => "Submission unconfirmed",
+                    };
+                    let mut entry = serde_json::json!({"attempt_id":v["attempt_id"],"transport":valid.unwrap_or("unknown"),"transport_label":label,"process_state":v["state"],"consumption":"unconfirmed","acceptance":outcome});
+                    if valid.is_none() {
+                        entry["transport_issue"] = "invalid transport state".into();
+                    }
+                    entry
+                });
+            // Only an undecided task without a failure moves its next step to the
+            // recorded transport; nothing here resends or retries.
+            let next = match projected["native_assignment"]["transport"].as_str() {
+                Some("intent") => Some("review unsent native assignment intent"),
+                Some("submitted") => Some("await native assignment result evidence"),
+                Some(_) => Some("inspect and reconcile unconfirmed native send before any retry"),
+                None => None,
+            };
+            if let Some(next) = next
+                && projected["representative_state"] == "pending"
+            {
+                projected["next_action"] = next.into();
+            }
+        }
         output.push(projected);
     }
     let missing_task = request.task_id.is_some() && output.is_empty();
@@ -1971,7 +2009,10 @@ mod tests {
         ) -> Result<CommandOutput> {
             let value = match command {
                 NativeCommand::Events => {
-                    assert_eq!(args, &["list", "--json"]);
+                    assert!(
+                        args == ["list", "--json"] || args == ["list", "--json", "--limit", "300"],
+                        "{args:?}"
+                    );
                     let mut attempts = vec![json!({
                         "attempt_id": MAIN, "tool": "panel-main", "provider": "codex",
                         "state": "working", "terminal": false, "refs": {
@@ -2153,5 +2194,220 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn native(attempt: &str, task: &str, transport: Value) -> Value {
+        json!({
+            "attempt_id": attempt, "tool": "panel-native-assignment", "provider": "codex",
+            "parent_attempt_id": MAIN, "task_id": task, "state": "working", "terminal": false,
+            "refs": {"native_assignment_schema": "1", "plan_id": format!("plan_{}", "1".repeat(32)),
+                "lease_id": format!("lease_{}", "2".repeat(32)), "panel_room_id": ROOM,
+                "native_transport": transport, "native_room_message": format!("msg-{attempt}"),
+                "native_binding_sha256": "3".repeat(64)}
+        })
+    }
+
+    fn index(repo: &Path, rows: &[Value]) {
+        let raw = rows
+            .iter()
+            .flat_map(|v| [serde_json::to_vec(v).unwrap(), b"\n".to_vec()])
+            .flatten()
+            .collect::<Vec<_>>();
+        Store::open(repo)
+            .unwrap()
+            .lock_at(Path::new("lock"), Duration::from_secs(3))
+            .unwrap()
+            .write(
+                Path::new(".oms/artifacts/index.jsonl"),
+                &raw,
+                false,
+                MAX_RESULT,
+            )
+            .unwrap();
+    }
+
+    fn task_view(repo: &Path, task: Option<&str>, attempts: Vec<Value>) -> Value {
+        let request = ResultsRequest {
+            task_id: task.map(str::to_owned),
+            ..Default::default()
+        };
+        results_page(
+            repo,
+            &request,
+            &ClaimedTask(attempts),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn native_assignment_result_reports_latest_transport_only() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let unsent = "review unsent native assignment intent";
+        let awaiting = "await native assignment result evidence";
+        let reconcile = "inspect and reconcile unconfirmed native send before any retry";
+        for (recorded, transport, label, next) in [
+            (json!("intent"), "intent", "Intent not sent", unsent),
+            (
+                json!("sending"),
+                "sending",
+                "Submission unconfirmed",
+                reconcile,
+            ),
+            (json!("submitted"), "submitted", "Submitted", awaiting),
+            (
+                json!("unknown"),
+                "unknown",
+                "Submission unconfirmed",
+                reconcile,
+            ),
+            (
+                json!("consumed"),
+                "unknown",
+                "Submission unconfirmed",
+                reconcile,
+            ),
+            (json!(7), "unknown", "Submission unconfirmed", reconcile),
+            (Value::Null, "unknown", "Submission unconfirmed", reconcile),
+        ] {
+            let mut newer_schema = native("native-v2", TASK, "submitted".into());
+            newer_schema["refs"]["native_assignment_schema"] = "2".into();
+            let attempts = vec![
+                native("native-old", TASK, "submitted".into()),
+                native("native-new", TASK, recorded.clone()),
+                newer_schema,
+            ];
+            let row = &task_view(&repo.0, Some(TASK), attempts)["rows"][0];
+            let issue = (transport == "unknown" && recorded != "unknown")
+                .then_some("invalid transport state");
+            let mut expected = json!({"attempt_id": "native-new", "transport": transport,
+                "transport_label": label, "process_state": "working",
+                "consumption": "unconfirmed", "acceptance": "pending"});
+            if let Some(issue) = issue {
+                expected["transport_issue"] = issue.into();
+            }
+            assert_eq!(row["native_assignment"], expected, "{recorded}");
+            assert_eq!(row["outcome"], Value::Null);
+            assert_eq!(row["representative_state"], "pending");
+            assert_eq!(row["next_action"], next, "{recorded}");
+        }
+        // An independent terminal failure keeps its own state and action.
+        let mut failed = native("native-new", TASK, "unknown".into());
+        failed["state"] = "failed".into();
+        let row = &task_view(&repo.0, Some(TASK), vec![failed])["rows"][0];
+        assert_eq!(row["representative_state"], "failed");
+        assert_eq!(row["next_action"], "inspect failure and retry");
+        // Without a native assignment the undecided task still awaits Main.
+        let row = &task_view(
+            &repo.0,
+            Some(TASK),
+            vec![worker("call-x", "read", "working")],
+        )["rows"][0];
+        assert_eq!(row["native_assignment"], Value::Null);
+        assert_eq!(row["next_action"], "record main decision");
+    }
+
+    #[test]
+    fn native_assignment_result_never_confirms_consumption_from_bound_evidence() {
+        let repo = crate::git::Scratch::new().unwrap();
+        index(
+            &repo.0,
+            &[
+                json!({"schema": 1, "kind": "note", "ts": "2026-01-01T00:00:00Z",
+                "task_id": TASK, "attempt_id": "native-a"}),
+            ],
+        );
+        for transport in ["intent", "submitted"] {
+            let mut child = worker("call-child", "read", "working");
+            child["parent_attempt_id"] = "native-a".into();
+            let attempts = vec![native("native-a", TASK, transport.into()), child];
+            let entry = &task_view(&repo.0, Some(TASK), attempts)["rows"][0]["native_assignment"];
+            assert_eq!(entry["attempt_id"], "native-a");
+            assert_eq!(entry["transport"], transport);
+            assert_eq!(entry["consumption"], "unconfirmed", "{entry}");
+            assert_eq!(entry["acceptance"], "pending");
+        }
+    }
+
+    #[test]
+    fn native_assignment_result_mirrors_finalized_decision_not_transport() {
+        for outcome in ["accepted", "rejected"] {
+            let repo = crate::git::Scratch::new().unwrap();
+            let revision = "4".repeat(24);
+            let summary = "Reviewed native assignment";
+            let body = serde_json::to_vec(&json!({
+                "schema": 1, "kind": "oms-panel-result", "task_id": TASK, "revision": revision,
+                "summary": summary, "summary_sha256": crate::digest(summary.as_bytes()),
+                "outcome": outcome, "main_attempt_id": MAIN
+            }))
+            .unwrap();
+            let artifact = format!(".oms/artifacts/panel-results/result-{TASK}-{revision}.json");
+            Store::open(&repo.0)
+                .unwrap()
+                .lock_at(Path::new("lock"), Duration::from_secs(3))
+                .unwrap()
+                .write(Path::new(&artifact), &body, false, MAX_RESULT)
+                .unwrap();
+            index(
+                &repo.0,
+                &[
+                    json!({"schema": 1, "kind": "panel-result", "ts": "2026-01-01T00:00:00Z",
+                    "task_id": TASK, "attempt_id": MAIN, "artifact": artifact,
+                    "artifact_sha256": crate::digest(&body)}),
+                ],
+            );
+            let view = task_view(
+                &repo.0,
+                Some(TASK),
+                vec![native("native-a", TASK, "submitted".into())],
+            );
+            let row = &view["rows"][0];
+            assert_eq!(row["outcome"], outcome, "{row}");
+            assert_eq!(
+                row["representative_state"],
+                format!("main_decision {outcome}")
+            );
+            assert_eq!(row["next_action"], "none");
+            assert_eq!(row["stages"]["main_decision"]["state"], outcome);
+            let entry = &row["native_assignment"];
+            assert_eq!(entry["acceptance"], outcome);
+            assert_eq!(entry["transport"], "submitted");
+            assert_eq!(entry["consumption"], "unconfirmed");
+            // A taskless attempt adopted through main_attempt_id is not this task's.
+            let mut adopted = native("native-adopted", TASK, "submitted".into());
+            adopted["task_id"] = Value::Null;
+            let row = &task_view(&repo.0, Some(TASK), vec![adopted])["rows"][0];
+            assert_eq!(row["outcome"], outcome);
+            assert_eq!(row["native_assignment"], Value::Null, "{row}");
+        }
+    }
+
+    #[test]
+    fn native_assignment_result_leaves_other_tasks_and_list_view_unchanged() {
+        let repo = crate::git::Scratch::new().unwrap();
+        let other = "task-other";
+        let mut unrelated = worker(WORKER, "read", "working");
+        unrelated["task_id"] = other.into();
+        let attempts = vec![native("native-a", TASK, "submitted".into()), unrelated];
+        let list = task_view(&repo.0, None, attempts.clone());
+        let rows = array(&list["rows"]);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|v| v.get("native_assignment").is_none()));
+        assert_eq!(
+            crate::digest(&serde_json::to_vec(&list).unwrap()),
+            "a3f4fc67a2a12a7e3002612dc60a492e790e898c1aac846f5f225c13090ba6a7"
+        );
+        for task in [TASK, other] {
+            let mut row = task_view(&repo.0, Some(task), attempts.clone())["rows"][0].clone();
+            let native = row.as_object_mut().unwrap().remove("native_assignment");
+            assert_eq!(native.unwrap().is_null(), task == other);
+            let mut expected = rows.iter().find(|v| v["task_id"] == task).unwrap().clone();
+            if task == TASK {
+                // Only the undecided task's next step follows its submitted input.
+                assert_eq!(expected["next_action"], "record main decision");
+                expected["next_action"] = "await native assignment result evidence".into();
+            }
+            assert_eq!(row, expected);
+        }
     }
 }
