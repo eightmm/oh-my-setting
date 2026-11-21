@@ -962,6 +962,20 @@ pub fn allocate_with_account_rank(
         {
             continue;
         }
+        if role == "researcher" {
+            c.effort = "low".into();
+        }
+        let effort_allowed = |account: Option<&str>| {
+            native_model::effort_support(
+                &c.provider,
+                &c.model,
+                &c.effort,
+                inputs
+                    .provider_evidence
+                    .get(&c.provider)
+                    .and_then(|e| e.applicable_efforts(&c.model, account)),
+            ) != native_model::EffortSupport::ReportedUnsupported
+        };
         let mut account = None;
         let mut account_reason = None;
         let mut account_rank = None;
@@ -986,6 +1000,7 @@ pub fn allocate_with_account_rank(
                 inputs.explicit_target,
                 inputs.requested_account.as_deref(),
                 now,
+                |id| effort_allowed(Some(id)),
             ) {
                 Ok((entry, reason, rank)) => {
                     used = account_weekly_used(&readings[&entry.id], now);
@@ -995,22 +1010,12 @@ pub fn allocate_with_account_rank(
                 }
                 Err(_) => continue,
             }
-        } else if let Some(accounts) = &inputs.accounts
-            && ACCOUNT_PROVIDERS.contains(&c.provider.as_str())
-            && active_account_home(&c.provider)
-                .is_some_and(|home| accounts.home_claimed_by_other(&c.provider, &home))
-        {
-            continue;
-        }
-        if native_model::effort_support(
-            &c.provider,
-            &c.model,
-            &c.effort,
-            inputs
-                .provider_evidence
-                .get(&c.provider)
-                .and_then(|e| e.applicable_efforts(&c.model, account.as_deref())),
-        ) == native_model::EffortSupport::ReportedUnsupported
+        } else if !effort_allowed(None)
+            || inputs.accounts.as_ref().is_some_and(|accounts| {
+                ACCOUNT_PROVIDERS.contains(&c.provider.as_str())
+                    && active_account_home(&c.provider)
+                        .is_some_and(|home| accounts.home_claimed_by_other(&c.provider, &home))
+            })
         {
             continue;
         }
@@ -1109,10 +1114,7 @@ pub fn allocate_with_account_rank(
     if !independent && let Some(preferred) = &inputs.preferred {
         eligible.sort_by_key(|v| &v.0.provider != preferred);
     }
-    let (mut candidate, _, account, account_reason, account_rank) = eligible.remove(0);
-    if role == "researcher" {
-        candidate.effort = "low".into();
-    }
+    let (candidate, _, account, account_reason, account_rank) = eligible.remove(0);
     let judge_note = if independent
         && inputs.explicit_target
         && model_family(&candidate.provider, &candidate.model).ok() == judged_family.as_deref()
@@ -1449,6 +1451,7 @@ impl Accounts {
             explicit,
             requested,
             crate::timestamp(),
+            |_| true,
         )
         .map(|(account, reason, _)| (account, reason))
     }
@@ -1463,6 +1466,7 @@ impl Accounts {
         explicit: bool,
         requested: Option<&str>,
         now: u64,
+        effort_allowed: impl Fn(&str) -> bool,
     ) -> Result<(Account, String, Option<AccountRank>)> {
         let config = self
             .providers
@@ -1495,6 +1499,9 @@ impl Accounts {
                 bucket,
             ));
         }
+        // The default home must not relabel an incompatible registered account.
+        let allow_default = eligible.is_empty() && effort_allowed("default");
+        eligible.retain(|(_, _, _, entry, _)| effort_allowed(&entry.id));
         eligible.sort_by_key(|v| (v.0, v.1, v.2));
         if let Some((quota, load, _, entry, bucket)) = eligible.first() {
             let next = eligible.get(1);
@@ -1530,7 +1537,8 @@ impl Accounts {
             ));
         }
         let has_default = config.accounts.iter().any(|e| e.id == "default");
-        if has_default
+        if !allow_default
+            || has_default
             || requested.is_some() && requested != Some("default")
             || requested.is_none() && !explicit
         {
@@ -1697,6 +1705,81 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn account_ranking_excludes_only_the_account_with_unsupported_effort() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let homes = crate::git::Scratch::new().unwrap();
+        let accounts = ["limited", "busy", "spare", "unobserved"]
+            .into_iter()
+            .map(|id| {
+                let home = homes.0.join(id);
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&home)
+                    .unwrap();
+                Account {
+                    id: id.into(),
+                    home,
+                }
+            })
+            .collect();
+        let policy = Policy::bundled().unwrap();
+        let mut inputs = claude_inputs();
+        inputs.accounts = Some(Accounts {
+            providers: BTreeMap::from([(
+                "claude".into(),
+                ProviderAccounts {
+                    policy: "spread".into(),
+                    accounts,
+                },
+            )]),
+        });
+        inputs.requested_effort = Some("high".into());
+        inputs.running_accounts.insert("claude:busy".into(), 2);
+        inputs.status = json!({"claude":{"accounts":{
+            "limited":{"weekly_used":8},
+            "busy":{"weekly_used":42},
+            "spare":{"weekly_used":47}
+        }}});
+        let pick = |inputs: &RoutingInputs| {
+            allocate_with_account_rank(&policy, "codex", "worker", None, "read", None, inputs)
+        };
+        assert_eq!(pick(&inputs).unwrap().0.account.as_deref(), Some("limited"));
+
+        inputs.provider_evidence.insert(
+            "claude".into(),
+            ProviderEvidence::from_catalog_row(&json!({
+                "model_effort_scales":{"claude-sonnet-5-6":["low","medium"]},
+                "capability_evidence":{"schema":1,"source":"fixture","account_alias":"limited"}
+            }))
+            .unwrap(),
+        );
+        let (route, rank) = pick(&inputs).unwrap();
+        assert_eq!(route.account.as_deref(), Some("spare"));
+        assert_eq!(
+            route.snapshot.unwrap().capabilities.effort_support,
+            EffortSupport::Unknown
+        );
+        let rank = rank.unwrap();
+        assert_eq!(rank.eligible_accounts, 3);
+        assert_eq!(rank.decided_by, "working_attempts");
+
+        inputs.status["claude"]["accounts"]["busy"]["weekly_used"] = json!(97);
+        inputs.status["claude"]["accounts"]["spare"]["weekly_used"] = json!(95);
+        let (route, rank) = pick(&inputs).unwrap();
+        assert_eq!(route.account.as_deref(), Some("unobserved"));
+        assert_eq!(rank.unwrap().weekly_bucket, None);
+
+        inputs.requested_account = Some("limited".into());
+        assert!(pick(&inputs).is_err());
+        inputs.requested_account = Some("busy".into());
+        let (route, _) = pick(&inputs).unwrap();
+        assert_eq!(route.account.as_deref(), Some("busy"));
+        assert!(route.account_pinned);
+    }
+
     #[test]
     fn explicit_reviewer_provider_is_required_and_unpinned_routing_stays_independent() {
         let policy = Policy::bundled().unwrap();
