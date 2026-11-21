@@ -474,14 +474,27 @@ fn council_seat_publication_stops_after_thread_append_failure() {
 
 #[test]
 fn delegate_research_roles_expose_public_tools_without_file_write_authority() {
-    provider_isolated(
+    assert_delegate_research_tools(
         "delegate_research_roles_expose_public_tools_without_file_write_authority",
+        false,
+    );
+}
+
+#[test]
+fn delegate_research_roles_honor_panel_no_web() {
+    assert_delegate_research_tools("delegate_research_roles_honor_panel_no_web", true);
+}
+
+fn assert_delegate_research_tools(test: &str, no_web: bool) {
+    provider_isolated_with_env(
+        test,
         "private",
+        &[("OMS_PANEL_NO_WEB", if no_web { "1" } else { "0" })],
         || {
             let repo = provider_repo();
             for provider in ["codex", "claude"] {
                 for role in ["", "repo-auditor", "researcher", "scholar"] {
-                    let public = matches!(role, "researcher" | "scholar");
+                    let public = !no_web && matches!(role, "researcher" | "scholar");
                     let mut values = args(&[
                         "--to",
                         provider,
@@ -520,13 +533,19 @@ fn delegate_research_roles_expose_public_tools_without_file_write_authority() {
                         } else {
                             "web_search=\"disabled\""
                         };
-                        assert!(argv.iter().any(|a| a == search));
+                        assert!(
+                            argv.iter().any(|a| a == search),
+                            "{provider}/{role}: {argv:?}"
+                        );
                     } else {
                         assert_eq!(option_value(argv, "--permission-mode").unwrap(), "plan");
                         let tools = option_value(argv, "--tools").unwrap().to_str().unwrap();
-                        assert_eq!(tools.contains("WebSearch"), public);
-                        assert_eq!(tools.contains("WebFetch"), public);
-                        assert!(!tools.contains("Write") && !tools.contains("Edit"));
+                        let expected = if public {
+                            "Read,Grep,Glob,Bash,WebSearch,WebFetch"
+                        } else {
+                            "Read,Grep,Glob,Bash"
+                        };
+                        assert_eq!(tools, expected, "{provider}/{role}");
                         assert!(argv.iter().any(|a| a == "--strict-mcp-config"));
                     }
                 }

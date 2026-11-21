@@ -571,7 +571,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         role,
     )?;
     route.explicit = !providers::panel_implicit_target() || route.account_pinned;
-    route.public_research = read && matches!(args.get("role"), "researcher" | "scholar");
+    route.public_research = read
+        && matches!(args.get("role"), "researcher" | "scholar")
+        && std::env::var_os("OMS_PANEL_NO_WEB").is_none_or(|value| value != "1");
     providers::bind_account(&mut route, &repo)?;
     let run = peer::run_id()?;
     let artifact = directory.join(format!("{}-delegate-{run}.md", target.provider));
