@@ -405,26 +405,38 @@ hide_provider_clis() {
   echo "ci-parity: provider CLIs hidden from PATH ($count shadowed)"
 }
 
+is_ordinary_doc_change() {
+  local status="$1" path="$2" relative
+  case "$path" in
+    README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md) return 0 ;;
+    crates/*/README.md)
+      relative="${path#crates/}"
+      [[ "$status" == [AM] && "${relative#*/}" == README.md ]]
+      return
+      ;;
+  esac
+  return 1
+}
+
 prepare_affected_gate() {
-  local changes="$CHECK_RUNTIME/affected-changes" path docs_only=1 scoped_only=1 reason
+  local changes="$CHECK_RUNTIME/affected-changes" status path docs_only=1 scoped_only=1 reason
   # shellcheck source=scripts/lib/critical-paths.sh disable=SC1091
   . "$ROOT/scripts/lib/critical-paths.sh"
   AFFECTED_NATIVE=false
-  git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$changes"
-  while IFS= read -r path; do
+  git diff --name-status --no-renames -z "$QUICK_FROM" "$QUICK_TO" -- > "$changes"
+  while IFS= read -r -d '' status && IFS= read -r -d '' path; do
     case "$path" in
       .github/workflows/*|install.sh|scripts/oms|scripts/lib/platform.sh|scripts/lib/*lock*|\
       Cargo.toml|Cargo.lock|rust-toolchain.toml|crates/*|tests/*install*|tests/*portability*)
         AFFECTED_NATIVE=true ;;
     esac
-    case "$path" in
-      README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md) ;;
-      *) docs_only=0 ;;
-    esac
-    case "$path" in
-      README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md|custom-skills/*.md|templates/*.md|roles/*.md) ;;
-      *) scoped_only=0 ;;
-    esac
+    if ! is_ordinary_doc_change "$status" "$path"; then
+      docs_only=0
+      case "$path" in
+        custom-skills/*.md|templates/*.md|roles/*.md) ;;
+        *) scoped_only=0 ;;
+      esac
+    fi
     if [ "$AFFECTED_MODE" != full ] && reason="$(oms_critical_path_reason "$path")"; then
       AFFECTED_MODE=full; AFFECTED_REASONS="$reason"
     fi
@@ -444,6 +456,7 @@ prepare_affected_gate() {
   fi
   if [ "$AFFECTED_REASONS" = documentation-only ]; then
     RUN_DOCS=1
+    AFFECTED_NATIVE=false
   elif [ "$AFFECTED_MODE" = affected ]; then
     RUN_QUICK=1
   elif [ "$CI_PARITY" = 1 ]; then

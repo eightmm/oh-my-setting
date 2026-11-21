@@ -22,7 +22,7 @@ jobs:
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       native: ${{ steps.plan.outputs.native }}
-      rust: ${{ steps.rust_scope.outputs.required }}
+      rust: ${{ steps.plan.outputs.docs_only == 'true' && 'false' || steps.rust_scope.outputs.required }}
       docs_only: ${{ steps.plan.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v7

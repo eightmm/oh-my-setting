@@ -64,6 +64,7 @@ EOF
       TMPDIR="$check_probe/tmp" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
       OMS_CHECK_FORBIDDEN_LOG="${OMS_CHECK_FORBIDDEN_LOG:-$check_probe/forbidden.log}" \
       OMS_CHECK_MAINT_ALLOW="${OMS_CHECK_MAINT_ALLOW:-0}" OMS_NATIVE_NO_AUTO_STAGE=0 \
+      OMS_AFFECTED_FULL="${OMS_AFFECTED_FULL:-0}" \
       bash "$repo/scripts/check.sh" "$@"
   }
   print_plan() { invoke_check --affected --print-affected-mode "$@"; }
@@ -86,6 +87,74 @@ EOF
 
   selected="$(invoke_check --affected --list-stages --changed-from "$base" --changed-to "$docs")"
   [ "$selected" = "$(printf 'doc-references\ncheck: ok')" ] || fail "documentation-only stages are not reference checks only: $selected"
+
+  # Direct non-critical crate README changes are ordinary docs, while mixed
+  # code, nested READMEs, non-README crate docs, deletes, renames, critical
+  # crates, and forced full stay strict.
+  mkdir -p "$repo/crates/oms-json"
+  printf '# oms-json\n' > "$repo/crates/oms-json/README.md"
+  git -C "$repo" add crates/oms-json/README.md
+  git -C "$repo" commit -qm crate-readme
+  crate_readme="$(git -C "$repo" rev-parse HEAD)"
+  selected="$(print_plan --changed-from "$docs" --changed-to "$crate_readme")"
+  [ "$selected" = affected ] || fail "direct crate README planning selected: $selected"
+  print_plan --changed-from "$docs" --changed-to "$crate_readme" --ci-output "$check_probe/crate-readme.out"
+  expected_ci_record affected false true > "$check_probe/expected.out"
+  cmp -s "$check_probe/crate-readme.out" "$check_probe/expected.out" || fail "direct crate README CI selection changed: $(cat "$check_probe/crate-readme.out")"
+  selected="$(invoke_check --affected --list-stages --changed-from "$docs" --changed-to "$crate_readme")"
+  [ "$selected" = "$(printf 'doc-references\ncheck: ok')" ] || fail "direct crate README stages are not reference checks only: $selected"
+
+  OMS_AFFECTED_FULL=1 print_plan --changed-from "$docs" --changed-to "$crate_readme" --ci-output "$check_probe/crate-readme-forced.out" 2>/dev/null
+  expected_ci_record full true false > "$check_probe/expected.out"
+  cmp -s "$check_probe/crate-readme-forced.out" "$check_probe/expected.out" || fail "OMS_AFFECTED_FULL=1 did not override direct crate README"
+
+  mkdir -p "$repo/crates/oms-json/sub"
+  printf 'nested readme\n' > "$repo/crates/oms-json/sub/README.md"
+  git -C "$repo" add crates/oms-json/sub/README.md
+  git -C "$repo" commit -qm crate-nested-readme
+  crate_nested="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$crate_readme" --changed-to "$crate_nested" --ci-output "$check_probe/crate-nested.out" 2>/dev/null
+  expected_ci_record full true false > "$check_probe/expected.out"
+  cmp -s "$check_probe/crate-nested.out" "$check_probe/expected.out" || fail "nested crate README must stay full/native"
+
+  printf 'extra notes\n' > "$repo/crates/oms-json/NOTES.md"
+  git -C "$repo" add crates/oms-json/NOTES.md
+  git -C "$repo" commit -qm crate-non-readme
+  crate_notes="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$crate_nested" --changed-to "$crate_notes" --ci-output "$check_probe/crate-notes.out" 2>/dev/null
+  cmp -s "$check_probe/crate-notes.out" "$check_probe/expected.out" || fail "non-README crate markdown must stay full/native"
+
+  mkdir -p "$repo/crates/oms-json/src"
+  printf 'updated\n' >> "$repo/crates/oms-json/README.md"
+  printf 'pub fn ok() {}\n' > "$repo/crates/oms-json/src/lib.rs"
+  git -C "$repo" add crates/oms-json/README.md crates/oms-json/src/lib.rs
+  git -C "$repo" commit -qm crate-mixed-code
+  crate_mixed="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$crate_notes" --changed-to "$crate_mixed" --ci-output "$check_probe/crate-mixed.out" 2>/dev/null
+  cmp -s "$check_probe/crate-mixed.out" "$check_probe/expected.out" || fail "mixed crate README + source must stay full/native"
+
+  mkdir -p "$repo/crates/oms-other"
+  git -C "$repo" mv crates/oms-json/README.md crates/oms-other/README.md
+  git -C "$repo" commit -qm crate-readme-rename
+  crate_rename="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$crate_mixed" --changed-to "$crate_rename" --ci-output "$check_probe/crate-rename.out" 2>/dev/null
+  cmp -s "$check_probe/crate-rename.out" "$check_probe/expected.out" || fail "renamed crate README must stay full/native"
+
+  git -C "$repo" rm -q crates/oms-other/README.md
+  git -C "$repo" commit -qm crate-readme-delete
+  crate_delete="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$crate_rename" --changed-to "$crate_delete" --ci-output "$check_probe/crate-delete.out" 2>/dev/null
+  cmp -s "$check_probe/crate-delete.out" "$check_probe/expected.out" || fail "deleted crate README must stay full/native"
+
+  mkdir -p "$repo/crates/oms-bootstrap"
+  printf '# bootstrap\n' > "$repo/crates/oms-bootstrap/README.md"
+  git -C "$repo" add crates/oms-bootstrap/README.md
+  git -C "$repo" commit -qm critical-crate-readme
+  critical_crate_readme="$(git -C "$repo" rev-parse HEAD)"
+  print_plan --changed-from "$crate_delete" --changed-to "$critical_crate_readme" --ci-output "$check_probe/critical-crate-readme.out" 2>/dev/null
+  cmp -s "$check_probe/critical-crate-readme.out" "$check_probe/expected.out" || fail "critical crate README must remain full/native"
+
+  git -C "$repo" checkout -q --detach "$docs"
 
   mkdir -p "$repo/crates/oms/src"
   printf 'fn main() {}\n' > "$repo/crates/oms/src/main.rs"
@@ -376,6 +445,8 @@ grep -Fq 'gate:' "$workflow" ||
   fail "workflow must expose a fixed gate job"
 grep -Fq 'if: always()' "$workflow" ||
   fail "gate must evaluate all needs even on failure/cancellation"
+grep -Fq "rust: \${{ steps.plan.outputs.docs_only == 'true' && 'false' || steps.rust_scope.outputs.required }}" "$workflow" ||
+  fail "affected_plan rust output must suppress Rust only when docs_only is proven true"
 grep -Fq 'tests/*.sh' "$ROOT/scripts/check.sh" ||
   fail "shellcheck lint must cover tests/*.sh"
 toolchain="$ROOT/rust-toolchain.toml"
