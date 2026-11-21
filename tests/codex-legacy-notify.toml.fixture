@@ -1,0 +1,5 @@
+# >>> oh-my-setting managed Codex usage (notify) >>>
+notify = ["/usr/bin/python3", "{{checkout}}/scripts/lib/codex_turn_notify.py"]
+# <<< oh-my-setting managed Codex usage (notify) <<<
+[tui]
+status_line = ["model", "git-branch"]

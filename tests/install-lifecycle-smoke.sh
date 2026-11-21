@@ -232,10 +232,9 @@ EOF
     if [ "$mode" = copy ]; then
       notify_config="$HOME/.codex/config.toml"
       mkdir -p "${notify_config%/*}"
-      printf '%s\n' '# >>> oh-my-setting managed Codex usage (notify) >>>' \
-        "notify = [\"/usr/bin/python3\", \"$case_dir/checkout/scripts/lib/codex_turn_notify.py\"]" \
-        '# <<< oh-my-setting managed Codex usage (notify) <<<' \
-        '[tui]' 'status_line = ["model", "git-branch"]' > "$notify_config"
+      jq -Rr --arg checkout "$case_dir/checkout" \
+        'split("{{checkout}}") | join($checkout | @json | .[1:-1])' \
+        "$ROOT/tests/codex-legacy-notify.toml.fixture" > "$notify_config"
       rev2="$(git -C "$case_dir/remote" rev-parse main)"
       oms_smoke_stage_native "$case_dir/checkout/target/oms-native/$rev2" "$build_dir" ||
         fail "failed staging notifier migration payload ($mode)"
