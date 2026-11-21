@@ -1,15 +1,42 @@
 # Orchestrator lifecycle: 예약 반환·취소·복구 구현 패킷
 
 기준: `f9a695ea2de90a160754252c1ee9cbaa4dd7a488` (2026-11-18).
-상태: **구현 제안**. 이 문서가 추가하는 runtime 동작은 없다.
+상태: **부분 구현**. 아래 구현 현황을 제외한 LC-03 등의 항목은 후속 제안이다.
 상위 계약: [Team runtime](TEAM-ORCHESTRATION-RUNTIME.md),
 [validation](TEAM-ORCHESTRATION-VALIDATION.md).
 
+## 구현 현황
+
+Native resource front door에 `discard-write`, `retire-team`, `reconcile`이
+연결되었다. `status`는 exact dispatch snapshot digest와 Team/write revision,
+execution/candidate pending을 제공한다. Live Main/Room/owner-generation guard와
+immutable native decision을 먼저 확보하고, dispatch writer 안에서는 이미 잡은
+guard만 검사하며, writer 종료 후 full owner/base 증명을 다시 검사한다.
+
+- 명시적 write discard는 sealed execution cleanup 뒤에만 WIP를 반환한다.
+  candidate 파일과 usage receipt는 보존하며 task acceptance/completion을 만들지 않는다.
+- Team withdrawal 또는 canonical successor가 확인되고 execution/WIP가 모두 끝난
+  정확한 generation만 반환한다. `team-cancel` 후 자동 반환을 시도하고,
+  write discard 후에도 같은 반환을 재시도한다. `pending`/`unknown`은 그대로 남는다.
+- `reconcile`은 exact held/drained snapshot에서 같은 domain의 새 epoch만 시작한다.
+  과거 policy/claim/decision/usage는 지우지 않는다.
+
+공개 명령·재시도 계약은 [resource CLI](../crates/oms-runtime/README.md)에 있다.
+기존 native resource fixture를 확장하여 public CLI → live Main/Room → native
+decision → checked store를 검증한다. 로컬 child의 sealed cleanup, pending 거절,
+candidate/unknown usage 보존, decision replay/conflict, 작은 capacity 재사용과
+held epoch 재개를 포함한다.
+
+**남은 범위:** active member cancel 전달, accepted-candidate 자동 WIP 반환,
+old Main/host-loss unknown claim 복구, persistent session idle/close producer는
+아직 연결하지 않았다. 기존 `team-cancel`의 `settled`는 계약 철회이며 실제
+process cleanup 완료가 아니다. 아래 기준 source 표는 구현 전 분석 기록이다.
+
 ## 1. 해결할 실제 문제와 범위
 
-Managed Team 경로는 실행 전에 자원을 예약하고, 확인된 process cleanup 뒤에는
+기준 SHA의 Managed Team 경로는 실행 전에 자원을 예약하고, 확인된 process cleanup 뒤에는
 invocation/process 예약을 반환한다. 그러나 Team 자체와 write candidate의 별도 예약을
-반환하는 store API는 native 완료·취소·acceptance 경로에 아직 연결되지 않았다.
+반환하는 store API는 native 완료·취소·acceptance 경로에 연결되지 않았었다.
 완료한 작업의 예약이 남으면 다음 팀이나 writer가 capacity에 막힐 수 있다.
 이는 비용을 초과한다는 증거가 아니라, 안전하게 보류된 예약을 끝내는 경로의 공백이다.
 
@@ -207,4 +234,4 @@ Rollback은 새 admission부터 보류하고 기존 cleanup·retirement·usage �
 검토 범위: 위 native resource producer, resource store, Team cancel/admission/view,
 peer settlement 및 panel acceptance/orchestrator 경계의 source를 확인했다.
 store source와 native resource action은 읽었으나 전체 provider·모든 OS/live 실행 검증은 하지 않았다.
-이 문서는 분석·구현 지시이며, 미실행 runtime tests나 실제 복구 성공을 주장하지 않는다.
+미구현 항목은 분석·구현 지시이며, 미실행 runtime tests나 실제 복구 성공을 주장하지 않는다.

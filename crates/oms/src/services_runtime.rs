@@ -770,7 +770,7 @@ fn parse_dscacheutil_account_entries(
 // interpreter or legacy script is invoked.
 // ---------------------------------------------------------------------------
 #[path = "services_resources.rs"]
-mod resources;
+pub(crate) mod resources;
 use crate::services_control::ControlServices;
 use oms_runtime::services::{
     BackendRequest, BackendResult, ExternalOutput, InstallerRequest, LedgerRequest, LedgerResult,
@@ -1210,7 +1210,7 @@ impl oms_runtime::Services for RuntimeServices<'_> {
         state_repo: &Path,
         action: &oms_runtime::services::ResourceAction,
     ) -> oms_command_plan::Result<Value> {
-        resources::action(repo, state_repo, action, self.cancel())
+        resources::action(repo, state_repo, action, self.cancel(), &self.control)
     }
     /// Read-only passwd lookup of a named user's home; no file or exec authority.
     fn account_home(&self, username: &OsStr) -> oms_command_plan::Result<Option<PathBuf>> {

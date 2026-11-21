@@ -603,9 +603,31 @@ impl<'a> Plan<'a> {
                 room_id(&self.context.room_id),
                 "team mutation requires an enrolled room",
             )?;
-            return self.locked(false, Some(&self.context.room_id), || {
+            let response = self.locked(false, Some(&self.context.room_id), || {
                 crate::team::execute(self, req)
-            });
+            })?;
+            if req.action != TeamCancel {
+                return Ok(response);
+            }
+            let retirement = match self.services.team_withdrawn(
+                &self.context,
+                req.value("id")?,
+                req.value("expected-team-sha256")?,
+            ) {
+                Ok(value) => value,
+                Err(error) => Some(object([
+                    ("status", string("unknown")),
+                    ("reason", string(error.message)),
+                ])),
+            };
+            if let Some(retirement) = retirement {
+                let mut result = json::parse(&response.stdout)?;
+                let mut record = result.get(req.value("id")?).clone();
+                record.set("resource_retirement", retirement)?;
+                result.set(req.value("id")?, record)?;
+                return Response::json(&result);
+            }
+            return Ok(response);
         }
         if matches!(
             req.action,

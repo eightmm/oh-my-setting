@@ -1,7 +1,7 @@
 //! The existing panel reservation namespace and exact flock authority, shared
 //! with physical-call admission. Payload publication and registry CAS are
 //! separate effects; callers must reconcile a partial publication before retry.
-use super::{StoreError, cancelled};
+use super::{StoreError, cancelled, resources};
 use oms_json::{ParseOptions, Value};
 use oms_lock::{Guard, Lock, Mode, Settings};
 use oms_safe_fs::{
@@ -117,14 +117,14 @@ impl<'a> Transaction<'a> {
     pub fn snapshot(&self) -> Result<Option<Vec<u8>>> {
         let read = || -> std::result::Result<Option<Vec<u8>>, StoreError> {
             self.check()?;
-            let bytes = snapshot(&self.root, self.interrupted)?;
+            let bytes = snapshot(&self.root, self.interrupted, false)?;
             self.check()?;
-            Ok(bytes)
+            Ok(bytes.map(|state| state.raw))
         };
         read().map_err(|source| self.error(source))
     }
     pub fn replace(&self, expected: Option<&[u8]>, candidate: &[u8]) -> Result<()> {
-        validate_registry(candidate).map_err(|source| self.error(source))?;
+        validate_registry(candidate, false).map_err(|source| self.error(source))?;
         self.mutate(
             Path::new(REGISTRY),
             MAX_REGISTRY,
@@ -134,7 +134,7 @@ impl<'a> Transaction<'a> {
                     return Err(StoreError::Changed);
                 }
                 if expected.is_some() {
-                    validate_registry(old)?;
+                    validate_registry(old, false)?;
                 }
                 Ok(candidate.to_vec())
             },
@@ -250,12 +250,23 @@ pub fn read_snapshot(
     repo: &Path,
     interrupted: &AtomicBool,
 ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
-    snapshot(&Root::open(repo)?, interrupted)
+    Ok(snapshot(&Root::open(repo)?, interrupted, false)?.map(|state| state.raw))
+}
+pub(super) struct RegistrySnapshot {
+    pub raw: Vec<u8>,
+    pub resources: Option<resources::Summary>,
+}
+pub(super) fn read_resource_snapshot(
+    repo: &Path,
+    interrupted: &AtomicBool,
+) -> std::result::Result<Option<RegistrySnapshot>, StoreError> {
+    snapshot(&Root::open(repo)?, interrupted, true)
 }
 fn snapshot(
     root: &Root,
     interrupted: &AtomicBool,
-) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+    inspect_legacy_resources: bool,
+) -> std::result::Result<Option<RegistrySnapshot>, StoreError> {
     cancelled(interrupted)?;
     let path = root.physical_root().join(REGISTRY);
     super::paths::validate(root, &path, false)?;
@@ -275,10 +286,16 @@ fn snapshot(
     };
     cancelled(interrupted)?;
     super::paths::validate(root, &path, false)?;
-    validate_registry(&bytes)?;
-    Ok(Some(bytes))
+    let resources = validate_registry(&bytes, inspect_legacy_resources)?;
+    Ok(Some(RegistrySnapshot {
+        raw: bytes,
+        resources,
+    }))
 }
-fn validate_registry(body: &[u8]) -> std::result::Result<(), StoreError> {
+fn validate_registry(
+    body: &[u8],
+    inspect_legacy_resources: bool,
+) -> std::result::Result<Option<resources::Summary>, StoreError> {
     if body.len() > MAX_REGISTRY {
         return Err(StoreError::Invalid("dispatch registry exceeds byte limit"));
     }
@@ -290,12 +307,18 @@ fn validate_registry(body: &[u8]) -> std::result::Result<(), StoreError> {
             "unsupported dispatch registry schema or calls",
         ));
     }
-    if has_schema(&value, "2") || super::resources::has_contract(&value) {
-        let registry = crate::value::parse(body, true)
-            .map_err(|_| StoreError::Invalid("invalid resource registry"))?;
-        super::resources::validate(&registry)?;
+    let has_resources = has_schema(&value, "2") || resources::has_contract(&value);
+    if has_resources || inspect_legacy_resources {
+        let registry = crate::value::parse(body, true).map_err(|_| {
+            StoreError::Invalid(if has_resources {
+                "invalid resource registry"
+            } else {
+                "invalid resource JSON"
+            })
+        })?;
+        return resources::validate(&registry);
     }
-    Ok(())
+    Ok(None)
 }
 fn has_schema(value: &Value, schema: &str) -> bool {
     value

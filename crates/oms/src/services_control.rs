@@ -378,6 +378,20 @@ impl<'a> ControlServices<'a> {
 }
 
 impl oms_command_plan::Services for ControlServices<'_> {
+    fn team_withdrawn(
+        &self,
+        context: &oms_command_plan::Context,
+        team_id: &str,
+        spec_sha256: &str,
+    ) -> oms_command_plan::Result<Option<oms_command_plan::json::Value>> {
+        crate::services_runtime::resources::team_withdrawn(
+            context,
+            team_id,
+            spec_sha256,
+            self,
+            self.interrupted,
+        )
+    }
     fn lifecycle_writer_before(
         &self,
         repo: &Path,

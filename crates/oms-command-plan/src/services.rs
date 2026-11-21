@@ -74,6 +74,17 @@ pub struct GroupMembership {
 pub type GroupResolver = fn(u32) -> Result<GroupMembership>;
 
 pub trait Services {
+    /// Called after the canonical Team withdrawal has published and its writers
+    /// have dropped. The native producer may retire independently drained
+    /// custody; this is never a claim that the member processes were cancelled.
+    fn team_withdrawn(
+        &self,
+        _context: &crate::Context,
+        _team_id: &str,
+        _spec_sha256: &str,
+    ) -> Result<Option<Value>> {
+        Ok(None)
+    }
     /// Verified shared state root for a managed scratch worktree of `repo`
     /// (the `oms_state_root` contract). `None` keeps the repository's own root.
     /// Consulted only when `OMS_STATE_REPO` is unset; never inferred here.

@@ -289,12 +289,16 @@ Inactive historical claims retain their original policy and host bindings.
 Unknown usage remains a liability and is never reset or refunded by an epoch
 transition. Unsupported versions refuse; resource schema 1 remains readable.
 
-The native runtime exposes policy `host`, `status`, explicit `activate --policy`
-and exact-policy `hold` through `oms runtime resources`; see the
+The native runtime exposes policy `host`, `status`, explicit `activate --policy`,
+exact-policy `hold`, live-owner `discard-write`/`retire-team`, and held/drained
+`reconcile` through `oms runtime resources`; see the
 [resource CLI contract](../oms-runtime/README.md). The native Peer/Main factory
 qualifies canonical Root/Team bindings around physical registration; unsupported
-Team capability/resource/budget requests refuse. Producer-validated retirement
-and epoch consumers remain separate work.
+Team capability/resource/budget requests refuse. Team withdrawal and explicit
+candidate disposition use canonical producer guards before/after the checked
+retirement APIs; their callbacks check only pinned guards under dispatch. Team
+withdrawal never supplies an OS cleanup proof. Epoch reconciliation preserves
+unknown usage liabilities and requires independently drained custody.
 Unknown native descendants, provider-account capacity and cross-host global hard
 bounds are unsupported. Calls without a qualifying native owner refuse in an
 active domain. The existing usage fixture covers mixed-call concurrency, partial writes,

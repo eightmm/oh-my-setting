@@ -531,7 +531,7 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"}
-   ],"children":[{"name":"host","help":"read the actual kernel boot generation hash"},{"name":"status","help":"read the selected state repository's policy and independent custody"},{"name":"activate","help":"activate an explicit policy before Main starts; preserve prior history"},{"name":"hold","help":"block new admission while preserving custody and settlement"}],"groups":[]},
+   ],"children":[{"name":"host","help":"read the actual kernel boot generation hash"},{"name":"status","help":"read the selected state repository's policy and independent custody"},{"name":"activate","help":"activate an explicit policy before Main starts; preserve prior history"},{"name":"hold","help":"block new admission while preserving custody and settlement"},{"name":"reconcile","help":"resume a fully drained held domain with an exact new epoch"},{"name":"retire-team","help":"release an exact closed Team generation after all custody ends"},{"name":"discard-write","help":"retire write WIP after cleanup while preserving candidate artifacts"}],"groups":[]},
   {"path":["resources", "host"],"description":"Read-only boot generation identity; no policy or provider starts.",
    "arguments":[
     {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
@@ -557,6 +557,33 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
     {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
     {"names":["--expected-policy-sha256"],"required":true,"help":"exact policy digest from status; stale or changed policies refuse"}
+   ],"children":[],"groups":[]},
+  {"path":["resources", "reconcile"],"description":"Parent-only resume with an exact held and fully drained snapshot; history and usage remain.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
+    {"names":["--policy"],"required":true,"help":"owned next policy with a fresh epoch"},
+    {"names":["--expected-snapshot-sha256"],"required":true,"help":"exact dispatch snapshot digest from status"},
+    {"names":["--reason"],"required":true,"help":"bounded reason for the new epoch"}
+   ],"children":[],"groups":[]},
+  {"path":["resources", "retire-team"],"description":"Live canonical Main retires a withdrawn or superseded Team only after all execution and candidate custody ends.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
+    {"names":["--team-id"],"required":true,"help":"canonical Team id"},
+    {"names":["--team-spec-sha256"],"required":true,"help":"exact withdrawn or superseded Team specification digest"},
+    {"names":["--expected-revision"],"required":true,"help":"exact resource Team revision from status"}
+   ],"children":[],"groups":[]},
+  {"path":["resources", "discard-write"],"description":"Live canonical Main explicitly discards a stopped write candidate from WIP; files and receipts are preserved.",
+   "arguments":[
+    {"names":["-h","--help"],"action":"help","help":"show this help message and exit"},
+    {"names":["--repo"],"default":"SUPPRESS","help":"project repository or directory"},
+    {"names":["--pretty"],"action":"store_true","default":"SUPPRESS","help":"pretty-print JSON"},
+    {"names":["--operation-id"],"required":true,"help":"exact physical write operation"},
+    {"names":["--expected-revision"],"required":true,"help":"exact write revision from status"},
+    {"names":["--reason"],"required":true,"help":"bounded reason for discarding this candidate"}
    ],"children":[],"groups":[]},
   {"path":["doctor"],"description":"",
    "arguments":[

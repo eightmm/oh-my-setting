@@ -190,6 +190,17 @@ impl AdmissionGuard<'_, '_> {
                 .unwrap_or(error)
         })
     }
+    /// Checks retained producer ownership without acquiring a lock, reading a
+    /// foreign producer, or launching Git. Use only between full checks while a
+    /// later dispatch writer is held; it is not an admission check by itself.
+    pub fn check_pinned(&self) -> Result<()> {
+        admission_before(self.plan, self.deadline)?;
+        for lock in &self.locks {
+            lock.check().map_err(|e| error(e.to_string()))?;
+        }
+        self.lifecycle.check()?;
+        admission_before(self.plan, self.deadline)
+    }
     fn check_current(&self) -> Result<()> {
         admission_before(self.plan, self.deadline)?;
         for lock in &self.locks {
@@ -215,8 +226,9 @@ impl AdmissionGuard<'_, '_> {
     fn current(&self) -> Result<Value> {
         self.current_plan().map(|(_, binding)| binding)
     }
-    /// Reuses the same bounded read set for a writer under this guard.
-    pub(crate) fn writer_before(&self) -> Result<Plan<'_>> {
+    /// Reuses the same bounded read set under this guard. Native decision
+    /// producers use it before taking later dispatch/usage writers.
+    pub fn writer_before(&self) -> Result<Plan<'_>> {
         let (plan, binding) = self.current_plan()?;
         require(binding == self.binding, "Team writer binding changed")?;
         Ok(plan)

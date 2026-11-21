@@ -109,8 +109,27 @@ pub struct RelatedSource {
 pub enum ResourceAction {
     Host,
     Status,
-    Activate { policy: PathBuf },
-    Hold { expected_policy_sha256: String },
+    Activate {
+        policy: PathBuf,
+    },
+    Hold {
+        expected_policy_sha256: String,
+    },
+    Reconcile {
+        policy: PathBuf,
+        expected_snapshot_sha256: String,
+        reason: String,
+    },
+    RetireTeam {
+        team_id: String,
+        spec_sha256: String,
+        expected_revision: u64,
+    },
+    DiscardWrite {
+        operation_id: String,
+        expected_revision: u64,
+        reason: String,
+    },
 }
 
 pub trait Services {
