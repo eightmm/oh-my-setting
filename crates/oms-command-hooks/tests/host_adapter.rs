@@ -2112,3 +2112,40 @@ fn intake_reminder_is_stateless_and_limited_to_real_requests() {
     assert!(pre_out.contains("[oms intake]"), "{pre_out}");
     assert!(!repo.join(".oms").exists(), "unadopted repo gains no state");
 }
+
+#[test]
+fn command_guard_audit_reports_rules_timestamps_and_the_legacy_footer() {
+    let name = "command_guard_audit_reports_rules_timestamps_and_the_legacy_footer";
+    let state = std::env::temp_dir().join(format!("oms-hooks-audit-{}", std::process::id()));
+    if !clean_env_child(name, &[("XDG_STATE_HOME", &state.to_string_lossy())]) {
+        let _ = fs::remove_dir_all(&state);
+        return;
+    }
+    // The child's XDG_STATE_HOME is a private path, so the user's real audit log is never read.
+    let state = PathBuf::from(std::env::var_os("XDG_STATE_HOME").expect("state home"));
+    let dir = state.join("oh-my-setting");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let rows = concat!(
+        r#"{"ts":"2026-11-23T11:00:00Z","verdict":"refused","rule":"git-clean","command":"git","sha256":"abcdef"}"#,
+        "\n",
+        r#"{"ts":"2026-11-23T10:00:00Z","verdict":"noted","rule":"transfer","command":"scp","sha256":"012345"}"#,
+        "\n"
+    );
+    fs::write(dir.join("command-guard.jsonl"), rows).unwrap();
+    let tmp = TempDir::new("audit");
+    let (code, out, _) = hook(&tmp, "command-guard-hook", &["--audit"], b"");
+    let _ = fs::remove_dir_all(&state);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("command guard: newest 2 row(s): 1 refused, 0 bypassed"));
+    assert!(
+        out.contains("refused   git-clean") && out.contains("transfer"),
+        "{out}"
+    );
+    assert!(out.contains("2026-11-23T11:00:00Z"), "{out}");
+    assert!(
+        out.ends_with("rows carry no command text; any process of this user can edit the file, so read it as a record, not proof\n"),
+        "{out}"
+    );
+}

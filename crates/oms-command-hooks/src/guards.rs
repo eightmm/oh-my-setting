@@ -511,7 +511,7 @@ fn audit(args: &[OsString]) -> Output {
             word(row, "sha256", 12)
         ));
     }
-    output.push_str("rows are counted by verdict category only, with no rule, command text or timestamps; any process of this user can edit the file, so read it as a record, not proof\n");
+    output.push_str("rows carry no command text; any process of this user can edit the file, so read it as a record, not proof\n");
     out(output)
 }
 fn record(found: &Verdict, command: &str, sid: &str, bypass: bool) -> usize {
