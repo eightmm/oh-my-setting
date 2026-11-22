@@ -52,13 +52,13 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 
 | 순위 | 공백 | 가진 도구 | OMS 현황 | 확인 | 관계 | 진행 | 다음 PR 단위 |
 |---|---|---|---|---|---|---|---|
-| 1 | Main의 직접 저장소 수정을 runtime이 거절 | Claude Code PreToolUse 차단, Codex read-only sandbox | [Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)는 프롬프트·스킬 계약 | 소스 | 정합 | [#337](https://github.com/eightmm/oh-my-setting/pull/337): Claude Code edit 도구 | ① Bash를 통한 쓰기 판정 ② Codex·AGY Main(상태 기록은 허용하는 제한 기동) ③ Room에 기록되는 1회 예외 |
+| 1 | Main의 직접 저장소 수정을 runtime이 거절 | Claude Code PreToolUse 차단, Codex read-only sandbox | [Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)는 프롬프트·스킬 계약. 원 순위 1/현재 순위 1의 검증된 소스 범위(`f51bdab5`): Claude native 파일 도구 4종(`Edit`·`Write`·`MultiEdit`·`NotebookEdit`)만 판정하는 PreToolUse guard가 있다. 관리되는 worker와 Lead(delegated child)는 허용하고 panel Main은 거절한다. 그 밖의 하네스 강제(Bash 쓰기, Codex·AGY Main)는 여전히 남아 있다. 이 소스가 설치되었다는 주장은 아니다. | 소스 | 정합 | [#337](https://github.com/eightmm/oh-my-setting/pull/337): Claude Code edit 도구 | ① Bash를 통한 쓰기 판정 ② Codex·AGY Main(상태 기록은 허용하는 제한 기동) ③ Room에 기록되는 1회 예외 |
 | 2 | Native 배정·결과 bridge와 공통 task card | Claude Code agent teams의 공유 task list, Gas Town Beads | Plan에 `depends`·`ready`·claim·lease가 있음. 설치본에는 Codex lead 한정 opt-in 바인딩이 있어 claim·lease·Room 메시지·전송 intent(`native_intent_sha256`)를 묶음(`7ace15b7`, `native_assignment.rs`). 아직 없는 것은 provider 소비·결과의 인증된 durable 연결, Claude·AGY lead, 결과→verifier evidence 수락이다. 전송 receipt는 소비·완료 증거가 아니다. 기존 Room ack 신원은 호출자가 넘긴 값이라 인증된 provider 소비 증거는 신뢰할 수 있는 출처를 기다린다. | 소스 | 정합(새 task DB는 비범위) | 최근 main의 native Lead 작업 | P0-B 나머지: 인증된 소비·결과 기록과 다른 provider |
 | 3 | 배치 land 후보와 실패 시 bisect | Gas Town Refinery, Graphite 배치 | land는 저장소의 Git 공통 디렉터리 하나당 `active` 잠금으로 직렬(`delivery.rs`) | 소스 | 조건부(GitHub merge queue 의존과 보호 규칙 우회는 비범위) | | ① 수락된 후보 N개를 한 통합 후보로 합쳐 한 번 검증 ② 실패 시 절반씩 나눠 원인만 보류 |
-| 4 | land의 CI 대기 시간 | merge queue 계열의 병렬 CI | 전체 run이 성공해야 설치 증거가 됨. 2026-11-22 full run 한 건: Ubuntu job 5–8분, macOS job은 runner 대기 약 16분 뒤 8–13분, 합계 32분 | 소스(workflow, land CI 판정, 실측 1건) | 정합(CI와 설치 증거 요구는 유지) | #327(macOS 간헐 실패) | ① macOS 대기를 여러 run에서 계측 ② macOS 증거를 land가 기다리는 방식 결정. focused 분할은 병목이 아님 |
+| 4 | land의 CI 대기 시간 | merge queue 계열의 병렬 CI | 전체 run이 성공해야 설치 증거가 됨. 2026-11-22 full run 한 건: Ubuntu job 5–8분, macOS job은 runner 대기 약 16분 뒤 8–13분, 합계 32분. 원 순위 4의 검증된 소스 범위: 기존 pre-push hook의 정확한 legacy 형태를 이전하며 전체 native code gate는 보존된다. | 소스(workflow, land CI 판정, 실측 1건) | 정합(CI와 설치 증거 요구는 유지) | #327(macOS 간헐 실패) | ① macOS 대기를 여러 run에서 계측 ② macOS 증거를 land가 기다리는 방식 결정. focused 분할은 병목이 아님 |
 | 5 | Room 메시지를 MCP로 노출 | Claude Code agent teams mailbox | Room 읽기·게시·ack는 MCP `oms_peer_start`/`oms_peer_result`의 `room` 경로로 열려 있음(`oms-mcp-server/src/peer.rs`: updates·send·ack, 기존 방·joined participant 검사). `participant`가 호출자가 낸 문자열이라 호출자와 participant의 정확한 일치(exact participant authority)를 강제하지 않는다. | 소스 | 조건부(AH-09의 named workflow로 한정) | #313 | 호출자 신원에 묶인 participant 권한 검사 |
 | 6 | OMS 측 하드 예산 집행 | 확실한 선례 없음 | campaign은 호출·usage 예산 admission이 있고 provider별 call cap과 `total_calls`를 넘으면 중단함(`COMPONENTS.md` campaign 절, `c5fc7627`). Team admission에는 hard cap이 없다. Team view는 `native_global_hard_cap: unsupported`로 표시한다(`teams.rs`). provider 지출 상한도 아니다. | 소스 | 조건부(provider 지출 상한으로 표현하지 않음) | | 상한 초과 시 Team·전역 새 위임을 거절하는 opt-in 정책(campaign admission 재사용) |
-| 7 | 호출별 token 사용량을 Board에 표시 | — | 호출별 detail이 있다: Board 호출 상세(`render.rs` `call_detail_meta`)와 native Codex child의 응답별 in/out/cache/reasoning 표시(`native_children.rs`). Board 호출 상세는 기존 범용 포매터로 선택한 호출의 `Rsn`을 이미 표시하며 `f21a8501`은 그 표시 테스트를 더했다(`render.rs`). 같은 main 변경(`f21a8501`·`713bb3eb`, 설치 기준 `f3296931` 이후)의 새 조각은 AGY headless 호출이 보고한 `thinking_tokens`만 선택적 reasoning 증거로 따로 보관하고 합계는 바꾸지 않는 것이다(`usage.rs`, `telemetry/store/usage.rs`, `metrics.rs`). 다른 provider·native child의 reasoning 범위는 이 변경이 넓히지 않는다. 이슈 #279는 열려 있다. Room·attempt·provider·account 신원 연속성, Claude·AGY native child의 version-matched counter, Board 표시 확인이 아직 남았다. 이 두 커밋의 설치 성공은 정확한 Land 증거가 따로 보여 주며 이 문서는 주장하지 않는다. | 소스(이슈) | 정합 | #279 | 이슈의 acceptance 중 남은 것 |
+| 7 | 호출별 token 사용량을 Board에 표시 | — | 호출별 detail이 있다: Board 호출 상세(`render.rs` `call_detail_meta`)와 native Codex child의 응답별 in/out/cache/reasoning 표시(`native_children.rs`). Board 호출 상세는 기존 범용 포매터로 선택한 호출의 `Rsn`을 표시하며, 정확한 AGY headless reasoning 값도 이 표시로 보인다(`f21a8501`의 `render.rs` 테스트). 같은 main 변경(`f21a8501`·`713bb3eb`, 설치 기준 `f3296931` 이후)의 새 조각은 AGY headless 호출이 보고한 `thinking_tokens`만 선택적 reasoning 증거로 따로 보관하고 합계는 바꾸지 않는 것이다(`usage.rs`, `telemetry/store/usage.rs`, `metrics.rs`). 다른 provider·native child의 reasoning 범위는 이 변경이 넓히지 않는다. 이슈 #279는 열려 있다. Room·attempt·provider·account 신원 연속성, Claude·AGY native child의 version-matched counter 등 native provider 증거 공백이 아직 남았다. 이 두 커밋의 설치 성공은 정확한 Land 증거가 따로 보여 주며 이 문서는 주장하지 않는다. | 소스(이슈) | 정합 | #279 | 이슈의 acceptance 중 남은 것 |
 
 ### A: 하네스 범위와 복구 (8–18)
 
@@ -66,7 +66,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 |---|---|---|---|---|---|---|---|
 | 8 | Worker sandbox 기본 적용과 네트워크 정책 | Codex 커널 sandbox | `oms-supervisor` `sandbox.rs`에 Linux `bwrap --unshare-net`·macOS `sandbox-exec (deny network*)` 래퍼와 테스트(`sandbox.rs`, `providers.rs`)가 있음. 다만 `providers.rs`가 `OMS_WORKER_SANDBOX`를 opt-in으로만 읽고 `Auto`에서 `codex`를 건너뛰며 `allow_network: true`를 고정함. | 소스 | 조건부(AH-06 별도 승인; 기본값·네트워크 정책 변경) | #313 | hook이 없는 transport부터 opt-in 네트워크 차단과 기본값 승인 |
 | 9 | native child 역할의 실효 권한 검증 | — | `agent-role` 정적 렌더링·`surface`(`native.rs`, `render.rs`, `tests/native.rs`), `doctor.rs` 설정 감사(`effective: unknown` 표시), `18920ced`의 `provider-capabilities.json` `tool_guard` 한계 명시(Codex `hooks.json`에 `PreToolUse` 없음; fixture는 기록된 파일만 검증)가 있음. provider·계정별 native child 실효 권한 검증 fixture와 enforced/advisory 구분 보고는 아직 없음. | 소스(이슈) | 정합 | #277 | provider·계정별 read-only 실효 권한 fixture와 surface 구분 보고 |
-| 10 | 결정적 정체 감지와 attention 승격 | Gas Town Problems 뷰 | `fail-ledger --stalls`(`failures.rs` `error-repeat`), `open-failures` inbox attention(`state_projection.rs`), 미연결 `advisory::detect_stalls`(`advisory.rs`), 패널 `attention.rs`의 terminal `held` 전용 `stale`이 있음. 활성 무출력·반복 실패 worker를 Main attention으로 결정적 승격하는 경로는 미연결. | 소스 | 조건부(AI 감독 계층·자동 kill은 [비범위](CONTROL-PLANE-EVOLUTION.md#7-착수하지-않을-작업), advisory 전용) | | LLM 없이 무출력·반복 실패 판정 → advisory attention 승격 |
+| 10 | 결정적 정체 감지와 attention 승격 | Gas Town Problems 뷰 | `fail-ledger --stalls`(`failures.rs` `error-repeat`), `open-failures` inbox attention(`state_projection.rs`), 미연결 `advisory::detect_stalls`(`advisory.rs`), 패널 `attention.rs`의 terminal `held` 전용 `stale`이 있음. 활성 무출력·반복 실패 worker를 Main attention으로 결정적 승격하는 경로는 미연결. 원 순위 9/현재 순위 10의 검증된 소스 범위: Inbox와 Dashboard가 최근 실패 횟수를 정확히 표시한다. 일반 교번·순환 감지는 남아 있다. | 소스 | 조건부(AI 감독 계층·자동 kill은 [비범위](CONTROL-PLANE-EVOLUTION.md#7-착수하지-않을-작업), advisory 전용) | | LLM 없이 무출력·반복 실패 판정 → advisory attention 승격 |
 | 11 | turn 단위 되돌리기 | Claude Code `/rewind` | 수동 `oms checkpoint create/list/verify/restore`(`checkpoint.rs`, `--apply` 전 `auto-backup-before-{id}` 필수, `landing_contract.rs` 검증)가 있음. `session restore files`는 소유권 미연결로 거절(`session.rs`)하며 worker turn별 자동 ref·복원은 없음. | 소스 | 정합 | | attempt의 turn별 가벼운 ref와 소유권 검증 복원 |
 | 12 | 충돌에서 integrator 배정까지 자동 연결 | Refinery, Graphite 자동 rebase | `oms land conflicts`(`delivery.rs` `git merge-tree --write-tree`, 단 `landing_contract.rs`에 직접 테스트 없음)와 `integrator` 역할(`roles/integrator.md`, `role-contracts.json`)이 있음. 충돌 결과를 `integrator` 작업 제안으로 구조화·연결하는 경로와 `land conflicts` 직접 테스트가 없음. | 소스 | 정합(제안만, 자동 배정·병합 금지) | | land conflicts의 integrator 작업 제안 출력과 landing_contract.rs fixture |
 | 13 | ACP client | ACP 지원 에디터·에이전트 | `crates/`에 구현 없음, 설계만([research follow-ups](RESEARCH-FOLLOWUPS.md) RF-02; [feature scope](FEATURE-SCOPE.md) 보류). RF-01 duplex supervisor와 기존 CLI transport로 못 푸는 named workflow가 선행 필요. | 소스 | 조건부 | #313(AH-04) | RF-01·named workflow 확정 뒤 선택형 transport |
@@ -93,7 +93,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 29 | usage ledger 증분 저장 | 전체 history를 다시 씀 | 소스 | 조건부(계측 먼저) | 계측 → compaction |
 | 30 | 작업별 dev server 미리보기 | 없음 | 소스 | 조건부 | worktree별 포트 |
 | 31 | CI 안에서 에이전트를 실행하는 template | 프로젝트용 CI template만 | 소스 | 조건부(CI는 작게) | 명시적 trigger template |
-| 32 | 기간별 감사 요약 | command guard audit, attempt bundle | 소스 | 조건부 | 요약 명령 |
+| 32 | 기간별 감사 요약 | command guard audit, attempt bundle. 원 순위 48/현재 순위 32의 검증된 소스 범위: 기간이 제한된 verdict 전용 시간 감사가 있다 | 소스 | 조건부 | 요약 명령 |
 
 ## 범위 결정이 먼저인 것
 
@@ -183,7 +183,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 45 | Codex Lead 긴 배정 가시성 | 이미 있음(#322) |
 | 46 | Room 헤더와 주간 사용량 | 이미 있음(#274) |
 | 47 | CI 안에서 에이전트 실행 template | 순위 31 |
-| 48 | 감사 보고서 export | 순위 32 |
+| 48 | 감사 보고서 export | 순위 32(검증된 소스 범위: 기간이 제한된 verdict 전용 시간 감사가 있다. 전체 보고서 export는 아니다) |
 | 49 | 팀·다중 사용자 설정과 RBAC | 범위 결정이 먼저(1인 로컬 전제) |
 | 50 | native Windows | 범위 결정이 먼저(지원 종료) |
 

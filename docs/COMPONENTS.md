@@ -2932,11 +2932,13 @@ spawned directly by a Claude panel Main inherit Main's environment without those
 markers and are likewise refused. A brief for `--brief-file` is an outside file:
 Main writes it to session scratch or `TMPDIR`, not into the checkout.
 
-It is a seatbelt, not a sandbox. It reads the edit tool's target path only: a
-change made through Bash is not judged, and a payload it cannot parse passes
-with one stderr line. Shell access stays governed by the provider's own shell
-permissions. Coverage is Claude Code only, as for the command guard;
-a Codex or Antigravity Main still relies on its startup contract.
+The guard judges the edit tool's target path. It covers files in the managed
+repository and in its linked worktrees, and it also covers submodules inside
+them. When the tool payload cannot be parsed, the call passes and the guard
+prints one stderr diagnostic line. Changes made through Bash are not judged
+by this guard. Shell access stays governed by the provider's own shell
+permissions. The guard runs under Claude Code only, as the command guard
+does. A Codex or Antigravity Main relies on its startup contract.
 
 The switch belongs to the person: `OMS_MAIN_WRITE_GUARD=0` in the environment
 `oms panel` was started from turns the guard off for that Main. When the user
