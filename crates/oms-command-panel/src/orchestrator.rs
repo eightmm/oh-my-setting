@@ -450,7 +450,7 @@ pub(crate) struct ObservationGeneration {
     claude_quota_mark: Option<String>,
     main_account_ready: Option<bool>,
     main_account: Option<ObservationAccount>,
-    lead_accounts: [Option<ObservationAccount>; 2],
+    lead_accounts: [Option<ObservationAccount>; 3],
 }
 
 #[derive(PartialEq, Eq)]
@@ -892,7 +892,11 @@ impl<'a> Panel<'a> {
             Some((pane, identity)) => account("orchestrator", provider, pane, identity),
             None => Ok(None),
         };
-        let lead_accounts = [lead_account("codex")?, lead_account("claude")?];
+        let lead_accounts = [
+            lead_account("codex")?,
+            lead_account("claude")?,
+            lead_account("antigravity")?,
+        ];
         Ok(ObservationGeneration {
             session: self.session_proof.clone(),
             main,
@@ -966,6 +970,7 @@ impl<'a> Panel<'a> {
         if let Some(fields) = report.as_object_mut() {
             fields.remove("claude_local_weekly");
             fields.remove("codex_weekly_account");
+            fields.remove("agy_footer_weekly");
         }
         let mut children = Vec::new();
         let mut bound_codex = None;
@@ -1031,6 +1036,25 @@ impl<'a> Panel<'a> {
                             *activity = json!({"state":"working"});
                         }
                         activity["children"] = json!(children);
+                    }
+                    let report_current = !self.stop.load(Ordering::Acquire)
+                        && report["capacity_stale"] != true
+                        && report
+                            .get("collection")
+                            .is_none_or(|c| c["ok"] == true && c["pending"] != true);
+                    let same_account = report_current
+                        && self.binding_with_birth(
+                            "orchestrator",
+                            "antigravity",
+                            pane,
+                            &sample.identity.birth,
+                            host,
+                        ) == binding;
+                    if same_account
+                        && let Some(remaining) =
+                            crate::provider_activity::agy_footer_weekly(&screen)
+                    {
+                        report["agy_footer_weekly"] = json!({"remaining": remaining});
                     }
                 }
                 let model = (provider == "codex")
@@ -7395,6 +7419,163 @@ mod tests {
                 [["tmux", "send-keys", "-t", "%4", "Escape"]]
             );
             assert_eq!(*spy.room_queries.borrow(), [true]);
+        }
+
+        #[test]
+        fn agy_footer_weekly_requires_owned_process_and_preserves_usage() {
+            let tmp = TempDir::new("agy-footer-weekly");
+            let repo = private_dir(&tmp.0.join("repo"));
+            let spy = SpyPanel::new(repo.clone());
+            spy.leads.borrow_mut().push(FakeLead {
+                window: "@4".into(),
+                pane_id: "%4".into(),
+                pid: 2001,
+                active: false,
+                provider: "antigravity".into(),
+            });
+            let mut host = FakeHost::new(private_dir(&tmp.0.join("state")));
+            host.owners.insert(
+                2001,
+                Owner {
+                    pid: 2001,
+                    uid: host.uid,
+                    birth: "agy-birth-1".into(),
+                },
+            );
+            let panel = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
+            let mut readings = Observations::default();
+            let rule = "────────────────────────";
+            let footer_screen = |weekly: &str| {
+                format!(
+                    "prior\n{rule}\n>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | {weekly} | main\n"
+                )
+            };
+            let sample =
+                |screen: &str, report: &mut Value, readings: &mut Observations, h: &FakeHost| {
+                    spy.screens.borrow_mut().insert("%4".into(), screen.into());
+                    panel.observe_with_host(readings, report, false, h);
+                };
+
+            // Owned live AGY pane with intact OMS footer projects agy_footer_weekly only.
+            let mut report = json!({"collection": {"ok": true}});
+            sample(
+                &footer_screen("Gemini weekly 99% left"),
+                &mut report,
+                &mut readings,
+                &host,
+            );
+            assert_eq!(report["agy_footer_weekly"], json!({"remaining": "99%"}));
+            assert!(
+                report["provider_status"]["antigravity"]
+                    .get("weekly_used")
+                    .is_none()
+            );
+
+            // Bounded <1% and >99% survive intact without becoming weekly_used.
+            for expected in ["<1%", ">99%"] {
+                let mut bounded = json!({"collection": {"ok": true}});
+                sample(
+                    &footer_screen(&format!("Gemini weekly {expected} left")),
+                    &mut bounded,
+                    &mut readings,
+                    &host,
+                );
+                assert_eq!(bounded["agy_footer_weekly"], json!({"remaining": expected}));
+                assert!(
+                    bounded["provider_status"]["antigravity"]
+                        .get("weekly_used")
+                        .is_none()
+                );
+            }
+
+            // Holds, pending, failed collection, and nonfinal/malformed footers clear display.
+            for held in [
+                json!({"collection": {"ok": true, "pending": true}, "agy_footer_weekly": {"remaining": "99%"}}),
+                json!({"collection": {"ok": false}, "agy_footer_weekly": {"remaining": "99%"}}),
+                json!({"collection": {"ok": true}, "capacity_stale": true, "agy_footer_weekly": {"remaining": "99%"}}),
+            ] {
+                let mut held = held;
+                sample(
+                    &footer_screen("Gemini weekly 99% left"),
+                    &mut held,
+                    &mut readings,
+                    &host,
+                );
+                assert!(held.get("agy_footer_weekly").is_none());
+            }
+            let mut bad_footer =
+                json!({"collection": {"ok": true}, "agy_footer_weekly": {"remaining": "99%"}});
+            sample(
+                &format!("{}trailing\n", footer_screen("Gemini weekly 99% left")),
+                &mut bad_footer,
+                &mut readings,
+                &host,
+            );
+            assert!(bad_footer.get("agy_footer_weekly").is_none());
+
+            // Unowned / foreign process clears agy_footer_weekly.
+            host.owners.insert(
+                2001,
+                Owner {
+                    pid: 2001,
+                    uid: host.uid + 1,
+                    birth: "1".into(),
+                },
+            );
+            let mut foreign =
+                json!({"collection": {"ok": true}, "agy_footer_weekly": {"remaining": "99%"}});
+            sample(
+                &footer_screen("Gemini weekly 99% left"),
+                &mut foreign,
+                &mut readings,
+                &host,
+            );
+            assert!(foreign.get("agy_footer_weekly").is_none());
+
+            // Restore ownership; verified /usage preserves its value and timestamp alongside footer.
+            host.owners.insert(
+                2001,
+                Owner {
+                    pid: 2001,
+                    uid: host.uid,
+                    birth: "agy-birth-1".into(),
+                },
+            );
+            let current_usage = AGY_QUOTA_VIEWPORT.replacen("100.00%", "94.62%", 1);
+            let mut usage_report = json!({"collection": {"ok": true}});
+            sample(&current_usage, &mut usage_report, &mut readings, &host);
+            let observed =
+                usage_report["provider_status"]["antigravity"]["weekly_native_observed_at"]
+                    .as_f64()
+                    .unwrap();
+            let mut both = json!({"collection": {"ok": true}});
+            sample(
+                &footer_screen("Gemini weekly 99% left"),
+                &mut both,
+                &mut readings,
+                &host,
+            );
+            assert_eq!(
+                both["provider_status"]["antigravity"]["weekly_native_observed_at"],
+                json!(observed)
+            );
+            assert!(
+                (both["provider_status"]["antigravity"]["weekly_used"]
+                    .as_f64()
+                    .unwrap()
+                    - 5.38)
+                    .abs()
+                    < 0.001
+            );
+            assert_eq!(both["agy_footer_weekly"], json!({"remaining": "99%"}));
+            assert!(
+                crate::render::weekly_usage_detail(&both, observed)
+                    .contains("Source AGY Gemini quota · Reset unreported")
+            );
+            assert!(
+                crate::render::weekly_usage_detail(&both, observed + 601.0)
+                    .contains("Source AGY native footer · Age unknown · Reset unknown")
+            );
         }
 
         #[test]

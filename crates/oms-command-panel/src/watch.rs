@@ -1591,7 +1591,7 @@ pub(crate) struct NativeReading {
     agy: Option<AgyDockCheck>,
 }
 
-const NATIVE_FIELDS: [&str; 10] = [
+const NATIVE_FIELDS: [&str; 11] = [
     "native_children",
     "native_dock",
     "provider_sessions",
@@ -1601,6 +1601,7 @@ const NATIVE_FIELDS: [&str; 10] = [
     "provider_status",
     "claude_local_weekly",
     "codex_weekly_account",
+    "agy_footer_weekly",
     "main_model_observation",
 ];
 type NativeProjection = [Option<Value>; NATIVE_FIELDS.len()];
@@ -1704,6 +1705,7 @@ fn clear_private_weekly(report: &mut Value) {
     if let Some(fields) = report.as_object_mut() {
         fields.remove("claude_local_weekly");
         fields.remove("codex_weekly_account");
+        fields.remove("agy_footer_weekly");
     }
 }
 
@@ -4458,6 +4460,7 @@ mod tests {
             json!({"codex":{"account":"acct-b","pinned":false,"verification":"verified"}});
         previous["claude_local_weekly"] = json!({"weekly_used":14});
         previous["codex_weekly_account"] = json!("acct-b");
+        previous["agy_footer_weekly"] = json!({"remaining":"99%"});
 
         let pending_snap = Snapshot {
             status: 0,
@@ -4485,6 +4488,7 @@ mod tests {
         ] {
             assert!(report.get("claude_local_weekly").is_none());
             assert!(report.get("codex_weekly_account").is_none());
+            assert!(report.get("agy_footer_weekly").is_none());
             assert_eq!(report["provider_status"]["codex"]["weekly_used"], 14);
             assert_eq!(report["provider_accounts"]["codex"]["account"], "acct-b");
         }
@@ -4505,6 +4509,7 @@ mod tests {
             "provider_accounts",
             "codex_weekly_account",
             "claude_local_weekly",
+            "agy_footer_weekly",
         ] {
             assert!(
                 contradicted.get(key).is_none(),

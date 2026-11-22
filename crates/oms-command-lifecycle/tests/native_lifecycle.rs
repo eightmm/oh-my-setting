@@ -1000,176 +1000,99 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     );
 }
 
-#[test]
-fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
-    let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
-        for case in [
-            "ok",
-            "edge",
-            "fallback",
-            "offline",
-            "release-edge",
-            "release-custom",
-            "release-stable",
-            "proof",
-            "verify",
-            "receipt",
-            "cleanup",
-            "crash",
-            "foreign",
-            "late-worker",
-            "prepared-locked-ref",
-            "apply-locked-ref",
-            "apply-locked-explicit",
-            "apply-locked-auto",
-            "apply-locked-verify",
-            "apply-locked-release",
-            "prepared-cutover-worker",
-            "prepared-live",
-            "prepared-stale",
-            "prepared-tamper",
-            "prepared-refresh",
-            "auto-refresh",
-            "prepared-cancel",
-            "prepared-bundle",
-            "prepared-crash",
-            "prepared-crash-install",
-            "prepared-crash-repair",
-        ] {
-            let root =
-                std::env::temp_dir().join(format!("oms-cold-update-{}-{case}", std::process::id()));
-            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-            let f = Fixture(fs::canonicalize(root).unwrap());
-            for name in ["bin", "home", "config", "data", "state", "cache", "locks"] {
-                fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(f.0.join(name))
-                    .unwrap();
-            }
-            for name in ["git", "mkdir", "cp", "chmod", "ps", "tar", "gzip"] {
-                let path = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-                    .map(|p| p.join(name))
-                    .find(|p| p.is_file())
-                    .unwrap();
-                symlink(fs::canonicalize(path).unwrap(), f.0.join("bin").join(name)).unwrap();
-            }
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "cold_update_prepares_incoming_and_rolls_back_owned_state",
-                    "--nocapture",
-                ])
-                .env_clear()
-                .env("PATH", f.0.join("bin"))
-                .env("HOME", f.0.join("home"))
-                .env("XDG_CONFIG_HOME", f.0.join("config"))
-                .env("XDG_DATA_HOME", f.0.join("data"))
-                .env("XDG_STATE_HOME", f.0.join("state"))
-                .env("XDG_CACHE_HOME", f.0.join("cache"))
-                .env("TMPDIR", &f.0)
-                .env("RUSTUP_TOOLCHAIN", "caller-toolchain")
-                .env("CARGO_HOME", f.0.join("cargo"))
-                .env("RUSTUP_HOME", f.0.join("rustup"))
-                .env("OMS_LOCK_DIR", f.0.join("locks"))
-                .env("OMS_LIFECYCLE_UPDATE_FIXTURE", &f.0)
-                .env("OMS_COLD_CASE", case)
-                .env(
-                    "OH_MY_SETTING_AUTO_UPDATE_STATE",
-                    f.0.join("auto-update.status"),
-                )
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null");
-            if case == "ok" {
-                command.env(
-                    "OMS_CAPABILITY_RECEIPT",
-                    f.0.join("selected capabilities.json"),
-                );
-            }
-            if case == "offline" {
-                command
-                    .env("CARGO_NET_OFFLINE", "true")
-                    .env("OH_MY_SETTING_REF", "reviewed-tag");
-            }
-            let out = command.output().unwrap();
-            if matches!(case, "crash" | "foreign") || case.starts_with("prepared-crash") {
-                assert_eq!(
-                    out.status.code(),
-                    Some(91),
-                    "{}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                let state = read(&f.0.join("fixture-state.json"));
-                let target = state["target"].as_str().unwrap();
-                let receipt = f.0.join("config/oh-my-setting/install.json");
-                assert_eq!(read(&receipt)["commit"], state["before"]);
-                assert_eq!(
-                    fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
-                    b"prior frontdoor"
-                );
-                assert!(!f.0.join("incoming").exists());
-                let journal = fs::read_to_string(f.0.join(if case.starts_with("prepared-crash") {
-                    "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
-                } else {
-                    "config/oh-my-setting/native-update/transaction.json"
-                }))
+fn run_cold_update_cases(cases: &[&str]) {
+    for &case in cases {
+        let root =
+            std::env::temp_dir().join(format!("oms-cold-update-{}-{case}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let f = Fixture(fs::canonicalize(root).unwrap());
+        for name in ["bin", "home", "config", "data", "state", "cache", "locks"] {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(f.0.join(name))
                 .unwrap();
-                assert!(!journal.contains(&format!("{}/incoming", f.0.display())));
-                let cache = f.0.join("source/target/oms-native").join(target);
-                assert!(cache.join("oms").is_file());
-                if case == "foreign" {
-                    fs::write(cache.join("oms"), b"foreign bytes").unwrap();
-                }
-                if case == "prepared-crash-repair" {
-                    let payload = fs::read(cache.join("oms")).unwrap();
-                    let prior = fs::read(&receipt).unwrap();
-                    let flow = fs::read(f.0.join("flow")).unwrap();
-                    let out = command
-                        .env("OMS_COLD_CASE", "repair-preview")
-                        .env("OH_MY_SETTING_DRY_RUN", "1")
-                        .output()
-                        .unwrap();
-                    assert!(
-                        out.status.success(),
-                        "{}\n{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    command.env_remove("OH_MY_SETTING_DRY_RUN");
-                    assert_eq!(
-                        fs::read_to_string(f.0.join(
-                            "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
-                        ))
-                        .unwrap(),
-                        journal
-                    );
-                    assert_eq!(fs::read(cache.join("oms")).unwrap(), payload);
-                    assert_eq!(fs::read(&receipt).unwrap(), prior);
-                    assert_eq!(fs::read(f.0.join("flow")).unwrap(), flow);
-                    assert_eq!(
-                        fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
-                        b"prior frontdoor"
-                    );
-                }
-                let out = command.env("OMS_COLD_CASE", "recover").output().unwrap();
-                assert!(
-                    out.status.success(),
-                    "{case}: {}\n{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                continue;
-            }
-            assert!(
-                out.status.success(),
-                "{case}: {}\n{}",
-                String::from_utf8_lossy(&out.stdout),
+        }
+        for name in ["git", "mkdir", "cp", "chmod", "ps", "tar", "gzip"] {
+            let path = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|p| p.join(name))
+                .find(|p| p.is_file())
+                .unwrap();
+            symlink(fs::canonicalize(path).unwrap(), f.0.join("bin").join(name)).unwrap();
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "cold_update_prepares_incoming_and_rolls_back_owned_state",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", f.0.join("bin"))
+            .env("HOME", f.0.join("home"))
+            .env("XDG_CONFIG_HOME", f.0.join("config"))
+            .env("XDG_DATA_HOME", f.0.join("data"))
+            .env("XDG_STATE_HOME", f.0.join("state"))
+            .env("XDG_CACHE_HOME", f.0.join("cache"))
+            .env("TMPDIR", &f.0)
+            .env("RUSTUP_TOOLCHAIN", "caller-toolchain")
+            .env("CARGO_HOME", f.0.join("cargo"))
+            .env("RUSTUP_HOME", f.0.join("rustup"))
+            .env("OMS_LOCK_DIR", f.0.join("locks"))
+            .env("OMS_LIFECYCLE_UPDATE_FIXTURE", &f.0)
+            .env("OMS_COLD_CASE", case)
+            .env(
+                "OH_MY_SETTING_AUTO_UPDATE_STATE",
+                f.0.join("auto-update.status"),
+            )
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        if case == "ok" {
+            command.env(
+                "OMS_CAPABILITY_RECEIPT",
+                f.0.join("selected capabilities.json"),
+            );
+        }
+        if case == "offline" {
+            command
+                .env("CARGO_NET_OFFLINE", "true")
+                .env("OH_MY_SETTING_REF", "reviewed-tag");
+        }
+        let out = command.output().unwrap();
+        if matches!(case, "crash" | "foreign") || case.starts_with("prepared-crash") {
+            assert_eq!(
+                out.status.code(),
+                Some(91),
+                "{}",
                 String::from_utf8_lossy(&out.stderr)
             );
-            if case == "release-edge" {
+            let state = read(&f.0.join("fixture-state.json"));
+            let target = state["target"].as_str().unwrap();
+            let receipt = f.0.join("config/oh-my-setting/install.json");
+            assert_eq!(read(&receipt)["commit"], state["before"]);
+            assert_eq!(
+                fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
+                b"prior frontdoor"
+            );
+            assert!(!f.0.join("incoming").exists());
+            let journal = fs::read_to_string(f.0.join(if case.starts_with("prepared-crash") {
+                "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
+            } else {
+                "config/oh-my-setting/native-update/transaction.json"
+            }))
+            .unwrap();
+            assert!(!journal.contains(&format!("{}/incoming", f.0.display())));
+            let cache = f.0.join("source/target/oms-native").join(target);
+            assert!(cache.join("oms").is_file());
+            if case == "foreign" {
+                fs::write(cache.join("oms"), b"foreign bytes").unwrap();
+            }
+            if case == "prepared-crash-repair" {
+                let payload = fs::read(cache.join("oms")).unwrap();
+                let prior = fs::read(&receipt).unwrap();
+                let flow = fs::read(f.0.join("flow")).unwrap();
                 let out = command
-                    .env("OMS_COLD_CASE", "release-override")
-                    .env("OH_MY_SETTING_UPDATE_TARGET_COMMIT", "0".repeat(40))
+                    .env("OMS_COLD_CASE", "repair-preview")
+                    .env("OH_MY_SETTING_DRY_RUN", "1")
                     .output()
                     .unwrap();
                 assert!(
@@ -1178,8 +1101,101 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
+                command.env_remove("OH_MY_SETTING_DRY_RUN");
+                assert_eq!(
+                    fs::read_to_string(f.0.join(
+                        "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
+                    ))
+                    .unwrap(),
+                    journal
+                );
+                assert_eq!(fs::read(cache.join("oms")).unwrap(), payload);
+                assert_eq!(fs::read(&receipt).unwrap(), prior);
+                assert_eq!(fs::read(f.0.join("flow")).unwrap(), flow);
+                assert_eq!(
+                    fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
+                    b"prior frontdoor"
+                );
             }
+            let out = command.env("OMS_COLD_CASE", "recover").output().unwrap();
+            assert!(
+                out.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            continue;
         }
+        assert!(
+            out.status.success(),
+            "{case}: {}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if case == "release-edge" {
+            let out = command
+                .env("OMS_COLD_CASE", "release-override")
+                .env("OH_MY_SETTING_UPDATE_TARGET_COMMIT", "0".repeat(40))
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state_releases_and_recovery() {
+    run_cold_update_cases(&[
+        "release-custom",
+        "release-stable",
+        "proof",
+        "verify",
+        "receipt",
+        "cleanup",
+        "late-worker",
+        "crash",
+        "foreign",
+        "prepared-crash",
+    ]);
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state_locked_updates() {
+    run_cold_update_cases(&[
+        "prepared-locked-ref",
+        "apply-locked-ref",
+        "apply-locked-explicit",
+        "apply-locked-auto",
+        "apply-locked-verify",
+        "apply-locked-release",
+        "auto-refresh",
+    ]);
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state_prepared_lifecycle() {
+    run_cold_update_cases(&[
+        "prepared-cutover-worker",
+        "prepared-live",
+        "prepared-stale",
+        "prepared-tamper",
+        "prepared-refresh",
+        "prepared-cancel",
+        "prepared-bundle",
+        "prepared-crash-install",
+        "prepared-crash-repair",
+    ]);
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
+    let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
+        run_cold_update_cases(&["ok", "edge", "fallback", "offline", "release-edge"]);
         return;
     };
     let mut host = ColdUpdateHost {
