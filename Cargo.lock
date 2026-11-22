@@ -1134,6 +1134,7 @@ name = "oms-mcp-server"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "oms-command-agent-role",
  "oms-context",
  "oms-output",
  "oms-output-capture",

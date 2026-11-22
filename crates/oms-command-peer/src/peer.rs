@@ -192,12 +192,12 @@ pub(crate) fn question(args: &Args, context: &Context<'_>) -> Result<String> {
     }
     Ok(prompt.into())
 }
-pub(crate) fn detect_caller() -> Result<Option<String>> {
+pub(crate) fn detect_caller(owner_cwd: &Path) -> Result<Option<String>> {
     let env_nonempty = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
     if let Ok(raw) = std::env::var("OMS_AGENT")
         && !raw.trim().is_empty()
     {
-        return providers::normalize(raw.trim()).map(Some);
+        return providers::normalize_at(raw.trim(), owner_cwd).map(Some);
     }
     if env_nonempty("CLAUDECODE") || env_nonempty("CLAUDE_CODE_ENTRYPOINT") {
         return Ok(Some("claude".into()));
@@ -1051,7 +1051,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     };
     let dir = directory(args, &repo, kind)?;
     let single = matches!(tool, "agent-call" | "advise" | "consult");
-    let caller = detect_caller()?.unwrap_or_default();
+    let caller = detect_caller(context.cwd)?.unwrap_or_default();
     let default = if tool == "advise" {
         std::env::var("OMS_ADVISOR_PROVIDER")
             .ok()
@@ -1072,25 +1072,28 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         if !explicit.is_empty() {
             explicit
                 .into_iter()
-                .map(|s| Target::parse(&s))
+                .map(|s| Target::parse_at(&s, context.cwd))
                 .collect::<Result<Vec<_>>>()?
         } else if let Some(default) = default {
-            vec![Target::parse(&default)?]
+            vec![Target::parse_at(&default, context.cwd)?]
         } else if tool == "agent-call" {
             return fail("--to is required");
         } else {
             let peers = ["codex", "claude", "antigravity"]
                 .iter()
                 .filter(|p| **p != caller)
-                .filter(|p| providers::discovered(p))
+                .filter(|p| providers::discovered_at(p, context.cwd))
                 .take(if args.has("all") { 3 } else { 1 })
-                .map(|p| Target::parse(p))
+                .map(|p| Target::parse_at(p, context.cwd))
                 .collect::<Result<Vec<_>>>()?;
-            if peers.is_empty() && !caller.is_empty() && providers::discovered(&caller) {
+            if peers.is_empty()
+                && !caller.is_empty()
+                && providers::discovered_at(&caller, context.cwd)
+            {
                 warnings.extend_from_slice(
                     b"note: no independent provider available; answering from the caller's own family (self-advice)\n",
                 );
-                vec![Target::parse(&caller)?]
+                vec![Target::parse_at(&caller, context.cwd)?]
             } else {
                 peers
             }
@@ -1099,15 +1102,15 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         args.value("providers", "codex,claude,antigravity")
             .split(',')
             .map(str::trim)
-            .map(Target::parse)
+            .map(|raw| Target::parse_at(raw, context.cwd))
             .collect::<Result<Vec<_>>>()?
     };
     if tool == "peer-review" && args.has("writer") && !args.has("providers") {
-        let writer = providers::normalize(args.get("writer"))?;
+        let writer = providers::normalize_at(args.get("writer"), context.cwd)?;
         targets.retain(|s| s.provider != writer);
     }
     if tool == "peer-review" && args.has("writer") && args.has("providers") {
-        let writer = providers::normalize(args.required("writer")?)?;
+        let writer = providers::normalize_at(args.required("writer")?, context.cwd)?;
         let writer_family = providers::family(&writer, "");
         let mut correlated = false;
         for target in &targets {
@@ -1341,7 +1344,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         }
     }
     if args.has("synthesize") {
-        let target = Target::parse(args.get("synthesize"))?;
+        let target = Target::parse_at(args.get("synthesize"), context.cwd)?;
         let mut synthesis = format!(
             "Synthesize these independent answers. Preserve disagreements, missing evidence and uncertainty. Question:\n{question}\n"
         );

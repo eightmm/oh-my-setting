@@ -446,6 +446,98 @@ fn utf8(path: &Path) -> &str {
     path.to_str().expect("utf8")
 }
 
+#[test]
+fn models_use_canonical_provider_identity_and_owner_adapter_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new("models-identity");
+    let owner = tmp.path().join("owner");
+    let adapters = owner.join("adapters");
+    fs::create_dir_all(&adapters).unwrap();
+    for name in [
+        "fixture", "-bad", ".bad", "_bad", "bad..id", "Bad", "disabled",
+    ] {
+        let path = adapters.join(format!("oms-agent-adapter-{name}"));
+        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(if name == "disabled" { 0o600 } else { 0o700 }),
+        )
+        .unwrap();
+    }
+    let env = [
+        ("HOME", utf8(tmp.path())),
+        ("PATH", utf8(&owner)),
+        ("OMS_PROVIDER_ADAPTER_DIR", "adapters"),
+    ];
+    let aliases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../oms-mcp-server/tests/provider-aliases.json"
+    ))
+    .unwrap();
+    for row in aliases.as_array().unwrap() {
+        let (code, out, err) = isolated(
+            "models",
+            &["--providers", row["input"].as_str().unwrap(), "--json"],
+            &owner,
+            &oms_source(),
+            &env,
+        );
+        assert_eq!(code, 0, "{err}");
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let actual = report["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["provider"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(serde_json::json!(actual), row["expected"]);
+    }
+    let (code, out, err) = isolated(
+        "models",
+        &["--providers", "auto", "--json"],
+        &owner,
+        &oms_source(),
+        &env,
+    );
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["providers"].as_array().unwrap().len(), 1);
+    assert_eq!(report["providers"][0]["provider"], "fixture");
+    assert_eq!(
+        report["providers"][0]["binary"],
+        utf8(&adapters.join("oms-agent-adapter-fixture"))
+    );
+    for bad in [
+        "-bad", ".bad", "_bad", "bad..id", "Bad", "disabled", "missing",
+    ] {
+        let (code, _, _) = isolated(
+            "models",
+            &["--providers", bad, "--json"],
+            &owner,
+            &oms_source(),
+            &env,
+        );
+        assert_eq!(code, 2, "{bad}");
+    }
+    let path_adapter = owner.join("bin/oms-agent-adapter-fallback");
+    fs::create_dir_all(path_adapter.parent().unwrap()).unwrap();
+    fs::write(&path_adapter, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&path_adapter, fs::Permissions::from_mode(0o700)).unwrap();
+    let (code, out, err) = isolated(
+        "models",
+        &["--providers", "fallback", "--json"],
+        &owner,
+        &oms_source(),
+        &[
+            ("HOME", utf8(tmp.path())),
+            ("PATH", "bin"),
+            ("OMS_PROVIDER_ADAPTER_DIR", "missing-adapters"),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["providers"][0]["binary"], utf8(&path_adapter));
+}
+
 fn write_all(base: &Path, files: &[(&str, &str)]) {
     for (name, body) in files {
         let path = base.join(name);

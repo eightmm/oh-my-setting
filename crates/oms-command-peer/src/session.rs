@@ -428,7 +428,7 @@ pub(crate) fn advice_digest(
     allow_sensitive: bool,
     context: &Context<'_>,
 ) -> Result<String> {
-    let caller = crate::peer::detect_caller()?.filter(|p| matches!(p.as_str(), "claude" | "codex" | "pi")).ok_or_else(|| {
+    let caller = crate::peer::detect_caller(context.cwd)?.filter(|p| matches!(p.as_str(), "claude" | "codex" | "pi")).ok_or_else(|| {
         Error::new(
             2,
             "cannot identify calling agent with native session history for --session; set OMS_AGENT (e.g. codex or claude) or pass --session-id",
@@ -767,7 +767,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
         );
     }
     refuse_managed_resume(&repo, &source, fork, context)?;
-    let binary = providers::binary(&source.provider);
+    let binary = providers::binary_at(&source.provider, context.cwd);
     let help = process::invoke(
         context,
         &repo,

@@ -49,7 +49,7 @@ impl oms_command_plan::Services for Services<'_, '_> {
         })
     }
     fn normalize_provider(&self, provider: &str) -> oms_command_plan::Result<String> {
-        crate::providers::normalize(provider).map_err(domain)
+        crate::providers::normalize_at(provider, self.0.cwd).map_err(domain)
     }
 }
 impl oms_command_autonomy::Services for Services<'_, '_> {

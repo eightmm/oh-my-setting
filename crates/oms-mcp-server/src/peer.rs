@@ -14,49 +14,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 fn normalize(raw: &str, cwd: &Path) -> Option<String> {
-    let name = match raw {
-        "agy" => "antigravity",
-        "cursor-agent" => "cursor",
-        "grok-build" => "grok",
-        "gemini-cli" => "gemini",
-        "qwen-code" => "qwen",
-        "opencode2" => "opencode",
-        "dsh" | "deepseek-harness" => "deepseek",
-        "mistral-vibe" => "vibe",
-        "github-copilot" => "copilot",
-        "factory-droid" => "droid",
-        "kiro-cli" => "kiro",
-        "cn" => "continue",
-        "codex" | "claude" | "antigravity" | "cursor" | "grok" | "gemini" | "qwen" | "opencode"
-        | "deepseek" | "vibe" | "pi" | "copilot" | "droid" | "aider" | "muse" | "kimi" | "kiro"
-        | "continue" | "goose" | "cline" | "kilo" | "openhands" | "auggie" => raw,
-        other => {
-            if !matches("[a-z0-9][a-z0-9._-]{0,63}", other) || other.contains("..") {
-                return None;
-            }
-            let config = std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/nonexistent".into()))
-                        .join(".config")
-                });
-            let dir = std::env::var_os("OMS_PROVIDER_ADAPTER_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| config.join("oh-my-setting/provider-adapters"));
-            let binary = format!("oms-agent-adapter-{other}");
-            let search_path = std::env::var_os("PATH").unwrap_or_default();
-            let candidates = std::iter::once(cwd.join(dir).join(&binary))
-                .chain(std::env::split_paths(&search_path).map(|p| cwd.join(p).join(&binary)));
-            if !candidates
-                .into_iter()
-                .any(|p| p.is_file() && rustix::fs::access(p, rustix::fs::Access::EXEC_OK).is_ok())
-            {
-                return None;
-            }
-            other
-        }
-    };
-    Some(name.into())
+    oms_command_agent_role::provider_identity::Discovery::from_env(cwd)
+        .ok()?
+        .normalize(raw)
+        .map(str::to_owned)
 }
 fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
     let mut values = Vec::new();
@@ -1351,5 +1312,66 @@ mod tests {
             .unwrap();
             assert_eq!(result, row["expected"]);
         }
+        if let Some(owner) = std::env::var_os("OMS_MCP_IDENTITY_OWNER").map(PathBuf::from) {
+            assert_eq!(
+                targets("fixture:model=x", &owner).unwrap(),
+                ["fixture:model=x"]
+            );
+            for bad in [
+                "-bad",
+                ".bad",
+                "_bad",
+                "bad..id",
+                "Bad",
+                "disabled",
+                "missing",
+                "fixture:account=work",
+            ] {
+                assert!(targets(bad, &owner).is_err(), "{bad}");
+            }
+            assert!(targets(&format!("fixture:model={}", "x".repeat(160)), &owner).is_ok());
+            assert!(targets(&format!("fixture:model={}", "x".repeat(161)), &owner).is_err());
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("oms-mcp-identity-{}", std::process::id()));
+        let owner = root.join("owner");
+        let ambient = root.join("ambient");
+        std::fs::create_dir_all(owner.join("adapters")).unwrap();
+        std::fs::create_dir_all(&ambient).unwrap();
+        for name in [
+            "fixture", "-bad", ".bad", "_bad", "bad..id", "Bad", "disabled",
+        ] {
+            let path = owner
+                .join("adapters")
+                .join(format!("oms-agent-adapter-{name}"));
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(
+                path,
+                std::fs::Permissions::from_mode(if name == "disabled" { 0o600 } else { 0o700 }),
+            )
+            .unwrap();
+        }
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "peer::tests::canonical_provider_aliases_and_cursor_bytes",
+                "--nocapture",
+            ])
+            .current_dir(&ambient)
+            .env_clear()
+            .env("HOME", &root)
+            .env("PATH", &ambient)
+            .env("OMS_PROVIDER_ADAPTER_DIR", "adapters")
+            .env("OMS_MCP_IDENTITY_OWNER", &owner)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            child.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
     }
 }

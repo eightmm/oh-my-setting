@@ -3,123 +3,35 @@ use crate::model_probe;
 use oms_command_agent_role::native_model::{
     agy_catalog_selector, fixed_effort_model, supports_exact_model_override,
 };
+use oms_command_agent_role::provider_identity::Discovery;
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BUILTINS: &[(&str, &str)] = &[
-    ("codex", "codex"),
-    ("claude", "claude"),
-    ("antigravity", "agy"),
-    ("cursor", "cursor-agent"),
-    ("grok", "grok"),
-    ("gemini", "gemini"),
-    ("qwen", "qwen"),
-    ("opencode", "opencode"),
-    ("deepseek", "dsh"),
-    ("vibe", "vibe"),
-    ("pi", "pi"),
-    ("copilot", "copilot"),
-    ("droid", "droid"),
-    ("aider", "aider"),
-    ("muse", "muse"),
-    ("kimi", "kimi"),
-    ("kiro", "kiro-cli"),
-    ("continue", "cn"),
-    ("goose", "goose"),
-    ("cline", "cline"),
-    ("kilo", "kilo"),
-    ("openhands", "openhands"),
-    ("auggie", "auggie"),
-];
-pub(crate) fn normalize(raw: &str) -> Result<String> {
-    let name = match raw {
-        "agy" => "antigravity",
-        "cursor-agent" => "cursor",
-        "grok-build" => "grok",
-        "gemini-cli" => "gemini",
-        "qwen-code" => "qwen",
-        "opencode2" => "opencode",
-        "dsh" | "deepseek-harness" => "deepseek",
-        "mistral-vibe" => "vibe",
-        "github-copilot" => "copilot",
-        "factory-droid" => "droid",
-        "kiro-cli" => "kiro",
-        "cn" => "continue",
-        _ => raw,
-    };
-    if BUILTINS.iter().any(|(n, _)| *n == name) {
-        return Ok(name.into());
-    }
-    if !name.is_empty()
-        && name.len() <= 64
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
-        && installed(&binary(name)?)
-    {
-        Ok(name.into())
-    } else {
-        Err(error("unsupported provider"))
-    }
+pub(crate) fn normalize(raw: &str, cwd: &std::path::Path) -> Result<String> {
+    Discovery::from_env(cwd)?
+        .normalize(raw)
+        .map(str::to_owned)
+        .ok_or_else(|| error("unsupported provider"))
 }
-fn binary(name: &str) -> Result<String> {
-    if name == "opencode" && !installed("opencode") && installed("opencode2") {
-        return Ok("opencode2".into());
-    }
-    if let Some((_, bin)) = BUILTINS.iter().find(|(n, _)| *n == name) {
-        return Ok((*bin).into());
-    }
-    let base = env_path(
-        "OMS_PROVIDER_ADAPTER_DIR",
-        env_path("XDG_CONFIG_HOME", home()?.join(".config"))
-            .join("oh-my-setting/provider-adapters"),
-    );
-    let direct = base.join(format!("oms-agent-adapter-{name}"));
-    if installed(&direct.to_string_lossy()) {
-        Ok(direct.to_string_lossy().into_owned())
-    } else {
-        Ok(format!("oms-agent-adapter-{name}"))
-    }
+fn binary(discovery: &Discovery, name: &str) -> Result<String> {
+    discovery
+        .binary(name)
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok_or_else(|| error("unsupported provider"))
 }
-fn selection(raw: &str) -> Result<Vec<String>> {
-    let mut available = BUILTINS
-        .iter()
-        .map(|(n, _)| n.to_string())
-        .collect::<Vec<_>>();
-    let mut dirs =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
-    dirs.push(env_path(
-        "OMS_PROVIDER_ADAPTER_DIR",
-        env_path("XDG_CONFIG_HOME", home()?.join(".config"))
-            .join("oh-my-setting/provider-adapters"),
-    ));
-    for dir in dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten().take(4096) {
-                if let Some(name) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|s| s.strip_prefix("oms-agent-adapter-"))
-                    && !available.iter().any(|n| n == name)
-                    && normalize(name).is_ok()
-                {
-                    available.push(name.into());
-                }
-            }
-        }
-    }
+fn selection(raw: &str, discovery: &Discovery) -> Result<Vec<String>> {
+    let available = discovery.providers();
     if ["default", "auto", "installed", "all", ""].contains(&raw) {
         return Ok(available
             .into_iter()
-            .filter(|n| {
+            .filter(|name| {
                 raw == "all"
                     || (matches!(raw, "default" | "")
-                        && ["codex", "claude", "antigravity"].contains(&n.as_str()))
-                    || binary(n).is_ok_and(|b| installed(&b))
+                        && ["codex", "claude", "antigravity"].contains(&name.as_str()))
+                    || discovery.discovered(name)
             })
             .collect());
     }
@@ -133,11 +45,13 @@ fn selection(raw: &str) -> Result<Vec<String>> {
         if value.is_empty() {
             continue;
         }
-        let name = normalize(&value)?;
-        if !seen.insert(name.clone()) {
+        let name = discovery
+            .normalize(&value)
+            .ok_or_else(|| error("unsupported provider"))?;
+        if !seen.insert(name.to_owned()) {
             return Err(error("duplicate provider"));
         }
-        out.push(name);
+        out.push(name.to_owned());
     }
     if out.is_empty() {
         return Err(error("no providers selected"));
@@ -291,7 +205,8 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
     if let Some(timeout) = args.get("--timeout") {
         number(timeout, 1, 3600, "--timeout")?;
     }
-    let providers = selection(args.get("--providers").unwrap_or("default"))?;
+    let discovery = Discovery::from_env(ctx.cwd)?;
+    let providers = selection(args.get("--providers").unwrap_or("default"), &discovery)?;
     let cache = env_path(
         "OMS_CAPABILITY_DIR",
         env_path("XDG_CACHE_HOME", home()?.join(".cache")).join("oh-my-setting/capabilities"),
@@ -303,8 +218,8 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
     let mut text = String::new();
     for provider in providers {
         ctx.check()?;
-        let bin = binary(&provider)?;
-        let present = installed(&bin);
+        let bin = binary(&discovery, &provider)?;
+        let present = discovery.discovered(&provider);
         let env_file = cache.join(format!("{provider}.env"));
         let models_file = cache.join(format!("{provider}.models"));
         let efforts_file = cache.join(format!("{provider}.efforts"));

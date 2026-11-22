@@ -543,7 +543,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     } else {
         None
     };
-    let mut target = Target::parse(args.required("to")?)?;
+    let mut target = Target::parse_at(args.required("to")?, context.cwd)?;
     peer::apply_account(args, std::slice::from_mut(&mut target))?;
     let question = peer::question(args, context)?;
     let repo = storage::repository(context, &args.path("repo", context.cwd))?;

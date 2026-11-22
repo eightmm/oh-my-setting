@@ -193,6 +193,8 @@ fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], bo
             "OMS_PROVIDER_ADAPTER_DIR",
             if layout == "override" {
                 fixture.0.join("adapters")
+            } else if layout == "relative" {
+                PathBuf::from("adapters")
             } else {
                 PathBuf::new()
             },
@@ -878,9 +880,32 @@ fn run(repo: &Repo, source: &Path, tool: &str, values: &[&str]) -> Output {
 
 #[test]
 fn provider_adapter_discovery_requires_marker() {
-    for layout in ["override", "xdg", "home"] {
+    for layout in ["override", "xdg", "home", "relative"] {
         provider_isolated("provider_adapter_discovery_requires_marker", layout, || {
             use oms_command_peer::providers::{binary, discovered, normalize};
+            if layout == "relative" {
+                let repo = provider_repo();
+                executable_fixture(&repo, "adapters/oms-agent-adapter-owned-fixture");
+                let adapter = repo.0.join("adapters/oms-agent-adapter-owned-fixture");
+                assert_eq!(
+                    oms_command_peer::providers::normalize_at("owned-fixture", &repo.0).unwrap(),
+                    "owned-fixture"
+                );
+                let probe = ProviderProbe::default();
+                success(provider_call(
+                    &repo,
+                    "owned-fixture",
+                    "provider-default",
+                    "auto",
+                    b"inspect owner adapter",
+                    &probe,
+                ));
+                let calls = probe.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_ne!(calls[0].request.cwd, repo.0);
+                assert_eq!(calls[0].request.argv[0], adapter);
+                return;
+            }
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
             let dir = match layout {
                 "override" => home.join("adapters"),
@@ -923,24 +948,23 @@ fn provider_adapter_discovery_requires_marker() {
                 assert!(!discovered(&name));
             }
             assert_eq!(normalize("opencode2").unwrap(), "opencode");
-            for (alias, provider) in [
-                ("agy", "antigravity"),
-                ("cursor-agent", "cursor"),
-                ("grok-build", "grok"),
-                ("gemini-cli", "gemini"),
-                ("qwen-code", "qwen"),
-                ("opencode2", "opencode"),
-                ("dsh", "deepseek"),
-                ("deepseek-harness", "deepseek"),
-                ("mistral-vibe", "vibe"),
-                ("github-copilot", "copilot"),
-                ("factory-droid", "droid"),
-                ("kiro-cli", "kiro"),
-                ("cn", "continue"),
-            ] {
-                assert_eq!(normalize(alias).unwrap(), provider);
-                assert_eq!(binary(alias), binary(provider));
-                assert!(discovered(alias));
+            let aliases = V::parse(include_bytes!(
+                "../../oms-mcp-server/tests/provider-aliases.json"
+            ))
+            .unwrap();
+            for row in aliases.array() {
+                for (alias, provider) in row
+                    .get("input")
+                    .text()
+                    .unwrap()
+                    .split(',')
+                    .zip(row.get("expected").array())
+                {
+                    let provider = provider.text().unwrap();
+                    assert_eq!(normalize(alias).unwrap(), provider);
+                    assert_eq!(binary(alias), binary(provider));
+                    assert!(discovered(alias));
+                }
             }
             assert_eq!(binary("opencode"), "opencode2");
             assert!(discovered("opencode"));

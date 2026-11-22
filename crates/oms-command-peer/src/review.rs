@@ -800,7 +800,7 @@ pub(crate) fn finish(
             if option == "security-audit" && risk_paths(&paths, &patch).is_empty() {
                 continue;
             }
-            let target = providers::Target::parse(args.get(option))?;
+            let target = providers::Target::parse_at(args.get(option), context.cwd)?;
             let requested = providers::route(context, &target, "", "auto", "security-auditor")?;
             if args.has("writer")
                 && providers::family(&requested.provider, &requested.model)
@@ -1419,7 +1419,7 @@ fn confirm(
     patch: &[u8],
     context: &Context<'_>,
 ) -> Result<String> {
-    let target = providers::Target::parse(args.required("confirm")?)?;
+    let target = providers::Target::parse_at(args.required("confirm")?, context.cwd)?;
     let route = providers::route(context, &target, "", "auto", "reviewer")?;
     let family = providers::family(&route.provider, &route.model);
     if args.has("writer") && family == providers::family(args.get("writer"), "") {

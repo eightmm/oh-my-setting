@@ -9,6 +9,8 @@
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
 pub mod native_model;
+#[cfg(unix)]
+pub mod provider_identity;
 
 #[cfg(unix)]
 mod native;

@@ -271,7 +271,7 @@ pub(crate) fn import(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     if !["ask", "review", "delegate", "call"].contains(&kind) {
         return Err(error("--kind must be ask, review, delegate, or call"));
     }
-    let provider = crate::models::normalize(args.required("--provider")?)?;
+    let provider = crate::models::normalize(args.required("--provider")?, ctx.cwd)?;
     let bytes = read(&ctx.path(args.required("--file")?), LIMIT)?;
     if bytes.is_empty() {
         return Err(error("result file is empty"));

@@ -8,6 +8,7 @@ use crate::{
     process::{Completed, Invocation},
     storage, text,
 };
+use oms_command_agent_role::provider_identity::{Discovery, builtin_binary};
 use sha2::{Digest, Sha256};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -30,6 +31,9 @@ pub struct Target {
 }
 impl Target {
     pub fn parse(raw: &str) -> Result<Self> {
+        Self::parse_at(raw, &std::env::current_dir()?)
+    }
+    pub fn parse_at(raw: &str, owner_cwd: &Path) -> Result<Self> {
         let (raw, optional) = raw
             .strip_suffix(":optional")
             .map_or((raw, false), |s| (s, true));
@@ -37,7 +41,7 @@ impl Target {
             Some(at) => (&raw[..at], &raw[at..]),
             None => (raw, ""),
         };
-        let provider = normalize(provider)?;
+        let provider = normalize_at(provider, owner_cwd)?;
         let (mut model, mut account) = ("", "");
         let mut seen_model = false;
         // `:model=` may contain `:`, so it owns the text up to a later `:account=`.
@@ -101,28 +105,13 @@ pub fn account_id(value: &str) -> Result<()> {
     }
 }
 pub fn normalize(raw: &str) -> Result<String> {
-    let value = canonical_provider(raw);
-    if !provider_id(value) || (builtin_binary(value).is_none() && !discovered(value)) {
-        return fail("unsupported provider name");
-    }
-    Ok(value.into())
+    normalize_at(raw, &std::env::current_dir()?)
 }
-fn canonical_provider(raw: &str) -> &str {
-    match raw {
-        "agy" => "antigravity",
-        "cursor-agent" => "cursor",
-        "grok-build" => "grok",
-        "gemini-cli" => "gemini",
-        "qwen-code" => "qwen",
-        "opencode2" => "opencode",
-        "dsh" | "deepseek-harness" => "deepseek",
-        "mistral-vibe" => "vibe",
-        "github-copilot" => "copilot",
-        "factory-droid" => "droid",
-        "kiro-cli" => "kiro",
-        "cn" => "continue",
-        _ => raw,
-    }
+pub fn normalize_at(raw: &str, owner_cwd: &Path) -> Result<String> {
+    Discovery::from_env(owner_cwd)?
+        .normalize(raw)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new(2, "unsupported provider name"))
 }
 pub fn model_name(value: &str) -> Result<()> {
     if value.len() > 256
@@ -158,84 +147,30 @@ pub fn family(provider: &str, model: &str) -> String {
     }
     .into()
 }
-fn provider_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && !value.contains("..")
-        && value.as_bytes()[0].is_ascii_alphanumeric()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
-}
-fn builtin_binary(provider: &str) -> Option<&str> {
-    Some(match provider {
-        "antigravity" => "agy",
-        "cursor" => "cursor-agent",
-        "deepseek" => "dsh",
-        "kiro" => "kiro-cli",
-        "continue" => "cn",
-        "codex" | "claude" | "grok" | "gemini" | "qwen" | "opencode" | "vibe" | "pi"
-        | "copilot" | "droid" | "aider" | "muse" | "kimi" | "goose" | "cline" | "kilo"
-        | "openhands" | "auggie" => provider,
-        _ => return None,
-    })
-}
-fn executable(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .ok()
-        .is_some_and(|m| m.is_file() && m.mode() & 0o111 != 0)
-}
-fn on_path(name: &OsStr) -> bool {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .any(|p| executable(&p.join(name)))
-}
 fn nonempty_env(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|v| !v.is_empty())
 }
-fn binary_path(provider: &str) -> PathBuf {
-    let provider = canonical_provider(provider);
-    if !provider_id(provider) {
-        return PathBuf::new();
-    }
-    if let Some(name) = builtin_binary(provider) {
-        return if provider == "opencode" && !on_path(name.as_ref()) && on_path("opencode2".as_ref())
-        {
-            "opencode2".into()
-        } else {
-            name.into()
-        };
-    }
-    let name = format!("oms-agent-adapter-{provider}");
-    let base = nonempty_env("OMS_PROVIDER_ADAPTER_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            nonempty_env("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(nonempty_env("HOME").unwrap_or_else(|| "/nonexistent".into()))
-                        .join(".config")
-                })
-                .join("oh-my-setting/provider-adapters")
-        });
-    let direct = base.join(&name);
-    if executable(&direct) {
-        // A relative adapter directory is relative to the owner, not the child worktree.
-        std::path::absolute(&direct).unwrap_or(direct)
-    } else {
-        name.into()
-    }
+fn binary_path_at(provider: &str, owner_cwd: &Path) -> PathBuf {
+    Discovery::from_env(owner_cwd)
+        .ok()
+        .and_then(|discovery| discovery.binary(provider))
+        .unwrap_or_default()
 }
 pub fn binary(provider: &str) -> String {
-    binary_path(provider).to_string_lossy().into_owned()
+    std::env::current_dir()
+        .map(|cwd| binary_at(provider, &cwd))
+        .unwrap_or_default()
+}
+pub fn binary_at(provider: &str, owner_cwd: &Path) -> String {
+    binary_path_at(provider, owner_cwd)
+        .to_string_lossy()
+        .into_owned()
 }
 pub fn discovered(provider: &str) -> bool {
-    let path = binary_path(provider);
-    !path.as_os_str().is_empty()
-        && if path.is_absolute() {
-            executable(&path)
-        } else {
-            on_path(path.as_os_str())
-        }
+    std::env::current_dir().is_ok_and(|cwd| discovered_at(provider, &cwd))
+}
+pub fn discovered_at(provider: &str, owner_cwd: &Path) -> bool {
+    Discovery::from_env(owner_cwd).is_ok_and(|discovery| discovery.discovered(provider))
 }
 fn requires_read_isolation(provider: &str) -> bool {
     matches!(provider, "antigravity" | "aider") || builtin_binary(provider).is_none()
@@ -277,7 +212,30 @@ pub fn resolve_route(
     effort: &str,
     role: &str,
 ) -> Result<Route> {
-    route_with_source(source, &Target::parse(provider)?, model, effort, role)
+    resolve_route_at(
+        source,
+        provider,
+        model,
+        effort,
+        role,
+        &std::env::current_dir()?,
+    )
+}
+pub fn resolve_route_at(
+    source: &Path,
+    provider: &str,
+    model: &str,
+    effort: &str,
+    role: &str,
+    owner_cwd: &Path,
+) -> Result<Route> {
+    route_with_source(
+        source,
+        &Target::parse_at(provider, owner_cwd)?,
+        model,
+        effort,
+        role,
+    )
 }
 fn route_with_source(
     source: &Path,
@@ -1336,6 +1294,7 @@ fn transport(
     route: &Route,
     prompt: &[u8],
     cwd: &Path,
+    owner_cwd: &Path,
     write: bool,
     timeout: u64,
 ) -> Result<Transport> {
@@ -1343,7 +1302,7 @@ fn transport(
     crate::native_model::validate_effort(provider, &route.model, &route.effort)
         .map_err(|message| Error::new(2, message))?;
     let mut cmd = Transport {
-        argv: vec![binary_path(provider).into_os_string()],
+        argv: vec![binary_path_at(provider, owner_cwd).into_os_string()],
         selected_effort: None,
         input: Some(prompt.to_vec()),
         environment: Vec::new(),
@@ -1975,7 +1934,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
 ) -> Result<Completed> {
     prompt.validate()?;
     crate::safety::outbound(prompt.bytes())?;
-    if !discovered(&route.provider) {
+    if !discovered_at(&route.provider, context.cwd) {
         return Err(Error::new(127, "provider command not found"));
     }
     if write
@@ -2015,7 +1974,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     {
         return fail("provider does not support read access through this transport");
     }
-    let transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let transport = transport(route, prompt.bytes(), cwd, context.cwd, write, timeout)?;
     let team_protocol = if extra_env
         .iter()
         .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")
@@ -3890,7 +3849,7 @@ mod bridge_route_tests {
         for model in crate::native_model::AGY_FIXED_EFFORT_MODELS {
             let fixed = resolve_route(source, "agy", model, "", "worker").unwrap();
             assert!(fixed.effort.is_empty());
-            let command = transport(&fixed, b"inspect", source, false, 30).unwrap();
+            let command = transport(&fixed, b"inspect", source, source, false, 30).unwrap();
             assert!(!command.argv.iter().any(|arg| arg == "--effort"));
             assert_eq!(command.selected_effort, None);
             assert!(resolve_route(source, "agy", model, "high", "worker").is_err());
@@ -3902,11 +3861,11 @@ mod bridge_route_tests {
             assert!(resolve_route(source, &seat, "other", "high", "worker").is_err());
             let mut invalid = fixed;
             invalid.effort = "high".into();
-            assert!(transport(&invalid, b"inspect", source, false, 30).is_err());
+            assert!(transport(&invalid, b"inspect", source, source, false, 30).is_err());
         }
         for model in ["gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh"] {
             let route = resolve_route(source, "agy", model, "xhigh", "worker").unwrap();
-            let command = transport(&route, b"inspect", source, false, 30).unwrap();
+            let command = transport(&route, b"inspect", source, source, false, 30).unwrap();
             assert_eq!(command.selected_effort.as_deref(), Some("xhigh"));
             assert!(resolve_route(source, "agy", model, "max", "worker").is_err());
         }
