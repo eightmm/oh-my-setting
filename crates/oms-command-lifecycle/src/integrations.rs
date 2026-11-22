@@ -678,10 +678,19 @@ fn git_hook(
             r::fail("git is required")
         };
     };
+    // An explicit --repo selects another OMS source worktree; the receipt owner stays canonical.
+    let explicit = options.path("--repo", &paths.cwd)?.is_some();
+    let base = if explicit { &paths.cwd } else { &paths.source };
     let output = r::command(
         git,
-        &["rev-parse".into(), "--git-path".into(), "hooks".into()],
-        &paths.source,
+        &[
+            "rev-parse".into(),
+            "--show-toplevel".into(),
+            "--git-common-dir".into(),
+            "--git-path".into(),
+            "hooks".into(),
+        ],
+        base,
         None,
         flag,
         std::time::Duration::from_secs(30),
@@ -695,12 +704,40 @@ fn git_hook(
     }
     let raw = String::from_utf8(output.1)
         .map_err(|_| r::Error(2, "Git hook directory is not UTF-8".into()))?;
-    let dir = PathBuf::from(raw.trim_end_matches(['\r', '\n']));
-    let dir = if dir.is_absolute() {
-        dir
-    } else {
-        paths.source.join(dir)
+    let lines = raw
+        .split('\n')
+        .map(|l| l.trim_end_matches('\r'))
+        .collect::<Vec<_>>();
+    let [top, common, hooks_path, ""] = lines.as_slice() else {
+        return r::fail("cannot resolve Git hook directory");
     };
+    let resolve = |p: &str| {
+        let p = PathBuf::from(p);
+        r::physical(&if p.is_absolute() { p } else { base.join(p) })
+    };
+    let dir = if explicit {
+        resolve(hooks_path)?
+    } else {
+        let dir = PathBuf::from(hooks_path);
+        if dir.is_absolute() {
+            dir
+        } else {
+            paths.source.join(dir)
+        }
+    };
+    if explicit {
+        let top = resolve(top)?;
+        if top != *base
+            || !top.join("Cargo.toml").is_file()
+            || !top.join("crates/oms/Cargo.toml").is_file()
+        {
+            return r::fail("--repo must be the root of an OMS source worktree");
+        }
+        // A shared or global core.hooksPath would write beyond this repository.
+        if !dir.starts_with(resolve(common)?) && !dir.starts_with(&top) {
+            return r::fail("Git hook directory is outside the selected repository");
+        }
+    }
     // Byte-exact hook written by scripts/install-hooks.sh at e0b92359; any edit stays unmanaged.
     const OLD_PUSH: &str = "#!/usr/bin/env bash\n# Installed by scripts/install-hooks.sh — runs the repo gate before every push.\n# Bypass for an emergency with: git push --no-verify\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/check.sh\"\n";
     let owned = |name: &str, header: &str, legacy: &str| -> Result<(PathBuf, bool)> {

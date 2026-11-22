@@ -2943,6 +2943,105 @@ esac
     success(call("install-hooks", &[], &source, &host));
     let upgraded = fs::read_to_string(&push_hook).unwrap();
     assert!(upgraded.contains(" pre-push-check") && upgraded.contains("--full"));
+    // --repo converges only the selected distinct OMS worktree's hooks; the canonical hooks stay put.
+    let other = root.join("other-repo");
+    let git_in = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git_in(&root, &["init", other.to_str().unwrap()]);
+    fs::create_dir_all(other.join("crates/oms")).unwrap();
+    fs::write(other.join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(other.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    let other_push = other.join(".git/hooks/pre-push");
+    fs::write(&other_push, old_push).unwrap();
+    let canonical_push = fs::read_to_string(&push_hook).unwrap();
+    let repo_arg = ["--repo", other.to_str().unwrap()];
+    success(call("install-hooks", &repo_arg, &source, &host));
+    let converged = fs::read_to_string(&other_push).unwrap();
+    assert!(converged.contains(" pre-push-check") && converged.contains("--full"));
+    assert!(other.join(".git/hooks/pre-merge-commit").exists());
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), canonical_push);
+    let edited = format!("{old_push}echo mine\n");
+    fs::write(&other_push, &edited).unwrap();
+    assert_ne!(call("install-hooks", &repo_arg, &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), edited);
+    // A linked worktree shares the common-dir hooks; a non-OMS or subdirectory target is refused.
+    fs::write(&other_push, old_push).unwrap();
+    git_in(
+        &other,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+    );
+    let linked = root.join("linked-repo");
+    git_in(
+        &other,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::create_dir_all(linked.join("crates/oms")).unwrap();
+    fs::write(linked.join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(linked.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    success(call(
+        "install-hooks",
+        &["--repo", linked.to_str().unwrap()],
+        &source,
+        &host,
+    ));
+    assert!(fs::read_to_string(&other_push).unwrap().contains("--full"));
+    assert_ne!(
+        call(
+            "install-hooks",
+            &["--repo", other.join("crates").to_str().unwrap()],
+            &source,
+            &host
+        )
+        .0,
+        0
+    );
+    let plain = root.join("plain-repo");
+    git_in(&root, &["init", plain.to_str().unwrap()]);
+    assert_ne!(
+        call(
+            "install-hooks",
+            &["--repo", plain.to_str().unwrap()],
+            &source,
+            &host
+        )
+        .0,
+        0
+    );
+    assert!(!plain.join(".git/hooks/pre-push").exists());
+    success(call(
+        "install-hooks",
+        &["--remove", "--repo", other.to_str().unwrap()],
+        &source,
+        &host,
+    ));
+    assert!(!other_push.exists());
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), canonical_push);
     let merge = hooks_dir.join("pre-merge-commit");
     let merge_text = fs::read_to_string(&merge).unwrap();
     assert!(merge_text.starts_with("#!/bin/sh\n# oh-my-setting native pre-merge-commit\n"));
