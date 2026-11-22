@@ -350,6 +350,84 @@ fn card_top_styled(
     out
 }
 
+const MAIN_SWITCH_LABELS: [&str; 2] = ["[s Switch Main]", "[s Switch]"];
+
+fn card_top_with_action(
+    title: &str,
+    tag: Option<&str>,
+    action_labels: &[&'static str],
+    columns: usize,
+    colored: bool,
+    title_style: &'static str,
+) -> (String, Option<(usize, usize)>) {
+    if columns < 44 {
+        return (
+            card_top_styled(title, tag, columns, colored, title_style),
+            None,
+        );
+    }
+    let clean_tag = tag
+        .filter(|v| !v.is_empty())
+        .map(|v| clip(v, (columns / 3).max(6)))
+        .filter(|v| !v.is_empty());
+    let clean_title = clean(title, columns);
+    let title_w = width(&clean_title);
+    let prefix_len = 3usize; // "╭─ "
+    let title_space = 1usize; // " "
+    let end_cap = 1usize; // "╮"
+    let tag_w = clean_tag.as_deref().map_or(0, width);
+    let Some(&action) = action_labels.iter().find(|&&label| {
+        let action_w = width(label);
+        let right_len = if clean_tag.is_some() {
+            tag_w + action_w + 6
+        } else {
+            action_w + 3
+        };
+        prefix_len + title_w + title_space + right_len + end_cap < columns
+    }) else {
+        return (
+            card_top_styled(title, tag, columns, colored, title_style),
+            None,
+        );
+    };
+    let action_w = width(action);
+    let right_len = if clean_tag.is_some() {
+        tag_w + action_w + 6
+    } else {
+        action_w + 3
+    };
+    let used = prefix_len + title_w + title_space + right_len + end_cap;
+    let fill = columns.saturating_sub(used);
+    let mut spans = vec![
+        Span::literal("╭─ ", Some(SGR_BORDER)),
+        Span {
+            plain: clean_title,
+            sgr: Some(title_style),
+        },
+        Span::literal(" ", None),
+        Span {
+            plain: "─".repeat(fill),
+            sgr: Some(SGR_BORDER),
+        },
+        Span::literal(" ", None),
+    ];
+    if let Some(t) = clean_tag {
+        spans.push(Span {
+            plain: t,
+            sgr: Some(SGR_MUTED),
+        });
+        spans.push(Span::literal(" · ", Some(SGR_MUTED)));
+    }
+    let start = spans_width(&spans) + 1;
+    let end = start + action_w - 1;
+    spans.push(Span::literal(action, Some(SGR_GOLD_BOLD)));
+    spans.push(Span::literal(" ─", Some(SGR_BORDER)));
+    spans.push(Span::literal("╮", Some(SGR_BORDER)));
+    let mut out = String::new();
+    emit_spans(&mut out, &spans, colored, None);
+    (out, Some((start, end)))
+}
+
 fn card_row_lr(
     left: Vec<Span>,
     right: Vec<Span>,
@@ -1555,6 +1633,21 @@ pub(crate) struct BoardFrame {
     /// Painted calls, including Overall Main, keyed by zero-based terminal row.
     pub worker_rows: BTreeMap<usize, (String, String)>,
     pub weekly_usage: Option<WeeklyUsageHit>,
+    pub main_switch: Option<ActionZone>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActionZone {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl ActionZone {
+    pub(crate) fn contains(self, x: u16, y: u16) -> bool {
+        let col = usize::from(x);
+        usize::from(y).checked_sub(1) == Some(self.row) && (self.start..=self.end).contains(&col)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1639,6 +1732,7 @@ fn frame_with_capacity(
     let mut provider_rows = [None; 3];
     let mut worker_rows = BTreeMap::new();
     let mut weekly_usage = None;
+    let mut main_switch = None;
     let use_cards = columns >= 44;
     let inner_width = if use_cards {
         columns.saturating_sub(4)
@@ -1695,8 +1789,17 @@ fn frame_with_capacity(
         columns,
         colored,
     ));
+    let overlay = nav.help || nav.health || nav.detail;
     let mut main_cards = use_cards && height >= 12;
-    let mut main = render_main_section(goal, pinned, main_selected, columns, main_cards, colored);
+    let (mut main, mut main_switch_cols) = render_main_section(
+        goal,
+        pinned,
+        main_selected,
+        columns,
+        main_cards,
+        colored,
+        !overlay,
+    );
     let mut notices = Vec::new();
     if let Some(notice) = &nav.notice {
         for part in wrap(notice, columns.saturating_sub(2).max(1))
@@ -1718,7 +1821,6 @@ fn frame_with_capacity(
     }
 
     let stale = report["collection"]["ok"] != true || report["capacity_stale"] == true;
-    let overlay = nav.help || nav.health || nav.detail;
     let filtering = !nav.filter.is_empty() || nav.editing;
     let short_board = (9..14).contains(&height) && !overlay;
     let filtered_out = total.saturating_sub(history + inactive + filtered_count);
@@ -1734,7 +1836,7 @@ fn frame_with_capacity(
     let required = fixed + main.len();
     // Keep the Main and Goal, dropping their card borders only when needed for Weekly.
     let compact_main = (short_board && main_cards && !main.is_empty() && required >= height)
-        .then(|| render_main_section(goal, pinned, main_selected, columns, false, colored))
+        .then(|| render_main_section(goal, pinned, main_selected, columns, false, colored, false).0)
         .filter(|compact| fixed + compact.len() < height);
     let mut optional = Vec::new();
     if height >= 14 || (short_board && required < height) || compact_main.is_some() {
@@ -1751,6 +1853,7 @@ fn frame_with_capacity(
             if let Some(compact) = compact_main {
                 main = compact;
                 main_cards = false;
+                main_switch_cols = None;
             }
             lines.push(line);
         }
@@ -1826,7 +1929,8 @@ fn frame_with_capacity(
         lines.truncate(body.saturating_sub(worker_row + main_row));
         let main_room = body.saturating_sub(lines.len() + worker_row);
         if main_cards && main.len() > main_room {
-            main = render_main_section(goal, pinned, main_selected, columns, false, colored);
+            (main, main_switch_cols) =
+                render_main_section(goal, pinned, main_selected, columns, false, colored, false);
             main_cards = false;
         }
         main.truncate(main_room);
@@ -1873,6 +1977,16 @@ fn frame_with_capacity(
             .saturating_sub(lines.len() + main.len());
         lines.extend(optional.into_iter().chain(notices).take(remaining));
         if let Some(call) = pinned {
+            if main_cards
+                && !main.is_empty()
+                && let Some((start, end)) = main_switch_cols
+            {
+                main_switch = Some(ActionZone {
+                    row: lines.len(),
+                    start,
+                    end,
+                });
+            }
             let row = usize::from(main_cards);
             if row < main.len() {
                 register_call(&mut worker_rows, lines.len() + row, call);
@@ -2041,6 +2155,7 @@ fn frame_with_capacity(
     }
     worker_rows.retain(|row, _| *row < painted);
     weekly_usage = weekly_usage.filter(|hit| hit.row < painted);
+    main_switch = main_switch.filter(|zone| zone.row < painted);
     let tab = if nav.view == View::Auto {
         "All"
     } else {
@@ -2073,6 +2188,7 @@ fn frame_with_capacity(
         provider_rows,
         worker_rows,
         weekly_usage,
+        main_switch,
     }
 }
 
@@ -3662,9 +3778,10 @@ fn render_main_section(
     columns: usize,
     use_cards: bool,
     colored: bool,
-) -> Vec<String> {
+    allow_switch: bool,
+) -> (Vec<String>, Option<(usize, usize)>) {
     if main.is_none() && goal.is_empty() {
-        return vec![];
+        return (vec![], None);
     }
     let model = main
         .map(|call| {
@@ -3683,14 +3800,31 @@ fn render_main_section(
         .unwrap_or("");
     let state = main.map(|call| text(call, "state")).unwrap_or("");
     let mut out = Vec::new();
+    let mut switch_cols = None;
     if use_cards {
-        out.push(card_top_styled(
-            "Overall Main",
-            Some(state),
-            columns,
-            colored,
-            SGR_MAIN_TITLE,
-        ));
+        let (top, cols) = if allow_switch && main.is_some() {
+            card_top_with_action(
+                "Overall Main",
+                Some(state),
+                &MAIN_SWITCH_LABELS,
+                columns,
+                colored,
+                SGR_MAIN_TITLE,
+            )
+        } else {
+            (
+                card_top_styled(
+                    "Overall Main",
+                    Some(state),
+                    columns,
+                    colored,
+                    SGR_MAIN_TITLE,
+                ),
+                None,
+            )
+        };
+        switch_cols = cols;
+        out.push(top);
     }
     let identity = if main.is_none() {
         "No active Main".to_owned()
@@ -3779,7 +3913,7 @@ fn render_main_section(
     if let Some(bottom) = card_bottom(columns, use_cards, colored) {
         out.push(bottom);
     }
-    out
+    (out, switch_cols)
 }
 
 pub(crate) fn main_switch_frame(
@@ -3813,6 +3947,7 @@ pub(crate) fn main_switch_frame(
         provider_rows: [None; 3],
         worker_rows: Default::default(),
         weekly_usage: None,
+        main_switch: None,
     }
 }
 
@@ -8304,7 +8439,66 @@ mod tests {
                 assert_eq!(*plain, strip_sgr(styled));
                 assert!(width(plain) <= columns);
             }
+            if wide {
+                let expected = if columns >= 46 {
+                    "[s Switch Main]"
+                } else {
+                    "[s Switch]"
+                };
+                let zone = board
+                    .main_switch
+                    .expect("Switch Main hit zone on Overall Main card");
+                assert_eq!(colored.main_switch, Some(zone));
+                assert_eq!(zone.row, main_row - 1);
+                let top = &board.lines[zone.row];
+                let hit_text: String = top
+                    .chars()
+                    .skip(zone.start - 1)
+                    .take(zone.end - zone.start + 1)
+                    .collect();
+                assert_eq!(hit_text, expected, "{columns}: {top}");
+                assert!(zone.contains(zone.start as u16, (zone.row + 1) as u16));
+                assert!(zone.contains(zone.end as u16, (zone.row + 1) as u16));
+                assert!(!zone.contains((zone.start - 1) as u16, (zone.row + 1) as u16));
+                assert!(!zone.contains((zone.end + 1) as u16, (zone.row + 1) as u16));
+                assert!(!zone.contains(zone.start as u16, zone.row as u16));
+                assert!(!zone.contains(zone.start as u16, (zone.row + 2) as u16));
+            } else {
+                assert!(board.main_switch.is_none());
+                assert!(colored.main_switch.is_none());
+            }
         }
+        let clipped = board_frame(
+            &report,
+            &navigation::Navigation::default(),
+            100,
+            11,
+            &read,
+            false,
+            true,
+        );
+        assert!(clipped.main_switch.is_none());
+        assert!(!clipped.lines.iter().any(|line| line.contains("[s Switch")));
+        let mut unpinned = report.clone();
+        unpinned["room"]["main"] = Value::Null;
+        unpinned["room"]["participants"] = json!([
+            {"participant":"worker","attempt":"build-1","role":"worker","alias":"아다","provider":"codex","state":"working","title":"Fix"}
+        ]);
+        unpinned["room_attempts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("main-1");
+        let no_main = board_frame(
+            &unpinned,
+            &navigation::Navigation::default(),
+            100,
+            20,
+            &read,
+            false,
+            true,
+        );
+        assert!(no_main.main_switch.is_none());
+        assert!(!no_main.lines.iter().any(|line| line.contains("[s Switch")));
         let detail = render_detail_card(
             calls(&report).iter().find(|c| c["participant"] == "worker"),
             100,
@@ -8335,7 +8529,10 @@ mod tests {
                 selected,
                 ..Default::default()
             };
-            let card = frame(&report, &nav, 100, 30, &read).join("\n");
+            let detail_board = board_frame(&report, &nav, 100, 30, &read, false, false);
+            assert!(detail_board.main_switch.is_none());
+            let card = detail_board.lines.join("\n");
+            assert!(!card.contains("[s Switch"), "{card}");
             assert!(
                 card.lines()
                     .any(|line| line.contains(heading) && line.contains("Esc back")),

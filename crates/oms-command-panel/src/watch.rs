@@ -109,6 +109,7 @@ fn run_with_source_writer(
     let mut provider_rows = [None; 3];
     let mut worker_rows = std::collections::BTreeMap::new();
     let mut weekly_hit = None;
+    let mut main_switch_hit = None;
     let mut weekly = WeeklyUsage::default();
     let mut chat: Option<ChatDock> = None;
     let mut split = DockSplit::default();
@@ -364,6 +365,7 @@ fn run_with_source_writer(
             provider_rows = frame.provider_rows;
             worker_rows = frame.worker_rows;
             weekly_hit = frame.weekly_usage;
+            main_switch_hit = frame.main_switch;
             draw(
                 output,
                 &frame.lines,
@@ -665,15 +667,15 @@ fn run_with_source_writer(
                         &read,
                     );
                     let action = if let input::Key::Click(x, y) = key {
-                        if crate::layout::dimensions() == last_size
-                            && x > 0
-                            && usize::from(x) <= last_size.0
-                        {
-                            provider_at_row(&provider_rows, y)
-                                .map_or(navigation::Action::None, navigation::Action::Provider)
-                        } else {
-                            navigation::Action::None
-                        }
+                        click_action(
+                            x,
+                            y,
+                            last_size,
+                            crate::layout::dimensions(),
+                            nav.editing,
+                            main_switch_hit,
+                            &provider_rows,
+                        )
                     } else if !action_scope_current && direct_detail {
                         deny_row_action(&mut nav);
                         navigation::Action::None
@@ -924,6 +926,7 @@ fn run_with_source_writer(
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
                     weekly_hit = frame.weekly_usage;
+                    main_switch_hit = frame.main_switch;
                     draw(
                         output,
                         &frame.lines,
@@ -953,6 +956,7 @@ fn run_with_source_writer(
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
                     weekly_hit = frame.weekly_usage;
+                    main_switch_hit = frame.main_switch;
                     draw(
                         output,
                         &frame.lines,
@@ -987,6 +991,7 @@ fn run_with_source_writer(
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
                     weekly_hit = frame.weekly_usage;
+                    main_switch_hit = frame.main_switch;
                     draw(
                         output,
                         &frame.lines,
@@ -2110,6 +2115,24 @@ fn provider_at_row(rows: &[Option<usize>; 3], y: u16) -> Option<usize> {
     rows.iter().position(|value| *value == Some(row))
 }
 
+fn click_action(
+    x: u16,
+    y: u16,
+    last_size: (usize, usize),
+    current_size: (usize, usize),
+    editing: bool,
+    main_switch: Option<render::ActionZone>,
+    provider_rows: &[Option<usize>; 3],
+) -> navigation::Action {
+    if current_size != last_size || x == 0 || usize::from(x) > last_size.0 {
+        return navigation::Action::None;
+    }
+    if !editing && main_switch.is_some_and(|zone| zone.contains(x, y)) {
+        return navigation::Action::SwitchMain;
+    }
+    provider_at_row(provider_rows, y).map_or(navigation::Action::None, navigation::Action::Provider)
+}
+
 const CLOSE_NATIVE: &str = "[ Return ]";
 
 fn close_native_key(key: &input::Key, (columns, height): (usize, usize)) -> bool {
@@ -3012,6 +3035,7 @@ fn frame(
             provider_rows: [None; 3],
             worker_rows: Default::default(),
             weekly_usage: None,
+            main_switch: None,
         };
     }
     let (mut nav, board_height) = board_viewport(report, nav, height, dock_rows);
@@ -5223,12 +5247,161 @@ mod tests {
         let refuse = |_: &BoardScope, _: &crate::native_panel::MainSwitchTarget| {
             panic!("cancelled or stale switch reached the dispatcher")
         };
+        let report = json!({
+            "project_name": "proj",
+            "generated_at": 1_700_000_037,
+            "collection": {"ok": true},
+            "room": {
+                "id": "room-one",
+                "main": "main-member",
+                "participants": [
+                    {"participant": "earlier", "role": "main", "provider": "claude", "model": "opus", "state": "working", "created_at": "1"},
+                    {"participant": "main-member", "attempt": "attempt-old", "role": "main", "provider": "codex", "model": "gpt-x", "state": "working", "joined": true}
+                ]
+            },
+            "room_attempts": {
+                "attempt-old": {
+                    "attempt_id": "attempt-old",
+                    "tool": "panel-main",
+                    "provider": "codex",
+                    "state": "working",
+                    "terminal": false,
+                    "refs": {
+                        "panel_host": "tmux",
+                        "panel_harness": "codex",
+                        "panel_room_id": "room-one",
+                        "panel_room_participant": "main-member",
+                        "panel_role": "main"
+                    }
+                }
+            }
+        });
+        let read = std::collections::BTreeMap::new();
+        let mut board_nav = navigation::Navigation::default();
+        let board = frame(
+            &report,
+            &board_nav,
+            (100, 20),
+            &read,
+            false,
+            None,
+            None,
+            None,
+        );
+        let zone = board
+            .main_switch
+            .expect("Switch Main hit zone on Board with pinned Main");
+        let click_x = zone.start as u16;
+        let click_y = (zone.row + 1) as u16;
+        let action = click_action(
+            click_x,
+            click_y,
+            (100, 20),
+            (100, 20),
+            false,
+            board.main_switch,
+            &board.provider_rows,
+        );
+        assert_eq!(action, navigation::Action::SwitchMain);
+        assert_eq!(
+            allow_board_action(&mut board_nav, action, true, true),
+            navigation::Action::SwitchMain
+        );
+        assert_eq!(
+            allow_board_action(&mut board_nav, action, true, false),
+            navigation::Action::None
+        );
+        assert_eq!(
+            click_action(
+                click_x,
+                click_y,
+                (100, 20),
+                (100, 20),
+                true,
+                board.main_switch,
+                &board.provider_rows,
+            ),
+            navigation::Action::None
+        );
+        let rows = render::visible(&report, &navigation::Navigation::default());
+        let earlier = rows
+            .iter()
+            .position(|call| crate::text(call, "participant") == "earlier")
+            .unwrap();
+        let detail_nav = navigation::Navigation {
+            detail: true,
+            selected: earlier,
+            ..Default::default()
+        };
+        let detail_board = frame(
+            &report,
+            &detail_nav,
+            (100, 20),
+            &read,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(detail_board.main_switch.is_none());
+        assert_eq!(
+            click_action(
+                click_x,
+                click_y,
+                (100, 20),
+                (100, 20),
+                false,
+                detail_board.main_switch,
+                &detail_board.provider_rows,
+            ),
+            navigation::Action::None
+        );
+        let mut dock_split = DockSplit::default();
+        let mut dock = ChatDock {
+            title: "Worker".into(),
+            history: "body".into(),
+            back: 0,
+            chat: None,
+            agy_locator: None,
+            main: None,
+        };
+        let docked_board = frame(
+            &report,
+            &navigation::Navigation::default(),
+            (100, 14),
+            &read,
+            false,
+            Some(&mut dock_split),
+            Some(&mut dock),
+            None,
+        );
+        assert!(docked_board.main_switch.is_none());
+        assert_eq!(
+            click_action(
+                click_x,
+                click_y,
+                (100, 14),
+                (100, 14),
+                false,
+                docked_board.main_switch,
+                &docked_board.provider_rows,
+            ),
+            navigation::Action::None
+        );
         let (mut flow, mut nav) = make_menu();
+        let modal = frame(&report, &nav, (100, 20), &read, false, None, None, None);
+        assert!(modal.main_switch.is_none());
+        assert!(flow.running.is_none());
+        assert!(!flow.key(&Key::Click(2, 2), &mut nav, || None, refuse));
+        assert!(nav.main_switch.as_ref().unwrap().selected.is_none());
         assert!(!flow.key(&Key::Char('y'), &mut nav, || None, refuse));
         assert!(flow.key(&Key::Char('1'), &mut nav, || None, refuse));
+        assert!(!flow.key(&Key::Click(2, 3), &mut nav, || Some(scope.clone()), refuse));
+        assert!(flow.running.is_none() && nav.main_switch.is_some());
         let frame = render::main_switch_frame(nav.main_switch.as_ref().unwrap(), 31, 6);
         assert!(frame.lines.iter().any(|line| line.contains("Y Confirm")));
         assert!(frame.worker_rows.is_empty());
+        assert!(frame.main_switch.is_none());
         assert!(flow.key(&Key::Escape, &mut nav, || None, refuse));
         assert!(flow.selection.is_none() && nav.main_switch.is_none());
         let (mut flow, mut nav) = make_menu();
