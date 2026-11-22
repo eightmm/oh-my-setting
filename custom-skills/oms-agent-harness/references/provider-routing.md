@@ -56,12 +56,32 @@ oms peer-delegate --to cursor --prompt 'Implement the reviewed change.'
 ```
 
 Use `--providers all` only for diagnostics that should also show absent
-built-ins. The default `peer-ask` and `peer-review` council remains the stable
-Codex/Claude/Antigravity set, so installing another CLI never causes surprise
-fan-out or spend. Name optional seats explicitly; `consult --all` is also an
-explicit fan-out request. `OMS_PEER_PROVIDERS` (a comma list) replaces that
-default for an install that states it; `--providers` still wins, and the listed
-seats pass the same discovery, read-mode and model-family checks.
+built-ins. `peer-ask` and `peer-review` choose their ordered seats from explicit
+`--providers`, then nonempty `OMS_PEER_PROVIDERS` (both comma lists), then the
+trusted installation's `config/panel-routing.json` optional
+`council.peer_default` array, then the stable Codex/Claude/Antigravity set.
+Installing another CLI never adds a default seat. `consult --all` remains an
+explicit fan-out request, independent of this setting.
+
+For example, add `"peer_default": ["codex", "claude", "pi:model=openrouter/example-model:optional"]`
+beside the existing `council.extra` field. The array uses the same target syntax,
+discovery, read-mode, account, duplicate-seat and model-family checks as an
+explicit list; order is preserved and at least one seat must be required.
+Omitting the field preserves existing configurations and legacy defaults; using
+`peer_default` requires the updated strict readers, because older binaries reject
+it as an unknown field. Null, an empty array or malformed seats
+fail when selected; they never silently revert. Whitespace-only environment
+values fall through. Higher-priority choices do not read this default-seat
+field, while existing model/effort routing still reads the file when needed.
+The runtime reports the selected source name on stderr without copying the raw
+configuration or environment value into that diagnostic.
+
+The source is the installed OMS configuration, independent of `--repo` or cwd;
+there is no new path override. `peer-review --writer` still removes the writer
+from environment/configuration/legacy defaults. Only explicit `--providers`
+keeps that seat and emits the existing correlated-family warning. This field
+does not grant Team authority, supply an explicit Team request target, change
+`council.extra`, or select Main/Lead/Worker panel routes.
 
 Exact model names stay attached to their carrier (`opencode` in the GLM
 example and `aider` in the DeepSeek-model example). `deepseek` by itself is the

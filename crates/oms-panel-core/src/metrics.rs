@@ -884,7 +884,8 @@ fn codex_readings(
     let mut best_weekly: Option<(u8, f64, Option<f64>)> = None;
     let mut newest_shorts: Vec<Value> = Vec::new();
     let mut source_proven = crate::routing::private_home(&home);
-    let limit = if fallback_older { 64 } else { 1 };
+    // Registered homes use one bounded pass; only ambient discovery probes tails.
+    let limit = if fallback_older { 64 } else { 16 };
     for (idx, (mtime, ino, size, path)) in files.into_iter().take(limit).enumerate() {
         if default_home && idx == 0 && now - (mtime as f64 / 1e9) > CODEX_WEEK_SECONDS {
             break;
@@ -935,7 +936,7 @@ fn codex_readings(
                 best_weekly = Some((u, r, observed));
             }
         }
-        if best_weekly.is_some() && (!fallback_older || idx == 0) {
+        if best_weekly.is_some() && idx == 0 {
             break;
         }
     }
@@ -1217,6 +1218,63 @@ mod receipt_token_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn registered_home_weekly_survives_newer_rollouts() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let repo = Repo::new();
+        let other = Repo::new();
+        let now = 2_000_000_000.0;
+        let day = repo.0.join("sessions/2033/05/18");
+        std::fs::create_dir_all(&day).unwrap();
+        let write = |name: &str, age: u64, row: Value| {
+            let file = std::fs::File::create(day.join(format!("rollout-{name}.jsonl"))).unwrap();
+            serde_json::to_writer(&file, &row).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(now as u64 - age))
+                .unwrap();
+        };
+        let weekly = |used, observed, reset| {
+            json!({
+                "timestamp": observed,
+                "rate_limits": {"secondary": {
+                    "window_minutes": 10080, "used_percent": used, "resets_at": reset
+                }}
+            })
+        };
+        write("older", 30, weekly(31, now - 15.0, now + 3600.0));
+        write("weekly", 20, weekly(42, now - 20.0, now + 3600.0));
+        write("expired", 10, weekly(99, now - 10.0, now));
+        for newest in [
+            json!({"timestamp": now, "rate_limits": {"primary": {
+                "window_minutes": 300, "used_percent": 7, "resets_at": now + 300.0
+            }}}),
+            json!({"type": "session_meta", "payload": {"id": "new-session"}}),
+        ] {
+            write("newest", 0, newest);
+            let readings = codex_readings(Some(&repo.0), now, false);
+            assert_eq!(readings.weekly_used, Some(31));
+            assert_eq!(readings.observed_at, Some(now - 15.0));
+            assert_eq!(readings.resets_at, Some(now + 3600.0));
+            assert_eq!(
+                readings.home,
+                Some(crate::digest(repo.0.as_os_str().as_encoded_bytes()))
+            );
+            assert!(
+                codex_readings(Some(&other.0), now, false)
+                    .weekly_used
+                    .is_none()
+            );
+        }
+        for age in 0..16 {
+            write(&format!("meta-{age}"), age, json!({"type": "session_meta"}));
+        }
+        assert!(
+            codex_readings(Some(&repo.0), now, false)
+                .weekly_used
+                .is_none()
+        );
     }
 
     fn write(

@@ -66,6 +66,18 @@ impl Default for TieBand {
 #[serde(deny_unknown_fields)]
 pub struct Council {
     pub extra: Vec<Candidate>,
+    /// Ordered defaults for peer-ask/review, independent of panel council extras.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "peer_default"
+    )]
+    pub peer_default: Option<Vec<String>>,
+}
+fn peer_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error> {
+    Vec::<String>::deserialize(deserializer).map(Some)
 }
 fn enabled() -> bool {
     true
@@ -161,6 +173,12 @@ impl Policy {
         for route in &policy.council.extra {
             valid_route(route)?;
             require(extra.insert(&route.provider), "duplicate council provider")?;
+        }
+        if let Some(seats) = &policy.council.peer_default {
+            require(
+                !seats.is_empty() && seats.iter().all(|seat| !seat.trim().is_empty()),
+                "invalid council peer_default seats",
+            )?;
         }
         Ok(policy)
     }
@@ -2185,13 +2203,38 @@ mod tests {
     fn schema_two_remains_strict_and_snapshots_separate_model_identities() {
         let policy = Policy::bundled().unwrap();
         let original = serde_json::to_value(&policy).unwrap();
-        for path in ["policy", "candidate", "role", "schema", "effort"] {
+        assert!(
+            !original["council"]
+                .as_object()
+                .unwrap()
+                .contains_key("peer_default")
+        );
+        let mut defaults = original.clone();
+        defaults["council"]["peer_default"] = json!([
+            "codex:account=work",
+            "custom-provider:model=custom/demo:optional"
+        ]);
+        let parsed = Policy::parse(&serde_json::to_vec(&defaults).unwrap()).unwrap();
+        assert_eq!(parsed.council.extra, policy.council.extra);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), defaults);
+        for value in [
+            json!(null),
+            json!([]),
+            json!("codex"),
+            json!(["codex", 1]),
+            json!([" "]),
+        ] {
+            defaults["council"]["peer_default"] = value;
+            assert!(Policy::parse(&serde_json::to_vec(&defaults).unwrap()).is_err());
+        }
+        for path in ["policy", "candidate", "role", "schema", "effort", "council"] {
             let mut changed = original.clone();
             match path {
                 "policy" => changed["execution_profile"] = "composite".into(),
                 "candidate" => changed["tiers"]["routine"][0]["served_model"] = "other".into(),
                 "role" => changed["roles"]["worker"]["risk"] = "low".into(),
                 "schema" => changed["schema"] = 3.into(),
+                "council" => changed["council"]["peer_defaults"] = json!(["codex"]),
                 _ => changed["tiers"]["routine"][0]["effort"] = "native-fixed".into(),
             }
             assert!(

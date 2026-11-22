@@ -619,7 +619,7 @@ impl oms_command_autonomy::Services for ControlServices<'_> {
     /// tiers or `provider-default`.
     fn resolve_route(
         &self,
-        _repo: &Path,
+        repo: &Path,
         assignment: &Value,
         role: &str,
         interrupted: &AtomicBool,
@@ -627,8 +627,9 @@ impl oms_command_autonomy::Services for ControlServices<'_> {
         if interrupted.load(Ordering::Acquire) {
             return Err(autonomy_error(130, "interrupted"));
         }
-        let provider = oms_command_peer::providers::normalize(&text_of(assignment, "provider"))
-            .map_err(|e| autonomy_error(2, e.message))?;
+        let provider =
+            oms_command_peer::providers::normalize_at(&text_of(assignment, "provider"), repo)
+                .map_err(|e| autonomy_error(2, e.message))?;
         let primary_raw = text_of(assignment, "model");
         let fallback = text_of(assignment, "fallback_model");
         let effort_raw = text_of(assignment, "reasoning_effort");
@@ -645,12 +646,13 @@ impl oms_command_autonomy::Services for ControlServices<'_> {
             }
         }
         let role_name = if role.is_empty() { "worker" } else { role };
-        let resolved = oms_command_peer::providers::resolve_route(
+        let resolved = oms_command_peer::providers::resolve_route_at(
             &self.source,
             &provider,
             &primary_raw,
             &effort_raw,
             role_name,
+            repo,
         )
         .map_err(|e| autonomy_error(2, e.message))?;
         if resolved.provider != provider {

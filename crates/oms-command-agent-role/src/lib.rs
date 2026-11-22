@@ -9,6 +9,8 @@
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
 pub mod native_model;
+#[cfg(unix)]
+pub mod provider_identity;
 
 #[cfg(unix)]
 mod native;
@@ -25,6 +27,14 @@ mod write;
 /// Classification performs no reads, writes, or actions.
 pub fn owns(_: &[OsString]) -> bool {
     true
+}
+
+/// Validate the existing panel policy and project its optional ordered peer seats.
+/// Callers supply bounded bytes from the trusted installation root. Provider
+/// discovery, account binding and target semantics remain the peer caller's work.
+#[cfg(unix)]
+pub fn council_peer_defaults(bytes: &[u8]) -> Result<Option<Vec<String>>, String> {
+    policy::peer_defaults(bytes)
 }
 
 pub fn run(

@@ -192,12 +192,12 @@ pub(crate) fn question(args: &Args, context: &Context<'_>) -> Result<String> {
     }
     Ok(prompt.into())
 }
-pub(crate) fn detect_caller() -> Result<Option<String>> {
+pub(crate) fn detect_caller(owner_cwd: &Path) -> Result<Option<String>> {
     let env_nonempty = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
     if let Ok(raw) = std::env::var("OMS_AGENT")
         && !raw.trim().is_empty()
     {
-        return providers::normalize(raw.trim()).map(Some);
+        return providers::normalize_at(raw.trim(), owner_cwd).map(Some);
     }
     if env_nonempty("CLAUDECODE") || env_nonempty("CLAUDE_CODE_ENTRYPOINT") {
         return Ok(Some("claude".into()));
@@ -1015,6 +1015,62 @@ pub(crate) fn call(
         round,
     })
 }
+fn council_targets(args: &Args, context: &Context<'_>) -> Result<(Vec<Target>, &'static str)> {
+    const CONFIG: &str = "config/panel-routing.json:council.peer_default";
+    let parse = |seats: &[&str], source| {
+        seats
+            .iter()
+            .map(|seat| {
+                Target::parse_at(seat.trim(), context.cwd).map_err(|error| Error {
+                    message: format!("{source}: {}", error.message),
+                    ..error
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(|targets| (targets, source))
+    };
+    if args.has("providers") {
+        return parse(
+            &args.get("providers").split(',').collect::<Vec<_>>(),
+            "--providers",
+        );
+    }
+    match std::env::var("OMS_PEER_PROVIDERS") {
+        Ok(value) if !value.trim().is_empty() => {
+            return parse(&value.split(',').collect::<Vec<_>>(), "OMS_PEER_PROVIDERS");
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return fail("OMS_PEER_PROVIDERS: provider list must be UTF-8");
+        }
+        _ => {}
+    }
+    // Seat defaults use the same trusted installation root as model routing.
+    // Higher-priority choices do not consume this field; route() still reads
+    // the policy when a seat needs its configured model or effort.
+    let bytes = storage::root(context.source)?.read_no_follow(
+        Path::new("config/panel-routing.json"),
+        oms_safe_fs::ByteReadOptions {
+            missing_ok: false,
+            max_bytes: 1024 * 1024,
+        },
+    );
+    match bytes {
+        Err(oms_safe_fs::ByteError::Missing) => {}
+        Err(error) => return fail(format!("{CONFIG}: cannot read routing policy: {error:?}")),
+        Ok(bytes) => {
+            if let Some(seats) = oms_command_agent_role::council_peer_defaults(&bytes)
+                .map_err(|message| Error::new(2, format!("{CONFIG}: {message}")))?
+            {
+                return parse(
+                    &seats.iter().map(String::as_str).collect::<Vec<_>>(),
+                    CONFIG,
+                );
+            }
+        }
+    }
+    parse(&["codex", "claude", "antigravity"], "legacy default")
+}
+
 pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<Output> {
     safety::parent()?;
     let mut resolved = args.clone();
@@ -1051,7 +1107,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     };
     let dir = directory(args, &repo, kind)?;
     let single = matches!(tool, "agent-call" | "advise" | "consult");
-    let caller = detect_caller()?.unwrap_or_default();
+    let caller = detect_caller(context.cwd)?.unwrap_or_default();
     let default = if tool == "advise" {
         std::env::var("OMS_ADVISOR_PROVIDER")
             .ok()
@@ -1064,6 +1120,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         None
     };
     let mut warnings = Vec::new();
+    let mut seat_source = None;
     let mut targets = if single {
         let explicit = args.all("to");
         if args.has("all") && !explicit.is_empty() {
@@ -1072,51 +1129,53 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         if !explicit.is_empty() {
             explicit
                 .into_iter()
-                .map(|s| Target::parse(&s))
+                .map(|s| Target::parse_at(&s, context.cwd))
                 .collect::<Result<Vec<_>>>()?
         } else if let Some(default) = default {
-            vec![Target::parse(&default)?]
+            vec![Target::parse_at(&default, context.cwd)?]
         } else if tool == "agent-call" {
             return fail("--to is required");
         } else {
             let peers = ["codex", "claude", "antigravity"]
                 .iter()
                 .filter(|p| **p != caller)
-                .filter(|p| providers::discovered(p))
+                .filter(|p| providers::discovered_at(p, context.cwd))
                 .take(if args.has("all") { 3 } else { 1 })
-                .map(|p| Target::parse(p))
+                .map(|p| Target::parse_at(p, context.cwd))
                 .collect::<Result<Vec<_>>>()?;
-            if peers.is_empty() && !caller.is_empty() && providers::discovered(&caller) {
+            if peers.is_empty()
+                && !caller.is_empty()
+                && providers::discovered_at(&caller, context.cwd)
+            {
                 warnings.extend_from_slice(
                     b"note: no independent provider available; answering from the caller's own family (self-advice)\n",
                 );
-                vec![Target::parse(&caller)?]
+                vec![Target::parse_at(&caller, context.cwd)?]
             } else {
                 peers
             }
         }
     } else {
-        // Default seats: an explicit list wins, then the install's stated
-        // preference, then the stable council. Every seat still passes the
-        // discovery, read-capability and model-family checks below.
-        let preferred = std::env::var("OMS_PEER_PROVIDERS")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-        args.value(
-            "providers",
-            preferred.as_deref().unwrap_or("codex,claude,antigravity"),
+        let (targets, source) = council_targets(args, context)?;
+        seat_source = Some(source);
+        warnings.extend_from_slice(format!("council providers source: {source}\n").as_bytes());
+        targets
+    };
+    let seat_error = |message: &str| {
+        Error::new(
+            2,
+            seat_source.map_or_else(
+                || message.to_owned(),
+                |source| format!("{source}: {message}"),
+            ),
         )
-        .split(',')
-        .map(str::trim)
-        .map(Target::parse)
-        .collect::<Result<Vec<_>>>()?
     };
     if tool == "peer-review" && args.has("writer") && !args.has("providers") {
-        let writer = providers::normalize(args.get("writer"))?;
+        let writer = providers::normalize_at(args.get("writer"), context.cwd)?;
         targets.retain(|s| s.provider != writer);
     }
     if tool == "peer-review" && args.has("writer") && args.has("providers") {
-        let writer = providers::normalize(args.required("writer")?)?;
+        let writer = providers::normalize_at(args.required("writer")?, context.cwd)?;
         let writer_family = providers::family(&writer, "");
         let mut correlated = false;
         for target in &targets {
@@ -1147,19 +1206,19 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             "Team request channel requires exactly one explicit --providers target and one round",
         );
     }
-    apply_account(args, &mut targets)?;
+    apply_account(args, &mut targets).map_err(|error| seat_error(&error.message))?;
     if targets.is_empty() {
-        return fail("no available peer target");
+        return Err(seat_error("no available peer target"));
     }
     if targets.iter().all(|t| t.optional) {
-        return fail("at least one seat must be required");
+        return Err(seat_error("at least one seat must be required"));
     }
     let mut seen = BTreeSet::new();
     if targets
         .iter()
         .any(|t| !seen.insert(format!("{}:{}:{}", t.provider, t.model, t.account)))
     {
-        return fail("duplicate council seat");
+        return Err(seat_error("duplicate council seat"));
     }
     if (args.has("model") || args.has("fallback-model")) && targets.len() != 1 {
         return fail("model overrides require exactly one provider");
@@ -1350,7 +1409,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         }
     }
     if args.has("synthesize") {
-        let target = Target::parse(args.get("synthesize"))?;
+        let target = Target::parse_at(args.get("synthesize"), context.cwd)?;
         let mut synthesis = format!(
             "Synthesize these independent answers. Preserve disagreements, missing evidence and uncertainty. Question:\n{question}\n"
         );

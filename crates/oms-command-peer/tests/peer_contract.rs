@@ -193,6 +193,8 @@ fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], bo
             "OMS_PROVIDER_ADAPTER_DIR",
             if layout == "override" {
                 fixture.0.join("adapters")
+            } else if layout == "relative" {
+                PathBuf::from("adapters")
             } else {
                 PathBuf::new()
             },
@@ -721,7 +723,7 @@ fn provider_native_transports_match_shell_contract() {
             for (provider, bin, pattern) in cases {
                 for exact in [false, true] {
                     let native_model = ["deepseek", "vibe", "openhands"].contains(&provider);
-                    let model = if exact && !native_model {
+                    let model = if exact {
                         "fixture-model"
                     } else {
                         "provider-default"
@@ -735,6 +737,23 @@ fn provider_native_transports_match_shell_contract() {
                         "inspect λ\nnext line".as_bytes(),
                         &probe,
                     );
+                    if exact && native_model {
+                        assert_eq!(output.0, 1, "{provider}");
+                        let artifact = String::from_utf8_lossy(&output.1)
+                            .lines()
+                            .find(|line| Path::new(line).is_file())
+                            .map(PathBuf::from)
+                            .expect("failed seat artifact");
+                        assert!(
+                            fs::read_to_string(artifact)
+                                .unwrap()
+                                .contains("no documented per-invocation model override"),
+                            "{provider}: {}",
+                            message(&output)
+                        );
+                        assert!(probe.calls.lock().unwrap().is_empty());
+                        continue;
+                    }
                     if [
                         "muse",
                         "kimi",
@@ -861,9 +880,32 @@ fn run(repo: &Repo, source: &Path, tool: &str, values: &[&str]) -> Output {
 
 #[test]
 fn provider_adapter_discovery_requires_marker() {
-    for layout in ["override", "xdg", "home"] {
+    for layout in ["override", "xdg", "home", "relative"] {
         provider_isolated("provider_adapter_discovery_requires_marker", layout, || {
             use oms_command_peer::providers::{binary, discovered, normalize};
+            if layout == "relative" {
+                let repo = provider_repo();
+                executable_fixture(&repo, "adapters/oms-agent-adapter-owned-fixture");
+                let adapter = repo.0.join("adapters/oms-agent-adapter-owned-fixture");
+                assert_eq!(
+                    oms_command_peer::providers::normalize_at("owned-fixture", &repo.0).unwrap(),
+                    "owned-fixture"
+                );
+                let probe = ProviderProbe::default();
+                success(provider_call(
+                    &repo,
+                    "owned-fixture",
+                    "provider-default",
+                    "auto",
+                    b"inspect owner adapter",
+                    &probe,
+                ));
+                let calls = probe.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_ne!(calls[0].request.cwd, repo.0);
+                assert_eq!(calls[0].request.argv[0], adapter);
+                return;
+            }
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
             let dir = match layout {
                 "override" => home.join("adapters"),
@@ -906,24 +948,23 @@ fn provider_adapter_discovery_requires_marker() {
                 assert!(!discovered(&name));
             }
             assert_eq!(normalize("opencode2").unwrap(), "opencode");
-            for (alias, provider) in [
-                ("agy", "antigravity"),
-                ("cursor-agent", "cursor"),
-                ("grok-build", "grok"),
-                ("gemini-cli", "gemini"),
-                ("qwen-code", "qwen"),
-                ("opencode2", "opencode"),
-                ("dsh", "deepseek"),
-                ("deepseek-harness", "deepseek"),
-                ("mistral-vibe", "vibe"),
-                ("github-copilot", "copilot"),
-                ("factory-droid", "droid"),
-                ("kiro-cli", "kiro"),
-                ("cn", "continue"),
-            ] {
-                assert_eq!(normalize(alias).unwrap(), provider);
-                assert_eq!(binary(alias), binary(provider));
-                assert!(discovered(alias));
+            let aliases = V::parse(include_bytes!(
+                "../../oms-mcp-server/tests/provider-aliases.json"
+            ))
+            .unwrap();
+            for row in aliases.array() {
+                for (alias, provider) in row
+                    .get("input")
+                    .text()
+                    .unwrap()
+                    .split(',')
+                    .zip(row.get("expected").array())
+                {
+                    let provider = provider.text().unwrap();
+                    assert_eq!(normalize(alias).unwrap(), provider);
+                    assert_eq!(binary(alias), binary(provider));
+                    assert!(discovered(alias));
+                }
             }
             assert_eq!(binary("opencode"), "opencode2");
             assert!(discovered("opencode"));
@@ -1187,6 +1228,293 @@ fn view_embedded_and_installed_assets() {
         assert!(!repo.0.join("ancestor.html").exists());
     });
 }
+#[test]
+fn council_default_seat_sources() {
+    const CONFIG: &str = "config/panel-routing.json:council.peer_default";
+    for (layout, preference) in [
+        ("absent", None),
+        ("empty", Some(" \t ")),
+        ("relative", None),
+        (
+            "environment",
+            Some(
+                " codex:model=gpt-6.1-sol:account=work , claude:model=claude-sonnet-5-5:optional ",
+            ),
+        ),
+        ("invalid", Some("unmarked-fixture")),
+        ("duplicate", Some("codex,codex")),
+        ("optional", Some("codex:optional")),
+    ] {
+        let env = preference
+            .map(|value| vec![("OMS_PEER_PROVIDERS", value)])
+            .unwrap_or_default();
+        provider_isolated_with_env("council_default_seat_sources", layout, &env, || {
+            let repo = Repo::new();
+            repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ]);
+            let source = Repo::new();
+            let configure = |seats: Option<&str>| {
+                let mut policy =
+                    V::parse(include_bytes!("../../../config/panel-routing.json")).unwrap();
+                if let Some(seats) = seats {
+                    let mut council = policy.get("council").clone();
+                    council.set("peer_default", V::parse(seats.as_bytes()).unwrap());
+                    policy.set("council", council);
+                }
+                source.write("config/panel-routing.json", policy.json(false).unwrap());
+            };
+            let invoke = |tool: &str, extra: &[&str]| {
+                let mut values = vec!["--dry-run", "--prompt", "Inspect council"];
+                values.extend(extra);
+                run(&repo, &source.0, tool, &values)
+            };
+            let seats = |output: Output, expected: &[&str], origin: &str| {
+                let diagnostic = String::from_utf8_lossy(&output.2);
+                assert_eq!(output.0, 0, "{diagnostic}");
+                let output = String::from_utf8_lossy(&output.1);
+                let selected = output
+                    .lines()
+                    .filter_map(|line| {
+                        line.strip_prefix("dry-run: ")?
+                            .split_once(" -> ")
+                            .map(|(seat, _)| seat)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(selected, expected);
+                assert!(
+                    diagnostic.contains(&format!("council providers source: {origin}\n")),
+                    "{diagnostic}"
+                );
+            };
+            let refused = |output: Output, origin: &str, message: &str| {
+                assert_eq!(output.0, 2);
+                let diagnostic = String::from_utf8_lossy(&output.2);
+                assert!(
+                    diagnostic.contains(origin) && diagnostic.contains(message),
+                    "{diagnostic}"
+                );
+            };
+            if layout == "relative" {
+                assert_ne!(std::env::current_dir().unwrap(), repo.0);
+                executable_fixture(&repo, "adapters/oms-agent-adapter-council-owned");
+                assert!(oms_command_peer::providers::Target::parse("council-owned").is_err());
+                configure(Some(r#"["council-owned:model=custom/demo"]"#));
+                for tool in ["peer-ask", "peer-review"] {
+                    seats(invoke(tool, &[]), &["council-owned"], CONFIG);
+                }
+                seats(
+                    invoke(
+                        "peer-ask",
+                        &["--providers", "council-owned:model=custom/demo"],
+                    ),
+                    &["council-owned"],
+                    "--providers",
+                );
+                return;
+            }
+            configure(Some(
+                r#"["claude:model=claude-sonnet-5-5","codex:model=gpt-6.1-sol:account=work","fixture:model=custom/demo:optional"]"#,
+            ));
+            // A repository-local file never overrides the trusted installation root.
+            repo.write("config/panel-routing.json", "not installation policy");
+            if matches!(layout, "invalid" | "duplicate" | "optional") {
+                let message = match layout {
+                    "duplicate" => "duplicate council seat",
+                    "optional" => "at least one seat must be required",
+                    _ => "unsupported provider name",
+                };
+                refused(invoke("peer-ask", &[]), "OMS_PEER_PROVIDERS", message);
+            } else if layout == "environment" {
+                for tool in ["peer-ask", "peer-review"] {
+                    seats(
+                        invoke(tool, &[]),
+                        &["codex", "claude"],
+                        "OMS_PEER_PROVIDERS",
+                    );
+                }
+                seats(
+                    invoke("peer-review", &["--writer", "claude"]),
+                    &["codex"],
+                    "OMS_PEER_PROVIDERS",
+                );
+                configure(Some("null"));
+                seats(
+                    invoke("peer-ask", &[]),
+                    &["codex", "claude"],
+                    "OMS_PEER_PROVIDERS",
+                );
+                source.write("config/panel-routing.json", "not JSON");
+                seats(
+                    invoke("peer-ask", &[]),
+                    &["codex", "claude"],
+                    "OMS_PEER_PROVIDERS",
+                );
+            } else {
+                for tool in ["peer-ask", "peer-review"] {
+                    seats(invoke(tool, &[]), &["claude", "codex", "fixture"], CONFIG);
+                }
+                seats(
+                    invoke("peer-review", &["--writer", "claude"]),
+                    &["codex", "fixture"],
+                    CONFIG,
+                );
+                for (value, message) in [
+                    ("null", "invalid panel council peer_default seats"),
+                    ("[]", "invalid panel council peer_default seats"),
+                    (r#""codex""#, "invalid panel council peer_default seats"),
+                    (r#"["codex",1]"#, "invalid panel council peer_default seats"),
+                    (r#"[" "]"#, "invalid panel council peer_default seats"),
+                    (r#"["codex","codex"]"#, "duplicate council seat"),
+                    (r#"["antigravity","agy"]"#, "duplicate council seat"),
+                    (
+                        r#"["codex:optional"]"#,
+                        "at least one seat must be required",
+                    ),
+                    (r#"["unmarked-fixture"]"#, "unsupported provider name"),
+                ] {
+                    configure(Some(value));
+                    refused(invoke("peer-ask", &[]), CONFIG, message);
+                }
+                configure(Some(r#"["codex:model=gpt-6.1-sol:account=work"]"#));
+                seats(
+                    invoke("peer-ask", &["--account", "work"]),
+                    &["codex"],
+                    CONFIG,
+                );
+                refused(
+                    invoke("peer-ask", &["--account", "other"]),
+                    CONFIG,
+                    "conflicts",
+                );
+                refused(
+                    invoke("peer-review", &["--writer", "codex"]),
+                    CONFIG,
+                    "no available peer target",
+                );
+                configure(Some(r#"["fixture:model=custom/demo"]"#));
+                let team = run(
+                    &repo,
+                    &source.0,
+                    "peer-ask",
+                    &[
+                        "--team-requests",
+                        "--team-id",
+                        "fixture-team",
+                        "--team-spec-sha256",
+                        &"a".repeat(64),
+                        "--team-member",
+                        "lead",
+                        "--team-member-generation",
+                        "1",
+                        "--prompt",
+                        "Inspect council",
+                    ],
+                );
+                refused(team, "explicit --providers", "exactly one");
+                configure(None);
+                let mut policy =
+                    V::parse(&fs::read(source.0.join("config/panel-routing.json")).unwrap())
+                        .unwrap();
+                policy.set("unknown-policy-field", true);
+                source.write("config/panel-routing.json", policy.json(false).unwrap());
+                refused(
+                    invoke("peer-ask", &[]),
+                    CONFIG,
+                    "unsupported panel routing policy",
+                );
+                configure(None);
+                seats(
+                    invoke("peer-ask", &[]),
+                    &["codex", "claude", "antigravity"],
+                    "legacy default",
+                );
+                let mut policy =
+                    V::parse(&fs::read(source.0.join("config/panel-routing.json")).unwrap())
+                        .unwrap();
+                if let V::Obj(fields) = &mut policy {
+                    fields.remove(b"council".as_slice());
+                }
+                source.write("config/panel-routing.json", policy.json(false).unwrap());
+                seats(
+                    invoke("peer-ask", &[]),
+                    &["codex", "claude", "antigravity"],
+                    "legacy default",
+                );
+                fs::remove_file(source.0.join("config/panel-routing.json")).unwrap();
+                // Missing defaults still select the three legacy seats; --model remains single-seat only.
+                refused(
+                    invoke("peer-ask", &["--model", "fixture"]),
+                    "model overrides",
+                    "exactly one",
+                );
+                for malformed in ["", "{", "null", r#"{"schema":1}"#] {
+                    source.write("config/panel-routing.json", malformed);
+                    refused(invoke("peer-ask", &[]), CONFIG, "routing");
+                }
+            }
+            // Explicit CLI choices win even over invalid environment/default configuration.
+            configure(Some("null"));
+            seats(
+                invoke("peer-ask", &["--providers", "claude"]),
+                &["claude"],
+                "--providers",
+            );
+            source.write("config/panel-routing.json", "not JSON");
+            seats(
+                invoke(
+                    "peer-ask",
+                    &["--providers", "claude:model=claude-sonnet-5-5"],
+                ),
+                &["claude"],
+                "--providers",
+            );
+            seats(
+                invoke(
+                    "peer-review",
+                    &[
+                        "--providers",
+                        "claude:model=claude-sonnet-5-5",
+                        "--writer",
+                        "claude",
+                    ],
+                ),
+                &["claude"],
+                "--providers",
+            );
+            refused(
+                invoke("peer-ask", &["--providers", ""]),
+                "--providers",
+                "unsupported provider name",
+            );
+            refused(
+                invoke("peer-ask", &["--providers", "codex,codex"]),
+                "--providers",
+                "duplicate council seat",
+            );
+            // Skipping seat defaults never bypasses the existing model-route file read.
+            refused(
+                invoke("peer-ask", &["--providers", "codex"]),
+                "invalid JSON",
+                "invalid JSON",
+            );
+            for tool in ["agent-call", "advise", "consult"] {
+                success(invoke(
+                    tool,
+                    &["--to", "codex", "--model", "gpt-6.1-sol", "--no-strategy"],
+                ));
+            }
+        });
+    }
+}
+
 #[test]
 fn peer_dry_runs_and_ml_context() {
     isolated("peer_dry_runs_and_ml_context", || {

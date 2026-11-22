@@ -777,6 +777,9 @@ mod local_observation {
     const AUTO_SWITCH: &str = "OMS_PANEL_CLAUDE_AUTO_OBSERVATION";
     const SLOT: &str = ".oms-claude-weekly-candidate.json";
     const AUTO_SLOT: &str = ".oms-claude-auto-weekly.json";
+    // Skip redundant fsync/rename when an active auto slot has identical quota
+    // values within a short fraction of the 600s consumer freshness TTL.
+    const SAME_VALUE_REFRESH_SECONDS: f64 = 60.0;
     const DIR: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
         .union(OFlags::NOFOLLOW)
@@ -864,6 +867,7 @@ mod local_observation {
         };
         let owner = source(&dir)?;
         let process = hash(format!("claude-process\0{}\0{}", owner.pid, owner.birth));
+        let session = hash(format!("claude-session\0{id}"));
         let slot = if auto.is_some() { AUTO_SLOT } else { SLOT };
         fs::flock(&dir, fs::FlockOperation::NonBlockingLockExclusive).ok()?;
         match fs::statat(&dir, slot, AtFlags::SYMLINK_NOFOLLOW) {
@@ -874,16 +878,19 @@ mod local_observation {
                 } else {
                     crate::common::document(&old)?
                 };
-                let blocked = if auto.is_some() {
-                    let previous = &prior["observation"];
-                    // Two live launches can share a home. Keep the first active window,
-                    // and let the reader's exact launch proof determine who can use it.
-                    !prior["launch"].as_str().is_some_and(hex64)
-                        || previous["schema"] != 1
-                        || previous["home"] != marker
-                        || !previous["resets_at"]
-                            .as_f64()
-                            .is_some_and(|reset| reset <= callback_observed_at)
+                let blocked = if let Some(launch) = auto {
+                    !allow_auto_replace(
+                        &prior,
+                        &AutoCandidate {
+                            launch,
+                            home: marker,
+                            process: &process,
+                            session: &session,
+                            used,
+                            reset,
+                            observed_at: callback_observed_at,
+                        },
+                    )
                 } else {
                     prior["schema"] != 1
                         || (prior["home"] == marker
@@ -903,13 +910,94 @@ mod local_observation {
         }
         open_home(&home, marker)?;
         let observation = json!({"schema":1,"home":marker,"process":process,
-            "session":hash(format!("claude-session\0{id}")),"weekly_used":used,"resets_at":reset,
+            "session":session,"weekly_used":used,"resets_at":reset,
             "callback_observed_at":callback_observed_at});
         let record = match auto {
             Some(launch) => json!({"launch":launch, "observation":observation}),
             None => observation,
         };
         write_slot(&dir, slot, &serde_json::to_vec(&record).ok()?)
+    }
+
+    struct AutoCandidate<'a> {
+        launch: &'a str,
+        home: &'a str,
+        process: &'a str,
+        session: &'a str,
+        used: f64,
+        reset: f64,
+        observed_at: f64,
+    }
+
+    fn allow_auto_replace(prior: &Value, next: &AutoCandidate<'_>) -> bool {
+        let Some(root) = prior.as_object().filter(|m| m.len() == 2) else {
+            return false;
+        };
+        let Some(previous_launch) = root
+            .get("launch")
+            .and_then(Value::as_str)
+            .filter(|v| hex64(v))
+        else {
+            return false;
+        };
+        let Some(previous) = root
+            .get("observation")
+            .and_then(Value::as_object)
+            .filter(|m| m.len() == 7)
+        else {
+            return false;
+        };
+        if previous.get("schema") != Some(&json!(1))
+            || previous.get("home").and_then(Value::as_str) != Some(next.home)
+        {
+            return false;
+        }
+        let Some(previous_process) = previous
+            .get("process")
+            .and_then(Value::as_str)
+            .filter(|v| hex64(v))
+        else {
+            return false;
+        };
+        let Some(previous_session) = previous
+            .get("session")
+            .and_then(Value::as_str)
+            .filter(|v| hex64(v))
+        else {
+            return false;
+        };
+        let Some(previous_used) = previous
+            .get("weekly_used")
+            .and_then(Value::as_f64)
+            .filter(|n| (0.0..=100.0).contains(n))
+        else {
+            return false;
+        };
+        let Some(previous_reset) = previous.get("resets_at").and_then(Value::as_f64) else {
+            return false;
+        };
+        let Some(previous_observed_at) = previous
+            .get("callback_observed_at")
+            .and_then(Value::as_f64)
+            .filter(|t| *t >= 0.0 && *t < previous_reset)
+        else {
+            return false;
+        };
+        if previous_reset <= next.observed_at {
+            return true;
+        }
+        // Two live launches can share a home. Keep an active window protected
+        // against foreign launches/processes/sessions and replays, while allowing
+        // the exact same source to refresh before the 600s consumer TTL expires.
+        if previous_launch != next.launch
+            || previous_process != next.process
+            || previous_session != next.session
+            || next.observed_at <= previous_observed_at
+        {
+            return false;
+        }
+        let same_value = next.used == previous_used && next.reset == previous_reset;
+        !(same_value && next.observed_at - previous_observed_at < SAME_VALUE_REFRESH_SECONDS)
     }
 
     fn hex64(value: &str) -> bool {
@@ -1146,9 +1234,10 @@ mod local_observation {
         #[test]
         fn local_weekly_callback_checks_native_parent_and_keeps_first_observation() {
             const CASE: &str = "OMS_LOCAL_WEEKLY_FIXTURE";
+            const RESET_ENV: &str = "OMS_LOCAL_WEEKLY_RESET";
             const SESSION: &str = "fixture-native-session";
             const TEST: &str = "statusline::local_observation::tests::local_weekly_callback_checks_native_parent_and_keeps_first_observation";
-            let run = |case: &str, dir: &Path, marker: &str, gateway: bool| {
+            let run = |case: &str, dir: &Path, marker: &str, gateway: bool, reset: Option<u64>| {
                 let mut command = std::process::Command::new(std::env::current_exe().unwrap());
                 command
                     .args(["--exact", TEST])
@@ -1163,6 +1252,9 @@ mod local_observation {
                         marker,
                     )
                     .env("CLAUDE_CONFIG_DIR", dir);
+                if let Some(reset) = reset {
+                    command.env(RESET_ENV, reset.to_string());
+                }
                 if gateway {
                     command.env("CLAUDE_CODE_USE_BEDROCK", "1");
                 }
@@ -1185,46 +1277,171 @@ mod local_observation {
                         json!({"pid":pid,"procStart":start,"sessionId":SESSION}).to_string(),
                     )
                     .unwrap();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let active_reset = now + 3600;
                     if case == "contending-owner" {
-                        run("contended", &dir, &marker, false);
+                        run("contended", &dir, &marker, false, Some(active_reset));
                         return;
                     }
                     for case in ["duplicate-key", "elapsed", "future", "other-session"] {
-                        run(case, &dir, &marker, false);
+                        run(case, &dir, &marker, false, Some(active_reset));
                     }
-                    run("override", &dir, &marker, true);
+                    run("override", &dir, &marker, true, Some(active_reset));
                     assert!(!dir.join(AUTO_SLOT).exists());
-                    run("valid", &dir, &marker, false);
+                    run("valid", &dir, &marker, false, Some(active_reset));
                     let path = dir.join(AUTO_SLOT);
                     let first = std::fs::read(&path).unwrap();
+                    let first_doc = crate::common::strict_document(&first).unwrap();
+                    let first_ts = first_doc["observation"]["callback_observed_at"]
+                        .as_f64()
+                        .unwrap();
                     let inode = std::fs::metadata(&path).unwrap().ino();
-                    run("duplicate", &dir, &marker, false);
+                    // Same value within short bounded interval avoids redundant write/fsync.
+                    run("duplicate", &dir, &marker, false, Some(active_reset));
                     assert_eq!(std::fs::read(&path).unwrap(), first);
                     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+
+                    // Repeated same-source callback with new used refreshes before weekly reset.
+                    run("refresh-used", &dir, &marker, false, Some(active_reset));
+                    let refreshed = std::fs::read(&path).unwrap();
+                    let refreshed_doc = crate::common::strict_document(&refreshed).unwrap();
+                    let refreshed_ts = refreshed_doc["observation"]["callback_observed_at"]
+                        .as_f64()
+                        .unwrap();
+                    assert_eq!(refreshed_doc["observation"]["weekly_used"], 28.0);
+                    assert!(refreshed_ts > first_ts);
+                    assert_ne!(std::fs::metadata(&path).unwrap().ino(), inode);
+
+                    // Same value past bounded interval refreshes timestamp before consumer TTL.
+                    let mut stale_same = refreshed_doc.clone();
+                    let backdated = refreshed_ts - 65.0;
+                    stale_same["observation"]["callback_observed_at"] = json!(backdated);
+                    std::fs::write(&path, serde_json::to_vec(&stale_same).unwrap()).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    run(
+                        "refresh-same-stale",
+                        &dir,
+                        &marker,
+                        false,
+                        Some(active_reset),
+                    );
+                    let stale_refreshed =
+                        crate::common::strict_document(&std::fs::read(&path).unwrap()).unwrap();
+                    assert_eq!(stale_refreshed["observation"]["weekly_used"], 28.0);
+                    assert!(
+                        stale_refreshed["observation"]["callback_observed_at"]
+                            .as_f64()
+                            .unwrap()
+                            > backdated
+                    );
+
+                    // Replay (non-newer timestamp) retains existing.
+                    let mut replay = refreshed_doc.clone();
+                    replay["observation"]["callback_observed_at"] = json!(now as f64 + 60.0);
+                    let replay_bytes = serde_json::to_vec(&replay).unwrap();
+                    std::fs::write(&path, &replay_bytes).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    let replay_ino = std::fs::metadata(&path).unwrap().ino();
+                    run("rejected-update", &dir, &marker, false, Some(active_reset));
+                    assert_eq!(std::fs::read(&path).unwrap(), replay_bytes);
+                    assert_eq!(std::fs::metadata(&path).unwrap().ino(), replay_ino);
+
+                    // Wrong session retains existing.
+                    let mut wrong_session = refreshed_doc.clone();
+                    wrong_session["observation"]["session"] =
+                        json!(hash("claude-session\0other-session"));
+                    let wrong_session_bytes = serde_json::to_vec(&wrong_session).unwrap();
+                    std::fs::write(&path, &wrong_session_bytes).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    let wrong_session_ino = std::fs::metadata(&path).unwrap().ino();
+                    run("rejected-update", &dir, &marker, false, Some(active_reset));
+                    assert_eq!(std::fs::read(&path).unwrap(), wrong_session_bytes);
+                    assert_eq!(std::fs::metadata(&path).unwrap().ino(), wrong_session_ino);
+
+                    // Wrong process retains existing.
+                    let mut wrong_process = refreshed_doc.clone();
+                    wrong_process["observation"]["process"] =
+                        json!(hash("claude-process\0999999\0other-boot:1"));
+                    let wrong_process_bytes = serde_json::to_vec(&wrong_process).unwrap();
+                    std::fs::write(&path, &wrong_process_bytes).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    let wrong_process_ino = std::fs::metadata(&path).unwrap().ino();
+                    run("rejected-update", &dir, &marker, false, Some(active_reset));
+                    assert_eq!(std::fs::read(&path).unwrap(), wrong_process_bytes);
+                    assert_eq!(std::fs::metadata(&path).unwrap().ino(), wrong_process_ino);
+
+                    // Malformed prior (missing timestamp, extra field, invalid JSON) retains existing.
+                    let mut missing_ts = refreshed_doc.clone();
+                    missing_ts["observation"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("callback_observed_at");
+                    let mut extra_field = refreshed_doc.clone();
+                    extra_field["observation"]
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("unexpected".into(), json!(true));
+                    for malformed_bytes in [
+                        serde_json::to_vec(&missing_ts).unwrap(),
+                        serde_json::to_vec(&extra_field).unwrap(),
+                        b"{not-json".to_vec(),
+                    ] {
+                        std::fs::write(&path, &malformed_bytes).unwrap();
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                            .unwrap();
+                        let malformed_ino = std::fs::metadata(&path).unwrap().ino();
+                        run("rejected-update", &dir, &marker, false, Some(active_reset));
+                        assert_eq!(std::fs::read(&path).unwrap(), malformed_bytes);
+                        assert_eq!(std::fs::metadata(&path).unwrap().ino(), malformed_ino);
+                    }
+
+                    // Restore valid refreshed receipt for outer assertions & contending-owner check.
+                    std::fs::write(&path, &refreshed).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
                     return;
                 }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
+                let fixed_reset = std::env::var(RESET_ENV)
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(now + 3600);
                 let reset = match case.as_str() {
                     "elapsed" => now - 1,
                     "future" => now + 8 * 86400,
-                    _ => now + 3600,
+                    _ => fixed_reset,
+                };
+                let used = match case.as_str() {
+                    "refresh-used" | "refresh-same-stale" => 28.0,
+                    "rejected-update" | "pinned-refresh" => 42.0,
+                    _ => 14.0,
                 };
                 let id = if case == "other-session" {
                     "different-session"
                 } else {
                     SESSION
                 };
-                let raw = json!({"session_id":id,"rate_limits":{"seven_day":{"used_percentage":14.0,"resets_at":reset}}});
+                let raw = json!({"session_id":id,"rate_limits":{"seven_day":{"used_percentage":used,"resets_at":reset}}});
                 let mut bytes = raw.to_string();
                 if case == "duplicate-key" {
                     bytes.insert_str(1, &format!(r#""session_id":"{SESSION}","#));
                 }
                 assert_eq!(
                     record(&raw, bytes.as_bytes(), Path::new("/unused")).is_some(),
-                    case == "valid"
+                    matches!(
+                        case.as_str(),
+                        "valid" | "refresh-used" | "refresh-same-stale"
+                    )
                 );
                 return;
             }
@@ -1260,15 +1477,16 @@ mod local_observation {
                 return;
             };
             for case in ["elapsed", "future", "other-session"] {
-                run(case, &home, &identity, false);
+                run(case, &home, &identity, false, None);
             }
-            run("override", &home, &identity, true);
-            run("wrong-home", &other, &identity, false);
+            run("override", &home, &identity, true, None);
+            run("wrong-home", &other, &identity, false, None);
             assert!(!home.join(SLOT).exists() && !other.join(SLOT).exists());
-            run("valid", &home, &identity, false);
+            run("valid", &home, &identity, false, None);
             let stored = std::fs::read(home.join(SLOT)).unwrap();
             let inode = std::fs::metadata(home.join(SLOT)).unwrap().ino();
-            run("duplicate", &home, &identity, false);
+            run("duplicate", &home, &identity, false, None);
+            run("pinned-refresh", &home, &identity, false, None);
             assert_eq!(std::fs::metadata(home.join(SLOT)).unwrap().ino(), inode);
             assert_eq!(std::fs::read(home.join(SLOT)).unwrap(), stored);
             assert_eq!(
@@ -1276,29 +1494,30 @@ mod local_observation {
                 0o600
             );
             assert!(!String::from_utf8(stored).unwrap().contains(SESSION));
-            run("valid", &other, &other_identity, false);
+            run("valid", &other, &other_identity, false, None);
             let second =
                 crate::common::document(&std::fs::read(other.join(SLOT)).unwrap()).unwrap();
             assert_eq!(second["home"], other_identity);
 
             let auto = format!("{}:{identity}", "a".repeat(64));
-            run("spoofed-child", &home, &auto, false);
-            run("wrong-home", &other, &auto, false);
+            run("spoofed-child", &home, &auto, false, None);
+            run("wrong-home", &other, &auto, false, None);
             let path = home.join(AUTO_SLOT);
             assert!(!path.exists() && !other.join(AUTO_SLOT).exists());
-            run("auto-owner", &home, &auto, false);
+            run("auto-owner", &home, &auto, false, None);
             let first = std::fs::read(&path).unwrap();
             let meta = std::fs::metadata(&path).unwrap();
             assert_eq!(meta.mode() & 0o777, 0o600);
             let receipt = crate::common::strict_document(&first).unwrap();
             assert_eq!(receipt["launch"], "a".repeat(64));
-            assert_eq!(receipt["observation"]["weekly_used"], 14.0);
+            assert_eq!(receipt["observation"]["weekly_used"], 28.0);
             assert!(!String::from_utf8_lossy(&first).contains(SESSION));
             run(
                 "contending-owner",
                 &home,
                 &format!("{}:{identity}", "b".repeat(64)),
                 false,
+                None,
             );
             assert_eq!(std::fs::read(&path).unwrap(), first);
             assert_eq!(std::fs::metadata(&path).unwrap().ino(), meta.ino());

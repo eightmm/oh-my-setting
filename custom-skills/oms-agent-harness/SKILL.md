@@ -12,7 +12,9 @@ OMS is an agent-side control plane.
 Overall Main owns scope, admission, verification, commit, push, release, and
 synthesis across providers. An explicitly authorized Provider Lead can coordinate
 native subagents within that scope and the host's permissions. Leaf Workers
-return evidence and patches without recursively delegating.
+return evidence and patches without recursively delegating. While a team runs,
+Main manages and edits nothing: see
+[coordination-layers.md](references/coordination-layers.md).
 Operate OMS internally. Users give goals, constraints, and authority.
 Never ask users to copy commands, digests, `.oms` paths, or recovery procedures.
 Ask only for material decisions or new authority.
@@ -82,6 +84,7 @@ projections, not authority.
 - Graphs: [graphs.md](references/graphs.md)
 - Plans, failures, recovery: [plans-recovery.md](references/plans-recovery.md)
 - Worker roles: [roles.md](references/roles.md)
+- Main, Lead and Worker duties: [coordination-layers.md](references/coordination-layers.md)
 - Consultation: [cross-agent-consultation.md](references/cross-agent-consultation.md)
 - Review/release gates: [review-gates.md](references/review-gates.md)
 - Prior session: [session-handoff.md](references/session-handoff.md)

@@ -1,122 +1,37 @@
 use crate::common::*;
-use oms_command_agent_role::native_model::{agy_catalog_selector, fixed_effort_model};
+use crate::model_probe;
+use oms_command_agent_role::native_model::{
+    agy_catalog_selector, fixed_effort_model, supports_exact_model_override,
+};
+use oms_command_agent_role::provider_identity::Discovery;
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BUILTINS: &[(&str, &str)] = &[
-    ("codex", "codex"),
-    ("claude", "claude"),
-    ("antigravity", "agy"),
-    ("cursor", "cursor-agent"),
-    ("grok", "grok"),
-    ("gemini", "gemini"),
-    ("qwen", "qwen"),
-    ("opencode", "opencode"),
-    ("deepseek", "dsh"),
-    ("vibe", "vibe"),
-    ("pi", "pi"),
-    ("copilot", "copilot"),
-    ("droid", "droid"),
-    ("aider", "aider"),
-    ("muse", "muse"),
-    ("kimi", "kimi"),
-    ("kiro", "kiro-cli"),
-    ("continue", "cn"),
-    ("goose", "goose"),
-    ("cline", "cline"),
-    ("kilo", "kilo"),
-    ("openhands", "openhands"),
-    ("auggie", "auggie"),
-];
-pub(crate) fn normalize(raw: &str) -> Result<String> {
-    let name = match raw {
-        "agy" => "antigravity",
-        "cursor-agent" => "cursor",
-        "grok-build" => "grok",
-        "gemini-cli" => "gemini",
-        "qwen-code" => "qwen",
-        "opencode2" => "opencode",
-        "dsh" | "deepseek-harness" => "deepseek",
-        "mistral-vibe" => "vibe",
-        "github-copilot" => "copilot",
-        "factory-droid" => "droid",
-        "kiro-cli" => "kiro",
-        "cn" => "continue",
-        _ => raw,
-    };
-    if BUILTINS.iter().any(|(n, _)| *n == name) {
-        return Ok(name.into());
-    }
-    if !name.is_empty()
-        && name.len() <= 64
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
-        && installed(&binary(name)?)
-    {
-        Ok(name.into())
-    } else {
-        Err(error("unsupported provider"))
-    }
+pub(crate) fn normalize(raw: &str, cwd: &std::path::Path) -> Result<String> {
+    Discovery::from_env(cwd)?
+        .normalize(raw)
+        .map(str::to_owned)
+        .ok_or_else(|| error("unsupported provider"))
 }
-fn binary(name: &str) -> Result<String> {
-    if name == "opencode" && !installed("opencode") && installed("opencode2") {
-        return Ok("opencode2".into());
-    }
-    if let Some((_, bin)) = BUILTINS.iter().find(|(n, _)| *n == name) {
-        return Ok((*bin).into());
-    }
-    let base = env_path(
-        "OMS_PROVIDER_ADAPTER_DIR",
-        env_path("XDG_CONFIG_HOME", home()?.join(".config"))
-            .join("oh-my-setting/provider-adapters"),
-    );
-    let direct = base.join(format!("oms-agent-adapter-{name}"));
-    if installed(&direct.to_string_lossy()) {
-        Ok(direct.to_string_lossy().into_owned())
-    } else {
-        Ok(format!("oms-agent-adapter-{name}"))
-    }
+fn binary(discovery: &Discovery, name: &str) -> Result<String> {
+    discovery
+        .binary(name)
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok_or_else(|| error("unsupported provider"))
 }
-fn selection(raw: &str) -> Result<Vec<String>> {
-    let mut available = BUILTINS
-        .iter()
-        .map(|(n, _)| n.to_string())
-        .collect::<Vec<_>>();
-    let mut dirs =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
-    dirs.push(env_path(
-        "OMS_PROVIDER_ADAPTER_DIR",
-        env_path("XDG_CONFIG_HOME", home()?.join(".config"))
-            .join("oh-my-setting/provider-adapters"),
-    ));
-    for dir in dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten().take(4096) {
-                if let Some(name) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|s| s.strip_prefix("oms-agent-adapter-"))
-                    && !available.iter().any(|n| n == name)
-                    && normalize(name).is_ok()
-                {
-                    available.push(name.into());
-                }
-            }
-        }
-    }
+fn selection(raw: &str, discovery: &Discovery) -> Result<Vec<String>> {
+    let available = discovery.providers();
     if ["default", "auto", "installed", "all", ""].contains(&raw) {
         return Ok(available
             .into_iter()
-            .filter(|n| {
+            .filter(|name| {
                 raw == "all"
                     || (matches!(raw, "default" | "")
-                        && ["codex", "claude", "antigravity"].contains(&n.as_str()))
-                    || binary(n).is_ok_and(|b| installed(&b))
+                        && ["codex", "claude", "antigravity"].contains(&name.as_str()))
+                    || discovery.discovered(name)
             })
             .collect());
     }
@@ -130,11 +45,13 @@ fn selection(raw: &str) -> Result<Vec<String>> {
         if value.is_empty() {
             continue;
         }
-        let name = normalize(&value)?;
-        if !seen.insert(name.clone()) {
+        let name = discovery
+            .normalize(&value)
+            .ok_or_else(|| error("unsupported provider"))?;
+        if !seen.insert(name.to_owned()) {
             return Err(error("duplicate provider"));
         }
-        out.push(name);
+        out.push(name.to_owned());
     }
     if out.is_empty() {
         return Err(error("no providers selected"));
@@ -153,14 +70,6 @@ fn family(provider: &str) -> &str {
         "muse" => "meta",
         "kimi" => "moonshot",
         _ => "unknown",
-    }
-}
-fn mechanism(provider: &str) -> &str {
-    match provider {
-        "codex" => "config",
-        "claude" | "antigravity" | "grok" | "pi" | "copilot" | "droid" | "aider" | "muse"
-        | "kiro" | "cline" | "kilo" => "flag",
-        _ => "none",
     }
 }
 fn age(path: &std::path::Path) -> Option<u64> {
@@ -296,7 +205,8 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
     if let Some(timeout) = args.get("--timeout") {
         number(timeout, 1, 3600, "--timeout")?;
     }
-    let providers = selection(args.get("--providers").unwrap_or("default"))?;
+    let discovery = Discovery::from_env(ctx.cwd)?;
+    let providers = selection(args.get("--providers").unwrap_or("default"), &discovery)?;
     let cache = env_path(
         "OMS_CAPABILITY_DIR",
         env_path("XDG_CACHE_HOME", home()?.join(".cache")).join("oh-my-setting/capabilities"),
@@ -308,8 +218,8 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
     let mut text = String::new();
     for provider in providers {
         ctx.check()?;
-        let bin = binary(&provider)?;
-        let present = installed(&bin);
+        let bin = binary(&discovery, &provider)?;
+        let present = discovery.discovered(&provider);
         let env_file = cache.join(format!("{provider}.env"));
         let models_file = cache.join(format!("{provider}.models"));
         let efforts_file = cache.join(format!("{provider}.efforts"));
@@ -323,36 +233,24 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
         let mut version = None;
         let mut reachable = false;
         if (refresh || doctor) && present {
-            let version_args = if provider == "grok" {
-                vec!["--no-auto-update", "version"]
-            } else {
-                vec!["--version"]
-            };
-            let output = ctx.command(&bin, &version_args, 10)?;
+            let output = ctx.command(&bin, model_probe::version_args(&provider), 10)?;
             version = String::from_utf8_lossy(&output.out)
                 .lines()
                 .next()
                 .map(str::to_owned);
-            let help_args = match provider.as_str() {
-                "codex" | "muse" => vec!["exec", "--help"],
-                "kiro" => vec!["chat", "--help"],
-                "goose" | "kilo" => vec!["run", "--help"],
-                "grok" => vec!["--no-auto-update", "--help"],
-                _ => vec!["--help"],
-            };
-            let help = ctx.command(&bin, &help_args, 10)?;
-            reachable = help.code == 0;
-            usable = Some(output.code == 0 && reachable);
+            let help = ctx.command(&bin, model_probe::help_args(&provider), 10)?;
+            let evidence = model_probe::inspect(&provider, output.code, help.code, &help.out);
+            reachable = evidence.reachable;
+            usable = Some(evidence.usable());
             if usable == Some(true) {
                 let _guard = lock(&env_file)?;
-                fields.insert("effort_mechanism".into(), mechanism(&provider).into());
-                fields.insert(
-                    "probed_at".into(),
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                        .to_string(),
+                fields.extend(
+                    evidence.cache_fields(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    ),
                 );
                 if refresh {
                     let listed = if provider == "codex" {
@@ -427,10 +325,7 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
                         }
                     }
                 }
-                let bytes = fields
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}\n"))
-                    .collect::<String>();
+                let bytes = model_probe::cache_text(&fields);
                 write_locked(&env_file, bytes.as_bytes(), false, None)?;
             }
         } else if refresh || doctor {
@@ -534,7 +429,7 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             }
             rows.push(json!({"provider":provider,"binary":bin,"installed":present,"usable":usable.unwrap_or(false),"version":version,"provider_default_reachable":reachable,"family":family(&provider),"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"configured_default":configured,"configured_default_routable":configured_standing,"routable":routable}));
         } else {
-            rows.push(json!({"provider":provider,"binary":bin,"present":present,"usable":usable,"exact_model_override":true,"catalog_models":catalog,"models":models,"routable":routable,"not_routed":not_routed,"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"model_effort_scales":scales,"catalog_probe":if ["codex","antigravity","opencode"].contains(&provider.as_str()){fields.get("models_probe").map(String::as_str).unwrap_or("unknown")}else{"unsupported"},"snapshot_age_seconds":snapshot_age,"catalog_age_seconds":age(&models_file)}));
+            rows.push(json!({"provider":provider,"binary":bin,"present":present,"usable":usable,"exact_model_override":supports_exact_model_override(&provider),"catalog_models":catalog,"models":models,"routable":routable,"not_routed":not_routed,"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"model_effort_scales":scales,"catalog_probe":if ["codex","antigravity","opencode"].contains(&provider.as_str()){fields.get("models_probe").map(String::as_str).unwrap_or("unknown")}else{"unsupported"},"snapshot_age_seconds":snapshot_age,"catalog_age_seconds":age(&models_file)}));
         }
         text.push_str(&format!(
             "## {provider} ({})\nmodels: {}\neffort: {} {}\n",

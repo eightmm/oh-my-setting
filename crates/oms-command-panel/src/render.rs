@@ -2722,6 +2722,7 @@ enum WeeklyReading {
     Reset,
     Stale(Option<f64>),
     Current(String),
+    Footer(String),
     Missing,
 }
 
@@ -2784,6 +2785,18 @@ fn local_claude_weekly(report: &Value, now: f64) -> Option<(WeeklyReading, f64, 
         WeeklyReading::Current(remaining)
     };
     Some((reading, age, reset))
+}
+
+fn agy_footer_weekly(report: &Value) -> Option<&str> {
+    if report["collection"]["ok"] != true
+        || report["collection"]["pending"] == true
+        || report["capacity_stale"] == true
+    {
+        return None;
+    }
+    report["agy_footer_weekly"]["remaining"]
+        .as_str()
+        .filter(|value| crate::provider_activity::valid_agy_footer_remaining(value))
 }
 
 fn report_held(report: &Value) -> bool {
@@ -2885,6 +2898,7 @@ pub(crate) fn weekly_usage_detail(report: &Value, now: f64) -> String {
                 let (state, reset) = match reading {
                     WeeklyReading::Current(left) => (format!("{left} left"),
                         format!("in {}", crate::usage::format_duration(reset - now))),
+                    WeeklyReading::Footer(_) => unreachable!("local Claude reading never emits footer"),
                     WeeklyReading::Reset => ("window expired".into(), "elapsed".into()),
                     WeeklyReading::Stale(_) => ("stale".into(), "unreported".into()),
                     WeeklyReading::Missing => ("missing weekly reading".into(), "unreported".into()),
@@ -2892,6 +2906,15 @@ pub(crate) fn weekly_usage_detail(report: &Value, now: f64) -> String {
                 return format!("{label} · {state}\n  Source Claude local statusline · Callback age {age} · Reset {reset}");
             }
             let provider = &usage["providers"][name];
+            let base = weekly_reading(&report["provider_status"][name], provider, now);
+            if name == "antigravity"
+                && matches!(base, WeeklyReading::Missing | WeeklyReading::Stale(_))
+                && let Some(left) = agy_footer_weekly(report)
+            {
+                return format!(
+                    "{label} · {left} left\n  Source AGY native footer · Age unknown · Reset unknown"
+                );
+            }
             let source = match (name, text(&provider["reading"], "source")) {
                 ("codex", "Codex session log") => "Codex session log",
                 ("claude", "HUD cache") => "HUD cache",
@@ -2900,27 +2923,25 @@ pub(crate) fn weekly_usage_detail(report: &Value, now: f64) -> String {
                 ("antigravity", "AGY Gemini quota") => "AGY Gemini quota",
                 _ => "unreported",
             };
-            let (state, reset) =
-                match weekly_reading(&report["provider_status"][name], provider, now) {
-                    WeeklyReading::Reset => ("window expired".into(), "elapsed".into()),
-                    WeeklyReading::Stale(age) => (
-                        age.map_or_else(
-                            || "stale".into(),
-                            |age| format!("stale ({})", crate::usage::format_age(age)),
-                        ),
-                        "unreported".into(),
+            let (state, reset) = match base {
+                WeeklyReading::Reset => ("window expired".into(), "elapsed".into()),
+                WeeklyReading::Stale(age) => (
+                    age.map_or_else(
+                        || "stale".into(),
+                        |age| format!("stale ({})", crate::usage::format_age(age)),
                     ),
-                    WeeklyReading::Current(left) => (
-                        format!("{left} left"),
-                        weekly_window(provider)
-                            .filter(|_| weekly_reset_bound(provider))
-                            .and_then(|window| window["resets_in"].as_str())
-                            .map_or_else(|| "unreported".into(), |time| format!("in {time}")),
-                    ),
-                    WeeklyReading::Missing => {
-                        ("missing weekly reading".into(), "unreported".into())
-                    }
-                };
+                    "unreported".into(),
+                ),
+                WeeklyReading::Current(left) => (
+                    format!("{left} left"),
+                    weekly_window(provider)
+                        .filter(|_| weekly_reset_bound(provider))
+                        .and_then(|window| window["resets_in"].as_str())
+                        .map_or_else(|| "unreported".into(), |time| format!("in {time}")),
+                ),
+                WeeklyReading::Footer(_) => unreachable!("weekly_reading never emits footer"),
+                WeeklyReading::Missing => ("missing weekly reading".into(), "unreported".into()),
+            };
             let headline = if name == "codex"
                 && let Some(alias) = verified_codex_weekly_account(report, now)
             {
@@ -2997,11 +3018,21 @@ fn provider_line(
     });
     let readings = WEEKLY_PROVIDERS.map(|(name, _)| match &local_claude {
         Some((reading, _, _)) if name == "claude" => reading.clone(),
-        _ => weekly_reading(
-            &report["provider_status"][name],
-            &usage["providers"][name],
-            now,
-        ),
+        _ => {
+            let reading = weekly_reading(
+                &report["provider_status"][name],
+                &usage["providers"][name],
+                now,
+            );
+            if name == "antigravity"
+                && matches!(reading, WeeklyReading::Missing | WeeklyReading::Stale(_))
+                && let Some(left) = agy_footer_weekly(report)
+            {
+                WeeklyReading::Footer(left.to_owned())
+            } else {
+                reading
+            }
+        }
     });
     #[derive(Clone, Copy)]
     enum ActivityDisplay {
@@ -3018,9 +3049,13 @@ fn provider_line(
             .enumerate()
             .map(|(index, (name, full))| {
                 let provider = &usage["providers"][name];
+                let footer = matches!(&readings[index], WeeklyReading::Footer(_));
                 let label = match tier {
+                    0 if footer => "Af",
                     0 => ["C", "L", "A"][index],
+                    1 if footer => "AGYf",
                     1 => ["Cdx", "Cld", "AGY"][index],
+                    _ if footer => "AGY footer",
                     _ if name == "antigravity"
                         && provider["reading"]["source"] == "AGY Gemini quota" =>
                     {
@@ -3035,10 +3070,12 @@ fn provider_line(
                         (3, Some(age)) => format!("stale {}", crate::usage::format_age(*age)),
                         _ => "stale".into(),
                     },
-                    WeeklyReading::Current(left) if tier >= 2 && !compact_value && left == "0%" => {
+                    WeeklyReading::Current(left) | WeeklyReading::Footer(left)
+                        if tier >= 2 && !compact_value && left == "0%" =>
+                    {
                         "0% exhausted".into()
                     }
-                    WeeklyReading::Current(left) => left.clone(),
+                    WeeklyReading::Current(left) | WeeklyReading::Footer(left) => left.clone(),
                     WeeklyReading::Missing => "—".into(),
                 };
                 let tail = match (activity[index], display) {
@@ -4471,6 +4508,19 @@ pub fn results(report: &Value, columns: usize) -> String {
             && row["summary"].as_str() != Some(summary)
         {
             lines.extend(wrap(summary, columns));
+        }
+        let entry = &row["native_assignment"];
+        if entry.is_object() {
+            lines.extend(wrap(
+                &format!(
+                    "  ◇ Native assignment {} · {} · consumption {} · decision {}",
+                    text(entry, "attempt_id"),
+                    text(entry, "transport_label"),
+                    text(entry, "consumption"),
+                    text(entry, "acceptance")
+                ),
+                columns,
+            ));
         }
         lines.push(String::new());
     }
@@ -6521,6 +6571,105 @@ mod tests {
     }
 
     #[test]
+    fn agy_footer_weekly_is_board_only_bounded_and_yields_to_fresh_usage() {
+        let now = 1_000_000.0;
+        let mut report = json!({
+            "collection":{"ok":true},
+            "provider_status":{
+                "codex":{"source":"session log","weekly_used":25,"observed_at":now - 30.0},
+                "claude":{"source":"HUD cache","weekly_used":14,"observed_at":now - 30.0},
+                "antigravity":{"source":"unavailable"}
+            },
+            "agy_footer_weekly":{"remaining":"99%"}
+        });
+        let generic = crate::usage::snapshot(&report, now);
+        assert!(weekly_window(&generic["providers"]["antigravity"]).is_none());
+        let line = |r: &Value, cols, at| {
+            let usage = crate::usage::snapshot(r, at);
+            provider_line(r, &usage, at, cols, false)
+                .0
+                .trim_end()
+                .to_owned()
+        };
+
+        // Normal, low (<1%, 0%), and bounded >99% footer values across header widths and detail.
+        assert_eq!(
+            line(&report, 80, now),
+            "Weekly left · Codex 75% │ Claude 86% │ AGY footer 99%"
+        );
+        assert_eq!(line(&report, 50, now), "Wk left Cdx75% Cld86% AGYf99%");
+        assert_eq!(line(&report, 24, now), "W C75% L86% Af99%");
+        assert!(
+            weekly_usage_detail(&report, now).contains(
+                "AGY · 99% left\n  Source AGY native footer · Age unknown · Reset unknown"
+            )
+        );
+
+        for (value, header, detail_left) in [
+            ("<1%", "AGY footer <1%", "<1% left"),
+            (">99%", "AGY footer >99%", ">99% left"),
+            ("0%", "AGY footer 0% exhausted", "0% left"),
+            ("100%", "AGY footer 100%", "100% left"),
+        ] {
+            report["agy_footer_weekly"] = json!({"remaining": value});
+            assert!(line(&report, 80, now).contains(header), "{value}");
+            assert!(
+                weekly_usage_detail(&report, now).contains(&format!(
+                    "AGY · {detail_left}\n  Source AGY native footer · Age unknown · Reset unknown"
+                )),
+                "{value}"
+            );
+        }
+
+        // Unknown / malformed footer values stay unknown.
+        for bad in [
+            json!({"remaining":"101%"}),
+            json!({"remaining":"09%"}),
+            json!({"remaining":"<2%"}),
+            json!(null),
+        ] {
+            report["agy_footer_weekly"] = bad;
+            assert!(line(&report, 80, now).contains("AGY —"));
+            assert!(
+                weekly_usage_detail(&report, now).contains(
+                    "AGY · missing weekly reading\n  Source unreported · Reset unreported"
+                )
+            );
+        }
+
+        // Fresh verified /usage takes priority; stale /usage falls back to current footer.
+        report["agy_footer_weekly"] = json!({"remaining": "99%"});
+        report["provider_status"]["antigravity"] = json!({
+            "weekly_used": 40,
+            "weekly_native_observed_at": now - 30.0
+        });
+        assert!(line(&report, 80, now).contains("AGY Gemini 60%"));
+        assert!(
+            weekly_usage_detail(&report, now)
+                .contains("AGY · 60% left\n  Source AGY Gemini quota · Reset unreported")
+        );
+        let stale_at = now + 601.0;
+        assert!(line(&report, 80, stale_at).contains("AGY footer 99%"));
+        assert!(
+            weekly_usage_detail(&report, stale_at).contains(
+                "AGY · 99% left\n  Source AGY native footer · Age unknown · Reset unknown"
+            )
+        );
+
+        // Holds, pending refresh, and failed collection clear the footer display.
+        for (collection, held) in [
+            (json!({"ok":true,"pending":true}), false),
+            (json!({"ok":false}), false),
+            (json!({"ok":true}), true),
+        ] {
+            report["collection"] = collection;
+            report["capacity_stale"] = json!(held);
+            assert!(!line(&report, 80, stale_at).contains("AGY footer"));
+            assert!(!weekly_usage_detail(&report, stale_at).contains("AGY native footer"));
+        }
+    }
+
+    #[test]
     fn available_agy_chrome_is_a_display_only_roster() {
         let mut report = top_bar_report();
         report["provider_sessions"] = json!(["claude", "antigravity"]);
@@ -8331,5 +8480,40 @@ mod tests {
                 "{leaked}: {missing_no_accounts}"
             );
         }
+    }
+
+    #[test]
+    fn native_assignment_result_renders_separate_facts() {
+        let plain = json!({"task_id":"task-plain","outcome":"accepted","title":"Plain",
+            "summary":"Reviewed","calls":[{"kind":"delegate","selected_model":"m","reason_code":"ok"}]});
+        let before = "OMS · Results\n────────────────────────────────────────────────────────────\n■ task-plain · accepted · Plain\nReviewed\n  ├─ delegate · m · ok\n\n";
+        assert_eq!(results(&json!({"rows":[plain.clone()]}), 140), before);
+        let native = json!({"task_id":"task-native","outcome":null,"title":"Native","native_assignment":
+            {"attempt_id":"native-a","transport_label":"Submitted","consumption":"unconfirmed","acceptance":"pending"}});
+        let output = results(&json!({"rows":[native.clone(), plain]}), 140);
+        let lines = output.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|v| v.starts_with("■ task-native"))
+            .unwrap();
+        assert_eq!(
+            lines[start + 1..start + 3],
+            [
+                "  ◇ Native assignment native-a · Submitted · consumption unconfirmed · decision pending",
+                "",
+            ]
+        );
+        assert!(
+            output.ends_with(
+                "\n■ task-plain · accepted · Plain\nReviewed\n  ├─ delegate · m · ok\n\n"
+            )
+        );
+        assert!(!output.contains("Input receipt is not"));
+        let narrow = results(&json!({"rows":[native]}), 30);
+        assert!(narrow.lines().all(|v| width(v) <= 30), "{narrow}");
+        assert!(
+            narrow.replace('\n', "").contains("decision pending"),
+            "{narrow}"
+        );
     }
 }

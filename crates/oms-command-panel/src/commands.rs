@@ -408,17 +408,19 @@ impl Session {
         main: Option<&str>,
         rows: &[Value],
     ) -> ProviderStatus {
-        let print = oms_panel_core::digest(
-            format!(
-                "{}|{:?}|{}|{}|{}",
-                report["room"]["participants"],
-                main,
-                oms_panel_core::cache::stamp(&repo.join(".oms/artifacts/index.jsonl")),
-                sessions_stamp(),
-                codex_registry_stamp()
-            )
-            .as_bytes(),
-        );
+        let candidates = main_candidates_key(report).to_string();
+        let main_id = format!("{main:?}");
+        let index = oms_panel_core::cache::stamp(&repo.join(".oms/artifacts/index.jsonl"));
+        let sessions = sessions_stamp();
+        let registry = codex_registry_stamp();
+        let print = oms_panel_core::cache::fingerprint(&[
+            ("repo", repo.as_os_str().as_encoded_bytes()),
+            ("candidates", candidates.as_bytes()),
+            ("main", main_id.as_bytes()),
+            ("index", index.as_bytes()),
+            ("sessions", sessions.as_bytes()),
+            ("registry", registry.as_bytes()),
+        ]);
         if let Ok(guard) = self.metrics.lock()
             && let Some((at, key, value)) = guard.as_ref()
             && *key == print
@@ -432,6 +434,32 @@ impl Session {
         }
         value
     }
+}
+/// Only the rows the collector can select as a Codex/Claude main feed the cache key.
+fn main_candidates_key(report: &Value) -> Value {
+    let keys = [
+        "participant",
+        "attempt_id",
+        "provider",
+        "state",
+        "consumer",
+        "account",
+        "model",
+    ];
+    let rows = rows(&report["room"]["participants"])
+        .iter()
+        .filter(|v| {
+            v["role"] == "main" && matches!(v["provider"].as_str(), Some("codex" | "claude"))
+        })
+        .map(|v| {
+            Value::Object(
+                keys.iter()
+                    .filter_map(|k| v.get(k).map(|value| ((*k).into(), value.clone())))
+                    .collect(),
+            )
+        })
+        .collect();
+    json!([report["room"]["id"], Value::Array(rows)])
 }
 fn sessions_stamp() -> String {
     let home = |name: &str, sub: &str| {
@@ -3311,6 +3339,20 @@ mod tests {
             .unwrap()
             .write_all(bytes)
             .unwrap();
+    }
+
+    #[test]
+    fn provider_status_key_ignores_worker_churn_but_not_main_changes() {
+        let mut report = main_report("room-1", "main-1", "c1");
+        let base = super::main_candidates_key(&report);
+        let rows = report["room"]["participants"].as_array_mut().unwrap();
+        rows.push(json!({"participant":"w1","role":"worker","provider":"codex","state":"working"}));
+        assert_eq!(super::main_candidates_key(&report), base);
+        report["room"]["participants"][0]["model"] = json!(null);
+        let model_key = super::main_candidates_key(&report);
+        assert_ne!(model_key, base);
+        report["room"]["participants"][0]["state"] = json!("done");
+        assert_ne!(super::main_candidates_key(&report), model_key);
     }
 
     #[test]

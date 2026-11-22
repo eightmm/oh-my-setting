@@ -138,7 +138,7 @@ skill manifest, doc references) then focused smoke suites and Rust tests.
   --quick               Run changed-file checks plus invariants.
   --affected            Plan and verify affected scope (--changed-from/--changed-to).
   --print-affected-mode Print affected or full after planning and exit.
-  --ci-output FILE      Append mode=..., native=..., python=false, operator= to FILE.
+  --ci-output FILE      Append mode, native, python, operator, and docs_only to FILE.
   --ci-parity           Affected gate with provider CLIs hidden from PATH.
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
@@ -171,7 +171,10 @@ while [ "$#" -gt 0 ]; do
     --affected) select_mode affected; shift ;;
     --print-affected-mode) PRINT_AFFECTED_MODE=1; shift ;;
     --ci-output)
-      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: --ci-output requires a file" >&2; exit 2; }
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "error: --ci-output requires a file" >&2
+        exit 2
+      fi
       CI_OUTPUT="$2"; shift 2 ;;
     --ci-parity) CI_PARITY=1; shift ;;
     --changed-from)
@@ -206,30 +209,39 @@ if [ -n "$FOCUSED_LANE" ]; then
 fi
 
 if [ "$MODE" = quick ] || [ "$MODE" = affected ]; then
-  [ -n "$QUICK_FROM" ] && [ -n "$QUICK_TO" ] || { echo "error: --$MODE requires --changed-from and --changed-to" >&2; exit 2; }
+  if [ -z "$QUICK_FROM" ] || [ -z "$QUICK_TO" ]; then
+    echo "error: --$MODE requires --changed-from and --changed-to" >&2
+    exit 2
+  fi
 fi
 if [ "$PRINT_AFFECTED_MODE" = 1 ] && [ "$MODE" != affected ]; then
   echo "error: --print-affected-mode requires --affected" >&2
   exit 2
 fi
 
-# Execution registers maintenance protection and stages its native payload once.
-# Affected-mode printing only selects work; it must not build or acquire a lease.
-if [ "$LIST_STAGES" != 1 ] && [ "$PRINT_AFFECTED_MODE" != 1 ]; then
-  # shellcheck source=scripts/lib/check-maintenance.sh
-  . "$ROOT/scripts/lib/check-maintenance.sh"
-  OMS_LOCK_DIR="$CHECK_ORIGINAL_LOCK_DIR" oms_check_maintenance_begin "$ROOT"
-  # shellcheck source=scripts/lib/platform.sh
+ensure_native_payload() {
+  # shellcheck source=scripts/lib/platform.sh disable=SC1091
   . "$ROOT/scripts/lib/platform.sh"
   if ! oms_native_resolve "$ROOT" >/dev/null 2>&1; then
     [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" = 1 ] || oms_native_stage "$ROOT" || true
   fi
+}
+
+# Execution registers maintenance protection before running any checks.
+# Affected-mode printing and stage listing only select work; they must not
+# build or acquire a lease. Native payload staging is deferred until after
+# affected selection so clean docs-only runs stay Cargo-free.
+if [ "$LIST_STAGES" != 1 ] && [ "$PRINT_AFFECTED_MODE" != 1 ]; then
+  # shellcheck source=scripts/lib/check-maintenance.sh disable=SC1091
+  . "$ROOT/scripts/lib/check-maintenance.sh"
+  OMS_LOCK_DIR="$CHECK_ORIGINAL_LOCK_DIR" oms_check_maintenance_begin "$ROOT"
 fi
 
 if [ "$PARALLEL" = 1 ]; then
   [ "$MODE" = full ] || { echo "error: --parallel requires the complete gate" >&2; exit 2; }
   if [ "$LIST_STAGES" != 1 ]; then
-    # shellcheck source=scripts/lib/check-parallel.sh
+    ensure_native_payload
+    # shellcheck source=scripts/lib/check-parallel.sh disable=SC1091
     . "$ROOT/scripts/lib/check-parallel.sh"
     oms_check_parallel "$ROOT/scripts/check.sh" "$CHECK_RUNTIME/parallel" "$SKIP_LINT"
     if [ "$SKIP_LINT" = 1 ]; then
@@ -265,6 +277,8 @@ lint_shell() {
   case "$jobs" in ''|*[!0-9]*) jobs=2 ;; esac
   [ "$jobs" -le "${OMS_LINT_JOBS_MAX:-4}" ] || jobs="${OMS_LINT_JOBS_MAX:-4}"
   [ "$jobs" -ge 1 ] || jobs=1
+  # Keep larger sources first to balance ShellCheck worker time.
+  # shellcheck disable=SC2012
   ls -S -- "$@" | tr '\n' '\0' | xargs -0 -P "$jobs" -n 2 "$SHELLCHECK" -x -S warning
 }
 export -f lint_shell
@@ -391,26 +405,38 @@ hide_provider_clis() {
   echo "ci-parity: provider CLIs hidden from PATH ($count shadowed)"
 }
 
+is_ordinary_doc_change() {
+  local status="$1" path="$2" relative
+  case "$path" in
+    README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md) return 0 ;;
+    crates/*/README.md)
+      relative="${path#crates/}"
+      [[ "$status" == [AM] && "${relative#*/}" == README.md ]]
+      return
+      ;;
+  esac
+  return 1
+}
+
 prepare_affected_gate() {
-  local changes="$CHECK_RUNTIME/affected-changes" path docs_only=1 scoped_only=1 reason
-  # shellcheck source=scripts/lib/critical-paths.sh
+  local changes="$CHECK_RUNTIME/affected-changes" status path docs_only=1 scoped_only=1 reason
+  # shellcheck source=scripts/lib/critical-paths.sh disable=SC1091
   . "$ROOT/scripts/lib/critical-paths.sh"
   AFFECTED_NATIVE=false
-  git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$changes"
-  while IFS= read -r path; do
+  git diff --name-status --no-renames -z "$QUICK_FROM" "$QUICK_TO" -- > "$changes"
+  while IFS= read -r -d '' status && IFS= read -r -d '' path; do
     case "$path" in
       .github/workflows/*|install.sh|scripts/oms|scripts/lib/platform.sh|scripts/lib/*lock*|\
       Cargo.toml|Cargo.lock|rust-toolchain.toml|crates/*|tests/*install*|tests/*portability*)
         AFFECTED_NATIVE=true ;;
     esac
-    case "$path" in
-      README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md) ;;
-      *) docs_only=0 ;;
-    esac
-    case "$path" in
-      README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md|custom-skills/*.md|templates/*.md|roles/*.md) ;;
-      *) scoped_only=0 ;;
-    esac
+    if ! is_ordinary_doc_change "$status" "$path"; then
+      docs_only=0
+      case "$path" in
+        custom-skills/*.md|templates/*.md|roles/*.md) ;;
+        *) scoped_only=0 ;;
+      esac
+    fi
     if [ "$AFFECTED_MODE" != full ] && reason="$(oms_critical_path_reason "$path")"; then
       AFFECTED_MODE=full; AFFECTED_REASONS="$reason"
     fi
@@ -430,6 +456,7 @@ prepare_affected_gate() {
   fi
   if [ "$AFFECTED_REASONS" = documentation-only ]; then
     RUN_DOCS=1
+    AFFECTED_NATIVE=false
   elif [ "$AFFECTED_MODE" = affected ]; then
     RUN_QUICK=1
   elif [ "$CI_PARITY" = 1 ]; then
@@ -449,12 +476,19 @@ prepare_affected_gate() {
 if [ "$RUN_AFFECTED" = 1 ]; then
   prepare_affected_gate
   if [ -n "$CI_OUTPUT" ]; then
-    printf 'mode=%s\nnative=%s\npython=false\noperator=\n' "$AFFECTED_MODE" "$AFFECTED_NATIVE" >> "$CI_OUTPUT"
+    docs_only=false
+    if [ "$RUN_DOCS" = 1 ]; then docs_only=true; fi
+    printf 'mode=%s\nnative=%s\npython=false\noperator=\ndocs_only=%s\n' \
+      "$AFFECTED_MODE" "$AFFECTED_NATIVE" "$docs_only" >> "$CI_OUTPUT"
     [ "$PRINT_AFFECTED_MODE" = 1 ] && { verify_oms_state; exit 0; }
     [ "$AFFECTED_MODE" != full ] || { verify_oms_state; exit 0; }
   elif [ "$PRINT_AFFECTED_MODE" = 1 ]; then
     echo "$AFFECTED_MODE"; verify_oms_state; exit 0
   fi
+fi
+
+if [ "$LIST_STAGES" != 1 ] && [ "$RUN_DOCS" != 1 ]; then
+  ensure_native_payload
 fi
 
 if [ "$RUN_LINT" = 1 ]; then
@@ -491,9 +525,11 @@ if [ "$RUN_DOCS" = 1 ]; then
 fi
 
 if [ "$RUN_INVARIANTS" = 1 ] || [ "$RUN_QUICK" = 1 ]; then
-  stage invariants-skill-manifest bash scripts/install-skills.sh
-  stage invariants-doc-references bash tests/source-distribution-smoke.sh --docs-only
-  stage invariants-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+  if [ "$RUN_LINT" != 1 ]; then
+    stage invariants-skill-manifest bash scripts/install-skills.sh
+    stage invariants-doc-references bash tests/source-distribution-smoke.sh --docs-only
+    stage invariants-migration-check cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+  fi
   stage invariants-source-distribution bash tests/source-distribution-smoke.sh
 fi
 

@@ -9,9 +9,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 ### Added
 
 - `OMS_PEER_PROVIDERS` sets the default `peer-ask`/`peer-review` seats for an
-  install that uses other transports. `--providers` still wins, the stable
-  Codex/Claude/Antigravity council stays the default without it, and listed
-  seats pass the same discovery, read-mode and model-family checks.
+  install that uses other transports. Explicit `--providers` wins, followed by
+  nonempty `OMS_PEER_PROVIDERS`, optional `council.peer_default` in the trusted
+  installation's `config/panel-routing.json`, then Codex/Claude/Antigravity.
+  Listed seats pass the same discovery, read-mode and model-family checks.
 - The panel reader's Files view (`f`) shows a worker's declared scope and
   changed files as a directory tree with `+N -M`, marks files outside its scope
   or shared with another live write worker, opens a file's coloured diff with
@@ -530,6 +531,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A panel Overall Main now manages only. Its startup contract and the
+  `oms-panel-orchestrator` skill no longer allow "integration and unblocking"
+  edits: every repository change goes to a worker or Provider Lead, fixes
+  return to their writer with `--continue`, conflicts go to an `integrator`,
+  and Main edits only on the user's explicit instruction, recorded in the Room.
+  The Provider Lead contract names it a team lead for one assignment and lists
+  what returns to Main. `coordination-layers.md` holds the Main, Lead and
+  Worker duty table. This is a prompt and skill contract; no runtime guard
+  refuses a Main edit. Solo sessions without a team still work locally.
 - Managed tool upgrades resolve current upstream releases instead of a checked-in
   `tools.lock.json`: Node follows the newest LTS, uv/gh use their latest stable
   GitHub release, npm tools follow `latest`, and Antigravity uses its current-host

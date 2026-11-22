@@ -59,10 +59,21 @@ fn route(value: &Value) -> bool {
 }
 
 pub(crate) fn load(root: &Path) -> Result<Value, String> {
-    let value: Value = serde_json::from_slice(
-        &fs::read(root.join("config/panel-routing.json")).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    parse(&fs::read(root.join("config/panel-routing.json")).map_err(|e| e.to_string())?)
+}
+
+pub(crate) fn peer_defaults(bytes: &[u8]) -> Result<Option<Vec<String>>, String> {
+    let value = parse(bytes)?;
+    Ok(value["council"]["peer_default"].as_array().map(|seats| {
+        seats
+            .iter()
+            .map(|seat| seat.as_str().unwrap().to_owned())
+            .collect()
+    }))
+}
+
+fn parse(bytes: &[u8]) -> Result<Value, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if !allowed(
         &value,
         &["schema", "main", "tiers", "roles"],
@@ -86,9 +97,21 @@ pub(crate) fn load(root: &Path) -> Result<Value, String> {
     }
     if let Some(council) = value.get("council") {
         let extra = council["extra"].as_array();
-        if !keys(council, &["extra"]) || extra.is_none() || extra.unwrap().iter().any(|r| !route(r))
+        if !allowed(council, &["extra"], &["peer_default"])
+            || extra.is_none()
+            || extra.unwrap().iter().any(|r| !route(r))
         {
             return Err("invalid panel council extra routes".into());
+        }
+        if let Some(seats) = council.get("peer_default")
+            && seats.as_array().is_none_or(|seats| {
+                seats.is_empty()
+                    || seats
+                        .iter()
+                        .any(|seat| seat.as_str().is_none_or(|seat| seat.trim().is_empty()))
+            })
+        {
+            return Err("invalid panel council peer_default seats".into());
         }
         let extra = extra.unwrap();
         if extra

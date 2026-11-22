@@ -609,6 +609,12 @@ fn council_catalog_shapes() {
     ]});
     *fake.catalog.borrow_mut() = Some(catalog.clone());
     let plan = review::council_plan(Path::new("."), &request, &policy, &fake, &STOP).unwrap();
+    let mut peer_defaults = policy.clone();
+    peer_defaults.council.peer_default = Some(vec!["custom-provider:model=custom/demo".into()]);
+    let unchanged =
+        review::council_plan(Path::new("."), &request, &peer_defaults, &fake, &STOP).unwrap();
+    assert_eq!(unchanged["argv"], plan["argv"]);
+    assert_eq!(unchanged["families"], plan["families"]);
     assert_eq!(
         plan["argv"][1],
         "claude:effort=medium:model=claude-sonnet-5-5,codex:effort=medium:model=gpt-6.2-terra,antigravity:effort=high:model=gemini-4-carbon-high"

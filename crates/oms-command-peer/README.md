@@ -25,6 +25,29 @@ explicit verification commands and provider executables run through the
 execution boundary. Online citation lookup additionally needs `curl`; an
 unavailable request remains unverified.
 
+### Default council seats
+
+`peer-ask` and `peer-review` resolve seats in this order: explicit `--providers`,
+nonempty `OMS_PEER_PROVIDERS`, optional `council.peer_default` in the trusted
+installation's `config/panel-routing.json`, then `codex,claude,antigravity`.
+The file field is an ordered, nonempty array of target strings; model, effort,
+account and `:optional` selectors reuse the existing target parser. Both strict
+panel policy readers accept the optional field without permitting unknown keys.
+Peer projects the selected file through the existing agent-role policy validator.
+Omitting the field preserves existing configurations and serialized policy
+snapshots; using `peer_default` requires the updated strict readers, because
+older binaries reject it as an unknown field. Null,
+empty or malformed selected values fail with the source name. The environment
+falls through only when unset or whitespace-only.
+
+Only the chosen default source is consumed. Existing model/effort resolution
+still reads the same routing file when the target needs a configured model.
+The selection does not manufacture a `--providers` argument: writer exclusion,
+explicit Team-request admission and account pins retain their existing meaning.
+Panel `council.extra`, panel allocation and single-target advice/consultation
+retain their separate contracts. `peer_contract::council_default_seat_sources`
+uses isolated environments and dry-run artifacts to exercise these boundaries.
+
 ### Session handoff prompt
 
 Explicit `session-handoff prompt` calls the existing autonomy handoff renderer

@@ -95,7 +95,7 @@ pub fn begin_interactive_with_executor(
     }
     let extra = operation_env(&extra)?;
     let route = crate::providers::Route {
-        provider: crate::providers::normalize(request.provider)?,
+        provider: crate::providers::normalize_at(request.provider, context.contract_repo)?,
         model: request.selected_model.unwrap_or("provider-default").into(),
         effort: String::new(),
         explicit: request.selected_model.is_some(),
