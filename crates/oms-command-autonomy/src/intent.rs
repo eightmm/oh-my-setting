@@ -304,12 +304,14 @@ fn list_issues(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         next_step: String,
     }
     let mut items = Vec::new();
+    let mut skipped = 0usize;
     for row in rows {
         require(
             row.is_object(),
             "GitHub response contains a non-object entry",
         )?;
         if row.get("pull_request").is_some_and(|v| !v.is_null()) {
+            skipped += 1;
             continue;
         }
         let number = row["number"]
@@ -381,13 +383,16 @@ fn list_issues(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             "limit": limit,
             "trusted": false,
             "count": json_items.len(),
+            "checked": rows.len(),
+            "skipped_pull_requests": skipped,
             "issues": json_items,
             "note": "Metadata only; listing is not selection or approval. Review one, then: oms intent draft --from-issue URL --dry-run",
         }));
     }
     if items.is_empty() {
         return Ok(Output::text(format!(
-            "intent: no open issues for {owner}/{name} with label {label} (read-only)"
+            "intent: no eligible issues among the {} checked row(s) for {owner}/{name} with label {label} (one bounded page; {skipped} pull request(s) skipped; read-only)",
+            rows.len()
         )));
     }
     let mut lines = vec![format!(

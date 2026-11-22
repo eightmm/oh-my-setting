@@ -27,7 +27,9 @@ URL, scrubbed title, labels, `updated_at`, and the explicit
 `oms intent draft --from-issue <url> --dry-run` next step; `trusted: false` in
 `--json`) and never reads or displays raw issue bodies. Scope is always
 explicit: no remote inference, polling, daemon, comments, `.oms/` writes,
-adoption or dispatch. Pull-request objects are skipped; wrong-repo URLs,
+adoption or dispatch. Pull-request objects are skipped and counted
+(`checked`, `skipped_pull_requests` in `--json`); an empty result reports no eligible issues among the checked
+rows of that one bounded page; wrong-repo URLs,
 non-open states, missing labels, unsafe numbers/URLs, malformed JSON and
 oversized lists fail closed with exit 2.
 

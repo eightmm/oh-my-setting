@@ -1041,6 +1041,28 @@ fn intent_issues_lists_labeled_candidates_read_only() {
         ]
     );
 
+    // A page holding only labeled pull requests reports its checked rows and bounded page.
+    let pr_only = Fake(
+        Default::default(),
+        serde_json::to_vec(&json!([row(5, "p", true), row(6, "q", true)])).unwrap(),
+    );
+    let (code, empty) = run(&pr_only, &["--github", "Org/repo", "--label", "oms-ready"]);
+    assert_eq!(code, 0, "{empty}");
+    assert!(
+        empty.contains("no eligible issues among the 2 checked row(s)")
+            && empty.contains("one bounded page")
+            && empty.contains("2 pull request(s) skipped")
+    );
+    let (_, empty_json) = run(
+        &pr_only,
+        &["--github", "Org/repo", "--label", "oms-ready", "--json"],
+    );
+    let empty_json: serde_json::Value = serde_json::from_str(&empty_json).unwrap();
+    assert_eq!(empty_json["count"], 0);
+    assert_eq!(empty_json["checked"], 2);
+    assert_eq!(empty_json["skipped_pull_requests"], 2);
+    pr_only.0.lock().unwrap().clear();
+
     // Endpoint builder percent-encodes special allowed label characters.
     assert_eq!(
         oms_command_autonomy::services::issues_list_endpoint("Org", "repo", "oms:ready", 3)
