@@ -10508,6 +10508,13 @@ mod tests {
             assert!(
                 spy.calls_named("set-buffer")[0][5].chars().count() <= CODEX_VISIBLE_PASTE_CHARS
             );
+            // Only registered public verbs may appear in the copyable reader line.
+            let pasted = spy.calls_named("set-buffer")[0][5].clone();
+            assert!(
+                pasted
+                    .contains("oms agent-plan --repo \"$R\" evidence-snapshot --id 'native-one';")
+            );
+            assert!(!pasted.contains("oms plan "));
             assert_eq!(spy.calls_named("send-keys").len(), 1);
             let binding: Value = serde_json::from_slice(
                 &std::fs::read(repo.join(first["binding"].as_str().unwrap())).unwrap(),
