@@ -335,6 +335,13 @@ impl Plan<'_> {
                     ("verify", t.get("verify").clone()),
                     ("depends", t.get("depends").clone()),
                     ("why_ready", string(why)),
+                    ("role", string(t.text("role"))),
+                    (
+                        "resources",
+                        t.opt("resources")
+                            .cloned()
+                            .unwrap_or_else(|| Value::Array(Vec::new())),
+                    ),
                 ]);
                 if t.get("discovered_from").truth() {
                     v.set("discovered_from", t.get("discovered_from").clone())?;

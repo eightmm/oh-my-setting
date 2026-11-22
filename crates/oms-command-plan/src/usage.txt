@@ -198,7 +198,8 @@ Commands:
                                      emits every task's `show` view at once.
   ready  [--json] [--limit N]        Print ids actionable now (deps done), in
                                      claim order; --json adds title, allowed,
-                                     verify, depends, why_ready (schema 1).
+                                     verify, depends, why_ready, role,
+                                     resources (schema 1; legacy: "" and []).
   discovered [--json]                Read-only: tasks recorded with add
                                      --discovered-from, grouped by parent.
   retro  [--json]                    Read-only: what took more than one try
