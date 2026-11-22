@@ -539,9 +539,24 @@ impl Root {
 
     /// Persists the directory entry of an existing destination through the same
     /// pinned, no-follow ancestry as `atomic_mutate`; it never creates anything.
+    /// The leaf must currently be a safe regular file: missing is `Missing`,
+    /// symlinks, directories and other unsafe leaves are refused, and a real
+    /// fsync failure is returned.
     pub fn sync_parent(&self, path: &Path) -> Result<(), ByteError> {
-        let anchor = Anchor::open(self, path, false, &mut |_| Ok(()))?;
-        directory_sync(fs::fsync(anchor.parent()))
+        self.sync_parent_with(path, |_| Ok(()))
+    }
+
+    fn sync_parent_with(
+        &self,
+        path: &Path,
+        mut hook: impl FnMut(Stage) -> Result<(), Errno>,
+    ) -> Result<(), ByteError> {
+        let anchor = Anchor::open(self, path, false, &mut hook)?;
+        if anchor.named()?.is_none() {
+            return Err(ByteError::Missing);
+        }
+        directory_sync(hook(Stage::BeforeDirectorySync).and_then(|()| fs::fsync(anchor.parent())))?;
+        anchor.check_leaf(anchor.named()?.as_ref())
     }
 
     fn mutate_with<E>(

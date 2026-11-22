@@ -1108,6 +1108,7 @@ fn antigravity(args: &Args, id: &str) -> Result<Output> {
         default_claude: &default_claude,
         placement: &|path| home_placement(path, None),
         mutate: &real_mutate,
+        sync: &real_sync,
     };
     agy_locked(args, id, &host, || (), || ())
 }
@@ -1118,6 +1119,16 @@ struct AgyHost<'a> {
     placement: &'a dyn Fn(&Path) -> Result<()>,
     /// The destination write; tests wrap it to inject publication outcomes.
     mutate: &'a AgyMutate<'a>,
+    /// Parent-directory durability; tests count or fail it around the real helper.
+    sync: &'a AgySync<'a>,
+}
+type AgySync<'a> =
+    dyn Fn(&oms_safe_fs::Root, &Path) -> std::result::Result<(), oms_safe_fs::ByteError> + 'a;
+fn real_sync(
+    root: &oms_safe_fs::Root,
+    path: &Path,
+) -> std::result::Result<(), oms_safe_fs::ByteError> {
+    root.sync_parent(path)
 }
 type AgyMutate<'a> = dyn Fn(
         &oms_safe_fs::Root,
@@ -1180,6 +1191,19 @@ fn agy_locked(
     let receipts = receipts.as_array_mut().unwrap();
     if args.has("--remove") {
         if !rows.iter().chain(receipts.iter()).any(|r| r["id"] == id) {
+            // An earlier attempt may have published the removal without a
+            // confirmed directory sync; an existing metadata file proves the
+            // physical parent to sync before calling it settled.
+            if let Some(path) = [(&registry_path, old_registry), (&receipt_path, old_receipt)]
+                .into_iter()
+                .find_map(|(path, old)| old.map(|_| path))
+            {
+                (host.sync)(&root, path).map_err(|e| {
+                    error(format!(
+                        "directory durability unconfirmed: {e:?}; {id} is absent from the account files but the removal is not confirmed durable; rerun the same --remove"
+                    ))
+                })?;
+            }
             return Ok(Output::text(format!(
                 "Antigravity account {id} is not registered; nothing changed\n"
             )));
@@ -1207,11 +1231,14 @@ fn agy_locked(
                         )));
                     }
                     return Err(error(format!(
-                        "partial publication failure: {AGY_REGISTRY} was updated, but writing {AGY_RECEIPT} failed ({}); home and ADC profile were not modified; rerun --remove to finish cleanup",
+                        "partial publication failure: {AGY_REGISTRY} may have been updated, but writing {AGY_RECEIPT} failed ({}) and rollback was not confirmed; home and ADC profile were not modified; rerun --remove to finish cleanup",
                         err.message
                     )));
                 }
-                return Err(error(format!("atomic write refused: {}", err.message)));
+                return Err(error(format!(
+                    "removal failed while writing {AGY_RECEIPT} ({}); {AGY_REGISTRY} already held the removal and was not rolled back; home and ADC profile were not modified; rerun --remove to finish cleanup",
+                    err.message
+                )));
             }
             return Err(error(format!(
                 "partial publication failure: {AGY_RECEIPT} write outcome is unconfirmed ({}); {AGY_REGISTRY} was not rolled back; home and ADC profile were not modified; rerun the same --remove to reconcile",
@@ -1379,11 +1406,14 @@ fn agy_locked(
                 )));
             }
             return Err(error(format!(
-                "partial publication failure: {AGY_RECEIPT} was written, but {AGY_REGISTRY} was not updated ({}); ADC profile was not modified; rerun the same registration or --remove to recover",
+                "partial publication failure: {AGY_RECEIPT} may have been written, but {AGY_REGISTRY} was not updated ({}) and rollback was not confirmed; ADC profile was not modified; rerun the same registration or --remove to recover",
                 err.message
             )));
         }
-        return Err(error(format!("atomic write refused: {}", err.message)));
+        return Err(error(format!(
+            "publication failed before {AGY_REGISTRY} was updated ({}); {AGY_RECEIPT} already held this registration and was not rolled back; ADC profile was not modified; rerun the same registration or --remove to recover",
+            err.message
+        )));
     }
     Ok(Output::text(format!(
         "Antigravity account {id}: registered; ADC profile {}; {AGY_UNVERIFIED}\n",
@@ -1489,8 +1519,7 @@ fn write_private(
         message: e.message,
     })?;
     match (host.mutate)(root, path, &bytes, old) {
-        Ok(out) if out.disposition == MutationDisposition::Unchanged => root
-            .sync_parent(path)
+        Ok(out) if out.disposition == MutationDisposition::Unchanged => (host.sync)(root, path)
             .map(|()| None)
             .map_err(|e| WriteFail {
                 before: false,
@@ -2197,6 +2226,7 @@ mod tests {
                 default_claude: &claude,
                 placement: &|_| Ok(()),
                 mutate: &real_mutate,
+                sync: &real_sync,
             };
             agy_locked(&args, id, &host, before_publish, between_writes)
         }
@@ -2237,6 +2267,28 @@ mod tests {
                 default_claude: &claude,
                 placement: &|_| Ok(()),
                 mutate: &mutate,
+                sync: &real_sync,
+            };
+            agy_locked(&args, id, &host, || (), || ())
+        }
+        /// Real writes with the parent sync observed (and optionally failed).
+        fn run_synced(&self, spec: &[&str], sync: &AgySync<'_>) -> Result<Output> {
+            let raw: Vec<OsString> = spec.iter().map(OsString::from).collect();
+            let args = Args::parse(
+                &raw,
+                &["--account", "--home"],
+                &["--first", "--last", "--remove", "--verify"],
+            )
+            .unwrap();
+            let id = spec[1].split_once(':').unwrap().1;
+            let claude = self.0.join(".claude");
+            let config = self.config();
+            let host = AgyHost {
+                config: &config,
+                default_claude: &claude,
+                placement: &|_| Ok(()),
+                mutate: &real_mutate,
+                sync,
             };
             agy_locked(&args, id, &host, || (), || ())
         }
@@ -2790,5 +2842,85 @@ mod tests {
             fx.run(&remove, || ()).unwrap();
         }
         assert_eq!(fs::read(&a_profile).unwrap(), a_bytes);
+    }
+
+    #[test]
+    fn already_removed_retry_syncs_the_parent_before_settling() {
+        use oms_safe_fs::{ByteError, MutationPhase::Published};
+        use std::cell::Cell;
+        let fx = Fixture::new("settle");
+        let (a, b) = (fx.home("a", true), fx.home("b", true));
+        let spec = |id: &str, home: &Path| {
+            vec![
+                "--account".to_owned(),
+                format!("antigravity:{id}"),
+                "--home".to_owned(),
+                home.to_str().unwrap().to_owned(),
+            ]
+        };
+        let run = |args: &[String], sync: &AgySync<'_>| {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            fx.run_synced(&args, sync)
+        };
+        let calls = Cell::new(0);
+        let counting = |root: &oms_safe_fs::Root, path: &Path| {
+            calls.set(calls.get() + 1);
+            real_sync(root, path)
+        };
+        let failing = |_: &oms_safe_fs::Root, _: &Path| Err(ByteError::Io(rustix::io::Errno::IO));
+
+        // A fresh missing-state removal has no metadata to prove a parent.
+        let remove = ["--account", "antigravity:a", "--remove"];
+        let message =
+            String::from_utf8(run(&remove.map(str::to_owned), &counting).unwrap().out).unwrap();
+        assert!(message.contains("nothing changed"), "{message}");
+        assert_eq!(calls.get(), 0);
+        assert!(!fx.config().join(AGY_REGISTRY).exists());
+
+        fx.register("a", &a, || ()).unwrap();
+        fx.register("b", &b, || ()).unwrap();
+        // The second write is applied but reported unconfirmed: the target is
+        // already absent from both files, so the retry sees nothing to remove.
+        let m = fx
+            .run_fault(&remove, AGY_RECEIPT, Published, true)
+            .err()
+            .unwrap()
+            .message;
+        assert!(m.contains("unconfirmed"), "{m}");
+        let snapshot = fx.files();
+
+        refused(
+            run(&remove.map(str::to_owned), &failing),
+            "durability unconfirmed",
+        );
+        assert_eq!(fx.files(), snapshot);
+        calls.set(0);
+        let message =
+            String::from_utf8(run(&remove.map(str::to_owned), &counting).unwrap().out).unwrap();
+        assert!(message.contains("nothing changed"), "{message}");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(fx.files(), snapshot);
+        // The unrelated account survives in both files.
+        for file in [AGY_REGISTRY, AGY_RECEIPT] {
+            assert!(
+                fs::read_to_string(fx.config().join(file))
+                    .unwrap()
+                    .contains("\"b\"")
+            );
+            assert!(
+                !fs::read_to_string(fx.config().join(file))
+                    .unwrap()
+                    .contains("\"a\"")
+            );
+        }
+
+        // An unchanged registration retry also confirms the parent, and an
+        // unconfirmed sync is an error, not success.
+        let again = spec("b", &b);
+        calls.set(0);
+        run(&again, &counting).unwrap();
+        assert_eq!(calls.get(), 2);
+        refused(run(&again, &failing), "durability unconfirmed");
+        assert_eq!(fx.files(), snapshot);
     }
 }

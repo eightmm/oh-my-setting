@@ -1002,3 +1002,39 @@ fn private_registry_rejects_unsafe_absolute_paths() {
         Err(crate::Error::InvalidPath)
     ));
 }
+
+#[test]
+fn sync_parent_requires_a_safe_existing_leaf_and_reports_fsync_failure() {
+    let f = Fixture::new();
+    let root = Root::open(&f.0).unwrap();
+    let before = names(&f.0);
+    assert_eq!(root.sync_parent(Path::new("file")), Err(ByteError::Missing));
+    assert_eq!(
+        root.sync_parent(Path::new("absent/file")),
+        Err(ByteError::Missing)
+    );
+    std::fs::create_dir(f.0.join("dir")).unwrap();
+    symlink("file", f.0.join("link")).unwrap();
+    for leaf in ["dir", "link"] {
+        assert_eq!(root.sync_parent(Path::new(leaf)), Err(ByteError::Unsafe));
+    }
+    std::fs::write(f.0.join("file"), b"x").unwrap();
+    assert_eq!(root.sync_parent(Path::new("file")), Ok(()));
+    let failed = root.sync_parent_with(Path::new("file"), |at| {
+        if at == Stage::BeforeDirectorySync {
+            Err(Errno::IO)
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(failed, Err(ByteError::Io(Errno::IO)));
+    assert_eq!(
+        names(&f.0),
+        [
+            OsString::from("dir"),
+            OsString::from("file"),
+            OsString::from("link")
+        ]
+    );
+    assert!(before.is_empty());
+}
