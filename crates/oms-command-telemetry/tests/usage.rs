@@ -1914,6 +1914,7 @@ fn receipts_are_absolute_idempotent_and_revision_ordered() {
                 cache_read_tokens: Some(20),
                 cache_write_tokens: Some(0),
                 total_tokens: Some(100),
+                reasoning_tokens: None,
             }
         }]
     );
@@ -2185,6 +2186,7 @@ fn cumulative_attribution_does_not_bridge_unobserved_dimensions() {
                     cache_read_tokens: read,
                     cache_write_tokens: write,
                     total_tokens: total,
+                    reasoning_tokens: None,
                 },
                 "{id}"
             );
@@ -2780,4 +2782,89 @@ fn malformed_or_conflicting_receipt_history_refuses_accounting() {
     impossible.usage.input_tokens = Some(10);
     impossible.usage.output_tokens = Some(1);
     assert!(usage::record(&root.0, &impossible, &stop).is_err());
+}
+
+#[test]
+fn optional_reasoning_evidence_is_exact_bounded_and_never_core_usage() {
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let digest = "ab".repeat(32);
+    let pending = usage::begin(&root.0, bound_identity("call_one"), None, &stop).unwrap();
+    let mut final_ = observe(pending, 1, 20, Cost::Unknown);
+    final_.source_sha256 = Some(digest.clone());
+    // Nothing is recorded for an unrecorded or non-matching receipt.
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    assert!(!root.0.join(usage::REASONING).exists());
+    usage::record(&root.0, &final_, &stop).unwrap();
+    let core = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let load = || usage::load(&root.0).unwrap();
+    assert_eq!(load().calls[0].reasoning_tokens, None);
+
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert!(!usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert!(usage::record_reasoning(&root.0, &final_, 8, &stop).is_err());
+    assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), core);
+    let projected = load();
+    assert_eq!(projected.calls[0].reasoning_tokens, Some(7));
+    assert_eq!(projected.calls[0].tokens, Some(20), "totals are unchanged");
+    assert_eq!(
+        projected.attributed_calls()[0].usage.reasoning_tokens,
+        Some(7)
+    );
+    assert_eq!(projected.attributed_calls()[0].usage.total_tokens, Some(20));
+
+    let good = std::fs::read(root.0.join(usage::REASONING)).unwrap();
+    let text = String::from_utf8(good.clone()).unwrap();
+    // Mismatched identity, torn, duplicate-key, unknown-field and extra-schema
+    // supplements leave core usage readable and reasoning unknown.
+    let mut unknown = text.trim_end().to_owned();
+    unknown.pop();
+    let bad = [
+        text.replace("call_one", "call_two"),
+        text.replace("att_call_one", "att_other"),
+        text.replace(&digest, &"cd".repeat(32)),
+        text.replace("\"revision\": 1", "\"revision\": 2"),
+        text.replacen('{', "{\"schema\":1,", 1),
+        format!("{unknown},\"extra\":1}}\n"),
+        text.replace("\"schema\": 1", "\"schema\": 2"),
+        text.trim_end().to_owned(),
+        text.replace("tokens\": 7", "tokens\": -7"),
+        format!("{text}{{bad}}\n"),
+    ];
+    for supplement in bad {
+        root.write(usage::REASONING, supplement.as_bytes());
+        let projected = load();
+        assert_eq!(projected.calls[0].reasoning_tokens, None, "{supplement}");
+        assert_eq!(projected.calls[0].tokens, Some(20));
+        assert_eq!(projected.attributed_calls()[0].usage.reasoning_tokens, None);
+    }
+    // Conflicting counts for one exact receipt prove nothing.
+    root.write(
+        usage::REASONING,
+        format!("{text}{}", text.replace("tokens\": 7", "tokens\": 8")).as_bytes(),
+    );
+    assert_eq!(load().calls[0].reasoning_tokens, None);
+    // Zero is a valid observation, distinct from absence.
+    root.write(
+        usage::REASONING,
+        text.replace("tokens\": 7", "tokens\": 0").as_bytes(),
+    );
+    assert_eq!(load().calls[0].reasoning_tokens, Some(0));
+    root.write(usage::REASONING, &good);
+    assert_eq!(load().calls[0].reasoning_tokens, Some(7));
+
+    // A later receipt revision, or a non-final/cumulative receipt, is not proven.
+    let mut newer = observe(final_.clone(), 2, 30, Cost::Unknown);
+    newer.source_sha256 = Some(digest.clone());
+    usage::record(&root.0, &newer, &stop).unwrap();
+    assert_eq!(load().calls[0].reasoning_tokens, None);
+    let mut partial = newer.clone();
+    partial.phase = Phase::Partial;
+    assert!(usage::record_reasoning(&root.0, &partial, 7, &stop).is_err());
+    let mut resumed = newer;
+    resumed.cumulative = Some(Cumulative {
+        session_id: "session_one".into(),
+        baseline_unknown: false,
+    });
+    assert!(usage::record_reasoning(&root.0, &resumed, 7, &stop).is_err());
 }

@@ -9158,6 +9158,12 @@ mod tests {
         ] {
             assert!(detail.contains(label), "{label}: {detail}");
         }
+        report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"]["launch_accounts"][0]["reasoning"] =
+            json!(6);
+        let detail = frame(&report, &nav, 80, 13, &read).join("\n");
+        assert!(detail.contains("Rsn 6 · Total 0"), "{detail}");
+        report["board_receipt_tokens"]["cmp-1"]["providers"]["codex"]["launch_accounts"][0]["reasoning"] =
+            json!(null);
         let narrow = frame(&report, &nav, 43, 13, &read);
         assert!(
             narrow.iter().any(

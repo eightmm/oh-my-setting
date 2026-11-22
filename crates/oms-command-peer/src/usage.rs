@@ -606,7 +606,7 @@ fn count(row: &V, key: &str) -> Option<u64> {
         _ => None,
     }
 }
-fn antigravity_usage(raw: &[u8]) -> Option<Usage> {
+fn antigravity_usage(raw: &[u8]) -> Option<(Usage, u64)> {
     // JSON print mode emits one terminal envelope. Usage in a continued
     // conversation can be cumulative.
     // https://antigravity.google/docs/cli/headless/#json
@@ -631,23 +631,24 @@ fn antigravity_usage(raw: &[u8]) -> Option<Usage> {
     let output = count(usage, "output_tokens")?;
     let cache_read = count(usage, "cache_read_tokens")?;
     let total = count(usage, "total_tokens")?;
-    count(usage, "thinking_tokens")?;
+    let thinking = count(usage, "thinking_tokens")?;
     // The receipt store requires at least input + output. The provider's
     // explicit total needs no adjustment for cache reads or thinking.
     if total < input.checked_add(output)? {
         return None;
     }
-    Some(Usage {
+    let usage = Usage {
         input_tokens: Some(input),
         output_tokens: Some(output),
         cache_read_tokens: Some(cache_read),
         total_tokens: Some(total),
         ..Usage::default()
-    })
+    };
+    Some((usage, thinking))
 }
 fn observation(provider: &str, raw: &[u8]) -> (Usage, Cost, Option<String>, bool) {
     if provider == "antigravity" {
-        let usage = antigravity_usage(raw);
+        let usage = antigravity_usage(raw).map(|(usage, _)| usage);
         let reported = usage.is_some();
         return (usage.unwrap_or_default(), Cost::Unknown, None, reported);
     }
@@ -759,7 +760,15 @@ pub(crate) fn finish(
             receipt.phase = Phase::Unknown;
         }
     }
-    persist(repo, &receipt)
+    persist(repo, &receipt)?;
+    // Optional evidence never fails a settled call; reruns repeat it idempotently.
+    let reasoning = (receipt.phase == Phase::Final && receipt.identity.provider == "antigravity")
+        .then(|| antigravity_usage(raw))
+        .flatten();
+    if let Some((_, tokens)) = reasoning {
+        let _ = usage::record_reasoning(repo, &receipt, tokens, &AtomicBool::new(false));
+    }
+    Ok(())
 }
 
 /// Interactive terminal output is not the provider's accounting protocol.
@@ -837,7 +846,7 @@ mod tests {
 
     #[test]
     fn antigravity_accepts_zero_and_exact_large_integers() {
-        let usage = antigravity_usage(AGY_ZERO.as_bytes()).unwrap();
+        let usage = antigravity_usage(AGY_ZERO.as_bytes()).unwrap().0;
         assert_eq!(
             usage,
             Usage {
@@ -853,7 +862,7 @@ mod tests {
         let maximum = AGY_ZERO
             .replace(r#""input_tokens": 0"#, &format!(r#""input_tokens": {max}"#))
             .replace(r#""total_tokens": 0"#, &format!(r#""total_tokens": {max}"#));
-        let usage = antigravity_usage(maximum.as_bytes()).unwrap();
+        let usage = antigravity_usage(maximum.as_bytes()).unwrap().0;
         assert_eq!(usage.input_tokens, Some(u64::MAX));
         assert_eq!(usage.tokens(), Some(u64::MAX));
     }
@@ -1008,6 +1017,109 @@ mod tests {
                 assert_eq!(call.receipt.phase, Phase::Unknown);
                 assert_eq!(call.receipt.usage, Usage::default());
             }
+        }
+    }
+
+    #[test]
+    fn antigravity_reasoning_is_optional_exact_and_recoverable() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let path = std::env::temp_dir().join(crate::id("oms-antigravity-reasoning-").unwrap());
+        std::fs::create_dir(&path).unwrap();
+        let repo = Fixture(path);
+        let stop = AtomicBool::new(false);
+        let begin = |call: &str, provider: &str, attempt: Option<&str>| {
+            usage::begin(
+                &repo.0,
+                Identity {
+                    call_id: call.into(),
+                    operation_id: format!("op_{call}"),
+                    provider: provider.into(),
+                    attempt_id: attempt.map(str::to_owned),
+                    ..Identity::default()
+                },
+                None,
+                &stop,
+            )
+            .unwrap()
+        };
+        let reasoning = |call: &str| {
+            usage::load(&repo.0)
+                .unwrap()
+                .calls
+                .into_iter()
+                .find(|c| c.receipt.identity.call_id == call)
+                .unwrap()
+                .reasoning_tokens
+        };
+        let supplement = repo.0.join(usage::REASONING);
+
+        // A blocked supplement neither fails nor changes core usage; a retry of
+        // the same settlement writes it exactly once.
+        let pending = begin("call_one", "antigravity", Some("att_one"));
+        std::fs::create_dir_all(&supplement).unwrap();
+        finish(&repo.0, pending.clone(), AGY_SUCCESS.as_bytes(), true, None).unwrap();
+        let core = std::fs::read(repo.0.join(usage::RECEIPTS)).unwrap();
+        assert_eq!(reasoning("call_one"), None);
+        std::fs::remove_dir(&supplement).unwrap();
+        finish(&repo.0, pending.clone(), AGY_SUCCESS.as_bytes(), true, None).unwrap();
+        finish(&repo.0, pending, AGY_SUCCESS.as_bytes(), true, None).unwrap();
+        assert_eq!(std::fs::read(repo.0.join(usage::RECEIPTS)).unwrap(), core);
+        assert_eq!(reasoning("call_one"), Some(616));
+        assert_eq!(
+            std::fs::read(&supplement)
+                .unwrap()
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count(),
+            1
+        );
+        let one = usage::load(&repo.0).unwrap().calls.remove(0);
+        assert_eq!(one.tokens, Some(11072), "reasoning never alters totals");
+
+        // Observed zero is kept; unproven, unbound, incomplete and other-provider
+        // calls record no reasoning.
+        finish(
+            &repo.0,
+            begin("call_zero", "antigravity", Some("att_zero")),
+            AGY_ZERO.as_bytes(),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(reasoning("call_zero"), Some(0));
+        let no_thinking = AGY_SUCCESS.replace(r#""thinking_tokens": 616,"#, "");
+        for (call, provider, attempt, raw, complete) in [
+            ("call_unbound", "antigravity", None, AGY_SUCCESS, true),
+            (
+                "call_incomplete",
+                "antigravity",
+                Some("att_i"),
+                AGY_SUCCESS,
+                false,
+            ),
+            (
+                "call_absent",
+                "antigravity",
+                Some("att_a"),
+                no_thinking.as_str(),
+                true,
+            ),
+            ("call_codex", "codex", Some("att_c"), AGY_SUCCESS, true),
+        ] {
+            finish(
+                &repo.0,
+                begin(call, provider, attempt),
+                raw.as_bytes(),
+                complete,
+                None,
+            )
+            .unwrap();
+            assert_eq!(reasoning(call), None, "{call}");
         }
     }
 
