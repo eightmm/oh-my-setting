@@ -316,10 +316,30 @@ pub(crate) struct AgyRosterRow {
     role: &'static str,
     title: String,
     state: &'static str,
+    activity: Option<&'static str>,
     elapsed: Option<String>,
 }
 
 pub(crate) const AGY_ROSTER_LIMIT: usize = 3;
+
+fn agy_activity_label(activity: &str) -> Option<&'static str> {
+    let operation = activity
+        .split_once(" · ")
+        .map_or(activity, |(head, _)| head);
+    [
+        ("Reading file", "Reading file"),
+        ("Searching", "Searching"),
+        ("Editing", "Editing"),
+        ("Running command", "Running command"),
+        ("Generating", "Generating"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, label)| {
+        operation.strip_prefix(prefix).and_then(|suffix| {
+            (suffix.is_empty() || suffix.starts_with(' ') || suffix == "...").then_some(label)
+        })
+    })
+}
 
 const AGY_PLACEHOLDER: &str =
     "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
@@ -466,11 +486,12 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
             };
             let title = title.strip_suffix(&format!(" {role}")).unwrap_or(title);
             let title = oms_panel_core::redact(title.as_bytes()).ok()?;
-            let state = match activity.split_ascii_whitespace().next()? {
-                "Reading" | "Searching" => "reading",
-                "Editing" => "editing",
-                "Generating" | "Generating..." => "generating",
-                "Running" => "running",
+            let label = agy_activity_label(activity);
+            let state = match label {
+                Some("Reading file" | "Searching") => "reading",
+                Some("Editing") => "editing",
+                Some("Generating") => "generating",
+                Some("Running command") => "running",
                 _ => "working",
             };
             static DURATION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
@@ -486,6 +507,7 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
                 role,
                 title,
                 state,
+                activity: label,
                 elapsed,
             })
         })
@@ -553,6 +575,43 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
     assert_eq!(rows[0].elapsed.as_deref(), Some("53m17s"));
     assert_eq!(rows[1].role, "Researcher");
     assert_eq!(rows[1].elapsed, None);
+
+    for (operation, expected, state) in [
+        (
+            "Reading file secret/path · 12s",
+            Some("Reading file"),
+            "reading",
+        ),
+        (
+            "Searching secret query · 2m3s",
+            Some("Searching"),
+            "reading",
+        ),
+        (
+            "Editing files secret/path · 1h2m3s",
+            Some("Editing"),
+            "editing",
+        ),
+        (
+            "Running command secret args · 4s",
+            Some("Running command"),
+            "running",
+        ),
+        ("Generating... · 53m1", Some("Generating"), "generating"),
+        ("Reading filefish · 4s", None, "working"),
+        ("Running commands · 4s", None, "working"),
+        ("Unknown secret prompt · 4s", None, "working"),
+    ] {
+        let screen = roster.replace("Reading file · 53m17s", operation);
+        let row = serde_json::to_value(&agy_roster(&screen)[0]).unwrap();
+        assert_eq!(row["activity"].as_str(), expected, "{operation}");
+        assert_eq!(row["state"], state, "{operation}");
+    }
+    let pasted = roster.replace(
+        "prior output",
+        "  ● Agent(research: Pasted) · Gemini 4 Hydrogen (Orchestrator)  Searching secret",
+    );
+    assert_eq!(agy_roster(&pasted), rows);
 
     let generated = roster.replace(
         "slice-builder: Team Check Builder",

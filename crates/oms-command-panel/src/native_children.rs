@@ -16,6 +16,7 @@ const CODEX_CANDIDATE_LIMIT: usize = 24;
 const CODEX_READ_BUDGET: usize = 8 * 1024 * 1024;
 const CODEX_RECENT_ROOT_BYTES: usize = 1024 * 1024;
 const CODEX_CHAT_WINDOW: usize = 1024 * 1024;
+const CODEX_USAGE_BUDGET: usize = 2 * 1024 * 1024;
 const CODEX_CHAT_LIMIT: usize = 12_000;
 const CODEX_DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
@@ -452,8 +453,16 @@ pub(crate) fn observe_codex(
         codex_today()?,
         stop,
     )?;
-    codex_rows_checked(&rollouts, repo, turn, &mut remaining, stop, codex_now_ms())
-        .map(|(observed, _)| observed)
+    codex_rows_checked(
+        &rollouts,
+        repo,
+        turn,
+        &mut remaining,
+        stop,
+        codex_now_ms(),
+        true,
+    )
+    .map(|(observed, _)| observed)
 }
 
 pub(crate) fn same_codex_turn(before: &str, after: &str) -> bool {
@@ -872,6 +881,7 @@ fn codex_rows_at<'a>(
         remaining,
         &AtomicBool::new(false),
         now_ms,
+        true,
     )
 }
 
@@ -890,6 +900,7 @@ fn codex_rows_checked<'a>(
     remaining: &mut usize,
     stop: &AtomicBool,
     now_ms: u64,
+    project_usage: bool,
 ) -> Option<(ObservedChildren, CodexParentSample<'a>)> {
     let mut parent = None;
     let mut children = Vec::new();
@@ -991,7 +1002,7 @@ fn codex_rows_checked<'a>(
         }
     }
     let root = rollouts.root_unchanged()?;
-    let (parent_id, parent_sample) = parent?;
+    let (parent_id, mut parent_sample) = parent?;
     let parent = CodexAnchor::new(parent_id, parent_sample.rollout);
     let mut counts = BTreeMap::new();
     for (id, _, _, _, _) in &children {
@@ -1024,17 +1035,48 @@ fn codex_rows_checked<'a>(
     picked.truncate(3);
     let mut seen_participants = BTreeSet::new();
     let mut observed = ObservedChildren::default();
+    // Reserve exact sampled ranges for a possible parent append proof.
+    let proof_reserve = parent_sample
+        .header
+        .len()
+        .checked_add(parent_sample.body.len())?;
+    let mut usage_budget = remaining
+        .saturating_sub(proof_reserve)
+        .min(CODEX_USAGE_BUDGET);
+    let usage_initial = usage_budget;
     for (id, rollout, _, started, title) in picked.into_iter().map(|index| &children[index]) {
         let id = *id;
         let mut child_row = row("codex", id, title, "", started, "", "unknown");
+        if !started.is_empty() {
+            child_row["started_at"] = json!(started);
+        }
+        if project_usage
+            && counts[id] == 1
+            && let Some(usage) = codex_child_usage(
+                rollouts,
+                rollout,
+                repo,
+                id,
+                parent_id,
+                &parent_sample.header,
+                &mut usage_budget,
+            )
+        {
+            child_row["native_response_usage"] = usage;
+        }
         let participant = text(&child_row, "participant").to_owned();
         let participant = participant.as_str();
         if !seen_participants.insert(participant.to_owned()) {
             observed.codex.remove(participant);
+            child_row
+                .as_object_mut()
+                .unwrap()
+                .remove("native_response_usage");
             for earlier in &mut observed.rows {
                 if text(earlier, "participant") == participant
                     && let Some(fields) = earlier.as_object_mut()
                 {
+                    fields.remove("native_response_usage");
                     fields.remove("seen_at");
                     fields.remove("seen_observed_ms");
                 }
@@ -1059,7 +1101,117 @@ fn codex_rows_checked<'a>(
         }
         observed.rows.push(child_row);
     }
+    *remaining -= usage_initial - usage_budget;
+    let has_usage = observed
+        .rows
+        .iter()
+        .any(|row| row.get("native_response_usage").is_some());
+    if rollouts.root_unchanged()? != root
+        || rollouts
+            .status(parent_sample.rollout, &parent_sample.file)
+            .is_none()
+    {
+        return None;
+    }
+    if has_usage {
+        let confirmed = rollouts
+            .confirm_snapshot(
+                parent_sample.rollout,
+                &mut parent_sample.file,
+                &parent_sample.sampled,
+                &[
+                    (0, &parent_sample.header),
+                    (parent_sample.offset, &parent_sample.body),
+                ],
+                remaining,
+            )
+            .unwrap_or(false);
+        if rollouts.root_unchanged()? != root
+            || rollouts
+                .status(parent_sample.rollout, &parent_sample.file)
+                .is_none()
+        {
+            return None;
+        }
+        if !confirmed {
+            for row in &mut observed.rows {
+                row.as_object_mut().unwrap().remove("native_response_usage");
+            }
+        }
+    }
     (!stop.load(Ordering::Acquire)).then_some((observed, parent_sample))
+}
+
+#[cfg(test)]
+thread_local!(static CODEX_TEST_APPEND_PARENT: std::cell::RefCell<Option<(PathBuf, bool)>> = const { std::cell::RefCell::new(None) });
+
+fn codex_child_usage(
+    rollouts: &CodexRollouts,
+    rollout: &CodexRollout,
+    repo: &Path,
+    id: &str,
+    parent: &str,
+    parent_header: &[u8],
+    remaining: &mut usize,
+) -> Option<Value> {
+    #[cfg(test)]
+    CODEX_TEST_APPEND_PARENT.with(|path| {
+        if let Some((path, alter)) = path.borrow_mut().take() {
+            use std::io::Write;
+            if alter {
+                let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                file.write_all(b" ").unwrap();
+            }
+            writeln!(
+                std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+                "{{}} "
+            )
+            .unwrap();
+        }
+    });
+    let (mut file, sampled) = rollouts.open(rollout)?;
+    let size = u64::try_from(sampled.st_size).ok()?;
+    let header_bytes = codex_read_header(&mut file, size, remaining)?;
+    let header = codex_header(&header_bytes, id, repo)?;
+    if codex_spawn(&header)["parent_thread_id"] != parent {
+        return None;
+    }
+    let session = text(&header["payload"], "session_id");
+    if !uuid(session)
+        || !oms_panel_core::decode(parent_header, MAX_LINE)
+            .is_ok_and(|meta| meta["payload"]["session_id"] == session)
+    {
+        return None;
+    }
+    let header_end = header_bytes.len() as u64;
+    let recent_only = size.checked_sub(header_end)? > CODEX_CHAT_WINDOW as u64;
+    let offset = if recent_only {
+        size - CODEX_CHAT_WINDOW as u64 - 1
+    } else {
+        header_end
+    };
+    let len = usize::try_from(size.checked_sub(offset)?).ok()?;
+    let body = codex_read_range(&mut file, offset, len, remaining)?.ok()?;
+    let (_, usage) = codex_history_parts(&body, recent_only, repo, id, Some(session), false);
+    if !rollouts.confirm_snapshot(
+        rollout,
+        &mut file,
+        &sampled,
+        &[(0, &header_bytes), (offset, &body)],
+        remaining,
+    )? {
+        return None;
+    }
+    let observation = usage?;
+    let counters = |v: &Value| {
+        let u = CodexResponseUsage::from_counters(v)?;
+        Some(
+            json!({"input_tokens":u.input, "output_tokens":u.output, "cached_input_tokens":u.cache_read, "cache_write_input_tokens":u.cache_write, "reasoning_output_tokens":u.reasoning, "total_tokens":u.total}),
+        )
+    };
+    Some(json!({"response": counters(&observation.payload["usage"])?,
+        "turn": counters(&observation.payload["turn_token_usage"])?,
+        "thread": counters(&observation.payload["thread_token_usage"])?}))
 }
 
 pub(crate) fn codex_chat_turn_matches(terminal: &str, expected: &CodexLocator) -> bool {
@@ -1122,6 +1274,7 @@ fn codex_chat_checked(
         &mut remaining,
         stop,
         expected.observed_ms,
+        false,
     )?;
     if stop.load(Ordering::Acquire) || !current.codex.values().any(|locator| locator == expected) {
         return None;
@@ -1244,8 +1397,28 @@ fn codex_history(
     recent_only: bool,
     repo: &Path,
     child: &str,
-    mut usage_session: Option<&str>,
+    usage_session: Option<&str>,
 ) -> Option<String> {
+    let (history, observation) =
+        codex_history_parts(body, recent_only, repo, child, usage_session, true);
+    let history = chat_tail(&history)?;
+    let Some(observation) = observation else {
+        return Some(history);
+    };
+    let line = observation.usage.line();
+    let start = history
+        .ceil_char_boundary((history.len() + 2 + line.len()).saturating_sub(CODEX_CHAT_LIMIT));
+    Some(format!("{}\n\n{line}", history[start..].trim_start()))
+}
+
+fn codex_history_parts(
+    body: &[u8],
+    recent_only: bool,
+    repo: &Path,
+    child: &str,
+    mut usage_session: Option<&str>,
+    collect_chat: bool,
+) -> (String, Option<CodexUsageObservation>) {
     let mut contexts = BTreeMap::new();
     let mut current = None;
     let mut messages = Vec::new();
@@ -1299,7 +1472,8 @@ fn codex_history(
                 }
             }
             "event_msg"
-                if payload["type"] == "item_completed"
+                if collect_chat
+                    && payload["type"] == "item_completed"
                     && payload["thread_id"] == child
                     && current.as_deref() == Some(turn)
                     && payload["item"]["type"] == "AgentMessage" =>
@@ -1323,8 +1497,7 @@ fn codex_history(
         .filter_map(|(turn, message)| contexts[&turn].then_some(message))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let history = chat_tail(&history)?;
-    let Some(observation) = usage_session.and_then(|_| {
+    let observation = usage_session.and_then(|_| {
         observations
             .into_values()
             .flatten()
@@ -1334,14 +1507,8 @@ fn codex_history(
                     .is_none_or(|exact| *exact)
             })
             .max_by_key(|observation| observation.offset)
-    }) else {
-        return Some(history);
-    };
-    let line = observation.usage.line();
-    // Keep the generated footer separate from untrusted chat text and within its cap.
-    let start = history
-        .ceil_char_boundary((history.len() + 2 + line.len()).saturating_sub(CODEX_CHAT_LIMIT));
-    Some(format!("{}\n\n{line}", history[start..].trim_start()))
+    });
+    (history, observation)
 }
 
 /// Child chat as displayed: redacted, control-free and clipped to its last 12000 bytes.
@@ -2896,6 +3063,77 @@ mod tests {
     }
 
     #[test]
+    fn codex_optional_usage_preserves_parent_append_proof_under_tight_budget() {
+        let fixture = RolloutFixture::new("usage-budget-append");
+        let repo = fixture.store.repo();
+        let mut parent = codex_meta(PARENT, repo, json!("vscode"));
+        parent["payload"]["session_id"] = json!(PARENT);
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[parent.clone(), codex_user_event(PARENT, TURN)],
+        );
+        let mut child = codex_child_meta(CHILD, repo);
+        child["payload"]["session_id"] = json!(PARENT);
+        fixture.write(
+            fixture.date,
+            CHILD,
+            &[child, json!({"padding": "x".repeat(4096)})],
+        );
+        let rollouts = fixture.rollouts();
+        let mut baseline = CODEX_READ_BUDGET;
+        let (_, sample) = codex_rows_checked(
+            &rollouts,
+            repo,
+            TURN,
+            &mut baseline,
+            &AtomicBool::new(false),
+            0,
+            false,
+        )
+        .unwrap();
+        let proof = sample.header.len() + sample.body.len();
+        let mut remaining = CODEX_READ_BUDGET - baseline + proof;
+        CODEX_TEST_APPEND_PARENT
+            .with(|path| *path.borrow_mut() = Some((fixture.path(fixture.date, PARENT), false)));
+        let (observed, _) = codex_rows_checked(
+            &rollouts,
+            repo,
+            TURN,
+            &mut remaining,
+            &AtomicBool::new(false),
+            0,
+            true,
+        )
+        .expect("parent append proof must retain roster");
+        assert_eq!(observed.rows.len(), 1);
+        assert!(observed.rows[0].get("native_response_usage").is_none());
+        assert_eq!(remaining, proof);
+
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[parent, codex_user_event(PARENT, TURN)],
+        );
+        let mut remaining = CODEX_READ_BUDGET - baseline;
+        CODEX_TEST_APPEND_PARENT
+            .with(|path| *path.borrow_mut() = Some((fixture.path(fixture.date, PARENT), false)));
+        let (observed, _) = codex_rows_checked(
+            &fixture.rollouts(),
+            repo,
+            TURN,
+            &mut remaining,
+            &AtomicBool::new(false),
+            0,
+            true,
+        )
+        .expect("exhausted optional reserve must retain roster");
+        assert_eq!(observed.rows.len(), 1);
+        assert!(observed.rows[0].get("native_response_usage").is_none());
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
     fn codex_chat_returns_only_text_with_exact_child_turn_context() {
         use std::io::Write;
 
@@ -3041,6 +3279,12 @@ mod tests {
             fixture.write(fixture.date, CHILD, &rows);
             let observed = fixture.projection(TURN).unwrap();
             assert_eq!(observed.rows.len(), 1);
+            if usage_rows == [latest.clone()] && header == &child {
+                assert_eq!(
+                    observed.rows[0]["native_response_usage"]["response"]["total_tokens"],
+                    19
+                );
+            }
             assert!(
                 !observed.rows[0]
                     .to_string()
@@ -3136,6 +3380,70 @@ mod tests {
             "Ordinary owned reply"
         );
 
+        let projected = |header: &Value, records: &[Value]| {
+            let mut rows = vec![header.clone()];
+            rows.extend_from_slice(records);
+            fixture.write(fixture.date, CHILD, &rows);
+            fixture.projection(TURN).unwrap().rows.remove(0)
+        };
+        let valid = projected(&child, &[latest.clone(), latest.clone()]);
+        assert_eq!(valid["native_response_usage"]["turn"]["total_tokens"], 280);
+        assert_eq!(
+            valid["native_response_usage"]["thread"]["total_tokens"],
+            520
+        );
+        assert_eq!(valid["started_at"], "2026-11-18T15:01:01+00:00");
+        assert_eq!(valid["state"], "unknown");
+        let mut conflict = latest.clone();
+        conflict["payload"]["usage"]["total_tokens"] = json!(20);
+        let mut wrong_session = latest.clone();
+        wrong_session["payload"]["session_id"] = json!(SECOND_CHILD);
+        for records in [vec![], vec![latest.clone(), conflict], vec![wrong_session]] {
+            assert!(
+                projected(&child, &records)
+                    .get("native_response_usage")
+                    .is_none()
+            );
+        }
+        let mut invalid_stats = latest.clone();
+        invalid_stats["payload"]["thread_token_usage"]["total_tokens"] = json!(-1);
+        assert!(
+            projected(&child, &[invalid_stats])
+                .get("native_response_usage")
+                .is_none()
+        );
+        let mut mismatched = child.clone();
+        mismatched["payload"]["session_id"] = json!(SECOND_CHILD);
+        assert!(
+            projected(&mismatched, std::slice::from_ref(&latest))
+                .get("native_response_usage")
+                .is_none()
+        );
+        let mut bad_clock = child.clone();
+        bad_clock["timestamp"] = json!("invalid");
+        assert!(projected(&bad_clock, &[]).get("started_at").is_none());
+        fixture.write(fixture.date, CHILD, &[child.clone(), latest.clone()]);
+        let rollouts = fixture.rollouts();
+        let rollout = rollouts
+            .candidates
+            .iter()
+            .find(|r| codex_filename_id(&r.path) == Some(CHILD))
+            .unwrap();
+        let mut budget = 0;
+        assert!(
+            codex_child_usage(
+                &rollouts,
+                rollout,
+                repo,
+                CHILD,
+                PARENT,
+                parent.to_string().as_bytes(),
+                &mut budget
+            )
+            .is_none()
+        );
+        assert_eq!(budget, 0);
+
         let locator = ready(&child, std::slice::from_ref(&latest));
         let child_path = fixture.path(fixture.date, CHILD);
         let duplicate_key = latest.to_string().replace(
@@ -3155,7 +3463,44 @@ mod tests {
             fixture.chat(&terminal, &locator).as_deref(),
             Some("Ordinary owned reply")
         );
-        let locator = ready(&child, &[latest]);
+        assert!(
+            fixture.projection(TURN).unwrap().rows[0]
+                .get("native_response_usage")
+                .is_none()
+        );
+        let locator = ready(&child, std::slice::from_ref(&latest));
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&child_path)
+                .unwrap(),
+            r#"{{"type":"event_msg","payload":{{"type":"item_completed","type":"other"}}}}"#
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.chat(&terminal, &locator).as_deref(),
+            Some("Ordinary owned reply")
+        );
+        assert!(
+            fixture.projection(TURN).unwrap().rows[0]
+                .get("native_response_usage")
+                .is_none()
+        );
+        ready(&child, std::slice::from_ref(&latest));
+        CODEX_TEST_APPEND_PARENT
+            .with(|path| *path.borrow_mut() = Some((fixture.path(fixture.date, PARENT), true)));
+        let observed = fixture
+            .projection(TURN)
+            .expect("failed optional proof retains roster");
+        assert_eq!(observed.rows.len(), 1);
+        assert_eq!(observed.codex.len(), 1);
+        assert!(observed.rows[0].get("native_response_usage").is_none());
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[parent.clone(), codex_user_event(PARENT, TURN)],
+        );
+        let locator = ready(&child, std::slice::from_ref(&latest));
         assert_eq!(fixture.chat(&terminal, &locator).as_deref(), Some(usage));
         let prior = child_path.with_extension("prior");
         std::fs::rename(&child_path, &prior).unwrap();
@@ -3300,18 +3645,17 @@ mod tests {
             .unwrap()
             .0
             .rows;
-        assert_eq!(
-            rows,
-            [row(
-                "codex",
-                CHILD,
-                "Native subagent",
-                "",
-                "2026-11-18T15:01:01+00:00",
-                "",
-                "unknown"
-            )]
+        let mut expected = row(
+            "codex",
+            CHILD,
+            "Native subagent",
+            "",
+            "2026-11-18T15:01:01+00:00",
+            "",
+            "unknown",
         );
+        expected["started_at"] = json!("2026-11-18T15:01:01+00:00");
+        assert_eq!(rows, [expected]);
         assert!(fixture.observe("abcdef1234567890abcd").is_none());
     }
 
