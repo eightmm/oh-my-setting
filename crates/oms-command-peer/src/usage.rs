@@ -1081,6 +1081,37 @@ mod tests {
         let one = usage::load(&repo.0).unwrap().calls.remove(0);
         assert_eq!(one.tokens, Some(11072), "reasoning never alters totals");
 
+        // A held supplement lock never stalls or fails settlement; the same
+        // settlement retried after release records the evidence.
+        let held_call = begin("call_held", "antigravity", Some("att_held"));
+        let target = oms_command_telemetry::store::canonical_index(
+            &repo.0,
+            Some(std::path::Path::new(usage::REASONING)),
+            false,
+            false,
+        )
+        .unwrap();
+        let mut settings = oms_lock::Settings::from_env().unwrap();
+        settings.mode = oms_lock::Mode::LegacyAuto;
+        let held = oms_lock::Lock::for_file(&target, settings)
+            .unwrap()
+            .try_acquire()
+            .unwrap();
+        let started = std::time::Instant::now();
+        finish(
+            &repo.0,
+            held_call.clone(),
+            AGY_SUCCESS.as_bytes(),
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(reasoning("call_held"), None);
+        drop(held);
+        finish(&repo.0, held_call, AGY_SUCCESS.as_bytes(), true, None).unwrap();
+        assert_eq!(reasoning("call_held"), Some(616));
+
         // Observed zero is kept; unproven, unbound, incomplete and other-provider
         // calls record no reasoning.
         finish(

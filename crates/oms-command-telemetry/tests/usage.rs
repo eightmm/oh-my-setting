@@ -2868,3 +2868,87 @@ fn optional_reasoning_evidence_is_exact_bounded_and_never_core_usage() {
     });
     assert!(usage::record_reasoning(&root.0, &resumed, 7, &stop).is_err());
 }
+
+#[test]
+fn reasoning_evidence_is_bounded_nonblocking_and_conflict_free() {
+    use oms_command_telemetry::store::{StoreError, canonical_index};
+    use oms_lock::{Lock, Mode, Settings};
+    use std::path::Path;
+    let root = Temp::new();
+    let stop = AtomicBool::new(false);
+    let digest = "ab".repeat(32);
+    let pending = usage::begin(&root.0, bound_identity("call_one"), None, &stop).unwrap();
+    let mut final_ = observe(pending, 1, 20, Cost::Unknown);
+    final_.source_sha256 = Some(digest.clone());
+    usage::record(&root.0, &final_, &stop).unwrap();
+    let core = std::fs::read(root.0.join(usage::RECEIPTS)).unwrap();
+    let reasoning = || usage::load(&root.0).unwrap().calls[0].reasoning_tokens;
+    let supplement = root.0.join(usage::REASONING);
+
+    // A held lock fails fast without writing; core usage is untouched and a
+    // later retry records the evidence.
+    let target = canonical_index(&root.0, Some(Path::new(usage::REASONING)), false, false).unwrap();
+    let mut settings = Settings::from_env().unwrap();
+    settings.mode = Mode::LegacyAuto;
+    let held = Lock::for_file(&target, settings)
+        .unwrap()
+        .try_acquire()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap_err();
+    assert!(
+        matches!(error, StoreError::Lock(oms_lock::Error::Busy)),
+        "{error:?}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!supplement.exists());
+    assert_eq!(reasoning(), None);
+    drop(held);
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert_eq!(reasoning(), Some(7));
+    let good = std::fs::read(&supplement).unwrap();
+
+    // Cancellation is honoured before any write.
+    let cancelled = AtomicBool::new(true);
+    std::fs::remove_file(&supplement).unwrap();
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &cancelled).is_err());
+    assert!(!supplement.exists());
+
+    // An oversized supplement is neither read nor extended; core stays intact.
+    let oversized = vec![b'\n'; usage::MAX_REASONING_BYTES + 1];
+    root.write(usage::REASONING, &oversized);
+    assert_eq!(reasoning(), None);
+    assert_eq!(usage::load(&root.0).unwrap().calls[0].tokens, Some(20));
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    assert_eq!(std::fs::read(&supplement).unwrap(), oversized);
+
+    // Conflicting duplicates for one call and revision are rejected before
+    // identity matching, even when one row matches the receipt exactly.
+    let text = String::from_utf8(good.clone()).unwrap();
+    let other_attempt = text.replace("att_call_one", "att_other");
+    root.write(
+        usage::REASONING,
+        format!("{text}{other_attempt}").as_bytes(),
+    );
+    assert_eq!(reasoning(), None);
+    root.write(
+        usage::REASONING,
+        format!("{other_attempt}{text}").as_bytes(),
+    );
+    assert_eq!(reasoning(), None);
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    // Identical repeats stay idempotent.
+    root.write(usage::REASONING, format!("{text}{text}").as_bytes());
+    assert_eq!(reasoning(), Some(7));
+
+    // An unsafe supplement fails only the optional write; once repaired the
+    // same settlement records exactly once.
+    std::fs::remove_file(&supplement).unwrap();
+    std::fs::create_dir(&supplement).unwrap();
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).is_err());
+    assert_eq!(reasoning(), None);
+    std::fs::remove_dir(&supplement).unwrap();
+    assert!(usage::record_reasoning(&root.0, &final_, 7, &stop).unwrap());
+    assert_eq!(std::fs::read(&supplement).unwrap(), good);
+    assert_eq!(std::fs::read(root.0.join(usage::RECEIPTS)).unwrap(), core);
+}
