@@ -672,22 +672,32 @@ fn hook_dir(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Optio
             r::fail("git is required")
         };
     };
-    let explicit = explicit_repo(paths, options)?;
-    let base = if explicit { &paths.cwd } else { &paths.source };
-    let output = r::command(
-        git,
-        &[
-            "rev-parse".into(),
-            "--show-toplevel".into(),
-            "--git-common-dir".into(),
-            "--git-path".into(),
-            "hooks".into(),
-        ],
-        base,
-        None,
-        flag,
-        std::time::Duration::from_secs(30),
-    )?;
+    let explicit = options.has("--repo");
+    let output = if explicit {
+        r::command(
+            git,
+            &[
+                "rev-parse".into(),
+                "--show-toplevel".into(),
+                "--git-common-dir".into(),
+                "--git-path".into(),
+                "hooks".into(),
+            ],
+            &paths.cwd,
+            None,
+            flag,
+            std::time::Duration::from_secs(30),
+        )?
+    } else {
+        r::command(
+            git,
+            &["rev-parse".into(), "--git-path".into(), "hooks".into()],
+            &paths.source,
+            None,
+            flag,
+            std::time::Duration::from_secs(30),
+        )?
+    };
     if output.0 != 0 {
         return if remove {
             Ok(None)
@@ -697,6 +707,15 @@ fn hook_dir(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Optio
     }
     let raw = String::from_utf8(output.1)
         .map_err(|_| r::Error(2, "Git hook directory is not UTF-8".into()))?;
+    if !explicit {
+        let dir = PathBuf::from(raw.trim_end_matches(['\r', '\n']));
+        return Ok(Some(if dir.is_absolute() {
+            dir
+        } else {
+            paths.source.join(dir)
+        }));
+    }
+    let base = &paths.cwd;
     let lines = raw
         .split('\n')
         .map(|l| l.trim_end_matches('\r'))
@@ -708,36 +727,22 @@ fn hook_dir(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Optio
         let p = PathBuf::from(p);
         r::physical(&if p.is_absolute() { p } else { base.join(p) })
     };
-    let dir = if explicit {
-        resolve(hooks_path)?
-    } else {
-        let dir = PathBuf::from(hooks_path);
-        if dir.is_absolute() {
-            dir
-        } else {
-            paths.source.join(dir)
-        }
-    };
-    if explicit {
-        let top = resolve(top)?;
-        if top != *base
-            || !top.join("Cargo.toml").is_file()
-            || !top.join("crates/oms/Cargo.toml").is_file()
-        {
-            return r::fail("--repo must be the root of an OMS source worktree");
-        }
-        if !remove && !top.join("scripts/check.sh").is_file() {
-            return r::fail("--repo must contain scripts/check.sh");
-        }
-        // A shared or global core.hooksPath would write beyond this repository.
-        if !dir.starts_with(resolve(common)?) && !dir.starts_with(&top) {
-            return r::fail("Git hook directory is outside the selected repository");
-        }
+    let dir = resolve(hooks_path)?;
+    let top = resolve(top)?;
+    if top != *base
+        || !top.join("Cargo.toml").is_file()
+        || !top.join("crates/oms/Cargo.toml").is_file()
+    {
+        return r::fail("--repo must be the root of an OMS source worktree");
+    }
+    if !remove && !top.join("scripts/check.sh").is_file() {
+        return r::fail("--repo must contain scripts/check.sh");
+    }
+    // A shared or global core.hooksPath would write beyond this repository.
+    if !dir.starts_with(resolve(common)?) && !dir.starts_with(&top) {
+        return r::fail("Git hook directory is outside the selected repository");
     }
     Ok(Some(dir))
-}
-fn explicit_repo(paths: &Paths, options: &Options) -> Result<bool> {
-    Ok(options.path("--repo", &paths.cwd)?.is_some())
 }
 fn git_hook(
     paths: &Paths,
@@ -955,7 +960,7 @@ pub(crate) fn run(
     let mut prepared = prepared;
     if options.has("--check-protection") {
         // An explicit target must prove its own protection, after validation and before mutation.
-        let target = if options.tool == "install-hooks" && explicit_repo(paths, options)? {
+        let target = if options.tool == "install-hooks" && options.has("--repo") {
             hook_dir(paths, options, flag)?;
             &paths.cwd
         } else {

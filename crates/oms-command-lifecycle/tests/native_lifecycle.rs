@@ -3038,6 +3038,24 @@ esac
         0
     );
     assert!(!plain.join(".git/hooks/pre-push").exists());
+    // An external core.hooksPath would write beyond the selected repository: refused, bytes kept.
+    let external = root.join("external-hooks");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("pre-push"), old_push).unwrap();
+    let prior = fs::read_to_string(&other_push).unwrap();
+    fs::write(&other_push, old_push).unwrap();
+    git_in(
+        &other,
+        &["config", "core.hooksPath", external.to_str().unwrap()],
+    );
+    assert_ne!(call("install-hooks", &repo_arg, &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), old_push);
+    assert_eq!(
+        fs::read_to_string(external.join("pre-push")).unwrap(),
+        old_push
+    );
+    git_in(&other, &["config", "--unset", "core.hooksPath"]);
+    fs::write(&other_push, prior).unwrap();
     // Protection binds to the validated selected target, never the canonical owner.
     struct ProtectedOnly(PathBuf, RefCell<Vec<PathBuf>>);
     impl Services for ProtectedOnly {
