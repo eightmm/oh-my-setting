@@ -695,12 +695,16 @@ fn git_hook(
     } else {
         paths.source.join(dir)
     };
+    // Byte-exact hook written by scripts/install-hooks.sh at e0b92359; any edit stays unmanaged.
+    const OLD_PUSH: &str = "#!/usr/bin/env bash\n# Installed by scripts/install-hooks.sh — runs the repo gate before every push.\n# Bypass for an emergency with: git push --no-verify\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/check.sh\"\n";
     let owned = |name: &str, header: &str, legacy: &str| -> Result<(PathBuf, bool)> {
         let target = dir.join(name);
         let ours = !r::exists(&target) || {
             let old = r::read(&target, r::LIMIT)?;
             let text = String::from_utf8_lossy(&old);
-            text.starts_with(header) || !legacy.is_empty() && text.contains(legacy)
+            text.starts_with(header)
+                || !legacy.is_empty() && text.contains(legacy)
+                || name == "pre-push" && text == OLD_PUSH
         };
         Ok((target, ours))
     };

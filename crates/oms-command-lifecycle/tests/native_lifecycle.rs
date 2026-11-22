@@ -2932,6 +2932,17 @@ esac
         0
     );
     let hooks_dir = source.join(".git/hooks");
+    // The exact e0b92359 hook is upgraded to the native full hook; any variant stays protected.
+    let old_push = "#!/usr/bin/env bash\n# Installed by scripts/install-hooks.sh \u{2014} runs the repo gate before every push.\n# Bypass for an emergency with: git push --no-verify\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/check.sh\"\n";
+    let push_hook = hooks_dir.join("pre-push");
+    let variant = format!("{old_push}echo mine\n");
+    fs::write(&push_hook, &variant).unwrap();
+    assert_ne!(call("install-hooks", &[], &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), variant);
+    fs::write(&push_hook, old_push).unwrap();
+    success(call("install-hooks", &[], &source, &host));
+    let upgraded = fs::read_to_string(&push_hook).unwrap();
+    assert!(upgraded.contains(" pre-push-check") && upgraded.contains("--full"));
     let merge = hooks_dir.join("pre-merge-commit");
     let merge_text = fs::read_to_string(&merge).unwrap();
     assert!(merge_text.starts_with("#!/bin/sh\n# oh-my-setting native pre-merge-commit\n"));
