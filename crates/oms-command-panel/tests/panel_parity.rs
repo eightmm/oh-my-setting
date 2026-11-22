@@ -1069,6 +1069,47 @@ fn settle_review_and_recommend_parity() {
     assert_eq!(rec["schema"], json!(1));
     assert!(rec["escalation"].is_object());
 
+    // Configured categories fill defaults only; explicit risk never loses to them.
+    let cat = |args: &[&str]| {
+        let mut argv = vec!["--recommend"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        let (code, out, _) = run_with_services(
+            "panel",
+            &os(&argv),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        );
+        (
+            code,
+            serde_json::from_slice::<Value>(&out).unwrap_or(Value::Null),
+        )
+    };
+    let (code, typo) = cat(&["typo"]);
+    assert_eq!(code, 0);
+    assert_eq!(typo["task_kind"], "mechanical-edit");
+    assert_eq!(
+        (typo["risk"].as_str(), typo["size"].as_str()),
+        (Some("low"), Some("small"))
+    );
+    assert_eq!(typo["category"]["defaulted"], json!(["risk", "size"]));
+    assert_eq!(typo["tier"], "light");
+    let (_, high) = cat(&["typo", "--risk", "high"]);
+    assert_eq!(high["risk"], "high");
+    assert_eq!(high["category"]["defaulted"], json!(["size"]));
+    assert_eq!(high["tier"], "deep");
+    assert_ne!(cat(&["typo", "--risk", "low", "--diff", "HEAD"]).0, 0);
+    assert_ne!(cat(&["nosuchword"]).0, 0);
+    let mut bad = table_val.clone();
+    bad["categories"]["debug"] = json!({"kind": "debug", "risk": "low", "size": "small"});
+    bad["categories"]["Two"] = json!({"kind": "debug"});
+    assert_eq!(recommend::lint(&bad).len(), 3);
+    let mut legacy = table_val.clone();
+    legacy.as_object_mut().unwrap().remove("categories");
+    assert!(recommend::lint(&legacy).is_empty());
+
     std::fs::write(repo.path().join("README.md"), "updated line\n").unwrap();
     git_ok(repo.path(), &["add", "README.md"]);
     git_ok(repo.path(), &["commit", "-m", "second"]);

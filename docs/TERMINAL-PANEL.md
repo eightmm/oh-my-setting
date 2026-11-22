@@ -1737,7 +1737,11 @@ review, summarize) prints the first row of
 the kind, a risk (`low`, `medium`, `high`) and a size (`small`, `medium`, `large`),
 with its tier, effort and reason; `--json` prints the same. Give `--diff RANGE` to
 measure risk (the review gate's risk-path selectors) and size (lines and files,
-bucket limits in the file), or give both `--risk` and `--size`. It launches nothing and
+bucket limits in the file), or give both `--risk` and `--size`. An optional `categories` map in that file adds
+one-word names (`typo`, `bugfix`, `refactor`) that resolve to a kind plus default risk and
+size, so `--recommend typo` works alone; explicit `--risk`/`--size` or a measured `--diff`
+always override those defaults, and the output shows the category and which axes defaulted.
+Unknown or invalid categories fail before any route is computed. It launches nothing and
 keeps an explicit `--model`, `--reasoning-effort` or `--workload` you pass. With
 `--failed N` (N of 2 or more) it adds a suggestion: raise effort one step, and once
 effort is already `high`, raise the tier; `deep` is the ceiling because frontier is
