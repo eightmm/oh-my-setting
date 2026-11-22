@@ -17,7 +17,10 @@ Source baseline: `76ff19f` (재검증 기준).
 - 근거로 든 이슈 7건(#267, #269, #273, #274, #275, #295, #322)은 이미 완료로 닫혀 있었다.
 - 그 7건을 포함해 12개 항목은 이미 있었다. [이미 있는 것](#이미-있는-것-순위에서-제외)에 옮겼다.
 - 6개 항목은 기존 범위 결정이 제외한 것이라 따로 묶었다.
-- 남은 후보는 32개이고, 그중 여러 개는 열린 PR이나 이슈에서 진행 중이다.
+- 남은 후보는 32개이고, 그중 여러 개는 열린 PR이나 이슈에서 진행 중이다. 30개는 첫 판 항목이고
+  7위([#279](https://github.com/eightmm/oh-my-setting/issues/279))와
+  16위([#271](https://github.com/eightmm/oh-my-setting/issues/271))는 이슈에서 새로 생긴 항목이다.
+- 첫 판 50개 전부의 처분은 [첫 판 50개 대조표](#첫-판-50개-대조표)에 있다.
 
 외부 도구의 기능은 공개 문서·README 조사 범위이며 설치·실행·벤치마크는 하지 않았다.
 
@@ -123,6 +126,95 @@ Source baseline: `76ff19f` (재검증 기준).
 | worktree·branch 정리 목록 | `oms cleanup`이 dry-run으로 worktree와 `oms/*` branch를 보고 |
 | plugin marketplace | `.claude-plugin/marketplace.json` |
 | flaky 확인 명령 | `oms ci-status flaky` |
+
+## 첫 판 50개 대조표
+
+첫 판 순위(원 순위)별 현재 처분이다. 합계는 50개이며 순위 30, 범위 결정 5, 이미 있음 12,
+복원 3으로 나뉜다. 현재 순위 32개 중 7위·16위는 첫 판에 없던 이슈 기반 항목이라 이 표에 나오지 않고,
+첫 판 19번과 7번처럼 둘로 나뉜 항목은 각각 한 행으로 센다. 범위 결정 표의 "AI 감독 에이전트"는
+첫 판 9번의 제외 사유이며 별도 항목이 아니다.
+
+| 원 순위 | 첫 판 항목 | 현재 처분 |
+|---|---|---|
+| 1 | Main 직접 수정 runtime 거절 | 순위 1 |
+| 2 | Native 배정·결과 bridge와 task card | 순위 2 |
+| 3 | 배치 land 후보와 bisect | 순위 3 |
+| 4 | CI 우선 land 경로 | 순위 4(CI 대기 시간으로 재정의) |
+| 5 | Room 메시지 MCP 노출 | 순위 5 |
+| 6 | OMS 측 하드 예산 집행 | 순위 6 |
+| 7 | 작업 카테고리 → 모델 tier 별칭과 이유 출력 | 이미 있음: `--workload` tier와 routing 이유(#269). 카테고리 한 단어 별칭은 순위 항목이 아님 |
+| 8 | Worker sandbox 기본 적용 | 순위 8 |
+| 9 | 결정적 정체 감지와 attention 승격 | 순위 10 |
+| 10 | 편집 단위 checkpoint와 되돌리기 | 순위 11(수동 `oms checkpoint`는 있음) |
+| 11 | 역할별 실효 권한 보고 | 순위 9(#277) |
+| 12 | 충돌 시 integrator 자동 배정 | 순위 12 |
+| 13 | 다중 계정 바인딩·routing 설명 | 이미 있음(#269) |
+| 14 | 패널 입력 반응성 | 이미 있음(#267) |
+| 15 | N회 병렬 시도와 선택 | 순위 24 |
+| 16 | ACP client | 순위 13 |
+| 17 | 범용 원격·격리 실행 profile | 순위 14 |
+| 18 | 외부 이벤트·시간 trigger | 순위 15(시간 주기는 `oms tick schedule`로 있음) |
+| 19 | flaky 자동 재시도와 격리 목록 | 나눔: 확인 명령 `oms ci-status flaky`는 이미 있음. 1회 재시도·격리 목록은 미구현이며 순위 밖 후보(아래 복원 항목) |
+| 20 | 양방향 원격 알림·승인 | 범위 결정이 먼저 |
+| 21 | 이슈 라벨 polling과 intake | 순위 18 |
+| 22 | provider별 hook 이벤트 coverage 표와 trace 확대 | 나눔: 정적 coverage 표는 이미 있음(`18920ced`). Claude·AGY 런타임 이벤트 trace는 소스 확인 전의 순위 밖 후보(아래). 16위(#271)와 무관 |
+| 23 | Stacked PR land | 순위 19 |
+| 24 | 임의 CLI adapter 확대 | 순위 17 |
+| 25 | 규칙을 다른 포맷으로 내보내기 | 순위 20 |
+| 26 | PR 코멘트에서 후속 작업 | 순위 22 |
+| 27 | 리뷰 결과를 PR 코멘트로 게시 | 순위 21 |
+| 28 | skill·역할 eval 세트 | 순위 23 |
+| 29 | 읽기 전용 로컬 web 보드 | 범위 결정이 먼저 |
+| 30 | 문서 경로 drift 검사 | 이미 있음(#295) |
+| 31 | ML checkpoint 정책 lint | 이미 있음(`oms run checkpoints`) |
+| 32 | 실험 추적 도구로 export | 순위 25 |
+| 33 | GPU·Slurm 자원 admission | 순위 26 |
+| 34 | OpenTelemetry export | 범위 결정이 먼저 |
+| 35 | plugin marketplace 게시 | 이미 있음(`.claude-plugin/marketplace.json`) |
+| 36 | 세션 다른 호스트 이어받기 | 순위 27 |
+| 37 | Main 교체(swap) | 순위 28 |
+| 38 | worktree 수명주기 뷰와 orphan 정리 | 이미 있음(`oms cleanup` dry-run) |
+| 39 | 작업별 dev server 미리보기 | 순위 30 |
+| 40 | prompt injection 방어 강화 | 복원, 순위 밖 후보(아래) |
+| 41 | council 좌석 설정화 | 이미 있음(#273, #318 진행) |
+| 42 | usage ledger 증분 저장 | 순위 29 |
+| 43 | 한 단어 "끝까지" 실행 trigger | 복원, 순위 밖 후보(아래) |
+| 44 | 리뷰 settle 사유 보존 | 이미 있음(#275) |
+| 45 | Codex Lead 긴 배정 가시성 | 이미 있음(#322) |
+| 46 | Room 헤더와 주간 사용량 | 이미 있음(#274) |
+| 47 | CI 안에서 에이전트 실행 template | 순위 31 |
+| 48 | 감사 보고서 export | 순위 32 |
+| 49 | 팀·다중 사용자 설정과 RBAC | 범위 결정이 먼저(1인 로컬 전제) |
+| 50 | native Windows | 범위 결정이 먼저(지원 종료) |
+
+### 새 이슈 기반 항목 (첫 판에 없음)
+
+| 현재 순위 | 항목 | 근거 | 첫 판과의 구분 |
+|---|---|---|---|
+| 7 | 호출별 token 사용량의 Board 표시 | [#279](https://github.com/eightmm/oh-my-setting/issues/279) | 첫 판 7번(카테고리 별칭)과 무관 |
+| 16 | Codex hook 실패 진단의 남은 부분 | [#271](https://github.com/eightmm/oh-my-setting/issues/271) | 첫 판 22번(provider별 hook coverage 표)과 무관 |
+
+### 복원한 항목 (순위 밖 후보)
+
+재검증에서 빠졌던 항목이다. 현재 순위에는 넣지 않고 처분만 남긴다. 구현 약속이 아니며,
+순위에 올리려면 근거를 소스에서 다시 확인한다.
+
+| 원 순위 | 항목 | 처분 | 확인 |
+|---|---|---|---|
+| 19(재시도 부분) | flaky 테스트 1회 재시도와 만료일 있는 격리 목록 | 미구현 후보, 순위 밖. required gate는 유지. 목록 확인(`oms ci-status flaky`)은 이미 있음 | 소스(`oms ci-status flaky`는 목록만 확인) |
+| 22(런타임 부분) | Claude·AGY 런타임 hook 이벤트 trace | 조건부 후보, 순위 밖. 정적 coverage 표는 `18920ced`로 출하되어 `config/provider-capabilities.json`의 `tool_guard`에 있고 fixture 기준이다. 실제 이벤트 전달은 확인되지 않았다 | 소스(정적 표), 보고(#313 AH-05, 런타임 trace는 소스 확인 필요) |
+| 40 | 외부 텍스트 격리 표시 등 prompt-injection 방어 경계 강화 | 조건부 후보, 순위 밖. 기존 hook injection ledger(`context-inspect --injections`)는 관측만 한다 | 소스(ledger), 보고(나머지, 소스 확인 필요) |
+| 43 | 승인된 goal에만 붙는 한 단어 "끝까지" trigger | 조건부 후보, 순위 밖. `oms goal-drive`가 승인된 plan을 실행하는 기존 경로다 | 소스(goal-drive), 보고(trigger, 소스 확인 필요) |
+
+## 배포 기준
+
+2026-11-22 증거 snapshot이다. `f3296931`은 origin/main에 게시되어 있고 설치되었으며 CI run
+45030929261이 같은 SHA에서 성공했다. 이 PR branch는 `3416c218`에서 갈라졌고 `3416c218`은
+`f3296931`의 조상이다. branch 상태는 시간이 지나면 달라지므로 현재 상태는 `git`과 CI에서 다시 확인한다.
+
+이 문서의 "있음" 판정은 소스 baseline `76ff19f`, 닫힌 이슈, 위 snapshot의 `f3296931`
+조상 commit을 근거로 한다. 첫 판 22번의 정적 provider coverage는 `18920ced`로 출하되었고
+`f3296931`의 조상이다. 이 PR은 문서만 바꾼다.
 
 ## 외부 출처
 
