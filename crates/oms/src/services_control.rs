@@ -3415,6 +3415,21 @@ mod tests {
             }
             assert!(!String::from_utf8_lossy(&output.1).contains("nonce"));
             assert!(!String::from_utf8_lossy(&output.2).contains("nonce"));
+            if mode == "protocol-partial" {
+                let mut seen = String::from_utf8_lossy(&output.2).into_owned();
+                for entry in std::fs::read_dir(repo.join(".oms/artifacts/ask"))
+                    .unwrap()
+                    .flatten()
+                {
+                    seen.push_str(&String::from_utf8_lossy(
+                        &std::fs::read(entry.path()).unwrap_or_default(),
+                    ));
+                }
+                assert!(
+                    seen.contains("channel-partial-frame"),
+                    "partial-frame cue not delivered"
+                );
+            }
             return;
         }
         if std::env::var_os("OMS_NATIVE_PHYSICAL_FIXTURE").is_none() {
