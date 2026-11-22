@@ -386,6 +386,15 @@ fn validate_claude_registry(
     }
     Ok(())
 }
+fn account_flags(args: &Args, id: &str) -> Result<()> {
+    if !valid_account_id(id) || (id == "default" && !args.has("--verify")) {
+        return Err(error("invalid provider account id; default is reserved"));
+    }
+    if args.has("--first") && args.has("--last") {
+        return Err(error("choose --first or --last"));
+    }
+    Ok(())
+}
 fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     let (provider, id) = args
         .required("--account")?
@@ -414,6 +423,7 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                 PI_SHARED,
                 "pi-account-links.json",
             ),
+            "antigravity" => return antigravity(args, id),
             _ => {
                 return Err(error(
                     "provider account isolation is unproved and unavailable",
@@ -421,12 +431,7 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
             }
         };
     let claude = provider == "claude";
-    if !valid_account_id(id) || (id == "default" && !args.has("--verify")) {
-        return Err(error("invalid provider account id; default is reserved"));
-    }
-    if args.has("--first") && args.has("--last") {
-        return Err(error("choose --first or --last"));
-    }
+    account_flags(args, id)?;
     let config = env_path("XDG_CONFIG_HOME", home()?.join(".config")).join("oh-my-setting");
     let config = physical(&config)?;
     let registry = config.join("provider-accounts.json");
@@ -741,30 +746,7 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
         })
         .unwrap_or_else(|| main.join("accounts").join(id));
     let path = physical(&path)?;
-    let main_homes = [
-        ("CODEX_HOME", ".codex"),
-        ("CLAUDE_CONFIG_DIR", ".claude"),
-        ("PI_CODING_AGENT_DIR", ".pi/agent"),
-    ];
-    for (variable, fallback) in main_homes {
-        if path == physical(&env_path(variable, home()?.join(fallback)))? {
-            return Err(error("account home must differ from the main home"));
-        }
-    }
-    if path == main {
-        return Err(error("account home must differ from the main home"));
-    }
-    for ancestor in path.ancestors() {
-        if ancestor.join(".git").exists()
-            || (ancestor.join("HEAD").is_file()
-                && ancestor.join("objects").is_dir()
-                && ancestor.join("refs").is_dir())
-        {
-            return Err(error(
-                "account home must not be inside a repository; use --home elsewhere",
-            ));
-        }
-    }
+    home_placement(&path, Some(&main))?;
     for (owner, settings) in value["providers"]
         .as_object()
         .ok_or_else(|| error("invalid providers"))?
@@ -830,6 +812,13 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                     ));
                 }
             }
+        }
+    }
+    for canon in agy_homes(&config)? {
+        if canon == path || (value["providers"].get(provider).is_none() && canon == main) {
+            return Err(error(
+                "canonical home is already registered by another provider",
+            ));
         }
     }
     let mut next_value = value.clone();
@@ -1054,6 +1043,605 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
         "{label} account {id}: registered, login pending\n"
     )))
 }
+fn home_placement(path: &Path, main: Option<&Path>) -> Result<()> {
+    let main_homes = [
+        ("CODEX_HOME", ".codex"),
+        ("CLAUDE_CONFIG_DIR", ".claude"),
+        ("PI_CODING_AGENT_DIR", ".pi/agent"),
+    ];
+    for (variable, fallback) in main_homes {
+        if path == physical(&env_path(variable, home()?.join(fallback)))? {
+            return Err(error("account home must differ from the main home"));
+        }
+    }
+    if main == Some(path) {
+        return Err(error("account home must differ from the main home"));
+    }
+    for ancestor in path.ancestors() {
+        if ancestor.join(".git").exists()
+            || (ancestor.join("HEAD").is_file()
+                && ancestor.join("objects").is_dir()
+                && ancestor.join("refs").is_dir())
+        {
+            return Err(error(
+                "account home must not be inside a repository; use --home elsewhere",
+            ));
+        }
+    }
+    Ok(())
+}
+/// Antigravity rows live in sibling files: routing and peer launch refuse any
+/// unproved provider key in `provider-accounts.json`, so AGY stays unrouted.
+const AGY_REGISTRY: &str = "provider-accounts.antigravity.json";
+const AGY_RECEIPT: &str = "antigravity-account-receipts.json";
+/// gcloud's ADC file in a `CLOUDSDK_CONFIG`-style profile home; only its
+/// metadata is inspected, never its bytes.
+const AGY_PROFILE: &str = "application_default_credentials.json";
+const AGY_UNVERIFIED: &str = "login and served identity unverified";
+/// Register, verify or remove a local Antigravity ADC profile home. Records
+/// bind the home's stat identity; nothing here proves login, the served
+/// account or runtime routing, and removal never touches the home.
+fn antigravity(args: &Args, id: &str) -> Result<Output> {
+    account_flags(args, id)?;
+    if args.has("--repair") {
+        return Err(error("antigravity accounts have no links to repair"));
+    }
+    let config = env_path("XDG_CONFIG_HOME", home()?.join(".config")).join("oh-my-setting");
+    let _guard = lock(&physical(&config)?.join("provider-accounts.json"))?;
+    let default_claude = physical(&home()?.join(".claude"))?;
+    let host = AgyHost {
+        config: &config,
+        default_claude: &default_claude,
+        placement: &|path| home_placement(path, None),
+    };
+    agy_locked(args, id, &host, || ())
+}
+/// Environment-derived inputs, injected so unit tests never consult a real home.
+struct AgyHost<'a> {
+    config: &'a Path,
+    default_claude: &'a Path,
+    placement: &'a dyn Fn(&Path) -> Result<()>,
+}
+/// The locked transaction; `between` runs after every validation and before
+/// the publication recheck, as a test seam for races.
+fn agy_locked(args: &Args, id: &str, host: &AgyHost<'_>, between: impl FnOnce()) -> Result<Output> {
+    let config = host.config;
+    let root = private_root(config)?;
+    let registry_path = config.join(AGY_REGISTRY);
+    let receipt_path = config.join(AGY_RECEIPT);
+    let read_own = |path: &Path| -> Result<Option<Vec<u8>>> {
+        let options = oms_safe_fs::ByteReadOptions {
+            missing_ok: false,
+            max_bytes: LIMIT,
+        };
+        match root.read_no_follow(path, options) {
+            Err(oms_safe_fs::ByteError::Missing) => Ok(None),
+            Err(_) => Err(error(
+                "antigravity account files must be private, single-link and owned by the current user",
+            )),
+            Ok(raw) if raw.is_empty() => Err(empty_metadata("antigravity", path)),
+            Ok(raw) => Ok(Some(raw)),
+        }
+    };
+    let old_registry = read_own(&registry_path)?;
+    let old_receipt = read_own(&receipt_path)?;
+    let mut registry = match &old_registry {
+        Some(raw) => json(raw)?,
+        None => agy_empty_registry(),
+    };
+    let mut receipts = match &old_receipt {
+        Some(raw) => json(raw)?,
+        None => json!([]),
+    };
+    let (old_registry, old_receipt) = (old_registry.as_deref(), old_receipt.as_deref());
+    validate_agy(&registry, &receipts)?;
+    let rows = registry["accounts"].as_array_mut().unwrap();
+    let receipts = receipts.as_array_mut().unwrap();
+    if args.has("--remove") {
+        if !rows.iter().chain(receipts.iter()).any(|r| r["id"] == id) {
+            return Ok(Output::text(format!(
+                "Antigravity account {id} is not registered; nothing changed\n"
+            )));
+        }
+        rows.retain(|r| r["id"] != id);
+        receipts.retain(|r| r["id"] != id);
+        write_private(&root, &registry_path, &registry, old_registry)?;
+        write_private(&root, &receipt_path, &json!(receipts), old_receipt)?;
+        return Ok(Output::text(format!(
+            "Antigravity account removed: {id}; home and ADC profile kept\n"
+        )));
+    }
+    let receipt_for = |rid: &Value, rhome: &Value| {
+        receipts
+            .iter()
+            .find(|r| r["id"] == *rid && r["home"] == *rhome)
+            .cloned()
+    };
+    if args.has("--verify") {
+        if rows.is_empty() {
+            return Err(error("Antigravity account is not registered"));
+        }
+        let mut text = String::new();
+        let mut failed = false;
+        for row in rows.iter() {
+            let checked = receipt_for(&row["id"], &row["home"])
+                .ok_or_else(|| error("missing antigravity account receipt"))
+                .and_then(|receipt| {
+                    let home = agy_home(Path::new(row["home"].as_str().unwrap()))?;
+                    if agy_identity(&home.stat) != receipt["identity"] {
+                        return Err(error("home identity no longer matches its receipt"));
+                    }
+                    agy_profile(home.profile.as_ref())
+                });
+            let detail = match checked {
+                Ok(true) => "local profile structure verified".to_owned(),
+                Ok(false) => "ADC profile missing".to_owned(),
+                Err(e) => e.message,
+            };
+            let good = detail == "local profile structure verified";
+            failed |= !good;
+            text.push_str(&format!(
+                "{}: antigravity account {} {detail}; {AGY_UNVERIFIED}\n",
+                if good { "ok" } else { "warn" },
+                row["id"].as_str().unwrap()
+            ));
+        }
+        let mut out = Output::text(text);
+        out.code = i32::from(failed);
+        return Ok(out);
+    }
+    let existing = rows.iter().find(|r| r["id"] == id).cloned();
+    let path = match (args.get("--home"), &existing) {
+        (Some(raw), _) => PathBuf::from(raw),
+        (None, Some(row)) => PathBuf::from(row["home"].as_str().unwrap()),
+        (None, None) => return Err(error("antigravity accounts require --home PATH")),
+    };
+    if !path.is_absolute() {
+        return Err(error(
+            "antigravity account home must be an absolute physical path",
+        ));
+    }
+    let home = agy_home(&path)?;
+    (host.placement)(&path)?;
+    let identity = agy_identity(&home.stat);
+    let same = |home: &Path| {
+        use std::os::unix::fs::MetadataExt;
+        home == path
+            || std::fs::metadata(home).is_ok_and(|m| {
+                json!(m.dev()) == identity["st_dev"] && json!(m.ino()) == identity["st_ino"]
+            })
+    };
+    if foreign_homes(config, host.default_claude)?
+        .iter()
+        .any(|h| same(h))
+    {
+        return Err(error(
+            "canonical home is already registered by another provider",
+        ));
+    }
+    let home_value = json!(path);
+    for row in rows.iter().chain(receipts.iter()) {
+        let other = Path::new(row["home"].as_str().unwrap());
+        if row["id"] == id && row["home"] != home_value {
+            return Err(error(format!(
+                "antigravity account {id} is already registered with another home; nothing was changed"
+            )));
+        }
+        if row["id"] != id && same(other) {
+            return Err(error("duplicate provider account id or canonical home"));
+        }
+    }
+    match receipt_for(&json!(id), &home_value) {
+        Some(receipt) if receipt["identity"] != identity => {
+            return Err(error(
+                "antigravity account receipt does not match the home identity; nothing was changed",
+            ));
+        }
+        None if existing.is_some() => {
+            return Err(error(
+                "missing antigravity account receipt; remove the account and register it again",
+            ));
+        }
+        Some(_) => (),
+        None => receipts.push(json!({"id":id,"home":path,"identity":identity,
+            "verification":"unverified"})),
+    }
+    let profile = agy_profile(home.profile.as_ref())?;
+    let entry = json!({"id":id,"home":path});
+    if existing.is_none() || args.has("--first") || args.has("--last") {
+        rows.retain(|r| r["id"] != id);
+        if args.has("--first") {
+            rows.insert(0, entry);
+        } else {
+            rows.push(entry);
+        }
+    }
+    between();
+    // Publication goes through the descriptors held since validation: the
+    // home's ancestry and leaf are re-stat'ed, and both writes use `root`.
+    agy_unchanged(&home, &identity)?;
+    write_private(&root, &receipt_path, &json!(receipts), old_receipt)?;
+    agy_unchanged(&home, &identity)?;
+    write_private(&root, &registry_path, &registry, old_registry)?;
+    Ok(Output::text(format!(
+        "Antigravity account {id}: registered; ADC profile {}; {AGY_UNVERIFIED}\n",
+        if profile { "present" } else { "pending" }
+    )))
+}
+fn validate_agy(registry: &Value, receipts: &Value) -> Result<()> {
+    let bad = || error("invalid antigravity account registry or receipt");
+    let keys = |v: &Value, allowed: &[&str]| {
+        v.as_object()
+            .is_some_and(|m| m.keys().all(|k| allowed.contains(&k.as_str())))
+    };
+    if registry["schema"] != 1
+        || registry["provider"] != "antigravity"
+        || !keys(registry, &["schema", "provider", "accounts"])
+    {
+        return Err(bad());
+    }
+    let rows = registry["accounts"].as_array().ok_or_else(bad)?;
+    let receipts = receipts.as_array().ok_or_else(bad)?;
+    let stat_keys = ["st_uid", "st_dev", "st_ino", "st_mode"];
+    for (list, receipt) in [(rows, false), (receipts, true)] {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut homes = std::collections::BTreeSet::new();
+        for row in list {
+            let (rid, rhome) = if receipt {
+                if !keys(row, &["id", "home", "identity", "verification"])
+                    || row["verification"] != "unverified"
+                    || !keys(&row["identity"], &stat_keys)
+                    || !stat_keys.iter().all(|k| row["identity"][k].is_u64())
+                {
+                    return Err(bad());
+                }
+                let probe = json!({"id":row["id"],"home":row["home"]});
+                let (rid, rhome) = validate_account_row(&probe, false).map_err(|_| bad())?;
+                (rid.to_owned(), rhome.to_owned())
+            } else {
+                let (rid, rhome) = validate_account_row(row, false).map_err(|_| bad())?;
+                (rid.to_owned(), rhome.to_owned())
+            };
+            if !ids.insert(rid) || !homes.insert(rhome) {
+                return Err(error("duplicate provider account id or canonical home"));
+            }
+        }
+    }
+    Ok(())
+}
+/// Private-registry root at the nearest existing ancestor, as `write_locked`
+/// anchors, so a missing config directory is created beneath safe ancestry.
+fn private_root(dir: &Path) -> Result<oms_safe_fs::Root> {
+    let mut anchor = dir;
+    while !anchor.is_dir() {
+        anchor = anchor
+            .parent()
+            .ok_or_else(|| error("missing destination root"))?;
+    }
+    oms_safe_fs::Root::open_private_registry(anchor).map_err(|_| {
+        error(
+            "unsafe antigravity account registry ancestry; every directory from / must be physical, user- or root-owned and not group/world-writable",
+        )
+    })
+}
+/// `old` is `None` only when the file was absent (ENOENT); a file appearing
+/// or changing since that read refuses the write.
+fn write_private(
+    root: &oms_safe_fs::Root,
+    path: &Path,
+    value: &Value,
+    old: Option<&[u8]>,
+) -> Result<()> {
+    let bytes = json_bytes(value)?;
+    if old == Some(bytes.as_slice()) {
+        return Ok(());
+    }
+    root.atomic_mutate(
+        path,
+        oms_safe_fs::MutationOptions {
+            read: oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: LIMIT,
+            },
+            create_parent: true,
+            expected_exists: Some(old.is_some()),
+            ..Default::default()
+        },
+        |current| {
+            if current != old.unwrap_or_default() {
+                return Err(error("destination changed during transaction"));
+            }
+            Ok(bytes)
+        },
+    )
+    .map_err(|e| error(format!("atomic write refused: {e:?}")))?;
+    Ok(())
+}
+fn agy_empty_registry() -> Value {
+    json!({"schema":1,"provider":"antigravity","accounts":[]})
+}
+fn empty_metadata(owner: &str, path: &Path) -> Error {
+    error(format!(
+        "{owner} account metadata is empty (corrupt): {}; nothing was changed",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+/// Existing account metadata read strictly: only ENOENT is missing, and an
+/// existing empty file is corruption rather than a fresh registry.
+fn present(path: &Path, owner: &str) -> Result<Option<Vec<u8>>> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+        Ok(_) => match read(path, LIMIT)? {
+            raw if raw.is_empty() => Err(empty_metadata(owner, path)),
+            raw => Ok(Some(raw)),
+        },
+    }
+}
+fn invalid_metadata(file: &str, e: Error) -> Error {
+    error(format!(
+        "invalid provider account metadata ({file}): {}; nothing was changed",
+        e.message
+    ))
+}
+/// Rows of a codex/pi link receipt (array) or Claude effects document, held
+/// to the shape their writers in `account` create.
+fn link_receipts<'a>(doc: &'a Value, claude: bool, names: &[&str]) -> Result<&'a Vec<Value>> {
+    let bad = || error("invalid provider account receipt");
+    let rows = if claude {
+        if doc["schema"] != 1
+            || !doc.as_object().is_some_and(|m| {
+                m.keys()
+                    .all(|k| ["schema", "accounts"].contains(&k.as_str()))
+            })
+        {
+            return Err(bad());
+        }
+        doc["accounts"].as_array()
+    } else {
+        doc.as_array()
+    }
+    .ok_or_else(bad)?;
+    let (keys, strings, stats): (&[&str], &[&str], &[&str]) = if claude {
+        (
+            &[
+                "id",
+                "provider",
+                "home",
+                "parent",
+                "parent_identity",
+                "identity",
+                "settings",
+                "hooks_receipt",
+                "source_root",
+                "status",
+                "links",
+            ],
+            &[
+                "provider",
+                "parent",
+                "settings",
+                "hooks_receipt",
+                "source_root",
+                "status",
+            ],
+            &["parent_identity", "identity"],
+        )
+    } else {
+        (&["id", "home", "links", "st_dev", "st_ino"], &[], &[])
+    };
+    for row in rows {
+        let obj = row.as_object().ok_or_else(bad)?;
+        if !obj.keys().all(|k| keys.contains(&k.as_str()))
+            || strings
+                .iter()
+                .any(|k| obj.get(*k).is_some_and(|v| !v.is_string()))
+            || stats.iter().any(|k| {
+                obj.get(*k)
+                    .is_some_and(|v| !v.as_object().is_some_and(|m| m.values().all(Value::is_u64)))
+            })
+            || ["st_dev", "st_ino"]
+                .iter()
+                .any(|k| obj.get(*k).is_some_and(|v| !v.is_u64()))
+            || obj
+                .get("provider")
+                .is_some_and(|p| p.as_str() != Some("claude"))
+        {
+            return Err(bad());
+        }
+        validate_account_row(&json!({"id":row["id"],"home":row["home"]}), false)?;
+        validate_receipt_links(row, names, claude)?;
+    }
+    Ok(rows)
+}
+/// Every other provider's registered, seeded or receipted home. Foreign
+/// metadata refuses, never skips, when it is empty, fails its owner's schema,
+/// or a non-default registered row lacks the receipt its owner writes first.
+fn foreign_homes(config: &Path, default_claude: &Path) -> Result<Vec<PathBuf>> {
+    let load = |file: &str| -> Result<Option<Value>> {
+        present(&config.join(file), "provider")?
+            .map(|raw| json(&raw).map_err(|e| invalid_metadata(file, e)))
+            .transpose()
+    };
+    let shared =
+        load("provider-accounts.json")?.unwrap_or_else(|| json!({"schema":1,"providers":{}}));
+    let shared_homes = validate_shared_registry(&shared)
+        .map_err(|e| invalid_metadata("provider-accounts.json", e))?;
+    let claude = load("provider-accounts.claude.json")?;
+    if let Some(doc) = &claude {
+        validate_claude_registry(doc, default_claude, &shared, &shared_homes)
+            .map_err(|e| invalid_metadata("provider-accounts.claude.json", e))?;
+    }
+    let mut homes: Vec<PathBuf> = shared_homes.into_iter().collect();
+    let mut owned = std::collections::BTreeMap::new();
+    for (owner, file, names) in [
+        ("codex", "codex-account-links.json", SHARED),
+        ("pi", "pi-account-links.json", PI_SHARED),
+        ("claude", "provider-account-effects.json", CLAUDE_SHARED),
+    ] {
+        let mut receipted = Vec::new();
+        if let Some(doc) = load(file)? {
+            for row in link_receipts(&doc, owner == "claude", names)
+                .map_err(|e| invalid_metadata(file, e))?
+            {
+                let home = physical(Path::new(row["home"].as_str().unwrap()))?;
+                receipted.push((row["id"].clone(), home.clone()));
+                homes.push(home);
+            }
+        }
+        owned.insert(owner, (file, receipted));
+    }
+    let registered = shared["providers"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .flat_map(|(owner, s)| {
+            s["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(move |row| (owner.as_str(), row))
+        })
+        .chain(claude.iter().flat_map(|doc| {
+            doc["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| ("claude", row))
+        }));
+    for (owner, row) in registered {
+        if row["id"] == "default" {
+            continue;
+        }
+        let home = physical(Path::new(row["home"].as_str().unwrap()))?;
+        let (file, receipted) = &owned[owner];
+        if !receipted
+            .iter()
+            .any(|(rid, rhome)| *rid == row["id"] && *rhome == home)
+        {
+            return Err(error(format!(
+                "missing {owner} account receipt for {} ({file}); re-register or --repair that account first; nothing was changed",
+                row["id"].as_str().unwrap()
+            )));
+        }
+        homes.push(home);
+    }
+    Ok(homes)
+}
+/// Antigravity homes as foreign metadata for codex, claude and pi
+/// registration, refused on the same terms as `foreign_homes`.
+fn agy_homes(config: &Path) -> Result<Vec<PathBuf>> {
+    let invalid = |e| invalid_metadata(&format!("{AGY_REGISTRY}, {AGY_RECEIPT}"), e);
+    let load = |file: &str| -> Result<Option<Value>> {
+        present(&config.join(file), "antigravity")?
+            .map(|raw| json(&raw).map_err(invalid))
+            .transpose()
+    };
+    let registry = load(AGY_REGISTRY)?.unwrap_or_else(agy_empty_registry);
+    let receipts = load(AGY_RECEIPT)?.unwrap_or_else(|| json!([]));
+    validate_agy(&registry, &receipts).map_err(invalid)?;
+    let (rows, receipts) = (
+        registry["accounts"].as_array().unwrap(),
+        receipts.as_array().unwrap(),
+    );
+    if let Some(row) = rows.iter().find(|row| {
+        !receipts
+            .iter()
+            .any(|r| r["id"] == row["id"] && r["home"] == row["home"])
+    }) {
+        return Err(error(format!(
+            "missing antigravity account receipt for {} ({AGY_RECEIPT}); nothing was changed",
+            row["id"].as_str().unwrap()
+        )));
+    }
+    rows.iter()
+        .chain(receipts)
+        .map(|row| physical(Path::new(row["home"].as_str().unwrap())))
+        .collect()
+}
+/// A profile home validated through private ancestry. `root` holds the
+/// ancestor and home descriptors until publication; `profile` is the ADC
+/// file's no-follow metadata (its bytes are never read).
+struct AgyHome {
+    root: oms_safe_fs::Root,
+    stat: rustix::fs::Stat,
+    profile: Option<rustix::fs::Stat>,
+}
+fn agy_private_dir(info: &rustix::fs::Stat) -> bool {
+    info.st_uid == rustix::process::getuid().as_raw() && info.st_mode & 0o7077 == 0
+}
+/// The home must be named by its physical spelling through private ancestry
+/// and be an owner-only directory.
+fn agy_home(path: &Path) -> Result<AgyHome> {
+    let root = oms_safe_fs::Root::open_private_registry(path).map_err(|_| {
+        error(
+            "antigravity account home must be an existing physical directory (no symlink, `.` or `..`) whose ancestors are user- or root-owned and not group/world-writable",
+        )
+    })?;
+    let (stat, profile) = root
+        .pinned_metadata(std::ffi::OsStr::new(AGY_PROFILE))
+        .map_err(|_| error("cannot inspect account directory"))?;
+    if !agy_private_dir(&stat) {
+        return Err(error(
+            "antigravity account home must be owned by the current user and private (chmod 700)",
+        ));
+    }
+    Ok(AgyHome {
+        root,
+        stat,
+        profile,
+    })
+}
+/// Publication recheck through the held descriptors, never a reopened name:
+/// the ancestry and home leaf still match their validated no-follow stats,
+/// the home keeps its private mode and recorded identity, and the ADC
+/// profile keeps its validated presence, identity, mode and link count.
+fn agy_unchanged(home: &AgyHome, identity: &Value) -> Result<()> {
+    let changed =
+        || error("antigravity account home changed during registration; nothing was changed");
+    let (stat, profile) = home
+        .root
+        .pinned_metadata(std::ffi::OsStr::new(AGY_PROFILE))
+        .map_err(|_| changed())?;
+    if !agy_private_dir(&stat) || agy_identity(&stat) != *identity {
+        return Err(changed());
+    }
+    let key = |s: &rustix::fs::Stat| (s.st_dev, s.st_ino, s.st_uid, s.st_mode, s.st_nlink);
+    let same = match (&home.profile, &profile) {
+        (None, None) => true,
+        (Some(a), Some(b)) => agy_profile(Some(b)).is_ok() && key(a) == key(b),
+        _ => false,
+    };
+    if !same {
+        return Err(error(
+            "antigravity ADC profile changed during registration; nothing was changed",
+        ));
+    }
+    Ok(())
+}
+fn agy_identity(info: &rustix::fs::Stat) -> Value {
+    let mut identity = stat_id(info);
+    identity["st_mode"] = json!(info.st_mode);
+    identity
+}
+/// Present and structurally safe (`true`), absent (`false`), or refused.
+fn agy_profile(profile: Option<&rustix::fs::Stat>) -> Result<bool> {
+    match profile {
+        None => Ok(false),
+        Some(s)
+            if rustix::fs::FileType::from_raw_mode(s.st_mode)
+                == rustix::fs::FileType::RegularFile
+                && s.st_nlink == 1
+                && s.st_uid == rustix::process::getuid().as_raw()
+                && s.st_mode & 0o7077 == 0 =>
+        {
+            Ok(true)
+        }
+        Some(_) => Err(error(
+            "antigravity ADC profile must be a private (0600), single-link regular file owned by the current user",
+        )),
+    }
+}
 fn validate_receipt_links(
     row: &Value,
     names: &[&str],
@@ -1214,4 +1802,532 @@ fn open_home(path: &Path, owner: Option<&Value>) -> Result<std::os::fd::OwnedFd>
         return Err(error("account directory identity changed or unverified"));
     }
     Ok(fd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    /// Why `dir` cannot hold fixture roots: not absolute, inside the
+    /// repository, or an ancestor from `/` that is not a real root- or
+    /// user-owned directory without group/world write. `dir` is checked as
+    /// given, so callers canonicalize first and a symlinked ancestor is refused.
+    fn parent_refusal(dir: &Path) -> Option<String> {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        if !dir.is_absolute() {
+            return Some("not absolute".into());
+        }
+        if dir.starts_with(&repo) {
+            return Some(format!("inside the repository {}", repo.display()));
+        }
+        let uid = rustix::process::getuid().as_raw();
+        let mut chain: Vec<&Path> = dir.ancestors().collect();
+        chain.reverse();
+        chain
+            .into_iter()
+            .find(|a| {
+                !fs::symlink_metadata(a).is_ok_and(|m| {
+                    m.file_type().is_dir()
+                        && (m.uid() == 0 || m.uid() == uid)
+                        && m.mode() & 0o022 == 0
+                })
+            })
+            .map(|a| format!("unsafe ancestor {}", a.display()))
+    }
+    /// A root in the first candidate that canonicalizes, passes
+    /// `parent_refusal` and takes a fresh `Fixture`; panics naming every
+    /// refused candidate.
+    fn select_parent(candidates: &[PathBuf], name: &str) -> Fixture {
+        let mut refused = Vec::new();
+        for candidate in candidates {
+            let why = if !candidate.is_absolute() {
+                "not absolute".to_string()
+            } else {
+                match candidate.canonicalize() {
+                    Err(e) => format!("unresolvable: {e}"),
+                    Ok(dir) => match parent_refusal(&dir) {
+                        None => match Fixture::create(&dir, name) {
+                            Ok(fixture) => return fixture,
+                            Err(e) => format!("cannot create a root: {e}"),
+                        },
+                        Some(why) => why,
+                    },
+                }
+            };
+            refused.push(format!("{}: {why}", candidate.display()));
+        }
+        panic!(
+            "antigravity account fixtures need a writable parent outside the repository whose every ancestor is a root- or user-owned directory without group/world write; refused: {}",
+            refused.join("; ")
+        );
+    }
+    /// Antigravity registries and homes refuse a sticky 1777 `/tmp`, so try
+    /// TMPDIR, XDG_RUNTIME_DIR, `/run/user/<uid>` (also when the variable is
+    /// unset), then HOME (only ever a parent for a fresh fixture root).
+    fn private_fixture(name: &str) -> Fixture {
+        let uid = rustix::process::getuid().as_raw();
+        let candidates: Vec<PathBuf> = [
+            Some(std::env::temp_dir()),
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            Some(PathBuf::from(format!("/run/user/{uid}"))),
+            std::env::var_os("HOME").map(PathBuf::from),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let fixture = select_parent(&candidates, name);
+        let base = fixture.0.parent().unwrap();
+        eprintln!("account fixture parent: {}", base.display());
+        fixture
+    }
+
+    /// A fresh 0700 `oms-agy-<pid>-<name>-<hex>` root bound to its dev/ino:
+    /// only that exact directory is removed, and never one that was replaced.
+    struct Fixture(PathBuf, (u64, u64));
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let same = fs::symlink_metadata(&self.0)
+                .is_ok_and(|m| m.file_type().is_dir() && (m.dev(), m.ino()) == self.1);
+            if same && self.0.canonicalize().ok().as_ref() == Some(&self.0) {
+                let _ = fs::remove_dir_all(&self.0);
+            } else {
+                eprintln!(
+                    "fixture root {} was replaced; left in place",
+                    self.0.display()
+                );
+            }
+        }
+    }
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let fixture = private_fixture(name);
+            fs::create_dir(fixture.config()).unwrap();
+            mode(&fixture.config(), 0o700);
+            fixture
+        }
+        /// `Err` only when the mkdir itself fails because `parent` cannot
+        /// take a new entry (nothing was made, so another parent may be
+        /// tried); any other mkdir error, or a made directory failing the
+        /// checks, panics. A failed directory is removed only while it is
+        /// still the empty one just made.
+        fn create(parent: &Path, name: &str) -> std::io::Result<Self> {
+            use std::io::ErrorKind::*;
+            use std::io::Read;
+            use std::os::unix::fs::DirBuilderExt;
+            let mut bytes = [0u8; 8];
+            fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut bytes))
+                .unwrap();
+            let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let root = parent.join(format!("oms-agy-{}-{name}-{suffix}", std::process::id()));
+            // Non-recursive: refuses an existing path instead of adopting it.
+            if let Err(e) = fs::DirBuilder::new().mode(0o700).create(&root) {
+                if matches!(
+                    e.kind(),
+                    PermissionDenied
+                        | ReadOnlyFilesystem
+                        | NotFound
+                        | NotADirectory
+                        | StorageFull
+                        | QuotaExceeded
+                        | AlreadyExists
+                ) {
+                    return Err(e);
+                }
+                panic!("creating fixture root {}: {e}", root.display());
+            }
+            let m = fs::symlink_metadata(&root).unwrap();
+            let id = (m.dev(), m.ino());
+            if !(m.file_type().is_dir()
+                && m.uid() == rustix::process::getuid().as_raw()
+                && m.mode() & 0o777 == 0o700
+                && root.canonicalize().ok().as_ref() == Some(&root))
+            {
+                if m.file_type().is_dir()
+                    && fs::symlink_metadata(&root).is_ok_and(|n| (n.dev(), n.ino()) == id)
+                {
+                    let _ = fs::remove_dir(&root);
+                }
+                panic!(
+                    "fixture root {} is not a fresh private directory",
+                    root.display()
+                );
+            }
+            Ok(Self(root, id))
+        }
+        fn config(&self) -> PathBuf {
+            self.0.join("config")
+        }
+        /// A home with an obviously fake ADC placeholder (never a credential).
+        fn home(&self, name: &str, profile: bool) -> PathBuf {
+            let home = self.0.join(name);
+            fs::create_dir(&home).unwrap();
+            mode(&home, 0o700);
+            if profile {
+                put(&home.join(AGY_PROFILE), b"{\"placeholder\":true}\n");
+            }
+            home
+        }
+        fn run(&self, spec: &[&str], between: impl FnOnce()) -> Result<Output> {
+            let raw: Vec<OsString> = spec.iter().map(OsString::from).collect();
+            let args = Args::parse(
+                &raw,
+                &["--account", "--home"],
+                &["--first", "--last", "--remove", "--verify"],
+            )
+            .unwrap();
+            let id = spec[1].split_once(':').unwrap().1;
+            let claude = self.0.join(".claude");
+            let host = AgyHost {
+                config: &self.config(),
+                default_claude: &claude,
+                placement: &|_| Ok(()),
+            };
+            agy_locked(&args, id, &host, between)
+        }
+        fn register(&self, id: &str, home: &Path, between: impl FnOnce()) -> Result<Output> {
+            let account = format!("antigravity:{id}");
+            self.run(
+                &["--account", &account, "--home", home.to_str().unwrap()],
+                between,
+            )
+        }
+        /// Every config file and its bytes, to prove a refusal wrote nothing.
+        fn files(&self) -> Vec<(OsString, Vec<u8>)> {
+            let mut out: Vec<_> = fs::read_dir(self.config())
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (e.file_name(), fs::read(e.path()).unwrap())
+                })
+                .collect();
+            out.sort();
+            out
+        }
+    }
+    fn mode(path: &Path, bits: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(bits)).unwrap();
+    }
+    fn put(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        mode(path, 0o600);
+    }
+    fn refused<T>(result: Result<T>, needle: &str) {
+        match result {
+            Ok(_) => panic!("accepted; expected a refusal containing {needle:?}"),
+            Err(e) => assert!(e.message.contains(needle), "{needle:?} not in {e:?}"),
+        }
+    }
+
+    #[test]
+    fn fixture_parent_selection_refuses_shared_symlinked_and_repo_paths() {
+        let fx = Fixture::new("select");
+        let at = |name: &str, bits: u32| {
+            let dir = fx.0.join(name);
+            fs::create_dir(&dir).unwrap();
+            mode(&dir, bits);
+            dir
+        };
+        let (good, other) = (at("good", 0o700), at("other", 0o755));
+        let sticky = at("sticky", 0o1777);
+        // Ancestry-safe but unwritable: selection must fall through, not panic.
+        let locked = at("locked", 0o555);
+        let locked_id = |dir: &Path| {
+            let m = fs::symlink_metadata(dir).unwrap();
+            let entries = fs::read_dir(dir).unwrap().count();
+            (m.mode(), m.ino(), entries)
+        };
+        let locked_before = locked_id(&locked);
+        assert_eq!(locked_before.2, 0);
+        at("group", 0o770);
+        let under_group = at("group/inner", 0o700);
+        let link = fx.0.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let parent_of = |candidates: &[PathBuf]| {
+            let fixture = select_parent(candidates, "pick");
+            fixture.0.parent().unwrap().to_path_buf()
+        };
+        // Root bypasses the 0555 mode, so only a non-root run can see EACCES.
+        let as_root = rustix::process::getuid().is_root();
+        let picked = parent_of(&[sticky.clone(), locked.clone(), good.clone(), other.clone()]);
+        if !as_root {
+            assert_eq!(picked, good);
+        }
+        assert_eq!(locked_id(&locked), locked_before);
+        // A symlinked candidate is judged by its physical target ...
+        assert_eq!(parent_of(std::slice::from_ref(&link)), good);
+        // ... and a symlink inside a path already taken as physical is refused.
+        assert_eq!(
+            parent_refusal(&link.join("inner")),
+            Some(format!("unsafe ancestor {}", link.display()))
+        );
+        assert_eq!(parent_refusal(&other), None);
+        let missing = fx.0.join("missing");
+        let mut candidates = vec![
+            sticky.clone(),
+            under_group.clone(),
+            repo.clone(),
+            missing.clone(),
+            PathBuf::from("relative"),
+        ];
+        let mut wants = vec![
+            format!("{}: unsafe ancestor {}", sticky.display(), sticky.display()),
+            format!(
+                "{}: unsafe ancestor {}",
+                under_group.display(),
+                fx.0.join("group").display()
+            ),
+            format!("{}: inside the repository", repo.display()),
+            format!("{}: unresolvable", missing.display()),
+            "relative: not absolute".to_string(),
+        ];
+        if !as_root {
+            candidates.push(locked.clone());
+            let denied = "cannot create a root: Permission denied";
+            wants.push(format!("{}: {denied}", locked.display()));
+        }
+        let Err(panic) = std::panic::catch_unwind(|| select_parent(&candidates, "none")) else {
+            panic!("every candidate must be refused");
+        };
+        let message = panic.downcast_ref::<String>().unwrap();
+        for want in wants {
+            assert!(message.contains(&want), "{want:?} not in {message}");
+        }
+        assert_eq!(locked_id(&locked), locked_before);
+    }
+
+    #[test]
+    fn publication_refuses_home_or_profile_changed_after_validation() {
+        let fx = Fixture::new("race");
+        fx.register("a", &fx.home("a", true), || ()).unwrap();
+        let before = fx.files();
+        type Swap = Box<dyn FnOnce(&Path)>;
+        let cases: Vec<(&str, bool, Swap, &str)> = vec![
+            (
+                "renamed",
+                true,
+                Box::new(|home| {
+                    let other = home.with_extension("other");
+                    fs::create_dir(&other).unwrap();
+                    mode(&other, 0o700);
+                    fs::rename(home, home.with_extension("moved")).unwrap();
+                    fs::rename(&other, home).unwrap();
+                }),
+                "home changed during registration",
+            ),
+            (
+                "chmod-home",
+                true,
+                Box::new(|home| mode(home, 0o750)),
+                "home changed during registration",
+            ),
+            (
+                "replaced",
+                true,
+                Box::new(|home| {
+                    put(&home.join("next"), b"{}\n");
+                    fs::rename(home.join("next"), home.join(AGY_PROFILE)).unwrap();
+                }),
+                "ADC profile changed during registration",
+            ),
+            (
+                "hardlinked",
+                true,
+                Box::new(|home| fs::hard_link(home.join(AGY_PROFILE), home.join("x")).unwrap()),
+                "ADC profile changed during registration",
+            ),
+            (
+                "chmod-profile",
+                true,
+                Box::new(|home| mode(&home.join(AGY_PROFILE), 0o644)),
+                "ADC profile changed during registration",
+            ),
+            (
+                "appeared",
+                false,
+                Box::new(|home| put(&home.join(AGY_PROFILE), b"{}\n")),
+                "ADC profile changed during registration",
+            ),
+        ];
+        for (name, profile, swap, needle) in cases {
+            let home = fx.home(name, profile);
+            refused(fx.register("b", &home, || swap(&home)), needle);
+            assert_eq!(fx.files(), before, "{name}");
+        }
+        // The registry root is held too: a config directory swapped in after
+        // validation is never written through.
+        let config = fx.config();
+        let home = fx.home("held-config", true);
+        refused(
+            fx.register("b", &home, || {
+                fs::rename(&config, config.with_extension("moved")).unwrap();
+                fs::create_dir(&config).unwrap();
+                mode(&config, 0o700);
+            }),
+            "atomic write refused",
+        );
+        assert!(fx.files().is_empty());
+        fs::remove_dir(&config).unwrap();
+        fs::rename(config.with_extension("moved"), &config).unwrap();
+        assert_eq!(fx.files(), before);
+        fx.register("b", &home, || ()).unwrap();
+    }
+
+    #[test]
+    fn empty_metadata_is_corrupt_never_missing() {
+        let fx = Fixture::new("empty");
+        let home = fx.home("a", true);
+        for file in [AGY_REGISTRY, AGY_RECEIPT] {
+            put(&fx.config().join(file), b"");
+            let before = fx.files();
+            for spec in [
+                vec![
+                    "--account",
+                    "antigravity:a",
+                    "--home",
+                    home.to_str().unwrap(),
+                ],
+                vec!["--account", "antigravity:a", "--remove"],
+                vec!["--account", "antigravity:a", "--verify"],
+            ] {
+                refused(
+                    fx.run(&spec, || ()),
+                    &format!("antigravity account metadata is empty (corrupt): {file}"),
+                );
+                assert_eq!(fx.files(), before);
+            }
+            refused(agy_homes(&fx.config()), "account metadata is empty");
+            fs::remove_file(fx.config().join(file)).unwrap();
+        }
+        for file in [
+            "provider-accounts.json",
+            "provider-accounts.claude.json",
+            "codex-account-links.json",
+            "pi-account-links.json",
+            "provider-account-effects.json",
+        ] {
+            put(&fx.config().join(file), b"");
+            let before = fx.files();
+            refused(
+                fx.register("a", &home, || ()),
+                &format!("provider account metadata is empty (corrupt): {file}"),
+            );
+            assert_eq!(fx.files(), before);
+            fs::remove_file(fx.config().join(file)).unwrap();
+        }
+        fx.register("a", &home, || ()).unwrap();
+    }
+
+    #[test]
+    fn malformed_foreign_rows_and_missing_receipts_refuse() {
+        let fx = Fixture::new("foreign");
+        let home = fx.home("a", true);
+        let work = fx.home("work", false);
+        let config = fx.config();
+        let shared = json!({"schema":1,"providers":{"codex":{"accounts":[
+            {"id":"default","home":fx.0.join("main")},{"id":"work","home":work}]}}});
+        put(
+            &config.join("provider-accounts.json"),
+            &json_bytes(&shared).unwrap(),
+        );
+        let links = config.join("codex-account-links.json");
+        let receipt = json!({"id":"work","home":work,"links":{},"st_dev":1,"st_ino":2});
+        let missing = "missing codex account receipt for work (codex-account-links.json)";
+        refused(fx.register("a", &home, || ()), missing);
+        put(
+            &links,
+            &json_bytes(&json!([{"id":"other","home":work}])).unwrap(),
+        );
+        refused(
+            fx.register("a", &home, || ()),
+            "invalid provider account metadata",
+        );
+        put(&links, b"[]");
+        refused(fx.register("a", &home, || ()), missing);
+        let invalid = "invalid provider account metadata (codex-account-links.json)";
+        for bad in [
+            json!({"id":"work"}),
+            json!([1]),
+            json!([{"id":"work","home":work,"links":{},"extra":1}]),
+            json!([{"id":"work","home":"relative","links":{}}]),
+            json!([{"id":"Bad id","home":work,"links":{}}]),
+            json!([{"id":"work","home":7,"links":{}}]),
+            json!([{"id":"work","home":work,"links":{"unknown":"x"}}]),
+            json!([{"id":"work","home":work,"links":{},"st_ino":"2"}]),
+        ] {
+            put(&links, &json_bytes(&bad).unwrap());
+            let before = fx.files();
+            refused(fx.register("a", &home, || ()), invalid);
+            assert_eq!(fx.files(), before, "{bad}");
+        }
+        put(&links, b"{bad");
+        refused(fx.register("a", &home, || ()), invalid);
+        put(&links, &json_bytes(&json!([receipt])).unwrap());
+        for (file, bad, needle) in [
+            (
+                "provider-accounts.claude.json",
+                json!({"schema":1,"provider":"claude","accounts":[{"id":"Bad","home":work}]}),
+                "invalid provider account metadata (provider-accounts.claude.json)",
+            ),
+            (
+                "pi-account-links.json",
+                json!({"accounts":[]}),
+                "invalid provider account metadata (pi-account-links.json)",
+            ),
+            (
+                "pi-account-links.json",
+                json!([{"id":"p","home":work,"links":{"config.toml":"x"}}]),
+                "invalid provider account metadata (pi-account-links.json)",
+            ),
+            (
+                "provider-account-effects.json",
+                json!({"schema":1,"accounts":[{"id":"x","home":work,"links":{},"provider":"codex"}]}),
+                "invalid provider account metadata (provider-account-effects.json)",
+            ),
+            (
+                "provider-accounts.claude.json",
+                json!({"schema":1,"provider":"claude","accounts":[{"id":"c","home":fx.0.join("c")}]}),
+                "missing claude account receipt for c (provider-account-effects.json)",
+            ),
+        ] {
+            put(&config.join(file), &json_bytes(&bad).unwrap());
+            let before = fx.files();
+            refused(fx.register("a", &home, || ()), needle);
+            assert_eq!(fx.files(), before, "{file}");
+            fs::remove_file(config.join(file)).unwrap();
+        }
+        // A well-formed foreign registry still reserves its homes.
+        refused(
+            fx.register("a", &work, || ()),
+            "already registered by another provider",
+        );
+        fx.register("a", &home, || ()).unwrap();
+
+        // Codex, Claude and Pi registration read Antigravity rows the same way.
+        let registry = config.join(AGY_REGISTRY);
+        let receipts = config.join(AGY_RECEIPT);
+        assert_eq!(
+            agy_homes(&config).unwrap(),
+            vec![home.clone(), home.clone()]
+        );
+        let good = fs::read(&receipts).unwrap();
+        put(&receipts, b"[]");
+        refused(
+            agy_homes(&config),
+            "missing antigravity account receipt for a",
+        );
+        put(&receipts, &good);
+        let mut doc: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        doc["accounts"][0]["extra"] = json!(1);
+        put(&registry, &json_bytes(&doc).unwrap());
+        refused(agy_homes(&config), "invalid provider account metadata");
+        put(&registry, b"{bad");
+        refused(agy_homes(&config), "invalid provider account metadata");
+    }
 }

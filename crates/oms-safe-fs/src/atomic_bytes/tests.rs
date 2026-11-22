@@ -907,3 +907,98 @@ fn atomic_overlapping_transactions_detect_second_publication() {
     assert_eq!(std::fs::read(f.0.join("file")).unwrap(), b"follower");
     assert_eq!(names(&f.0), [OsString::from("file")]);
 }
+
+#[test]
+fn private_registry_byte_policy_and_mode_races() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.0.join("dir")).unwrap();
+    std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = f.0.join("dir/file");
+    std::fs::write(&file, b"old").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Exercise byte policy independently of host ancestry, which may be unsafe.
+    let mut root = Root::open(&f.0).unwrap();
+    root.private_ancestry = Some(Vec::new());
+    for stage in [Stage::AfterRead, Stage::BeforePublish] {
+        let result = root.mutate_with(
+            Path::new("dir/file"),
+            options(),
+            |_| Ok::<_, Infallible>(b"new".to_vec()),
+            |at| {
+                if at == stage {
+                    std::fs::set_permissions(
+                        f.0.join("dir"),
+                        std::fs::Permissions::from_mode(0o770),
+                    )
+                    .unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(refused(ByteError::Changed)));
+        assert_eq!(std::fs::read(&file).unwrap(), b"old");
+        std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let read = root.read_bytes_with(Path::new("dir/file"), options().read, |stage| {
+        if stage == Stage::AfterRead {
+            std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o770))
+                .unwrap();
+        }
+        Ok(())
+    });
+    assert_eq!(read, Err(ByteError::Changed));
+    std::fs::set_permissions(f.0.join("dir"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        root.read_no_follow(Path::new("dir/file"), options().read),
+        Err(ByteError::Unsafe)
+    );
+    assert_eq!(
+        change(&root, Path::new("dir/file"), options(), b"new"),
+        Err(refused(ByteError::Unsafe))
+    );
+    assert_eq!(
+        Root::open(&f.0)
+            .unwrap()
+            .read_no_follow(Path::new("dir/file"), options().read)
+            .unwrap(),
+        b"old"
+    );
+    // Pinned metadata names one entry beneath the held root and never follows it.
+    symlink(f.0.join("dir"), f.0.join("link")).unwrap();
+    let (held, entry) = root.pinned_metadata(OsStr::new("link")).unwrap();
+    assert_eq!(held.st_ino, std::fs::metadata(&f.0).unwrap().ino());
+    assert_eq!(
+        FileType::from_raw_mode(entry.unwrap().st_mode),
+        FileType::Symlink
+    );
+    assert!(
+        root.pinned_metadata(OsStr::new("absent"))
+            .unwrap()
+            .1
+            .is_none()
+    );
+    for bad in ["", ".", "..", "dir/file"] {
+        assert!(matches!(
+            root.pinned_metadata(OsStr::new(bad)),
+            Err(crate::Error::InvalidPath)
+        ));
+    }
+}
+
+#[test]
+fn private_registry_rejects_unsafe_absolute_paths() {
+    let f = Fixture::new();
+    let alias = f.0.join("alias");
+    symlink(&f.0, &alias).unwrap();
+    assert!(Root::open_private_registry(&alias).is_err());
+    assert!(Root::open(&alias).is_ok());
+    assert!(matches!(
+        Root::open_private_registry("/a/../b"),
+        Err(crate::Error::InvalidPath)
+    ));
+    assert!(matches!(
+        Root::open_private_registry("/a//b"),
+        Err(crate::Error::InvalidPath)
+    ));
+}

@@ -1,4 +1,4 @@
-use super::{Root, directory_flags, identity};
+use super::{Root, directory_flags, identity, safe_registry_dir, same_registry_dir};
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
@@ -185,6 +185,7 @@ struct Anchor<'a> {
     root: &'a Root,
     parts: Vec<OsString>,
     dirs: Vec<OwnedFd>,
+    dir_stats: Vec<Stat>,
 }
 impl<'a> Anchor<'a> {
     fn open(
@@ -197,6 +198,7 @@ impl<'a> Anchor<'a> {
             root,
             parts: parts(root, path)?,
             dirs: Vec::new(),
+            dir_stats: Vec::new(),
         };
         anchor.revalidate()?;
         for index in 0..anchor.parts.len() - 1 {
@@ -229,16 +231,22 @@ impl<'a> Anchor<'a> {
                     return Err(io_error(error));
                 }
             };
-            if FileType::from_raw_mode(named.st_mode) != FileType::Directory {
+            if FileType::from_raw_mode(named.st_mode) != FileType::Directory
+                || (root.private_ancestry.is_some() && !safe_registry_dir(&named))
+            {
                 return Err(ByteError::Unsafe);
             }
             let dir = hook(Stage::BeforeDirectoryOpen)
                 .and_then(|()| fs::openat(parent, name, directory_flags(), Mode::empty()))
                 .map_err(observed_directory_error)?;
-            if !identity(&named, &fs::fstat(&dir).map_err(ByteError::Io)?) {
+            let opened = fs::fstat(&dir).map_err(ByteError::Io)?;
+            if !identity(&named, &opened)
+                || (root.private_ancestry.is_some() && !same_registry_dir(&named, &opened))
+            {
                 return Err(ByteError::Changed);
             }
             anchor.dirs.push(dir);
+            anchor.dir_stats.push(opened);
         }
         anchor.revalidate()?;
         Ok(anchor)
@@ -253,6 +261,9 @@ impl<'a> Anchor<'a> {
     }
 
     fn revalidate(&self) -> Result<(), ByteError> {
+        self.root
+            .revalidate_private()
+            .map_err(|_| ByteError::Changed)?;
         let root = fs::open(&self.root.path, directory_flags(), Mode::empty())
             .map_err(|_| ByteError::Changed)?;
         if !identity(&self.root.initial, &fs::fstat(root).map_err(ByteError::Io)?) {
@@ -266,8 +277,12 @@ impl<'a> Anchor<'a> {
             };
             let named = fs::statat(parent, &self.parts[index], AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|_| ByteError::Changed)?;
+            let opened = fs::fstat(dir).map_err(ByteError::Io)?;
             if FileType::from_raw_mode(named.st_mode) != FileType::Directory
-                || !identity(&named, &fs::fstat(dir).map_err(ByteError::Io)?)
+                || !identity(&named, &opened)
+                || (self.root.private_ancestry.is_some()
+                    && (!same_registry_dir(&self.dir_stats[index], &named)
+                        || !same_registry_dir(&self.dir_stats[index], &opened)))
             {
                 return Err(ByteError::Changed);
             }
@@ -275,9 +290,23 @@ impl<'a> Anchor<'a> {
         Ok(())
     }
 
+    fn valid_leaf(&self, stat: &Stat) -> bool {
+        regular(stat)
+            && (self.root.private_ancestry.is_none()
+                || (stat.st_uid == rustix::process::getuid().as_raw()
+                    && stat.st_mode & 0o077 == 0
+                    && stat.st_mode & 0o7000 == 0))
+    }
+
+    fn leaf_unchanged(&self, a: &Stat, b: &Stat) -> bool {
+        unchanged(a, b)
+            && (self.root.private_ancestry.is_none()
+                || (self.valid_leaf(b) && a.st_uid == b.st_uid && a.st_mode == b.st_mode))
+    }
+
     fn named(&self) -> Result<Option<Stat>, ByteError> {
         match fs::statat(self.parent(), self.name(), AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) if regular(&stat) => Ok(Some(stat)),
+            Ok(stat) if self.valid_leaf(&stat) => Ok(Some(stat)),
             Ok(_) => Err(ByteError::Unsafe),
             Err(Errno::NOENT) => Ok(None),
             Err(error) => Err(io_error(error)),
@@ -287,7 +316,7 @@ impl<'a> Anchor<'a> {
     fn check_leaf(&self, before: Option<&Stat>) -> Result<(), ByteError> {
         match (before, self.named()?) {
             (None, None) => Ok(()),
-            (Some(before), Some(after)) if unchanged(before, &after) => Ok(()),
+            (Some(before), Some(after)) if self.leaf_unchanged(before, &after) => Ok(()),
             _ => Err(ByteError::Changed),
         }
     }
@@ -314,10 +343,13 @@ impl<'a> Anchor<'a> {
             Err(error) => return Err(io_error(error)),
         };
         let before = fs::fstat(&fd).map_err(io_error)?;
-        if !regular(&before) {
+        if !self.valid_leaf(&before) {
             return Err(ByteError::Unsafe);
         }
-        if !named.as_ref().is_some_and(|stat| unchanged(stat, &before)) {
+        if !named
+            .as_ref()
+            .is_some_and(|stat| self.leaf_unchanged(stat, &before))
+        {
             return Err(ByteError::Changed);
         }
         self.check_leaf(Some(&before))?;
@@ -347,7 +379,7 @@ impl<'a> Anchor<'a> {
             bytes.extend_from_slice(&buffer[..count]);
         }
         hook(Stage::AfterRead).map_err(io_error)?;
-        if !unchanged(&before, &fs::fstat(&file).map_err(io_error)?) {
+        if !self.leaf_unchanged(&before, &fs::fstat(&file).map_err(io_error)?) {
             return Err(ByteError::Changed);
         }
         self.check_leaf(Some(&before))?;
@@ -549,7 +581,7 @@ impl Root {
             )
             .map_err(io_error)?;
             let probed = fs::fstat(probe).map_err(io_error)?;
-            if !regular(&probed) || !unchanged(before, &probed) {
+            if !anchor.valid_leaf(&probed) || !anchor.leaf_unchanged(before, &probed) {
                 return Err(ByteError::Changed.into());
             }
         }
@@ -569,7 +601,10 @@ impl Root {
         hook(Stage::BeforePublish).map_err(io_error)?;
         anchor.revalidate()?;
         anchor.check_leaf(before.as_ref())?;
-        if !temp.owns_name() {
+        if !temp.owns_name()
+            || (self.private_ancestry.is_some()
+                && !anchor.valid_leaf(&fs::fstat(&temp.file).map_err(io_error)?))
+        {
             return Err(ByteError::Changed.into());
         }
         // From<ByteError> always means BeforePublication. Every fallible operation

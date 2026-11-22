@@ -8,6 +8,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms connect-services --account antigravity:ID --home PATH` registers a
+  local Antigravity ADC profile home (`--verify`, `--remove`; `--repair` is
+  refused). Records live in `provider-accounts.antigravity.json` and
+  `antigravity-account-receipts.json` under the shared account lock; the held
+  home and profile are re-checked before writing, profile bytes are never read,
+  and empty or malformed metadata or a row missing its receipt is refused.
+  Runtime routing still never selects these accounts; login and the served
+  identity remain unverified.
 - The panel reader's Files view (`f`) shows a worker's declared scope and
   changed files as a directory tree with `+N -M`, marks files outside its scope
   or shared with another live write worker, opens a file's coloured diff with

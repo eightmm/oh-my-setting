@@ -13,8 +13,9 @@ credential origin을 증명하지 못하므로 `--verify` 격리 검증은 여�
 unsupported/uncertain이다. Native status는 선택된 root에 metadata를 초기화할 수
 있다. 등록·doctor·update는 status를 자동 실행하지 않는다. Claude 상태는 기존
 Codex 및 Pi 파일과 분리되며, 구버전은 이를 관리하거나 임의 홈 충돌을 보호하지
-못한다. Antigravity OAuth 계정 격리는 확인되지 않아 fail-closed
-(`provider account isolation is unproved`)로 거부된다.
+못한다. Antigravity 계정은 로컬 ADC 프로필 등록·`--verify`·`--remove`
+(`antigravity:ID --home PATH`)만 지원한다. 런타임 라우팅은 이 계정을 선택하지
+않으며, 로그인·실제 제공 계정·OAuth 계정 격리는 여전히 확인되지 않았다.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
