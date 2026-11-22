@@ -64,17 +64,17 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 
 | 순위 | 공백 | 가진 도구 | OMS 현황 | 확인 | 관계 | 진행 | 다음 PR 단위 |
 |---|---|---|---|---|---|---|---|
-| 8 | Worker sandbox 기본 적용과 네트워크 정책 | Codex 커널 sandbox | `OMS_WORKER_SANDBOX`는 opt-in | 소스(존재), 보고(기본값) | 조건부(AH-06은 별도 승인) | #313 | hook이 없는 transport부터 |
-| 9 | native child 역할의 실효 권한 검증 | — | Codex 역할 파일의 sandbox 설정은 read-only를 보장하지 않음 | 소스(이슈) | 정합 | #277 | provider·계정별 fixture |
-| 10 | 결정적 정체 감지와 attention 승격 | Gas Town Problems 뷰 | fail-ledger 정체 기록과 attention 알림 | 보고 | 조건부(AI 감독 계층과 자동 kill은 [비범위](CONTROL-PLANE-EVOLUTION.md#7-착수하지-않을-작업)) | | LLM 없이 무출력·반복 실패 판정 → attention |
-| 11 | turn 단위 되돌리기 | Claude Code `/rewind` | 수동 `oms checkpoint`가 있음. Worker turn마다 자동 저장은 없음 | 소스 | 정합 | | attempt의 turn별 ref와 복원 |
-| 12 | 충돌에서 integrator 배정까지 자동 연결 | Refinery, Graphite 자동 rebase | `integrator` 역할과 `oms land conflicts` | 소스 | 정합 | | 충돌을 integrator 작업 제안으로 기록 |
-| 13 | ACP client | ACP 지원 에디터·에이전트 | 설계만([research follow-ups](RESEARCH-FOLLOWUPS.md)) | 소스 | 조건부 | #313(AH-04) | 선택형 transport |
-| 14 | 범용 원격·격리 실행 profile | Codex cloud, Claude Code cloud 세션 | SSH·Slurm·Apptainer CPU는 있음. generic `remote`·`isolated`는 unavailable | 소스 | 조건부 | | SSH Worker transport 연결 |
-| 15 | 외부 이벤트 trigger | Agent HQ 이슈 이벤트 | `oms tick schedule`은 승인된 autopilot의 시간 주기만 줌 | 소스 | 조건부(상주 서버는 비범위) | | CI 실패·리뷰 요청 관측을 검토 대기 작업으로 |
-| 16 | Codex hook 실패 진단의 남은 부분 | — | callback trace sidecar가 있음. 관리 callback에 닿지 않은 provider 측 실패 구분이 남음 | 소스(이슈) | 정합 | #271 | 이슈의 acceptance 그대로 |
-| 17 | 임의 CLI adapter 확대 | claude-squad, Vibe Kanban | custom adapter 경계 | 소스 | 조건부 | #319, #333, #334 | 진행 중인 conformance 뒤 |
-| 18 | 이슈 라벨 polling과 자동 intake | Agent HQ | [`intent draft --from-issue`](INTENT-SOURCE-INTAKE.md)는 이슈 한 건 | 소스 | 조건부 | | 라벨 조회 → 검토 대기 draft |
+| 8 | Worker sandbox 기본 적용과 네트워크 정책 | Codex 커널 sandbox | `oms-supervisor` `sandbox.rs`에 Linux `bwrap --unshare-net`·macOS `sandbox-exec (deny network*)` 래퍼와 테스트(`sandbox.rs`, `providers.rs`)가 있음. 다만 `providers.rs`가 `OMS_WORKER_SANDBOX`를 opt-in으로만 읽고 `Auto`에서 `codex`를 건너뛰며 `allow_network: true`를 고정함. | 소스 | 조건부(AH-06 별도 승인; 기본값·네트워크 정책 변경) | #313 | hook이 없는 transport부터 opt-in 네트워크 차단과 기본값 승인 |
+| 9 | native child 역할의 실효 권한 검증 | — | `agent-role` 정적 렌더링·`surface`(`native.rs`, `render.rs`, `tests/native.rs`), `doctor.rs` 설정 감사(`effective: unknown` 표시), `18920ced`의 `provider-capabilities.json` `tool_guard` 한계 명시(Codex `hooks.json`에 `PreToolUse` 없음; fixture는 기록된 파일만 검증)가 있음. provider·계정별 native child 실효 권한 검증 fixture와 enforced/advisory 구분 보고는 아직 없음. | 소스(이슈) | 정합 | #277 | provider·계정별 read-only 실효 권한 fixture와 surface 구분 보고 |
+| 10 | 결정적 정체 감지와 attention 승격 | Gas Town Problems 뷰 | `fail-ledger --stalls`(`failures.rs` `error-repeat`), `open-failures` inbox attention(`state_projection.rs`), 미연결 `advisory::detect_stalls`(`advisory.rs`), 패널 `attention.rs`의 terminal `held` 전용 `stale`이 있음. 활성 무출력·반복 실패 worker를 Main attention으로 결정적 승격하는 경로는 미연결. | 소스 | 조건부(AI 감독 계층·자동 kill은 [비범위](CONTROL-PLANE-EVOLUTION.md#7-착수하지-않을-작업), advisory 전용) | | LLM 없이 무출력·반복 실패 판정 → advisory attention 승격 |
+| 11 | turn 단위 되돌리기 | Claude Code `/rewind` | 수동 `oms checkpoint create/list/verify/restore`(`checkpoint.rs`, `--apply` 전 `auto-backup-before-{id}` 필수, `landing_contract.rs` 검증)가 있음. `session restore files`는 소유권 미연결로 거절(`session.rs`)하며 worker turn별 자동 ref·복원은 없음. | 소스 | 정합 | | attempt의 turn별 가벼운 ref와 소유권 검증 복원 |
+| 12 | 충돌에서 integrator 배정까지 자동 연결 | Refinery, Graphite 자동 rebase | `oms land conflicts`(`delivery.rs` `git merge-tree --write-tree`, 단 `landing_contract.rs`에 직접 테스트 없음)와 `integrator` 역할(`roles/integrator.md`, `role-contracts.json`)이 있음. 충돌 결과를 `integrator` 작업 제안으로 구조화·연결하는 경로와 `land conflicts` 직접 테스트가 없음. | 소스 | 정합(제안만, 자동 배정·병합 금지) | | land conflicts의 integrator 작업 제안 출력과 landing_contract.rs fixture |
+| 13 | ACP client | ACP 지원 에디터·에이전트 | `crates/`에 구현 없음, 설계만([research follow-ups](RESEARCH-FOLLOWUPS.md) RF-02; [feature scope](FEATURE-SCOPE.md) 보류). RF-01 duplex supervisor와 기존 CLI transport로 못 푸는 named workflow가 선행 필요. | 소스 | 조건부 | #313(AH-04) | RF-01·named workflow 확정 뒤 선택형 transport |
+| 14 | 범용 원격·격리 실행 profile | Codex cloud, Claude Code cloud 세션 | Apptainer CPU(`backend.rs`), OpenSSH(`ssh_adapter.rs`), 원격 실험 reconcile(`experiment/remote.rs`), Slurm(`runtime_contract.rs` 검증)이 있음. generic `isolated`·`remote` profile은 명시적으로 unavailable을 반환(`backend.rs`). | 소스 | 조건부 | | SSH Worker transport를 remote profile에 연결(once-only·reconcile 유지) |
+| 15 | 외부 이벤트 trigger | Agent HQ 이슈 이벤트 | 승인된 autopilot의 시간 주기만 깨우는 `oms tick schedule`(`tick.rs`, `native_lifecycle.rs` 검증)이 있음. CI 실패·리뷰 요청 등 외부 이벤트 1회 관측→검토 대기 작업 생성 명령은 없음. | 소스 | 조건부(상주 서버·연속 polling은 비범위) | | 명시적 1회 CI·리뷰 관측 → 검토 대기 작업 기록 |
+| 16 | Codex hook 실패 진단의 남은 부분 | — | 관리 callback trace sidecar(`trace.rs`, `OMS_CODEX_HOOK_TRACE=1`, `host_adapter.rs` 검증)와 `18920ced`의 `provider-capabilities.json` hook 범위 기록이 있음. `oms harness-hook` 진입 전 provider 측 로딩·wiring 실패(trace 0건)를 callback 실패와 구분하는 읽기 전용 진단이 남음. | 소스(이슈) | 정합 | #271 | hooks.json·경로·trace 유무를 대조하는 읽기 전용 진단과 host_adapter.rs fixture |
+| 17 | 임의 CLI adapter 확대 | claude-squad, Vibe Kanban | marker 기반 custom adapter 경계(`providers.rs` `oms-agent-adapter-*`·SHA-256 manifest·명시적 쓰기 opt-in, `peer_contract.rs` 검증)가 있음. 열린 PR `#333`(`doctor` adapter conformance probe)·`#334`(공유 `provider_identity`·발견) 뒤로 보류(`#338`은 AGY 로컬 계정 등록으로 별개). | 소스 | 조건부 | #319, #333, #334 | #333·#334 병합 뒤 named workflow와 conformance fixture |
+| 18 | 이슈 라벨 polling과 자동 intake | Agent HQ | 읽기 전용 단건 SHA-pinned [`intent draft --from-issue`](INTENT-SOURCE-INTAKE.md)(`intent.rs`, `autonomy_contract.rs` 검증)가 있음. 라벨 단위 1회 조회→검토 대기 draft 생성은 없음. | 소스 | 조건부(연속 polling·자동 채택/배정은 비범위) | | 명시적 1회 라벨 조회 → 검토 대기 draft |
 
 ### B: 뒤로 미뤄도 되는 것 (19–32)
 
