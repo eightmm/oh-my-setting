@@ -58,7 +58,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 4 | land의 CI 대기 시간 | merge queue 계열의 병렬 CI | 전체 run이 성공해야 설치 증거가 됨. 2026-11-22 full run 한 건: Ubuntu job 5–8분, macOS job은 runner 대기 약 16분 뒤 8–13분, 합계 32분 | 소스(workflow, land CI 판정, 실측 1건) | 정합(CI와 설치 증거 요구는 유지) | #327(macOS 간헐 실패) | ① macOS 대기를 여러 run에서 계측 ② macOS 증거를 land가 기다리는 방식 결정. focused 분할은 병목이 아님 |
 | 5 | Room 메시지를 MCP로 노출 | Claude Code agent teams mailbox | Room 읽기·게시·ack는 MCP `oms_peer_start`/`oms_peer_result`의 `room` 경로로 열려 있음(`oms-mcp-server/src/peer.rs`: updates·send·ack, 기존 방·joined participant 검사). `participant`가 호출자가 낸 문자열이라 호출자와 participant의 정확한 일치(exact participant authority)를 강제하지 않는다. | 소스 | 조건부(AH-09의 named workflow로 한정) | #313 | 호출자 신원에 묶인 participant 권한 검사 |
 | 6 | OMS 측 하드 예산 집행 | 확실한 선례 없음 | campaign은 호출·usage 예산 admission이 있고 provider별 call cap과 `total_calls`를 넘으면 중단함(`COMPONENTS.md` campaign 절, `c5fc7627`). Team admission에는 hard cap이 없다. Team view는 `native_global_hard_cap: unsupported`로 표시한다(`teams.rs`). provider 지출 상한도 아니다. | 소스 | 조건부(provider 지출 상한으로 표현하지 않음) | | 상한 초과 시 Team·전역 새 위임을 거절하는 opt-in 정책(campaign admission 재사용) |
-| 7 | 호출별 token 사용량을 Board에 표시 | — | 호출별 detail이 있다: Board 호출 상세(`render.rs` `call_detail_meta`)와 native Codex child의 응답별 in/out/cache/reasoning 표시(`native_children.rs`). 이슈 #279는 열려 있다. durable reasoning counter, Room·attempt·provider·account 신원 연속성, Claude·AGY child의 version-matched counter가 아직 없다. | 소스(이슈) | 정합 | #279 | 이슈의 acceptance 중 남은 세 가지 |
+| 7 | 호출별 token 사용량을 Board에 표시 | — | 호출별 detail이 있다: Board 호출 상세(`render.rs` `call_detail_meta`)와 native Codex child의 응답별 in/out/cache/reasoning 표시(`native_children.rs`). main(`f21a8501`·`713bb3eb`, 설치 기준 `f3296931` 이후)은 AGY headless 호출이 보고한 `thinking_tokens`만 선택적 reasoning 증거로 따로 보관하고 합계는 바꾸지 않는다(`usage.rs`, `telemetry/store/usage.rs`, `metrics.rs`). 이슈 #279는 열려 있다. Room·attempt·provider·account 신원 연속성, Claude·AGY native child의 version-matched counter, Board 표시 확인이 아직 남았다. 이 main 변경의 설치·CI 완료는 이 문서가 주장하지 않는다. | 소스(이슈) | 정합 | #279 | 이슈의 acceptance 중 남은 것 |
 
 ### A: 하네스 범위와 복구 (8–18)
 
@@ -74,7 +74,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 15 | 외부 이벤트 trigger | Agent HQ 이슈 이벤트 | 승인된 autopilot의 시간 주기만 깨우는 `oms tick schedule`(`tick.rs`, `native_lifecycle.rs` 검증)이 있음. CI 실패·리뷰 요청 등 외부 이벤트 1회 관측→검토 대기 작업 생성 명령은 없음. | 소스 | 조건부(상주 서버·연속 polling은 비범위) | | 명시적 1회 CI·리뷰 관측 → 검토 대기 작업 기록 |
 | 16 | Codex hook 실패 진단의 남은 부분 | — | 관리 callback trace sidecar(`trace.rs`, `OMS_CODEX_HOOK_TRACE=1`, `host_adapter.rs` 검증)와 `18920ced`의 `provider-capabilities.json` hook 범위 기록이 있음. `oms harness-hook` 진입 전 provider 측 로딩·wiring 실패(trace 0건)를 callback 실패와 구분하는 읽기 전용 진단이 남음. | 소스(이슈) | 정합 | #271 | hooks.json·경로·trace 유무를 대조하는 읽기 전용 진단과 host_adapter.rs fixture |
 | 17 | 임의 CLI adapter 확대 | claude-squad, Vibe Kanban | marker 기반 custom adapter 경계(`providers.rs` `oms-agent-adapter-*`·SHA-256 manifest·명시적 쓰기 opt-in, `peer_contract.rs` 검증)가 있음. 열린 PR `#333`(`doctor` adapter conformance probe)·`#334`(공유 `provider_identity`·발견) 뒤로 보류(`#338`은 AGY 로컬 계정 등록으로 별개). | 소스 | 조건부 | #319, #333, #334 | #333·#334 병합 뒤 named workflow와 conformance fixture |
-| 18 | 이슈 라벨 polling과 자동 intake | Agent HQ | 읽기 전용 단건 SHA-pinned [`intent draft --from-issue`](INTENT-SOURCE-INTAKE.md)(`intent.rs`, `autonomy_contract.rs` 검증)가 있음. 라벨 단위 1회 조회→검토 대기 draft 생성은 없음. | 소스 | 조건부(연속 polling·자동 채택/배정은 비범위) | | 명시적 1회 라벨 조회 → 검토 대기 draft |
+| 18 | 이슈 라벨 polling과 자동 intake | Agent HQ | 읽기 전용 단건 SHA-pinned [`intent draft --from-issue`](INTENT-SOURCE-INTAKE.md)(`intent.rs`, `autonomy_contract.rs` 검증)가 있다. main(`c2f7a72b`·`54316ab7`, 설치 기준 `f3296931` 이후)에는 `oms intent issues --github OWNER/REPO --label LABEL`이 `gh api --method GET` 1회로 최대 20개 열린 이슈의 정제된 메타데이터만 보여준다(본문·polling·`.oms/` 쓰기·채택·배정 없음). 라벨 조회 결과로 검토 대기 draft를 자동 생성하는 경로는 없다. 설치·CI 완료는 주장하지 않는다. | 소스 | 조건부(연속 polling·자동 채택/배정은 비범위) | | 조회 결과에서 사용자가 고른 이슈만 `--from-issue` draft로 잇는 선택 경로 |
 
 ### B: 뒤로 미뤄도 되는 것 (19–32)
 
@@ -89,7 +89,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 25 | 실험 추적 도구로 export | run ledger·capsule | 보고 | 조건부 | capsule → MLflow |
 | 26 | GPU 가용량을 본 admission | slurm-lint의 GPU-hours 경고 | 소스 | 조건부 | 참고값으로만 |
 | 27 | 세션을 다른 호스트에서 이어받기 | handoff, capsule | 소스 | 조건부 | 원격 resume |
-| 28 | Main 교체 | `swap_main_host` unsupported | 소스 | 조건부 | CC-09 |
+| 28 | Main 교체의 남은 부분 | 관리되는 tmux pane의 검증된 Codex Main에서는 있음: `oms panel --swap-main`과 Board `s`(`bff2927b`·`1dfa9a49`, 설치 기준 `f3296931`의 조상; [TERMINAL-PANEL](TERMINAL-PANEL.md#swap-the-main)). 기본 `Services::swap_main_host`(`services.rs`)는 unsupported지만 live `CollabServices`(`services_collab.rs`)가 `native_panel::swap_main_host`로 덮어쓴다. 남은 것: 현재 Main이 AGY·Claude·Pi면 정상 종료 후 시작 선택기로 고르는 비Codex 원본 종료·소유 이전, 이 사용자 패널의 실제 전환은 주장하지 않음 | 소스 | 조건부 | CC-09 |
 | 29 | usage ledger 증분 저장 | 전체 history를 다시 씀 | 소스 | 조건부(계측 먼저) | 계측 → compaction |
 | 30 | 작업별 dev server 미리보기 | 없음 | 소스 | 조건부 | worktree별 포트 |
 | 31 | CI 안에서 에이전트를 실행하는 template | 프로젝트용 CI template만 | 소스 | 조건부(CI는 작게) | 명시적 trigger template |
@@ -142,13 +142,13 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 4 | CI 우선 land 경로 | 순위 4(CI 대기 시간으로 재정의) |
 | 5 | Room 메시지 MCP 노출 | 순위 5 |
 | 6 | OMS 측 하드 예산 집행 | 순위 6 |
-| 7 | 작업 카테고리 → 모델 tier 별칭과 이유 출력 | 이미 있음: `--workload` tier와 routing 이유(#269). 카테고리 한 단어 별칭은 순위 항목이 아님 |
+| 7 | 작업 카테고리 → 모델 tier 별칭과 이유 출력 | 이미 있음: `--workload` tier와 routing 이유(#269). 한 단어 카테고리 별칭도 main에 있다: `oms panel --recommend typo`(`d85aaec3`, `config/task-routing-rules.json` `categories`; 설치 기준 `f3296931` 이후). 순위 항목이 아님 |
 | 8 | Worker sandbox 기본 적용 | 순위 8 |
 | 9 | 결정적 정체 감지와 attention 승격 | 순위 10 |
 | 10 | 편집 단위 checkpoint와 되돌리기 | 순위 11(수동 `oms checkpoint`는 있음) |
 | 11 | 역할별 실효 권한 보고 | 순위 9(#277) |
 | 12 | 충돌 시 integrator 자동 배정 | 순위 12 |
-| 13 | 다중 계정 바인딩·routing 설명 | 이미 있음(#269) |
+| 13 | 다중 계정 바인딩·routing 설명 | 이미 있음(#269). AGY 로컬 profile 등록은 별개로 main에 있다(`caf1086a`, #338; 등록·복구 메타데이터만이며 routing·실행 권한 변경 아님; 설치 기준 이후) |
 | 14 | 패널 입력 반응성 | 이미 있음(#267) |
 | 15 | N회 병렬 시도와 선택 | 순위 24 |
 | 16 | ACP client | 순위 13 |
@@ -156,7 +156,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 18 | 외부 이벤트·시간 trigger | 순위 15(시간 주기는 `oms tick schedule`로 있음) |
 | 19 | flaky 자동 재시도와 격리 목록 | 나눔: 확인 명령 `oms ci-status flaky`는 이미 있음. 1회 재시도·격리 목록은 미구현이며 순위 밖 후보(아래 복원 항목) |
 | 20 | 양방향 원격 알림·승인 | 범위 결정이 먼저 |
-| 21 | 이슈 라벨 polling과 intake | 순위 18 |
+| 21 | 이슈 라벨 polling과 intake | 순위 18(1회 읽기 전용 라벨 GET 목록은 main에 있음, draft 자동 생성은 없음) |
 | 22 | provider별 hook 이벤트 coverage 표와 trace 확대 | 나눔: 정적 coverage 표는 이미 있음(`18920ced`). Claude·AGY 런타임 이벤트 trace는 소스 확인 전의 순위 밖 후보(아래). 16위(#271)와 무관 |
 | 23 | Stacked PR land | 순위 19 |
 | 24 | 임의 CLI adapter 확대 | 순위 17 |
@@ -172,7 +172,7 @@ Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f329693
 | 34 | OpenTelemetry export | 범위 결정이 먼저 |
 | 35 | plugin marketplace 게시 | 이미 있음(`.claude-plugin/marketplace.json`) |
 | 36 | 세션 다른 호스트 이어받기 | 순위 27 |
-| 37 | Main 교체(swap) | 순위 28 |
+| 37 | Main 교체(swap) | 순위 28(관리 tmux Codex 원본은 있음, 비Codex 원본 종료·소유 이전이 남음) |
 | 38 | worktree 수명주기 뷰와 orphan 정리 | 이미 있음(`oms cleanup` dry-run) |
 | 39 | 작업별 dev server 미리보기 | 순위 30 |
 | 40 | prompt injection 방어 강화 | 복원, 순위 밖 후보(아래) |
