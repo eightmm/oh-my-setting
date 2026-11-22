@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod account_cleanup;
+mod adapter_conformance;
 mod agy_hook;
 mod agy_surface;
 mod cli;

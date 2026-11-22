@@ -736,6 +736,7 @@ dependencies = [
  "oms-lock",
  "oms-safe-fs",
  "oms-scrub",
+ "oms-supervisor",
  "oms-toml",
  "regex",
  "rustix",

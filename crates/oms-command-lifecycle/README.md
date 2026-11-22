@@ -107,6 +107,21 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
 - Existing status, sandbox, residue, pins, scheduler, and tick behavior remains
   native. Optional external adapters must actually satisfy profile requirements;
   their absence is accepted only by explicit allow-missing policy.
+- `doctor --providers --conformance PATH [--probe-bound SECONDS]`: explicitly
+  checks one `oms-agent-adapter-ID` name and executable, then runs only its
+  `--version` and `--help` probes from private scratch with closed stdin.
+  The existing supervisor bounds each stream to 32 KiB, honors cancellation and
+  applies a per-probe execution deadline (default 10 seconds, range 1–60).
+  Cleanup may outlast the execution deadline; unconfirmed cleanup fails the
+  probe and prevents another launch. JSON contains outcome metadata, never raw
+  stdout/stderr, and a probe pass does not update the capability table or cache.
+  Ordinary `--providers` and `--providers --check` still do not start adapters.
+  This implements the non-inference slice of AH-08/#319. Explicit `--run`/write
+  conformance, file/`-` prompt transport, unchanged-worktree/commit/state checks
+  and output-file isolation remain unimplemented. Process-group observations
+  do not establish whole-tree containment, sandboxing, admission or live-provider
+  compatibility; these report as unknown. The adapter is a trusted local
+  executable and may itself use the inherited environment or network.
 
 Downloads, metadata, archive members, provider output, and stdin are bounded.
 Invalid paths, links escaping staged payloads, malformed manifests, checksum

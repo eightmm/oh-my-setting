@@ -3076,6 +3076,29 @@ test references without running providers. The
 [native lifecycle fixture](../crates/oms-command-lifecycle/tests/native_lifecycle.rs)
 exercises this check.
 
+`oms doctor --providers --conformance PATH [--probe-bound SECONDS]` is a separate,
+explicit probe of one `oms-agent-adapter-ID` executable. Relative paths resolve
+from the caller's directory (or explicit `--repo`) before the probes start in
+private scratch. It validates the marker/name and executable and calls only
+`--version` and `--help`, with closed stdin, a per-probe execution deadline
+(default 10 seconds, decimal range 1–60), and 32 KiB per output stream through
+the existing supervisor. Cancellation, nonzero exits, output overflow and
+incomplete cleanup remain failures; cleanup can outlast the execution deadline.
+The JSON report includes statuses and bounded outcome metadata, not raw provider
+output. Exit status is 0 for these probe checks, 1 for a failed check, 2 for invalid
+options and 130 for interruption. It does not change capability cells or caches.
+
+This is the first native AH-08 slice associated with
+[#319](https://github.com/eightmm/oh-my-setting/pull/319). It makes no inference
+request. `--run`/write conformance, prompt file/`-` transport, no-commit/no-`.oms`
+and clean-read-worktree assertions, and output-file isolation still need an
+explicit execution opt-in implementation. The report leaves those checks,
+whole-tree containment, sandboxing, admission and live compatibility unknown.
+The trusted local executable retains its own environment/network access; the
+probe is not a sandbox. Plain `--providers` and `--providers --check` retain their
+table/report behavior without executing an adapter. See
+[native conformance](../crates/oms-command-lifecycle/src/adapter_conformance.rs).
+
 
 #### Optional hints and budgets
 

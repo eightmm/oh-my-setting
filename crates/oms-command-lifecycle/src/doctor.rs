@@ -1426,6 +1426,9 @@ pub(crate) fn run(
         return extensions(paths, options.has("--mcp"), options, flag);
     }
     if options.has("--providers") {
+        if options.has("--conformance") {
+            return crate::adapter_conformance::run(paths, options, flag);
+        }
         return providers(paths, options);
     }
     if options.has("--repair") {
