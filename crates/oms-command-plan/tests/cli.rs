@@ -2396,3 +2396,189 @@ fn contract_registry_refuses_unsafe_inputs_and_permissions() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(run(&["contract-list"]).0, 2);
 }
+
+#[test]
+fn add_batch_is_atomic_replay_safe_and_cas_bound() {
+    if isolated("add_batch_is_atomic_replay_safe_and_cas_bound") {
+        return;
+    }
+    use oms_command_plan::{Context, Plan, Request, json};
+    let tmp = Tmp::new();
+    let file = tmp.0.join("batch.json");
+    let apply_in = |repo_path: &Path, body: &str, plan: &str| {
+        fs::write(&file, body).unwrap();
+        let sha = json::sha(body.as_bytes());
+        go(
+            &tmp.0,
+            &[
+                "--repo",
+                repo_path.to_str().unwrap(),
+                "add-batch",
+                "--tasks",
+                file.to_str().unwrap(),
+                "--expected-tasks-sha256",
+                &sha,
+                "--expected-plan-sha256",
+                plan,
+            ],
+        )
+    };
+    // Fresh absent plan: refuses 64-hex SHA, accepts `absent`, mints lineage, and replays cleanly.
+    let fresh = repo_at(&tmp, "fresh");
+    let fresh_plan = fresh.join(".oms/plan/tasks.json");
+    let one = r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"f0","title":"fresh 0","allowed":["src"]}]}"#;
+    let stale = "0".repeat(64);
+    assert_eq!(apply_in(&fresh, one, &stale).0, 2);
+    assert!(!fresh_plan.exists());
+    let (c, o, e) = apply_in(&fresh, one, "absent");
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("batch added"), "{o}");
+    let fresh_bytes = fs::read(&fresh_plan).unwrap();
+    let (_, fresh_list, _) = go(
+        &tmp.0,
+        &["--repo", fresh.to_str().unwrap(), "list", "--json"],
+    );
+    let fresh_doc = json::parse(fresh_list.as_bytes()).unwrap();
+    assert!(fresh_doc.text("plan_id").starts_with("plan_"));
+    assert_eq!(fresh_doc.get("tasks").array().unwrap().len(), 1);
+    let (c, o, e) = apply_in(&fresh, one, "absent");
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("already applied"), "{o}");
+    assert_eq!(fresh_bytes, fs::read(&fresh_plan).unwrap());
+    let two = r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"f1","title":"fresh 1"}]}"#;
+    assert_eq!(apply_in(&fresh, two, "absent").0, 2);
+    assert_eq!(fresh_bytes, fs::read(&fresh_plan).unwrap());
+
+    let r = repo(&tmp);
+    let rs = r.to_str().unwrap();
+    let run = |rest: &[&str]| {
+        let mut command = vec!["--repo", rs];
+        command.extend_from_slice(rest);
+        go(&tmp.0, &command)
+    };
+    assert_eq!(run(&["init", "--goal", "g"]).0, 0);
+    assert_eq!(run(&["add", "--id", "pre0", "--title", "existing"]).0, 0);
+    let rows = |n: usize, last: &str| {
+        let mut v = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"id":"t{i}","title":"task {i}","allowed":["d{i}"],"verify":"true","role":"builder","priority":{i}}}"#
+                )
+            })
+            .collect::<Vec<_>>();
+        v.push(last.to_owned());
+        format!(
+            r#"{{"schema":1,"kind":"agent-plan-batch","tasks":[{}]}}"#,
+            v.join(",")
+        )
+    };
+    let apply = |body: &str, plan: &str| apply_in(&r, body, plan);
+    let plan_path = r.join(".oms/plan/tasks.json");
+    let plan_sha = || json::sha(fs::read(&plan_path).unwrap());
+    let before = fs::read(&plan_path).unwrap();
+    let pre_batch_sha = plan_sha();
+    for bad in [
+        r#"{"id":"bad","title":"x","depends":["nope"]}"#,
+        r#"{"id":"bad","title":"x","allowed":[""]}"#,
+        r#"{"id":"bad","title":"x","allowed":["   "]}"#,
+        r#"{"id":"bad","title":"x","allowed":["/"]}"#,
+        r#"{"id":"bad","title":"x","forbidden":["/etc/passwd"]}"#,
+        r#"{"id":"bad","title":"x","allowed":["[z-a]"]}"#,
+        r#"{"id":"bad","title":"a","title":"b"}"#,
+    ] {
+        let (c, _, e) = apply(&rows(9, bad), &pre_batch_sha);
+        assert_eq!(c, 2, "{bad}: {e}");
+        assert_eq!(before, fs::read(&plan_path).unwrap(), "{bad}");
+    }
+    let good = rows(
+        9,
+        r#"{"id":"t9","title":"task 9","allowed":["d9"],"verify":"true","depends":["t0","t1"]}"#,
+    );
+    let (c, _, e) = apply(&good, &stale);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("plan changed"), "{e}");
+    assert_eq!(before, fs::read(&plan_path).unwrap());
+    assert_eq!(apply(&good, "absent").0, 2);
+    assert_eq!(before, fs::read(&plan_path).unwrap());
+    // Parent-only authority check: child context is refused before mutation.
+    fs::write(&file, &good).unwrap();
+    let good_sha = json::sha(good.as_bytes());
+    let child_req = Request::parse(&args(&[
+        "--repo",
+        rs,
+        "add-batch",
+        "--tasks",
+        file.to_str().unwrap(),
+        "--expected-tasks-sha256",
+        &good_sha,
+        "--expected-plan-sha256",
+        &pre_batch_sha,
+    ]))
+    .unwrap();
+    let mut child_ctx = Context::from_environment(&child_req, &r).unwrap();
+    child_ctx.child = true;
+    let stop = AtomicBool::new(false);
+    let child_err = Plan::open(child_ctx, &Host, &stop)
+        .unwrap()
+        .execute(&child_req)
+        .unwrap_err();
+    assert_eq!(child_err.code, 2);
+    assert!(child_err.message.contains("parent-only"), "{child_err}");
+    assert_eq!(before, fs::read(&plan_path).unwrap());
+
+    let (c, o, e) = apply(&good, &pre_batch_sha);
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("batch added"), "{o}");
+    let (c, listed, e) = run(&["list", "--json"]);
+    assert_eq!(c, 0, "{e}");
+    let doc = json::parse(listed.as_bytes()).unwrap();
+    let persisted = doc.get("tasks").array().unwrap();
+    assert_eq!(persisted.len(), 11, "pre0 + 10 batch tasks: {listed}");
+    for id in [
+        "pre0", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9",
+    ] {
+        assert!(persisted.iter().any(|t| t.text("id") == id), "missing {id}");
+    }
+    let t9 = persisted.iter().find(|t| t.text("id") == "t9").unwrap();
+    assert_eq!(t9.get("depends").strings().unwrap(), vec!["t0", "t1"]);
+    assert_eq!(t9.get("allowed_paths").strings().unwrap(), vec!["d9"]);
+    assert_eq!(t9.text("verify"), "true");
+    let t3 = persisted.iter().find(|t| t.text("id") == "t3").unwrap();
+    assert_eq!(t3.text("title"), "task 3");
+    assert_eq!(t3.text("role"), "builder");
+    assert!(t3.get("priority").is_int(3));
+    let (_, ready, _) = run(&["ready"]);
+    assert_eq!(ready.lines().count(), 10, "pre0 + t0..t8 ready: {ready}");
+    assert!(!ready.contains("t9"), "{ready}");
+
+    assert_eq!(run(&["claim", "--id", "t0", "--provider", "codex"]).0, 0);
+    let after = fs::read(&plan_path).unwrap();
+    assert_ne!(plan_sha(), pre_batch_sha);
+    // Exact replay with the ORIGINAL pre-batch token succeeds and preserves the claim.
+    let (c, o, e) = apply(&good, &pre_batch_sha);
+    assert_eq!(c, 0, "replay after claim with original token: {e}");
+    assert!(o.contains("already applied"), "{o}");
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    // Syntactically invalid or missing plan CAS token is rejected BEFORE replay.
+    assert_eq!(apply(&good, "not-a-sha").0, 2);
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    let (c, _, _) = run(&[
+        "add-batch",
+        "--tasks",
+        file.to_str().unwrap(),
+        "--expected-tasks-sha256",
+        &good_sha,
+    ]);
+    assert_eq!(c, 2);
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    let changed = good.replace("task 3", "other");
+    let (c, _, e) = apply(&changed, &pre_batch_sha);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("does not match"), "{e}");
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    let partial = r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"t0","title":"task 0","allowed":["d0"],"verify":"true","role":"builder","priority":0},{"id":"t10","title":"task 10"}]}"#;
+    let (c, _, e) = apply(partial, &plan_sha());
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("partially present"), "{e}");
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+}

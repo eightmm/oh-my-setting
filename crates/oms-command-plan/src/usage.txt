@@ -51,6 +51,17 @@ Commands:
                                      digest, scope envelope, dependencies, and
                                      duplicate definitions are checked under
                                      the plan lock. Exact replay is idempotent.
+  add-batch --tasks FILE --expected-tasks-sha256 SHA256
+         --expected-plan-sha256 absent|SHA256
+                                     Parent-only. Atomically add 1..12 typed
+                                     tasks from a reviewed agent-plan-batch
+                                     JSON file ({"schema":1,"kind":
+                                     "agent-plan-batch","tasks":[{id,title,
+                                     depends,allowed,forbidden,verify,role,
+                                     assignment,resources,contracts,priority}]}).
+                                     Same limits as add; contract-bound plans
+                                     refuse. Exact replay is idempotent; any
+                                     conflict or invalid row changes nothing.
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
          [--resources CSV] [--contracts CSV] [--priority I32]

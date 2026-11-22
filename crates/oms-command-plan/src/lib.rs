@@ -8,6 +8,7 @@
 
 pub mod acceptance;
 mod approval;
+mod batch;
 mod cli;
 pub mod completion;
 mod contracts;

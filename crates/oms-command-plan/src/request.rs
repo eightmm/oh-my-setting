@@ -21,6 +21,7 @@ pub enum Action {
     Retire,
     ApplyProposal,
     Add,
+    AddBatch,
     Claim,
     Start,
     Touch,
@@ -70,6 +71,7 @@ impl Action {
         ("retire", Self::Retire),
         ("apply-proposal", Self::ApplyProposal),
         ("add", Self::Add),
+        ("add-batch", Self::AddBatch),
         ("claim", Self::Claim),
         ("start", Self::Start),
         ("touch", Self::Touch),
@@ -184,6 +186,8 @@ pub(crate) const NAMES: &[&str] = &[
     "expected-lease-id",
     "disposition",
     "proposal",
+    "tasks",
+    "expected-tasks-sha256",
     "expected-proposal-sha256",
     "expected-plan-sha256",
     "expected-task-sha256",
@@ -403,6 +407,12 @@ impl Request {
                 format!("--{name} is invalid for {}", self.action.name()),
             )?;
         }
+        for name in ["tasks", "expected-tasks-sha256"] {
+            require(
+                !self.has(name) || self.action == AddBatch,
+                format!("--{name} is invalid for {}", self.action.name()),
+            )?;
+        }
         for name in ["max-writers", "max-review-backlog"] {
             require(
                 !self.has(name) || matches!(self.action, Ready | Next),
@@ -492,6 +502,11 @@ impl Request {
                 "operator-consent",
                 "decision-artifact",
                 "expected-decision-artifact-sha256",
+            ]),
+            AddBatch => Some(vec![
+                "tasks",
+                "expected-tasks-sha256",
+                "expected-plan-sha256",
             ]),
             _ => None,
         };

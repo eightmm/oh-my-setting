@@ -895,6 +895,12 @@ fn empty_scope_preserved_on_continue_and_dry_run_launch() {
     assert!(prompt.contains("oms panel --results --room ROOM --task-id ID --json"));
     assert!(prompt.contains("oms panel --orchestrator"));
     assert!(prompt.contains("verify the integrated result"));
+    assert!(prompt.contains("record each distinct user request and unresolved prior item"));
+    assert!(prompt.contains(
+        "`oms agent-plan add-batch --tasks FILE --expected-tasks-sha256 SHA --expected-plan-sha256 PLAN_SHA` (use `absent` if no Plan exists)"
+    ));
+    assert!(prompt.contains("oms agent-plan --help"));
+    assert!(prompt.contains("save a pending Room summary"));
 }
 
 fn settle_review_and_recommend_parity() {
