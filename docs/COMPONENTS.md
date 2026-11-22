@@ -2917,22 +2917,25 @@ Antigravity `command(...)` deny rules, so nothing is generated for them.
 #### Main write guard
 
 A panel Overall Main manages only
-([Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)). A PreToolUse hook on
+([Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)). This accident-prevention
+hook gates the four Claude native file-edit tools: a PreToolUse hook on
 `Edit`, `Write`, `MultiEdit` and `NotebookEdit` refuses such a call from the
 panel Main when its target is inside the repository the panel manages
 (`OMS_ROOM_REPO`, else the session's directory) or one of that repository's
 linked worktrees. The refusal names the routes: `oms panel --dispatch ROLE
 --access write`, `--continue TASK_ID` for a fix and `--dispatch integrator` for
-a conflict. Files outside that repository, sessions without a panel, and Provider Leads or
-managed workers (which carry `OMS_HARNESS_CHILD=1` or
-`OMS_HARNESS_DELEGATE_DEPTH`) are not checked. Unmanaged native subagents
+a conflict. Files outside that repository and sessions without a panel are not checked.
+Dispatched workers (which carry `OMS_PANEL_DISPATCH=1`) and delegated children
+(`OMS_HARNESS_CHILD=1` or `OMS_HARNESS_DELEGATE_DEPTH`, which include Provider
+Leads and managed workers) are allowed. Unmanaged native subagents
 spawned directly by a Claude panel Main inherit Main's environment without those
 markers and are likewise refused. A brief for `--brief-file` is an outside file:
 Main writes it to session scratch or `TMPDIR`, not into the checkout.
 
 It is a seatbelt, not a sandbox. It reads the edit tool's target path only: a
 change made through Bash is not judged, and a payload it cannot parse passes
-with one stderr line. Coverage is Claude Code only, as for the command guard;
+with one stderr line. Shell access stays governed by the provider's own shell
+permissions. Coverage is Claude Code only, as for the command guard;
 a Codex or Antigravity Main still relies on its startup contract.
 
 The switch belongs to the person: `OMS_MAIN_WRITE_GUARD=0` in the environment
