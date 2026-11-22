@@ -429,6 +429,75 @@ fn syntax_guard_reports_json_errors_without_an_interpreter() {
     assert_eq!((code, out.as_str()), (0, ""));
 }
 
+#[test]
+fn main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only() {
+    const NAME: &str = "main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only";
+    const MAIN: [(&str, &str); 2] = [
+        ("OMS_PANEL_MAIN_ATTEMPT", "att-main-write"),
+        ("OMS_PANEL_SESSION", "oms-main-write"),
+    ];
+    if std::env::var_os("OMS_TEST_CLEAN_CHILD").is_none() {
+        clean_env_child(NAME, &MAIN);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_MAIN_WRITE_GUARD", "0")]);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_HARNESS_CHILD", "1")]);
+        clean_env_child(NAME, &[]);
+        return;
+    }
+    let set = |name: &str| std::env::var(name).unwrap_or_default();
+    let enforced = !set("OMS_PANEL_SESSION").is_empty()
+        && set("OMS_MAIN_WRITE_GUARD") != "0"
+        && set("OMS_HARNESS_CHILD") != "1";
+    let tmp = TempDir::new("main-write");
+    let repo = git_repo(&tmp);
+    let git = |args: &[&str]| {
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+        assert!(
+            Command::new("git")
+                .args(identity)
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .expect("git")
+                .success()
+        );
+    };
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(&["worktree", "add", "-q", "../linked", "-b", "linked"]);
+    let payload = |tool: &str, key: &str, path: &Path| {
+        serde_json::json!({"tool_name":tool,"cwd":repo,"tool_input":{key:path}}).to_string()
+    };
+    let run = |tool: &str, key: &str, path: &Path| {
+        hook(
+            &tmp,
+            "main-write-guard-hook",
+            &[],
+            payload(tool, key, path).as_bytes(),
+        )
+    };
+    for (tool, key, path) in [
+        ("Edit", "file_path", repo.join("src/new.rs")),
+        (
+            "NotebookEdit",
+            "notebook_path",
+            tmp.path().join("linked/a.ipynb"),
+        ),
+    ] {
+        let (code, out, err) = run(tool, key, &path);
+        if enforced {
+            assert_eq!((code, out.as_str()), (2, ""), "{tool}");
+            assert!(
+                err.starts_with("main write guard: ") && err.contains("--dispatch"),
+                "{err}"
+            );
+        } else {
+            assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "{tool}");
+        }
+    }
+    let (code, out, err) = run("Write", "file_path", &tmp.path().join("notes.md"));
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
+}
+
 fn harness(tmp: &TempDir, tool: &str, payload: &serde_json::Value) -> (i32, String) {
     let (code, out, _) = hook(tmp, "harness-hook", &[tool], payload.to_string().as_bytes());
     (code, out)

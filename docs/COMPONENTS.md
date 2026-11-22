@@ -2813,7 +2813,8 @@ HUDs. When supported by the CLI, OMS sets the Opus 5.5 per-model
 `modelSettings.<model>.autoCompactWindow` to 300000 and removes equal values;
 as with effort, an identical user value is treated as OMS-owned on removal.
 Model routing stays explicit in
-delegate/run commands; direct edits do not pay for a separate policy hook.
+delegate/run commands. Direct edits pay for one pre-edit hook, the
+[Main write guard](#main-write-guard), which returns at once outside a panel Main.
 
 
 #### Destructive command guard
@@ -2912,6 +2913,29 @@ Codex and Antigravity remain uncovered. No Codex or Antigravity CLI was
 available to confirm a pre-tool hook contract, `codex execpolicy` rules or
 Antigravity `command(...)` deny rules, so nothing is generated for them.
 
+
+#### Main write guard
+
+A panel Overall Main manages only
+([Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)). A PreToolUse hook on
+`Edit`, `Write`, `MultiEdit` and `NotebookEdit` refuses such a call from the
+panel Main when its target is inside the repository the panel manages
+(`OMS_ROOM_REPO`, else the session's directory) or one of that repository's
+linked worktrees. The refusal names the routes: `oms panel --dispatch ROLE
+--access write`, `--continue TASK_ID` for a fix and `--dispatch integrator` for
+a conflict. Files outside that repository, Provider Leads, workers and sessions
+without a panel are not checked.
+
+It is a seatbelt, not a sandbox. It reads the edit tool's target path only: a
+change made through Bash is not judged, and a payload it cannot parse passes
+with one stderr line. Coverage is Claude Code only, as for the command guard;
+a Codex or Antigravity Main still relies on its startup contract.
+
+The switch belongs to the person: `OMS_MAIN_WRITE_GUARD=0` in the environment
+`oms panel` was started from turns the guard off for that Main. When the user
+tells a running Main to make one change itself, the user makes it in their own
+shell or restarts the panel with the switch; the Room records the instruction
+either way.
 
 #### Hook ownership and audits
 

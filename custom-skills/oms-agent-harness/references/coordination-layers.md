@@ -52,7 +52,9 @@ configuration and makes no repository edit, including small ones.
 Two exceptions, both visible:
 
 - The user tells Main to make a specific change itself. Main makes that change
-  only and records it in the Room as a `--kind status` message.
+  only and records it in the Room as a `--kind status` message. A Claude Code
+  Main's edit tools are refused inside the managed repository unless the user
+  started the panel with `OMS_MAIN_WRITE_GUARD=0`; otherwise the user edits.
 - No worker can start (no provider, capacity or authority). Main reports the
   blocker to the user and waits; it does not do the work quietly.
 

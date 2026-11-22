@@ -1002,6 +1002,52 @@ pub fn git_move(raw: &[u8], ctx: &Context<'_>) -> Output {
     empty()
 }
 
+/// Shared Git directory of the checkout containing `path`, so a linked
+/// worktree resolves to the repository it belongs to.
+fn git_common(path: &Path) -> Option<PathBuf> {
+    let path = physical(path);
+    let top = path
+        .ancestors()
+        .find(|a| fs::symlink_metadata(a.join(".git")).is_ok())?;
+    let dot = top.join(".git");
+    if fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) {
+        return Some(physical(&dot));
+    }
+    let pointer = String::from_utf8(read(&dot, 4096).ok()?).ok()?;
+    let admin = absolute(top, Path::new(pointer.strip_prefix("gitdir:")?.trim()));
+    let shared = read(&admin.join("commondir"), 4096)
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .map_or_else(
+            || admin.clone(),
+            |relative| absolute(&admin, Path::new(relative.trim())),
+        );
+    Some(physical(&shared))
+}
+
+/// A panel Overall Main manages only. Its file-edit tools are refused inside
+/// the repository it manages, linked worktrees included; other paths pass.
+pub fn main_write(raw: &[u8], ctx: &Context<'_>) -> Output {
+    if !panel() || off("OMS_MAIN_WRITE_GUARD") || raw.is_empty() {
+        return empty();
+    }
+    let Some(v) = document(raw) else {
+        return (0,vec![],b"main write guard: cannot evaluate this edit (hook payload is not valid JSON); allowing it unchecked.\n".to_vec());
+    };
+    let target = first(&v["tool_input"], &["file_path", "notebook_path"]);
+    if target.is_empty() {
+        return empty();
+    }
+    let cwd = absolute(ctx.cwd, payload_cwd(&v, ctx.cwd));
+    let managed =
+        env_path("OMS_ROOM_REPO").map_or_else(|| cwd.clone(), |repo| absolute(&cwd, &repo));
+    let edited = git_common(&absolute(&cwd, Path::new(target)));
+    if edited.is_none() || edited != git_common(&managed) {
+        return empty();
+    }
+    (2,vec![],b"main write guard: a panel Overall Main manages only, and this file is inside the repository it manages. Instead: assign the change with oms panel --dispatch ROLE --access write, return a fix to its writer with --continue TASK_ID, or send a conflict to --dispatch integrator. If the user told this Main to make this change itself, record that in the Room and ask them to make the edit in their own shell (or start the panel with OMS_MAIN_WRITE_GUARD=0).\n".to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

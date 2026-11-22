@@ -182,11 +182,17 @@ pub fn strict_document(raw: &[u8]) -> Result<Value, String> {
     Ok(v)
 }
 pub fn input_error(name: &str) -> Output {
-    if ["command-guard-hook", "git-move-guard-hook"].contains(&name) {
-        let label = if name == "command-guard-hook" {
-            "command guard"
-        } else {
-            "git move guard"
+    if [
+        "command-guard-hook",
+        "git-move-guard-hook",
+        "main-write-guard-hook",
+    ]
+    .contains(&name)
+    {
+        let label = match name {
+            "command-guard-hook" => "command guard",
+            "git-move-guard-hook" => "git move guard",
+            _ => "main write guard",
         };
         (0, vec![], format!("{label}: cannot evaluate this command (hook input unavailable or oversized); allowing it unchecked.\n").into_bytes())
     } else if name == "turn-guard" {

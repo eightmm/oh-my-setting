@@ -2819,8 +2819,8 @@ esac
     )))
     .unwrap();
     native_only(&manifest);
-    assert_eq!(manifest["surfaces"].as_array().unwrap().len(), 13);
-    assert_eq!(manifest["hooks_schema"], 12);
+    assert_eq!(manifest["surfaces"].as_array().unwrap().len(), 14);
+    assert_eq!(manifest["hooks_schema"], 13);
     let settings = home.join(".claude/settings.json");
     let legacy = |script: &str| {
         format!(

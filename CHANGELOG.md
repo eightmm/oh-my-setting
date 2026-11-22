@@ -8,6 +8,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- A Main write guard for Claude Code. A panel Overall Main's `Edit`, `Write`,
+  `MultiEdit` and `NotebookEdit` calls are refused inside the repository it
+  manages and its linked worktrees, with the dispatch routes named. Provider
+  Leads, workers, solo sessions and other paths are unchanged; Bash changes and
+  Codex/Antigravity Mains are not judged. `OMS_MAIN_WRITE_GUARD=0` at panel
+  start turns it off, and the panel passes that switch to its Main. The Claude
+  hook schema moves to 13.
 - The panel reader's Files view (`f`) shows a worker's declared scope and
   changed files as a directory tree with `+N -M`, marks files outside its scope
   or shared with another live write worker, opens a file's coloured diff with
@@ -533,8 +540,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   and Main edits only on the user's explicit instruction, recorded in the Room.
   The Provider Lead contract names it a team lead for one assignment and lists
   what returns to Main. `coordination-layers.md` holds the Main, Lead and
-  Worker duty table. This is a prompt and skill contract; no runtime guard
-  refuses a Main edit. Solo sessions without a team still work locally.
+  Worker duty table. This is a prompt and skill contract; the Claude Code Main
+  write guard under Added refuses edit-tool calls, and nothing else is enforced
+  at runtime. Solo sessions without a team still work locally.
 - Managed tool upgrades resolve current upstream releases instead of a checked-in
   `tools.lock.json`: Node follows the newest LTS, uv/gh use their latest stable
   GitHub release, npm tools follow `latest`, and Antigravity uses its current-host
