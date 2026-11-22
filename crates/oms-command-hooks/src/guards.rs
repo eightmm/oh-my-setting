@@ -382,7 +382,6 @@ fn audit_window(raw: &[u8], now: f64, hours: u64) -> String {
     let (mut lines, mut unreadable, mut bad_ts, mut inside) = (0usize, 0usize, 0usize, 0usize);
     let mut oldest = f64::INFINITY;
     let mut verdicts = BTreeMap::<&str, usize>::new();
-    let mut rules = BTreeMap::<String, usize>::new();
     for line in raw.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
         lines += 1;
         let Some(row) = document(line) else {
@@ -405,17 +404,6 @@ fn audit_window(raw: &[u8], now: f64, hours: u64) -> String {
             _ => "other",
         };
         *verdicts.entry(v).or_default() += 1;
-        let rule = text(&row, "rule")
-            .chars()
-            .filter(|c| c.is_alphanumeric() || "._:-".contains(*c))
-            .take(32)
-            .collect::<String>();
-        let key = if rule.is_empty() || (rules.len() >= 16 && !rules.contains_key(&rule)) {
-            "other".into()
-        } else {
-            rule
-        };
-        *rules.entry(key).or_default() += 1;
     }
     let count = |k: &str| verdicts.get(k).copied().unwrap_or(0);
     let mut output = format!(
@@ -425,20 +413,19 @@ fn audit_window(raw: &[u8], now: f64, hours: u64) -> String {
         count("noted"),
         count("other")
     );
-    let mut sorted: Vec<_> = rules.iter().collect();
-    sorted.sort_by_key(|(k, n)| (std::cmp::Reverse(**n), (*k).clone()));
-    for (rule, n) in sorted {
-        output.push_str(&format!("  {n:4}  {rule}\n"));
-    }
     output.push_str(&format!(
         "not counted: {bad_ts} row(s) with a missing, malformed or future timestamp, {unreadable} unreadable line(s)\n"
     ));
-    output.push_str(if lines >= AUDIT_KEEP && oldest > cutoff {
-        "coverage: truncated; the log keeps only the newest 1000 rows and its oldest dated row is inside this window, so earlier rows may be missing\n"
+    output.push_str(if lines < AUDIT_KEEP {
+        "coverage: the log is under its 1000-row cap; a removed or edited log cannot be detected\n"
+    } else if !oldest.is_finite() {
+        "coverage: unknown; the log is at its 1000-row cap and no row has a usable timestamp\n"
+    } else if oldest >= cutoff {
+        "coverage: possibly incomplete; the log is at its 1000-row cap and its oldest dated row is not before the window start, so eligible earlier rows may have been dropped\n"
     } else {
-        "coverage: the retained rows reach back past the window start or the log is under its 1000-row cap; a removed or edited log cannot be detected\n"
+        "coverage: the retained rows reach back before the window start; a removed or edited log cannot be detected\n"
     });
-    output.push_str("rows carry no command text; any process of this user can edit the file, so read it as a record, not proof\n");
+    output.push_str("rows are counted by verdict category only, with no rule, command text or timestamps; any process of this user can edit the file, so read it as a record, not proof\n");
     output
 }
 fn audit(args: &[OsString]) -> Output {
@@ -524,7 +511,7 @@ fn audit(args: &[OsString]) -> Output {
             word(row, "sha256", 12)
         ));
     }
-    output.push_str("rows carry no command text; any process of this user can edit the file, so read it as a record, not proof\n");
+    output.push_str("rows are counted by verdict category only, with no rule, command text or timestamps; any process of this user can edit the file, so read it as a record, not proof\n");
     out(output)
 }
 fn record(found: &Verdict, command: &str, sid: &str, bypass: bool) -> usize {
@@ -1155,17 +1142,28 @@ mod tests {
         raw += &row("2026-11-23T12:00:01Z", "refused", "git-clean");
         raw += &row("garbage", "weird", "x/../y");
         raw += "not json\n";
+        raw += &row("2026-11-23T09:00:00Z", "ZVERDICTID", "ZRULEID").replace("SECRETCMD", "ZCMDID");
         let report = audit_window(raw.as_bytes(), now, 24);
         assert!(
-            report.contains("last 24h (UTC): 2 row(s): 1 refused, 0 bypassed, 1 noted, 0 other")
+            !report.contains("ZRULEID")
+                && !report.contains("ZVERDICTID")
+                && !report.contains("ZCMDID")
+        );
+        assert!(
+            report.contains("last 24h (UTC): 3 row(s): 1 refused, 0 bypassed, 1 noted, 1 other")
         );
         assert!(report.contains("not counted: 2 row(s)"), "{report}");
         assert!(report.contains("1 unreadable line(s)"));
-        assert!(report.contains("under its 1000-row cap"));
+        assert!(report.contains("under its 1000-row cap") && !report.contains("git-clean"));
         assert!(!report.contains("SECRETCMD") && !report.contains("2026-11-23T11"));
         let full = row("2026-11-23T11:00:00Z", "refused", "git-clean").repeat(AUDIT_KEEP);
-        assert!(audit_window(full.as_bytes(), now, 24).contains("coverage: truncated"));
-        assert!(audit_window(full.as_bytes(), now, 1).contains("coverage: the retained"));
+        assert!(audit_window(full.as_bytes(), now, 24).contains("coverage: possibly incomplete"));
+        let edge = row("2026-11-22T12:00:00Z", "refused", "x").repeat(AUDIT_KEEP);
+        assert!(audit_window(edge.as_bytes(), now, 24).contains("possibly incomplete"));
+        let older = row("2026-11-20T00:00:00Z", "refused", "x") + &full;
+        assert!(audit_window(older.as_bytes(), now, 1).contains("reach back before"));
+        let undated = row("bad", "refused", "x").repeat(AUDIT_KEEP);
+        assert!(audit_window(undated.as_bytes(), now, 24).contains("coverage: unknown"));
     }
 
     #[test]
