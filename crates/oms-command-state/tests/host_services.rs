@@ -1013,7 +1013,7 @@ fn state_verify_survives_more_than_fifty_thousand_nonjsonl_artifacts() {
 }
 
 #[test]
-fn inbox_warns_on_recent_failure_repeat_without_extra_reads_or_command_text() {
+fn inbox_warns_on_recent_failure_repeat_without_command_text() {
     let repo = TempRepo::new();
     seed(repo.path());
     let fail = |fp: &str| {
@@ -1035,13 +1035,37 @@ fn inbox_warns_on_recent_failure_repeat_without_extra_reads_or_command_text() {
         .find(|i| i.text("code") == code)
         .expect("repeat warning");
     assert_eq!(item.get("count").int().unwrap(), 3);
-    assert!(!format!("{item:?}").contains("SECRET-CMD"));
+    assert_eq!(item.text("priority"), "P1");
+    assert!(item.text("command").contains("list --stalls"));
+    let state = view_json("state", repo.path());
+    assert_eq!(
+        state
+            .get("failures")
+            .get("recent_repeat")
+            .get("count")
+            .int()
+            .unwrap(),
+        3
+    );
+    let dashboard = view_json("dashboard", repo.path());
+    let surfaces = [
+        serde_like(&inbox),
+        serde_like(state.get("failures").get("recent_repeat")),
+        serde_like(dashboard.get("attention")),
+    ];
+    assert!(surfaces[2].contains(code), "dashboard attention carries it");
+    for text in &surfaces {
+        assert!(!text.contains("SECRET-CMD"), "command text leaked: {text}");
+    }
     assert!(
         inbox_codes(repo.path())
             .iter()
             .any(|c| c == "open-failures")
     );
     seed_rows(fail("a").repeat(3) + &fail("b"));
+    assert!(!inbox_codes(repo.path()).iter().any(|c| c == code));
+    let resolved = "{\"schema\":2,\"event\":\"resolved\",\"ts\":\"2026-01-01T00:00:00Z\",\"agent\":\"a\",\"fingerprint\":\"a\",\"how\":\"fixed\"}\n";
+    seed_rows(fail("a").repeat(3) + resolved);
     assert!(!inbox_codes(repo.path()).iter().any(|c| c == code));
     seed_rows(fail("a").repeat(3) + "not json\n");
     let codes = inbox_codes(repo.path());
