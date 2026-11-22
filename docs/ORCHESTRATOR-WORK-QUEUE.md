@@ -300,5 +300,34 @@ CC-01과 CC-03은 provider 파일의 한 writer가 연결하되, model-family �
 Council 기본 좌석은 [#313](https://github.com/eightmm/oh-my-setting/pull/313)의 AH-10과
 [#318](https://github.com/eightmm/oh-my-setting/pull/318)의 기존 설정 owner에서 이어간다.
 권장 후속은 명시 `--providers` → `OMS_PEER_PROVIDERS` → optional 설정 기본값 → legacy 기본값의
-우선순위를 해당 consumer에 연결하는 것이다. 이는 아직 설정 구현 완료를 뜻하지 않는다.
+우선순위를 해당 consumer에 연결하는 것이다. 최초 재대조 시점에는 설정 구현 전이었다.
+같은 날 구현 PR의 상태는 아래 표를 따른다.
 Panel의 기존 `council.extra` 의미와 strict schema를 보존하며 새 council 명세나 별도 router는 만들지 않는다.
+
+### 같은 날 게시된 구현 slice와 검토 순서
+
+아래는 최초 재대조 이후 게시한 검토 단위를 위 owner에 연결한 지도다. 위의 다음 변경과
+합격 조건을 대체하지 않으며, PR 게시를 병합·전체 roadmap 완료·hosted CI 또는 live provider
+검증 완료로 읽지 않는다. 실제 실행 증거와 남은 범위는 각 PR에서 확인한다.
+
+| 기존 owner | 게시된 PR | 이번 slice와 계속 남는 범위 |
+|---|---|---|
+| CC-06·REL-04 | [#328](https://github.com/eightmm/oh-my-setting/pull/328) | Plan Git caller를 기존 supervisor에 연결. Broker·Graph·Task의 서로 다른 I/O 계약 이전은 별도 |
+| MR-A, TM-01·07~09 | [#329](https://github.com/eightmm/oh-my-setting/pull/329) | Probe 결과 해석·cache metadata·exact-model override 표시 공유. Process/cache I/O와 실패 시 effort/cache provenance는 caller별 계약 유지 |
+| 계층 계약·native prompt owner | [#330](https://github.com/eightmm/oh-my-setting/pull/330) | Main/Lead/Worker 문서 정합성과 이 owner 지도. Compact/full prompt의 공통 책임 projection은 후속 |
+| Panel·peer dispatch, LC·REL-02 | [#331](https://github.com/eightmm/oh-my-setting/pull/331) | Typed dispatch metadata의 env/attempt refs projection. 기존 protected binding을 보존하며 env를 권한으로 승격하지 않음 |
+| AH-08, 기존 #319 | [#333](https://github.com/eightmm/oh-my-setting/pull/333) | Native doctor의 non-inference adapter probe 연결. 명시적 실행·write·`-` prompt·output isolation 및 live coverage는 #319 후속 |
+| CC-01 | [#334](https://github.com/eightmm/oh-my-setting/pull/334) | Provider identity·alias·owner cwd discovery 공유. Model-family/unknown evidence의 의미 교정은 별도 diff |
+| CC-03 → CC-01 | [#335](https://github.com/eightmm/oh-my-setting/pull/335) | Account registry decode·validation 공유. Caller별 선택·pin·retry·credential 정책을 합치는 변경은 아님 |
+| Lifecycle·doctor, #276 후속 | [#336](https://github.com/eightmm/oh-my-setting/pull/336) | Post-refresh integration 검증과 정제된 phase/tool/exit 진단. Vendor binary를 core rollback으로 복구한다는 보장은 추가하지 않음 |
+| AH-10, 기존 council 설정 owner | [#318](https://github.com/eightmm/oh-my-setting/pull/318) | CLI → nonempty env → optional `council.peer_default` → legacy 우선순위와 strict reader 연결. `council.extra`·panel 배정·Team 권한은 별도 |
+
+겹치는 provider 변경은 **#329 → #334 → #318 / #335** 순서로 검토한다. #318과 #335는
+#334를 base로 둔 후속이며, 어느 한쪽의 검토를 다른 쪽의 합격 증거로 사용하지 않는다.
+#336은 main 기준 독립 slice다. #328/#330/#331/#333은 각 PR의 실제 base와 변경 범위를
+확인해 별도로 검토하며, 이 지도가 일괄 병합 순서나 전체 gate 통과를 선언하지 않는다.
+
+[#316](https://github.com/eightmm/oh-my-setting/pull/316)의 팀 Main/solo 문구 후속은 원래 PR에
+연결했으며, handoff section 손실 표시와 exact recovery lineage는 그 기존 REL-01·DR-03/04
+owner에 남긴다. [#319](https://github.com/eightmm/oh-my-setting/pull/319)는 #333의 native probe
+slice와 남은 실행 conformance를 연결하는 기존 owner다. 새 중복 명세나 완료 표시를 만들지 않는다.
