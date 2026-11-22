@@ -1118,7 +1118,14 @@ fn git_checkout(path: &Path) -> Option<(PathBuf, PathBuf)> {
 /// the repository it manages, linked worktrees and submodules included; other
 /// paths pass.
 pub fn main_write(raw: &[u8], ctx: &Context<'_>) -> Output {
-    if !panel() || delegate_child() || off("OMS_MAIN_WRITE_GUARD") || raw.is_empty() {
+    // Managed workers inherit OMS_PANEL_MAIN_ATTEMPT and the oms-* session but
+    // carry OMS_PANEL_DISPATCH=1 (set by dispatch and review; Main removes it).
+    if !panel()
+        || env("OMS_PANEL_DISPATCH") == "1"
+        || delegate_child()
+        || off("OMS_MAIN_WRITE_GUARD")
+        || raw.is_empty()
+    {
         return empty();
     }
     let Some(v) = document(raw) else {

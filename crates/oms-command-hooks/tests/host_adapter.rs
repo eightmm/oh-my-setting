@@ -445,11 +445,13 @@ fn main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only() {
             NAME,
             &[MAIN[0], MAIN[1], ("OMS_HARNESS_DELEGATE_DEPTH", "1")],
         );
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_PANEL_DISPATCH", "1")]);
         clean_env_child(NAME, &[]);
         return;
     }
     let set = |name: &str| std::env::var(name).unwrap_or_default();
     let enforced = !set("OMS_PANEL_SESSION").is_empty()
+        && set("OMS_PANEL_DISPATCH") != "1"
         && set("OMS_MAIN_WRITE_GUARD") != "0"
         && set("OMS_HARNESS_CHILD") != "1"
         && matches!(set("OMS_HARNESS_DELEGATE_DEPTH").as_str(), "" | "0");
