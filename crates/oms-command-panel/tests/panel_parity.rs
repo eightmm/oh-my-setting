@@ -960,6 +960,112 @@ fn settle_review_and_recommend_parity() {
         ]
     });
 
+    // Malformed panel_review_reason refs must fail consistently before dry-run
+    // and apply without invoking native Events.
+    let seen_before_bad = services.native_seen.borrow().len();
+    for bad_reason in [
+        "/abs/path",
+        "\\unc\\path",
+        "C:/drive/path",
+        "../escape",
+        "a/../b",
+        "..",
+    ] {
+        for apply in [false, true] {
+            let mut argv = vec![
+                "--repo".to_owned(),
+                repo.path().to_string_lossy().into_owned(),
+                "--owner".to_owned(),
+                "claude".to_owned(),
+                "--settle-review".to_owned(),
+                "--attempt".to_owned(),
+                "att-rev".to_owned(),
+                "--reason".to_owned(),
+                bad_reason.to_owned(),
+            ];
+            if apply {
+                argv.push("--apply".to_owned());
+            }
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let (bad_code, _, bad_err) = run_with_services(
+                "panel",
+                &os(&refs),
+                repo.path(),
+                repo.path(),
+                &STOP,
+                &services,
+            );
+            assert_ne!(
+                bad_code, 0,
+                "malformed reason {bad_reason:?} (apply={apply}) should fail"
+            );
+            assert!(
+                String::from_utf8_lossy(&bad_err).contains("panel_review_reason"),
+                "unexpected stderr for {bad_reason:?} (apply={apply}): {}",
+                String::from_utf8_lossy(&bad_err)
+            );
+        }
+    }
+    for apply in [false, true] {
+        let mut argv = vec![
+            "--repo".to_owned(),
+            repo.path().to_string_lossy().into_owned(),
+            "--settle-review".to_owned(),
+            "--standalone".to_owned(),
+            "--older-than".to_owned(),
+            "1e-250".to_owned(),
+        ];
+        if apply {
+            argv.push("--apply".to_owned());
+        }
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let (bad_code, _, bad_err) = run_with_services(
+            "panel",
+            &os(&refs),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        );
+        assert_ne!(
+            bad_code, 0,
+            "oversized formatted --older-than reason (apply={apply}) should fail"
+        );
+        assert!(
+            String::from_utf8_lossy(&bad_err).contains("panel_review_reason"),
+            "unexpected stderr for oversized --older-than (apply={apply}): {}",
+            String::from_utf8_lossy(&bad_err)
+        );
+    }
+    assert_eq!(services.native_seen.borrow().len(), seen_before_bad);
+
+    // Prior valid relative-path / punctuation reasons remain accepted on dry-run.
+    let (rel_code, rel_out, rel_err) = run_with_services(
+        "panel",
+        &os(&[
+            "--repo",
+            &repo.path().to_string_lossy(),
+            "--owner",
+            "claude",
+            "--settle-review",
+            "--attempt",
+            "att-rev",
+            "--reason",
+            "replaced src/review.rs (score=0)",
+        ]),
+        repo.path(),
+        repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(rel_code, 0, "stderr={}", String::from_utf8_lossy(&rel_err));
+    let rel_dry: Value = serde_json::from_slice(&rel_out).unwrap();
+    assert_eq!(rel_dry["executes"], json!(false));
+    assert_eq!(
+        rel_dry["candidates"][0]["reason"],
+        "replaced src/review.rs (score=0)"
+    );
+
     // Dry settle-review with explicit --attempt.
     let (code, stdout, stderr) = run_with_services(
         "panel",
