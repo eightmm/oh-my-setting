@@ -330,8 +330,10 @@ custom adapter session, ACP, guard/sandbox 범위와 council 등의 연결 작�
 다시 쓸 수 있는 복구 경험, 하네스의 실제 효과**를 다룬다. #313의 구현이나 병합을
 전제하지 않으며 그 파일·provider writer를 함께 수정하지 않는다.
 
-Overall Main은 직접 수행과 필요한 분업을 선택한다. Planner, Lead, reviewer를 모든
-작업의 필수 단계로 만들지 않는다. Provider native tool loop와 compaction을 보존하고,
+팀을 운영하는 Overall Main은 계획·배정·검토·결정을 맡고 repository 편집은 Lead나
+worker에게 배정한다([#321](https://github.com/eightmm/oh-my-setting/pull/321)). 팀이 없는
+solo session은 직접 작업한다. 필요한 Lead와 worker를 선택하되 Planner, Lead, reviewer를
+모든 작업의 필수 단계로 만들지 않는다. Provider native tool loop와 compaction을 보존하고,
 기존 [작업 큐](ORCHESTRATOR-WORK-QUEUE.md)의 owner·채택 조건을 따른다.
 아래 표는 새 작업 큐나 신규 ID 체계가 아니라 기존 작업의 구체화다.
 
@@ -412,9 +414,10 @@ review eligibility, hygiene, supersede/retire를 사용하며 skill 후보도 �
 동일 조건이나 인과적 개선을 보장하지 않는다. 특히 현재 duration은 provider sample이
 없으면 lifecycle-event sample을 사용하며 그 선택이 snapshot basis에서 분리되지 않는다.
 
-반복되는 실제 선택 문제가 생기면 7절의 pair protocol을 적용한다. 예를 들어 Main 단독과
-독립 reviewer 추가를 비교할 때 같은 task/base/verifier·환경·예산을 고정하고 해당 요소만
-변경한다. 품질·실패·사람의 수정량·시간과 알려진 사용량을 함께 보며 실패 arm을 빼지 않는다.
+반복되는 실제 선택 문제가 생기면 7절의 pair protocol을 적용한다. 예를 들어 같은 builder
+assignment에 독립 reviewer를 추가하는 효과를 비교할 때, 양쪽의 필수 검증은 유지하고
+같은 task/base/verifier·환경·예산에서 추가 review만 변경한다. 품질·실패·사람의 수정량·시간과
+알려진 사용량을 함께 보며 실패 arm을 빼지 않는다.
 효과를 입증하지 못한 강제 분업·반복 review·context 주입은 줄이는 후보로 검토한다.
 현재 model/effort의 가용한 조합을 사용하며 vendor 이름이나 고정 tier만으로 경로를 정하지 않는다.
 이 보강에서는 유료 model/API 평가나 GPU/원격 작업을 실행하지 않았다.
