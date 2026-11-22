@@ -4509,6 +4509,19 @@ pub fn results(report: &Value, columns: usize) -> String {
         {
             lines.extend(wrap(summary, columns));
         }
+        let entry = &row["native_assignment"];
+        if entry.is_object() {
+            lines.extend(wrap(
+                &format!(
+                    "  ◇ Native assignment {} · {} · consumption {} · decision {}",
+                    text(entry, "attempt_id"),
+                    text(entry, "transport_label"),
+                    text(entry, "consumption"),
+                    text(entry, "acceptance")
+                ),
+                columns,
+            ));
+        }
         lines.push(String::new());
     }
     if rows(&report["rows"]).is_empty() {
@@ -8467,5 +8480,40 @@ mod tests {
                 "{leaked}: {missing_no_accounts}"
             );
         }
+    }
+
+    #[test]
+    fn native_assignment_result_renders_separate_facts() {
+        let plain = json!({"task_id":"task-plain","outcome":"accepted","title":"Plain",
+            "summary":"Reviewed","calls":[{"kind":"delegate","selected_model":"m","reason_code":"ok"}]});
+        let before = "OMS · Results\n────────────────────────────────────────────────────────────\n■ task-plain · accepted · Plain\nReviewed\n  ├─ delegate · m · ok\n\n";
+        assert_eq!(results(&json!({"rows":[plain.clone()]}), 140), before);
+        let native = json!({"task_id":"task-native","outcome":null,"title":"Native","native_assignment":
+            {"attempt_id":"native-a","transport_label":"Submitted","consumption":"unconfirmed","acceptance":"pending"}});
+        let output = results(&json!({"rows":[native.clone(), plain]}), 140);
+        let lines = output.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|v| v.starts_with("■ task-native"))
+            .unwrap();
+        assert_eq!(
+            lines[start + 1..start + 3],
+            [
+                "  ◇ Native assignment native-a · Submitted · consumption unconfirmed · decision pending",
+                "",
+            ]
+        );
+        assert!(
+            output.ends_with(
+                "\n■ task-plain · accepted · Plain\nReviewed\n  ├─ delegate · m · ok\n\n"
+            )
+        );
+        assert!(!output.contains("Input receipt is not"));
+        let narrow = results(&json!({"rows":[native]}), 30);
+        assert!(narrow.lines().all(|v| width(v) <= 30), "{narrow}");
+        assert!(
+            narrow.replace('\n', "").contains("decision pending"),
+            "{narrow}"
+        );
     }
 }
