@@ -658,28 +658,21 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
     }
     Ok(())
 }
-fn git_hook(
-    paths: &Paths,
-    options: &Options,
-    tx: &mut Transaction,
-    flag: &AtomicBool,
-) -> Result<()> {
-    if options.has("--check-protection") && !options.hook_protected {
-        return r::fail("CI gate requirement was not proven; quick hook unchanged");
-    }
+/// The validated hook directory, or `None` when removal has nothing to undo.
+/// An explicit `--repo` selects another OMS source worktree; the receipt owner stays canonical.
+fn hook_dir(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Option<PathBuf>> {
     // The mutation helper suppresses hooks with core.hooksPath=/dev/null;
     // a read-only path query must retain Git's configured hook directory.
     let remove = options.has("--remove");
     let Some(git) = r::find("git", &paths.cwd) else {
         // Withdrawal has nothing to undo without git; install cannot proceed.
         return if remove {
-            Ok(())
+            Ok(None)
         } else {
             r::fail("git is required")
         };
     };
-    // An explicit --repo selects another OMS source worktree; the receipt owner stays canonical.
-    let explicit = options.path("--repo", &paths.cwd)?.is_some();
+    let explicit = explicit_repo(paths, options)?;
     let base = if explicit { &paths.cwd } else { &paths.source };
     let output = r::command(
         git,
@@ -697,7 +690,7 @@ fn git_hook(
     )?;
     if output.0 != 0 {
         return if remove {
-            Ok(())
+            Ok(None)
         } else {
             r::fail("cannot resolve Git hook directory")
         };
@@ -733,11 +726,32 @@ fn git_hook(
         {
             return r::fail("--repo must be the root of an OMS source worktree");
         }
+        if !remove && !top.join("scripts/check.sh").is_file() {
+            return r::fail("--repo must contain scripts/check.sh");
+        }
         // A shared or global core.hooksPath would write beyond this repository.
         if !dir.starts_with(resolve(common)?) && !dir.starts_with(&top) {
             return r::fail("Git hook directory is outside the selected repository");
         }
     }
+    Ok(Some(dir))
+}
+fn explicit_repo(paths: &Paths, options: &Options) -> Result<bool> {
+    Ok(options.path("--repo", &paths.cwd)?.is_some())
+}
+fn git_hook(
+    paths: &Paths,
+    options: &Options,
+    tx: &mut Transaction,
+    flag: &AtomicBool,
+) -> Result<()> {
+    if options.has("--check-protection") && !options.hook_protected {
+        return r::fail("CI gate requirement was not proven; quick hook unchanged");
+    }
+    let remove = options.has("--remove");
+    let Some(dir) = hook_dir(paths, options, flag)? else {
+        return Ok(());
+    };
     // Byte-exact hook written by scripts/install-hooks.sh at e0b92359; any edit stays unmanaged.
     const OLD_PUSH: &str = "#!/usr/bin/env bash\n# Installed by scripts/install-hooks.sh — runs the repo gate before every push.\n# Bypass for an emergency with: git push --no-verify\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/check.sh\"\n";
     let owned = |name: &str, header: &str, legacy: &str| -> Result<(PathBuf, bool)> {
@@ -940,7 +954,14 @@ pub(crate) fn run(
     };
     let mut prepared = prepared;
     if options.has("--check-protection") {
-        let out = services.hook_protection(&paths.source, flag);
+        // An explicit target must prove its own protection, after validation and before mutation.
+        let target = if options.tool == "install-hooks" && explicit_repo(paths, options)? {
+            hook_dir(paths, options, flag)?;
+            &paths.cwd
+        } else {
+            &paths.source
+        };
+        let out = services.hook_protection(target, flag);
         if out.0 != 0 {
             return Err(r::Error(
                 1,

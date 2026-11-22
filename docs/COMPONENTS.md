@@ -3308,6 +3308,7 @@ documentation references without its CI orchestration, installation or CLI-help 
 that probe once before installing: only a proven answer (exit 0) installs the quick
 hook; absent (1) and unknown (2) refuse with the probe's line and leave the existing
 hook untouched.
+`--repo PATH` converges (or with `--remove` withdraws) the hooks of another OMS source worktree root, which must hold `scripts/check.sh` to install; `--check-protection` then probes that target, and the default hook stays full.
 
 
 ### CI selection and execution

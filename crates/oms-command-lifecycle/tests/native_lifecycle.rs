@@ -2962,6 +2962,8 @@ esac
     fs::create_dir_all(other.join("crates/oms")).unwrap();
     fs::write(other.join("Cargo.toml"), "[workspace]\n").unwrap();
     fs::write(other.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    fs::create_dir_all(other.join("scripts")).unwrap();
+    fs::write(other.join("scripts/check.sh"), "#!/bin/sh\n").unwrap();
     let other_push = other.join(".git/hooks/pre-push");
     fs::write(&other_push, old_push).unwrap();
     let canonical_push = fs::read_to_string(&push_hook).unwrap();
@@ -3004,6 +3006,8 @@ esac
     fs::create_dir_all(linked.join("crates/oms")).unwrap();
     fs::write(linked.join("Cargo.toml"), "[workspace]\n").unwrap();
     fs::write(linked.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    fs::create_dir_all(linked.join("scripts")).unwrap();
+    fs::write(linked.join("scripts/check.sh"), "#!/bin/sh\n").unwrap();
     success(call(
         "install-hooks",
         &["--repo", linked.to_str().unwrap()],
@@ -3034,6 +3038,53 @@ esac
         0
     );
     assert!(!plain.join(".git/hooks/pre-push").exists());
+    // Protection binds to the validated selected target, never the canonical owner.
+    struct ProtectedOnly(PathBuf, RefCell<Vec<PathBuf>>);
+    impl Services for ProtectedOnly {
+        fn hook_protection(&self, source: &Path, _: &AtomicBool) -> Output {
+            self.1.borrow_mut().push(source.to_path_buf());
+            (i32::from(source != self.0), Vec::new(), Vec::new())
+        }
+    }
+    fn quick(repo: &Path) -> [&str; 4] {
+        [
+            "--quick",
+            "--check-protection",
+            "--repo",
+            repo.to_str().unwrap(),
+        ]
+    }
+    let wrong_owner = ProtectedOnly(fs::canonicalize(&source).unwrap(), RefCell::default());
+    assert_ne!(
+        call("install-hooks", &quick(&other), &source, &wrong_owner).0,
+        0
+    );
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), converged);
+    assert_ne!(
+        call("install-hooks", &quick(&plain), &source, &wrong_owner).0,
+        0
+    );
+    assert!(!plain.join(".git/hooks/pre-push").exists());
+    assert_ne!(
+        call(
+            "install-hooks",
+            &quick(&other.join("crates")),
+            &source,
+            &wrong_owner
+        )
+        .0,
+        0
+    );
+    assert!(wrong_owner.1.borrow().iter().all(|p| p.starts_with(&other)));
+    // Explicit installation needs the target's own gate script; removal does not.
+    fs::remove_file(other.join("scripts/check.sh")).unwrap();
+    assert_ne!(call("install-hooks", &repo_arg, &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), converged);
+    fs::write(other.join("scripts/check.sh"), "#!/bin/sh\n").unwrap();
+    let right = ProtectedOnly(fs::canonicalize(&other).unwrap(), RefCell::default());
+    success(call("install-hooks", &quick(&other), &source, &right));
+    assert!(!fs::read_to_string(&other_push).unwrap().contains("--full"));
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), canonical_push);
     success(call(
         "install-hooks",
         &["--remove", "--repo", other.to_str().unwrap()],
