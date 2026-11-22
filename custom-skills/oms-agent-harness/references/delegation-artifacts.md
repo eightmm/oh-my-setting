@@ -361,7 +361,8 @@ outside any plan task, `oms lease add PATH` / `oms lease check PATH` give adviso
 For an authorized landing, `oms scratch-worktree add --repo .` starts detached;
 create a local nontracking branch with `git checkout --no-track -b oms/<task>`,
 admit patches there and rebase on the remote target. No upstream is needed.
-After verification and authorized commit, `oms land` pushes the verified SHA.
+After verification and authorized commit, `oms land` publishes the verified SHA:
+a GitHub PR that merges only with `--merge`, else a direct push.
 Read `oms land status --repo PATH` (`active: true`), never infer activity from
 `pgrep`. A concurrent land exits 75 after `OMS_LOCK_TIMEOUT` (default 300s);
 retry after the active land finishes. The shared-checkout campaign exception

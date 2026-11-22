@@ -172,7 +172,7 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     ),
     (
         "land",
-        "Land a committed worktree on the shared branch as one detached job.",
+        "Gate a committed worktree and open its pull request (merge on request) as one detached job.",
     ),
     (
         "lease",

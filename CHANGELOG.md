@@ -6,6 +6,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ## [Unreleased]
 
+### Changed
+
+- `oms land` on a GitHub remote now opens a pull request and stops at
+  `awaiting-merge` after CI (exit 0); it merges only with `--merge`, and then
+  installs when GitHub's squash or merge commit holds the head's tree directly
+  on the checked base. The PR body carries Summary, Motivation (`--why` or the
+  commit bodies) and Verification sections, and the default head branch is
+  `oms/<type>/<slug>` from the commit subject. `--direct` to GitHub is limited
+  to a docs-only change of at most 2 lines, `OMS_LAND_MODE=auto` is gone, and
+  `agent-plan finish --landed-commit` accepts the head of a squash-merged PR.
+  The command guard refuses an agent's `git commit` on main/master and
+  `git push` to it outside a landing run. Global rules, templates and skills
+  describe this pull-request workflow for every OMS project.
+
 ### Added
 
 - The panel reader's Files view (`f`) shows a worker's declared scope and

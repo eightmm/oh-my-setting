@@ -37,7 +37,10 @@
 - Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
   and pushes only while HEAD and the tracked tree remain unchanged, without a
   duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`.
-  Installation needs successful CI for that same SHA plus full proof (`gate`
+  On GitHub it pushes a work branch, opens a PR and stops at `awaiting-merge`
+  after CI; `--merge`, only when the user asked to merge, merges and installs.
+  Installation needs successful CI for that same SHA (after a squash merge: an
+  identical tree on an unchanged base) plus full proof (`gate`
   + `lint` + `focused` + `native (ubuntu-latest, copy)`, with optional
   `rust (ubuntu-24.04)` / `rust (macos-latest)` / `native (macos-latest, auto)`).
 - CI scopes PRs and main pushes alike using pure-Rust jobs (Linux lint, Rust

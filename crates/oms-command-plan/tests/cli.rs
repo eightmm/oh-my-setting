@@ -2028,17 +2028,66 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
         false,
     )
     .unwrap();
-    call(
-        &[
-            "finish",
-            "--id",
-            "commit-product",
-            "--landed-commit",
-            &product_commit,
-        ],
-        false,
-    )
-    .unwrap();
+    let finish = [
+        "finish",
+        "--id",
+        "commit-product",
+        "--landed-commit",
+        &product_commit,
+    ];
+    let awaiting =
+        String::from_utf8_lossy(&land_receipt).replace("\"passed\"", "\"awaiting-merge\"");
+    fs::write(&receipt_path, awaiting).unwrap();
+    let refused = call(&finish, false).unwrap_err();
+    assert!(
+        refused
+            .message
+            .contains("pull request is open and unmerged"),
+        "{}",
+        refused.message
+    );
+    // A squash merge reaches the target as a new commit with the head's tree;
+    // only a receipt that names that merged commit proves the landing.
+    let squash = git_text(&[
+        "commit-tree",
+        &product_tree,
+        "-p",
+        &base_commit,
+        "-m",
+        "actual completion product (squash)",
+    ]);
+    git(&r, &["update-ref", "refs/remotes/fixture/main", &squash]);
+    fs::write(&receipt_path, &land_receipt).unwrap();
+    assert!(
+        call(&finish, false)
+            .unwrap_err()
+            .message
+            .contains("not reachable")
+    );
+    let merged = |commit: &str| {
+        String::from_utf8_lossy(&land_receipt).replace(
+            "\"push\":",
+            &format!("\"merge\":{{\"commit\":\"{commit}\",\"state\":\"MERGED\"}},\"push\":"),
+        )
+    };
+    let other_tree = git_text(&[
+        "commit-tree",
+        "HEAD^^{tree}",
+        "-p",
+        &base_commit,
+        "-m",
+        "other",
+    ]);
+    git(
+        &r,
+        &["update-ref", "refs/remotes/fixture/main", &other_tree],
+    );
+    fs::write(&receipt_path, merged(&other_tree)).unwrap();
+    assert!(call(&finish, false).is_err());
+    git(&r, &["update-ref", "refs/remotes/fixture/main", &squash]);
+    let land_receipt = merged(&squash).into_bytes();
+    fs::write(&receipt_path, &land_receipt).unwrap();
+    call(&finish, false).unwrap();
 
     let parent = json::parse(&fs::read(r.join(".oms/plan/tasks.json")).unwrap()).unwrap();
     let dependent = parent.get("tasks").get("commit-dependent");
@@ -2267,10 +2316,7 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     guard.check().unwrap();
     git(&r, &["update-ref", "-d", "refs/remotes/fixture/main"]);
     assert!(guard.check().unwrap_err().message.contains("not reachable"));
-    git(
-        &r,
-        &["update-ref", "refs/remotes/fixture/main", &product_commit],
-    );
+    git(&r, &["update-ref", "refs/remotes/fixture/main", &squash]);
     guard.check().unwrap();
     drop(guard);
     fs::write(r.join(artifact_path), b"tampered product report\n").unwrap();

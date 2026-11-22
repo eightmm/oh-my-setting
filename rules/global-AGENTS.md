@@ -126,3 +126,7 @@ Default: concise, scoped, evidence-driven.
 - Commit as `<type>: <description>` (feat, fix, refactor, docs, test, chore,
   perf, ci). Attribution trailers (Co-Authored-By, session link) allowed. For a PR, read `git diff <base>...HEAD`
   whole, with a test plan.
+- Never commit code/config on the default branch: one `<type>/<slug>` branch
+  per purpose/PR via `oms scratch-worktree`; test/lint/type/build first.
+- Authorized `oms land` opens a GitHub PR and waits for CI; `--merge` only if the
+  user asked, else report PR URL+summary. `--direct`: consented docs, <=2 lines.

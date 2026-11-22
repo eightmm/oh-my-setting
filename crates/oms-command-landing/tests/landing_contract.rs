@@ -486,7 +486,17 @@ fn parse_errors_exit_two() {
         (
             "land",
             vec!["--pr", "--local-merge", "--from", "x"],
-            "--pr and --local-merge are mutually exclusive",
+            "--pr, --direct and --local-merge are mutually exclusive",
+        ),
+        (
+            "land",
+            vec!["--pr", "--direct"],
+            "--pr, --direct and --local-merge are mutually exclusive",
+        ),
+        (
+            "land",
+            vec!["--pr", "--merge-method", "merge"],
+            "--merge-method requires --merge",
         ),
         (
             "land",
@@ -1651,15 +1661,43 @@ impl Isolated {
         self.git(&repo, &["push", "-q", "origin", "main"]);
         (repo, bare)
     }
+    /// Like `with_remote`, but the push destination reads as GitHub: a bare
+    /// repository inside the work tree at the relative path `github.com/owner/NAME.git`.
+    fn with_github_remote(&self, name: &str) -> (PathBuf, PathBuf) {
+        let repo = self.repo(name);
+        let bare = repo.join(format!("github.com/owner/{name}.git"));
+        fs::create_dir_all(&bare).expect("bare dir");
+        self.git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        fs::create_dir_all(repo.join(".git/info")).expect("info dir");
+        fs::write(repo.join(".git/info/exclude"), "/github.com/\n").expect("exclude");
+        let url = format!("github.com/owner/{name}.git");
+        self.git(&repo, &["remote", "add", "origin", &url]);
+        self.git(&repo, &["push", "-q", "origin", "main"]);
+        strip_group_world_write(&repo);
+        (repo, bare)
+    }
     fn commit_file(&self, repo: &Path, file: &str) -> String {
-        fs::write(repo.join(file), format!("{file}\n")).expect("write");
+        self.commit_as(repo, file, &format!("{file}\n"), &[&format!("add {file}")])
+    }
+    /// Commit `text` as `file`; each message is one `-m` paragraph (subject, body...).
+    fn commit_as(&self, repo: &Path, file: &str, text: &str, message: &[&str]) -> String {
+        let path = repo.join(file);
+        fs::create_dir_all(path.parent().unwrap()).expect("parent");
+        fs::write(path, text).expect("write");
         self.git(repo, &["add", file]);
-        self.git(repo, &["commit", "-q", "-m", &format!("add {file}")]);
+        let mut args = vec!["commit", "-q"];
+        for m in message {
+            args.extend(["-m", m]);
+        }
+        self.git(repo, &args);
         strip_group_world_write(repo);
         self.git_out(repo, &["rev-parse", "HEAD"])
     }
     /// Fake `gh`: logs argv, answers JSON queries from the bare remote, and
-    /// reports CI as `ci` for the exact `--commit` it is asked about.
+    /// reports CI as `ci` for the exact `--commit` it is asked about. It keeps
+    /// the created PR body in `gh.pr.body`. With `gh.pr.squash` present, `pr
+    /// merge` squashes the head tree onto main; `gh.pr.moved` first moves main
+    /// by one empty commit, as a concurrent merge would.
     fn fake_gh(&self, bare: &Path, ci: &str) -> (PathBuf, PathBuf) {
         let log = self.home.path().join("gh.log");
         let state = self.home.path().join("gh.pr");
@@ -1667,23 +1705,34 @@ impl Isolated {
         let body = format!(
             r#"#!{bash}
 printf '%s\n' "$*" >> '{log}'
-head=; commit=; event=
+head=; commit=; event=; body=; match=
 args=("$@")
 for ((i = 0; i < ${{#args[@]}}; i++)); do
   case "${{args[i]}}" in
     --head) head=${{args[i+1]}} ;;
     --commit) commit=${{args[i+1]}} ;;
     --event) event=${{args[i+1]}} ;;
+    --body-file) body=${{args[i+1]}} ;;
+    --match-head-commit) match=${{args[i+1]}} ;;
   esac
 done
+squash() {{
+  git --git-dir='{bare}' -c user.name=T -c user.email=t@example.invalid commit-tree "$@" -p refs/heads/main -m squash
+}}
 case "$1 $2" in
   "pr list")
     if [ -f '{state}' ]; then
       tip=$(git --git-dir='{bare}' rev-parse "refs/heads/$head")
       printf '[{{"number":7,"url":"https://example.invalid/pull/7","headRefOid":"%s"}}]\n' "$tip"
     else echo '[]'; fi ;;
-  "pr create") : > '{state}'; echo https://example.invalid/pull/7 ;;
-  "pr merge") ;;
+  "pr create") : > '{state}'; IFS= read -rd '' text < "$body"; printf '%s' "$text" > '{state}.body'; echo https://example.invalid/pull/7 ;;
+  "pr merge")
+    if [ -f '{state}.moved' ]; then
+      git --git-dir='{bare}' update-ref refs/heads/main "$(squash 'refs/heads/main^{{tree}}')"
+    fi
+    if [ -f '{state}.squash' ]; then
+      git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$match^{{tree}}")"
+    fi ;;
   "pr view") printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)" ;;
   "run list")
     if [ "$event" = pull_request ]; then
@@ -1704,48 +1753,96 @@ esac
 }
 
 #[test]
-fn land_pr_pushes_feature_branch_and_merges_after_exact_sha_ci() {
+fn land_to_github_opens_a_pr_and_merges_only_with_merge() {
     let iso = Isolated::new();
-    let (repo, bare) = iso.with_remote("pr");
-    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
-    let head = iso.commit_file(&repo, "feat.txt");
+    let (repo, bare) = iso.with_github_remote("pr");
+    let head = iso.commit_as(
+        &repo,
+        "feat.txt",
+        "feat\n",
+        &["feat: Add Feature X, now!", "Users asked for X."],
+    );
     let main_before = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
     let (gh, log) = iso.fake_gh(&bare, "success");
-    let r = iso.run_with_services(
-        "land",
-        &repo,
-        &["--pr", "--gate", "true", "--ignore-siblings", "--no-update"],
-        &[("OMS_GH_BIN", gh.to_str().unwrap())],
-    );
+    let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
+    // the gate passes once only, so a resumed land must reuse its result
+    let gate = r#"bash -c '! test -e "$HOME/gate-ran" && : > "$HOME/gate-ran"'"#;
+    let args = ["--gate", gate, "--ignore-siblings", "--no-update"];
+    // the default on a GitHub destination opens a PR and never merges
+    let r = iso.run_with_services("land", &repo, &args, &env);
     assert_eq!(r.0, 0, "{r:?}");
-    assert!(r.1.contains("merged PR #7 (squash)"), "{r:?}");
+    assert!(
+        r.1.contains("pull request #7 open: https://example.invalid/pull/7; CI success; not merged \u{2014} pass --merge only when the user asked to merge"),
+        "{r:?}"
+    );
     assert_eq!(
         iso.git_out(&bare, &["rev-parse", "refs/heads/main"]),
         main_before
     );
-    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
+    let branch = "refs/heads/oms/feat/add-feature-x-now";
+    assert_eq!(iso.git_out(&bare, &["rev-parse", branch]), head);
+    let calls = fs::read_to_string(&log).expect("gh log");
+    assert!(
+        calls.contains("pr create") && !calls.contains("pr merge"),
+        "{calls}"
+    );
+    let body = fs::read_to_string(iso.home.path().join("gh.pr.body")).expect("PR body");
+    let short = iso.git_out(&repo, &["rev-parse", "--short", "HEAD"]);
+    assert_eq!(
+        body,
+        format!(
+            "## Summary\n- {short} feat: Add Feature X, now!\n\n## Motivation\nUsers asked for X.\n\n## Verification\n- Local gate `{gate}` passed (scope unknown) on exact head {head}\n- `oms land` checks CI on this exact head; merge only with explicit `--merge`\n"
+        )
+    );
+    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+    for needle in [
+        "\"state\": \"awaiting-merge\"",
+        "\"reason\": \"awaiting-merge\"",
+    ] {
+        assert!(status.contains(needle), "{needle}: {status}");
+    }
+    // --merge (any method) resumes the same receipt and merges after exact-SHA CI
+    let merge = ["--merge", "--merge-method", "merge"];
+    let r = iso.run_with_services("land", &repo, &[&args[..], &merge].concat(), &env);
+    assert_eq!(r.0, 0, "{r:?}");
+    assert!(r.1.contains("merged PR #7 (merge)"), "{r:?}");
     let calls = fs::read_to_string(log).expect("gh log");
-    let create = calls.find("pr create").expect("pr create");
     let ci = calls
-        .find(&format!("--commit {head} --event pull_request"))
+        .rfind(&format!("--commit {head} --event pull_request"))
         .expect("exact-SHA CI query");
     let merge = calls
         .find(&format!(
-            "pr merge 7 --repo {} --squash --delete-branch --match-head-commit {head}",
-            bare.to_string_lossy().trim_end_matches(".git")
+            "pr merge 7 --repo github.com/owner/pr --merge --delete-branch --match-head-commit {head}"
         ))
         .expect("pr merge");
-    assert!(create < ci && ci < merge, "{calls}");
+    assert!(
+        ci < merge && calls.matches("pr create").count() == 1,
+        "{calls}"
+    );
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     for needle in [
         "\"mode\": \"pr\"",
-        "\"head_branch\": \"feat\"",
+        "\"head_branch\": \"oms/feat/add-feature-x-now\"",
         "\"pr_number\": 7",
         "\"state\": \"passed\"",
         "\"state\": \"MERGED\"",
     ] {
         assert!(status.contains(needle), "{needle}: {status}");
     }
+    // the resumed merge keeps the first run's push row, which plan completion
+    // reads as the landed range
+    let row = V::parse(status.as_bytes()).expect("status json");
+    assert_eq!(row.get("push").get("rc"), &0usize.into(), "{status}");
+    assert_eq!(row.get("push").get("moved"), &1usize.into(), "{status}");
+    assert_eq!(
+        row.get("push").get("base").text(),
+        Some(main_before.as_str())
+    );
+    let merged = row.get("merge").get("commit").text().unwrap_or_default();
+    assert!(
+        merged.len() == 40 && merged.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{status}"
+    );
 }
 
 #[test]
@@ -1757,7 +1854,14 @@ fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
     let (gh, log) = iso.fake_gh(&bare, "failure");
     let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
     let args = ["--pr", "--gate", "true", "--ignore-siblings", "--no-update"];
+    // a subject-only commit carries no motivation; refused before the gate
     let r = iso.run_with_services("land", &repo, &args, &env);
+    assert_refused(
+        &r,
+        "a pull request needs a motivation: pass --why TEXT or write a commit body",
+    );
+    let args = [&args[..], &["--why", "fixture"]].concat();
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--merge"]].concat(), &env);
     assert_eq!(r.0, 1, "{r:?}");
     assert!(r.1.contains("CI failure"), "{r:?}");
     let calls = fs::read_to_string(log).expect("gh log");
@@ -1773,13 +1877,28 @@ fn land_pr_refuses_to_merge_after_failed_ci_or_onto_the_target() {
         &env,
     );
     assert_refused(&r, "PR head branch must differ from the target branch");
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &[&args[..], &["--merge", "--ci-wait", "0"]].concat(),
+        &env,
+    );
+    assert_refused(&r, "--merge needs --ci-wait above zero");
+    // shared sync and receipt handoff act only after a real merge
+    let r = iso.run_with_services(
+        "land",
+        &repo,
+        &[&args[..], &["--sync-shared", "shared"]].concat(),
+        &env,
+    );
+    assert_refused(&r, "need --merge in pull-request mode");
     let r = iso.run_env(
         "land",
         &repo,
         &["--gate", "true"],
-        &[("OMS_LAND_MODE", "sometimes")],
+        &[("OMS_LAND_MODE", "auto")],
     );
-    assert_refused(&r, "OMS_LAND_MODE must be pr, auto or direct");
+    assert_refused(&r, "OMS_LAND_MODE must be pr or direct");
 }
 
 #[test]
@@ -1794,8 +1913,16 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
     let head = iso.commit_file(&repo, "feat.txt");
     let (gh, log) = iso.fake_gh(&bare, "success");
     let env = [("OMS_GH_BIN", gh.to_str().unwrap())];
-    let args = ["--pr", "--gate", "true", "--ignore-siblings", "--no-update"];
-    let r = iso.run_with_services("land", &repo, &args, &env);
+    let args = [
+        "--pr",
+        "--why",
+        "fixture",
+        "--gate",
+        "true",
+        "--ignore-siblings",
+        "--no-update",
+    ];
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--merge"]].concat(), &env);
     assert_eq!(r.0, 1, "{r:?}");
     assert!(r.1.contains("diverged"), "{r:?}");
     assert_ne!(iso.git_out(&bare, &["rev-parse", "refs/heads/feat"]), head);
@@ -1807,30 +1934,71 @@ fn land_pr_refuses_diverged_remote_branch_and_ci_wait_zero_leaves_pr_open() {
         &env,
     );
     assert_eq!(r.0, 0, "{r:?}");
-    assert!(r.1.contains("merge skipped because --ci-wait=0"), "{r:?}");
+    assert!(r.1.contains("CI skipped; not merged"), "{r:?}");
     let calls = fs::read_to_string(log).expect("gh log");
     assert!(
-        calls.contains("pr create") && !calls.contains("pr merge"),
+        calls.contains("pr create --repo")
+            && calls.contains("--head feat --title")
+            && !calls.contains("pr merge"),
         "{calls}"
     );
 }
 
 #[test]
-fn land_pr_defers_install_when_merge_commit_differs_from_head() {
-    let iso = Isolated::new();
-    let (repo, bare) = iso.with_remote("prsquash");
-    iso.git(&repo, &["checkout", "-q", "-b", "feat"]);
-    iso.commit_file(&repo, "feat.txt");
-    let (gh, _) = iso.fake_gh(&bare, "success");
-    let r = iso.run_with_services(
-        "land",
-        &repo,
-        &["--pr", "--gate", "true", "--ignore-siblings"],
-        &[("OMS_GH_BIN", gh.to_str().unwrap())],
-    );
-    assert_eq!(r.0, 0, "{r:?}");
-    let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
-    assert!(status.contains("merge-commit-pending-ci"), "{status}");
+fn land_pr_installs_a_tree_equal_squash_and_defers_when_the_base_moved() {
+    for moved in [false, true] {
+        let iso = Isolated::new();
+        let (repo, bare) = iso.with_github_remote("prsquash");
+        iso.commit_as(
+            &repo,
+            "scripts/check.sh",
+            "exit 0\n",
+            &["fix: add gate", "Fixture gate."],
+        );
+        let (gh, log) = iso.fake_gh(&bare, "success");
+        fs::write(iso.home.path().join("gh.pr.squash"), "").expect("squash flag");
+        if moved {
+            fs::write(iso.home.path().join("gh.pr.moved"), "").expect("moved flag");
+        }
+        let r = iso.run_with_services(
+            "land",
+            &repo,
+            &[
+                "--merge",
+                "--gate",
+                "bash scripts/check.sh --parallel",
+                "--ignore-siblings",
+            ],
+            &[("OMS_GH_BIN", gh.to_str().unwrap())],
+        );
+        assert_eq!(r.0, 0, "{r:?}");
+        let calls = fs::read_to_string(&log).expect("gh log");
+        assert!(calls.contains("--squash --delete-branch"), "{calls}");
+        let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
+        let row = V::parse(status.as_bytes()).expect("status json");
+        assert_eq!(
+            row.get("merge").get("tree_equal"),
+            &V::Bool(true),
+            "{status}"
+        );
+        if moved {
+            assert_eq!(
+                row.get("update").get("reason").text(),
+                Some("merge-commit-pending-ci"),
+                "{status}"
+            );
+        } else {
+            assert_eq!(row.get("update").get("rc"), &0usize.into(), "{status}");
+            assert_eq!(row.get("state").text(), Some("passed"), "{status}");
+            assert_eq!(row.get("push").get("moved"), &1usize.into(), "{status}");
+            let merged = row.get("merge").get("commit").text().unwrap_or_default();
+            assert_eq!(row.get("merge").get("state").text(), Some("MERGED"));
+            assert_eq!(
+                iso.git_out(&repo, &["rev-parse", &format!("{merged}^")]),
+                row.get("push").get("base").text().unwrap_or_default()
+            );
+        }
+    }
 }
 
 #[test]
@@ -1905,6 +2073,23 @@ fn land_direct_still_gates_then_pushes_the_target() {
     assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
     let (_, status, _) = iso.run("land", &repo, &["status", "--json"]);
     assert!(status.contains("\"mode\": \"direct\""), "{status}");
+    // a GitHub target takes a direct push only for a docs-only change of at most 2 lines
+    let (repo, bare) = iso.with_github_remote("directgh");
+    let main = iso.git_out(&bare, &["rev-parse", "refs/heads/main"]);
+    let refusal = "direct land to main is limited to a docs-only change of at most 2 lines; land without --direct to open a pull request";
+    iso.commit_file(&repo, "code.rs");
+    let r = iso.run_with_services("land", &repo, &args, &[("OMS_LAND_MODE", "direct")]);
+    assert_refused(&r, refusal);
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), main);
+    iso.git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+    iso.commit_as(&repo, "README.md", "one\ntwo\nthree\n", &["docs: grow"]);
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--direct"]].concat(), &[]);
+    assert_refused(&r, refusal);
+    iso.git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+    let head = iso.commit_as(&repo, "README.md", "one\ntwo\n", &["docs: note"]);
+    let r = iso.run_with_services("land", &repo, &[&args[..], &["--direct"]].concat(), &[]);
+    assert_eq!(r.0, 0, "{r:?}");
+    assert_eq!(iso.git_out(&bare, &["rev-parse", "refs/heads/main"]), head);
 }
 
 /// Multi-repo manifest fixture: repo-app depends on repo-core, repo-docs is

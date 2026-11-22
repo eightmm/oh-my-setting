@@ -11,9 +11,12 @@ Ordinary docs use reference checks; critical changes or
 uncertain impact select full coverage. Shell lint requires ShellCheck.
 Run `bash scripts/check.sh --preflight` first: it reports missing ShellCheck, the pinned Rust toolchain, or crate dependencies without installing anything.
 
-When publication is authorized, finish the scoped commits and run `oms land`.
-It owns the gate, unchanged-tree push, CI receipt and eligible installation
-update. Do not run a duplicate full gate first. See
+Commit code and config changes on a work branch in an isolated worktree, not
+on `main`. When
+publication is authorized, finish the scoped commits and run `oms land`.
+It owns the gate, unchanged-tree push, pull request and CI receipt; it merges
+and updates an eligible installation only with `--merge`, which is passed when
+the maintainer asked to merge. Do not run a duplicate full gate first. See
 [verification and release](docs/COMPONENTS.md#verification-and-release) for CI
 scope, installation proof and direct-push requirements.
 

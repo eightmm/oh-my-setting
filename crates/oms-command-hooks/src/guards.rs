@@ -214,6 +214,88 @@ fn git_rule(sub: &str, rest: &[String], base: Option<&Path>, land_active: bool) 
             "oms land --pr or oms land --local-merge --from <branch>",
         ));
     }
+    // Default-branch work goes through a pull request (`oms land`); only the
+    // landing run itself, which pushes with its own exact-head checks, may
+    // write main/master directly. A repository with no commit or no remote
+    // yet, and the first publish of a default branch, have no PR to target.
+    let repo = base.and_then(|b| root(b, b));
+    let common = repo.as_deref().and_then(git_directories).map(|(_, c)| c);
+    let branch = match repo.as_deref().and_then(head_ref) {
+        Some(HeadRef::Branch(name)) => name,
+        _ => String::new(),
+    };
+    let protected = |name: &str| {
+        let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+        ["main", "master"].contains(&name).then(|| name.to_owned())
+    };
+    let known = |name: &str| {
+        common.as_ref().is_some_and(|c| {
+            c.join(name).is_file()
+                || read(&c.join("packed-refs"), INPUT_MAX).is_ok_and(|p| {
+                    String::from_utf8_lossy(&p)
+                        .lines()
+                        .any(|l| l.split_once(' ').is_some_and(|(_, r)| r == name))
+                })
+        })
+    };
+    let instead = "commit on a work branch in `oms scratch-worktree`, then `oms land` (opens a PR); `oms land --direct` only for a consented docs-only change of at most 2 lines";
+    if !land_active
+        && sub == "commit"
+        && !longs.contains("--dry-run")
+        && protected(&branch).is_some()
+        && repo.as_deref().and_then(head).is_some()
+        && common.as_ref().is_some_and(|c| {
+            read(&c.join("config"), INPUT_MAX)
+                .is_ok_and(|raw| String::from_utf8_lossy(&raw).contains("[remote \""))
+        })
+    {
+        return Some(Verdict::new(
+            "git-commit-protected-branch",
+            "git commit on main/master bypasses the pull-request workflow",
+            instead,
+        ));
+    }
+    if !land_active && sub == "push" && !longs.contains("--dry-run") && !letters.contains(&'n') {
+        let operands = operands(rest);
+        let remote = operands.first().copied().unwrap_or("origin");
+        let specs = operands.iter().skip(1).copied().collect::<Vec<_>>();
+        let destinations: Vec<String> = if longs.contains("--all") || longs.contains("--mirror") {
+            ["main", "master"]
+                .into_iter()
+                .filter(|b| known(&format!("refs/heads/{b}")))
+                .map(str::to_owned)
+                .collect()
+        } else if specs.is_empty() {
+            protected(&branch)
+                .filter(|_| !longs.contains("--tags"))
+                .into_iter()
+                .collect()
+        } else {
+            specs
+                .iter()
+                .filter_map(|spec| {
+                    let spec = spec.trim_start_matches('+');
+                    match spec.split_once(':') {
+                        Some((_, destination)) => protected(destination),
+                        None if spec == "HEAD" => protected(&branch),
+                        None => protected(spec),
+                    }
+                })
+                .collect()
+        };
+        // Only a URL or a remote whose default branch was fetched before can
+        // be overwritten; an absent tracking ref is the initial publish.
+        let published = |b: &String| {
+            remote.contains(['/', ':']) || known(&format!("refs/remotes/{remote}/{b}"))
+        };
+        if destinations.iter().any(published) {
+            return Some(Verdict::new(
+                "git-push-protected-branch",
+                "git push to main/master bypasses the pull-request workflow",
+                instead,
+            ));
+        }
+    }
     if sub == "reset" && longs.contains("--hard") {
         return Some(Verdict::new(
             "git-reset-hard",
@@ -1031,6 +1113,72 @@ mod tests {
             for flag in ["--abort", "--quit", "--continue"] {
                 assert!(git_rule("merge", &words(&[flag]), Some(&dir), false).is_none());
             }
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn commit_and_push_to_a_protected_branch_need_the_pull_request_workflow() {
+        let oid = "1".repeat(40);
+        let published = |head: &str| {
+            let dir = checkout(head);
+            for name in [
+                "refs/heads/main",
+                "refs/heads/feat/x",
+                "refs/remotes/origin/main",
+            ] {
+                fs::create_dir_all(dir.join(".git").join(name).parent().unwrap()).unwrap();
+                fs::write(dir.join(".git").join(name), format!("{oid}\n")).unwrap();
+            }
+            fs::write(dir.join(".git/config"), "[remote \"origin\"]\n").unwrap();
+            dir
+        };
+        let main = published("ref: refs/heads/main\n");
+        let feat = published("ref: refs/heads/feat/x\n");
+        let fresh = checkout("ref: refs/heads/main\n");
+        let rule = |sub: &str, args: &[&str], dir: &PathBuf, land: bool| {
+            git_rule(sub, &words(args), Some(dir), land).map(|v| v.rule)
+        };
+        let commit = Some("git-commit-protected-branch");
+        let push = Some("git-push-protected-branch");
+        assert_eq!(rule("commit", &["-m", "x"], &main, false), commit);
+        assert_eq!(rule("commit", &["-m", "x"], &main, true), None);
+        assert_eq!(rule("commit", &["--dry-run"], &main, false), None);
+        assert_eq!(rule("commit", &["-m", "x"], &feat, false), None);
+        // an unborn or remote-less repository has no pull request to open yet
+        assert_eq!(rule("commit", &["-m", "x"], &fresh, false), None);
+        fs::write(fresh.join(".git/config"), "[core]\n").unwrap();
+        fs::create_dir_all(fresh.join(".git/refs/heads")).unwrap();
+        fs::write(fresh.join(".git/refs/heads/main"), format!("{oid}\n")).unwrap();
+        assert_eq!(rule("commit", &["-m", "x"], &fresh, false), None);
+        for args in [
+            &[][..],
+            &["origin"],
+            &["origin", "HEAD"],
+            &["-u", "origin", "main"],
+            &["origin", "+feat/x:main"],
+            &["--all", "origin"],
+            &["git@example.invalid:o/r.git", "HEAD:refs/heads/master"],
+        ] {
+            assert_eq!(rule("push", args, &main, false), push, "{args:?}");
+            assert_eq!(rule("push", args, &main, true), None, "{args:?}");
+        }
+        for args in [
+            &["origin", "HEAD"][..],
+            &["-u", "origin", "feat/x"],
+            &["origin", "main:feat/x"],
+        ] {
+            assert_eq!(rule("push", args, &feat, false), None, "{args:?}");
+        }
+        assert_eq!(rule("push", &["origin", "main"], &feat, false), push);
+        assert_eq!(rule("push", &["--tags", "origin"], &main, false), None);
+        assert_eq!(rule("push", &["-n", "origin", "main"], &main, false), None);
+        // the first publish of a default branch has no remote branch to target
+        assert_eq!(rule("push", &["-u", "origin", "main"], &fresh, false), None);
+        assert_eq!(rule("push", &["origin", "HEAD:master"], &main, false), None);
+        let found = git_rule("push", &words(&["origin", "main"]), Some(&main), false).unwrap();
+        assert!(found.instead.contains("oms land"));
+        for dir in [main, feat, fresh] {
             fs::remove_dir_all(dir).unwrap();
         }
     }
