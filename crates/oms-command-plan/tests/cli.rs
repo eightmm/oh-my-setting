@@ -2556,7 +2556,10 @@ fn add_batch_is_atomic_replay_safe_and_cas_bound() {
     assert_ne!(plan_sha(), pre_batch_sha);
     // Exact replay with the ORIGINAL pre-batch token succeeds and preserves the claim.
     let (c, o, e) = apply(&good, &pre_batch_sha);
-    assert_eq!(c, 0, "replay after claim with original token: {e}");
+    assert_eq!(
+        c, 0,
+        "replay after claim with the original pre-batch sha: {e}"
+    );
     assert!(o.contains("already applied"), "{o}");
     assert_eq!(after, fs::read(&plan_path).unwrap());
     // Syntactically invalid or missing plan CAS token is rejected BEFORE replay.
