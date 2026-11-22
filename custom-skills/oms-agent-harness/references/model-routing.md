@@ -19,7 +19,7 @@ Before an authorized delegation, choose from repository evidence:
 
 | Work | Handling |
 |---|---|
-| File existence, known lookup, syntax or a known small fix | Run the local tool directly. |
+| File existence, known lookup, syntax or a known small fix | Run the local tool directly. A panel Main routes the fix to a worker. |
 | Exploration or documentation research | Bound a read-only brief to the missing fact and require source references; reuse existing findings. |
 | Implementation with known paths, constraints and verifier | Use the routine worker route when substantial enough to justify a worker. |
 | Bounded implementation needing further investigation | Keep the standard worker route; return unresolved decisions to the parent. |

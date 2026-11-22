@@ -30,16 +30,19 @@ instructions just because they were recorded.
 
 ## Roles and authority
 
-Ordinary work can be completed by Main, an existing provider Lead, or a bounded
-direct worker. A Team is useful when a task needs several coordinated members;
-a separate Lead or native child is not required for every call. Do not route
-simple work to a direct worker solely because it is simple: context continuity,
+Ordinary work is completed by an existing provider Lead or a bounded direct
+worker. An Overall Main running a team manages only: it plans, assigns, reviews
+and decides, and routes every repository edit to a Lead or worker (see
+[Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)); a solo session without a team
+still does its own work. A Team is useful when a task needs several coordinated
+members; a separate Lead or native child is not required for every call. Between
+a Lead and a direct worker, do not choose by size alone: context continuity,
 isolation, independent verification and the result contract determine the useful
 path. Provider sessions and managed Teams remain different execution paths.
 
 | Concept | Existing responsibility | Do not infer |
 |---|---|---|
-| Overall Main | Root owner for the room and integration target; decides within the user's authority | A provider coordinator can approve or publish on its own |
+| Overall Main | Root owner for the room and integration target; manages and decides within the user's authority | A provider coordinator can approve or publish on its own, or Main edits the repository itself |
 | Native provider orchestrator | Interactive provider session bound to the current Main | Managed Team admission, hard child limits or verified descendant cleanup |
 | Managed Team Lead | Scoped role submitting requests for the parent to validate | A second root owner or permission to launch arbitrary nested Teams |
 | Direct Worker / reviewer | Main assigns bounded work or independent evidence through the existing parent front door | Parentage from a shared provider, self-acceptance, publication rights or independence from a role name |

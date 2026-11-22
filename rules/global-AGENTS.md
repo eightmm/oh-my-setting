@@ -97,10 +97,13 @@ Default: concise, scoped, evidence-driven.
 
 ## Multi-Agent Work
 
-- Overall Main owns scope, admission, verification and publication. An explicitly
-  authorized Provider Lead may coordinate native subagents within inherited
-  scope, tool permissions, provider and spending limits. Leaf Workers cannot
-  recursively delegate or widen authority; a role label grants no capability.
+- Overall Main owns scope, admission, verification and publication. Running a
+  team (panel Main, control tower), it manages only and routes every repository
+  edit to a worker; a session without a team does its own work. An explicitly
+  authorized Provider Lead leads one assignment, coordinating native subagents
+  within inherited scope, tool permissions, provider and spending limits. Leaf
+  Workers cannot recursively delegate or widen authority; a role label grants no
+  capability.
 - Delegate when parallel work, independent review or noisy source reading
   justifies it within existing authority; keep small lookups local. Reading
   workers return coverage, gaps and source anchors; their parent checks decisive

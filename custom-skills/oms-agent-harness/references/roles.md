@@ -1,8 +1,9 @@
 # Worker Roles
 
 Use one strategy role per leaf Worker. Overall Main and Provider Lead authority
-comes from the assignment. Resolve project override, then global override,
-then bundled default:
+comes from the assignment; what each layer manages, integrates and produces is
+in [coordination-layers.md](coordination-layers.md). Resolve project override,
+then global override, then bundled default:
 
 ```bash
 oms agent-role --repo . --name repo-auditor resolve
@@ -148,7 +149,8 @@ For panel tasks, choose the role from source evidence: security-auditor for
 risky authentication, permissions, sensitive data, signals, install, deletion,
 destructive operations, scripts or hooks; verifier before declaring completion
 (original request against final result); architect for structural decisions;
-integrator for merging/conflicts; performance-engineer when measurement is
+integrator for merging/conflicts (a panel Main routes these edits here instead
+of making them); performance-engineer when measurement is
 needed; documenter at completion; release-engineer for deployment. Use each
 when its trigger applies, one at a time, rather than invoking every specialty.
 

@@ -8,7 +8,7 @@ Prepare scoped branch integration and resolve authorized conflicts.
 
 ## When used
 
-Use when changes must be combined. Inspect both sides and ownership; preserve unrelated work and public contracts.
+Use when changes must be combined. A managing Overall Main sends conflict and cross-slice glue edits here instead of making them. Inspect both sides and ownership; preserve unrelated work and public contracts.
 
 ## Evidence and output
 

@@ -57,15 +57,17 @@ Parent가 불명확한 legacy row는 unbound로 남기며, provider가 같다는
 
 | 대상 | 실행 책임과 실제 관계 | 작업 목록과 세션에 표시할 것 |
 |---|---|---|
-| Main의 직접 작업 | Overall Main이 수행 | Main 처리 중인 task; 가짜 Worker/Lead를 만들지 않음 |
+| Main의 직접 작업 | Overall Main이 수행하는 관리 작업(증거 검토·검증 실행·admission)과 사용자가 명시한 직접 변경 | Main 처리 중인 task; 가짜 Worker/Lead를 만들지 않음 |
 | Direct Worker / reviewer | Overall Main이 기존 parent-only dispatch로 배정 | Main 아래 해당 task와 attempt; provider는 속성 |
 | Native Provider Lead | Overall Main에게 받은 범위의 지속 native session | 배정된 task와 bound session; Lead가 직접 완료할 수도 있음 |
 | Native child | 지원되는 native surface가 입증한 Lead/child 관계 | 해당 Lead의 task 상세; 관계·실행 관측이 없으면 unreported |
 | Managed Team member | 기존 TeamSpec과 enrollment가 입증한 관계 | 해당 task의 Team 상세; native pane을 이 관계로 자동 승격하지 않음 |
 
 일반 요청마다 Lead/direct 중 하나를 사용자에게 고르게 하지 않는다. Main은 기존 대화 맥락,
-격리·독립 검증·결과 계약과 지원 capability에 맞춰 경로를 고른다. 작은 일은 Main이나
-기존 Lead가 직접 끝낼 수 있다. '단순 작업이면 direct' 또는 '항상 Lead를 경유'를 강제하지 않는다.
+격리·독립 검증·결과 계약과 지원 capability에 맞춰 경로를 고른다. Main은
+[관리 전용](TEAM-ORCHESTRATION-MAIN-POLICY.md)이므로 저장소 변경은 작은 것도 직접 하지 않는다.
+작은 일은 기존 Lead가 직접 끝내거나 direct worker에 배정한다. Lead와 direct worker 사이에서
+'단순 작업이면 direct' 또는 '항상 Lead를 경유'를 강제하지 않는다.
 OMS worker 배정은 Overall Main의 parent front door가 담당한다. Lead가 추가 OMS 작업을
 필요로 하면 Main에 요청하고, 직접 OMS worker를 재귀 dispatch하지 않는다. 허용된 native
 child 사용은 이 OMS 배정 권한과 별개이며 inherited scope와 승인 경계를 유지한다.
