@@ -524,6 +524,10 @@ impl Root {
     /// calls do not delete it. Cleanup checks identity and only unlinks this
     /// operation's own single-link temporary name. Publication errors and
     /// published durability errors MUST be reconciled before any retry.
+    ///
+    /// `Unchanged` never fsyncs, so a retry after a `Published` or
+    /// `PublicationUncertain` error must call [`Self::sync_parent`] before
+    /// reporting success.
     pub fn atomic_mutate<E>(
         &self,
         path: &Path,
@@ -531,6 +535,13 @@ impl Root {
         transform: impl FnOnce(&[u8]) -> Result<Vec<u8>, E>,
     ) -> Result<MutationOutcome, MutationError<E>> {
         self.mutate_with(path, options, transform, |_| Ok(()))
+    }
+
+    /// Persists the directory entry of an existing destination through the same
+    /// pinned, no-follow ancestry as `atomic_mutate`; it never creates anything.
+    pub fn sync_parent(&self, path: &Path) -> Result<(), ByteError> {
+        let anchor = Anchor::open(self, path, false, &mut |_| Ok(()))?;
+        directory_sync(fs::fsync(anchor.parent()))
     }
 
     fn mutate_with<E>(

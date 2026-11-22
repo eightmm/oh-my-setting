@@ -1107,6 +1107,7 @@ fn antigravity(args: &Args, id: &str) -> Result<Output> {
         config: &config,
         default_claude: &default_claude,
         placement: &|path| home_placement(path, None),
+        mutate: &real_mutate,
     };
     agy_locked(args, id, &host, || (), || ())
 }
@@ -1115,6 +1116,21 @@ struct AgyHost<'a> {
     config: &'a Path,
     default_claude: &'a Path,
     placement: &'a dyn Fn(&Path) -> Result<()>,
+    /// The destination write; tests wrap it to inject publication outcomes.
+    mutate: &'a AgyMutate<'a>,
+}
+type AgyMutate<'a> = dyn Fn(
+        &oms_safe_fs::Root,
+        &Path,
+        &[u8],
+        Option<&[u8]>,
+    ) -> std::result::Result<oms_safe_fs::MutationOutcome, oms_safe_fs::MutationError<Error>>
+    + 'a;
+/// A failed destination write. `before` is true only when the helper proved
+/// no replacement was attempted; otherwise the new bytes may be visible.
+struct WriteFail {
+    before: bool,
+    message: String,
 }
 /// The locked transaction; `before_publish` runs after every validation and
 /// before the publication recheck, and `between_writes` runs after the first
@@ -1170,22 +1186,37 @@ fn agy_locked(
         }
         rows.retain(|r| r["id"] != id);
         receipts.retain(|r| r["id"] != id);
-        let registry_written = write_private(&root, &registry_path, &registry, old_registry)?;
+        let registry_written = write_private(host, &root, &registry_path, &registry, old_registry)
+            .map_err(|f| {
+                first_write_error(
+                    f,
+                    AGY_REGISTRY,
+                    AGY_RECEIPT,
+                    "home and ADC profile were not modified",
+                    "--remove",
+                )
+            })?;
         between_writes();
-        if let Err(err) = write_private(&root, &receipt_path, &json!(receipts), old_receipt) {
-            if let Some(written) = registry_written.as_deref() {
-                if rollback_private(&root, &registry_path, old_registry, written) {
+        if let Err(err) = write_private(host, &root, &receipt_path, &json!(receipts), old_receipt) {
+            if err.before {
+                if let Some(written) = registry_written.as_deref() {
+                    if rollback_private(host, &root, &registry_path, old_registry, written) {
+                        return Err(error(format!(
+                            "removal failed while writing {AGY_RECEIPT} ({}); rolled back {AGY_REGISTRY}; home and ADC profile were not modified",
+                            err.message
+                        )));
+                    }
                     return Err(error(format!(
-                        "removal failed while writing {AGY_RECEIPT} ({}); rolled back {AGY_REGISTRY}; home and ADC profile were not modified",
+                        "partial publication failure: {AGY_REGISTRY} was updated, but writing {AGY_RECEIPT} failed ({}); home and ADC profile were not modified; rerun --remove to finish cleanup",
                         err.message
                     )));
                 }
-                return Err(error(format!(
-                    "partial publication failure: {AGY_REGISTRY} was updated, but writing {AGY_RECEIPT} failed ({}); home and ADC profile were not modified; rerun --remove to finish cleanup",
-                    err.message
-                )));
+                return Err(error(format!("atomic write refused: {}", err.message)));
             }
-            return Err(err);
+            return Err(error(format!(
+                "partial publication failure: {AGY_RECEIPT} write outcome is unconfirmed ({}); {AGY_REGISTRY} was not rolled back; home and ADC profile were not modified; rerun the same --remove to reconcile",
+                err.message
+            )));
         }
         return Ok(Output::text(format!(
             "Antigravity account removed: {id}; home and ADC profile kept\n"
@@ -1314,13 +1345,34 @@ fn agy_locked(
     // Publication goes through the descriptors held since validation: the
     // home's ancestry and leaf are re-stat'ed, and both writes use `root`.
     agy_unchanged(&home, &identity, true)?;
-    let receipt_written = write_private(&root, &receipt_path, &json!(receipts), old_receipt)?;
+    let receipt_written = write_private(host, &root, &receipt_path, &json!(receipts), old_receipt)
+        .map_err(|f| {
+            first_write_error(
+                f,
+                AGY_RECEIPT,
+                AGY_REGISTRY,
+                "ADC profile was not modified",
+                "registration",
+            )
+        })?;
     between_writes();
     let second = agy_unchanged(&home, &identity, false)
-        .and_then(|()| write_private(&root, &registry_path, &registry, old_registry).map(|_| ()));
+        .map_err(|e| WriteFail {
+            before: true,
+            message: e.message,
+        })
+        .and_then(|()| {
+            write_private(host, &root, &registry_path, &registry, old_registry).map(|_| ())
+        });
     if let Err(err) = second {
+        if !err.before {
+            return Err(error(format!(
+                "partial publication failure: {AGY_RECEIPT} was written, but {AGY_REGISTRY} write outcome is unconfirmed ({}); {AGY_RECEIPT} was not rolled back; ADC profile was not modified; rerun the same registration or --remove to reconcile",
+                err.message
+            )));
+        }
         if let Some(written) = receipt_written.as_deref() {
-            if rollback_private(&root, &receipt_path, old_receipt, written) {
+            if rollback_private(host, &root, &receipt_path, old_receipt, written) {
                 return Err(error(format!(
                     "publication failed before {AGY_REGISTRY} was updated ({}); rolled back {AGY_RECEIPT}; ADC profile was not modified",
                     err.message
@@ -1331,7 +1383,7 @@ fn agy_locked(
                 err.message
             )));
         }
-        return Err(err);
+        return Err(error(format!("atomic write refused: {}", err.message)));
     }
     Ok(Output::text(format!(
         "Antigravity account {id}: registered; ADC profile {}; {AGY_UNVERIFIED}\n",
@@ -1394,28 +1446,12 @@ fn private_root(dir: &Path) -> Result<oms_safe_fs::Root> {
         )
     })
 }
-/// `old` is `None` only when the file was absent (ENOENT); a file appearing
-/// or changing since that read refuses the write. Returns `Some(bytes)` when
-/// the file was written, or `None` when its contents were already identical.
-fn write_private(
-    root: &oms_safe_fs::Root,
-    path: &Path,
-    value: &Value,
-    old: Option<&[u8]>,
-) -> Result<Option<Vec<u8>>> {
-    let bytes = json_bytes(value)?;
-    if old == Some(bytes.as_slice()) {
-        return Ok(None);
-    }
-    write_private_bytes(root, path, &bytes, old)?;
-    Ok(Some(bytes))
-}
-fn write_private_bytes(
+fn real_mutate(
     root: &oms_safe_fs::Root,
     path: &Path,
     bytes: &[u8],
     old: Option<&[u8]>,
-) -> Result<()> {
+) -> std::result::Result<oms_safe_fs::MutationOutcome, oms_safe_fs::MutationError<Error>> {
     root.atomic_mutate(
         path,
         oms_safe_fs::MutationOptions {
@@ -1434,13 +1470,59 @@ fn write_private_bytes(
             Ok(bytes.to_vec())
         },
     )
-    .map_err(|e| error(format!("atomic write refused: {e:?}")))?;
-    Ok(())
 }
-/// Best-effort rollback of a first atomic write when the second write fails.
-/// Restores `previous` only if `path` still holds `written` (never deletes
-/// newly-created files and never touches any ADC profile).
+/// `old` is `None` only when the file was absent (ENOENT); a file appearing
+/// or changing since that read refuses the write. Returns `Some(bytes)` when
+/// the file was written, or `None` when its contents were already identical
+/// and the directory entry was re-synced (a prior retry may have published
+/// without confirming durability).
+fn write_private(
+    host: &AgyHost<'_>,
+    root: &oms_safe_fs::Root,
+    path: &Path,
+    value: &Value,
+    old: Option<&[u8]>,
+) -> std::result::Result<Option<Vec<u8>>, WriteFail> {
+    use oms_safe_fs::{MutationDisposition, MutationError, MutationPhase};
+    let bytes = json_bytes(value).map_err(|e| WriteFail {
+        before: true,
+        message: e.message,
+    })?;
+    match (host.mutate)(root, path, &bytes, old) {
+        Ok(out) if out.disposition == MutationDisposition::Unchanged => root
+            .sync_parent(path)
+            .map(|()| None)
+            .map_err(|e| WriteFail {
+                before: false,
+                message: format!("directory durability unconfirmed: {e:?}"),
+            }),
+        Ok(_) => Ok(Some(bytes)),
+        Err(MutationError::Transform(e)) => Err(WriteFail {
+            before: true,
+            message: e.message,
+        }),
+        Err(MutationError::Storage { phase, error }) => Err(WriteFail {
+            before: phase == MutationPhase::BeforePublication,
+            message: format!("{phase:?}: {error:?}"),
+        }),
+    }
+}
+/// A first-write failure: nothing else was written, so only the outcome of
+/// this one file needs an honest recovery instruction.
+fn first_write_error(f: WriteFail, file: &str, sibling: &str, kept: &str, verb: &str) -> Error {
+    if f.before {
+        return error(format!("atomic write refused: {}", f.message));
+    }
+    error(format!(
+        "partial publication failure: {file} write outcome is unconfirmed ({}); {sibling} was not written; {kept}; rerun the same {verb} to reconcile",
+        f.message
+    ))
+}
+/// Best-effort rollback of a first atomic write when the second write is
+/// proven not to have been attempted. Restores `previous` only if `path`
+/// still holds `written` (never deletes files, never touches any ADC profile).
 fn rollback_private(
+    host: &AgyHost<'_>,
     root: &oms_safe_fs::Root,
     path: &Path,
     previous: Option<&[u8]>,
@@ -1449,7 +1531,7 @@ fn rollback_private(
     let Some(prev) = previous else {
         return false;
     };
-    write_private_bytes(root, path, prev, Some(written)).is_ok()
+    (host.mutate)(root, path, prev, Some(written)).is_ok()
 }
 fn agy_empty_registry() -> Value {
     json!({"schema":1,"provider":"antigravity","accounts":[]})
@@ -2114,8 +2196,49 @@ mod tests {
                 config,
                 default_claude: &claude,
                 placement: &|_| Ok(()),
+                mutate: &real_mutate,
             };
             agy_locked(&args, id, &host, before_publish, between_writes)
+        }
+        /// Reports `phase` for every write to `file`, applying it first when
+        /// `apply`; other files use the real write.
+        fn run_fault(
+            &self,
+            spec: &[&str],
+            file: &str,
+            phase: oms_safe_fs::MutationPhase,
+            apply: bool,
+        ) -> Result<Output> {
+            let raw: Vec<OsString> = spec.iter().map(OsString::from).collect();
+            let args = Args::parse(
+                &raw,
+                &["--account", "--home"],
+                &["--first", "--last", "--remove", "--verify"],
+            )
+            .unwrap();
+            let id = spec[1].split_once(':').unwrap().1;
+            let claude = self.0.join(".claude");
+            let mutate =
+                |root: &oms_safe_fs::Root, path: &Path, bytes: &[u8], old: Option<&[u8]>| {
+                    if path.file_name().unwrap() != file {
+                        return real_mutate(root, path, bytes, old);
+                    }
+                    if apply {
+                        real_mutate(root, path, bytes, old).unwrap();
+                    }
+                    Err(oms_safe_fs::MutationError::Storage {
+                        phase,
+                        error: oms_safe_fs::ByteError::Io(rustix::io::Errno::IO),
+                    })
+                };
+            let config = self.config();
+            let host = AgyHost {
+                config: &config,
+                default_claude: &claude,
+                placement: &|_| Ok(()),
+                mutate: &mutate,
+            };
+            agy_locked(&args, id, &host, || (), || ())
         }
         fn register(&self, id: &str, home: &Path, between: impl FnOnce()) -> Result<Output> {
             let account = format!("antigravity:{id}");
@@ -2583,5 +2706,89 @@ mod tests {
             fx.run_with_config(&unsafe_alias, &b_spec, || (), || ()),
             "unsafe antigravity account registry ancestry",
         );
+    }
+
+    #[test]
+    fn published_and_uncertain_writes_reconcile_without_rollback() {
+        use oms_safe_fs::MutationPhase::{PublicationUncertain, Published};
+        let fx = Fixture::new("outcomes");
+        let a = fx.home("a", true);
+        let a_profile = a.join(AGY_PROFILE);
+        let a_bytes = fs::read(&a_profile).unwrap();
+        let reg = fx.config().join(AGY_REGISTRY);
+        let rec = fx.config().join(AGY_RECEIPT);
+        let spec = ["--account", "antigravity:a", "--home", a.to_str().unwrap()];
+        let remove = ["--account", "antigravity:a", "--remove"];
+        let msg = |r: Result<Output>| r.err().expect("fault must fail").message;
+        let count = |path: &Path| -> usize {
+            let doc: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            doc.get("accounts")
+                .unwrap_or(&doc)
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        let cases = [
+            (Published, true),
+            (PublicationUncertain, true),
+            (PublicationUncertain, false),
+        ];
+
+        // Second write published/uncertain: the first file is not rolled back
+        // and the same command reconciles, idempotently.
+        for (phase, apply) in cases {
+            let m = msg(fx.run_fault(&spec, AGY_REGISTRY, phase, apply));
+            assert!(
+                m.contains("unconfirmed")
+                    && m.contains("was not rolled back")
+                    && m.contains("ADC profile was not modified"),
+                "{m}"
+            );
+            assert_eq!(count(&rec), 1);
+            assert_eq!(
+                if reg.exists() { count(&reg) } else { 0 },
+                usize::from(apply)
+            );
+            fx.run(&spec, || ()).unwrap();
+            assert_eq!(
+                fx.run(&["--account", "antigravity:a", "--verify"], || ())
+                    .unwrap()
+                    .code,
+                0
+            );
+            let snapshot = fx.files();
+            fx.run(&spec, || ()).unwrap();
+            assert_eq!(fx.files(), snapshot);
+
+            let m = msg(fx.run_fault(&remove, AGY_RECEIPT, phase, apply));
+            assert!(
+                m.contains("unconfirmed")
+                    && m.contains("was not rolled back")
+                    && m.contains("rerun the same --remove"),
+                "{m}"
+            );
+            assert_eq!(count(&reg), 0);
+            fx.run(&remove, || ()).unwrap();
+            assert_eq!(count(&rec), 0);
+        }
+
+        // First write faulty: the sibling is never written; retry completes.
+        for (phase, apply) in [(Published, true), (PublicationUncertain, false)] {
+            let m = msg(fx.run_fault(&spec, AGY_RECEIPT, phase, apply));
+            assert!(
+                m.contains("unconfirmed") && m.contains("was not written"),
+                "{m}"
+            );
+            assert_eq!(count(&reg), 0);
+            fx.run(&spec, || ()).unwrap();
+            let m = msg(fx.run_fault(&remove, AGY_REGISTRY, phase, apply));
+            assert!(
+                m.contains("unconfirmed") && m.contains("was not written"),
+                "{m}"
+            );
+            assert_eq!(count(&rec), 1);
+            fx.run(&remove, || ()).unwrap();
+        }
+        assert_eq!(fs::read(&a_profile).unwrap(), a_bytes);
     }
 }
