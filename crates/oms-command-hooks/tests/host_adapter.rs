@@ -1055,6 +1055,8 @@ fn harness_hook_pi_panel_hook_prompts_hint_and_tools_stay_silent() {
     let (code, out) = harness(&tmp, "panel-hook", &base("UserPromptSubmit"));
     assert_eq!(code, 0);
     assert!(out.contains("[oms panel]"), "{out}");
+    assert!(out.contains("[oms intake]"), "{out}");
+    assert!(!out.contains("build it"), "{out}");
     let (code, out) = harness(&tmp, "panel-hook", &base("PostToolUse"));
     assert_eq!((code, out.as_str()), (0, ""));
     // malformed and empty input are silent, not errors
@@ -1915,4 +1917,198 @@ fn codex_hud_upgrades_the_legacy_block_and_keeps_custom_status_lines() {
     fs::write(&cfg, custom).unwrap();
     assert!(codex_hud(&tmp, "install", &cfg).contains("preserved user"));
     assert_eq!(fs::read_to_string(&cfg).unwrap(), custom);
+}
+
+#[test]
+fn intake_reminder_is_stateless_and_limited_to_real_requests() {
+    let mode = std::env::var("OMS_TEST_INTAKE_MODE").unwrap_or_default();
+    if mode.is_empty() {
+        let spawn = |case: &str, extra: &[(&str, &str)]| {
+            let mut cmd = Command::new(std::env::current_exe().expect("test exe"));
+            cmd.args([
+                "--exact",
+                "intake_reminder_is_stateless_and_limited_to_real_requests",
+                "--test-threads=1",
+                "--nocapture",
+            ]);
+            for (k, _) in std::env::vars_os() {
+                if k.to_string_lossy().starts_with("OMS_") {
+                    cmd.env_remove(k);
+                }
+            }
+            cmd.env_remove("CLAUDE_CODE_MESSAGING_SOCKET");
+            cmd.env(
+                "CLAUDE_CONFIG_DIR",
+                std::env::temp_dir().join("oms-hooks-no-claude"),
+            );
+            cmd.env("OMS_TEST_INTAKE_MODE", case);
+            cmd.envs(extra.iter().copied());
+            let out = cmd.output().expect("spawn intake child");
+            assert!(
+                out.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        spawn("normal", &[]);
+        spawn("router_off", &[("OMS_SKILL_ROUTER_OFF", "1")]);
+        spawn(
+            "child",
+            &[
+                ("OMS_HARNESS_CHILD", "1"),
+                ("OMS_PANEL_MAIN_ATTEMPT", "att_test"),
+                ("OMS_PANEL_SESSION", "oms-test"),
+                ("OMS_ROOM_ID", "room-test"),
+                ("OMS_ROOM_PARTICIPANT", "part-test"),
+            ],
+        );
+        spawn(
+            "delegate",
+            &[
+                ("OMS_HARNESS_DELEGATE_DEPTH", "1"),
+                ("OMS_PANEL_MAIN_ATTEMPT", "att_test"),
+                ("OMS_PANEL_SESSION", "oms-test"),
+                ("OMS_ROOM_ID", "room-test"),
+                ("OMS_ROOM_PARTICIPANT", "part-test"),
+            ],
+        );
+        return;
+    }
+    let tmp = TempDir::new(&format!("intake-{mode}"));
+    let repo = git_repo(&tmp);
+    if matches!(mode.as_str(), "child" | "delegate" | "router_off") {
+        let prompt_payload = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": repo,
+            "session_id": "s",
+            "prompt": "continue work",
+        });
+        let pre_payload = serde_json::json!({
+            "hook_event_name": "PreInvocation",
+            "cwd": repo,
+            "session_id": "s",
+            "prompt": "",
+            "intake_eligible": true,
+        });
+        let direct = hook(
+            &tmp,
+            "skill-router",
+            &[],
+            prompt_payload.to_string().as_bytes(),
+        )
+        .1;
+        let codex = harness(&tmp, "skill-router", &prompt_payload);
+        let pre = hook(
+            &tmp,
+            "skill-router",
+            &[],
+            pre_payload.to_string().as_bytes(),
+        )
+        .1;
+        if mode == "delegate" {
+            assert!(
+                direct.contains("[oms panel]") && !direct.contains("[oms intake]"),
+                "{direct}"
+            );
+            assert_eq!(codex.0, 0);
+            assert!(
+                codex.1.contains("[oms panel]") && !codex.1.contains("[oms intake]"),
+                "{}",
+                codex.1
+            );
+            assert!(!pre.contains("[oms intake]"), "{pre}");
+            let panel = harness(&tmp, "panel-hook", &prompt_payload);
+            assert_eq!(panel.0, 0);
+            assert!(
+                panel.1.contains("[oms panel]") && !panel.1.contains("[oms intake]"),
+                "{}",
+                panel.1
+            );
+        } else {
+            assert_eq!(direct, "");
+            assert_eq!(codex, (0, String::new()));
+            assert_eq!(pre, "");
+            if mode == "child" {
+                assert_eq!(
+                    harness(&tmp, "panel-hook", &prompt_payload),
+                    (0, String::new())
+                );
+            }
+            assert!(!repo.join(".oms").exists(), "unadopted repo gains no state");
+        }
+        return;
+    }
+    let run = |prompt: &str, id: &str| {
+        let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":id,"prompt":prompt});
+        hook(&tmp, "skill-router", &[], payload.to_string().as_bytes()).1
+    };
+    for prompt in [
+        "이어서",
+        "고쳐",
+        "고쳐줘",
+        "/goal ship it",
+        "<doc>fix the parser</doc>",
+    ] {
+        let out = run(prompt, "s");
+        assert!(
+            out.contains("[oms intake]")
+                && out.contains("role, scope, and checks")
+                && out.contains("existing task list")
+                && out.contains("initializes no state"),
+            "{prompt}: {out}"
+        );
+        assert!(
+            !out.contains(prompt),
+            "raw prompt must never be echoed: {prompt}: {out}"
+        );
+        assert_eq!(run(prompt, "s"), out, "stateless: repeats identically");
+        let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","cwd":repo,"session_id":"s","prompt":prompt});
+        let (code, codex_out) = harness(&tmp, "skill-router", &payload);
+        assert_eq!(code, 0);
+        let doc: serde_json::Value = serde_json::from_str(&codex_out).expect("codex json");
+        assert_eq!(
+            doc["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        let ctx = doc["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or("");
+        assert!(ctx.contains("[oms intake]"), "{prompt}: {ctx}");
+        assert!(!ctx.contains(prompt), "{prompt}: {ctx}");
+    }
+    for prompt in [
+        "",
+        "   ",
+        "?",
+        "<task-notification>done</task-notification>",
+        "[SYSTEM NOTIFICATION] wake",
+        "Another Claude session sent a message: ping",
+        "Your claude.ai usage limit has reset.",
+        "Task from Overall Main. Work within this task and report the result here. x",
+    ] {
+        assert!(!run(prompt, "s").contains("[oms intake]"), "{prompt}");
+    }
+    let legacy_pre = serde_json::json!({"hook_event_name":"PreInvocation","cwd":repo,"session_id":"s","prompt":""});
+    assert!(
+        !hook(&tmp, "skill-router", &[], legacy_pre.to_string().as_bytes())
+            .1
+            .contains("[oms intake]")
+    );
+    let false_pre = serde_json::json!({"hook_event_name":"PreInvocation","cwd":repo,"session_id":"s","prompt":"","intake_eligible":false});
+    assert!(
+        !hook(&tmp, "skill-router", &[], false_pre.to_string().as_bytes())
+            .1
+            .contains("[oms intake]")
+    );
+    let eligible_pre = serde_json::json!({"hook_event_name":"PreInvocation","cwd":repo,"session_id":"s","prompt":"","intake_eligible":true});
+    let pre_out = hook(
+        &tmp,
+        "skill-router",
+        &[],
+        eligible_pre.to_string().as_bytes(),
+    )
+    .1;
+    assert!(pre_out.contains("[oms intake]"), "{pre_out}");
+    assert!(!repo.join(".oms").exists(), "unadopted repo gains no state");
 }

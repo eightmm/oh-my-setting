@@ -3432,6 +3432,7 @@ fn agy_native_calls_reach_panel_attempts() {
                 "--nocapture",
             ])
             .env_remove("OMS_HARNESS_CHILD")
+            .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
             .env("OMS_LOCK_DIR", root.join("locks"))
             .env("OMS_AGY_CALL_FIXTURE", &root)
             .env("OMS_AGY_CALL_ACTION", action)
@@ -4037,4 +4038,216 @@ printf 'ok\n'
             "{case}:\n{env_file}"
         );
     }
+}
+
+#[test]
+fn agy_preinvocation_forwards_boolean_intake_intent_only() {
+    use oms_command_operations::{StartRequest, create_attempt, load_projection, value::obj};
+
+    #[derive(Default)]
+    struct IntakeHost(RefCell<Vec<String>>, RefCell<Option<Vec<u8>>>);
+    impl Services for IntakeHost {
+        fn provider_hook(
+            &self,
+            name: &str,
+            input: &[u8],
+            _: &Path,
+            _: &Path,
+            _: bool,
+            _: &AtomicBool,
+        ) -> Output {
+            self.0.borrow_mut().push(name.into());
+            if name != "skill-router" {
+                return (0, Vec::new(), Vec::new());
+            }
+            *self.1.borrow_mut() = Some(input.to_vec());
+            let v: Value = serde_json::from_slice(input).expect("adapted json");
+            assert_eq!(
+                (&v["hook_event_name"], &v["prompt"]),
+                (&json!("PreInvocation"), &json!(""))
+            );
+            let body = if v["intake_eligible"].as_bool() == Some(true) {
+                b"[oms intake] reminder\n".to_vec()
+            } else {
+                Vec::new()
+            };
+            (0, body, Vec::new())
+        }
+    }
+
+    if let Some(root) = std::env::var_os("OMS_AGY_INTAKE_FIXTURE").map(PathBuf::from) {
+        let action = std::env::var("OMS_AGY_INTAKE_ACTION").unwrap();
+        let host = IntakeHost::default();
+        let output = call("agy-hook", &[&action], &root, &host);
+        assert_eq!(output.0, 0);
+        fs::write(root.join("last-hooks.txt"), host.0.borrow().join(",")).unwrap();
+        if let Some(forwarded) = host.1.borrow().as_ref() {
+            fs::write(root.join("forwarded.json"), forwarded).unwrap();
+        }
+        print!("{}", String::from_utf8(output.1).unwrap());
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!("oms-agy-intake-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let _fixture = Fixture(root.clone());
+
+    let invoke =
+        |action: &str, payload: Value, extra: &[(&str, &str)]| -> (Value, Option<Value>, String) {
+            let (input, fwd_path, hooks_path) = (
+                root.join("input.json"),
+                root.join("forwarded.json"),
+                root.join("last-hooks.txt"),
+            );
+            let _ = fs::remove_file(&fwd_path);
+            fs::write(&input, serde_json::to_vec(&payload).unwrap()).unwrap();
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "agy_preinvocation_forwards_boolean_intake_intent_only",
+                "--nocapture",
+            ])
+            .env_remove("OH_MY_SETTING_AGY_HOOKS")
+            .env_remove("OMS_HARNESS_CHILD")
+            .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+            .env_remove("OMS_SKILL_ROUTER_OFF")
+            .env_remove("OMS_PANEL_MAIN_ATTEMPT")
+            .env_remove("OMS_ROOM_ID")
+            .env("OMS_LOCK_DIR", root.join("locks"))
+            .env("OMS_AGY_INTAKE_FIXTURE", &root)
+            .env("OMS_AGY_INTAKE_ACTION", action)
+            .stdin(fs::File::open(input).unwrap());
+            cmd.envs(extra.iter().copied());
+            let out = cmd.output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            let resp = serde_json::Deserializer::from_str(&stdout[stdout.find('{').unwrap()..])
+                .into_iter::<Value>()
+                .next()
+                .unwrap()
+                .unwrap();
+            let fwd = fs::read_to_string(&fwd_path).ok().map(|s| {
+                if let Some(raw) = payload["lastUserInput"].as_str().filter(|u| !u.is_empty()) {
+                    assert!(!s.contains(raw), "raw lastUserInput leaked: {s}");
+                }
+                serde_json::from_str(&s).unwrap()
+            });
+            (
+                resp,
+                fwd,
+                fs::read_to_string(&hooks_path).unwrap_or_default(),
+            )
+        };
+    let pre = |conv: &str, num: i64, input: Option<&str>| {
+        let mut p = json!({"workspacePaths":[root],"conversationId":conv,"invocationNum":num,"modelName":"gemini-test"});
+        if let Some(text) = input {
+            p["lastUserInput"] = json!(text);
+        }
+        p
+    };
+
+    // Short real input emits [oms intake] without echoing or forwarding raw text.
+    let (resp, fwd, _) = invoke("preinvocation", pre("conv-1", 1, Some("이어서")), &[]);
+    let msg = resp["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        msg.contains("[oms intake]") && !msg.contains("이어서"),
+        "{resp}"
+    );
+    assert_eq!(fwd.unwrap()["intake_eligible"], Value::Bool(true));
+
+    // Absent, empty, automated, relay lastUserInput and invocationNum > 1 stay quiet.
+    for quiet in [
+        None,
+        Some(""),
+        Some("?"),
+        Some("<task-notification>done</task-notification>"),
+        Some("Task from Overall Main. Work within this task and report the result here. x"),
+    ] {
+        let (resp, fwd, _) = invoke("preinvocation", pre("conv-q", 1, quiet), &[]);
+        assert_eq!(resp, json!({}), "{quiet:?}");
+        assert!(fwd.unwrap()["intake_eligible"].is_null(), "{quiet:?}");
+    }
+    let (later, fwd, _) = invoke("preinvocation", pre("conv-1", 2, Some("이어서")), &[]);
+    assert_eq!((later, fwd), (json!({}), None));
+
+    // Nonzero OMS_HARNESS_DELEGATE_DEPTH suppresses [oms intake] while keeping AGY tracking/observation intact.
+    fs::create_dir_all(root.join(".oms")).unwrap();
+    let flag = AtomicBool::new(false);
+    let main = create_attempt(
+        &root,
+        &StartRequest {
+            provider: "antigravity".into(),
+            tool: "agy".into(),
+            refs: obj([
+                ("panel_role", "main".into()),
+                ("panel_room_id", "room-intake".into()),
+                ("native_session", "main".into()),
+            ]),
+            ..Default::default()
+        },
+        &flag,
+    )
+    .unwrap();
+    let depth = [("OMS_HARNESS_DELEGATE_DEPTH", "1")];
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"sub-1","name":"invoke_subagent","args":{"TypeName":"self","Role":"worker","Prompt":"inspect child scope"}}}),
+            &depth,
+        )
+        .0,
+        json!({"decision": "allow"})
+    );
+    let (_, rows) = load_projection(&root).unwrap();
+    assert!(
+        rows.iter()
+            .any(|v| v.get("parent_attempt_id").text() == Some(main.as_str())
+                && v.get("refs").get("agy_tool_call_id").text() == Some("sub-1")
+                && v.get("state").text() == Some("working")),
+        "{rows:?}"
+    );
+    let (resp, fwd, hooks) = invoke(
+        "preinvocation",
+        pre("conv-depth", 1, Some("이어서")),
+        &depth,
+    );
+    assert_eq!(
+        (resp, hooks.as_str()),
+        (json!({}), "telemetry-hook,skill-router")
+    );
+    assert!(fwd.unwrap()["intake_eligible"].is_null());
+    let (resp, _, hooks) = invoke(
+        "stop",
+        json!({"workspacePaths":[root],"conversationId":"conv-depth","executionNum":1}),
+        &depth,
+    );
+    assert_eq!(
+        (resp, hooks.as_str()),
+        (json!({}), "turn-guard,telemetry-hook")
+    );
+
+    // OMS_HARNESS_CHILD=1 and correlated AGY child (is_child) stay completely quiet.
+    assert_eq!(
+        invoke(
+            "preinvocation",
+            pre("conv-child-env", 1, Some("이어서")),
+            &[("OMS_HARNESS_CHILD", "1")]
+        ),
+        (json!({}), None, String::new())
+    );
+    assert_eq!(
+        invoke(
+            "preinvocation",
+            pre("child-sub-1", 1, Some("inspect child scope")),
+            &[]
+        ),
+        (json!({}), None, String::new())
+    );
 }

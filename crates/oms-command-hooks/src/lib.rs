@@ -255,6 +255,7 @@ fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
                 for hint in [
                     routing::panel_hint(&v, &repo, ctx),
                     routing::collaboration(&v, &repo, ctx),
+                    routing::intake_reminder(&v).to_owned(),
                 ] {
                     if !hint.is_empty() {
                         text.push_str(&hint);
@@ -457,6 +458,8 @@ mod tests {
         );
         let direct = String::from_utf8(direct).unwrap();
         assert!(direct.starts_with("[oms panel] You are a control-tower main."));
+        assert!(direct.contains("[oms intake]"), "{direct}");
+        assert!(!direct.contains("inspect src/lib.rs"), "{direct}");
         let args = [OsString::from("skill-router")];
         for key in ["hook_event_name", "hookEventName"] {
             let stdout = invoke(

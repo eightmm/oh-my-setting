@@ -220,8 +220,18 @@ pub fn on(name: &str) -> bool {
     let value = env(name);
     value.is_empty() || value == "1"
 }
+pub fn automated_prompt(prompt: &str) -> bool {
+    cached_regex!(
+        r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b|Another Claude session sent a message:|Your claude\.ai usage limit has reset\b)"
+    )
+    .is_match(prompt)
+}
 pub fn child() -> bool {
     env("OMS_HARNESS_CHILD") == "1"
+}
+pub fn delegate_child() -> bool {
+    child()
+        || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| !v.is_empty() && v != "0")
 }
 pub fn panel() -> bool {
     !child()
