@@ -1,7 +1,7 @@
 # OMS 부족 기능 순위: 다른 하네스·오케스트레이터·협업 도구 대비
 
 작성: 2026-11-22. **COMPARISON / CANDIDATE RANKING ONLY**.
-Source baseline: `76ff19f` (재검증 기준).
+Source baseline: `76ff19f`(재검증 기준). 순위 1–7은 설치된 `f3296931` 소스로 다시 확인했다(`7ace15b7` native Codex claim·intent, `7cce75b3` task 선기록 포함).
 
 이 문서는 OMS를 "임의의 에이전트 하네스이자 에이전트 협업 도구"로 볼 때 다른 도구에는
 있고 OMS에는 없거나 부분적인 기능을 한 줄로 세운 후보 목록이다. 병합해도 구현 약속,
@@ -53,12 +53,12 @@ Source baseline: `76ff19f` (재검증 기준).
 | 순위 | 공백 | 가진 도구 | OMS 현황 | 확인 | 관계 | 진행 | 다음 PR 단위 |
 |---|---|---|---|---|---|---|---|
 | 1 | Main의 직접 저장소 수정을 runtime이 거절 | Claude Code PreToolUse 차단, Codex read-only sandbox | [Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)는 프롬프트·스킬 계약 | 소스 | 정합 | [#337](https://github.com/eightmm/oh-my-setting/pull/337): Claude Code edit 도구 | ① Bash를 통한 쓰기 판정 ② Codex·AGY Main(상태 기록은 허용하는 제한 기동) ③ Room에 기록되는 1회 예외 |
-| 2 | Native 배정·결과 bridge와 공통 task card | Claude Code agent teams의 공유 task list, Gas Town Beads | Plan에 `depends`·`ready`·claim·lease가 있음. native `--orchestrator --task`는 task/lease/result 바인딩을 만들지 않음(#285 P0-B) | 소스 | 정합(새 task DB는 비범위) | 최근 main의 native Lead 작업 | P0-B 단계 1(claim과 전송 intent)부터 |
-| 3 | 배치 land 후보와 실패 시 bisect | Gas Town Refinery, Graphite 배치 | land는 통합 대상별 직렬 | 소스 | 조건부(GitHub merge queue 의존과 보호 규칙 우회는 비범위) | | ① 수락된 후보 N개를 한 통합 후보로 합쳐 한 번 검증 ② 실패 시 절반씩 나눠 원인만 보류 |
+| 2 | Native 배정·결과 bridge와 공통 task card | Claude Code agent teams의 공유 task list, Gas Town Beads | Plan에 `depends`·`ready`·claim·lease가 있음. 설치본에는 Codex lead 한정 opt-in 바인딩이 있어 claim·lease·Room 메시지·전송 intent(`native_intent_sha256`)를 묶음(`7ace15b7`, `native_assignment.rs`). 아직 없는 것은 provider 소비·결과의 인증된 durable 연결, Claude·AGY lead, 결과→verifier evidence 수락이다. 전송 receipt는 소비·완료 증거가 아니다. 기존 Room ack 신원은 호출자가 넘긴 값이라 인증된 provider 소비 증거는 신뢰할 수 있는 출처를 기다린다. | 소스 | 정합(새 task DB는 비범위) | 최근 main의 native Lead 작업 | P0-B 나머지: 인증된 소비·결과 기록과 다른 provider |
+| 3 | 배치 land 후보와 실패 시 bisect | Gas Town Refinery, Graphite 배치 | land는 저장소의 Git 공통 디렉터리 하나당 `active` 잠금으로 직렬(`delivery.rs`) | 소스 | 조건부(GitHub merge queue 의존과 보호 규칙 우회는 비범위) | | ① 수락된 후보 N개를 한 통합 후보로 합쳐 한 번 검증 ② 실패 시 절반씩 나눠 원인만 보류 |
 | 4 | land의 CI 대기 시간 | merge queue 계열의 병렬 CI | 전체 run이 성공해야 설치 증거가 됨. 2026-11-22 full run 한 건: Ubuntu job 5–8분, macOS job은 runner 대기 약 16분 뒤 8–13분, 합계 32분 | 소스(workflow, land CI 판정, 실측 1건) | 정합(CI와 설치 증거 요구는 유지) | #327(macOS 간헐 실패) | ① macOS 대기를 여러 run에서 계측 ② macOS 증거를 land가 기다리는 방식 결정. focused 분할은 병목이 아님 |
-| 5 | Room 메시지를 MCP로 노출 | Claude Code agent teams mailbox | Room은 CLI에 있음. MCP에는 inbox·handoff만 있음 | 소스 | 조건부(AH-09의 named workflow로 한정) | #313 | Room 읽기·게시·ack 도구와 권한 검사 |
-| 6 | OMS 측 하드 예산 집행 | 확실한 선례 없음 | soft admission만 있고 Team view는 hard cap을 unsupported로 표시 | 소스 | 조건부(provider 지출 상한으로 표현하지 않음) | | 상한 초과 시 새 위임을 거절하는 opt-in 정책 |
-| 7 | 호출별 token 사용량을 Board에 표시 | — | 추적된 호출 합계는 있음. 선택한 호출·native child 단위 귀속은 미완 | 소스(이슈) | 정합 | #279 | 이슈의 acceptance 그대로 |
+| 5 | Room 메시지를 MCP로 노출 | Claude Code agent teams mailbox | Room 읽기·게시·ack는 MCP `oms_peer_start`/`oms_peer_result`의 `room` 경로로 열려 있음(`oms-mcp-server/src/peer.rs`: updates·send·ack, 기존 방·joined participant 검사). `participant`가 호출자가 낸 문자열이라 호출자와 participant의 정확한 일치(exact participant authority)를 강제하지 않는다. | 소스 | 조건부(AH-09의 named workflow로 한정) | #313 | 호출자 신원에 묶인 participant 권한 검사 |
+| 6 | OMS 측 하드 예산 집행 | 확실한 선례 없음 | campaign은 호출·usage 예산 admission이 있고 provider별 call cap과 `total_calls`를 넘으면 중단함(`COMPONENTS.md` campaign 절, `c5fc7627`). Team admission에는 hard cap이 없다. Team view는 `native_global_hard_cap: unsupported`로 표시한다(`teams.rs`). provider 지출 상한도 아니다. | 소스 | 조건부(provider 지출 상한으로 표현하지 않음) | | 상한 초과 시 Team·전역 새 위임을 거절하는 opt-in 정책(campaign admission 재사용) |
+| 7 | 호출별 token 사용량을 Board에 표시 | — | 호출별 detail이 있다: Board 호출 상세(`render.rs` `call_detail_meta`)와 native Codex child의 응답별 in/out/cache/reasoning 표시(`native_children.rs`). 이슈 #279는 열려 있다. durable reasoning counter, Room·attempt·provider·account 신원 연속성, Claude·AGY child의 version-matched counter가 아직 없다. | 소스(이슈) | 정합 | #279 | 이슈의 acceptance 중 남은 세 가지 |
 
 ### A: 하네스 범위와 복구 (8–18)
 
