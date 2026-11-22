@@ -2425,9 +2425,45 @@ fn pre_push_gate_runs_in_the_pushed_worktree_not_the_install_source() {
     let (code, out, _) = run(&sub, &["--full"], b"");
     assert_eq!((code, out.trim()), (7, "WORK-GATE"));
     assert!(!source.join("touched").exists());
+    let line = format!(
+        "refs/heads/x {} refs/heads/x {}\n",
+        "a".repeat(40),
+        "b".repeat(40)
+    );
+    for args in [&["--full"][..], &["--full", "origin"][..]] {
+        let (code, _, err) = run(&nogate, args, line.as_bytes());
+        assert_ne!(code, 0, "{err}");
+        assert!(err.contains("gate unproved"), "{err}");
+    }
     let (code, _, err) = run(&nogate, &["--full"], b"");
     assert_ne!(code, 0, "{err}");
     assert!(err.contains("gate unproved"));
+    let fake = tmp.path().join("fake");
+    fs::create_dir_all(fake.join("scripts")).unwrap();
+    fs::write(fake.join(".git"), "not a gitfile\n").unwrap();
+    fs::write(
+        fake.join("scripts/check.sh"),
+        "touch \"$(dirname \"$0\")/../ran\"\n",
+    )
+    .unwrap();
+    for (args, stdin) in [
+        (&["--full"][..], &b""[..]),
+        (&["--full"][..], line.as_bytes()),
+        (&["origin"][..], line.as_bytes()),
+    ] {
+        let (code, _, err) = run(&fake, args, stdin);
+        assert_ne!(code, 0, "{err}");
+        assert!(err.contains("gate unproved"), "{err}");
+        assert!(!fake.join("ran").exists());
+    }
+    let tag = format!(
+        "refs/tags/t {} refs/tags/t {}\n",
+        "a".repeat(40),
+        "0".repeat(40)
+    );
+    let (code, out, _) = run(&fake, &["origin"], tag.as_bytes());
+    assert_ne!(code, 0, "{out}");
+    assert!(!out.contains("gate skipped"));
     let (code, out, _) = run(
         &nogate,
         &["origin"],

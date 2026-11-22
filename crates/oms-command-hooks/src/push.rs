@@ -1,14 +1,24 @@
 use crate::{Output, common::*};
-use std::{ffi::OsString, fs, time::Duration};
+use std::{
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 fn zero(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b == b'0')
+}
+/// A non-bare Git checkout proved by Git itself; metadata under `.git` is not proof.
+fn toplevel(dir: &Path, ctx: &Context<'_>) -> Option<PathBuf> {
+    let top = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"], ctx)?);
+    (top.is_absolute() && fs::canonicalize(&top).ok()? == top).then_some(top)
 }
 fn full(ctx: &Context<'_>, reason: Option<&str>) -> Output {
     gate(ctx, None, None, reason)
 }
 fn gate(ctx: &Context<'_>, base: Option<&str>, head: Option<&str>, reason: Option<&str>) -> Output {
     let script = ctx.source.join("scripts/check.sh");
-    if fs::symlink_metadata(ctx.source.join(".git")).is_err() || !script.is_file() {
+    if toplevel(ctx.source, ctx).as_deref() != Some(ctx.source) || !script.is_file() {
         return fail(
             "pre-push: the pushed worktree has no Git root or scripts/check.sh; gate unproved",
         );
@@ -66,9 +76,8 @@ pub fn run(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
         return pre_merge(std::env::var("OMS_LAND_ACTIVE").as_deref() == Ok("1"), ctx);
     }
     // githooks(5): pre-push runs in the worktree being pushed, not the OMS install source.
-    let work = root(ctx.cwd, ctx.cwd)
-        .filter(|r| fs::symlink_metadata(r.join(".git")).is_ok())
-        .unwrap_or_else(|| ctx.cwd.to_owned());
+    let proved = toplevel(ctx.cwd, ctx);
+    let work = proved.clone().unwrap_or_else(|| ctx.cwd.to_owned());
     let ctx = &Context {
         snapshot: ctx.snapshot,
         provider: ctx.provider,
@@ -99,7 +108,7 @@ pub fn run(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
     } else {
         None
     };
-    let mut tag_only = refs.is_some();
+    let mut tag_only = proved.is_some() && refs.is_some();
     let refs = refs.unwrap_or_default();
     let mut records = 0;
     let mut updates = Vec::new();
