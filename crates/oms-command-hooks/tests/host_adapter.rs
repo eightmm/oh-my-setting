@@ -2115,28 +2115,65 @@ fn intake_reminder_is_stateless_and_limited_to_real_requests() {
 
 #[test]
 fn command_guard_audit_reports_rules_timestamps_and_the_legacy_footer() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    struct OwnedDir(PathBuf);
+    impl Drop for OwnedDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     let name = "command_guard_audit_reports_rules_timestamps_and_the_legacy_footer";
-    let state = std::env::temp_dir().join(format!("oms-hooks-audit-{}", std::process::id()));
-    if !clean_env_child(name, &[("XDG_STATE_HOME", &state.to_string_lossy())]) {
-        let _ = fs::remove_dir_all(&state);
+    if std::env::var_os("OMS_TEST_CLEAN_CHILD").is_none() {
+        let mut nonce = [0u8; 16];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut nonce))
+            .expect("read random suffix");
+        let suffix: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+        let state = std::env::temp_dir().join(format!("oms-hooks-audit-{suffix}"));
+        assert!(!clean_env_child(
+            name,
+            &[("XDG_STATE_HOME", state.to_str().expect("utf8 state path"))],
+        ));
         return;
     }
-    // The child's XDG_STATE_HOME is a private path, so the user's real audit log is never read.
-    let state = PathBuf::from(std::env::var_os("XDG_STATE_HOME").expect("state home"));
-    let dir = state.join("oh-my-setting");
-    fs::create_dir_all(&dir).unwrap();
-    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    // The child exclusively allocates its private XDG_STATE_HOME, so the user's real audit log is never read.
+    let state_path = PathBuf::from(std::env::var_os("XDG_STATE_HOME").expect("state home"));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state_path)
+        .expect("create exclusive state root");
+    let state = OwnedDir(state_path);
+    let dir = state.0.join("oh-my-setting");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .expect("create state dir");
     let rows = concat!(
         r#"{"ts":"2026-11-23T11:00:00Z","verdict":"refused","rule":"git-clean","command":"git","sha256":"abcdef"}"#,
         "\n",
         r#"{"ts":"2026-11-23T10:00:00Z","verdict":"noted","rule":"transfer","command":"scp","sha256":"012345"}"#,
         "\n"
     );
-    fs::write(dir.join("command-guard.jsonl"), rows).unwrap();
-    let tmp = TempDir::new("audit");
-    let (code, out, _) = hook(&tmp, "command-guard-hook", &["--audit"], b"");
-    let _ = fs::remove_dir_all(&state);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join("command-guard.jsonl"))
+        .expect("create audit log")
+        .write_all(rows.as_bytes())
+        .expect("write audit log");
+    let (code, stdout, _) = run_hook(
+        "command-guard-hook",
+        &argv(&["--audit"]),
+        b"",
+        &state.0,
+        &state.0,
+        &AtomicBool::new(false),
+    );
+    let out = String::from_utf8_lossy(&stdout);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("command guard: newest 2 row(s): 1 refused, 0 bypassed"));
     assert!(
