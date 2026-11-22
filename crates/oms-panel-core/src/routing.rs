@@ -3,6 +3,8 @@ use crate::value::{array, text};
 use crate::{Error, Result, Value, decode, require};
 pub use native_model::route_family;
 use oms_command_peer::native_model;
+use oms_context::provider_accounts::{self as accounts, Dialect};
+pub use oms_context::provider_accounts::{ACCOUNT_PROVIDERS, Account, ProviderAccounts};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1439,20 +1441,6 @@ fn daily_capped(status: &Value, c: &Candidate) -> bool {
         .is_some_and(|v| crate::now().starts_with(v) && v.len() == 10)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Account {
-    pub id: String,
-    pub home: PathBuf,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderAccounts {
-    #[serde(default = "ordered")]
-    pub policy: String,
-    pub accounts: Vec<Account>,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct AccountRank {
     pub policy: &'static str,
@@ -1463,19 +1451,9 @@ pub struct AccountRank {
     pub next_working_attempts: Option<usize>,
     pub decided_by: &'static str,
 }
-fn ordered() -> String {
-    "ordered".into()
-}
-/// Account-isolated providers: each has a proven per-account home variable.
-pub const ACCOUNT_PROVIDERS: &[&str] = &["codex", "claude", "pi"];
 /// Home variable and default home (relative to `$HOME`) for an account provider.
 pub fn account_home_env(provider: &str) -> Option<(&'static str, &'static str)> {
-    match provider {
-        "codex" => Some(("CODEX_HOME", ".codex")),
-        "claude" => Some(("CLAUDE_CONFIG_DIR", ".claude")),
-        "pi" => Some(("PI_CODING_AGENT_DIR", ".pi/agent")),
-        _ => None,
-    }
+    accounts::home_descriptor(provider).map(|spec| (spec.env, spec.home_sub))
 }
 /// The provider's currently active home (environment override or default).
 pub fn active_account_home(provider: &str) -> Option<PathBuf> {
@@ -1508,12 +1486,10 @@ fn parse_provider(
     if settings.get("policy").is_none() {
         settings["policy"] = "ordered".into();
     }
+    let valid_policy = accounts::policy(&settings, Dialect::Strict).is_some();
     let mut account: ProviderAccounts =
         serde_json::from_value(settings).map_err(|_| Error::new("invalid provider accounts"))?;
-    require(
-        ["ordered", "spread"].contains(&account.policy.as_str()),
-        "invalid provider account policy/list",
-    )?;
+    require(valid_policy, "invalid provider account policy/list")?;
     let mut ids = BTreeSet::new();
     let implicit_home = if let Some(home) = implicit_default {
         let home = std::fs::canonicalize(&home).unwrap_or(home);
@@ -1525,22 +1501,19 @@ fn parse_provider(
     };
     for entry in &mut account.accounts {
         require(
-            !entry.id.is_empty()
-                && entry.id.len() <= 64
-                && (entry.id.as_bytes()[0].is_ascii_lowercase()
-                    || entry.id.as_bytes()[0].is_ascii_digit())
-                && entry
-                    .id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
-                && ids.insert(entry.id.clone()),
+            accounts::valid_account_id(&entry.id) && !ids.contains(&entry.id),
             "invalid or duplicate account id",
         )?;
         require(entry.home.is_absolute(), "account home must be absolute")?;
         if let Ok(home) = std::fs::canonicalize(&entry.home) {
             entry.home = home;
         }
-        require(homes.insert(entry.home.clone()), "duplicate account home")?;
+        accounts::reserve_identity(&mut ids, homes, &entry.id, &entry.home).map_err(|error| {
+            Error::new(match error {
+                accounts::Duplicate::Id => "invalid or duplicate account id",
+                accounts::Duplicate::Home => "duplicate account home",
+            })
+        })?;
     }
     if let Some(home) = implicit_home
         && private_home(&home)
@@ -1565,19 +1538,22 @@ impl Accounts {
             path.parent()
                 .ok_or_else(|| Error::new("account path parent unavailable"))?,
         )?;
-        let value = root.json(Path::new(path.file_name().unwrap()), 1024 * 1024, true)?;
+        let read = |relative: &Path| -> Result<Option<Value>> {
+            let bytes = root.read(relative, 1024 * 1024, true)?;
+            if bytes.is_empty() {
+                Ok(None)
+            } else {
+                accounts::decode(&bytes, 1024 * 1024)
+                    .map(Some)
+                    .map_err(|_| Error::new("invalid panel JSON"))
+            }
+        };
+        let value = read(Path::new(path.file_name().unwrap()))?;
         let mut sections: Vec<(String, Value, bool)> = Vec::new();
         if let Some(value) = value {
-            require(
-                value["schema"].as_u64() == Some(1)
-                    && value.as_object().is_some_and(|v| {
-                        v.keys()
-                            .all(|k| ["schema", "providers"].contains(&k.as_str()))
-                    })
-                    && value["providers"].is_object(),
-                "invalid provider accounts schema",
-            )?;
-            for (name, settings) in value["providers"].as_object().unwrap() {
+            let providers = accounts::shared_providers(&value, Dialect::Strict)
+                .map_err(|_| Error::new("invalid provider accounts schema"))?;
+            for (name, settings) in providers {
                 require(
                     ACCOUNT_PROVIDERS.contains(&name.as_str()),
                     "provider account isolation is unproved",
@@ -1586,24 +1562,11 @@ impl Accounts {
             }
         }
         if !sections.iter().any(|(n, _, _)| n == "claude")
-            && let Some(file) = root.json(
-                Path::new("provider-accounts.claude.json"),
-                1024 * 1024,
-                true,
-            )?
+            && let Some(file) = read(Path::new("provider-accounts.claude.json"))?
         {
-            require(
-                file["schema"].as_u64() == Some(1)
-                    && file["provider"] == "claude"
-                    && file.as_object().is_some_and(|v| {
-                        v.keys().all(|k| {
-                            ["schema", "provider", "accounts", "policy"].contains(&k.as_str())
-                        })
-                    })
-                    && file["accounts"].is_array(),
-                "invalid Claude provider accounts schema",
-            )?;
-            if !array(&file["accounts"]).is_empty() {
+            let rows = accounts::claude_accounts(&file, Dialect::Strict)
+                .map_err(|_| Error::new("invalid Claude provider accounts schema"))?;
+            if !rows.is_empty() {
                 let mut settings = serde_json::json!({"accounts": file["accounts"]});
                 if let Some(policy) = file.get("policy") {
                     settings["policy"] = policy.clone();

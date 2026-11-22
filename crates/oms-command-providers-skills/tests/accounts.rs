@@ -480,6 +480,44 @@ fn account_id_and_home_edges() {
         ok(root, &["--account", &format!("pi:{}", "a".repeat(64))]);
         ok(root, &["--account", "pi:first", "--first"]);
         assert_eq!(registered(root, "pi")[0], "first");
+
+        // The same malformed/valid registry corpus is exercised by peer and panel.
+        // Connect retains strict schema/null-policy rules and its ownership writer.
+        let corpus_root = root.join("registry-corpus");
+        for name in ["one", "two", "three"] {
+            mk(corpus_root.join(name)).unwrap();
+        }
+        symlink(corpus_root.join("one"), corpus_root.join("alias")).unwrap();
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../oms-context/tests/fixtures/provider-accounts-v1.json"
+        ))
+        .unwrap();
+        let registry = config(root).join("provider-accounts.json");
+        for case in corpus.as_array().unwrap() {
+            let bytes = case["document"]
+                .as_str()
+                .unwrap()
+                .replace("@ROOT@", corpus_root.to_str().unwrap());
+            fs::write(&registry, &bytes).unwrap();
+            let out = connect(root, &["--account", "pi:corpus"]);
+            let expected = case["connect"].as_bool().unwrap();
+            assert_eq!(out.0 == 0, expected, "{}: {}", case["name"], out.2);
+            if !expected {
+                assert_eq!(fs::read_to_string(&registry).unwrap(), bytes);
+            }
+        }
+        let mut padded = corpus[0]["document"]
+            .as_str()
+            .unwrap()
+            .replace("@ROOT@", corpus_root.to_str().unwrap())
+            .into_bytes();
+        padded.resize(1024 * 1024 + 1, b' ');
+        fs::write(&registry, &padded).unwrap();
+        ok(root, &["--account", "pi:corpus"]);
+        padded.resize(4 * 1024 * 1024 + 1, b' ');
+        fs::write(&registry, &padded).unwrap();
+        refused(root, &["--account", "pi:corpus"], "invalid JSON");
+        assert_eq!(fs::read(&registry).unwrap(), padded);
     });
 }
 
@@ -709,6 +747,24 @@ fn preserves_preexisting_links_and_preflights_receipts_and_claude_schema() {
                 fs::read(config(root).join("provider-account-effects.json")).unwrap(),
                 before_effects
             );
+
+            // Connect checks policy even for an empty Claude legacy registry.
+            for policy in [Value::Null, json!("random")] {
+                fs::write(
+                    config(root).join("provider-accounts.claude.json"),
+                    serde_json::to_vec(
+                        &json!({"schema":1,"provider":"claude","policy":policy,"accounts":[]}),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                refused(root, &["--account", "claude:w2"], "invalid Claude registry");
+                assert!(!claude_main.join("accounts/w2").exists());
+                assert_eq!(
+                    fs::read(config(root).join("provider-account-effects.json")).unwrap(),
+                    before_effects
+                );
+            }
 
             // Corrupt provider-accounts.claude.json blocks --remove before unlinking or touching shared state.
             fs::write(

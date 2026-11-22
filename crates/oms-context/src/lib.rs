@@ -339,6 +339,7 @@ fn parse_mode_depth(
 
 pub mod attribution;
 mod manifest;
+pub mod provider_accounts;
 mod session_json;
 pub use manifest::{compare_manifests, inspect_manifest, inspection_limit_value};
 pub use session_json::{SessionJsonError, parse_session_json};

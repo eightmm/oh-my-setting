@@ -1,4 +1,5 @@
 use crate::common::*;
+use oms_context::provider_accounts::{self as accounts, Dialect, valid_account_id};
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -273,57 +274,24 @@ fn configure(id: &str, bin: &str, keyring: &str) -> Result<()> {
     }
     write_locked(&path, &json_bytes(&row)?, false, Some(&old))
 }
-fn valid_account_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
-}
-fn validate_account_row(row: &Value, allow_default: bool) -> Result<(&str, &str)> {
-    let Some(obj) = row.as_object() else {
-        return Err(error("invalid provider accounts"));
-    };
-    if !obj.keys().all(|k| ["id", "home"].contains(&k.as_str())) {
+fn validate_account_row(row: &Value, allow_default: bool) -> Result<(&str, &Path)> {
+    let (id, home) = accounts::account_row(row).map_err(|_| error("invalid provider accounts"))?;
+    if !allow_default && id == "default" {
         return Err(error("invalid provider accounts"));
     }
-    let Some(id) = row["id"]
-        .as_str()
-        .filter(|s| valid_account_id(s) && (allow_default || *s != "default"))
-    else {
-        return Err(error("invalid provider accounts"));
-    };
-    let Some(home) = row["home"].as_str().filter(|h| Path::new(h).is_absolute()) else {
-        return Err(error("invalid provider accounts"));
-    };
     Ok((id, home))
 }
 fn validate_shared_registry(value: &Value) -> Result<std::collections::BTreeSet<PathBuf>> {
-    if value["schema"] != 1
-        || !value.as_object().is_some_and(|m| {
-            m.keys()
-                .all(|k| ["schema", "providers"].contains(&k.as_str()))
-        })
-        || !value["providers"].is_object()
-    {
-        return Err(error("unsupported provider accounts schema"));
-    }
+    let providers = accounts::shared_providers(value, Dialect::Strict)
+        .map_err(|_| error("unsupported provider accounts schema"))?;
     let mut all_homes = std::collections::BTreeSet::new();
-    for (owner, settings) in value["providers"].as_object().unwrap() {
-        if !["codex", "claude", "pi"].contains(&owner.as_str()) {
+    for (owner, settings) in providers {
+        if accounts::home_descriptor(owner).is_none() {
             return Err(error("provider account isolation is unproved"));
         }
-        if !settings.as_object().is_some_and(|m| {
-            m.keys()
-                .all(|k| ["policy", "accounts"].contains(&k.as_str()))
-        }) || settings.get("policy").is_some_and(|p| {
-            p.as_str()
-                .is_none_or(|s| !["ordered", "spread"].contains(&s))
-        }) {
+        if !accounts::settings_fields(settings)
+            || accounts::policy(settings, Dialect::Strict).is_none()
+        {
             return Err(error("invalid provider accounts"));
         }
         let Some(entries) = settings["accounts"].as_array().filter(|a| !a.is_empty()) else {
@@ -332,10 +300,9 @@ fn validate_shared_registry(value: &Value) -> Result<std::collections::BTreeSet<
         let mut ids = std::collections::BTreeSet::new();
         for row in entries {
             let (rid, rhome) = validate_account_row(row, true)?;
-            let canon = physical(Path::new(rhome))?;
-            if !ids.insert(rid.to_owned()) || !all_homes.insert(canon) {
-                return Err(error("duplicate provider account id or canonical home"));
-            }
+            let canon = physical(rhome)?;
+            accounts::reserve_identity(&mut ids, &mut all_homes, rid, &canon)
+                .map_err(|_| error("duplicate provider account id or canonical home"))?;
         }
     }
     Ok(all_homes)
@@ -346,39 +313,27 @@ fn validate_claude_registry(
     shared: &Value,
     shared_homes: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<()> {
-    if doc["schema"] != 1
-        || doc["provider"] != "claude"
-        || !doc.as_object().is_some_and(|m| {
-            m.keys()
-                .all(|k| ["schema", "provider", "policy", "accounts"].contains(&k.as_str()))
-        })
-        || doc.get("policy").is_some_and(|p| {
-            p.as_str()
-                .is_none_or(|s| !["ordered", "spread"].contains(&s))
-        })
-    {
+    let rows = accounts::claude_accounts(doc, Dialect::Strict)
+        .map_err(|_| error("invalid Claude registry"))?;
+    if accounts::policy(doc, Dialect::Strict).is_none() {
         return Err(error("invalid Claude registry"));
     }
-    let Some(accounts) = doc["accounts"].as_array() else {
-        return Err(error("invalid Claude registry"));
-    };
-    for row in accounts {
+    for row in rows {
         validate_account_row(row, false).map_err(|_| error("invalid Claude registry"))?;
     }
     let mut ids = std::collections::BTreeSet::new();
     let mut homes = std::collections::BTreeSet::new();
     homes.insert(default_claude.to_owned());
-    for row in accounts {
+    for row in rows {
         let rid = row["id"].as_str().unwrap_or_default();
         let rhome = physical(Path::new(row["home"].as_str().unwrap_or_default()))?;
-        if !ids.insert(rid.to_owned()) || !homes.insert(rhome.clone()) {
-            return Err(error("duplicate provider account id or canonical home"));
-        }
+        accounts::reserve_identity(&mut ids, &mut homes, rid, &rhome)
+            .map_err(|_| error("duplicate provider account id or canonical home"))?;
         if shared["providers"].get("claude").is_none() && shared_homes.contains(&rhome) {
             return Err(error("duplicate provider account id or canonical home"));
         }
     }
-    if !accounts.is_empty()
+    if !rows.is_empty()
         && shared["providers"].get("claude").is_none()
         && shared_homes.contains(default_claude)
     {
@@ -391,35 +346,19 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
         .required("--account")?
         .split_once(':')
         .ok_or_else(|| error("--account requires PROVIDER:ID"))?;
-    let (label, env, default, names, receipt_name): (&str, &str, &str, &[&str], &str) =
-        match provider {
-            "codex" => (
-                "Codex",
-                "CODEX_HOME",
-                ".codex",
-                SHARED,
-                "codex-account-links.json",
-            ),
-            "claude" => (
-                "Claude",
-                "CLAUDE_CONFIG_DIR",
-                ".claude",
-                CLAUDE_SHARED,
-                "provider-account-effects.json",
-            ),
-            "pi" => (
-                "Pi",
-                "PI_CODING_AGENT_DIR",
-                ".pi/agent",
-                PI_SHARED,
-                "pi-account-links.json",
-            ),
-            _ => {
-                return Err(error(
-                    "provider account isolation is unproved and unavailable",
-                ));
-            }
-        };
+    let spec = accounts::home_descriptor(provider)
+        .ok_or_else(|| error("provider account isolation is unproved and unavailable"))?;
+    let (env, default) = (spec.env, spec.home_sub);
+    let (label, names, receipt_name): (&str, &[&str], &str) = match provider {
+        "codex" => ("Codex", SHARED, "codex-account-links.json"),
+        "claude" => ("Claude", CLAUDE_SHARED, "provider-account-effects.json"),
+        "pi" => ("Pi", PI_SHARED, "pi-account-links.json"),
+        _ => {
+            return Err(error(
+                "provider account isolation is unproved and unavailable",
+            ));
+        }
+    };
     let claude = provider == "claude";
     if !valid_account_id(id) || (id == "default" && !args.has("--verify")) {
         return Err(error("invalid provider account id; default is reserved"));
@@ -437,7 +376,7 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     let mut value = if old.is_empty() {
         json!({"schema":1,"providers":{}})
     } else {
-        json(&old)?
+        accounts::decode(&old, 4 * 1024 * 1024).map_err(|_| error("invalid JSON"))?
     };
     let shared_homes = validate_shared_registry(&value)?;
     let rows_raw = optional(&receipt)?;
@@ -475,7 +414,8 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
         if claude_raw.is_empty() {
             json!({"schema":1,"provider":"claude","accounts":[]})
         } else {
-            let parsed = json(&claude_raw)?;
+            let parsed = accounts::decode(&claude_raw, 4 * 1024 * 1024)
+                .map_err(|_| error("invalid JSON"))?;
             validate_claude_registry(&parsed, &default_claude, &value, &shared_homes)?;
             parsed
         }

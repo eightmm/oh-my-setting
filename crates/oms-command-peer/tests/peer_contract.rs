@@ -3391,6 +3391,52 @@ fn provider_accounts_select_pin_overflow_and_validate() {
                     message(&out)
                 );
             }
+            // The shared corpus preserves peer's legacy numeric schema and null
+            // policy compatibility; the strict connect/panel readers reject them.
+            let corpus_root = home.join("registry-corpus");
+            for name in ["one", "two", "three"] {
+                fs::create_dir_all(corpus_root.join(name)).unwrap();
+                fs::set_permissions(corpus_root.join(name), fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            std::os::unix::fs::symlink(corpus_root.join("one"), corpus_root.join("alias")).unwrap();
+            let corpus = oms_context::provider_accounts::decode(
+                include_bytes!("../../oms-context/tests/fixtures/provider-accounts-v1.json"),
+                1024 * 1024,
+            )
+            .unwrap();
+            let calls_before_corpus = account_log(home);
+            for case in corpus.as_array().unwrap() {
+                let bytes = case["document"]
+                    .as_str()
+                    .unwrap()
+                    .replace("@ROOT@", corpus_root.to_str().unwrap());
+                fs::write(&config, bytes).unwrap();
+                let out = account_delegate(&repo, &["--to", "pi", "--dry-run"]);
+                assert_eq!(
+                    out.0 == 0,
+                    case["peer"].as_bool().unwrap(),
+                    "{}: {}",
+                    case["name"],
+                    message(&out)
+                );
+            }
+            let mut padded = corpus[0]["document"]
+                .as_str()
+                .unwrap()
+                .replace("@ROOT@", corpus_root.to_str().unwrap())
+                .into_bytes();
+            padded.resize(1024 * 1024 + 1, b' ');
+            fs::write(&config, &padded).unwrap();
+            let out = account_delegate(&repo, &["--to", "pi", "--dry-run"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            padded.resize(4 * 1024 * 1024 + 1, b' ');
+            fs::write(&config, &padded).unwrap();
+            let out = account_delegate(&repo, &["--to", "pi", "--dry-run"]);
+            assert_ne!(out.0, 0);
+            // Dry-run proves validation only; the existing fake-provider
+            // calls above/below cover account binding, overflow and fallback.
+            assert_eq!(account_log(home), calls_before_corpus);
             fs::write(&config, "{bad").unwrap();
             let out = account_delegate(&repo, &["--to", "antigravity", "--dry-run"]);
             assert_eq!(out.0, 0, "{}", message(&out));
@@ -3433,6 +3479,7 @@ fn provider_accounts_select_pin_overflow_and_validate() {
             for bad in [
                 r#"{"schema":1,"provider":"claude"}"#,
                 r#"{"schema":1,"provider":"claude","accounts":"invalid"}"#,
+                r#"{"schema":1,"provider":"claude","accounts":[],"policy":"random"}"#,
             ] {
                 fs::write(&claude_private, bad).unwrap();
                 let _ = fs::remove_file(home.join("calls.log"));
@@ -3445,6 +3492,14 @@ fn provider_accounts_select_pin_overflow_and_validate() {
                 );
                 assert!(account_log(home).is_empty(), "{bad}");
             }
+            fs::write(
+                &claude_private,
+                r#"{"schema":1,"provider":"claude","accounts":[],"policy":null}"#,
+            )
+            .unwrap();
+            let out = account_delegate(&repo, &["--to", "claude", "--dry-run"]);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert!(account_log(home).is_empty());
             // Another provider owning the standard home must block both pinned default and implicit fallback.
             fs::remove_file(&claude_private).unwrap();
             fs::write(

@@ -1,0 +1,205 @@
+[
+  {
+    "name": "ordered_without_policy",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": true,
+    "panel": true,
+    "peer": true
+  },
+  {
+    "name": "same_id_across_providers",
+    "document": "{\"schema\":1,\"providers\":{\"codex\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]},\"claude\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/two\"}]},\"pi\":{\"policy\":\"spread\",\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/three\"}]}}}",
+    "connect": true,
+    "panel": true,
+    "peer": true
+  },
+  {
+    "name": "max_id",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": true,
+    "panel": true,
+    "peer": true
+  },
+  {
+    "name": "long_id",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "uppercase_id",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"Work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "prefix_id",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"_work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "empty_id",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "unicode_id",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"작업\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "relative_home",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"relative\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "missing_home",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "unknown_row",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\",\"extra\":true}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "duplicate_id",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"},{\"id\":\"work\",\"home\":\"@ROOT@/two\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "duplicate_home",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]},\"codex\":{\"accounts\":[{\"id\":\"other\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "physical_home_alias",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]},\"codex\":{\"accounts\":[{\"id\":\"other\",\"home\":\"@ROOT@/alias\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "empty_accounts",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "invalid_accounts",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":\"work\"}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "unknown_settings",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}],\"extra\":true}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "unknown_provider",
+    "document": "{\"schema\":1,\"providers\":{\"gemini\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "unknown_root",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}},\"extra\":true}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "unsupported_schema",
+    "document": "{\"schema\":2,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "invalid_policy",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}],\"policy\":\"random\"}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "legacy_null_policy",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}],\"policy\":null}}}",
+    "connect": false,
+    "panel": false,
+    "peer": true
+  },
+  {
+    "name": "legacy_boolean_schema",
+    "document": "{\"schema\":true,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": true
+  },
+  {
+    "name": "legacy_float_schema",
+    "document": "{\"schema\":1.0,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": true
+  },
+  {
+    "name": "legacy_exponent_schema",
+    "document": "{\"schema\":1e0,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": true
+  },
+  {
+    "name": "duplicate_root_key",
+    "document": "{\"schema\":1,\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "shared_default_is_not_legacy_default",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"default\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": true,
+    "panel": true,
+    "peer": true
+  },
+  {
+    "name": "duplicate_row_key",
+    "document": "{\"schema\":1,\"providers\":{\"pi\":{\"accounts\":[{\"id\":\"work\",\"id\":\"work\",\"home\":\"@ROOT@/one\"}]}}}",
+    "connect": false,
+    "panel": false,
+    "peer": false
+  },
+  {
+    "name": "missing_leaf_physical_parent_alias",
+    "document": "{\"schema\":1,\"providers\":{\"codex\":{\"accounts\":[{\"id\":\"first\",\"home\":\"@ROOT@/one/missing\"},{\"id\":\"second\",\"home\":\"@ROOT@/alias/missing\"}]},\"pi\":{\"accounts\":[{\"id\":\"work\",\"home\":\"@ROOT@/three\"}]}}}",
+    "connect": false,
+    "panel": true,
+    "peer": true
+  }
+]

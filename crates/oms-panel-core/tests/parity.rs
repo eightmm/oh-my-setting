@@ -1954,6 +1954,38 @@ fn multi_provider_accounts() {
     let accounts = write_config(good).unwrap().unwrap();
     assert_eq!(accounts.providers.len(), 3);
 
+    // Same registry corpus as connect/peer, with strict preview representation.
+    for name in ["one", "two", "three"] {
+        home(name);
+    }
+    std::os::unix::fs::symlink(root.join("one"), root.join("alias")).unwrap();
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../oms-context/tests/fixtures/provider-accounts-v1.json"
+    ))
+    .unwrap();
+    for case in corpus.as_array().unwrap() {
+        let bytes = case["document"]
+            .as_str()
+            .unwrap()
+            .replace("@ROOT@", root.to_str().unwrap());
+        std::fs::write(&file, bytes).unwrap();
+        let loaded = routing::Accounts::load(&file);
+        assert_eq!(
+            loaded.is_ok(),
+            case["panel"].as_bool().unwrap(),
+            "{}: {loaded:?}",
+            case["name"]
+        );
+    }
+    let mut padded = corpus[0]["document"]
+        .as_str()
+        .unwrap()
+        .replace("@ROOT@", root.to_str().unwrap())
+        .into_bytes();
+    padded.resize(1024 * 1024 + 1, b' ');
+    std::fs::write(&file, padded).unwrap();
+    assert!(routing::Accounts::load(&file).is_err());
+
     let mut bad = json!({"schema":1,"providers":{"antigravity":{"accounts":[entry("a", &c1)]}}});
     let err = write_config(bad.clone()).unwrap_err();
     assert!(err.message.contains("isolation is unproved"));
@@ -1985,6 +2017,34 @@ fn multi_provider_accounts() {
     assert!(ids.contains(&"work"));
     let wrong = json!({"schema":1,"provider":"codex","accounts":[entry("work", &k1)]});
     std::fs::write(&sibling, serde_json::to_vec(&wrong).unwrap()).unwrap();
+    assert!(routing::Accounts::load(&file).is_err());
+    // Empty Claude legacy lists remain absent in preview, including policy fields
+    // that execution/connect would reject. Default is reserved even if unavailable.
+    for policy in [Value::Null, json!("random")] {
+        std::fs::write(
+            &sibling,
+            serde_json::to_vec(
+                &json!({"schema":1,"provider":"claude","accounts":[],"policy":policy}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !routing::Accounts::load(&file)
+                .unwrap()
+                .unwrap()
+                .providers
+                .contains_key("claude")
+        );
+    }
+    std::fs::write(
+        &sibling,
+        serde_json::to_vec(
+            &json!({"schema":1,"provider":"claude","accounts":[entry("default", &k1)]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert!(routing::Accounts::load(&file).is_err());
     std::fs::write(&sibling, serde_json::to_vec(&claude).unwrap()).unwrap();
 

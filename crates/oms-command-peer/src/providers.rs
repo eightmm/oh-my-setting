@@ -9,6 +9,9 @@ use crate::{
     storage, text,
 };
 use oms_command_agent_role::provider_identity::{Discovery, builtin_binary};
+use oms_context::provider_accounts::{
+    self as accounts, Dialect, HOME_DESCRIPTORS as ISOLATED, HomeDescriptor as Isolated,
+};
 use sha2::{Digest, Sha256};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -98,7 +101,7 @@ impl Target {
     }
 }
 pub fn account_id(value: &str) -> Result<()> {
-    if cached_regex!(r"\A[a-z0-9][a-z0-9_-]{0,63}\z").is_match(value) {
+    if accounts::valid_account_id(value) {
         Ok(())
     } else {
         fail("invalid provider account id")
@@ -467,19 +470,6 @@ fn record_seat_health(
         };
     }
 }
-fn unique_keys(value: &oms_context::Json) -> bool {
-    match value {
-        oms_context::Json::Object(fields) => {
-            let mut keys = BTreeSet::new();
-            fields.iter().all(|(k, v)| keys.insert(k) && unique_keys(v))
-        }
-        oms_context::Json::Array(a) => a.iter().all(unique_keys),
-        _ => true,
-    }
-}
-fn keys_are(value: &V, allowed: &[&str]) -> bool {
-    matches!(value,V::Obj(fields) if fields.keys().all(|k|allowed.iter().any(|s|k==s.as_bytes())))
-}
 fn quota(home: &Path) -> Option<f64> {
     let mut pending = vec![(home.join("sessions"), 0)];
     let mut newest = None;
@@ -542,36 +532,8 @@ fn quota(home: &Path) -> Option<f64> {
     }
     None
 }
-/// A provider whose per-account home is selected by one environment variable and
-/// whose state stays inside that home. Anything else is refused as unproved.
-struct Isolated {
-    name: &'static str,
-    env: &'static str,
-    home_sub: &'static str,
-    quota: Option<fn(&Path) -> Option<f64>>,
-}
-const ISOLATED: [Isolated; 3] = [
-    Isolated {
-        name: "codex",
-        env: "CODEX_HOME",
-        home_sub: ".codex",
-        quota: Some(quota),
-    },
-    Isolated {
-        name: "claude",
-        env: "CLAUDE_CONFIG_DIR",
-        home_sub: ".claude",
-        quota: None,
-    },
-    Isolated {
-        name: "pi",
-        env: "PI_CODING_AGENT_DIR",
-        home_sub: ".pi/agent",
-        quota: None,
-    },
-];
 fn isolated(provider: &str) -> Option<&'static Isolated> {
-    ISOLATED.iter().find(|i| i.name == provider)
+    accounts::home_descriptor(provider)
 }
 const UNPROVED: &str = "provider account isolation is unproved";
 const CLAUDE_CREDENTIAL_ENV: [&str; 3] = [
@@ -580,11 +542,7 @@ const CLAUDE_CREDENTIAL_ENV: [&str; 3] = [
     "CLAUDE_CODE_OAUTH_TOKEN",
 ];
 
-#[derive(Clone, Debug)]
-pub(crate) struct Entry {
-    pub id: String,
-    pub home: PathBuf,
-}
+pub(crate) use accounts::Account as Entry;
 pub(crate) struct ProviderAccounts {
     pub spread: bool,
     pub entries: Vec<Entry>,
@@ -606,39 +564,35 @@ fn config_dir(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join(".config"))
         .join("oh-my-setting")
 }
-fn read_config(path: &Path) -> Result<Option<(V, Vec<u8>)>> {
+fn read_config(path: &Path) -> Result<Option<accounts::Value>> {
     let bytes = match storage::file(path) {
         Ok(bytes) => bytes,
         Err(_) if !path.exists() => return Ok(None),
         Err(e) => return Err(e),
     };
-    let parsed = oms_context::parse_json(&bytes)
+    let parsed = accounts::decode(&bytes, 4 * 1024 * 1024)
         .map_err(|_| Error::new(2, "invalid provider accounts configuration"))?;
-    if !unique_keys(&parsed) {
-        return fail("duplicate provider accounts configuration key");
-    }
-    Ok(Some((V::parse(&bytes)?, bytes)))
+    Ok(Some(parsed))
 }
 fn parse_entries(
-    settings: &V,
+    rows: &[accounts::Value],
     homes: &mut BTreeSet<PathBuf>,
     entries: &mut Vec<Entry>,
 ) -> Result<()> {
-    let id_re = cached_regex!(r"\A[a-z0-9][a-z0-9_-]{0,63}\z");
     let mut ids: BTreeSet<String> = entries.iter().map(|e| e.id.clone()).collect();
-    for entry in settings.get("accounts").array() {
-        if !keys_are(entry, &["id", "home"]) || !entry.has("id") || !entry.has("home") {
-            return fail("unknown or missing provider account fields");
-        }
-        let ident = text(entry, "id");
-        let raw = Path::new(text(entry, "home"));
-        if !id_re.is_match(ident) || !raw.is_absolute() {
-            return fail("invalid provider account id or home");
-        }
+    for entry in rows {
+        let (ident, raw) = accounts::account_row(entry).map_err(|error| {
+            Error::new(
+                2,
+                match error {
+                    accounts::RowError::Fields => "unknown or missing provider account fields",
+                    accounts::RowError::IdOrHome => "invalid provider account id or home",
+                },
+            )
+        })?;
         let location = canonical(raw);
-        if !ids.insert(ident.to_owned()) || !homes.insert(location.clone()) {
-            return fail("duplicate provider account id or canonical home");
-        }
+        accounts::reserve_identity(&mut ids, homes, ident, &location)
+            .map_err(|_| Error::new(2, "duplicate provider account id or canonical home"))?;
         entries.push(Entry {
             id: ident.into(),
             home: location,
@@ -646,15 +600,21 @@ fn parse_entries(
     }
     Ok(())
 }
-fn policy_of(settings: &V) -> Result<bool> {
-    match settings.get("policy") {
-        V::Null => Ok(false),
-        other => match other.text() {
-            Some("ordered") => Ok(false),
-            Some("spread") => Ok(true),
-            _ => fail("unsupported provider accounts policy"),
+fn policy_of(settings: &accounts::Value) -> Result<bool> {
+    accounts::policy(settings, Dialect::PeerLegacy)
+        .map(|policy| policy == "spread")
+        .ok_or_else(|| Error::new(2, "unsupported provider accounts policy"))
+}
+fn registry_header(error: accounts::HeaderError) -> Error {
+    Error::new(
+        2,
+        match error {
+            accounts::HeaderError::Fields => {
+                "unknown or unsupported provider accounts configuration keys"
+            }
+            accounts::HeaderError::Schema => "unsupported provider accounts schema",
         },
-    }
+    )
 }
 /// Registered accounts per isolated provider. Canonical homes must be unique
 /// across all providers; ids are provider-local. Claude falls back to its own
@@ -664,57 +624,42 @@ pub(crate) fn load_registry(home: &Path) -> Result<Registry> {
     let mut registry = Registry::new();
     let mut homes = BTreeSet::new();
     let mut claude_listed = false;
-    if let Some((config, _)) = read_config(&dir.join("provider-accounts.json"))? {
-        if !keys_are(&config, &["schema", "providers"])
-            || !matches!(config.get("providers"), V::Obj(_))
-        {
-            return fail("unknown or unsupported provider accounts configuration keys");
-        }
-        if config.get("schema") != &1usize.into() {
-            return fail("unsupported provider accounts schema");
-        }
-        if let V::Obj(fields) = config.get("providers") {
-            for (key, val) in fields {
-                if !ISOLATED.iter().any(|i| key == i.name.as_bytes()) {
-                    return fail(UNPROVED);
-                }
-                if !keys_are(val, &["policy", "accounts"]) {
-                    return fail("unknown account policy keys");
-                }
+    if let Some(config) = read_config(&dir.join("provider-accounts.json"))? {
+        let providers =
+            accounts::shared_providers(&config, Dialect::PeerLegacy).map_err(registry_header)?;
+        // Preserve the legacy V object's sorted validation/diagnostic order.
+        let ordered: std::collections::BTreeMap<_, _> = providers.iter().collect();
+        for (key, val) in ordered {
+            if isolated(key).is_none() {
+                return fail(UNPROVED);
+            }
+            if !accounts::settings_fields(val) {
+                return fail("unknown account policy keys");
             }
         }
         for spec in &ISOLATED {
-            let settings = config.get("providers").get(spec.name);
-            if matches!(settings, V::Null) {
+            let Some(settings) = providers.get(spec.name) else {
                 continue;
-            }
-            if !keys_are(settings, &["policy", "accounts"]) {
-                return fail("unknown account policy keys");
-            }
+            };
             let spread = policy_of(settings)?;
-            if settings.get("accounts").array().is_empty() {
+            let Some(rows) = settings["accounts"]
+                .as_array()
+                .filter(|rows| !rows.is_empty())
+            else {
                 return fail("provider accounts must be a non-empty list");
-            }
+            };
             let mut entries = Vec::new();
-            parse_entries(settings, &mut homes, &mut entries)?;
+            parse_entries(rows, &mut homes, &mut entries)?;
             claude_listed |= spec.name == "claude";
             registry.insert(spec.name.into(), ProviderAccounts { spread, entries });
         }
     }
-    if !claude_listed
-        && let Some((config, _)) = read_config(&dir.join("provider-accounts.claude.json"))?
+    if !claude_listed && let Some(config) = read_config(&dir.join("provider-accounts.claude.json"))?
     {
-        if !keys_are(&config, &["schema", "provider", "policy", "accounts"])
-            || text(&config, "provider") != "claude"
-            || !matches!(config.get("accounts"), V::Arr(_))
-        {
-            return fail("unknown or unsupported provider accounts configuration keys");
-        }
-        if config.get("schema") != &1usize.into() {
-            return fail("unsupported provider accounts schema");
-        }
+        let rows =
+            accounts::claude_accounts(&config, Dialect::PeerLegacy).map_err(registry_header)?;
         let spread = policy_of(&config)?;
-        if !config.get("accounts").array().is_empty() {
+        if !rows.is_empty() {
             let spec = isolated("claude").ok_or_else(|| Error::new(2, UNPROVED))?;
             let default = canonical(&home.join(spec.home_sub));
             // Reserve the implicit home so no provider can alias ~/.claude.
@@ -725,7 +670,7 @@ pub(crate) fn load_registry(home: &Path) -> Result<Registry> {
                 id: "default".into(),
                 home: default,
             }];
-            parse_entries(&config, &mut homes, &mut entries)?;
+            parse_entries(rows, &mut homes, &mut entries)?;
             registry.insert("claude".into(), ProviderAccounts { spread, entries });
         }
     }
@@ -954,7 +899,7 @@ fn account_environment(route: &Route, excluded: &BTreeSet<String>, repo: &Path) 
             Account {
                 provider: spec.name.into(),
                 id: entry.id.clone(),
-                used: spec.quota.and_then(|read| read(&entry.home)),
+                used: (spec.name == "codex").then(|| quota(&entry.home)).flatten(),
                 running: running
                     .get(&seat_key(spec.name, &entry.id))
                     .copied()
