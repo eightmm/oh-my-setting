@@ -80,24 +80,42 @@ fn resolve(base: Option<&Path>, target: &str) -> Option<PathBuf> {
     (literal(&target) && target != "-").then(|| absolute(base, Path::new(&target)))
 }
 fn physical(path: &Path) -> PathBuf {
+    physical_inner(path, 0)
+}
+fn physical_inner(path: &Path, depth: u8) -> PathBuf {
     if let Ok(p) = path.canonicalize() {
         return p;
     }
-    let mut rest = Vec::new();
-    let mut current = path;
-    while let Some(parent) = current.parent() {
-        if let Some(name) = current.file_name() {
-            rest.push(name);
-        }
-        current = parent;
-        if let Ok(mut p) = current.canonicalize() {
-            for name in rest.into_iter().rev() {
-                p.push(name);
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.push("..");
+                if let Ok(p) = resolved.canonicalize() {
+                    resolved = p;
+                } else {
+                    resolved = normalize(&resolved);
+                }
             }
-            return normalize(&p);
+            _ => {
+                resolved.push(component.as_os_str());
+                if let Ok(p) = resolved.canonicalize() {
+                    resolved = p;
+                } else if depth < 16
+                    && let Ok(link) = fs::read_link(&resolved)
+                {
+                    let next = if link.is_absolute() {
+                        link
+                    } else {
+                        resolved.parent().unwrap_or(Path::new("/")).join(link)
+                    };
+                    resolved = physical_inner(&next, depth + 1);
+                }
+            }
         }
     }
-    normalize(path)
+    normalize(&resolved)
 }
 fn rm_rule(args: &[String], base: Option<&Path>) -> Option<Verdict> {
     let (letters, longs) = flags(args);
@@ -1069,6 +1087,71 @@ pub fn git_move(raw: &[u8], ctx: &Context<'_>) -> Output {
         }
     }
     empty()
+}
+
+/// Checkout root and shared Git directory of the checkout containing `path`,
+/// so linked worktrees share a common directory and submodules sit under their
+/// parent checkout root.
+fn git_checkout(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let path = physical(path);
+    let top = path
+        .ancestors()
+        .find(|a| fs::symlink_metadata(a.join(".git")).is_ok())?
+        .to_path_buf();
+    let dot = top.join(".git");
+    if fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) {
+        return Some((top, physical(&dot)));
+    }
+    let pointer = String::from_utf8(read(&dot, 4096).ok()?).ok()?;
+    let admin = absolute(&top, Path::new(pointer.strip_prefix("gitdir:")?.trim()));
+    let shared = read(&admin.join("commondir"), 4096)
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .map_or_else(
+            || admin.clone(),
+            |relative| absolute(&admin, Path::new(relative.trim())),
+        );
+    Some((top, physical(&shared)))
+}
+
+/// A panel Overall Main manages only. Its file-edit tools are refused inside
+/// the repository it manages, linked worktrees and submodules included; other
+/// paths pass.
+pub fn main_write(raw: &[u8], ctx: &Context<'_>) -> Output {
+    if !panel() || delegate_child() || off("OMS_MAIN_WRITE_GUARD") || raw.is_empty() {
+        return empty();
+    }
+    let Some(v) = document(raw) else {
+        return (0,vec![],b"main write guard: cannot evaluate this edit (hook payload is not valid JSON); allowing it unchecked.\n".to_vec());
+    };
+    let target = first(&v["tool_input"], &["file_path", "notebook_path"]);
+    if target.is_empty() {
+        return empty();
+    }
+    let payload_dir = expand(payload_cwd(&v, ctx.cwd));
+    let cwd = physical(&if payload_dir.is_absolute() {
+        payload_dir
+    } else {
+        ctx.cwd.join(payload_dir)
+    });
+    let managed =
+        env_path("OMS_ROOM_REPO").map_or_else(|| cwd.clone(), |repo| absolute(ctx.cwd, &repo));
+    let Some((managed_root, managed_common)) = git_checkout(&managed) else {
+        return empty();
+    };
+    let expanded = expand(Path::new(target));
+    let edited_raw = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    let edited_phys = physical(&edited_raw);
+    let inside = edited_phys.starts_with(&managed_root)
+        || git_checkout(&edited_phys).is_some_and(|(_, common)| common == managed_common);
+    if !inside {
+        return empty();
+    }
+    (2,vec![],b"main write guard: a panel Overall Main manages only, and this file is inside the repository it manages. Instead: assign the change with oms panel --dispatch ROLE --access write, return a fix to its writer with --continue TASK_ID, or send a conflict to --dispatch integrator. Write a brief or other scratch file outside the repository (session scratch or TMPDIR). If the user told this Main to make this change itself, record that in the Room and ask them to make the edit in their own shell (or start the panel with OMS_MAIN_WRITE_GUARD=0).\n".to_vec())
 }
 
 #[cfg(test)]

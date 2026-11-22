@@ -25,6 +25,12 @@ pub(crate) fn expected(paths: &Paths) -> Result<Value> {
         ("PreToolUse", "git-move-guard-hook", Some("Bash"), Some(5)),
         ("PreToolUse", "command-guard-hook", Some("Bash"), Some(5)),
         (
+            "PreToolUse",
+            "main-write-guard-hook",
+            Some("Edit|Write|MultiEdit|NotebookEdit"),
+            Some(5),
+        ),
+        (
             "PostToolUse",
             "syntax-guard-hook",
             Some("Edit|Write|MultiEdit"),
@@ -51,7 +57,7 @@ pub(crate) fn expected(paths: &Paths) -> Result<Value> {
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({"schema":1,"hooks_schema":12,"root":paths.source,"surfaces":rows}))
+    Ok(json!({"schema":1,"hooks_schema":13,"root":paths.source,"surfaces":rows}))
 }
 pub(crate) fn native_command(paths: &Paths, verb: &str) -> Result<String> {
     Ok(format!(

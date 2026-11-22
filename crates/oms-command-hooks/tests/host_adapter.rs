@@ -429,6 +429,199 @@ fn syntax_guard_reports_json_errors_without_an_interpreter() {
     assert_eq!((code, out.as_str()), (0, ""));
 }
 
+#[test]
+fn main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only() {
+    const NAME: &str = "main_write_guard_refuses_managed_repository_edits_from_a_panel_main_only";
+    const MAIN: [(&str, &str); 2] = [
+        ("OMS_PANEL_MAIN_ATTEMPT", "att-main-write"),
+        ("OMS_PANEL_SESSION", "oms-main-write"),
+    ];
+    if std::env::var_os("OMS_TEST_CLEAN_CHILD").is_none() {
+        clean_env_child(NAME, &MAIN);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_ROOM_REPO", "repo")]);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_MAIN_WRITE_GUARD", "0")]);
+        clean_env_child(NAME, &[MAIN[0], MAIN[1], ("OMS_HARNESS_CHILD", "1")]);
+        clean_env_child(
+            NAME,
+            &[MAIN[0], MAIN[1], ("OMS_HARNESS_DELEGATE_DEPTH", "1")],
+        );
+        clean_env_child(NAME, &[]);
+        return;
+    }
+    let set = |name: &str| std::env::var(name).unwrap_or_default();
+    let enforced = !set("OMS_PANEL_SESSION").is_empty()
+        && set("OMS_MAIN_WRITE_GUARD") != "0"
+        && set("OMS_HARNESS_CHILD") != "1"
+        && matches!(set("OMS_HARNESS_DELEGATE_DEPTH").as_str(), "" | "0");
+    let tmp = TempDir::new("main-write");
+    let repo = git_repo(&tmp);
+    let git = |dir: &Path, args: &[&str]| {
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+        assert!(
+            Command::new("git")
+                .args(identity)
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git")
+                .success()
+        );
+    };
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(
+        &repo,
+        &["worktree", "add", "-q", "../linked", "-b", "linked"],
+    );
+    let submodule = repo.join("sub");
+    fs::create_dir_all(&submodule).unwrap();
+    let module_git = repo.join(".git/modules/sub");
+    fs::create_dir_all(module_git.parent().unwrap()).unwrap();
+    git(
+        &repo,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            module_git.to_str().unwrap(),
+            submodule.to_str().unwrap(),
+        ],
+    );
+    let sub_dir = repo.join("sub_dir");
+    fs::create_dir_all(&sub_dir).unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let link_dir = outside.join("link_dir");
+    std::os::unix::fs::symlink(&sub_dir, &link_dir).unwrap();
+    let dangling = outside.join("dangling.rs");
+    std::os::unix::fs::symlink(repo.join("does-not-exist.rs"), &dangling).unwrap();
+    let other_repo = tmp.path().join("other");
+    fs::create_dir_all(&other_repo).unwrap();
+    git(&other_repo, &["init", "-q"]);
+
+    let run_raw = |raw: &[u8]| hook(&tmp, "main-write-guard-hook", &[], raw);
+    let run_in = |cwd: &Path, tool: &str, key: &str, path: &Path| {
+        let payload =
+            serde_json::json!({"tool_name":tool,"cwd":cwd,"tool_input":{key:path}}).to_string();
+        run_raw(payload.as_bytes())
+    };
+    let assert_refused_if_enforced = |label: &str, (code, out, err): (i32, String, String)| {
+        if enforced {
+            assert_eq!((code, out.as_str()), (2, ""), "{label}");
+            assert!(
+                err.starts_with("main write guard: ") && err.contains("--dispatch"),
+                "{label}: {err}"
+            );
+        } else {
+            assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "{label}");
+        }
+    };
+
+    for (label, tool, key, path) in [
+        (
+            "Edit absolute",
+            "Edit",
+            "file_path",
+            repo.join("src/new.rs"),
+        ),
+        (
+            "Write relative missing nested",
+            "Write",
+            "file_path",
+            PathBuf::from("nested/missing/new.rs"),
+        ),
+        (
+            "MultiEdit absolute",
+            "MultiEdit",
+            "file_path",
+            repo.join("src/multi.rs"),
+        ),
+        (
+            "NotebookEdit linked worktree",
+            "NotebookEdit",
+            "notebook_path",
+            tmp.path().join("linked/a.ipynb"),
+        ),
+        (
+            "Edit submodule",
+            "Edit",
+            "file_path",
+            submodule.join("lib.rs"),
+        ),
+        (
+            "Write external symlink",
+            "Write",
+            "file_path",
+            link_dir.join("inside.rs"),
+        ),
+        (
+            "Edit external symlink parent traversal",
+            "Edit",
+            "file_path",
+            link_dir.join("../escaped.rs"),
+        ),
+        (
+            "Write dangling external symlink",
+            "Write",
+            "file_path",
+            dangling,
+        ),
+    ] {
+        assert_refused_if_enforced(label, run_in(&repo, tool, key, &path));
+    }
+
+    if !set("OMS_ROOM_REPO").is_empty() {
+        let outside_cwd = std::env::temp_dir();
+        assert_refused_if_enforced(
+            "OMS_ROOM_REPO with outside payload cwd",
+            run_in(&outside_cwd, "Edit", "file_path", &repo.join("src/room.rs")),
+        );
+        assert_eq!(
+            run_in(
+                &outside_cwd,
+                "Write",
+                "file_path",
+                &tmp.path().join("notes.md")
+            ),
+            (0, String::new(), String::new()),
+        );
+    }
+
+    for payload in [
+        serde_json::json!({"tool_name":"Edit","cwd":repo,"tool_input":{"file_path":""}}),
+        serde_json::json!({"tool_name":"Edit","cwd":repo,"tool_input":{}}),
+        serde_json::json!({"tool_name":"Edit","cwd":repo,"tool_input":{"file_path":123}}),
+    ] {
+        assert_eq!(
+            run_raw(payload.to_string().as_bytes()),
+            (0, String::new(), String::new()),
+            "{payload}"
+        );
+    }
+
+    let (code, out, err) = run_raw(b"{");
+    assert_eq!((code, out.as_str()), (0, ""));
+    if enforced {
+        assert!(
+            err.contains("main write guard: cannot evaluate this edit"),
+            "{err}"
+        );
+    } else {
+        assert_eq!(err, "");
+    }
+
+    for (label, path) in [
+        ("outside file", tmp.path().join("notes.md")),
+        ("unrelated git repo", other_repo.join("src/a.rs")),
+    ] {
+        assert_eq!(
+            run_in(&repo, "Write", "file_path", &path),
+            (0, String::new(), String::new()),
+            "{label}"
+        );
+    }
+}
+
 fn harness(tmp: &TempDir, tool: &str, payload: &serde_json::Value) -> (i32, String) {
     let (code, out, _) = hook(tmp, "harness-hook", &[tool], payload.to_string().as_bytes());
     (code, out)

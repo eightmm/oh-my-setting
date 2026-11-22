@@ -34,6 +34,7 @@ pub const HOOKS: &[&str] = &[
     "command-guard-hook",
     "syntax-guard-hook",
     "git-move-guard-hook",
+    "main-write-guard-hook",
     "fail-ledger-hook",
     "resume-hook",
     "telemetry-hook",
@@ -319,6 +320,7 @@ fn dispatch(
     match name {
         "command-guard-hook" => guards::command(args, stdin, ctx),
         "git-move-guard-hook" => guards::git_move(stdin, ctx),
+        "main-write-guard-hook" => guards::main_write(stdin, ctx),
         "syntax-guard-hook" => syntax::run(stdin, ctx),
         "codex-hud-config" | "codex-usage-config" => config::run(name, args, ctx),
         "codex-hook-bridge" => bridge::run(args, stdin, ctx),

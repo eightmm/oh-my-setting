@@ -182,13 +182,26 @@ pub fn strict_document(raw: &[u8]) -> Result<Value, String> {
     Ok(v)
 }
 pub fn input_error(name: &str) -> Output {
-    if ["command-guard-hook", "git-move-guard-hook"].contains(&name) {
-        let label = if name == "command-guard-hook" {
-            "command guard"
-        } else {
-            "git move guard"
+    if [
+        "command-guard-hook",
+        "git-move-guard-hook",
+        "main-write-guard-hook",
+    ]
+    .contains(&name)
+    {
+        let (label, subject) = match name {
+            "command-guard-hook" => ("command guard", "command"),
+            "git-move-guard-hook" => ("git move guard", "command"),
+            _ => ("main write guard", "edit"),
         };
-        (0, vec![], format!("{label}: cannot evaluate this command (hook input unavailable or oversized); allowing it unchecked.\n").into_bytes())
+        (
+            0,
+            vec![],
+            format!(
+                "{label}: cannot evaluate this {subject} (hook input unavailable or oversized); allowing it unchecked.\n"
+            )
+            .into_bytes(),
+        )
     } else if name == "turn-guard" {
         out(json_line(
             &json!({"systemMessage": "oh-my-setting turn guard: unavailable (unreadable input); this turn was not checked."}),
