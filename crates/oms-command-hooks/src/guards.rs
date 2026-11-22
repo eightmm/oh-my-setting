@@ -80,9 +80,32 @@ fn resolve(base: Option<&Path>, target: &str) -> Option<PathBuf> {
     (literal(&target) && target != "-").then(|| absolute(base, Path::new(&target)))
 }
 fn physical(path: &Path) -> PathBuf {
-    physical_inner(path, 0)
+    if let Ok(p) = path.canonicalize() {
+        return p;
+    }
+    let mut rest = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if let Some(name) = current.file_name() {
+            rest.push(name);
+        }
+        current = parent;
+        if let Ok(mut p) = current.canonicalize() {
+            for name in rest.into_iter().rev() {
+                p.push(name);
+            }
+            return normalize(&p);
+        }
+    }
+    normalize(path)
 }
-fn physical_inner(path: &Path, depth: u8) -> PathBuf {
+/// Main-write-guard resolution: walks components, following symlinks even when
+/// the leaf or its parents are missing. Separate from `physical`, which the
+/// command guards rely on unchanged.
+fn main_write_physical(path: &Path) -> PathBuf {
+    main_write_physical_inner(path, 0)
+}
+fn main_write_physical_inner(path: &Path, depth: u8) -> PathBuf {
     if let Ok(p) = path.canonicalize() {
         return p;
     }
@@ -110,7 +133,7 @@ fn physical_inner(path: &Path, depth: u8) -> PathBuf {
                     } else {
                         resolved.parent().unwrap_or(Path::new("/")).join(link)
                     };
-                    resolved = physical_inner(&next, depth + 1);
+                    resolved = main_write_physical_inner(&next, depth + 1);
                 }
             }
         }
@@ -1093,14 +1116,14 @@ pub fn git_move(raw: &[u8], ctx: &Context<'_>) -> Output {
 /// so linked worktrees share a common directory and submodules sit under their
 /// parent checkout root.
 fn git_checkout(path: &Path) -> Option<(PathBuf, PathBuf)> {
-    let path = physical(path);
+    let path = main_write_physical(path);
     let top = path
         .ancestors()
         .find(|a| fs::symlink_metadata(a.join(".git")).is_ok())?
         .to_path_buf();
     let dot = top.join(".git");
     if fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) {
-        return Some((top, physical(&dot)));
+        return Some((top, main_write_physical(&dot)));
     }
     let pointer = String::from_utf8(read(&dot, 4096).ok()?).ok()?;
     let admin = absolute(&top, Path::new(pointer.strip_prefix("gitdir:")?.trim()));
@@ -1111,7 +1134,7 @@ fn git_checkout(path: &Path) -> Option<(PathBuf, PathBuf)> {
             || admin.clone(),
             |relative| absolute(&admin, Path::new(relative.trim())),
         );
-    Some((top, physical(&shared)))
+    Some((top, main_write_physical(&shared)))
 }
 
 /// A panel Overall Main manages only. Its file-edit tools are refused inside
@@ -1136,7 +1159,7 @@ pub fn main_write(raw: &[u8], ctx: &Context<'_>) -> Output {
         return empty();
     }
     let payload_dir = expand(payload_cwd(&v, ctx.cwd));
-    let cwd = physical(&if payload_dir.is_absolute() {
+    let cwd = main_write_physical(&if payload_dir.is_absolute() {
         payload_dir
     } else {
         ctx.cwd.join(payload_dir)
@@ -1152,7 +1175,7 @@ pub fn main_write(raw: &[u8], ctx: &Context<'_>) -> Output {
     } else {
         cwd.join(expanded)
     };
-    let edited_phys = physical(&edited_raw);
+    let edited_phys = main_write_physical(&edited_raw);
     let inside = edited_phys.starts_with(&managed_root)
         || git_checkout(&edited_phys).is_some_and(|(_, common)| common == managed_common);
     if !inside {
