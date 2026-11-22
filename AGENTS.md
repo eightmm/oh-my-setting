@@ -41,8 +41,10 @@
   + `lint` + `focused` + `native (ubuntu-latest, copy)`, with optional
   `rust (ubuntu-24.04)` / `rust (macos-latest)` / `native (macos-latest, auto)`).
 - CI scopes PRs and main pushes alike using pure-Rust jobs (Linux lint, Rust
-  fmt/clippy/tests on Ubuntu and macOS, pure-Bash focused E2E suites, and
-  copy/macOS install lifecycle tests) with pinned Rust `1.99.1`.
+  fmt/clippy/tests on Ubuntu, pure-Bash focused E2E suites, and a copy
+  install lifecycle test) with pinned Rust `1.99.1`. The macOS Rust and
+  install lifecycle jobs run on the daily schedule or a dispatch with
+  `macos=true`, never on a push, PR or land's requested full run.
   Only plan-authorized skips pass the stable gate. CI remains authoritative.
 - Every tracked file passes the outbound scrubber
   (`scrubber_passes_tracked_repository_sources`): in fixtures, split key-shaped

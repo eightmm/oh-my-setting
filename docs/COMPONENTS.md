@@ -3284,16 +3284,24 @@ download. Selected smoke runs validate names before dispatch, partition each
 case once, and cap workers to the selected count. Event/ref
 [concurrency groups](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 keep scheduled/manual runs separate from pushes; newer pushes supersede older
-pushes. Native platform checks reuse the lifecycle matrix's macOS runner.
+pushes. Native platform checks reuse the lifecycle matrix's macOS runner on
+the runs that include macOS.
 [`!cancelled()`](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)
 lets later checks report failures after an earlier failure without continuing
 a cancelled run.
 
 PR and main pushes select affected or full verification. Full runs use Linux
-lint and focused Bash checks, the Ubuntu and macOS Rust matrix, and a Linux
-copy-install lifecycle fixture. The lifecycle matrix adds macOS when the
-selector requires native platform checks. The stable `gate` checks the
-selected jobs and their planned skips. [CI workflow](../.github/workflows/test.yml)
+lint and focused Bash checks, the Ubuntu Rust job, and a Linux copy-install
+lifecycle fixture. The stable `gate` checks the selected jobs and their planned
+skips. [CI workflow](../.github/workflows/test.yml)
+
+macOS is off the path a person or `oms land` waits on. The macOS Rust job and
+the macOS install lifecycle with its BSD userland fixtures run on the daily
+schedule and on `gh workflow run test.yml --ref REF -f macos=true`. A plain
+dispatch, which is what `oms land --ci-full` requests, stays on Linux. A macOS
+regression therefore shows on `main` within a day instead of blocking the
+change that caused it; request the `macos=true` run before landing a change to
+install lifecycle, locking, path resolution or BSD-sensitive shell.
 
 Require it in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks

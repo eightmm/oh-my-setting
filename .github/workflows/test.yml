@@ -5,8 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      macos:
+        description: Also run the macOS Rust and install lifecycle jobs
+        type: boolean
+        default: false
   schedule:
-    - cron: '23 3 * * 1'
+    - cron: '23 3 * * *'
 
 permissions:
   contents: read
@@ -105,7 +110,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        # macOS runs on the daily schedule or an explicit dispatch input, so
+        # pushes, PRs and land's requested full runs wait on Linux only.
+        os: ${{ fromJSON((github.event_name == 'schedule' || inputs.macos == true) && '["ubuntu-24.04","macos-latest"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -199,7 +206,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.affected_plan.outputs.native == 'true' && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
+        include: ${{ fromJSON((github.event_name == 'schedule' || inputs.macos == true) && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     name: native (${{ matrix.os }}, ${{ matrix.link_mode }})

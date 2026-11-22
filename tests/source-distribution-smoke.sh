@@ -497,6 +497,10 @@ if grep -Fq 'windows-latest' "$workflow"; then
 fi
 grep -Fq 'bsd-portability-smoke.sh' "$workflow" ||
   fail "macOS portability job must run bsd-portability-smoke.sh"
+[ "$(grep -Fc "(github.event_name == 'schedule' || inputs.macos == true)" "$workflow")" = 2 ] ||
+  fail "macOS Rust and lifecycle jobs must run only on the schedule or an explicit dispatch input"
+grep -Fq 'macos-latest' "$workflow" ||
+  fail "scheduled CI must keep the macOS Rust and lifecycle jobs"
 grep -Fq 'gate:' "$workflow" ||
   fail "workflow must expose a fixed gate job"
 grep -Fq 'if: always()' "$workflow" ||
