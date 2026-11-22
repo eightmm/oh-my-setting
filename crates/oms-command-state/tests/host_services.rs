@@ -1011,3 +1011,46 @@ fn state_verify_survives_more_than_fifty_thousand_nonjsonl_artifacts() {
             .is_ok()
     );
 }
+
+#[test]
+fn inbox_warns_on_recent_failure_repeat_without_extra_reads_or_command_text() {
+    let repo = TempRepo::new();
+    seed(repo.path());
+    let fail = |fp: &str| {
+        format!(
+            "{{\"schema\":2,\"event\":\"fail\",\"ts\":\"2026-01-01T00:00:00Z\",\"agent\":\"a\",\"fingerprint\":\"{fp}\",\"kind\":\"cmd\",\"cmd\":\"SECRET-CMD\",\"exit\":1}}\n"
+        )
+    };
+    let code = "recent-failure-repeat";
+    let seed_rows = |rows: String| put(repo.path(), ".oms/failures.jsonl", &rows, 0o600);
+    seed_rows(fail("a").repeat(2));
+    assert!(!inbox_codes(repo.path()).iter().any(|c| c == code));
+    seed_rows(fail("a").repeat(3));
+    let inbox = view_json("inbox", repo.path());
+    let item = inbox
+        .get("items")
+        .array()
+        .unwrap()
+        .iter()
+        .find(|i| i.text("code") == code)
+        .expect("repeat warning");
+    assert_eq!(item.get("count").int().unwrap(), 3);
+    assert!(!format!("{item:?}").contains("SECRET-CMD"));
+    assert!(
+        inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "open-failures")
+    );
+    seed_rows(fail("a").repeat(3) + &fail("b"));
+    assert!(!inbox_codes(repo.path()).iter().any(|c| c == code));
+    seed_rows(fail("a").repeat(3) + "not json\n");
+    let codes = inbox_codes(repo.path());
+    assert!(
+        codes.iter().any(|c| c == "failure-ledger-corrupt"),
+        "{codes:?}"
+    );
+    assert!(
+        codes.iter().any(|c| c == code),
+        "valid rows keep the same stalls evidence: {codes:?}"
+    );
+}
