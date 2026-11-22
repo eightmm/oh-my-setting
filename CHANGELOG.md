@@ -13,8 +13,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   manages and its linked worktrees, with the dispatch routes named. Provider
   Leads, workers, solo sessions and other paths are unchanged; Bash changes and
   Codex/Antigravity Mains are not judged. `OMS_MAIN_WRITE_GUARD=0` at panel
-  start turns it off, and the panel passes that switch to its Main. The Claude
-  hook schema moves to 13.
+  start turns it off, and the panel passes that switch to its Main. A Main
+  writes `--brief-file` briefs to session scratch or `TMPDIR`, since a brief
+  inside the checkout is refused too. The Claude hook schema moves to 13.
 - The panel reader's Files view (`f`) shows a worker's declared scope and
   changed files as a directory tree with `+N -M`, marks files outside its scope
   or shared with another live write worker, opens a file's coloured diff with

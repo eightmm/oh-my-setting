@@ -55,6 +55,7 @@ Two exceptions, both visible:
   only and records it in the Room as a `--kind status` message. A Claude Code
   Main's edit tools are refused inside the managed repository unless the user
   started the panel with `OMS_MAIN_WRITE_GUARD=0`; otherwise the user edits.
+  Brief files go to session scratch or `TMPDIR`, outside the checkout.
 - No worker can start (no provider, capacity or authority). Main reports the
   blocker to the user and waits; it does not do the work quietly.
 

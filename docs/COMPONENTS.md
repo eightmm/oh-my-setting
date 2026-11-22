@@ -2924,7 +2924,8 @@ panel Main when its target is inside the repository the panel manages
 linked worktrees. The refusal names the routes: `oms panel --dispatch ROLE
 --access write`, `--continue TASK_ID` for a fix and `--dispatch integrator` for
 a conflict. Files outside that repository, Provider Leads, workers and sessions
-without a panel are not checked.
+without a panel are not checked. A brief for `--brief-file` is such a file:
+Main writes it to session scratch or `TMPDIR`, not into the checkout.
 
 It is a seatbelt, not a sandbox. It reads the edit tool's target path only: a
 change made through Bash is not judged, and a payload it cannot parse passes

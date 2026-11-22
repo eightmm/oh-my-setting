@@ -1045,7 +1045,7 @@ pub fn main_write(raw: &[u8], ctx: &Context<'_>) -> Output {
     if edited.is_none() || edited != git_common(&managed) {
         return empty();
     }
-    (2,vec![],b"main write guard: a panel Overall Main manages only, and this file is inside the repository it manages. Instead: assign the change with oms panel --dispatch ROLE --access write, return a fix to its writer with --continue TASK_ID, or send a conflict to --dispatch integrator. If the user told this Main to make this change itself, record that in the Room and ask them to make the edit in their own shell (or start the panel with OMS_MAIN_WRITE_GUARD=0).\n".to_vec())
+    (2,vec![],b"main write guard: a panel Overall Main manages only, and this file is inside the repository it manages. Instead: assign the change with oms panel --dispatch ROLE --access write, return a fix to its writer with --continue TASK_ID, or send a conflict to --dispatch integrator. Write a brief or other scratch file outside the repository (session scratch or TMPDIR). If the user told this Main to make this change itself, record that in the Room and ask them to make the edit in their own shell (or start the panel with OMS_MAIN_WRITE_GUARD=0).\n".to_vec())
 }
 
 #[cfg(test)]
