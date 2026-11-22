@@ -395,6 +395,21 @@ fn account_flags(args: &Args, id: &str) -> Result<()> {
     }
     Ok(())
 }
+/// Single physical config root for account locks, registries and receipts.
+/// Follows the XDG Base Directory Specification (relative or empty
+/// `XDG_CONFIG_HOME` falls back to `$HOME/.config`) and canonicalizes once so
+/// parent path aliases (such as `/var` -> `/private/var`) resolve consistently.
+fn account_config_dir() -> Result<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        Some(path) => path,
+        None => home()?.join(".config"),
+    };
+    physical(&base.join("oh-my-setting"))
+}
 fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     let (provider, id) = args
         .required("--account")?
@@ -432,8 +447,7 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
         };
     let claude = provider == "claude";
     account_flags(args, id)?;
-    let config = env_path("XDG_CONFIG_HOME", home()?.join(".config")).join("oh-my-setting");
-    let config = physical(&config)?;
+    let config = account_config_dir()?;
     let registry = config.join("provider-accounts.json");
     let claude_registry = config.join("provider-accounts.claude.json");
     let receipt = config.join(receipt_name);
@@ -1086,15 +1100,15 @@ fn antigravity(args: &Args, id: &str) -> Result<Output> {
     if args.has("--repair") {
         return Err(error("antigravity accounts have no links to repair"));
     }
-    let config = env_path("XDG_CONFIG_HOME", home()?.join(".config")).join("oh-my-setting");
-    let _guard = lock(&physical(&config)?.join("provider-accounts.json"))?;
+    let config = account_config_dir()?;
+    let _guard = lock(&config.join("provider-accounts.json"))?;
     let default_claude = physical(&home()?.join(".claude"))?;
     let host = AgyHost {
         config: &config,
         default_claude: &default_claude,
         placement: &|path| home_placement(path, None),
     };
-    agy_locked(args, id, &host, || ())
+    agy_locked(args, id, &host, || (), || ())
 }
 /// Environment-derived inputs, injected so unit tests never consult a real home.
 struct AgyHost<'a> {
@@ -1102,11 +1116,22 @@ struct AgyHost<'a> {
     default_claude: &'a Path,
     placement: &'a dyn Fn(&Path) -> Result<()>,
 }
-/// The locked transaction; `between` runs after every validation and before
-/// the publication recheck, as a test seam for races.
-fn agy_locked(args: &Args, id: &str, host: &AgyHost<'_>, between: impl FnOnce()) -> Result<Output> {
-    let config = host.config;
-    let root = private_root(config)?;
+/// The locked transaction; `before_publish` runs after every validation and
+/// before the publication recheck, and `between_writes` runs after the first
+/// atomic write succeeds and before the second, as test seams for races and
+/// partial publication failures.
+fn agy_locked(
+    args: &Args,
+    id: &str,
+    host: &AgyHost<'_>,
+    before_publish: impl FnOnce(),
+    between_writes: impl FnOnce(),
+) -> Result<Output> {
+    if !host.config.is_absolute() {
+        return Err(error("antigravity config root must be an absolute path"));
+    }
+    let config = physical(host.config)?;
+    let root = private_root(&config)?;
     let registry_path = config.join(AGY_REGISTRY);
     let receipt_path = config.join(AGY_RECEIPT);
     let read_own = |path: &Path| -> Result<Option<Vec<u8>>> {
@@ -1145,8 +1170,23 @@ fn agy_locked(args: &Args, id: &str, host: &AgyHost<'_>, between: impl FnOnce())
         }
         rows.retain(|r| r["id"] != id);
         receipts.retain(|r| r["id"] != id);
-        write_private(&root, &registry_path, &registry, old_registry)?;
-        write_private(&root, &receipt_path, &json!(receipts), old_receipt)?;
+        let registry_written = write_private(&root, &registry_path, &registry, old_registry)?;
+        between_writes();
+        if let Err(err) = write_private(&root, &receipt_path, &json!(receipts), old_receipt) {
+            if let Some(written) = registry_written.as_deref() {
+                if rollback_private(&root, &registry_path, old_registry, written) {
+                    return Err(error(format!(
+                        "removal failed while writing {AGY_RECEIPT} ({}); rolled back {AGY_REGISTRY}; home and ADC profile were not modified",
+                        err.message
+                    )));
+                }
+                return Err(error(format!(
+                    "partial publication failure: {AGY_REGISTRY} was updated, but writing {AGY_RECEIPT} failed ({}); home and ADC profile were not modified; rerun --remove to finish cleanup",
+                    err.message
+                )));
+            }
+            return Err(err);
+        }
         return Ok(Output::text(format!(
             "Antigravity account removed: {id}; home and ADC profile kept\n"
         )));
@@ -1191,6 +1231,20 @@ fn agy_locked(args: &Args, id: &str, host: &AgyHost<'_>, between: impl FnOnce())
         return Ok(out);
     }
     let existing = rows.iter().find(|r| r["id"] == id).cloned();
+    for row in rows.iter() {
+        if row["id"] == id {
+            continue;
+        }
+        if !receipts
+            .iter()
+            .any(|r| r["id"] == row["id"] && r["home"] == row["home"])
+        {
+            return Err(error(format!(
+                "missing or mismatched antigravity account receipt for {} ({AGY_RECEIPT}); remove and re-register that account first; nothing was changed",
+                row["id"].as_str().unwrap()
+            )));
+        }
+    }
     let path = match (args.get("--home"), &existing) {
         (Some(raw), _) => PathBuf::from(raw),
         (None, Some(row)) => PathBuf::from(row["home"].as_str().unwrap()),
@@ -1211,7 +1265,7 @@ fn agy_locked(args: &Args, id: &str, host: &AgyHost<'_>, between: impl FnOnce())
                 json!(m.dev()) == identity["st_dev"] && json!(m.ino()) == identity["st_ino"]
             })
     };
-    if foreign_homes(config, host.default_claude)?
+    if foreign_homes(&config, host.default_claude)?
         .iter()
         .any(|h| same(h))
     {
@@ -1256,13 +1310,29 @@ fn agy_locked(args: &Args, id: &str, host: &AgyHost<'_>, between: impl FnOnce())
             rows.push(entry);
         }
     }
-    between();
+    before_publish();
     // Publication goes through the descriptors held since validation: the
     // home's ancestry and leaf are re-stat'ed, and both writes use `root`.
-    agy_unchanged(&home, &identity)?;
-    write_private(&root, &receipt_path, &json!(receipts), old_receipt)?;
-    agy_unchanged(&home, &identity)?;
-    write_private(&root, &registry_path, &registry, old_registry)?;
+    agy_unchanged(&home, &identity, true)?;
+    let receipt_written = write_private(&root, &receipt_path, &json!(receipts), old_receipt)?;
+    between_writes();
+    let second = agy_unchanged(&home, &identity, false)
+        .and_then(|()| write_private(&root, &registry_path, &registry, old_registry).map(|_| ()));
+    if let Err(err) = second {
+        if let Some(written) = receipt_written.as_deref() {
+            if rollback_private(&root, &receipt_path, old_receipt, written) {
+                return Err(error(format!(
+                    "publication failed before {AGY_REGISTRY} was updated ({}); rolled back {AGY_RECEIPT}; ADC profile was not modified",
+                    err.message
+                )));
+            }
+            return Err(error(format!(
+                "partial publication failure: {AGY_RECEIPT} was written, but {AGY_REGISTRY} was not updated ({}); ADC profile was not modified; rerun the same registration or --remove to recover",
+                err.message
+            )));
+        }
+        return Err(err);
+    }
     Ok(Output::text(format!(
         "Antigravity account {id}: registered; ADC profile {}; {AGY_UNVERIFIED}\n",
         if profile { "present" } else { "pending" }
@@ -1325,17 +1395,27 @@ fn private_root(dir: &Path) -> Result<oms_safe_fs::Root> {
     })
 }
 /// `old` is `None` only when the file was absent (ENOENT); a file appearing
-/// or changing since that read refuses the write.
+/// or changing since that read refuses the write. Returns `Some(bytes)` when
+/// the file was written, or `None` when its contents were already identical.
 fn write_private(
     root: &oms_safe_fs::Root,
     path: &Path,
     value: &Value,
     old: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<Option<Vec<u8>>> {
     let bytes = json_bytes(value)?;
     if old == Some(bytes.as_slice()) {
-        return Ok(());
+        return Ok(None);
     }
+    write_private_bytes(root, path, &bytes, old)?;
+    Ok(Some(bytes))
+}
+fn write_private_bytes(
+    root: &oms_safe_fs::Root,
+    path: &Path,
+    bytes: &[u8],
+    old: Option<&[u8]>,
+) -> Result<()> {
     root.atomic_mutate(
         path,
         oms_safe_fs::MutationOptions {
@@ -1351,11 +1431,25 @@ fn write_private(
             if current != old.unwrap_or_default() {
                 return Err(error("destination changed during transaction"));
             }
-            Ok(bytes)
+            Ok(bytes.to_vec())
         },
     )
     .map_err(|e| error(format!("atomic write refused: {e:?}")))?;
     Ok(())
+}
+/// Best-effort rollback of a first atomic write when the second write fails.
+/// Restores `previous` only if `path` still holds `written` (never deletes
+/// newly-created files and never touches any ADC profile).
+fn rollback_private(
+    root: &oms_safe_fs::Root,
+    path: &Path,
+    previous: Option<&[u8]>,
+    written: &[u8],
+) -> bool {
+    let Some(prev) = previous else {
+        return false;
+    };
+    write_private_bytes(root, path, prev, Some(written)).is_ok()
 }
 fn agy_empty_registry() -> Value {
     json!({"schema":1,"provider":"antigravity","accounts":[]})
@@ -1473,6 +1567,14 @@ fn foreign_homes(config: &Path, default_claude: &Path) -> Result<Vec<PathBuf>> {
             .map_err(|e| invalid_metadata("provider-accounts.claude.json", e))?;
     }
     let mut homes: Vec<PathBuf> = shared_homes.into_iter().collect();
+    if shared["providers"].get("claude").is_none()
+        && claude
+            .as_ref()
+            .and_then(|doc| doc["accounts"].as_array())
+            .is_some_and(|accounts| !accounts.is_empty())
+    {
+        homes.push(physical(default_claude)?);
+    }
     let mut owned = std::collections::BTreeMap::new();
     for (owner, file, names) in [
         ("codex", "codex-account-links.json", SHARED),
@@ -1596,9 +1698,17 @@ fn agy_home(path: &Path) -> Result<AgyHome> {
 /// the ancestry and home leaf still match their validated no-follow stats,
 /// the home keeps its private mode and recorded identity, and the ADC
 /// profile keeps its validated presence, identity, mode and link count.
-fn agy_unchanged(home: &AgyHome, identity: &Value) -> Result<()> {
-    let changed =
-        || error("antigravity account home changed during registration; nothing was changed");
+fn agy_unchanged(home: &AgyHome, identity: &Value, before_write: bool) -> Result<()> {
+    let suffix = if before_write {
+        "; nothing was changed"
+    } else {
+        ""
+    };
+    let changed = || {
+        error(format!(
+            "antigravity account home changed during registration{suffix}"
+        ))
+    };
     let (stat, profile) = home
         .root
         .pinned_metadata(std::ffi::OsStr::new(AGY_PROFILE))
@@ -1613,9 +1723,9 @@ fn agy_unchanged(home: &AgyHome, identity: &Value) -> Result<()> {
         _ => false,
     };
     if !same {
-        return Err(error(
-            "antigravity ADC profile changed during registration; nothing was changed",
-        ));
+        return Err(error(format!(
+            "antigravity ADC profile changed during registration{suffix}"
+        )));
     }
     Ok(())
 }
@@ -1974,6 +2084,23 @@ mod tests {
             home
         }
         fn run(&self, spec: &[&str], between: impl FnOnce()) -> Result<Output> {
+            self.run_with_config(&self.config(), spec, between, || ())
+        }
+        fn run_with_hooks(
+            &self,
+            spec: &[&str],
+            before_publish: impl FnOnce(),
+            between_writes: impl FnOnce(),
+        ) -> Result<Output> {
+            self.run_with_config(&self.config(), spec, before_publish, between_writes)
+        }
+        fn run_with_config(
+            &self,
+            config: &Path,
+            spec: &[&str],
+            before_publish: impl FnOnce(),
+            between_writes: impl FnOnce(),
+        ) -> Result<Output> {
             let raw: Vec<OsString> = spec.iter().map(OsString::from).collect();
             let args = Args::parse(
                 &raw,
@@ -1984,11 +2111,11 @@ mod tests {
             let id = spec[1].split_once(':').unwrap().1;
             let claude = self.0.join(".claude");
             let host = AgyHost {
-                config: &self.config(),
+                config,
                 default_claude: &claude,
                 placement: &|_| Ok(()),
             };
-            agy_locked(&args, id, &host, between)
+            agy_locked(&args, id, &host, before_publish, between_writes)
         }
         fn register(&self, id: &str, home: &Path, between: impl FnOnce()) -> Result<Output> {
             let account = format!("antigravity:{id}");
@@ -2329,5 +2456,132 @@ mod tests {
         refused(agy_homes(&config), "invalid provider account metadata");
         put(&registry, b"{bad");
         refused(agy_homes(&config), "invalid provider account metadata");
+    }
+
+    #[test]
+    fn between_write_failure_and_aliased_config_root() {
+        let fx = Fixture::new("partial");
+        let a = fx.home("a", true);
+        let b = fx.home("b", true);
+        let a_profile = a.join(AGY_PROFILE);
+        let a_bytes = fs::read(&a_profile).unwrap();
+        let a_ino = fs::symlink_metadata(&a_profile).unwrap().ino();
+        let reg_path = fx.config().join(AGY_REGISTRY);
+        let rec_path = fx.config().join(AGY_RECEIPT);
+
+        // 1. First registration: receipt succeeds, registry write is obstructed
+        // by a directory -> honest partial publication error, ADC untouched,
+        // no placeholder leakage, deterministic recovery once cleared.
+        let a_spec = ["--account", "antigravity:a", "--home", a.to_str().unwrap()];
+        let err = fx
+            .run_with_hooks(
+                &a_spec,
+                || (),
+                || {
+                    fs::create_dir(&reg_path).unwrap();
+                },
+            )
+            .err()
+            .expect("obstructed second write must fail");
+        assert!(
+            err.message.contains("partial publication failure")
+                && err.message.contains(AGY_RECEIPT)
+                && err.message.contains(AGY_REGISTRY)
+                && err.message.contains("ADC profile was not modified")
+                && !err.message.contains("nothing was changed")
+                && !err.message.contains("placeholder"),
+            "{err:?}"
+        );
+        assert!(rec_path.is_file());
+        assert!(reg_path.is_dir());
+        assert_eq!(fs::read(&a_profile).unwrap(), a_bytes);
+        assert_eq!(fs::symlink_metadata(&a_profile).unwrap().ino(), a_ino);
+        fs::remove_dir(&reg_path).unwrap();
+        fx.run(&a_spec, || ()).unwrap();
+        assert_eq!(
+            fx.run(&["--account", "antigravity:a", "--verify"], || ())
+                .unwrap()
+                .code,
+            0
+        );
+
+        // 2. Subsequent registration: receipt updated, registry write fails ->
+        // receipt rolls back to prior bytes, ADC untouched, rerun succeeds.
+        let before_rec = fs::read(&rec_path).unwrap();
+        let before_reg = fs::read(&reg_path).unwrap();
+        let b_spec = ["--account", "antigravity:b", "--home", b.to_str().unwrap()];
+        let b_profile = b.join(AGY_PROFILE);
+        let b_bytes = fs::read(&b_profile).unwrap();
+        let err = fx
+            .run_with_hooks(
+                &b_spec,
+                || (),
+                || {
+                    fs::remove_file(&reg_path).unwrap();
+                    fs::create_dir(&reg_path).unwrap();
+                },
+            )
+            .err()
+            .expect("obstructed registry update must fail");
+        assert!(
+            err.message.contains("rolled back")
+                && err.message.contains(AGY_RECEIPT)
+                && err.message.contains("ADC profile was not modified"),
+            "{err:?}"
+        );
+        assert_eq!(fs::read(&rec_path).unwrap(), before_rec);
+        assert_eq!(fs::read(&b_profile).unwrap(), b_bytes);
+        fs::remove_dir(&reg_path).unwrap();
+        put(&reg_path, &before_reg);
+        fx.run(&b_spec, || ()).unwrap();
+
+        // 3. Removal between-write failure: registry write succeeds, receipt
+        // write fails -> registry rolls back, home & ADC untouched, rerun succeeds.
+        let before_reg = fs::read(&reg_path).unwrap();
+        let before_rec = fs::read(&rec_path).unwrap();
+        let err = fx
+            .run_with_hooks(
+                &["--account", "antigravity:b", "--remove"],
+                || (),
+                || {
+                    fs::remove_file(&rec_path).unwrap();
+                    fs::create_dir(&rec_path).unwrap();
+                },
+            )
+            .err()
+            .expect("obstructed receipt removal must fail");
+        assert!(
+            err.message.contains("rolled back")
+                && err.message.contains(AGY_REGISTRY)
+                && err
+                    .message
+                    .contains("home and ADC profile were not modified"),
+            "{err:?}"
+        );
+        assert_eq!(fs::read(&reg_path).unwrap(), before_reg);
+        assert_eq!(fs::read(&b_profile).unwrap(), b_bytes);
+        fs::remove_dir(&rec_path).unwrap();
+        put(&rec_path, &before_rec);
+        fx.run(&["--account", "antigravity:b", "--remove"], || ())
+            .unwrap();
+
+        // 4. Aliased config root spelling resolves to the same physical root,
+        // while an unsafe symlinked config target is refused cleanly.
+        let alias_cfg = fx.0.join("cfg-alias");
+        std::os::unix::fs::symlink(fx.config(), &alias_cfg).unwrap();
+        fx.run_with_config(&alias_cfg, &b_spec, || (), || ())
+            .unwrap();
+        let reg_doc: Value = serde_json::from_slice(&fs::read(&reg_path).unwrap()).unwrap();
+        assert_eq!(reg_doc["accounts"].as_array().unwrap().len(), 2);
+
+        let unsafe_dir = fx.0.join("unsafe-cfg");
+        fs::create_dir(&unsafe_dir).unwrap();
+        mode(&unsafe_dir, 0o777);
+        let unsafe_alias = fx.0.join("unsafe-alias");
+        std::os::unix::fs::symlink(&unsafe_dir, &unsafe_alias).unwrap();
+        refused(
+            fx.run_with_config(&unsafe_alias, &b_spec, || (), || ()),
+            "unsafe antigravity account registry ancestry",
+        );
     }
 }

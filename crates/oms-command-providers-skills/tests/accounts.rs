@@ -134,7 +134,13 @@ impl Drop for OwnedRoot {
 /// (marker holding its witness, the env it set), so a stray
 /// `OMS_ACCOUNT_TEST_ROOT` can never aim a body at a real path or real
 /// provider config. Read-only.
-fn fixture_root(parent: Parent, owner: &str, ppid: Option<i32>, claude: Option<&str>) -> PathBuf {
+fn fixture_root(
+    parent: Parent,
+    owner: &str,
+    ppid: Option<i32>,
+    claude: Option<&str>,
+    xdg: Option<&str>,
+) -> PathBuf {
     let raw = PathBuf::from(std::env::var_os(ROOT).unwrap());
     let refuse = |why: &str| -> ! {
         panic!(
@@ -189,7 +195,7 @@ fn fixture_root(parent: Parent, owner: &str, ppid: Option<i32>, claude: Option<&
     }
     for (key, want) in [
         ("HOME", raw.join("home")),
-        ("XDG_CONFIG_HOME", raw.join("home/.config")),
+        ("XDG_CONFIG_HOME", raw.join(xdg.unwrap_or("home/.config"))),
         ("PATH", raw.join("bin")),
     ] {
         if std::env::var_os(key).as_deref() != Some(want.as_os_str()) {
@@ -213,7 +219,7 @@ fn isolated(name: &str, fakes: &[&str], body: fn(&Path)) {
 fn isolated_in(parent: Parent, name: &str, fakes: &[&str], body: fn(&Path)) {
     if std::env::var_os(ROOT).is_some() {
         let ppid = rustix::process::Pid::as_raw(rustix::process::getppid());
-        return body(&fixture_root(parent, name, Some(ppid), None));
+        return body(&fixture_root(parent, name, Some(ppid), None, None));
     }
     let owned = (parent.pick)(name);
     let root = owned.path.clone();
@@ -623,6 +629,7 @@ fn claude_legacy_migration_env_collision_child() {
         "same_id_across_providers_but_never_a_shared_home",
         None,
         Some("custom-claude-legacy"),
+        None,
     );
     refused(
         &root,
@@ -782,6 +789,7 @@ fn claude_verify_env_override_child() {
     let root = fixture_root(
         TEMP_PARENT,
         "claude_verify_uses_credentials_without_the_binary",
+        None,
         None,
         None,
     );
@@ -1590,4 +1598,307 @@ fn antigravity_local_profiles_register_verify_remove() {
             ok(root, &a_spec);
         },
     );
+}
+
+#[test]
+fn antigravity_path_alias_sibling_receipt_and_provider_compat() {
+    isolated_in(
+        PRIVATE_PARENT,
+        "antigravity_path_alias_sibling_receipt_and_provider_compat",
+        &[],
+        |root| {
+            let a = agy_home(root, "agy-a", true);
+            let b = agy_home(root, "agy-b", true);
+            let c = agy_home(root, "agy-c", true);
+            let home_alias = root.join("home-alias");
+            symlink(root.join("home"), &home_alias).unwrap();
+            let unsafe_cfg = root.join("unsafe-cfg");
+            mk(&unsafe_cfg).unwrap();
+            private(&unsafe_cfg, 0o777);
+            let unsafe_alias = root.join("unsafe-xdg-alias");
+            symlink(&unsafe_cfg, &unsafe_alias).unwrap();
+
+            // 1. Aliased XDG parent path resolves to the same physical config root
+            // for lock, registry, receipt and private-tree checks.
+            let alias_out = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "antigravity_path_alias_child", "--nocapture"])
+                .env(ROOT, root)
+                .env("HOME", root.join("home"))
+                .env("XDG_CONFIG_HOME", home_alias.join(".config"))
+                .output()
+                .unwrap();
+            assert!(
+                alias_out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&alias_out.stdout),
+                String::from_utf8_lossy(&alias_out.stderr)
+            );
+            let registry = config(root).join("provider-accounts.antigravity.json");
+            let receipt = config(root).join("antigravity-account-receipts.json");
+            assert_eq!(rj(&registry)["accounts"], json!([{"id":"a","home":a}]));
+            assert_eq!(rj(&receipt).as_array().unwrap().len(), 1);
+            assert_eq!(registered(root, "codex"), ["default", "work"]);
+
+            // Unsafe symlinked XDG target is refused cleanly.
+            let unsafe_out = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "antigravity_unsafe_xdg_alias_child",
+                    "--nocapture",
+                ])
+                .env(ROOT, root)
+                .env("HOME", root.join("home"))
+                .env("XDG_CONFIG_HOME", &unsafe_alias)
+                .output()
+                .unwrap();
+            assert!(
+                unsafe_out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&unsafe_out.stdout),
+                String::from_utf8_lossy(&unsafe_out.stderr)
+            );
+            assert!(!unsafe_cfg.join("oh-my-setting").exists());
+
+            // 2. Missing or mismatched sibling AGY receipt blocks unrelated
+            // registration while explicit recovery of the broken alias succeeds.
+            let a_kept = snapshot(&a);
+            let b_kept = snapshot(&b);
+            let b_spec = ["--account", "antigravity:b", "--home", b.to_str().unwrap()];
+            let a_spec = ["--account", "antigravity:a", "--home", a.to_str().unwrap()];
+            let good_receipt = fs::read(&receipt).unwrap();
+            fs::write(&receipt, b"[]\n").unwrap();
+            let before_missing = (fs::read(&registry).unwrap(), fs::read(&receipt).unwrap());
+            refused(
+                root,
+                &b_spec,
+                "missing or mismatched antigravity account receipt for a",
+            );
+            assert_eq!(
+                (fs::read(&registry).unwrap(), fs::read(&receipt).unwrap()),
+                before_missing
+            );
+            assert_eq!(snapshot(&b), b_kept);
+
+            let mut mismatched: Value = serde_json::from_slice(&good_receipt).unwrap();
+            mismatched[0]["home"] = json!(c);
+            fs::write(&receipt, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+            let before_mismatch = (fs::read(&registry).unwrap(), fs::read(&receipt).unwrap());
+            refused(
+                root,
+                &b_spec,
+                "missing or mismatched antigravity account receipt for a",
+            );
+            assert_eq!(
+                (fs::read(&registry).unwrap(), fs::read(&receipt).unwrap()),
+                before_mismatch
+            );
+
+            // Explicit recovery: remove broken alias `a`, re-register `a`, then `b`.
+            ok(root, &["--account", "antigravity:a", "--remove"]);
+            assert_eq!(snapshot(&a), a_kept);
+            ok(root, &a_spec);
+            ok(root, &b_spec);
+            assert_eq!(
+                rj(&registry)["accounts"],
+                json!([{"id":"a","home":a},{"id":"b","home":b}])
+            );
+
+            // 3. Deterministic recovery from on-disk partial publication states
+            // (orphaned receipt after write 1, or remaining receipt during --remove).
+            let c_kept = snapshot(&c);
+            let c_spec = ["--account", "antigravity:c", "--home", c.to_str().unwrap()];
+            ok(root, &c_spec);
+            let mut reg_without_c = rj(&registry);
+            reg_without_c["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|r| r["id"] != "c");
+            fs::write(&registry, serde_json::to_vec(&reg_without_c).unwrap()).unwrap();
+            // Re-running registration reconciles `c` into the registry.
+            ok(root, &c_spec);
+            assert_eq!(snapshot(&c), c_kept);
+            assert_eq!(rj(&registry)["accounts"].as_array().unwrap().len(), 3);
+            // Partial removal state (removed from registry, still in receipt) recovers via --remove.
+            fs::write(&registry, serde_json::to_vec(&reg_without_c).unwrap()).unwrap();
+            ok(root, &["--account", "antigravity:c", "--remove"]);
+            assert_eq!(snapshot(&c), c_kept);
+            assert!(
+                !rj(&receipt)
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["id"] == "c")
+            );
+
+            // 4. Existing providers (codex, claude, pi) stay completely intact.
+            for provider in ["codex", "claude", "pi"] {
+                seed(root, provider);
+                let spec = format!("{provider}:compat");
+                ok(root, &["--account", &spec]);
+                assert!(registered(root, provider).contains(&"compat".to_string()));
+                ok(root, &["--account", &spec, "--remove"]);
+                assert!(!registered(root, provider).contains(&"compat".to_string()));
+            }
+            assert!(
+                rj(&config(root).join("provider-accounts.json"))["providers"]["antigravity"]
+                    .is_null()
+            );
+        },
+    );
+}
+
+#[test]
+fn antigravity_path_alias_child() {
+    if std::env::var_os(ROOT).is_none() {
+        return;
+    }
+    let root = fixture_root(
+        PRIVATE_PARENT,
+        "antigravity_path_alias_sibling_receipt_and_provider_compat",
+        None,
+        None,
+        Some("home-alias/.config"),
+    );
+    let a = root.join("agy-a");
+    ok(
+        &root,
+        &["--account", "antigravity:a", "--home", a.to_str().unwrap()],
+    );
+    seed(&root, "codex");
+    ok(&root, &["--account", "codex:work"]);
+    refused(
+        &root,
+        &["--account", "codex:clash", "--home", a.to_str().unwrap()],
+        "already registered by another provider",
+    );
+}
+
+#[test]
+fn antigravity_unsafe_xdg_alias_child() {
+    if std::env::var_os(ROOT).is_none() {
+        return;
+    }
+    let root = fixture_root(
+        PRIVATE_PARENT,
+        "antigravity_path_alias_sibling_receipt_and_provider_compat",
+        None,
+        None,
+        Some("unsafe-xdg-alias"),
+    );
+    let b = root.join("agy-b");
+    refused(
+        &root,
+        &["--account", "antigravity:b", "--home", b.to_str().unwrap()],
+        "unsafe antigravity account registry ancestry",
+    );
+}
+
+#[test]
+fn antigravity_reserves_legacy_claude_default_home() {
+    isolated_in(
+        PRIVATE_PARENT,
+        "antigravity_reserves_legacy_claude_default_home",
+        &[],
+        |root| {
+            let (claude_main, _) = seed(root, "claude");
+            ok(root, &["--account", "claude:work"]);
+            // Make $HOME/.claude satisfy agy_home's 0700 check so only foreign_homes can refuse it.
+            private(&claude_main, 0o700);
+            // Remove the shared "claude" section so only legacy provider-accounts.claude.json remains.
+            let shared_path = config(root).join("provider-accounts.json");
+            let mut shared = rj(&shared_path);
+            shared["providers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("claude");
+            fs::write(&shared_path, serde_json::to_vec(&shared).unwrap()).unwrap();
+            assert!(
+                !rj(&config(root).join("provider-accounts.claude.json"))["accounts"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            let claude_override = root.join("claude-override");
+            mk(&claude_override).unwrap();
+            let distinct = agy_home(root, "agy-distinct", true);
+
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "antigravity_legacy_claude_default_home_child",
+                    "--nocapture",
+                ])
+                .env(ROOT, root)
+                .env("HOME", root.join("home"))
+                .env("XDG_CONFIG_HOME", root.join("home/.config"))
+                .env("CLAUDE_CONFIG_DIR", &claude_override)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let registry = config(root).join("provider-accounts.antigravity.json");
+            let receipt = config(root).join("antigravity-account-receipts.json");
+            assert_eq!(rj(&registry)["accounts"], json!([]));
+            assert_eq!(rj(&receipt), json!([]));
+            assert!(distinct.is_dir());
+        },
+    );
+}
+
+#[test]
+fn antigravity_legacy_claude_default_home_child() {
+    if std::env::var_os(ROOT).is_none() {
+        return;
+    }
+    let root = fixture_root(
+        PRIVATE_PARENT,
+        "antigravity_reserves_legacy_claude_default_home",
+        None,
+        Some("claude-override"),
+        None,
+    );
+    let claude_main = root.join("home/.claude");
+    let distinct = root.join("agy-distinct");
+    let cfg = config(&root);
+    let before = snapshot(&cfg);
+    // With CLAUDE_CONFIG_DIR overridden, canonical $HOME/.claude is still reserved
+    // by the implicit legacy Claude default home.
+    refused(
+        &root,
+        &[
+            "--account",
+            "antigravity:clash",
+            "--home",
+            claude_main.to_str().unwrap(),
+        ],
+        "canonical home is already registered by another provider",
+    );
+    assert_eq!(snapshot(&cfg), before);
+
+    // Ordinary registration targeting a distinct synthetic home succeeds.
+    let distinct_spec = [
+        "--account",
+        "antigravity:ok",
+        "--home",
+        distinct.to_str().unwrap(),
+    ];
+    ok(&root, &distinct_spec);
+    let registry = cfg.join("provider-accounts.antigravity.json");
+    let receipt = cfg.join("antigravity-account-receipts.json");
+    assert_eq!(
+        rj(&registry)["accounts"],
+        json!([{"id":"ok","home":distinct}])
+    );
+    assert_eq!(rj(&receipt).as_array().unwrap().len(), 1);
+
+    // Explicit --remove / recovery remains unaffected.
+    let kept = snapshot(&distinct);
+    ok(&root, &["--account", "antigravity:ok", "--remove"]);
+    assert_eq!(snapshot(&distinct), kept);
+    assert_eq!(rj(&registry)["accounts"], json!([]));
+    assert_eq!(rj(&receipt), json!([]));
 }
