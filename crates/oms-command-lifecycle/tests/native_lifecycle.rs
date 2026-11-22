@@ -1998,6 +1998,139 @@ fn worker_suffix() {}
     assert_eq!(check(&table_path, root).0, 1);
 }
 
+#[test]
+fn doctor_and_model_doctor_share_bounded_probe_evidence() {
+    if let Some(root) = std::env::var_os("OMS_PROBE_PARITY_ROOT").map(PathBuf::from) {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let expected = std::env::var("OMS_TEST_VERSION_EXIT").unwrap() == "0"
+            && std::env::var("OMS_TEST_HELP_EXIT").unwrap() == "0";
+        let stop = AtomicBool::new(false);
+        let narrow = oms_command_providers_skills::run_with_source(
+            "model-doctor",
+            &["--providers".into(), "claude".into(), "--json".into()],
+            &root,
+            source,
+            &stop,
+        );
+        let report: Value = serde_json::from_slice(&narrow.1).unwrap();
+        assert_eq!(narrow.0, i32::from(!expected), "{report}");
+        assert_eq!(report["providers"][0]["usable"], expected, "{report}");
+        let cache = root.join("capabilities");
+        let fields = |file: &Path| -> std::collections::BTreeMap<String, String> {
+            fs::read_to_string(file)
+                .unwrap()
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect()
+        };
+        let narrow_cache = fields(&cache.join("claude.env"));
+        if expected {
+            assert_eq!(report["providers"][0]["effort_mechanism"], "flag");
+            assert_eq!(
+                report["providers"][0]["effort_values"],
+                json!(["low", "medium", "high", "xhigh"])
+            );
+            assert_eq!(narrow_cache["binary_key"], "previous-binary");
+            assert_eq!(narrow_cache["models_probe"], "failed");
+        }
+        let aggregate = run_with_services(
+            "doctor",
+            &["--json".into()],
+            &root,
+            source,
+            &stop,
+            &NativeServices::default(),
+        );
+        assert!(
+            aggregate.2.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&aggregate.2)
+        );
+        let report: Value = serde_json::from_slice(&aggregate.1).unwrap();
+        let failures = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["section"] == "model doctor"
+                    && row["message"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("claude:"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failures.is_empty(), expected, "{report}");
+        if let Some(failure) = failures.first() {
+            let level = if std::env::var("OH_MY_SETTING_MODEL_DOCTOR").unwrap() == "1" {
+                "error"
+            } else {
+                "warn"
+            };
+            assert_eq!(failure["level"], level);
+        }
+        let aggregate_cache = fields(&cache.join("claude.env"));
+        if expected {
+            for key in ["effort_mechanism", "effort_values"] {
+                assert_eq!(narrow_cache[key], aggregate_cache[key], "{key}");
+            }
+        }
+        assert_ne!(aggregate_cache["binary_key"], "previous-binary");
+        assert_eq!(
+            fs::read_to_string(cache.join("claude.models")).unwrap(),
+            "cached-model\n"
+        );
+        assert_eq!(
+            fs::read_to_string(cache.join("claude.efforts")).unwrap(),
+            "cached-model\tlow high\n"
+        );
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("oms-probe-parity-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let _fixture = Fixture(root.clone());
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let executable = bin.join("claude");
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '--effort (low|medium|high|xhigh)'; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    for (version, help, mode) in [(0, 0, "auto"), (1, 0, "auto"), (0, 1, "1"), (1, 1, "1")] {
+        let case = root.join(format!("{version}-{help}"));
+        let cache = case.join("capabilities");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("claude.env"), "binary_key=previous-binary\neffort_mechanism=none\neffort_values=low\nmodels_probe=failed\nprobed_at=1\n").unwrap();
+        fs::write(cache.join("claude.models"), "cached-model\n").unwrap();
+        fs::write(cache.join("claude.efforts"), "cached-model\tlow high\n").unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "doctor_and_model_doctor_share_bounded_probe_evidence",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", &bin)
+            .env("HOME", &case)
+            .env("TMPDIR", &case)
+            .env("OMS_PROBE_PARITY_ROOT", &case)
+            .env("OMS_CAPABILITY_DIR", &cache)
+            .env("OMS_LOCK_DIR", case.join("locks"))
+            .env("OH_MY_SETTING_MODEL_DOCTOR", mode)
+            .env("OMS_TEST_VERSION_EXIT", version.to_string())
+            .env("OMS_TEST_HELP_EXIT", help.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "version={version}, help={help}: {} {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+}
+
 // Keep diagnostics in the canonical isolated lifecycle fixture: the same read-only
 // contract applies to both inventory and pin comparison, without --pin or probes.
 fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeServices) {
