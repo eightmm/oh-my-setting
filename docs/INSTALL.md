@@ -218,6 +218,11 @@ Keep private policy in user skills outside the tracked install tree.
 Incoming installation reconciles OMS components without reinstalling tools or
 rewriting capability choices. The owning update refreshes the selected tools
 after the core commit. `--no-tools` and rollback skip that refresh entirely.
+Successful refresh is followed by `doctor --integrations`, which checks recorded
+hook, plugin, and managed MCP configuration without live model or arbitrary MCP
+server probes. `--no-doctor` explicitly skips this check. A post-refresh failure
+reports a partial update with a sanitized phase/tool/exit diagnostic and retains
+the committed core receipt; vendor binaries are not rolled back.
 The incoming revision supplies its own installer: rolling back to an older
 revision that predates this separation retains that older install behavior.
 

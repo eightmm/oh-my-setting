@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use oms_command_lifecycle::{
-    IncomingPhase, IncomingSourceLease, Output, ReleaseChannel, Services, UnavailableServices,
-    apply_release_with_services, run_with_services,
+    IncomingDiagnostic, IncomingPhase, IncomingSourceLease, IncomingTool, Output, ReleaseChannel,
+    Services, UnavailableServices, apply_release_with_services, run_with_services,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -289,7 +289,7 @@ impl Services for ColdUpdateHost {
         revision: &str,
         old: &[u8],
         _: &[OsString],
-        _: &AtomicBool,
+        interrupted: &AtomicBool,
     ) -> Output {
         self.phases.borrow_mut().push(phase);
         if phase == IncomingPhase::Preflight {
@@ -331,31 +331,64 @@ impl Services for ColdUpdateHost {
                 vec![],
             );
         }
-        if phase == IncomingPhase::RefreshTools {
-            if self.fail == "apply-locked-auto" {
-                return (0, vec![], vec![]);
-            }
-            assert!(matches!(
-                self.fail.as_str(),
-                "prepared-refresh" | "auto-refresh" | "auto-refresh-ok"
-            ));
+        if matches!(
+            phase,
+            IncomingPhase::RefreshTools | IncomingPhase::VerifyIntegrations
+        ) {
             assert_eq!(read(&self.receipt())["commit"], revision);
+            assert_eq!(fs::read(self.receipt()).unwrap(), old);
             assert!(
                 !self
                     .root
                     .join("config/oh-my-setting/native-update/transaction.json")
                     .exists(),
-                "tool refresh follows the committed core transaction"
+                "post-update phases follow the committed core transaction"
             );
-            return (
-                if self.fail == "auto-refresh-ok" { 0 } else { 9 },
-                vec![],
-                if self.fail == "auto-refresh-ok" {
-                    vec![]
+            let integrations = phase == IncomingPhase::VerifyIntegrations;
+            if integrations && self.fail == "post-cancel" {
+                interrupted.store(true, std::sync::atomic::Ordering::Release);
+            }
+            let code = if integrations {
+                if matches!(
+                    self.fail.as_str(),
+                    "post-fail" | "post-forged" | "post-mismatch"
+                ) {
+                    7
                 } else {
-                    b"provider refresh unavailable\n".to_vec()
-                },
-            );
+                    0
+                }
+            } else if matches!(self.fail.as_str(), "prepared-refresh" | "auto-refresh") {
+                9
+            } else {
+                0
+            };
+            let mut out = IncomingDiagnostic {
+                phase,
+                tool: Some(if integrations {
+                    IncomingTool::Doctor
+                } else {
+                    IncomingTool::InstallTools
+                }),
+                exit: code,
+            }
+            .output();
+            if integrations && self.fail == "post-forged" {
+                out.1 = serde_json::to_vec(&json!({
+                    "phase":"verify_integrations", "tool":self.root.join("private-adapter"),
+                    "exit":7, "detail":"private-provider-output"
+                }))
+                .unwrap();
+            } else if integrations && self.fail == "post-mismatch" {
+                out.1 = IncomingDiagnostic {
+                    phase,
+                    tool: Some(IncomingTool::Doctor),
+                    exit: 0,
+                }
+                .output()
+                .1;
+            }
+            out.2 = format!("private-provider-output {}", self.root.display()).into_bytes();
+            return out;
         }
         assert_eq!(phase, IncomingPhase::Reconcile);
         assert_eq!(self.git(source, &["rev-parse", "HEAD"]), revision);
@@ -803,9 +836,22 @@ exec "$root/bin/actual/git" "$@"
         assert_eq!(outcome["status"], "partial");
         assert_eq!(outcome["core"], "updated");
         assert_eq!(outcome["tools"], "failed");
+        assert_eq!(outcome["integrations"], "skipped");
+        assert_eq!(outcome["integrations_skip_reason"], "refresh_failed");
+        assert_eq!(
+            outcome["diagnostics"],
+            json!([{"phase":"refresh_tools","tool":"install-tools","exit":9}])
+        );
         assert_eq!(outcome["current_commit"], target);
         assert!(String::from_utf8_lossy(&out.2).contains("core update succeeded"));
         assert!(host.phases.borrow().contains(&IncomingPhase::RefreshTools));
+        assert!(
+            !host
+                .phases
+                .borrow()
+                .contains(&IncomingPhase::VerifyIntegrations)
+        );
+        assert!(!String::from_utf8_lossy(&out.2).contains("private-provider-output"));
     } else {
         success(out);
         assert!(!host.phases.borrow().contains(&IncomingPhase::RefreshTools));
@@ -835,6 +881,116 @@ exec "$root/bin/actual/git" "$@"
             "build\nproof\n"
         },
         "activation reuses the prepared target without fetching or rebuilding"
+    );
+}
+
+fn post_refresh_case(host: &ColdUpdateHost, target: &str) {
+    let source = host.source();
+    let mut args = vec!["--json", "--ref", target];
+    let mut expected_commit = target;
+    let mut expected = vec![IncomingPhase::Preflight, IncomingPhase::Reconcile];
+    let reason = match host.fail.as_str() {
+        "post-no-doctor" => {
+            args.push("--no-doctor");
+            Some("no_doctor")
+        }
+        "post-no-tools" => {
+            args.push("--no-tools");
+            Some("no_tools")
+        }
+        "post-rollback" => {
+            success(call(
+                "update",
+                &["--ref", target, "--no-tools"],
+                &source,
+                host,
+            ));
+            host.phases.borrow_mut().clear();
+            args = vec!["--rollback", "--json"];
+            expected_commit = &host.before;
+            Some("rollback")
+        }
+        _ => None,
+    };
+    if host.fail != "post-no-doctor" {
+        expected.push(IncomingPhase::Verify);
+    }
+    if !matches!(reason, Some("no_tools" | "rollback")) {
+        expected.push(IncomingPhase::RefreshTools);
+    }
+    if reason.is_none() {
+        expected.push(IncomingPhase::VerifyIntegrations);
+    }
+    let out = call("update", &args, &source, host);
+    let code = match host.fail.as_str() {
+        "post-fail" | "post-forged" | "post-mismatch" => 7,
+        "post-cancel" => 130,
+        _ => 0,
+    };
+    assert_eq!(out.0, code, "{}", String::from_utf8_lossy(&out.2));
+    assert_eq!(*host.phases.borrow(), expected);
+    let report: Value = serde_json::from_slice(&out.1).unwrap();
+    assert_eq!(report["core"], "updated");
+    assert_eq!(report["current_commit"], expected_commit);
+    assert_eq!(report["integrations_skip_reason"], json!(reason));
+    assert_eq!(
+        report["integrations"],
+        if reason.is_some() {
+            "skipped"
+        } else if code == 130 {
+            "cancelled"
+        } else if code == 0 {
+            "passed"
+        } else {
+            "failed"
+        }
+    );
+    assert_eq!(
+        report["tools"],
+        if matches!(reason, Some("no_tools" | "rollback")) {
+            "skipped"
+        } else {
+            "updated"
+        }
+    );
+    let diagnostics = report["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        diagnostics.len(),
+        expected
+            .iter()
+            .filter(|p| matches!(
+                p,
+                IncomingPhase::RefreshTools | IncomingPhase::VerifyIntegrations
+            ))
+            .count()
+    );
+    if reason.is_none() {
+        let tool = if matches!(host.fail.as_str(), "post-forged" | "post-mismatch") {
+            Value::Null
+        } else {
+            json!("doctor")
+        };
+        assert_eq!(
+            diagnostics.last().unwrap(),
+            &json!({"phase":"verify_integrations","tool":tool,"exit":code})
+        );
+    }
+    for raw in [&out.1, &out.2] {
+        let text = String::from_utf8_lossy(raw);
+        assert!(!text.contains("private-provider-output"));
+        assert!(!text.contains(host.root.to_str().unwrap()));
+    }
+    if code != 0 {
+        assert_eq!(report["status"], "partial");
+        assert!(String::from_utf8_lossy(&out.2).contains("were not rolled back"));
+    }
+    assert_eq!(read(&host.receipt())["commit"], expected_commit);
+    assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), expected_commit);
+    assert!(
+        !host
+            .root
+            .join("config/oh-my-setting/native-update/transaction.json")
+            .exists()
     );
 }
 
@@ -885,6 +1041,10 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     assert_eq!(partial["last_apply_run"], partial["last_run"]);
     assert_eq!(partial["last_apply_local"], host.before);
     assert_eq!(partial["last_apply_remote"], target);
+    assert_eq!(
+        partial["last_apply_diagnostic"],
+        json!({"phase":"refresh_tools","tool":"install-tools","exit":9})
+    );
     assert_eq!(attention()["attention"], "failed");
     assert_eq!(fs::read(&state).unwrap(), saved, "status stays read-only");
     let phases = host.phases.borrow().clone();
@@ -897,10 +1057,15 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
         assert_eq!(checked["last_apply_status"], "partial");
         assert_eq!(checked["last_apply_run"], partial["last_run"]);
         assert_eq!(checked["last_apply_remote"], target);
+        assert_eq!(
+            checked["last_apply_diagnostic"],
+            partial["last_apply_diagnostic"]
+        );
         assert_eq!(attention()["attention"], "failed");
     }
     let text = success(call("auto-update", &["status"], &source, host));
     assert!(String::from_utf8_lossy(&text).contains("last apply: partial"));
+    assert!(String::from_utf8_lossy(&text).contains("last apply diagnostic:"));
     assert_eq!(*host.phases.borrow(), phases, "a check cannot retry tools");
     assert_eq!(fs::read(host.receipt()).unwrap(), receipt);
 
@@ -937,6 +1102,24 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     let invalid_bytes = fs::read(&state).unwrap();
     assert_eq!(call("auto-update", &["check"], &source, host).0, 2);
     assert_eq!(fs::read(&state).unwrap(), invalid_bytes);
+    write(&state, &partial);
+
+    // A saved diagnostic accepts only typed phase/tool/exit data, even when a
+    // legacy JSON state file has additional untrusted fields.
+    for (field, value) in [
+        ("tool", json!(host.root.join("private-adapter"))),
+        ("phase", json!("reconcile")),
+        ("exit", json!(256)),
+        ("exit", json!(0)),
+        ("private", json!("private-provider-output")),
+    ] {
+        let mut forged = partial.clone();
+        forged["last_apply_diagnostic"][field] = value;
+        write(&state, &forged);
+        assert!(status().get("last_apply_diagnostic").is_none());
+        check();
+        assert!(status().get("last_apply_diagnostic").is_none());
+    }
     write(&state, &partial);
 
     let mut installed = read(&host.receipt());
@@ -981,6 +1164,31 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     assert_eq!(status()["last_apply_status"], "skipped");
     assert_eq!(attention()["attention"], "blocked");
 
+    let failed_integrations = ColdUpdateHost {
+        root: host.root.clone(),
+        before: host.before.clone(),
+        fail: "post-fail".into(),
+        phases: RefCell::new(vec![]),
+    };
+    let out = call(
+        "auto-update",
+        &["apply", "--json"],
+        &source,
+        &failed_integrations,
+    );
+    assert_eq!(out.0, 7);
+    let outcome: Value = serde_json::from_slice(&out.1).unwrap();
+    assert_eq!(outcome["tools"], "updated");
+    assert_eq!(outcome["integrations"], "failed");
+    check();
+    assert_eq!(status()["last_apply_status"], "partial");
+    assert_eq!(
+        status()["last_apply_diagnostic"],
+        json!({"phase":"verify_integrations","tool":"doctor","exit":7})
+    );
+    assert_eq!(attention()["attention"], "failed");
+    assert_eq!(read(&host.receipt())["commit"], target);
+
     let retry = ColdUpdateHost {
         root: host.root.clone(),
         before: host.before.clone(),
@@ -992,6 +1200,11 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     assert_eq!(status()["last_apply_status"], "up_to_date");
     assert_eq!(status()["last_apply_local"], target);
     assert_eq!(status()["last_apply_remote"], target);
+    assert!(status().get("last_apply_diagnostic").is_none());
+    assert_eq!(
+        retry.phases.borrow().last(),
+        Some(&IncomingPhase::VerifyIntegrations)
+    );
     assert_eq!(attention()["attention"], "ok");
     assert_eq!(read(&host.receipt())["previous_commit"], host.before);
     assert_eq!(
@@ -1195,7 +1408,21 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state_prepared_lifecycle()
 #[test]
 fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
     let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
-        run_cold_update_cases(&["ok", "edge", "fallback", "offline", "release-edge"]);
+        run_cold_update_cases(&[
+            "ok",
+            "edge",
+            "fallback",
+            "offline",
+            "release-edge",
+            "post-ok",
+            "post-fail",
+            "post-cancel",
+            "post-forged",
+            "post-mismatch",
+            "post-no-doctor",
+            "post-no-tools",
+            "post-rollback",
+        ]);
         return;
     };
     let mut host = ColdUpdateHost {
@@ -1681,6 +1908,10 @@ echo build >> "$root/flow"
     }
     if host.fail == "auto-refresh" {
         auto_update_outcome_case(&host, &target);
+        return;
+    }
+    if host.fail.starts_with("post-") {
+        post_refresh_case(&host, &target);
         return;
     }
     let release_channel = match host.fail.as_str() {
@@ -2451,6 +2682,132 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     fs::remove_dir(source.join("rules")).unwrap();
 }
 
+fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServices) {
+    let home = root.join("home");
+    let receipt = root.join("config/oh-my-setting/install.json");
+    assert!(!receipt.exists());
+    let settings = home.join(".claude/settings.json");
+    let claude = home.join(".claude.json");
+    let codex = home.join(".codex/config.toml");
+    let cache =
+        home.join(".codex/plugins/cache/oh-my-setting-local/oh-my-setting/1.0.0/hooks.json");
+    let state = root.join("codex-state");
+    let files = [&settings, &claude, &codex, &cache, &state];
+    let before = files.map(|p| fs::read(p).ok());
+    let inspect = |components: Value| -> Value {
+        write(
+            &receipt,
+            &json!({"schema":1,"source_root":source,"version":"1","commit":"a".repeat(40),
+            "channel":"edge","installed_at":"fixture","components":components,
+            "plugin":{"name":"oh-my-setting","version":"1","sha256":"a".repeat(64)}}),
+        );
+        let saved = fs::read(&receipt).unwrap();
+        let out = call("doctor", &["--integrations", "--json"], source, host);
+        let report: Value = serde_json::from_slice(&out.1).unwrap();
+        assert_eq!(out.0, report["exit"].as_i64().unwrap() as i32);
+        assert_eq!(report["kind"], "oms-doctor-integrations");
+        assert_eq!(report["runtime"], "not_probed");
+        assert!(!String::from_utf8_lossy(&out.1).contains(root.to_str().unwrap()));
+        assert!(!String::from_utf8_lossy(&out.1).contains("private-provider-output"));
+        assert_eq!(
+            fs::read(&receipt).unwrap(),
+            saved,
+            "diagnosis cannot change the receipt"
+        );
+        report
+    };
+    let skipped = inspect(json!({}));
+    assert_eq!(skipped["exit"], 0);
+    assert!(
+        skipped["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["level"] == "note")
+    );
+    assert_eq!(inspect(json!({"codex_plugin":true}))["exit"], 0);
+    write(
+        &cache,
+        &json!({"hooks":{},"private":"private-provider-output"}),
+    );
+    assert_eq!(inspect(json!({"codex_plugin":true}))["exit"], 1);
+    assert_eq!(
+        read(&cache)["private"],
+        "private-provider-output",
+        "doctor cannot repair the cache"
+    );
+    fs::write(&cache, before[3].as_ref().unwrap()).unwrap();
+    fs::write(&state, b"gone\n").unwrap();
+    assert_eq!(inspect(json!({"codex_plugin":true}))["exit"], 1);
+    assert_eq!(fs::read(&state).unwrap(), b"gone\n");
+    fs::write(&state, b"here\n").unwrap();
+
+    let expected: Value = serde_json::from_slice(&success(call(
+        "install-claude-hooks",
+        &["--print-expected"],
+        source,
+        host,
+    )))
+    .unwrap();
+    let mut hooks = serde_json::Map::new();
+    for surface in expected["surfaces"].as_array().unwrap() {
+        hooks.entry(surface["event"].as_str().unwrap()).or_insert(json!([])).as_array_mut().unwrap().push(
+            json!({"matcher":surface["matcher"],"hooks":[{"type":"command","command":surface["command"],"timeout":surface["timeout"]}]}),
+        );
+    }
+    write(&settings, &json!({"hooks":hooks}));
+    assert_eq!(inspect(json!({"claude_hooks":true}))["exit"], 0);
+    write(&settings, &json!({"hooks":{}}));
+    assert_eq!(inspect(json!({"claude_hooks":true}))["exit"], 1);
+
+    let executable = home.join(".local/bin/oms");
+    let managed =
+        json!({"mcpServers":{"oh-my-setting":{"command":executable,"args":["mcp-server"]}}});
+    write(&claude, &managed);
+    fs::write(
+        &codex,
+        format!(
+            "[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n",
+            json!(executable)
+        ),
+    )
+    .unwrap();
+    assert_eq!(inspect(json!({"mcp":true}))["exit"], 0);
+    for invalid in [json!({"args":[]}), json!({"disabled":true})] {
+        let mut changed = managed.clone();
+        changed["mcpServers"]["oh-my-setting"]
+            .as_object_mut()
+            .unwrap()
+            .extend(invalid.as_object().unwrap().clone());
+        write(&claude, &changed);
+        assert_eq!(inspect(json!({"mcp":true}))["exit"], 1);
+    }
+    fs::write(
+        &claude,
+        format!("{{private-provider-output {}", root.display()),
+    )
+    .unwrap();
+    assert_eq!(inspect(json!({"mcp":true}))["exit"], 1);
+    assert_eq!(inspect(json!({"agy_plugin":true}))["exit"], 1);
+    for incompatible in ["--repair", "--surfaces", "--contract", "--live-models"] {
+        assert_eq!(
+            call("doctor", &["--integrations", incompatible], source, host).0,
+            2
+        );
+    }
+    fs::remove_file(receipt).unwrap();
+    for (path, original) in files.into_iter().zip(before) {
+        match original {
+            Some(raw) => fs::write(path, raw).unwrap(),
+            None => {
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+        }
+    }
+}
+
 fn run_fixture_cron(root: &Path) -> String {
     let cron = fs::read_to_string(root.join("cron")).unwrap();
     let command = cron
@@ -2715,6 +3072,7 @@ esac
     native_only(&read(&cache.join("hooks.json")));
     assert!(!cache.join("scripts").exists());
     let payload = fs::read(cache.join("hooks.json")).unwrap();
+    doctor_integration_diagnostics(&source, &root, &host);
     success(call("install-codex-plugin", &[], &source, &host));
     assert_eq!(fs::read(cache.join("hooks.json")).unwrap(), payload);
     // The native inventory does not read the legacy executable template.
@@ -3360,6 +3718,7 @@ esac
         IncomingPhase::Reconcile,
         IncomingPhase::Verify,
         IncomingPhase::RefreshTools,
+        IncomingPhase::VerifyIntegrations,
     ] {
         success(host.install_extras(phase, &source, &[], &flag));
         success(host.incoming_lifecycle(phase, &source, "", b"{}", &[], &flag));
