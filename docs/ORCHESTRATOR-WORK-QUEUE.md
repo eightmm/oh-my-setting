@@ -5,9 +5,14 @@
 이 문서는 코드 변경과 아직 구현하지 않은 작업 명세를 연결하는 index다.
 최신 source와 PR 상태는 구현 착수 시 다시 확인한다. 문서 병합은 해당 runtime 기능 완료가 아니다.
 개념 점검 기준은 main `189bfdaa28b6b628f0d4d50a4ca3d0df28396b88`이다.
-#259~#265는 문서 PR로 병합되었고 runtime source는 위 기준과 동일하다. #258은 draft다.
+#259~#265는 문서 PR로 병합되었고 runtime source는 위 기준과 동일했다. 당시 #258은 draft였다.
 제품 범위와 개념의 구분은 [Feature scope](FEATURE-SCOPE.md), 실제 착수 상태는 이 큐가 소유한다.
 이전 CP/TM/MR/UX/NF 번호는 acceptance의 출처이며 별도 전체 구현 지시가 아니다.
+
+2026-11-22 재대조 기준은 main `8527cd07d87b16efbc6ac7f4041b7ebe40e0adc8`이다.
+[§8](#8-2026-11-22-재대조와-작은-통합-단위)에 확인한 구현 상태와 다음 작은 변경을 기록한다.
+이전 날짜·SHA의 조사 기록과 채택 분류는 보존하되 현재 미구현 목록으로 다시 사용하지 않는다.
+PR의 병합, source 연결, fixture 존재와 이번 실행 결과는 각각 구분한다.
 
 2026-11-20 공유 제안의 코드 대조와 후속 구현 범위는
 [현재 감사 §10](ORCHESTRATOR-COMPLETION-AUDIT.md#10-2026-11-20-공유-제안의-현재-코드-대조와-구현)에
@@ -16,9 +21,9 @@
 
 ## 1. PR 지도
 
-| PR / 작업 | 실제 변경 | 구현 상태 / 다음 행동 |
+| PR / 작업 | 실제 변경 | 조사 시점 상태 / 후속 |
 |---|---|---|
-| [#258](https://github.com/eightmm/oh-my-setting/pull/258) | 새 native orchestrator의 model/effort 선택 코드·fixture·문서 | Draft. HEAD `4af980f`의 기존 CI 성공 확인. connected session 거절의 run-level fixture와 review는 남음 |
+| [#258](https://github.com/eightmm/oh-my-setting/pull/258) | 새 native orchestrator의 model/effort 선택 코드·fixture·문서 | 초기 조사 당시 Draft; 2026-11-22에는 병합 확인. 기존 세션의 재설정이나 실제 served 설정까지 구현한 것으로 확대하지 않음 |
 | [#259](https://github.com/eightmm/oh-my-setting/pull/259) | [현재 감사](ORCHESTRATOR-COMPLETION-AUDIT.md), [LC-01~04](ORCHESTRATOR-LIFECYCLE-IMPLEMENTATION.md), 이 index | 병합된 명세. 기존 Rust 구성요소와 빠진 연결, 우선순위의 기준 |
 | [#260](https://github.com/eightmm/oh-my-setting/pull/260) | [PERF-01~04](ORCHESTRATOR-PERFORMANCE-WORK-PACKETS.md) | 병합된 명세. 반복 I/O·Plan 읽기·usage persistence·lexical 전처리 |
 | [#261](https://github.com/eightmm/oh-my-setting/pull/261) | [REL-01~04](ORCHESTRATOR-RELIABILITY-WORK-PACKETS.md) | 병합된 명세. native 관측·실패 분류·총 deadline·Broker supervision |
@@ -26,8 +31,8 @@
 | [#263](https://github.com/eightmm/oh-my-setting/pull/263) | [AR-01~04](REMOTE-ARTIFACT-WORK-PACKETS.md) | 병합된 명세. 선택형 원격 수집·bundle 재개·cache 공간 관리 |
 | [#264](https://github.com/eightmm/oh-my-setting/pull/264) | [Graph retrieval 비교](GRAPH-RETRIEVAL-COMPARISON.md)와 [GR-01~13](GRAPH-RETRIEVAL-WORK-PACKETS.md), native README 교정 | 병합된 비교·명세. Rust/Python/shell/notebook 정확성, worker 전달, 평가, 조건부 semantic/hybrid 실험 |
 | [#265](https://github.com/eightmm/oh-my-setting/pull/265) | [호출 경로·중복 감사](CALLABLE-CONSOLIDATION-AUDIT.md), [CC-01~10](CALLABLE-CONSOLIDATION-WORK-PACKETS.md), MCP/Main swap 문서 교정 | 병합된 명세. 실제 caller, 재사용 대상과 제거 조건 |
-| [#281](https://github.com/eightmm/oh-my-setting/pull/281) | Native Claude xhigh·subagent effort·Fable 관측 호환성 | Draft 구현. 전체 capability 통합은 기존 MR-A/TM owner의 후속 |
-| [#282](https://github.com/eightmm/oh-my-setting/pull/282) | Native compaction 우선 안내, Main/Lead/leaf와 source 읽기 범위 명료화 | Draft 구현·지침. 자동 compaction·runtime lead 승격은 포함하지 않음 |
+| [#281](https://github.com/eightmm/oh-my-setting/pull/281) | Native Claude xhigh·subagent effort·Fable 관측 호환성 | 2026-11-19 조사 당시 Draft. 전체 capability 통합은 기존 MR-A/TM owner의 후속 |
+| [#282](https://github.com/eightmm/oh-my-setting/pull/282) | Native compaction 우선 안내, Main/Lead/leaf와 source 읽기 범위 명료화 | 2026-11-19 조사 당시 Draft. 자동 compaction·runtime lead 승격은 포함하지 않음 |
 
 2026-11-19 [모델 업그레이드 후속](MODEL-UPGRADE-ADAPTATION.md)은 공식 지침과 현재 caller를
 대조해 capability, native 관측, 공개 웹 조사 권한, Responses bridge의 완료 조건을
@@ -59,9 +64,9 @@ LC-01~04는 별도 핵심 연결 작업이다. “흡수”는 동등한 기능�
   전송 intent, 실제 결과 artifact와 verifier evidence를 연결해야 한다. Room 수신 ack나
   native 대화의 완료 보고만으로 task를 수락하지 않는다. 전송 결과가 불명확하면 기존
   evidence를 확인하기 전 자동 재전송하지 않는다.
-  현재 panel acceptance는 `--panel-accept` fence를 landing에 전달하지만,
-  `patch-land` parser는 이 인자를 받지 않는다. 따라서 이 경로의 end-to-end 수락은
-  미완료이며, 기존 acceptance 연결이 이미 동작한다고 가정하지 않는다.
+  초기 감사의 `--panel-accept` parser 누락은 현재 source에서 수정되어 있다.
+  기존 fence의 owner/task/base/candidate 재검증을 재사용하며, parser 연결만으로
+  native assignment나 여러 member의 통합 수락까지 완료했다고 간주하지 않는다.
 - **Managed built-in adapter:** lifecycle과 요청 계약을 먼저 갖추고 provider 하나의 지원 경로부터 연결한다.
 - **Catalog와 task 중심 board:** 기존 model/effort catalog·route evidence·Reader를 사용한다.
   #258의 launch 옵션 이후에도 account별 capability 최신성, 실제 적용 설정, task→Team→member 증거 연결은 남는다.
@@ -69,15 +74,16 @@ LC-01~04는 별도 핵심 연결 작업이다. “흡수”는 동등한 기능�
 ### Overall Main 아래의 작업과 native 세션 연결
 
 2026-11-19, main `7d9b291592a926ce389693141d11ef8269eccfcd`에서 확인한 후속 범위다.
-[패널 계약](TEAM-ORCHESTRATION-PANEL.md)은 하나의 작업 흐름 안에서 Main 직접 작업과
-필요한 Provider Lead를 구분한다. Provider별 분류는 세션 이동·활동 분류이며 배정 관계가 아니다.
+[패널 계약](TEAM-ORCHESTRATION-PANEL.md)은 하나의 작업 흐름 안에서 Main이 배정한 direct
+worker와 필요한 Provider Lead를 구분한다. 팀 Main의 직접 편집을 뜻하지 않는다.
+Provider별 분류는 세션 이동·활동 분류이며 배정 관계가 아니다.
 새 작업 큐를 만들지 않고 기존 TM-06과 P0-B/native assignment owner가 아래 순서로 연결한다.
 
 | 기존 owner / 순서 | 이번 변경과 후속 범위 | 완료 조건 / 선행 관계 |
 |---|---|---|
 | TM-06A: 현재 Auto overview | Room membership과 lifecycle parent attempt가 현재 room의 live owner를 가리키는 Worker·Reviewer·Researcher·Advisor를 Main 직접 작업 영역에 표시 | 빈/유실/모호한 parent와 native 관측은 provider 활동으로 표시; 선택·검색·페이지·mouse target·기존 session shortcut 보존 |
 | P0-B: 명시적 native 배정 | 기존 task/lease/attempt·Room reference와 native target/turn·결과를 연결 | 일반 native 대화에는 task 생성 강제 없음; 모호한 전송 뒤 direct 재배정·자동 재전송 금지; 작업과 실행 관계가 확인될 때만 공통 카드에 연결 |
-| TM-05 / 기존 landing owner: 결과 수락 | 현재 panel acceptance → native landing parser 연결 오류를 별도 correctness diff로 수정하고 결과 근거를 기존 수락 경로로 소비 | `--panel-accept`를 무시하는 호환 처리 금지; exact owner/task/base/candidate와 검토 근거 재검증; 실제 native parser를 지나는 기존 entry fixture에서 성공·stale·복구 검사 |
+| TM-05 / 기존 landing owner: 결과 수락 | 초기 parser 누락은 현재 수정됨; 기존 panel acceptance fence와 결과 수락 경로 재사용 | `--panel-accept`를 무시하는 호환 처리 금지; exact owner/task/base/candidate와 검토 근거 재검증. Native assignment와 composite acceptance는 별도 증거 필요 |
 | TM-06A/B: 같은 작업 inspector | 기존 Results/Events/Diff/Transcript reader에 작업·배정·결과 연결과 지원되는 action을 표시 | P0-B의 실제 binding과 해당 action capability를 소비; native 보고·verification·acceptance·publication 구분; 같은 작업을 실행 방식별로 중복 표시하지 않음 |
 | TM-06C / PERF-02 / REL-01 | [#267](https://github.com/eightmm/oh-my-setting/issues/267) 관리형 Board의 provider 관측을 기존 갱신 워커에 통합 | 격리 PTY에서 AGY 캡처가 대기 중일 때 Help 다시 그리기와 종료를 검증하고, 캡처 해제 뒤 갱신까지 별도 측정했다. PERF-02의 전체 Plan 읽기 계약과 REL-01의 zero/unknown/partial 표시, 실제 프로바이더의 cold/warm p95는 후속 검증 범위다. |
 
@@ -87,16 +93,20 @@ assignment/result/control의 완료를 뜻하지 않는다. Native 배정 설계
 [#286](https://github.com/eightmm/oh-my-setting/pull/286), 실제 역할 프롬프트는
 [#284](https://github.com/eightmm/oh-my-setting/pull/284)를 함께 읽는다.
 
-결과 수락 문제의 확인 경로는 `oms-panel-core/src/acceptance.rs`의 `--panel-accept`
-생성 → `oms/src/services_collab.rs`의 인자 전달 → `oms-command-landing/src/cli.rs`의
-해당 option 누락이다. 이는 소스 추적으로 확인한 거절 경로이며 이번 UI diff에서 수정하거나
-live로 재현한 기능이 아니다. Read-only 분류 수정은 이 후속과 독립적으로 검토할 수 있지만,
-수락·취소·복구 조작을 새로 활성화하는 데 필요한 증거를 대신하지 않는다.
+초기 결과 수락 문제는 `oms-panel-core/src/acceptance.rs`의 `--panel-accept`
+생성 → `oms/src/services_collab.rs`의 인자 전달 → landing parser의 option 누락이었다.
+2026-11-22 재대조에서는 [현재 parser](../crates/oms-command-landing/src/cli.rs)가 이 인자를
+받고 크기 및 조합을 검증하며, [기존 landing fixture](../crates/oms-command-landing/tests/landing_contract.rs)에
+해당 경로가 있음을 확인했다. 이번 문서 변경에서 runtime fixture나 live 수락을 실행한 것은 아니다.
+Read-only 분류는 수락·취소·복구 조작을 새로 활성화하는 데 필요한 증거를 대신하지 않는다.
 
 Main이 역할과 실행 조건을 판단하며 사용자가 매번 native/direct 모드를 선택하지 않는다.
 기존 Lead의 맥락을 이어 쓰는 작은 작업도 유효하고, 큰 작업의 독립 검토를 direct reviewer로
 맡길 수도 있다. Lead는 native loop 안에서 직접 수행·분업하고 OMS-managed 실행이 필요하면
-Main에 요청한다. Lead의 child marker를 제거하거나 parent-only guard를 완화하지 않는다.
+Main에 요청한다. 현재 [계층 계약](../custom-skills/oms-agent-harness/references/coordination-layers.md)에
+따라 Lead는 substantive work를 native children에게 맡기고 자신의 편집은 scoped integration과
+unblocking으로 제한한다. Native children이 없으면 직접 수행하고 그 제한을 보고한다.
+Lead의 child marker를 제거하거나 parent-only guard를 완화하지 않는다.
 
 새 성능/CI 개선은 이 P0의 예약·사용량·소유권·검증 의미를 유지해야 한다.
 시간이 오래 걸린다는 이유로 checked API, fsync, exact-SHA proof를 생략하지 않는다.
@@ -104,7 +114,8 @@ Main에 요청한다. Lead의 child marker를 제거하거나 parent-only guard�
 ## 3. 패킷별 채택 상태
 
 상세 source·fixture·완료 조건은 위 연결된 패킷에 보존한다. 이 표의 채택 조건을 먼저 적용한다.
-시작점은 LC-01/02, CC-02/04, VW-01이다. Graph의 명확한 parser/전달 오류는 해당 작은 회귀
+초기 시작점은 LC-01/02, CC-02/04, VW-01이었다. CC-02/04와 VW-01의 구현된 부분은
+§8에서 제외하고 실제 남은 caller부터 선택한다. Graph의 명확한 parser/전달 오류는 해당 작은 회귀
 fixture와 함께 고치며, 대규모 retrieval 평가를 기다리지 않는다. 우선순위는 측정된 병목 순위가 아니다.
 
 | ID | 채택 | 현재 범위 / 흡수할 owner | 착수·보존 조건 |
@@ -140,9 +151,9 @@ fixture와 함께 고치며, 대규모 retrieval 평가를 기다리지 않는�
 | GR-12 | 조건부 | 필요한 경우 Rust LSP/SCIP enrichment | syntax fix 뒤에도 남는 type-resolution 실패 corpus와 설치된 bounded producer |
 | GR-13 | 조건부 | 필요한 경우 한국어·본문 검색 확장 | 실제 no-match 평가; 기존 body/query expansion부터, 의존성은 measured gain 이후 |
 | CC-01 | 유지 | Provider identity/alias/discovery 공유 | 현재 ID validation 차이 교정; target·권한·account 정책은 adapter에 유지 |
-| CC-02 | 유지 | 전체 catalog의 routing consumer | display 20개와 allocation 분리; legacy/empty/unknown 구분 |
+| CC-02 | 유지·구현됨 | #276의 전체 catalog routing consumer 재사용 | display 20개와 allocation 분리; legacy/empty/unknown 계약을 회귀로 보존 |
 | CC-03 | 흡수 | CC-01의 provider 계약 정리 owner | registry decode만 공유; preview/execute 오류·선택·Claude default 의미 유지 |
-| CC-04 | 유지 | [이 tree에서 MCP reader·canonical reference 연결](TOOL-CONTEXT-REVIEW.md) | 기존 capture core; SHA·root·권한·전체 저장본 withhold·응답 cap 보존. 설치 revision/CI 증거는 별도 확인 |
+| CC-04 | 유지·구현됨 | [MCP reader·canonical reference 연결 재사용](TOOL-CONTEXT-REVIEW.md) | 기존 capture core; SHA·root·권한·전체 저장본 withhold·응답 cap 보존. 설치 revision/CI 증거는 별도 확인 |
 | CC-05 | 조건부 | Actual installer의 ownership/convergence 정리 | 설치 경로 수정이나 실제 drift가 있을 때; bare/absolute corpus와 rollback 선행 |
 | CC-06 | 흡수 | REL-04와 공통 supervisor API owner | caller별 작은 PR: Plan → graph → task; task API 동등성 전 기존 verify 유지 |
 | CC-07 | 조건부 | Lock cancellation watcher 제거 | 실제 contention/thread 비용 또는 관련 lock 변경; 의미 없는 API 확대 금지 |
@@ -174,8 +185,9 @@ Broker protocol, SSH 파일 게시, task stdin/live output은 별도의 caller �
 ## 5. 구현 에이전트 전달문
 
 > 최신 main의 실제 caller와 구현 PR을 확인하고 위 채택 표에서 가장 작은 유지 작업을 선택하세요.
-> LC-01/02의 예약 반환, CC-02의 catalog consumer, CC-04의 output reader, VW-01의 문서 판정을
-> 우선할 수 있습니다. 같은 파일의 writer는 한 명으로 정하고 작업별 critical gate를 지키세요.
+> §8의 확인 상태로 완료된 slice를 제외하고 LC/REL/CC의 실제 미연결 caller를 선택하세요.
+> CC-02의 catalog consumer와 CC-04의 output reader는 재사용하세요.
+> 같은 파일의 writer는 한 명으로 정하고 작업별 critical gate를 지키세요.
 > GR-01/02/03/04의 정확성 수정에는 GR-06의 작은 회귀를 함께 넣으세요. 더 넓은 평가·최적화는
 > 필요한 알고리즘/비용 판단이 생길 때 수행하며 별도 benchmark 완료를 모든 fix의 선행으로 만들지 마세요.
 > 흡수 항목은 해당 owner의 acceptance에 포함하세요. 조건부 항목은 실제 trigger를 기록한 뒤 착수하세요.
@@ -225,9 +237,68 @@ memory 후속 범위이며 신규 runtime 구현, 자동화 활성화 또는 여
 DR-06의 최소 관측 연결은 producer와 함께 준비하되 별도 평가 플랫폼 구축을 선행시키지 않는다.
 
 Native 기능 연결은 기존 LC/native assignment/composite acceptance, REL-01/RF-03/04에
-남긴다. Catalog 최신성은 CC-01/02/03 및 #258/#276을 따른다. 조사 시점 #258은 draft,
-#276은 open이며 아직 main 구현으로 간주하지 않는다. memory batch는 PERF-03의 usage
+남긴다. Catalog 최신성은 CC-01/02/03 및 #258/#276을 따른다. 이 절의 2026-11-19 조사 당시
+#258은 draft, #276은 open이었으며, 2026-11-22의 병합·구현 확인은 §8을 따른다. memory batch는 PERF-03의 usage
 persistence와 별개 owner이고, 검증 선택은 기존 VW owner와 조정한다.
 
 구현 에이전트는 새 명세의 DR별 완료 조건과 공통 전달문을 적용하고 실제 source/병합 상태를
 다시 확인한다. 이 문서 PR은 provider 호출·새 유료 평가·배포·사용자 데이터 삭제를 실행하지 않는다.
+
+## 8. 2026-11-22 재대조와 작은 통합 단위
+
+기준은 main
+[`8527cd07`](https://github.com/eightmm/oh-my-setting/commit/8527cd07d87b16efbc6ac7f4041b7ebe40e0adc8)과
+당일 확인한 PR 상태다. 아래는 실제 중복·의미 차이를 기존 owner에 배정하는 index다.
+새 작업 번호, 별도 전체 명세, 새 registry/DB/daemon을 만들지 않는다. Source와 fixture를
+읽어 연결을 확인한 것이며, 이 절의 추가로 runtime 테스트나 live provider 실행을 했다는 뜻은 아니다.
+
+### 구현된 부분과 기존 열린 변경
+
+| 확인한 slice | 현재 근거와 재사용할 경계 | 계속 남는 범위 |
+|---|---|---|
+| 새 Lead의 model/effort 선택 | 병합된 [#258](https://github.com/eightmm/oh-my-setting/pull/258), [native orchestrator](../crates/oms-command-panel/src/orchestrator.rs) | Connected session 재설정·실제 served 설정·account-scoped capability는 별도 |
+| Full catalog와 update 환경 전달 | 병합된 [#276](https://github.com/eightmm/oh-my-setting/pull/276), [routing inputs](../crates/oms-command-panel/src/commands.rs), [update](../crates/oms-command-lifecycle/src/update.rs) | CC-02 재구현 제외. Post-refresh 연동 점검과 정제된 실패 진단은 아래 lifecycle slice |
+| Canonical output reader | CC-04의 [기존 연결](TOOL-CONTEXT-REVIEW.md) | Capture reference와 peer answer reference의 owner 차이 유지 |
+| Main 선택과 역할 계약 | 병합된 [#286](https://github.com/eightmm/oh-my-setting/pull/286), [#321](https://github.com/eightmm/oh-my-setting/pull/321), [현재 Main registry](../crates/oms-command-panel/src/native_panel.rs) | 현재 registry는 Codex/Claude/AGY와 Pi CodexGateway. Main manage-only는 prompt 계약이며 runtime 편집 차단 완료를 뜻하지 않음 |
+| Landing parser·docs planning | [Landing parser](../crates/oms-command-landing/src/cli.rs)는 `--panel-accept`를 소비하고 [check.sh](../scripts/check.sh)는 docs-only reference 경로 전에 native payload를 준비하지 않음 | Native assignment/composite acceptance, 일반 runtime·hosted CI 성공까지 확대하지 않음 |
+| Runtime state envelope | [Native adapter](../crates/oms/src/services_control.rs)의 callback이 [state projection](../crates/oms-command-state/src/state_projection.rs)에 이미 연결됨 | [#316](https://github.com/eightmm/oh-my-setting/pull/316)의 설명 정정을 재사용; 새 callback 연결 불필요 |
+
+[#314](https://github.com/eightmm/oh-my-setting/pull/314)의 unknown benchmark 비교와
+[#315](https://github.com/eightmm/oh-my-setting/pull/315)의 accepted verification 뒤 failure resolve는
+열린 구현 변경이다. [#316](https://github.com/eightmm/oh-my-setting/pull/316)은 handoff section별
+손실 표시(REL-01)와 failure→action→accepted receipt의 정확한 연결(DR-03/04)을 이미 명세한다.
+해당 작업을 복제하지 않는다. #315의 command 단위 resolve와 exact recovery lineage도 구별한다.
+#316의 Main 직접 수행 문구는 팀 Main/solo session을 구분하도록 그 PR에서 정정할 대상이다.
+
+### 여덟 통합 경계와 다음 변경의 합격 조건
+
+아래 runtime 변경은 이 문서에서 구현하지 않았다. 기존 명세 중에서 **probe producer의 일치,
+typed dispatch context의 projection, model-family/unknown의 의미 교정**을 새로 좁힌다.
+Provider identity 정리와 family 의미 변경은 별도 diff로 검토한다. 순서는 의존 관계이며
+전체 기능을 한 PR이나 한 engine으로 합치라는 뜻이 아니다.
+
+| 통합 경계 / 기존 owner | 다음 작은 변경 | 기존 fixture에서 확인할 합격 조건 |
+|---|---|---|
+| Provider probe·capability cache / MR-A, TM-01·07~09 | [model-doctor](../crates/oms-command-providers-skills/src/models.rs)와 [doctor](../crates/oms-command-lifecycle/src/provider_check.rs)의 CLI probe·cache producer를 공유하고 `exact_model_override`를 provider capability 근거로 표시 | 같은 관측 근거의 usability·cache identity·freshness 의미가 두 caller에서 일치. 서로 다른 시각에 읽은 age 숫자의 동일성은 요구하지 않음. Version/help 부분 실패, binary 교체, unknown, probe 미실행을 구별. Exact-model flag 지원을 model entitlement로 확대하지 않음 |
+| DispatchContext / 기존 panel·peer dispatch owner, LC·REL-02 | [peer delegate](../crates/oms-command-peer/src/delegate.rs)와 [panel dispatch](../crates/oms-panel-core/src/dispatch.rs)의 task·parent attempt·Room/member·role/access·기존 route provenance를 typed value에서 env와 attempt refs로 변환 | 현재 단계별 subprocess 경계와 protected binding을 보존하고 두 projection의 동일한 metadata·누락 의미를 확인. Env metadata 자체를 권한으로 사용하지 않음. 일반 context manifest/compiler·graph·raw context 전달로 범위를 확대하지 않음 |
+| Main/Lead/Worker 정책 / 기존 [계층 계약](../custom-skills/oms-agent-harness/references/coordination-layers.md)과 native prompt owner | 이번 문서의 역할 충돌을 정정. 후속은 compact/full prompt가 공유할 책임과 caller별 명령 안내를 구분해 기존 renderer/fixture에 연결 | 팀 Main은 관리, solo session은 직접 작업, Lead의 scoped integration·native-child 부재 예외, leaf의 무위임을 모든 실제 projection에서 보존. Prompt 통일을 runtime guard 구현으로 표시하지 않음 |
+| Provider identity / CC-01; model family / MR-A·MR-C | Identity/alias/discovery는 [CC-01](CALLABLE-CONSOLIDATION-WORK-PACKETS.md#cc-01--provider-identity와-discovery) 범위만 공유. 별도 semantic diff로 [routing family](../crates/oms-panel-core/src/routing.rs)와 producer의 unknown·composite evidence 차이를 정정 | Alias·custom ID·owner cwd discovery를 유지. 같은 model ID의 family 해석을 대조하고 identifier-derived 진단을 verified served-family나 reviewer independence 증거로 승격하지 않음 |
+| 남은 subprocess caller / CC-06·REL-04 | 기존 [Reactor](../crates/oms-supervisor/src/process.rs)를 재사용. Plan Git의 남은 caller부터 연결하고 Broker·Graph·Task는 각 별도 계약으로 진행 | Deadline·cancel·stdin EOF·output cap·exit/signal·소유한 자식 회수를 보존. Task의 inherited stdin/live raw output, Broker framing/backpressure가 동등하기 전 해당 loop를 제거하지 않음 |
+| Account registry / CC-03 → CC-01 | [기존 CC-03](CALLABLE-CONSOLIDATION-WORK-PACKETS.md#cc-03--account-readvalidation-계약-공유)의 bounded decode·schema·ID·home validation만 공통화 | 같은 registry corpus에서 같은 validation. Preview를 실행 account pin으로 바꾸지 않으며 cooldown/retry 재선택·credential env·Claude implicit default·ownership writer 보존 |
+| Tool 갱신 후 연동 / 기존 lifecycle·doctor owner, #276 후속 | [update](../crates/oms-command-lifecycle/src/update.rs)의 Verify → core commit → RefreshTools 뒤 bounded integration probe를 재사용하고 phase/tool/exit 진단을 정제 | Refresh 뒤 hook/plugin/MCP가 깨진 fixture 탐지. Success/failure/explicit skip과 확정된 core receipt를 보존. Vendor binary를 core rollback으로 복구했다고 표시하거나 raw provider 출력·secret을 노출하지 않음 |
+| Native adapter conformance / AH-08, [#319](https://github.com/eightmm/oh-my-setting/pull/319) | Native `oms doctor --providers`에 #319의 adapter conformance를 연결. 기본 probe는 inference를 실행하지 않고 실제 실행은 명시적 opt-in으로 구분 | Public doctor 진입에서 fake adapter의 marker·target·stdin/payload·`-` prompt·output overflow·deadline/cancel·stderr/exit·malformed/unknown을 검사. 기존 [peer contract](../crates/oms-command-peer/tests/peer_contract.rs)를 재사용하되 public doctor 연결 검증을 대체하지 않음. Shell example 성공을 native/live provider 적합성으로 표시하지 않음 |
+
+첫 코드 단위는 probe producer와 Plan Git caller로 나누어 독립 검토할 수 있다.
+Post-refresh 점검은 같은 probe 의미를 재사용하고 lifecycle writer와 순차 반영한다.
+CC-01과 CC-03은 provider 파일의 한 writer가 연결하되, model-family 의미 변경은
+별도 회귀와 diff로 검토한다. Dispatch context도 공통 value를 먼저 정하고 실제 caller를
+순서대로 옮긴다. Compact/full prompt와 native conformance는 각 기존 fixture owner에서
+독립 진행할 수 있다. Broker·Graph·Task의 supervisor 이전은 Plan 변경만으로 완료되지 않으며
+각 caller의 위 계약이 보존된 뒤 old loop를 제거한다. 위 순서가 #314/#315의 correctness 수정이나
+#316의 handoff·recovery 후속을 새 공통 체계 완료까지 미루는 조건은 아니다.
+
+Council 기본 좌석은 [#313](https://github.com/eightmm/oh-my-setting/pull/313)의 AH-10과
+[#318](https://github.com/eightmm/oh-my-setting/pull/318)의 기존 설정 owner에서 이어간다.
+권장 후속은 명시 `--providers` → `OMS_PEER_PROVIDERS` → optional 설정 기본값 → legacy 기본값의
+우선순위를 해당 consumer에 연결하는 것이다. 이는 아직 설정 구현 완료를 뜻하지 않는다.
+Panel의 기존 `council.extra` 의미와 strict schema를 보존하며 새 council 명세나 별도 router는 만들지 않는다.

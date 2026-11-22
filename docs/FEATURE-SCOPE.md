@@ -4,8 +4,12 @@ OMS coordinates a main agent and bounded workers. Its core owns the path from
 an authorized task through isolated work, review, verification and publication.
 Add a subsystem only when an existing workflow cannot meet a named need.
 
-Current concept review: 2026-11-18, source
+Original concept review: 2026-11-18, source
 [`189bfdaa`](https://github.com/eightmm/oh-my-setting/commit/189bfdaa28b6b628f0d4d50a4ca3d0df28396b88).
+The role, Main capability and verification-planning corrections below were
+checked against `8527cd07` on 2026-11-22. The queue's
+[dated source review](ORCHESTRATOR-WORK-QUEUE.md#8-2026-11-22-재대조와-작은-통합-단위)
+separates implemented slices from the remaining work; it is not a new full audit.
 This page owns feature scope; the [implementation queue](ORCHESTRATOR-WORK-QUEUE.md)
 owns the remaining work and its admission conditions. Earlier CP/TM/MR/UX/NF
 documents preserve design evidence and acceptance criteria, not parallel queues
@@ -56,11 +60,17 @@ but do not relabel its pane as a managed Team. The
 
 ### Panel direction and execution connection
 
-Startup supports explicit Codex, Claude or AGY selection, with one Overall Main
-per room and integration target. The startup picker was proposed in
-[#286](https://github.com/eightmm/oh-my-setting/pull/286). The [panel contract](TEAM-ORCHESTRATION-PANEL.md)
-uses one task list and inspector for Main's own work, direct workers and work
-assigned to a provider Lead. Direct workers belong under their recorded Main;
+The current [Main capability registry](../crates/oms-command-panel/src/native_panel.rs)
+supports Codex, Claude and AGY native launch, plus Pi through the Codex gateway,
+with one Overall Main per room and integration target. Pi requires the Pi and
+Codex CLIs and the OMS launcher; it is not a separate inference provider. The
+picker filters installed capabilities. Launch support does not imply resume,
+native swap or managed Team support. The picker originated in
+[#286](https://github.com/eightmm/oh-my-setting/pull/286); that PR's original
+three-provider restriction does not describe the current registry.
+The [panel contract](TEAM-ORCHESTRATION-PANEL.md) uses one task list and inspector
+for work Main assigns to direct workers or provider Leads.
+Direct workers belong under their recorded Main;
 native children appear under a Lead only when that relationship is evidenced.
 Provider is a session shortcut/filter attribute, never evidence of parentage.
 Ordinary requests need no Lead/direct chooser. Preserve advanced route choices
@@ -68,7 +78,11 @@ and the different capability, scope, permission and publication checks.
 
 OMS worker assignment remains parent-only. A Lead may request additional OMS
 work from Main; it does not recursively dispatch OMS workers. Authorized native
-children stay within the inherited assignment, and a Lead may finish directly.
+children stay within the inherited assignment. Under the
+[coordination contract](../custom-skills/oms-agent-harness/references/coordination-layers.md),
+a Lead delegates substantive work and keeps its own edits to scoped integration
+or unblocking. Without native children, it does the assignment itself and reports
+that limitation. A solo session without a team still does its own work.
 Neither opening a session nor a native completion message grants acceptance.
 The conditional native delegation prompt comes from
 [#284](https://github.com/eightmm/oh-my-setting/pull/284).
@@ -79,6 +93,8 @@ read-only view. Auto groups active managed calls under
 `Overall Main · Direct work` when Room membership and the lifecycle attempt both
 point to the current live owner in that room. Other rows retain provider activity groups;
 connected panes use `Lead chat [1/2/3]`, with actual parent labels preserved.
+Here, the historical `Direct work` label groups assigned workers; it does not
+authorize the team Main to edit repository files.
 This display correction does not change dispatch, key/mouse targets or ownership,
 and does not implement common task cards or the assignment bridge.
 Native `--orchestrator --task` sends text rather than producing the same
@@ -230,7 +246,7 @@ not API compatibility or the evidence needed to retire existing behavior.
 
 | Expansion excluded from the default plan | Sufficient existing path or condition |
 |---|---|
-| Mandatory Main → provider lead → Team lead → worker, or a Lead/direct chooser for every task | Main or an existing Lead may finish directly; use bounded workers/Teams when the execution contract needs them |
+| Mandatory Main → provider lead → Team lead → worker, or a Lead/direct chooser for every task | A team Main assigns work to a bounded worker or Lead under the coordination contract; a solo session works directly. A separate Lead or Team is needed only when the execution contract calls for it |
 | New authoritative task/approval store, universal router or provider-specific scheduler | Existing Plan/Room/admission owners and caller-specific adapters |
 | Reimplement TeamSpec, route snapshots, context compiler, work inspector or duplex supervision | Reuse current producers; implement only the missing consumer or verified semantic correction |
 | Maintain a fixed vendor model ranking in every document | One current catalog with explicit selection; frozen model tables are historical evaluation inputs |
@@ -239,14 +255,16 @@ not API compatibility or the evidence needed to retire existing behavior.
 | Bundle/resume/cache deletion, web/mobile controls or all provider-native adapters as MVP prerequisites | Use an existing concrete workflow and its activation conditions; retain optional implementations |
 | A generic operation SLA, hard cooldown or automatic model escalation inferred from existing timeout/ranking fields | Separate opt-in policy with a named caller; preserve current per-call and ranking semantics |
 
-Verification cost has a concrete unresolved conflict: the current
-[workflow classifier](../.github/workflows/test.yml) treats `crates/*` as Rust
-changes, while [check.sh](../scripts/check.sh) also stages native tooling before
-affected planning and performs native checks in the docs path. VW-01 owns this
-correction; docs must keep required status reporting without triggering unrelated
-runtime preparation. This review does not change those classifiers or claim that
-hosted CI is currently free or skipped. Reuse measured timing in VW-03/04 rather
-than adding a new CI/benchmark subsystem.
+The previously reported native preparation before affected planning is corrected
+in [check.sh](../scripts/check.sh): plan printing and stage listing do not acquire
+a maintenance lease or prepare a native payload, and the ordinary docs-only
+path runs reference checks without Cargo. The
+[existing planning fixture](../tests/source-distribution-smoke.sh) covers these
+boundaries, including direct noncritical crate READMEs. Execution still registers
+maintenance protection, and mixed, critical or unknown changes retain broader
+coverage. VW-01/03/04 own any remaining classifier or measured verification-cost
+work. Source and fixture presence do not establish the result of a hosted CI run;
+this review does not rerun runtime checks or add a CI/benchmark subsystem.
 
 The review covers the current entrypoint/owner map, seven Team documents, all
 40 follow-up packets and the decisive native callers. It is not a proof that
