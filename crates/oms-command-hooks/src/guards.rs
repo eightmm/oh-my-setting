@@ -376,7 +376,89 @@ fn audit_rows() -> Vec<Value> {
         .filter_map(document)
         .collect()
 }
+const AUDIT_KEEP: usize = 1000;
+fn audit_window(raw: &[u8], now: f64, hours: u64) -> String {
+    let cutoff = now - hours as f64 * 3600.0;
+    let (mut lines, mut unreadable, mut bad_ts, mut inside) = (0usize, 0usize, 0usize, 0usize);
+    let mut oldest = f64::INFINITY;
+    let mut verdicts = BTreeMap::<&str, usize>::new();
+    let mut rules = BTreeMap::<String, usize>::new();
+    for line in raw.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        lines += 1;
+        let Some(row) = document(line) else {
+            unreadable += 1;
+            continue;
+        };
+        let Some(t) = epoch(text(&row, "ts")).filter(|t| *t <= now) else {
+            bad_ts += 1;
+            continue;
+        };
+        oldest = oldest.min(t);
+        if t < cutoff {
+            continue;
+        }
+        inside += 1;
+        let v = match text(&row, "verdict") {
+            "refused" => "refused",
+            "bypassed" => "bypassed",
+            "noted" => "noted",
+            _ => "other",
+        };
+        *verdicts.entry(v).or_default() += 1;
+        let rule = text(&row, "rule")
+            .chars()
+            .filter(|c| c.is_alphanumeric() || "._:-".contains(*c))
+            .take(32)
+            .collect::<String>();
+        let key = if rule.is_empty() || (rules.len() >= 16 && !rules.contains_key(&rule)) {
+            "other".into()
+        } else {
+            rule
+        };
+        *rules.entry(key).or_default() += 1;
+    }
+    let count = |k: &str| verdicts.get(k).copied().unwrap_or(0);
+    let mut output = format!(
+        "command guard: last {hours}h (UTC): {inside} row(s): {} refused, {} bypassed, {} noted, {} other\n",
+        count("refused"),
+        count("bypassed"),
+        count("noted"),
+        count("other")
+    );
+    let mut sorted: Vec<_> = rules.iter().collect();
+    sorted.sort_by_key(|(k, n)| (std::cmp::Reverse(**n), (*k).clone()));
+    for (rule, n) in sorted {
+        output.push_str(&format!("  {n:4}  {rule}\n"));
+    }
+    output.push_str(&format!(
+        "not counted: {bad_ts} row(s) with a missing, malformed or future timestamp, {unreadable} unreadable line(s)\n"
+    ));
+    output.push_str(if lines >= AUDIT_KEEP && oldest > cutoff {
+        "coverage: truncated; the log keeps only the newest 1000 rows and its oldest dated row is inside this window, so earlier rows may be missing\n"
+    } else {
+        "coverage: the retained rows reach back past the window start or the log is under its 1000-row cap; a removed or edited log cannot be detected\n"
+    });
+    output.push_str("rows carry no command text; any process of this user can edit the file, so read it as a record, not proof\n");
+    output
+}
 fn audit(args: &[OsString]) -> Output {
+    if args.get(1).is_some_and(|a| a == "--hours") {
+        let hours = args
+            .get(2)
+            .map(|s| s.to_string_lossy())
+            .filter(|s| !s.is_empty() && s.len() <= 4 && s.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|h| (1..=720).contains(h));
+        return match (hours, args.len()) {
+            (Some(h), 3) => match read(&audit_path(), 8 * INPUT_MAX) {
+                Ok(raw) => out(audit_window(&raw, seconds(), h)),
+                Err(_) => {
+                    out("command guard: history absent, unsafe or oversized; no window counted\n")
+                }
+            },
+            _ => fail("--audit --hours takes one whole number of hours from 1 to 720"),
+        };
+    }
     if args.len() > 2 {
         return fail("--audit takes one optional row count");
     }
@@ -1056,5 +1138,48 @@ mod tests {
             assert!(git_rule(sub, &[], None, false).is_none());
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn audit_window_counts_utc_rows_and_reports_gaps_without_row_text() {
+        let now = epoch("2026-11-23T12:00:00Z").unwrap();
+        let row = |ts: &str, verdict: &str, rule: &str| {
+            format!(
+                "{{\"ts\":\"{ts}\",\"verdict\":\"{verdict}\",\"rule\":\"{rule}\",\"command\":\"SECRETCMD\"}}\n"
+            )
+        };
+        let mut raw = String::new();
+        raw += &row("2026-11-23T11:00:00Z", "refused", "git-clean");
+        raw += &row("2026-11-23T10:00:00+00:00", "noted", "transfer");
+        raw += &row("2026-11-22T11:59:59Z", "refused", "git-clean");
+        raw += &row("2026-11-23T12:00:01Z", "refused", "git-clean");
+        raw += &row("garbage", "weird", "x/../y");
+        raw += "not json\n";
+        let report = audit_window(raw.as_bytes(), now, 24);
+        assert!(
+            report.contains("last 24h (UTC): 2 row(s): 1 refused, 0 bypassed, 1 noted, 0 other")
+        );
+        assert!(report.contains("not counted: 2 row(s)"), "{report}");
+        assert!(report.contains("1 unreadable line(s)"));
+        assert!(report.contains("under its 1000-row cap"));
+        assert!(!report.contains("SECRETCMD") && !report.contains("2026-11-23T11"));
+        let full = row("2026-11-23T11:00:00Z", "refused", "git-clean").repeat(AUDIT_KEEP);
+        assert!(audit_window(full.as_bytes(), now, 24).contains("coverage: truncated"));
+        assert!(audit_window(full.as_bytes(), now, 1).contains("coverage: the retained"));
+    }
+
+    #[test]
+    fn audit_hours_rejects_malformed_options_and_plain_audit_is_unchanged() {
+        let a = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        for bad in [
+            &["--audit", "--hours"][..],
+            &["--audit", "--hours", "0"],
+            &["--audit", "--hours", "721"],
+            &["--audit", "--hours", "1", "5"],
+            &["--audit", "--hours", "-1"],
+        ] {
+            assert_eq!(audit(&a(bad)).0, 2, "{bad:?}");
+        }
+        assert_eq!(audit(&a(&["--audit", "1", "2"])).0, 2);
     }
 }

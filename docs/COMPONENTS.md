@@ -2873,7 +2873,7 @@ refuses the same session again, the refusal line adds `This is refusal N of
 this rule in this session: stop and ask the owner instead of rewording the
 command.` (no blocking or ending; the count reads the log, so a removed log
 restarts it). A script's inside is still unseen. `bash scripts/command-guard-hook.sh --audit [N]` prints the
-newest N rows (default 50) counted by verdict and rule. The log records what
+newest N rows (default 50) counted by verdict and rule; `--audit --hours H` (1-720) counts the rows of the last H UTC hours instead and says when unusable timestamps or the 1000-row cap leave the window incomplete. The log records what
 the guard saw and is not a boundary: any process of the same user, an OMS
 worker included, can write or remove the file.
 

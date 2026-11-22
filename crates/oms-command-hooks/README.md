@@ -15,7 +15,7 @@ does not change process-global cwd, environment, signal handlers or toolchains.
 
 | Surface | Input and output contract |
 | --- | --- |
-| `command-guard-hook` | JSON command event; refusal on stderr with exit 2; malformed input allows with a diagnostic. `--audit [N]` accepts decimal counts, clamps 0 to 1 and large counts to 1000, and prints the audit view. |
+| `command-guard-hook` | JSON command event; refusal on stderr with exit 2; malformed input allows with a diagnostic. `--audit [N]` accepts decimal counts, clamps 0 to 1 and large counts to 1000, and prints the audit view; `--audit --hours H` (1–720) instead counts retained rows in the last H UTC hours by verdict and rule, reports rows with unusable timestamps and whether the 1000-row cap may have truncated the window, and prints no row text or timestamps. |
 | `git-move-guard-hook` | Panel-main command event; moving canonical Git state while calls are live exits 2 on stderr; other events allow. Malformed registry entries remain live. |
 | `syntax-guard-hook` | Edit/Write/MultiEdit/apply_patch event; bounded findings in PostToolUse additionalContext JSON, always exit 0. At most 12 paths and 2 MiB per file. TOML uses oms-toml, JSON uses serde_json; Bash and Python edits use their syntax oracle. |
 | `fail-ledger-hook` | Bash result/failure event; native fail-ledger records or resolves; only prior-context/advisor speech reaches stderr with exit 2. Background and interrupted successes do not resolve. |
