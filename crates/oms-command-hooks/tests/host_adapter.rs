@@ -2381,3 +2381,63 @@ fn command_guard_audit_reports_rules_timestamps_and_the_legacy_footer() {
         "{out}"
     );
 }
+
+#[test]
+fn pre_push_gate_runs_in_the_pushed_worktree_not_the_install_source() {
+    let tmp = TempDir::new("prepush");
+    let mk = |name: &str, body: &str| {
+        let repo = tmp.path().join(name);
+        fs::create_dir_all(repo.join("scripts")).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repo.join("scripts/check.sh"), body).unwrap();
+        repo
+    };
+    let source = mk(
+        "source",
+        "touch \"$(dirname \"$0\")/../touched\"; echo SOURCE-GATE\n",
+    );
+    let work = mk("work", "echo WORK-GATE \"$@\"; exit 7\n");
+    let nogate = mk("nogate", "");
+    fs::remove_file(nogate.join("scripts/check.sh")).unwrap();
+    let sub = work.join("scripts");
+    let run = |cwd: &Path, args: &[&str], stdin: &[u8]| {
+        let (c, o, e) = run_hook(
+            "pre-push-check",
+            &argv(args),
+            stdin,
+            cwd,
+            &source,
+            &AtomicBool::new(false),
+        );
+        (
+            c,
+            String::from_utf8_lossy(&o).into_owned(),
+            String::from_utf8_lossy(&e).into_owned(),
+        )
+    };
+    let (code, out, _) = run(&sub, &["--full"], b"");
+    assert_eq!((code, out.trim()), (7, "WORK-GATE"));
+    assert!(!source.join("touched").exists());
+    let (code, _, err) = run(&nogate, &["--full"], b"");
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("gate unproved"));
+    let (code, out, _) = run(
+        &nogate,
+        &["origin"],
+        format!(
+            "(delete) {} refs/heads/x {}\n",
+            "0".repeat(40),
+            "a".repeat(40)
+        )
+        .as_bytes(),
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("deletion-only"));
+}
