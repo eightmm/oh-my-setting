@@ -2016,8 +2016,19 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
             source,
             &stop,
         );
+        assert_eq!(
+            narrow.0,
+            i32::from(!expected),
+            "model-doctor exit: stdout={} stderr={}",
+            String::from_utf8_lossy(&narrow.1),
+            String::from_utf8_lossy(&narrow.2)
+        );
+        assert!(
+            narrow.2.is_empty(),
+            "model-doctor stderr: {}",
+            String::from_utf8_lossy(&narrow.2)
+        );
         let report: Value = serde_json::from_slice(&narrow.1).unwrap();
-        assert_eq!(narrow.0, i32::from(!expected), "{report}");
         assert_eq!(report["providers"][0]["usable"], expected, "{report}");
         let cache = root.join("capabilities");
         let fields = |file: &Path| -> std::collections::BTreeMap<String, String> {
@@ -2092,6 +2103,13 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
     let root = std::env::temp_dir().join(format!("oms-probe-parity-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     let _fixture = Fixture(root.clone());
+    // macOS temporary paths can have a symlinked prefix. Exercise that spelling
+    // on every host, then use the physical root required by descriptor writes.
+    let physical = root.join("physical");
+    fs::create_dir(&physical).unwrap();
+    let alias = root.join("alias");
+    symlink(&physical, &alias).unwrap();
+    let root = fs::canonicalize(alias).unwrap();
     let bin = root.join("bin");
     fs::create_dir(&bin).unwrap();
     let executable = bin.join("claude");
