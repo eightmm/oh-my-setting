@@ -267,6 +267,7 @@ pub(crate) struct ControlServices<'a> {
     scan_worker: Vec<OsString>,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     supervise_worker: Vec<OsString>,
+    gh_bin: OsString,
     scope: Scope,
     /// Approval grant validated before admission and reserved only by the
     /// landing fence, so a rejected admission never burns the approval.
@@ -333,6 +334,7 @@ impl<'a> ControlServices<'a> {
             native,
             scan_worker: vec![exe.into(), SCAN_WORKER_FLAG.into()],
             supervise_worker,
+            gh_bin: "gh".into(),
             scope,
             landing_grant: std::sync::Mutex::new(None),
         })
@@ -354,9 +356,16 @@ impl<'a> ControlServices<'a> {
             native,
             scan_worker,
             supervise_worker: Vec::new(),
+            gh_bin: "gh".into(),
             scope: Scope::ProcessGroup,
             landing_grant: std::sync::Mutex::new(None),
         }
+    }
+    /// Override the `gh` executable path in tests without mutating process `PATH`.
+    #[cfg(test)]
+    fn with_gh(mut self, gh: impl Into<OsString>) -> Self {
+        self.gh_bin = gh.into();
+        self
     }
     /// Opt into whole-tree containment in tests.
     #[cfg(test)]
@@ -611,6 +620,45 @@ impl<'a> ControlServices<'a> {
             .map_err(|e| autonomy_error(2, e))?;
         Ok((child.code, child.stdout, child.stderr))
     }
+    fn github_get(
+        &self,
+        endpoint: &str,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Vec<u8>> {
+        if interrupted.load(Ordering::Acquire) {
+            return Err(autonomy_error(130, "interrupted"));
+        }
+        let argv = vec![
+            self.gh_bin.clone(),
+            "api".into(),
+            "--hostname".into(),
+            "github.com".into(),
+            "--method".into(),
+            "GET".into(),
+            endpoint.into(),
+        ];
+        let mut spawn = Spawn::new(self.scope, argv, Duration::from_secs(20), 512 * 1024)
+            .environment(vec![
+                ("GH_PROMPT_DISABLED".into(), "1".into()),
+                ("GH_PAGER".into(), "cat".into()),
+            ]);
+        if self.scope == Scope::ProcessGroup {
+            spawn = spawn.terminate_grace(Duration::from_secs(5));
+        }
+        let child = self
+            .run_supervised(spawn, interrupted)
+            .map_err(|e| autonomy_error(2, e))?;
+        if child.cancelled {
+            return Err(autonomy_error(130, "interrupted"));
+        }
+        if child.code != 0 || child.timed_out || child.output_limited {
+            return Err(autonomy_error(
+                2,
+                "GitHub source unavailable or exceeded its bounded GET",
+            ));
+        }
+        Ok(child.stdout)
+    }
 }
 
 impl oms_command_autonomy::Services for ControlServices<'_> {
@@ -731,6 +779,18 @@ impl oms_command_autonomy::Services for ControlServices<'_> {
         interrupted: &AtomicBool,
     ) -> oms_command_autonomy::Result<Vec<u8>> {
         oms_command_autonomy::Services::read_issue(&self.local, endpoint, interrupted)
+    }
+    fn list_issues(
+        &self,
+        owner: &str,
+        repo: &str,
+        label: &str,
+        limit: u64,
+        interrupted: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Vec<u8>> {
+        let endpoint =
+            oms_command_autonomy::services::issues_list_endpoint(owner, repo, label, limit)?;
+        self.github_get(&endpoint, interrupted)
     }
     fn repair_feedback(
         &self,
@@ -5266,5 +5326,114 @@ done
         assert!(staged_dispatch_launcher(&staged_dir.join("other"), source).is_empty());
         let bad_rev = source.join("target/oms-native/not-a-sha/oms");
         assert!(staged_dispatch_launcher(&bad_rev, source).is_empty());
+    }
+
+    #[test]
+    fn control_services_list_issues_invokes_bounded_read_only_gh_get() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = Tmp::new();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let log = dir.path().join("gh.log");
+        let fake_gh = dir.path().join("fake-gh");
+        let script = format!(
+            "#!/usr/bin/env bash\n\
+             set -euo pipefail\n\
+             printf '%s|%s|%s\\n' \"${{GH_PROMPT_DISABLED:-}}\" \"${{GH_PAGER:-}}\" \"$*\" >> \"{}\"\n\
+             endpoint=\"${{*: -1}}\"\n\
+             case \"$endpoint\" in\n\
+               *labels=fail-exit*)\n\
+                 printf 'internal auth error\\n' >&2\n\
+                 exit 1\n\
+                 ;;\n\
+               *labels=fail-size*)\n\
+                 dd if=/dev/zero bs=1024 count=600 2>/dev/null | tr '\\0' 'a'\n\
+                 exit 0\n\
+                 ;;\n\
+             esac\n\
+             printf '%s\\n' '[{{\"number\":7,\"state\":\"open\",\"title\":\"Harden intake\",\"html_url\":\"https://github.com/Org/repo/issues/7\",\"updated_at\":\"2026-01-02T03:04:05Z\",\"labels\":[{{\"name\":\"oms:ready\"}}],\"body\":\"RAW_BODY_MUST_NOT_APPEAR\"}},{{\"number\":8,\"state\":\"open\",\"title\":\"Ignore PR\",\"html_url\":\"https://github.com/Org/repo/pull/8\",\"updated_at\":\"2026-01-02T03:04:05Z\",\"labels\":[{{\"name\":\"oms:ready\"}}],\"pull_request\":{{}}}}]'\n",
+            log.display(),
+        );
+        std::fs::write(&fake_gh, script).unwrap();
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let control = services(&stop, dir.path(), sh("exit 0")).with_gh(&fake_gh);
+        let args: Vec<OsString> = [
+            "issues",
+            "--github",
+            "Org/repo",
+            "--label",
+            "oms:ready",
+            "--limit",
+            "5",
+            "--json",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let (code, stdout, stderr) =
+            oms_command_autonomy::run_with_services("intent", &args, &repo, &stop, &control);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let out_text = String::from_utf8(stdout).unwrap();
+        assert!(!out_text.contains("RAW_BODY_MUST_NOT_APPEAR"));
+        let got: Value = serde_json::from_str(&out_text).unwrap();
+        assert_eq!(got["count"], 1);
+        assert_eq!(got["issues"][0]["number"], 7);
+        assert_eq!(
+            got["issues"][0]["url"],
+            "https://github.com/Org/repo/issues/7"
+        );
+        assert_eq!(got["issues"][0]["labels"], serde_json::json!(["oms:ready"]));
+        assert_eq!(
+            got["issues"][0]["next_step"],
+            "oms intent draft --from-issue https://github.com/Org/repo/issues/7 --dry-run"
+        );
+
+        let recorded = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            recorded.trim(),
+            "1|cat|api --hostname github.com --method GET repos/Org/repo/issues?state=open&labels=oms%3Aready&per_page=5"
+        );
+
+        // Non-zero exit fails closed without echoing gh stderr.
+        let fail_args: Vec<OsString> = [
+            "issues",
+            "--github",
+            "Org/repo",
+            "--label",
+            "fail-exit",
+            "--limit",
+            "2",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let (code, stdout, stderr) =
+            oms_command_autonomy::run_with_services("intent", &fail_args, &repo, &stop, &control);
+        assert_eq!(code, 2);
+        assert!(!String::from_utf8_lossy(&stdout).contains("internal auth error"));
+        assert!(!String::from_utf8_lossy(&stderr).contains("internal auth error"));
+
+        // Oversized response (>512 KiB) is terminated and fails closed.
+        let big_args: Vec<OsString> = [
+            "issues",
+            "--github",
+            "Org/repo",
+            "--label",
+            "fail-size",
+            "--limit",
+            "2",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        let (code, _, _) =
+            oms_command_autonomy::run_with_services("intent", &big_args, &repo, &stop, &control);
+        assert_eq!(code, 2);
+
+        // No state files are ever created by read-only issue discovery.
+        assert!(!repo.join(".oms").exists());
     }
 }

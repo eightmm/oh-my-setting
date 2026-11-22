@@ -61,7 +61,7 @@ impl Args {
     pub fn parse(tool: &str, raw: &[OsString]) -> Result<Self> {
         let (actions, values, flags): (&[&str], &[&str], &[&str]) = match tool {
             "intent" => (
-                &["draft", "show", "adopt", "amend"],
+                &["draft", "show", "adopt", "amend", "issues"],
                 &[
                     "repo",
                     "to",
@@ -78,8 +78,11 @@ impl Args {
                     "from-file",
                     "from-issue",
                     "source-sha256",
+                    "github",
+                    "label",
+                    "limit",
                 ],
-                &["dry-run"],
+                &["dry-run", "json"],
             ),
             "plan-from-spec" => (
                 &[],
@@ -249,7 +252,7 @@ impl Args {
 pub(crate) fn usage(tool: &str) -> &'static str {
     match tool {
         "intent" => {
-            "Usage: oms intent draft --goal TEXT [--kind feature|bugfix|quick] [--to PROVIDER]\n       oms intent draft (--from-file PATH | --from-issue URL) [--dry-run | --source-sha256 SHA]\n       oms intent show [--id ID]\n       oms intent amend --reason TEXT\n       oms intent adopt --id ID [--expected-project-sha256 SHA]\nCandidates are untrusted drafts. Only explicit adopt writes PROJECT.md; a live autopilot receipt refuses a contract swap."
+            "Usage: oms intent draft --goal TEXT [--kind feature|bugfix|quick] [--to PROVIDER]\n       oms intent draft (--from-file PATH | --from-issue URL) [--dry-run | --source-sha256 SHA]\n       oms intent issues --github OWNER/REPO --label LABEL [--limit 1..20] [--json]\n       oms intent show [--id ID]\n       oms intent amend --reason TEXT\n       oms intent adopt --id ID [--expected-project-sha256 SHA]\nCandidates are untrusted drafts. Only explicit adopt writes PROJECT.md; a live autopilot receipt refuses a contract swap."
         }
         "plan-from-spec" => {
             "Usage: oms plan-from-spec [--repo PATH] [--to PROVIDER] [--max-tasks 1..12]\n       oms plan-from-spec --apply FILE --expected-proposal-sha256 SHA\n       oms plan-from-spec --validate-spec FILE | --scope-only | --roadmap\nOptions: --allowed PATHS --id-prefix PREFIX --milestone ID --discover\n         --worker-provider PROVIDER --collaboration off|auto\n         --model MODEL --fallback-model MODEL --reasoning-effort E --provider-timeout DUR\nGenerated proposals never apply themselves. Apply binds exact reviewed bytes, plan CAS, base, spec and acceptance surface."
