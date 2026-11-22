@@ -663,16 +663,16 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
 fn hook_dir(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Option<PathBuf>> {
     // The mutation helper suppresses hooks with core.hooksPath=/dev/null;
     // a read-only path query must retain Git's configured hook directory.
-    let remove = options.has("--remove");
+    let explicit = options.has("--repo");
+    // Only legacy implicit withdrawal may no-op; an explicit target must be proved.
+    let remove = options.has("--remove") && !explicit;
     let Some(git) = r::find("git", &paths.cwd) else {
-        // Withdrawal has nothing to undo without git; install cannot proceed.
         return if remove {
             Ok(None)
         } else {
             r::fail("git is required")
         };
     };
-    let explicit = options.has("--repo");
     let output = if explicit {
         r::command(
             git,
@@ -735,7 +735,7 @@ fn hook_dir(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Optio
     {
         return r::fail("--repo must be the root of an OMS source worktree");
     }
-    if !remove && !top.join("scripts/check.sh").is_file() {
+    if !options.has("--remove") && !top.join("scripts/check.sh").is_file() {
         return r::fail("--repo must contain scripts/check.sh");
     }
     // A shared or global core.hooksPath would write beyond this repository.

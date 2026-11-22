@@ -3102,7 +3102,39 @@ esac
     let right = ProtectedOnly(fs::canonicalize(&other).unwrap(), RefCell::default());
     success(call("install-hooks", &quick(&other), &source, &right));
     assert!(!fs::read_to_string(&other_push).unwrap().contains("--full"));
+    assert_eq!(*right.1.borrow(), vec![fs::canonicalize(&other).unwrap()]);
     assert_eq!(fs::read_to_string(&push_hook).unwrap(), canonical_push);
+    // Explicit removal must prove its target: non-Git and bare_repo targets fail, metadata stays.
+    let no_git = root.join("no-git-repo");
+    let bare_repo = root.join("bare_repo-repo");
+    for dir in [&no_git, &bare_repo] {
+        fs::create_dir_all(dir.join("crates/oms")).unwrap();
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(dir.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    }
+    git_in(
+        &root,
+        &["init", "-q", "--bare", bare_repo.to_str().unwrap()],
+    );
+    for dir in [&no_git, &bare_repo] {
+        assert_ne!(
+            call(
+                "install-hooks",
+                &["--remove", "--repo", dir.to_str().unwrap()],
+                &source,
+                &host
+            )
+            .0,
+            0
+        );
+    }
+    assert!(other_push.exists());
+    assert_eq!(
+        fs::read_to_string(external.join("pre-push")).unwrap(),
+        old_push
+    );
+    // A valid explicit removal needs no gate script.
+    fs::remove_file(other.join("scripts/check.sh")).unwrap();
     success(call(
         "install-hooks",
         &["--remove", "--repo", other.to_str().unwrap()],
