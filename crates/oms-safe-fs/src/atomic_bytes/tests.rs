@@ -1013,6 +1013,7 @@ fn sync_parent_requires_a_safe_existing_leaf_and_reports_fsync_failure() {
         root.sync_parent(Path::new("absent/file")),
         Err(ByteError::Missing)
     );
+    assert!(names(&f.0).is_empty());
     std::fs::create_dir(f.0.join("dir")).unwrap();
     symlink("file", f.0.join("link")).unwrap();
     for leaf in ["dir", "link"] {
@@ -1037,4 +1038,34 @@ fn sync_parent_requires_a_safe_existing_leaf_and_reports_fsync_failure() {
         ]
     );
     assert!(before.is_empty());
+    for action in ["remove", "replace", "parent", "root"] {
+        let f = Fixture::new();
+        let repo = f.0.join("repo");
+        std::fs::create_dir_all(repo.join("dir")).unwrap();
+        let target = repo.join("dir/file");
+        std::fs::write(&target, b"old").unwrap();
+        let root = Root::open(&repo).unwrap();
+        let result = root.sync_parent_with(Path::new("dir/file"), |at| {
+            if at == Stage::BeforeDirectorySync {
+                match action {
+                    "remove" => std::fs::remove_file(&target).unwrap(),
+                    "replace" => {
+                        std::fs::rename(&target, repo.join("old")).unwrap();
+                        std::fs::write(&target, b"new").unwrap();
+                    }
+                    "parent" => {
+                        std::fs::rename(repo.join("dir"), repo.join("moved")).unwrap();
+                        std::fs::create_dir(repo.join("dir")).unwrap();
+                    }
+                    "root" => {
+                        std::fs::rename(&repo, f.0.join("moved")).unwrap();
+                        std::fs::create_dir(&repo).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err(ByteError::Changed), "{action}");
+    }
 }

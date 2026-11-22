@@ -552,11 +552,12 @@ impl Root {
         mut hook: impl FnMut(Stage) -> Result<(), Errno>,
     ) -> Result<(), ByteError> {
         let anchor = Anchor::open(self, path, false, &mut hook)?;
-        if anchor.named()?.is_none() {
+        let Some(before) = anchor.named()? else {
             return Err(ByteError::Missing);
-        }
+        };
         directory_sync(hook(Stage::BeforeDirectorySync).and_then(|()| fs::fsync(anchor.parent())))?;
-        anchor.check_leaf(anchor.named()?.as_ref())
+        anchor.revalidate()?;
+        anchor.check_leaf(Some(&before))
     }
 
     fn mutate_with<E>(
