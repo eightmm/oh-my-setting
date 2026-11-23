@@ -138,16 +138,25 @@ pub fn state_fingerprint(repo: &Path, interrupted: &AtomicBool) -> Result<String
         }
         "unborn".into()
     };
+    // The verify receipt precedes the failure-ledger resolve, so a tracked
+    // ledger's append is not source drift. Filtered here, not by pathspec,
+    // because GIT_LITERAL_PATHSPECS would turn an exclude into a no-match.
+    const LEDGER: &[u8] = b".oms/failures.jsonl";
     let index = checked(repo, &["ls-files", "--stage", "-z"], interrupted)?;
     let tracked = checked(repo, &["ls-files", "-z"], interrupted)?;
     let mut paths: Vec<_> = tracked
         .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
+        .filter(|p| !p.is_empty() && *p != LEDGER)
         .collect();
     paths.sort();
     let mut h = Sha256::new();
     h.update(b"index\0");
-    h.update(index);
+    for entry in index.split_inclusive(|b| *b == 0) {
+        let path = entry.splitn(2, |b| *b == b'\t').nth(1);
+        if path.map(|p| p.strip_suffix(b"\0").unwrap_or(p)) != Some(LEDGER) {
+            h.update(entry);
+        }
+    }
     for rel in paths {
         crate::checkpoint(interrupted, None)?;
         h.update(b"\0path\0");
