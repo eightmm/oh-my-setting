@@ -139,7 +139,7 @@ fn run_with_source_writer(
         let mut accepted_refresh = false;
         let mut checkout_changed = false;
         let mut scope_changed = false;
-        let mut rejected_native_frame = false;
+        let mut rejected_agy_detail_frame = false;
         let mut checked_agy = None;
         let mut incoming_agy_detail = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
@@ -167,7 +167,7 @@ fn run_with_source_writer(
                     .scope
                     .as_ref()
                     .is_some_and(|scope| scope.main.is_some());
-            rejected_native_frame = rejected_native;
+            rejected_agy_detail_frame = rejected_native || !board.phase.retains_agy_detail();
             let mut native_projection = None;
             if let Some(reading) = native {
                 native_projection = Some(reading.projection);
@@ -353,7 +353,7 @@ fn run_with_source_writer(
             &report,
             &nav,
             &observations,
-            rejected_native_frame,
+            rejected_agy_detail_frame,
             scope_changed,
         );
         settle_main_dock(&mut chat, &report);
@@ -2035,13 +2035,13 @@ fn reconcile_agy_detail_evidence(
     report: &Value,
     nav: &navigation::Navigation,
     observations: &Observations,
-    rejected_native: bool,
+    rejected_refresh: bool,
     scope_changed: bool,
 ) {
     if retained.is_none() && incoming.is_none() {
         return;
     }
-    if scope_changed || rejected_native || !nav.detail {
+    if scope_changed || rejected_refresh || !nav.detail {
         *retained = None;
         return;
     }
@@ -2212,6 +2212,15 @@ fn clear_rejected_native(report: &mut Value) {
 }
 
 impl NativeRequest {
+    fn authorized_agy_detail(&self, report: &Value) -> Option<&AgyDetailUsageRequest> {
+        let main = self.scope.main.as_ref()?;
+        self.seed.agy_detail.as_ref().filter(|req| {
+            same_footer_scope(&req.scope, &self.scope)
+                && report["room"]["id"] == self.scope.room
+                && report_has_live_main(report, main)
+        })
+    }
+
     pub(crate) fn observe(
         &self,
         snapshot: &mut Snapshot,
@@ -2238,9 +2247,7 @@ impl NativeRequest {
         let mut footer = self.seed.footer.clone();
         commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
         let report = &mut snapshot.report;
-        let agy_detail_req = self.seed.agy_detail.as_ref().filter(|req| {
-            same_footer_scope(&req.scope, &self.scope) && req.scope.main.as_ref() == Some(main)
-        });
+        let agy_detail_req = self.authorized_agy_detail(report);
         let agy_detail_evidence = panel
             .observe_passively(
                 &mut observations,
@@ -2325,6 +2332,10 @@ fn reset_weekly_scope(weekly: &mut WeeklyUsage, changed: bool) {
 impl RefreshPhase {
     fn pending(&self) -> bool {
         matches!(self, Self::Pending | Self::RetryingAfterFailure)
+    }
+
+    fn retains_agy_detail(&self) -> bool {
+        matches!(self, Self::Pending | Self::Fresh)
     }
 
     fn frame_report(
@@ -7829,7 +7840,7 @@ mod tests {
     fn agy_detail_usage_request_and_interactive_dispatch() {
         use super::{
             AgyDetailUsageEvidence, BoardScope, BoardTarget, InteractiveRefresh, LiveMain,
-            MainFooter, NativeSeed, RefreshKey, RefreshPhase, SelectionFence,
+            MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase, SelectionFence,
             agy_detail_usage_request, apply_selection_key, reconcile_agy_detail_evidence,
             report_for_frame,
         };
@@ -7885,16 +7896,19 @@ mod tests {
             "collection": {"ok": true},
             "room": {
                 "id": ROOM,
+                "closed": false,
                 "participants": [
-                    {"participant": MAIN, "role": "main", "provider": "codex", "state": "working", "terminal": false}
+                    {"participant": MAIN, "role": "main", "provider": "codex", "joined": true, "state": "working", "terminal": false}
                 ]
             },
             "room_attempts": {
                 MAIN: {
                     "attempt_id": MAIN,
                     "provider": "codex",
+                    "tool": "panel-main",
                     "state": "working",
-                    "refs": {"panel_room_id": ROOM, "panel_room_participant": MAIN}
+                    "terminal": false,
+                    "refs": {"panel_role": "main", "panel_room_id": ROOM, "panel_room_participant": MAIN}
                 }
             },
             "native_children": [call.clone()]
@@ -8072,7 +8086,7 @@ mod tests {
             &report,
             &nav,
             &observations,
-            false,
+            !RefreshPhase::Pending.retains_agy_detail(),
             false,
         );
         assert!(retained.as_ref() == Some(&ev));
@@ -8212,7 +8226,11 @@ mod tests {
                 _: &AtomicBool,
             ) -> Result<CommandOutput> {
                 let value = match command {
-                    NativeCommand::Events => json!([]),
+                    NativeCommand::Events => json!([{
+                        "attempt_id": MAIN, "tool": "panel-main", "provider": "claude",
+                        "terminal": false, "state": "working",
+                        "refs": {"panel_role": "main", "panel_room_id": ROOM}
+                    }]),
                     NativeCommand::Room => {
                         self.rooms
                             .send(args[2].to_string_lossy().into())
@@ -8251,7 +8269,7 @@ mod tests {
         let make_seed = || NativeSeed {
             target: BoardTarget {
                 room: Some(ROOM.into()),
-                caller: Some("%999999".into()),
+                caller: None,
                 managed: false,
             },
             observations: Observations::default(),
@@ -8259,6 +8277,21 @@ mod tests {
             agy: None,
             agy_detail: None,
         };
+        let mut seed = make_seed();
+        seed.agy_detail = Some(req.clone());
+        let native_request = NativeRequest {
+            scope: current_scope.clone(),
+            seed,
+        };
+        assert!(native_request.authorized_agy_detail(&report).is_some());
+        let mut wrong_owner = report.clone();
+        wrong_owner["room_attempts"][MAIN]["provider"] = json!("claude");
+        wrong_owner["room"]["participants"][0]["provider"] = json!("claude");
+        assert!(current_scope.key.matches(&oms_panel_core::state::Snapshot {
+            report: wrong_owner.clone(),
+            status: 0,
+        }));
+        assert!(native_request.authorized_agy_detail(&wrong_owner).is_none());
         let wait_ready = |board: &mut InteractiveRefresh| {
             let deadline = Instant::now() + Duration::from_secs(5);
             while !board.worker.ready() {
@@ -8293,7 +8326,8 @@ mod tests {
         );
         assert!(pending.is_none());
 
-        // 2. Queued behind a busy worker: retained until follow_up dispatches it once.
+        // 2. A queued wake races with a report whose Room and Events agree with
+        // each other but disagree with the current physical Main provider.
         let _ = board.update_with_native(
             Ok(current_scope.clone()),
             true,
@@ -8317,9 +8351,9 @@ mod tests {
         assert!(!changed);
         assert!(pending.is_some());
         assert!(board.deferred_refresh);
-        answer.send(Err(Error::new("transient"))).unwrap();
+        answer.send(Ok(wrong_owner["room"].clone())).unwrap();
         wait_ready(&mut board);
-        let (changed, _, _) = board.update_with_native(
+        let (changed, completed, _) = board.update_with_native(
             Ok(current_scope.clone()),
             false,
             true,
@@ -8327,7 +8361,26 @@ mod tests {
             &mut pending,
         );
         assert!(!changed);
+        assert!(completed.is_none());
+        assert_eq!(board.phase, RefreshPhase::RetryingAfterFailure);
         assert!(pending.is_none());
+        let retrying = board
+            .phase
+            .frame_report(completed, Some(report.clone()), ROOM);
+        assert_eq!(retrying["collection"]["pending"], true);
+        let mut rejected = Some(ev);
+        reconcile_agy_detail_evidence(
+            &mut rejected,
+            None,
+            board.scope.as_ref(),
+            &retrying,
+            &nav,
+            &observations,
+            !board.phase.retains_agy_detail(),
+            changed,
+        );
+        assert!(rejected.is_none());
+        assert!(!render_detail(&retrying, &nav, rejected.as_ref()).contains("1200 in"));
         assert_eq!(
             requested.recv_timeout(Duration::from_secs(5)).unwrap(),
             ROOM
