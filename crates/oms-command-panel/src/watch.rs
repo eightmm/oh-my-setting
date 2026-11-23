@@ -1941,6 +1941,7 @@ impl NativeRequest {
 #[derive(Debug, PartialEq, Eq)]
 enum RefreshPhase {
     Pending,
+    RetryingAfterFailure,
     Fresh,
     Failed(String),
 }
@@ -1964,6 +1965,10 @@ fn reset_weekly_scope(weekly: &mut WeeklyUsage, changed: bool) {
 }
 
 impl RefreshPhase {
+    fn pending(&self) -> bool {
+        matches!(self, Self::Pending | Self::RetryingAfterFailure)
+    }
+
     fn frame_report(
         &self,
         snapshot: Option<Snapshot>,
@@ -1971,7 +1976,7 @@ impl RefreshPhase {
         room: &str,
     ) -> Value {
         // Render hides a failed read's AGY roster; pending must not relabel it.
-        if *self == Self::Pending
+        if self.pending()
             && let Some(previous) = previous.as_mut().filter(|report| stale_report(report))
             && let Some(activity) = previous
                 .get_mut("provider_activity")
@@ -1985,7 +1990,7 @@ impl RefreshPhase {
             let mut current = snapshot.report;
             // A display-only result has no pane reads of its own. Retain the
             // same-scope observations so its native rows keep their identity.
-            if *self == Self::Pending {
+            if self.pending() {
                 let mut previous = match previous {
                     Some(Value::Object(previous)) => previous,
                     _ => Default::default(),
@@ -2018,9 +2023,17 @@ impl RefreshPhase {
     }
 
     fn report(&self, mut report: Value) -> Value {
+        // A pending frame can carry a proof only from the current scope.
+        // Erase known failures before relabeling a held report as pending.
+        if stale_report(&report)
+            || matches!(self, Self::RetryingAfterFailure | Self::Failed(_))
+            || report.get("board_write_slots").is_none()
+        {
+            report["board_write_slots"] = Value::Null;
+        }
         match self {
             Self::Fresh => {}
-            Self::Pending => {
+            Self::Pending | Self::RetryingAfterFailure => {
                 // The visible data describes the last successful read. The
                 // pending flag and private phase prevent acting on it.
                 report["collection"] = json!({"ok":true,"pending":true});
@@ -2184,6 +2197,7 @@ impl InteractiveRefresh {
         }
         let result = ready.then(|| self.worker.poll(&scope.key)).flatten();
         let follow_up = !self.worker.busy() && std::mem::take(&mut self.deferred_refresh);
+        let replied = result.is_some();
         let completed = result.and_then(|result| match result {
             Ok(snapshot)
                 if snapshot.status == 0
@@ -2239,6 +2253,9 @@ impl InteractiveRefresh {
                 }
             }
             self.request(&scope, seed);
+            if replied && completed.is_none() && self.phase == RefreshPhase::Pending {
+                self.phase = RefreshPhase::RetryingAfterFailure;
+            }
         }
         self.scope = Some(scope);
         (changed, completed, native)
@@ -5306,7 +5323,7 @@ mod tests {
     fn carried_board_report_drops_private_claude_weekly() {
         use super::{RefreshPhase, clear_private_weekly, clear_rejected_native, idle_report};
         use oms_panel_core::state::Snapshot;
-        use serde_json::json;
+        use serde_json::{Value, json};
 
         let mut previous = idle_report("room-fixture");
         previous["provider_status"] = json!({"codex":{"weekly_used":14}});
@@ -5315,6 +5332,8 @@ mod tests {
         previous["claude_local_weekly"] = json!({"weekly_used":14});
         previous["codex_weekly_account"] = json!("acct-b");
         previous["agy_footer_weekly"] = json!({"remaining":"99%"});
+        let slots = json!({"used":10,"limit":10,"active":0,"awaiting":8,"unconfirmed":2});
+        previous["board_write_slots"] = slots.clone();
         previous["provider_activity"] =
             json!({"antigravity":{"children":[{"role":"Worker","title":"Draft notes"}]}});
 
@@ -5369,6 +5388,15 @@ mod tests {
             );
             assert!(roster(&pending(sampled, None)).is_null());
         }
+        // Only a healthy same-scope held frame keeps its write slot evidence.
+        let held = pending(false, Some(previous.clone()));
+        assert_eq!(held["board_write_slots"], slots);
+        assert_eq!(pending(false, Some(held))["board_write_slots"], slots);
+        assert_eq!(pending(false, None)["board_write_slots"], Value::Null);
+        assert_eq!(
+            pending(true, Some(previous.clone()))["board_write_slots"],
+            Value::Null
+        );
         // A failed or stale frame hides its roster; pending must not relabel it.
         let failed = RefreshPhase::Failed("boom".into()).frame_report(
             None,
@@ -5377,11 +5405,15 @@ mod tests {
         );
         let mut stale = previous.clone();
         stale["capacity_stale"] = true.into();
+        assert_eq!(failed["board_write_slots"], Value::Null);
         for unhealthy in [failed.clone(), stale] {
             for sampled in [false, true] {
                 let replay = pending(sampled, Some(unhealthy.clone()));
                 assert!(roster(&replay).is_null(), "pending replayed failed roster");
-                assert!(roster(&pending(sampled, Some(replay))).is_null());
+                assert_eq!(replay["board_write_slots"], Value::Null);
+                let next = pending(sampled, Some(replay));
+                assert!(roster(&next).is_null());
+                assert_eq!(next["board_write_slots"], Value::Null);
             }
         }
         let mut sampled = idle_report("room-fixture");
@@ -6491,6 +6523,7 @@ mod tests {
         let pending = board.phase.report(idle_report(ROOM));
         assert_eq!(pending["collection"]["pending"], true);
         assert!(render::calls(&pending).is_empty());
+        assert_eq!(pending["board_write_slots"], Value::Null);
         let report_room = json!({"id":ROOM,"closed":false,"participants":[
             {"participant":MAIN,"role":"main","provider":"codex","joined":true},
             {"participant":"call-worker","role":"worker","joined":true,"state":"working"}
@@ -6574,8 +6607,10 @@ mod tests {
             requested.recv_timeout(Duration::from_secs(5)).unwrap(),
             ROOM
         );
-        let held = board.phase.report(fresh.clone());
+        let held = board.phase.frame_report(None, Some(fresh.clone()), ROOM);
         assert!(!render::calls(&held).is_empty());
+        assert_eq!(fresh["board_write_slots"]["used"], 0);
+        assert_eq!(held["board_write_slots"], fresh["board_write_slots"]);
         assert!(board.chat_cache().is_none());
         assert!(!settle_chat_dock(&mut dock, &observations, &held));
         let paint = |report: &Value, nav: &navigation::Navigation, dock: Option<&mut ChatDock>| {
@@ -6618,6 +6653,7 @@ mod tests {
             let painted = paint(&retained, &nav, dock.as_mut());
             displayed.push((label, painted.contains(label)));
             assert_eq!(retained["native_children"][0]["participant"], native);
+            assert_eq!(retained["board_write_slots"], fresh["board_write_slots"]);
             assert_eq!(retained["provider_accounts"]["codex"]["account"], "backup");
             assert_eq!(retained["provider_status"]["codex"]["weekly_used"], 14);
             assert!(!painted.contains("Refreshing Board"));
@@ -6649,12 +6685,10 @@ mod tests {
         ready(&mut board);
         let (_, failed) = board.update(Ok(scope(ROOM)), true, true);
         assert!(failed.is_none());
-        assert_eq!(board.phase, RefreshPhase::Pending);
-        let painted = paint(
-            &board.phase.frame_report(failed, Some(retained), ROOM),
-            &nav,
-            dock.as_mut(),
-        );
+        assert_eq!(board.phase, RefreshPhase::RetryingAfterFailure);
+        let retrying = board.phase.frame_report(failed, Some(retained), ROOM);
+        assert_eq!(retrying["board_write_slots"], Value::Null);
+        let painted = paint(&retrying, &nav, dock.as_mut());
         assert!(painted.contains("Second wake result"));
         assert!(!painted.contains("refresh failed"));
         assert_eq!(
@@ -6752,8 +6786,9 @@ mod tests {
         let (changed, replacement) = board.update(Ok(scope(new_room)), false, false);
         assert!(changed && replacement.is_none());
         assert!(board.chat_cache().is_none());
-        let cold = board.phase.report(idle_report(new_room));
+        let cold = board.phase.frame_report(replacement, None, new_room);
         assert_eq!(cold["room"]["id"], new_room);
+        assert_eq!(cold["board_write_slots"], Value::Null);
         assert!(render::calls(&cold).is_empty());
     }
 
