@@ -56,8 +56,7 @@ if [ "${1:-}" = --preflight ]; then
   pf_mode() { if [ "$2" = 1 ]; then echo "  yes  $1"; else echo "  no   $1"; fi; }
   pf_native=0; [ "$pf_tool" = 1 ] && [ "$pf_deps" = 1 ] && pf_native=1
   pf_both=0; [ "$pf_native" = 1 ] && [ "$pf_shellcheck" = 1 ] && pf_both=1
-  # Lint also runs the oms-migrate check through Cargo, so it needs the native build.
-  pf_mode "--lint-only (shellcheck + native build)" "$pf_both"
+  pf_mode "--lint-only (shellcheck + Cargo checks)" "$pf_both"
   pf_mode "--focused-only (native build)" "$pf_native"
   pf_mode "--affected, --quick, full (default gate)" "$pf_both"
   [ "$pf_missing" = 0 ] || { echo "preflight: prerequisites missing" >&2; exit 1; }
@@ -345,6 +344,11 @@ rust_migration_checks() {
   "${migrate[@]}" check --repo . && "${migrate[@]}" policy --repo .
 }
 
+lint_skill_manifest() {
+  cargo +1.99.1 run --quiet --manifest-path Cargo.toml -p oms-command-lifecycle \
+    --example skill_manifest --locked --offline
+}
+
 stage() {
   local name="$1" log rc=0 started elapsed deadline=1800
   shift
@@ -493,7 +497,7 @@ if [ "$RUN_AFFECTED" = 1 ]; then
   fi
 fi
 
-if [ "$LIST_STAGES" != 1 ] && [ "$RUN_DOCS" != 1 ]; then
+if [ "$LIST_STAGES" != 1 ] && [ "$RUN_DOCS" != 1 ] && [ "$MODE" != lint ]; then
   ensure_native_payload
 fi
 
@@ -501,7 +505,11 @@ if [ "$RUN_LINT" = 1 ]; then
   stage shellcheck lint_shell install.sh scripts/oms scripts/*.sh \
     scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh docs/examples/*.sh \
     templates/*.sh tests/*.sh tests/lib/*.sh
-  stage skill-manifest bash scripts/install-skills.sh
+  if [ "$MODE" = lint ]; then
+    stage skill-manifest lint_skill_manifest
+  else
+    stage skill-manifest bash scripts/install-skills.sh
+  fi
   stage doc-references bash tests/source-distribution-smoke.sh --docs-only
   stage rust-migration-check rust_migration_checks
 fi
