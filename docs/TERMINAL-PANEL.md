@@ -2326,8 +2326,30 @@ only `--finalize` after confirming the exact task completion.
 The owning Main can retain a report from a canonical task assigned to its existing
 ordinary Codex lead. First bind the task with
 `oms panel --repo . --room ROOM --orchestrator codex --task-id TASK --task TEXT`.
-Keep the returned attempt ID and `binding` path. The SHA-256 of those exact binding
-file bytes anchors the return manifest:
+New assignments require a bounded task scope and parent verifier, and freeze the
+Plan/task/lease/epoch, Main/Room/attempt, checkout/base and declared role. The role
+defaults to `worker` and does not grant capabilities. Requirement IDs come from the
+registered task; only tasks without such IDs use their ID/title as the fallback
+deliverable. A complete return inventory covers that contract, not every possible
+meaning of the user's request.
+
+Run `oms panel --repo . --results --task-id TASK --json`. The task row's
+`native_assignment.report` supplies `source_template`, `manifest_template` and
+`input_paths`. The two input layers have separate purposes:
+
+1. Fill the typed **source JSON** template with outcome `reported`, `blocked` or
+   `needs-decision`, a summary, every expected requirement ID, changed paths, and
+   claimed checks/evidence. Preserve its identity fields; verification continues to
+   use the frozen parent task's verifier. Each evidence
+   entry names normalized path, exact byte count and SHA-256; a candidate names one
+   of those entries in `candidate_patch`. Write the source at the generated path,
+   `.oms/artifacts/native-inputs/ATTEMPT/round-N/source.json`.
+2. Fill the existing **capture manifest** template with the SHA-256 of those exact
+   source bytes and the same summary. Every source evidence entry must map to its
+   candidate patch or one of at most four verification references. Write it at
+   `.oms/artifacts/native-inputs/ATTEMPT/round-N/manifest.json`.
+
+For example, the capture manifest still has its original shape:
 
 ```json
 {
@@ -2336,26 +2358,32 @@ file bytes anchors the return manifest:
   "binding_sha256": "BINDING_SHA256",
   "kind": "candidate",
   "summary": "Candidate and reported verification ready for inspection",
-  "source": {"path": "native-source.txt", "sha256": "SOURCE_SHA256"},
-  "patch": {"path": "native-candidate.patch", "sha256": "PATCH_SHA256"},
+  "source": {"path": ".oms/artifacts/native-inputs/ATTEMPT/round-1/source.json", "sha256": "SOURCE_SHA256"},
+  "patch": {"path": ".oms/artifacts/native-inputs/ATTEMPT/round-1/candidate.patch", "sha256": "PATCH_SHA256"},
   "verification": [
-    {"path": "native-verification.txt", "sha256": "VERIFICATION_SHA256"}
+    {"path": ".oms/artifacts/native-inputs/ATTEMPT/round-1/checks.txt", "sha256": "VERIFICATION_SHA256"}
   ]
 }
 ```
 
 Replace the placeholders with the recorded attempt and lowercase SHA-256 digests
-of the exact files. Use `"kind": "findings"` and omit `patch` for a read-only return.
+of the exact files. `binding_sha256` is the frozen assignment file's digest. Use
+`"kind": "findings"` and omit `patch` for a read-only return.
 Verification references are optional retained evidence; even text claiming a pass
-or exit zero remains **reported**, not a certified review or verification verdict.
-Paths resolve against `--repo` unless absolute. Inputs must be owned, single-link
-regular files. The manifest is bounded to 64 KiB, its summary to 4096 bytes, source
-and each verification file to 1 MiB, patch to 16 MiB, and verification references to
-four. Unknown manifest fields and sensitive content are refused.
+or exit zero remains **reported**. Typed evidence resolves from the exact frozen
+Lead checkout; `.oms/artifacts/` evidence resolves from the selected state repo
+and still obeys forbidden scope. The manifest accepts those exact relative paths
+or their bound absolute equivalents. Its source path resolves against `--repo`.
+Inputs must be owned, single-link regular files, without symlink traversal. The
+manifest and typed source are each bounded to 64 KiB, summary to 4096 bytes,
+each verification file to 1 MiB and patch to 16 MiB. Unknown fields, duplicate
+JSON keys, unsafe paths, mismatched evidence inventory and decoded sensitive
+content are refused. Legacy prose assignments retain the 64 KiB manifest limit and
+1 MiB source limit; they do not gain the typed reconciliation contract.
 
 ```bash
 oms panel --repo . --room ROOM --orchestrator codex --task-id TASK \
-  --native-result native-return.json
+  --native-result .oms/artifacts/native-inputs/ATTEMPT/round-1/manifest.json
 oms panel --repo . --results --task-id TASK --json
 ```
 
@@ -2371,27 +2399,84 @@ reconciliation. This command never opens a replacement
 lead, sends native input, changes a task's state, or converts native work into a
 managed delegate.
 
-The existing artifact store retains immutable manifest, source, patch and verifier
+The existing artifact store retains immutable manifest, source, patch and verification
 snapshots. A checked lifecycle reference publishes the report only after these bytes
 are retained. Retrying the identical manifest reuses the same report and event,
 including after an interruption between retaining snapshots and publication, while
-the original live custody remains valid. A deliberate revision must set
-`previous_sha256` to the current returned `result.sha256`; an older report cannot
-overwrite its successor. Inspect uncertain publication before changing a manifest.
-An unknown native send remains unknown after a report is attached and is never
-resent automatically.
+the original live custody remains valid. A changed typed report in the same round
+requires its next source revision, the previous **source** digest in
+`previous_report_sha256`, and the previous **retained result** digest in both the
+manifest's `previous_sha256` and CLI `--expected-previous-result-sha256 SHA`.
+The returned `result.sha256` identifies that retained result artifact; it is also
+shown as `native_assignment.report.artifact_sha256`. Use this public digest for
+Main decisions and continuation. The first report and identical replay need no
+replacement flag. The generated templates preserve the separate digest fields.
+Legacy revisions keep the existing manifest-only predecessor check.
 
-Task Results shows transport, the owner-imported report, reported verification and
-the Main's decision separately. Raw/Transcript opens the retained source and
-verification text; Diff/Files opens the digest-checked candidate. Missing or changed
-bytes appear as unavailable. These are historical custody snapshots checked at
-registration, not continuous proof of the current account or lease. Consumption and
-completion remain `unconfirmed`, write isolation `unmanaged`, effective permissions
-`unknown`, and child cleanup `unsupported`. Native reports are currently ineligible
-for acceptance: later
-completion/cleanup evidence and an explicit adapter into the existing admission and
-review gates are still required. Managed acceptance and publication gates remain in
-force.
+Main explicitly reviews that result, then either holds the task, requests another
+round, or records review:
+
+```bash
+oms panel --repo . --room ROOM --native-reconcile ATTEMPT \
+  --result-sha256 RESULT_SHA256 --decision request-revision
+oms panel --repo . --room ROOM --orchestrator codex --task-id TASK \
+  --after-native-result RESULT_SHA256 --task 'Address the reviewed gaps'
+```
+
+The other decisions are `blocked` and `reviewed`. Continuation preserves the same
+task, claim and attempt, records a new immutable round packet and retains the prior
+result in history. At most 32 rounds are admitted. An unknown native send is never
+resent automatically. Main review of a candidate can establish canonical Plan
+`review` with the exact lease and captured artifact/patch; run the existing
+`patch-admit`/`patch-land --plan-task` path from a clean integration checkout for
+actual verification and completion. Report commands and claimed checks are never
+executed. A native candidate remains external patch evidence rather than managed
+delegate provenance, and report ingestion/review alone grants no acceptance.
+
+The Plan review freezes both retained evidence digests. Admission and the final
+Plan land/finish fences reject a changed report or patch, while landing can move
+the exact patch bytes into its existing frozen store. Reconciliation cannot adopt
+an older path-only review as an exact native review.
+
+After genuine canonical Plan completion or cancellation, repeating exact-result
+`--native-reconcile ... --decision reviewed` retires the assignment lifecycle and
+Room reservation. The reusable Lead session remains open; this administrative
+retirement supplies no native child-cleanup proof. Results then points to the next
+ready task instead of recommending admission again. Native consumption and
+completion claims remain `unconfirmed`, write isolation `unmanaged`, effective
+permissions `unknown`, and child cleanup `unsupported`.
+
+If a first assignment was interrupted before writing its packet and its frozen
+inputs have changed, the owning Main can explicitly retire the original intent.
+Read `refs.native_intent_sha256` from `oms events show --attempt ATTEMPT --json`.
+
+```bash
+oms panel --repo . --room ROOM --owner codex --native-reconcile ATTEMPT \
+  --intent-sha256 INTENT_SHA256 --decision retire-unsent
+```
+
+This requires the original queued record, the exact Plan claim, a missing packet
+and no assignment member in the Room. It frees the Lead reservation without
+changing the Plan. To assign that task again, explicitly release the exact Plan
+lease and claim a fresh one. Bound, sent and uncertain attempts retain their
+existing reconciliation path.
+
+Task, participant and list Results show transport, return claims, Main resolution
+and next action separately. Ordinary typed projection reads at most 20 assignments,
+each with bounded binding/result/source metadata; it does not reopen patch or
+verification bodies. Raw/Transcript and Diff/Files perform the explicit retained
+byte checks. Absent, invalid and unavailable evidence stay distinct. Before the
+first import, a safely observed manifest at the generated input path produces an
+import hint only; its presence is not a report or verification result. The existing
+bounded tick wake can notify an idle eligible Main about pending input or changed
+result/decision, with exact digest deduplication. This bounded reminder enters
+Main's native provider session and may start a model turn. Import, reconciliation
+and Lead dispatch remain explicit Main actions, while approved goal-drive/autopilot
+contracts own their existing bounded automatic execution.
+
+Typed binding currently supports ordinary Codex Leads. Other native providers and
+alternate Codex use managed `--dispatch ROLE --task-id TASK` for canonical work.
+Explicit `--unbound --task TEXT` permits conversation without canonical task credit.
 
 ### Results reader
 

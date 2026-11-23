@@ -37,6 +37,7 @@ const FLAGS: &[&str] = &[
     "dry-run",
     "spread-accounts",
     "archived",
+    "unbound",
 ];
 const VALUES: &[&str] = &[
     "repo",
@@ -108,6 +109,12 @@ const VALUES: &[&str] = &[
     "verify",
     "task-id",
     "native-result",
+    "native-reconcile",
+    "result-sha256",
+    "intent-sha256",
+    "decision",
+    "expected-previous-result-sha256",
+    "after-native-result",
     "from-task",
     "label",
     "alias",
@@ -410,6 +417,7 @@ impl Options {
             "launch",
             "spawn-main",
             "orchestrator",
+            "native-reconcile",
             "focus-orchestrator",
             "swap-main",
             "reopen",
@@ -490,6 +498,7 @@ impl Options {
                     "results",
                     "settle-review",
                     "orchestrator",
+                    "native-reconcile",
                     "focus-orchestrator",
                 ]
                 .iter()
@@ -654,6 +663,60 @@ impl Options {
                     && !self.has("spread-accounts"),
                 "bound --task-id operations require an existing ordinary Codex lead and either --task or --native-result",
             )?;
+        }
+        self.needs(
+            &["result-sha256", "intent-sha256", "decision"],
+            &["native-reconcile"],
+        )?;
+        self.needs(&["expected-previous-result-sha256"], &["native-result"])?;
+        self.needs(&["after-native-result", "unbound"], &["orchestrator"])?;
+        if self.has("native-reconcile") {
+            let decision = self.required("decision")?;
+            self.choice(
+                "decision",
+                &["request-revision", "blocked", "reviewed", "retire-unsent"],
+            )?;
+            let (required, excluded) = if decision == "retire-unsent" {
+                ("intent-sha256", "result-sha256")
+            } else {
+                ("result-sha256", "intent-sha256")
+            };
+            self.required(required)?;
+            require(
+                !self.has(excluded),
+                "use --intent-sha256 for retire-unsent and --result-sha256 for result decisions",
+            )?;
+            crate::identifier(&self.required("native-reconcile")?)?;
+        }
+        if self.has("after-native-result") {
+            require(
+                self.has("task-id")
+                    && self.has("task")
+                    && self.get("orchestrator") == Some("codex"),
+                "--after-native-result requires a bound ordinary Codex assignment",
+            )?;
+        }
+        if self.has("unbound") {
+            require(
+                self.has("task") && !self.has("task-id"),
+                "--unbound requires a native conversation without --task-id",
+            )?;
+        }
+        for key in [
+            "result-sha256",
+            "intent-sha256",
+            "expected-previous-result-sha256",
+            "after-native-result",
+        ] {
+            if let Some(sha) = self.get(key) {
+                require(
+                    sha.len() == 64
+                        && sha
+                            .bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+                    "native digests must be lowercase SHA-256",
+                )?;
+            }
         }
         if self.has("count") {
             require(
@@ -830,10 +893,11 @@ pub fn usage() -> String {
     let mut text = String::from(
         "usage: oms panel [terminal ACTION | job ACTION] [OPTIONS]\n\nOMS terminal control panel with registered CLI peers.\n\nInteractive startup reuses a Main or offers installed harnesses on tmux. Set OMS_PANEL_MAIN to select a fresh Main, or use --watch for the board alone.\n\n",
     );
-    text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--account ID] [--model MODEL] [--reasoning-effort EFFORT]\nModel and effort apply to new sessions only. The native CLI validates availability.\nAssign an existing provider: --orchestrator PROVIDER [--account ID] --task TEXT\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
+    text.push_str("Provider sessions: --orchestrator codex|claude|antigravity [--account ID] [--model MODEL] [--reasoning-effort EFFORT]\nModel and effort apply to new sessions only. The native CLI validates availability.\nUnbound conversation: --orchestrator PROVIDER [--account ID] --unbound --task TEXT\nFocus a provider session: --focus-orchestrator PROVIDER\n\n");
     text.push_str("Codex alternate: --orchestrator codex --lead alternate --account ID [--task TEXT] | --focus-orchestrator codex --lead alternate\n\n");
     text.push_str("Bind a canonical task: --orchestrator codex --task-id ID --task TEXT\nReuses the exact claim and durable intent; an unknown send is never resent automatically.\n\n");
     text.push_str("Retain a native report: --orchestrator codex --task-id ID --native-result FILE\nImports digest-bound findings or candidate evidence; does not confirm consumption, completion or acceptance.\n\n");
+    text.push_str("Typed return paths/templates and next actions: --results [--task-id ID] --json\nA changed typed report requires --expected-previous-result-sha256 SHA; first capture and identical replay do not.\nReconcile an exact retained result: --native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed\nRetire a verified-unsent first intent: --native-reconcile ATTEMPT --intent-sha256 SHA --decision retire-unsent\nNative next round: --orchestrator codex --task-id ID --task TEXT --after-native-result SHA\nReviewed candidates use existing Plan review, patch-admit and patch-land; reports do not accept or finish tasks.\nClaude/AGY canonical work uses managed --dispatch ROLE --task-id ID until bound native adapters exist.\n\n");
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
@@ -954,6 +1018,111 @@ mod tests {
         }
         assert!(usage().contains("--orchestrator codex --task-id ID --task TEXT"));
         assert!(usage().contains("--orchestrator codex --task-id ID --native-result FILE"));
+        let sha = "a".repeat(64);
+        assert!(parse(&[bound.as_slice(), &["--after-native-result", &sha]].concat()).is_ok());
+        assert!(
+            parse(
+                &[
+                    returned.as_slice(),
+                    &["--expected-previous-result-sha256", &sha]
+                ]
+                .concat()
+            )
+            .is_ok()
+        );
+        for decision in ["request-revision", "blocked", "reviewed"] {
+            assert!(
+                parse(&[
+                    "--native-reconcile",
+                    "attempt-one",
+                    "--result-sha256",
+                    &sha,
+                    "--decision",
+                    decision
+                ])
+                .is_ok()
+            );
+        }
+        let retire = [
+            "--native-reconcile",
+            "attempt-one",
+            "--intent-sha256",
+            &sha,
+            "--decision",
+            "retire-unsent",
+            "--room",
+            "room-valid",
+            "--owner",
+            "codex",
+        ];
+        assert!(parse(&retire).is_ok());
+        assert!(parse(&[retire.as_slice(), &["--result-sha256", &sha]].concat()).is_err());
+        assert!(parse(&[retire.as_slice(), bound.as_slice()].concat()).is_err());
+        for args in [
+            &["--native-reconcile", "attempt-one"][..],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--intent-sha256",
+                "bad",
+                "--decision",
+                "retire-unsent",
+            ],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--result-sha256",
+                &sha,
+                "--decision",
+                "retire-unsent",
+            ],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--intent-sha256",
+                &sha,
+                "--decision",
+                "reviewed",
+            ],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--result-sha256",
+                &sha,
+                "--decision",
+                "accepted",
+            ],
+            &[
+                "--native-reconcile",
+                "attempt-one",
+                "--result-sha256",
+                "bad",
+                "--decision",
+                "reviewed",
+            ],
+            &[
+                "--orchestrator",
+                "codex",
+                "--task",
+                "chat",
+                "--after-native-result",
+                &sha,
+            ],
+            &["--unbound"],
+        ] {
+            assert!(parse(args).is_err(), "accepted {args:?}");
+        }
+        assert!(parse(&["--orchestrator", "claude", "--unbound", "--task", "chat"]).is_ok());
+        assert!(parse(&[bound.as_slice(), &["--unbound"]].concat()).is_err());
+        assert!(parse(&[returned.as_slice(), &["--after-native-result", &sha]].concat()).is_err());
+        for guide in [
+            "--native-reconcile",
+            "--expected-previous-result-sha256",
+            "--after-native-result",
+            "--unbound",
+        ] {
+            assert!(usage().contains(guide));
+        }
     }
 
     #[test]

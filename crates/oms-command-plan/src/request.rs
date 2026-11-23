@@ -160,6 +160,7 @@ pub(crate) const NAMES: &[&str] = &[
     "executor-id",
     "executor-soul-sha256",
     "expected-review-patch",
+    "expected-review-artifact-sha256",
     "expected-review-patch-sha256",
     "expected-review-verify",
     "expected-review-executor-id",
