@@ -11,7 +11,7 @@ use std::{
 
 type Response = (i32, Vec<u8>, Vec<u8>);
 
-const HELP: &str = "Usage: agent-role.sh [options] <list|show|path|resolve|init>\n\nManage named worker role profiles (.oms/roles/<name>.md; global fallback\n~/.oh-my-setting/local/roles/<name>.md; bundled fallback ROOT/roles). Roles are\ninjected into a delegated worker brief with peer-delegate.sh --role NAME.\n\nOptions:\n  --repo PATH   Repo for project-scoped roles (default: PWD, git-root anchored).\n  --name NAME   Role name ([A-Za-z0-9._-]+). Required for show/path/resolve/init.\n  --provider P  claude or codex; required for render.\n  --global      Use the global role store instead of the repo; resolve/show\n                fall back only to bundled roles.\n  --json        With surface: print JSON instead of the table.\n  -h, --help    Show help.\n\nCommands:\n  surface   Read-only report per bundled role: read_only, tool belt, tool\n            count, MCP on/off (from config/role-contracts.json).\n  list      List available role names (repo, global, bundled; deduped).\n  show      Print the resolved role file (repo, then global, then bundled).\n  path      Print where a role file lives for the chosen scope (may not exist).\n  resolve   Print the first existing role file path (repo, global, bundled);\n            exit 3 if none. Used by peer-delegate.sh --role.\n  init      Create a starter role file at the chosen scope if missing.\n  render    Print a provider-native subagent definition for the resolved role\n            to stdout (--provider claude: .claude/agents/<name>.md format;\n            --provider codex: .codex/agents/<name>.toml format). Name is\n            oms-<role>; model/effort come from config/panel-routing.json.\n            By default, Claude profiles list read-only tools and Codex profiles\n            emit sandbox_mode set to read-only. Only bundled write roles\n            render edit tools or workspace-write. Codex native custom\n            agents inherit the parent sandbox and approval policy. Treat\n            rendered settings as guidance and verify effective access in\n            the launcher. Writes nothing and installs nothing.\n";
+const HELP: &str = "Usage: agent-role.sh [options] <list|show|path|resolve|init>\n\nManage named worker role profiles (.oms/roles/<name>.md; global fallback\n~/.oh-my-setting/local/roles/<name>.md; bundled fallback ROOT/roles). Roles are\ninjected into a delegated worker brief with peer-delegate.sh --role NAME.\n\nOptions:\n  --repo PATH   Repo for project-scoped roles (default: PWD, git-root anchored).\n  --name NAME   Role name ([A-Za-z0-9._-]+). Required for show/path/resolve/init.\n  --provider P  claude, codex, or antigravity; required for render.\n  --global      Use the global role store instead of the repo; resolve/show\n                fall back only to bundled roles.\n  --json        With surface: print JSON instead of the table.\n  -h, --help    Show help.\n\nCommands:\n  surface   Read-only report per bundled role: read_only, tool belt, tool\n            count, MCP on/off (from config/role-contracts.json).\n  list      List available role names (repo, global, bundled; deduped).\n  show      Print the resolved role file (repo, then global, then bundled).\n  path      Print where a role file lives for the chosen scope (may not exist).\n  resolve   Print the first existing role file path (repo, global, bundled);\n            exit 3 if none. Used by peer-delegate.sh --role.\n  init      Create a starter role file at the chosen scope if missing.\n  render    Print a provider-native subagent definition for the resolved role\n            to stdout (--provider claude: .claude/agents/<name>.md format;\n            --provider codex: .codex/agents/<name>.toml format; --provider\n            antigravity: .agents/agents/<name>.md format). Name is\n            oms-<role>; Claude and Codex model/effort come from\n            config/panel-routing.json, while Antigravity sets\n            mainAgent: false, subagent: true, and model: inherit. By\n            default, Claude and Antigravity profiles list read-only tools\n            (Antigravity sets commandExecutionPolicy: off) and Codex\n            profiles emit sandbox_mode set to read-only. Only bundled\n            write roles render edit tools, commandExecutionPolicy:\n            sandbox, or workspace-write. Codex native custom agents\n            inherit the parent sandbox and approval policy. Treat\n            rendered settings as guidance and verify effective access in\n            the launcher. Writes nothing and installs nothing.\n";
 
 pub(crate) fn error(code: i32, message: impl AsRef<[u8]>) -> Response {
     let mut err = b"error: ".to_vec();
@@ -63,7 +63,7 @@ fn parse(args: &[OsString], cwd: &Path) -> Result<Args, Response> {
                 let missing = match value.as_bytes() {
                     b"--repo" => "--repo requires a path",
                     b"--name" => "--name requires a value",
-                    _ => "--provider requires claude or codex",
+                    _ => "--provider requires claude or codex or antigravity",
                 };
                 i += 1;
                 let Some(next) = args.get(i) else {
@@ -265,8 +265,13 @@ pub(crate) fn run(
             Err(write::Failure::Io(e)) => error(1, e.to_string()),
         };
     }
-    if args.action == "render" && !matches!(args.provider.as_bytes(), b"claude" | b"codex") {
-        return error(2, "render requires --provider claude|codex");
+    if args.action == "render"
+        && !matches!(
+            args.provider.as_bytes(),
+            b"claude" | b"codex" | b"antigravity"
+        )
+    {
+        return error(2, "render requires --provider claude|codex|antigravity");
     }
     let mut candidates = Vec::new();
     if !args.global {

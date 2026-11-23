@@ -191,6 +191,7 @@ pub const PANEL_ENV_PASSTHROUGH: &[&str] = &[
     "NO_COLOR",
     "OMS_CODEX_NOTIFY",
     "OMS_CLAUDE_NOTIFY",
+    "OMS_MAIN_WRITE_GUARD",
     "CLAUDE_CONFIG_DIR",
     "OMS_QUOTA_WARN_PCT",
     "OMS_ROOM_ID",
@@ -1208,6 +1209,13 @@ fn verify_startup_board(
 pub(crate) struct MainSwitchTarget {
     pub(crate) harness: &'static str,
     pub(crate) model: String,
+}
+
+pub(crate) fn check_outgoing_main_swap_harness(harness: Option<&str>) -> Result<()> {
+    require(
+        harness == Some("codex"),
+        "safe automatic exit currently requires a Codex Main composer",
+    )
 }
 
 pub(crate) fn main_switch_targets(source: &Path, current: &str) -> Result<Vec<MainSwitchTarget>> {
@@ -2328,10 +2336,7 @@ fn perform_main_swap(
 ) -> Result<Value> {
     let store = Store::open(repo)?;
     let pane = find_swap_source(repo, main, services, stop)?;
-    require(
-        pane.harness == "codex",
-        "safe automatic exit currently requires a Codex Main composer",
-    )?;
+    check_outgoing_main_swap_harness(Some(pane.harness.as_str()))?;
     let refs = &main["refs"];
     let wrapper = terminals::process(pane.pid)?;
     let native_pid = text(refs, "panel_native_pid")

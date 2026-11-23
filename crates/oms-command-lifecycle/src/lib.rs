@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod account_cleanup;
+mod adapter_conformance;
 mod agy_hook;
 mod agy_surface;
 mod cli;
@@ -29,7 +30,10 @@ mod tools;
 mod transaction;
 mod update;
 
-pub use services::{IncomingPhase, IncomingSourceLease, Services, UnavailableServices};
+pub use services::{
+    IncomingDiagnostic, IncomingPhase, IncomingSourceLease, IncomingTool, Services,
+    UnavailableServices,
+};
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 pub type Output = (i32, Vec<u8>, Vec<u8>);
 

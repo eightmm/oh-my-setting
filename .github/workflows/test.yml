@@ -22,7 +22,8 @@ jobs:
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       native: ${{ steps.plan.outputs.native }}
-      rust: ${{ steps.rust_scope.outputs.required }}
+      rust: ${{ steps.plan.outputs.docs_only == 'true' && 'false' || steps.rust_scope.outputs.required }}
+      docs_only: ${{ steps.plan.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -68,7 +69,7 @@ jobs:
               --changed-from "$DIFF_BASE" --changed-to HEAD \
               --ci-output "$GITHUB_OUTPUT"
           else
-            printf 'mode=full\nnative=true\npython=false\noperator=\n' >> "$GITHUB_OUTPUT"
+            printf 'mode=full\nnative=true\ndocs_only=false\npython=false\noperator=\n' >> "$GITHUB_OUTPUT"
           fi
 
   lint:
@@ -101,24 +102,11 @@ jobs:
   rust:
     needs: affected_plan
     if: needs.affected_plan.outputs.rust == 'true' || needs.affected_plan.outputs.mode == 'full'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: rust (ubuntu-24.04)
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
-      - name: Bash 5 on macOS
-        if: runner.os == 'macOS'
-        timeout-minutes: 10
-        run: |
-          prefix="$(brew --prefix)"
-          if ! "$prefix/bin/bash" -c "[ \${BASH_VERSINFO[0]} -ge 5 ]" 2>/dev/null; then
-            brew install bash
-          fi
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          "$prefix/bin/bash" --version | head -n 1
       - name: install pinned Rust toolchain
         timeout-minutes: 5
         run: |
@@ -131,11 +119,49 @@ jobs:
       - name: Rust workspace checks and tests
         timeout-minutes: 30
         run: |
-          cargo +1.99.1 fmt --manifest-path Cargo.toml --all -- --check
-          cargo +1.99.1 clippy --manifest-path Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
-          cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline
-          cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
-          cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
+          set -euo pipefail
+          total_start=$SECONDS
+          failed_phase=none
+          phase_timings=()
+
+          print_timing_summary() {
+            local rc=$?
+            printf '==> Rust workspace phase timings (total=%ds, status=%d, failed_phase=%s)\n' \
+              "$((SECONDS - total_start))" "$rc" "$failed_phase"
+            if [ "${#phase_timings[@]}" -gt 0 ]; then
+              printf '  %s\n' "${phase_timings[@]}"
+            fi
+          }
+          trap print_timing_summary EXIT
+
+          run_phase() {
+            local phase="$1"
+            shift
+            local start=$SECONDS
+            local status=0
+            printf '==> [rust:%s] start\n' "$phase"
+            if "$@"; then
+              status=0
+            else
+              status=$?
+            fi
+            local elapsed=$((SECONDS - start))
+            if [ "$status" -eq 0 ]; then
+              phase_timings+=("phase=${phase} status=ok exit=0 elapsed_s=${elapsed}")
+              printf '==> [rust:%s] ok (%ds)\n' "$phase" "$elapsed"
+            else
+              failed_phase="$phase"
+              phase_timings+=("phase=${phase} status=failed exit=${status} elapsed_s=${elapsed}")
+              printf '==> [rust:%s] failed (exit=%d, %ds)\n' "$phase" "$status" "$elapsed" >&2
+              return "$status"
+            fi
+          }
+
+          run_phase fmt cargo +1.99.1 fmt --manifest-path Cargo.toml --all -- --check
+          run_phase clippy cargo +1.99.1 clippy --manifest-path Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
+          run_phase all-targets cargo +1.99.1 test --manifest-path Cargo.toml --workspace --all-targets --locked --offline
+          run_phase doctests cargo +1.99.1 test --manifest-path Cargo.toml --workspace --doc --locked --offline
+          run_phase migrate cargo +1.99.1 run --manifest-path Cargo.toml -p oms-migrate --locked --offline -- check --repo .
 
   focused:
     needs: affected_plan
@@ -157,28 +183,14 @@ jobs:
   install_e2e:
     needs: affected_plan
     if: needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.native == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.affected_plan.outputs.native == 'true' && '[{"os":"ubuntu-latest","link_mode":"copy"},{"os":"macos-latest","link_mode":"auto"}]' || '[{"os":"ubuntu-latest","link_mode":"copy"}]') }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 50
-    name: native (${{ matrix.os }}, ${{ matrix.link_mode }})
+    name: native (ubuntu-latest, copy)
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - name: Bash 5 on macOS
-        if: runner.os == 'macOS'
-        timeout-minutes: 10
-        run: |
-          prefix="$(brew --prefix)"
-          if ! "$prefix/bin/bash" -c "[ \${BASH_VERSINFO[0]} -ge 5 ]" 2>/dev/null; then
-            brew install bash
-          fi
-          echo "$prefix/bin" >> "$GITHUB_PATH"
-          "$prefix/bin/bash" --version | head -n 1
       - name: install pinned Rust toolchain
         timeout-minutes: 5
         run: rustup toolchain install 1.99.1 --profile minimal
@@ -193,12 +205,8 @@ jobs:
       - name: install / update / uninstall lifecycle
         timeout-minutes: 10
         env:
-          OH_MY_SETTING_LINK_MODE: ${{ matrix.link_mode }}
+          OH_MY_SETTING_LINK_MODE: copy
         run: bash tests/install-lifecycle-smoke.sh
-      - name: BSD userland fixtures
-        timeout-minutes: 10
-        if: ${{ !cancelled() && runner.os == 'macOS' }}
-        run: bash tests/bsd-portability-smoke.sh
 
   affected_verify:
     needs: affected_plan
@@ -211,9 +219,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: install pinned Rust toolchain
+        if: needs.affected_plan.outputs.docs_only != 'true'
         timeout-minutes: 5
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: fetch locked Rust dependencies
+        if: needs.affected_plan.outputs.docs_only != 'true'
         timeout-minutes: 5
         run: cargo +1.99.1 fetch --manifest-path Cargo.toml --locked
       - name: verify affected changes

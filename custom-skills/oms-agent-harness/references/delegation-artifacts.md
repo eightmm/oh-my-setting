@@ -15,9 +15,11 @@ write authority. Task-aware calls and delegates record their own outcomes.
 ## Allocate an ordinary request
 
 Work locally unless the user or applicable instructions explicitly request
-delegation. The paths below describe authorized delegation, not permission to
-launch workers. A keyword hook must not launch paid workers or turn an
-explanation request into a write task. Inspect relevant source first:
+delegation. A panel Overall Main is the stated exception: it manages and routes
+every edit under [coordination-layers.md](coordination-layers.md). The paths
+below describe authorized delegation, not permission to launch workers. A
+keyword hook must not launch paid workers or turn an explanation request into
+a write task. Inspect relevant source first:
 
 - Answer, status, diagnosis, or review: keep read-only authority. Ask an
   independent peer only when its judgment can change the decision.
@@ -280,10 +282,12 @@ a clean result as "no repository surface moved", not as "the worker was safe".
 ## Panel main command reference
 
 The persistent main contract keeps authority, admission and recovery invariants;
-load these command details when needed. The same contract serves Claude, Codex
-and Pi mains with their durable `--owner` value. Room identity and addressed-message
-instructions are appended separately; native conversations remain separate from
-shared OMS records.
+load these command details when needed. Main manages and does not edit; the
+routes for changes, fixes and conflicts are in
+[coordination-layers.md](coordination-layers.md). The same contract serves
+Claude, Codex and Pi mains with their durable `--owner` value. Room identity and
+addressed-message instructions are appended separately; native conversations
+remain separate from shared OMS records.
 
 - Read judgment: `oms consult --to PROVIDER --repo . --prompt TEXT`.
   Bounded implementation: `oms peer-delegate --to PROVIDER --repo .
@@ -321,6 +325,7 @@ shared OMS records.
 For a PROJECT.md goal, `oms plan-from-spec` proposes tasks; review the bytes,
 then apply with `--apply --expected-proposal-sha256 DIGEST`. Applied tasks use
 the ordinary shared plan. `oms agent-plan add` is for bounded gaps only.
+In GitHub project mode both paths refuse a task without an issue (`--issue N`).
 Claim ready tasks in dependency order; dispatch with `--task-id` moves a task
 to running. After verification, inspection, integration and required checks,
 run `oms agent-plan review` after acceptance and record the owner result.

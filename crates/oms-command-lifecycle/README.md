@@ -107,6 +107,21 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
 - Existing status, sandbox, residue, pins, scheduler, and tick behavior remains
   native. Optional external adapters must actually satisfy profile requirements;
   their absence is accepted only by explicit allow-missing policy.
+- `doctor --providers --conformance PATH [--probe-bound SECONDS]`: explicitly
+  checks one `oms-agent-adapter-ID` name and executable, then runs only its
+  `--version` and `--help` probes from private scratch with closed stdin.
+  The existing supervisor bounds each stream to 32 KiB, honors cancellation and
+  applies a per-probe execution deadline (default 10 seconds, range 1–60).
+  Cleanup may outlast the execution deadline; unconfirmed cleanup fails the
+  probe and prevents another launch. JSON contains outcome metadata, never raw
+  stdout/stderr, and a probe pass does not update the capability table or cache.
+  Ordinary `--providers` and `--providers --check` still do not start adapters.
+  This implements the non-inference slice of AH-08/#319. Explicit `--run`/write
+  conformance, file/`-` prompt transport, unchanged-worktree/commit/state checks
+  and output-file isolation remain unimplemented. Process-group observations
+  do not establish whole-tree containment, sandboxing, admission or live-provider
+  compatibility; these report as unknown. The adapter is a trusted local
+  executable and may itself use the inherited environment or network.
 
 Downloads, metadata, archive members, provider output, and stdin are bounded.
 Invalid paths, links escaping staged payloads, malformed manifests, checksum
@@ -135,7 +150,13 @@ when their producer is unavailable.
   before live checkout mutation; `Reconcile` invokes that checkout's
   native `--oms-dispatch` frontdoor to converge recorded components and returns a
   schema-2 receipt; `Verify` invokes its native doctor; `RefreshTools` runs after
-  core commit. Child processes must finish before returning. The child receives
+  core commit; `VerifyIntegrations` follows successful tool refresh using
+  `doctor --integrations --json --no-model-doctor`. It checks recorded Claude hook
+  surfaces, Codex plugin inventory/generated cache, Antigravity plugin ownership,
+  and managed MCP launch registrations. These are configuration and inventory
+  checks: hook delivery, actual served models, and MCP runtime availability remain
+  unproven. No live inference, arbitrary MCP server probe, or repair is added.
+  Child processes must finish before returning. The child receives
   `OMS_NATIVE_UPDATE_PARENT` only in its own environment. Borrowing the receipt
   mutex requires the durable `native-update/lease.json`, matching receipt,
   live parent generation, process ancestry, and held mutex. It uses its own
@@ -146,6 +167,13 @@ when their producer is unavailable.
   provider paths are resolved before switching child cwd. Generated
   schedulers retain the installation and Rust paths without freezing a temporary
   toolchain override or sourcing interactive shell startup files.
+  The integration check reports `passed`, `failed`, `cancelled`, or `skipped`;
+  skips distinguish `no_doctor`, `no_tools`, `rollback`, and `refresh_failed`.
+  Post-commit failure returns `partial` and retains the committed core receipt.
+  Neither core rollback nor restoration of vendor binaries is claimed. Diagnostics
+  carry only allowlisted phase/tool names and shell exit codes, never child output
+  or executable paths. Scheduled status preserves the last failure diagnostic
+  across subsequent checks and clears it on a later successful apply.
 - `apply_project_template` and `provider_hook`: call the existing native
   template/hook domains for doctor fixtures and certified Antigravity routing.
   Fixture destinations are disposable. Advisory hooks cannot block a turn.

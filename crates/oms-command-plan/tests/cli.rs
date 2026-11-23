@@ -896,6 +896,27 @@ fn merged_dependencies_scheduling_and_late_results() {
     let (code, out, err) = run(&["ready"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.is_empty(), "shared resource should block b: {out}");
+    // `ready` reports scheduling inputs; claimed `a` still filters `b`.
+    for (id, extra) in [
+        ("c", &["--role", "builder", "--resources", "cpu,mem"][..]),
+        ("d", &[]),
+    ] {
+        let mut add = vec!["add", "--id", id, "--title", id, "--allowed", id];
+        add.extend_from_slice(extra);
+        assert_eq!(run(&add).0, 0);
+    }
+    let (code, out, err) = run(&["ready", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let ready = oms_command_plan::json::parse(out.as_bytes()).unwrap();
+    let rows = ready.get("tasks").array().unwrap();
+    assert_eq!(rows.len(), 2, "{out}");
+    assert_eq!(rows[0].text("role"), "builder", "{out}");
+    assert_eq!(rows[0].get("resources").strings().unwrap(), ["cpu", "mem"]);
+    assert_eq!(rows[1].text("role"), "", "{out}");
+    assert!(
+        rows[1].get("resources").strings().unwrap().is_empty(),
+        "{out}"
+    );
     let (code, _, err) = run(&["review", "--id", "a"]);
     assert_eq!(code, 0, "{err}");
     let (code, out, err) = run(&["ready", "--json", "--max-review-backlog", "1"]);
@@ -1121,7 +1142,15 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
             .canonicalize()
             .unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$*\" in *'rev-parse HEAD'*) if [ -f \"${{0%/*}}/gate\" ]; then printf entered > \"${{0%/*}}/entered\"; while [ -f \"${{0%/*}}/gate\" ]; do /bin/sleep 0.02; done; fi;; esac\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\n\
+case \"${{OMS_PLAN_GIT_IO_CASE-}}\" in\n\
+  echo) cat; printf tail; printf ignored >&2; exit 7;;\n\
+  held-pipe) /bin/sleep 5 & printf tail; exit 0;;\n\
+  blocked-input) printf entered > \"${{0%/*}}/io-entered\"; exec /bin/sleep 5;;\n\
+  closed-input) exec 0<&-; printf tail; exit 0;;\n\
+  signal) kill -TERM $$;;\n\
+esac\n\
+case \"$*\" in *'rev-parse HEAD'*) if [ -f \"${{0%/*}}/gate\" ]; then printf entered > \"${{0%/*}}/entered\"; while [ -f \"${{0%/*}}/gate\" ]; do /bin/sleep 0.02; done; fi;; esac\nexec '{}' \"$@\"\n",
             real.to_str().unwrap().replace('\'', "'\\''")
         );
         fs::write(bin.join("git"), script).unwrap();
@@ -1350,6 +1379,77 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     let tmp = Tmp::new();
     let r = repo(&tmp);
     let stop = AtomicBool::new(false);
+    // Reuse the isolated Git shim for the default query path as well as the
+    // admission deadline path exercised below.
+    let mut proof = oms_command_plan::repository::Git {
+        repo: &r,
+        interrupted: &stop,
+        group_resolver: None,
+        deadline: None,
+        group_snapshot: None,
+    };
+    let query =
+        |proof: &oms_command_plan::repository::Git<'_>, case: &str, input: Option<&[u8]>, limit| {
+            proof.output(
+                &[],
+                input,
+                &[("OMS_PLAN_GIT_IO_CASE".into(), case.into())],
+                limit,
+            )
+        };
+    let input = vec![b'x'; 1024 * 1024];
+    for bounded in [false, true] {
+        proof.deadline =
+            bounded.then(|| std::time::Instant::now() + std::time::Duration::from_secs(5));
+        for bytes in [None, Some(&[][..]), Some(input.as_slice())] {
+            let mut expected = bytes.unwrap_or_default().to_vec();
+            expected.extend_from_slice(b"tail");
+            let output = query(&proof, "echo", bytes, expected.len()).unwrap();
+            assert_eq!(output.code, 7);
+            assert_eq!(output.stdout, expected);
+        }
+        assert_eq!(
+            query(&proof, "echo", Some(&[]), 3).err().unwrap().message,
+            "Git output exceeds bound"
+        );
+        assert_eq!(
+            query(&proof, "signal", None, 16).unwrap().code,
+            if bounded { 143 } else { 128 }
+        );
+        let closed = query(&proof, "closed-input", Some(&input), 16);
+        if bounded {
+            assert_eq!(closed.unwrap().stdout, b"tail");
+        } else {
+            assert_eq!(closed.err().unwrap().message, "Git input unavailable");
+        }
+    }
+    proof.deadline = None;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        query(&proof, "held-pipe", None, 16).unwrap().stdout,
+        b"tail"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let git_bin = PathBuf::from(std::env::var_os("OMS_TEAM_GIT_FIXTURE_BIN").unwrap());
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !git_bin.join("io-entered").is_file() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            stop.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let refused = query(&proof, "blocked-input", Some(&input), 16)
+            .err()
+            .unwrap();
+        assert_eq!(refused.code, 2, "{refused}");
+        assert_eq!(refused.message, "local Git proof interrupted or timed out");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    });
+    assert!(git_bin.join("io-entered").is_file());
+    stop.store(false, Ordering::Release);
+    fs::remove_file(git_bin.join("io-entered")).unwrap();
     let host = TeamHost::default();
     let call = |values: &[&str], child: bool| {
         let req = Request::parse(&args(values)).unwrap();
@@ -2395,4 +2495,1076 @@ fn contract_registry_refuses_unsafe_inputs_and_permissions() {
     );
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(run(&["contract-list"]).0, 2);
+}
+
+#[test]
+fn add_batch_is_atomic_replay_safe_and_cas_bound() {
+    if isolated("add_batch_is_atomic_replay_safe_and_cas_bound") {
+        return;
+    }
+    use oms_command_plan::{Context, Plan, Request, json};
+    let tmp = Tmp::new();
+    let file = tmp.0.join("batch.json");
+    let apply_in = |repo_path: &Path, body: &str, plan: &str| {
+        fs::write(&file, body).unwrap();
+        let sha = json::sha(body.as_bytes());
+        go(
+            &tmp.0,
+            &[
+                "--repo",
+                repo_path.to_str().unwrap(),
+                "add-batch",
+                "--tasks",
+                file.to_str().unwrap(),
+                "--expected-tasks-sha256",
+                &sha,
+                "--expected-plan-sha256",
+                plan,
+            ],
+        )
+    };
+    // Fresh absent plan: refuses 64-hex SHA, accepts `absent`, mints lineage, and replays cleanly.
+    let fresh = repo_at(&tmp, "fresh");
+    let fresh_plan = fresh.join(".oms/plan/tasks.json");
+    let one = r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"f0","title":"fresh 0","allowed":["src"]}]}"#;
+    let stale = "0".repeat(64);
+    assert_eq!(apply_in(&fresh, one, &stale).0, 2);
+    assert!(!fresh_plan.exists());
+    let (c, o, e) = apply_in(&fresh, one, "absent");
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("batch added"), "{o}");
+    let fresh_bytes = fs::read(&fresh_plan).unwrap();
+    let (_, fresh_list, _) = go(
+        &tmp.0,
+        &["--repo", fresh.to_str().unwrap(), "list", "--json"],
+    );
+    let fresh_doc = json::parse(fresh_list.as_bytes()).unwrap();
+    assert!(fresh_doc.text("plan_id").starts_with("plan_"));
+    assert_eq!(fresh_doc.get("tasks").array().unwrap().len(), 1);
+    let (c, o, e) = apply_in(&fresh, one, "absent");
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("already applied"), "{o}");
+    assert_eq!(fresh_bytes, fs::read(&fresh_plan).unwrap());
+    let two = r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"f1","title":"fresh 1"}]}"#;
+    assert_eq!(apply_in(&fresh, two, "absent").0, 2);
+    assert_eq!(fresh_bytes, fs::read(&fresh_plan).unwrap());
+
+    let r = repo(&tmp);
+    let rs = r.to_str().unwrap();
+    let run = |rest: &[&str]| {
+        let mut command = vec!["--repo", rs];
+        command.extend_from_slice(rest);
+        go(&tmp.0, &command)
+    };
+    assert_eq!(run(&["init", "--goal", "g"]).0, 0);
+    assert_eq!(run(&["add", "--id", "pre0", "--title", "existing"]).0, 0);
+    let rows = |n: usize, last: &str| {
+        let mut v = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"id":"t{i}","title":"task {i}","allowed":["d{i}"],"verify":"true","role":"builder","priority":{i}}}"#
+                )
+            })
+            .collect::<Vec<_>>();
+        v.push(last.to_owned());
+        format!(
+            r#"{{"schema":1,"kind":"agent-plan-batch","tasks":[{}]}}"#,
+            v.join(",")
+        )
+    };
+    let apply = |body: &str, plan: &str| apply_in(&r, body, plan);
+    let plan_path = r.join(".oms/plan/tasks.json");
+    let plan_sha = || json::sha(fs::read(&plan_path).unwrap());
+    let before = fs::read(&plan_path).unwrap();
+    let pre_batch_sha = plan_sha();
+    for bad in [
+        r#"{"id":"bad","title":"x","depends":["nope"]}"#,
+        r#"{"id":"bad","title":"x","allowed":[""]}"#,
+        r#"{"id":"bad","title":"x","allowed":["   "]}"#,
+        r#"{"id":"bad","title":"x","allowed":["/"]}"#,
+        r#"{"id":"bad","title":"x","forbidden":["/etc/passwd"]}"#,
+        r#"{"id":"bad","title":"x","allowed":["[z-a]"]}"#,
+        r#"{"id":"bad","title":"a","title":"b"}"#,
+    ] {
+        let (c, _, e) = apply(&rows(9, bad), &pre_batch_sha);
+        assert_eq!(c, 2, "{bad}: {e}");
+        assert_eq!(before, fs::read(&plan_path).unwrap(), "{bad}");
+    }
+    let good = rows(
+        9,
+        r#"{"id":"t9","title":"task 9","allowed":["d9"],"verify":"true","depends":["t0","t1"]}"#,
+    );
+    let (c, _, e) = apply(&good, &stale);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("plan changed"), "{e}");
+    assert_eq!(before, fs::read(&plan_path).unwrap());
+    assert_eq!(apply(&good, "absent").0, 2);
+    assert_eq!(before, fs::read(&plan_path).unwrap());
+    // Parent-only authority check: child context is refused before mutation.
+    fs::write(&file, &good).unwrap();
+    let good_sha = json::sha(good.as_bytes());
+    let child_req = Request::parse(&args(&[
+        "--repo",
+        rs,
+        "add-batch",
+        "--tasks",
+        file.to_str().unwrap(),
+        "--expected-tasks-sha256",
+        &good_sha,
+        "--expected-plan-sha256",
+        &pre_batch_sha,
+    ]))
+    .unwrap();
+    let mut child_ctx = Context::from_environment(&child_req, &r).unwrap();
+    child_ctx.child = true;
+    let stop = AtomicBool::new(false);
+    let child_err = Plan::open(child_ctx, &Host, &stop)
+        .unwrap()
+        .execute(&child_req)
+        .unwrap_err();
+    assert_eq!(child_err.code, 2);
+    assert!(child_err.message.contains("parent-only"), "{child_err}");
+    assert_eq!(before, fs::read(&plan_path).unwrap());
+
+    let (c, o, e) = apply(&good, &pre_batch_sha);
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("batch added"), "{o}");
+    let (c, listed, e) = run(&["list", "--json"]);
+    assert_eq!(c, 0, "{e}");
+    let doc = json::parse(listed.as_bytes()).unwrap();
+    let persisted = doc.get("tasks").array().unwrap();
+    assert_eq!(persisted.len(), 11, "pre0 + 10 batch tasks: {listed}");
+    for id in [
+        "pre0", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9",
+    ] {
+        assert!(persisted.iter().any(|t| t.text("id") == id), "missing {id}");
+    }
+    let t9 = persisted.iter().find(|t| t.text("id") == "t9").unwrap();
+    assert_eq!(t9.get("depends").strings().unwrap(), vec!["t0", "t1"]);
+    assert_eq!(t9.get("allowed_paths").strings().unwrap(), vec!["d9"]);
+    assert_eq!(t9.text("verify"), "true");
+    let t3 = persisted.iter().find(|t| t.text("id") == "t3").unwrap();
+    assert_eq!(t3.text("title"), "task 3");
+    assert_eq!(t3.text("role"), "builder");
+    assert!(t3.get("priority").is_int(3));
+    let (_, ready, _) = run(&["ready"]);
+    assert_eq!(ready.lines().count(), 10, "pre0 + t0..t8 ready: {ready}");
+    assert!(!ready.contains("t9"), "{ready}");
+
+    assert_eq!(run(&["claim", "--id", "t0", "--provider", "codex"]).0, 0);
+    let after = fs::read(&plan_path).unwrap();
+    assert_ne!(plan_sha(), pre_batch_sha);
+    // Exact replay with the ORIGINAL pre-batch token succeeds and preserves the claim.
+    let (c, o, e) = apply(&good, &pre_batch_sha);
+    assert_eq!(
+        c, 0,
+        "replay after claim with the original pre-batch sha: {e}"
+    );
+    assert!(o.contains("already applied"), "{o}");
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    // Syntactically invalid or missing plan CAS token is rejected BEFORE replay.
+    assert_eq!(apply(&good, "not-a-sha").0, 2);
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    let (c, _, _) = run(&[
+        "add-batch",
+        "--tasks",
+        file.to_str().unwrap(),
+        "--expected-tasks-sha256",
+        &good_sha,
+    ]);
+    assert_eq!(c, 2);
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    let changed = good.replace("task 3", "other");
+    let (c, _, e) = apply(&changed, &pre_batch_sha);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("does not match"), "{e}");
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+    let partial = r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"t0","title":"task 0","allowed":["d0"],"verify":"true","role":"builder","priority":0},{"id":"t10","title":"task 10"}]}"#;
+    let (c, _, e) = apply(partial, &plan_sha());
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("partially present"), "{e}");
+    assert_eq!(after, fs::read(&plan_path).unwrap());
+}
+
+#[test]
+fn github_issue_links_stay_local_same_repo_and_mode_gated() {
+    if isolated("github_issue_links_stay_local_same_repo_and_mode_gated") {
+        return;
+    }
+    use oms_command_plan::json;
+    const REPO: &str = "example-org/example-repo";
+    let tmp = Tmp::new();
+    let at = |r: &Path, rest: &[&str]| {
+        let mut command = vec!["--repo", r.to_str().unwrap()];
+        command.extend_from_slice(rest);
+        go(&tmp.0, &command)
+    };
+    let plan = |r: &Path| fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let task = |r: &Path, id: &str| {
+        let (c, o, e) = at(r, &["show", "--id", id]);
+        assert_eq!(c, 0, "{e}");
+        json::parse(o.as_bytes()).unwrap()
+    };
+    // No origin and a non-GitHub origin refuse --issue without writing.
+    for (name, origin) in [
+        ("bare", None),
+        (
+            "gitlab",
+            Some("https://gitlab.com/example-org/example-repo.git"),
+        ),
+    ] {
+        let other = repo_at(&tmp, name);
+        if let Some(url) = origin {
+            git(&other, &["remote", "add", "origin", url]);
+        }
+        assert_eq!(at(&other, &["init", "--goal", "g"]).0, 0);
+        let before = plan(&other);
+        let (c, _, e) = at(
+            &other,
+            &["add", "--id", "x", "--title", "x", "--issue", "5"],
+        );
+        assert_eq!(c, 2, "{name}: {e}");
+        assert!(e.contains("origin"), "{name}: {e}");
+        assert_eq!(before, plan(&other), "{name}");
+    }
+
+    let r = repo(&tmp);
+    git(
+        &r,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example-org/example-repo.git",
+        ],
+    );
+    assert_eq!(at(&r, &["init", "--goal", "g"]).0, 0);
+    // Mode off: an unbound task keeps its exact pre-issue shape and digest.
+    assert_eq!(at(&r, &["add", "--id", "plain", "--title", "p"]).0, 0);
+    let stored = json::parse(&plan(&r))
+        .unwrap()
+        .get("tasks")
+        .get("plain")
+        .clone();
+    assert!(stored.opt("issue").is_none() && stored.opt("pr").is_none());
+    let shown = task(&r, "plain");
+    assert!(shown.opt("issue").is_none() && shown.opt("issue_cache").is_none());
+    assert_eq!(shown.text("task_sha256"), json::hash(&stored).unwrap());
+    for (id, input, number) in [
+        ("i1", "7", 7),
+        ("i2", "#8", 8),
+        ("i3", "example-org/example-repo#9", 9),
+        ("i4", "Example-Org/EXAMPLE-REPO#10", 10),
+    ] {
+        let (c, _, e) = at(&r, &["add", "--id", id, "--title", id, "--issue", input]);
+        assert_eq!(c, 0, "{input}: {e}");
+        assert_eq!(task(&r, id).text("issue"), format!("{REPO}#{number}"));
+    }
+    let before = plan(&r);
+    for bad in [
+        "other-org/example-repo#5",
+        "0",
+        "#",
+        "five",
+        "https://github.com/example-org/example-repo/issues/5",
+    ] {
+        let (c, _, e) = at(&r, &["add", "--id", "bad", "--title", "x", "--issue", bad]);
+        assert_eq!(c, 2, "{bad}: {e}");
+        assert_eq!(before, plan(&r), "{bad}");
+    }
+
+    // Cached status comes only from the local snapshot cache.
+    let unavailable = task(&r, "i1");
+    let cache = unavailable.get("issue_cache");
+    assert_eq!(cache.text("freshness"), "unavailable");
+    assert!(
+        cache.get("state") == &json::Value::Null && cache.get("captured_at") == &json::Value::Null
+    );
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let row = |n: u32, state: &str, age: i64, ttl: u64, title: &str| {
+        format!(
+            r#"{{"reference":"{REPO}#{n}","kind":"issue","state":"{state}","title":"{title}","labels":[],"body_sha256":"{}","captured_at":{},"ttl_s":{ttl}}}"#,
+            "b".repeat(64),
+            now - age
+        )
+    };
+    fs::create_dir_all(r.join(".oms/github")).unwrap();
+    fs::write(
+        r.join(".oms/github/cache.jsonl"),
+        [
+            row(7, "open", 10, 3600, "Remote title"),
+            row(8, "closed", 7200, 60, "Old"),
+            row(9, "merged", 10, 3600, "A pull").replace(r#""kind":"issue""#, r#""kind":"pull""#),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    for (id, freshness, state) in [
+        ("i1", "fresh", "open"),
+        ("i2", "stale", "closed"),
+        ("i3", "unavailable", ""),
+    ] {
+        let cache = task(&r, id).get("issue_cache").clone();
+        assert_eq!(
+            (cache.text("freshness"), cache.text("state")),
+            (freshness, state),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        task(&r, "i1").get("issue_cache").text("title"),
+        "Remote title"
+    );
+    // #9 has only a kind=pull row: never shown as issue state.
+    let pull = task(&r, "i3").get("issue_cache").clone();
+    assert!(
+        ["state", "captured_at", "title"]
+            .iter()
+            .all(|k| pull.get(k) == &json::Value::Null)
+    );
+    let (_, listed, _) = at(&r, &["list"]);
+    assert!(
+        listed.contains(&format!("issue {REPO}#7 (open, fresh)")),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!("issue {REPO}#9 (unknown, unavailable)")),
+        "{listed}"
+    );
+    assert!(!listed.contains("Remote title"), "{listed}");
+    let plain_line = listed.lines().find(|l| l.starts_with("plain")).unwrap();
+    assert!(!plain_line.contains("issue"), "{plain_line}");
+    let (_, brief, _) = at(&r, &["brief", "--id", "i2"]);
+    assert!(
+        brief.contains(&format!("issue: {REPO}#8 (closed, stale)")),
+        "{brief}"
+    );
+    let (_, listed, _) = at(&r, &["list", "--json"]);
+    let rows = json::parse(listed.as_bytes()).unwrap();
+    let rows = rows.get("tasks").array().unwrap();
+    assert!(
+        rows.iter()
+            .all(|t| t.opt("issue_cache").is_some() == t.opt("issue").is_some())
+    );
+
+    // link: idempotent, conflicting refs need --reason, active tasks refuse.
+    let (c, _, e) = at(&r, &["link", "--task", "plain", "--issue", "11"]);
+    assert_eq!(c, 0, "{e}");
+    let linked = plan(&r);
+    let (c, o, e) = at(
+        &r,
+        &["link", "--task", "plain", "--issue", &format!("{REPO}#11")],
+    );
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("already linked"), "{o}");
+    assert_eq!(linked, plan(&r));
+    let (c, _, e) = at(&r, &["link", "--task", "plain", "--issue", "12"]);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("--reason"), "{e}");
+    assert_eq!(linked, plan(&r));
+    let (c, _, e) = at(
+        &r,
+        &[
+            "link", "--task", "plain", "--issue", "12", "--reason", "split",
+        ],
+    );
+    assert_eq!(c, 0, "{e}");
+    let relinked = task(&r, "plain");
+    assert_eq!(relinked.text("issue"), format!("{REPO}#12"));
+    let event = relinked
+        .get("history")
+        .array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (
+            event.text("kind"),
+            event.text("before"),
+            event.text("after"),
+            event.text("reason")
+        ),
+        (
+            "issue-relinked",
+            format!("{REPO}#11").as_str(),
+            format!("{REPO}#12").as_str(),
+            "split"
+        )
+    );
+    assert_eq!(at(&r, &["add", "--id", "c1", "--title", "c"]).0, 0);
+    assert_eq!(at(&r, &["claim", "--id", "c1", "--provider", "codex"]).0, 0);
+    let claimed = plan(&r);
+    let (c, _, e) = at(&r, &["link", "--task", "c1", "--issue", "13"]);
+    assert_eq!(c, 2, "{e}");
+    assert_eq!(claimed, plan(&r));
+    for bad in [
+        &["link", "--task", "c1"][..],
+        &["show", "--id", "c1", "--issue", "1"],
+    ] {
+        assert_eq!(at(&r, bad).0, 2, "{bad:?}");
+    }
+
+    // Project mode on: local-only backlog is refused; decomposition inherits.
+    let project = |decl: &str| {
+        fs::write(
+            r.join("PROJECT.md"),
+            format!("# P\n\n## Collaboration\n\n{decl}\n"),
+        )
+        .unwrap()
+    };
+    project(&format!("- GitHub project: {REPO}"));
+    let before = plan(&r);
+    let (c, _, e) = at(&r, &["add", "--id", "m1", "--title", "m"]);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("GitHub project mode"), "{e}");
+    assert_eq!(
+        at(
+            &r,
+            &[
+                "add",
+                "--id",
+                "m1",
+                "--title",
+                "m",
+                "--discovered-from",
+                "c1"
+            ]
+        )
+        .0,
+        2
+    );
+    assert_eq!(before, plan(&r));
+    let (c, _, e) = at(
+        &r,
+        &[
+            "add",
+            "--id",
+            "m2",
+            "--title",
+            "m",
+            "--discovered-from",
+            "i1",
+        ],
+    );
+    assert_eq!(c, 0, "{e}");
+    assert_eq!(task(&r, "m2").text("issue"), format!("{REPO}#7"));
+    // An inherited value is revalidated: a hand-edited foreign parent issue fails closed.
+    let edited = String::from_utf8(plan(&r)).unwrap().replacen(
+        &format!("{REPO}#10\""),
+        "other-org/other-repo#5\"",
+        1,
+    );
+    assert!(edited.contains("other-org/other-repo#5"));
+    fs::write(r.join(".oms/plan/tasks.json"), &edited).unwrap();
+    let (c, _, e) = at(
+        &r,
+        &[
+            "add",
+            "--id",
+            "m4",
+            "--title",
+            "m",
+            "--discovered-from",
+            "i4",
+        ],
+    );
+    assert_eq!(c, 2, "{e}");
+    assert_eq!(edited.as_bytes(), plan(&r));
+    assert_eq!(
+        at(&r, &["add", "--id", "m3", "--title", "m", "--issue", "14"]).0,
+        0
+    );
+    let file = tmp.0.join("batch.json");
+    let batch = |body: &str| {
+        fs::write(&file, body).unwrap();
+        let sha = json::sha(body.as_bytes());
+        let current = json::sha(plan(&r));
+        at(
+            &r,
+            &[
+                "add-batch",
+                "--tasks",
+                file.to_str().unwrap(),
+                "--expected-tasks-sha256",
+                &sha,
+                "--expected-plan-sha256",
+                &current,
+            ],
+        )
+    };
+    let before = plan(&r);
+    let (c, _, e) = batch(
+        r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"b1","title":"b","issue":"15"},{"id":"b2","title":"b"}]}"#,
+    );
+    assert_eq!(c, 2, "{e}");
+    assert_eq!(before, plan(&r));
+    assert_eq!(batch(r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"b1","title":"b","issue":"nope"}]}"#).0, 2);
+    let (c, _, e) = batch(
+        r#"{"schema":1,"kind":"agent-plan-batch","tasks":[{"id":"b1","title":"b","issue":"15"}]}"#,
+    );
+    assert_eq!(c, 0, "{e}");
+    assert_eq!(task(&r, "b1").text("issue"), format!("{REPO}#15"));
+
+    // A mismatched or malformed declaration fails closed; removing it restores mode off.
+    for decl in [
+        "- GitHub project: example-org/other-repo",
+        "- GitHub project: not a slug",
+    ] {
+        project(decl);
+        let before = plan(&r);
+        for command in [
+            &["add", "--id", "z", "--title", "z", "--issue", "16"][..],
+            &[
+                "add",
+                "--id",
+                "z",
+                "--title",
+                "z",
+                "--discovered-from",
+                "i1",
+            ],
+            &["link", "--task", "c1", "--issue", "16"],
+            &["add", "--id", "z", "--title", "z"],
+        ] {
+            let (c, _, e) = at(&r, command);
+            assert_eq!(c, 2, "{decl} {command:?}: {e}");
+            assert_eq!(before, plan(&r), "{decl} {command:?}");
+        }
+    }
+    // A non-UTF-8 PROJECT.md that still names the declaration fails closed.
+    let mut broken = format!("# P\n\n## Collaboration\n\n- GitHub project: {REPO}\n").into_bytes();
+    broken.push(0xff);
+    fs::write(r.join("PROJECT.md"), &broken).unwrap();
+    let before = plan(&r);
+    let (c, _, e) = at(&r, &["add", "--id", "z", "--title", "z"]);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("not UTF-8"), "{e}");
+    assert_eq!(before, plan(&r));
+    project("- Collaboration mode: careful");
+    assert_eq!(at(&r, &["add", "--id", "z", "--title", "z"]).0, 0);
+    assert!(task(&r, "z").opt("issue").is_none());
+
+    // A committed .github/oms-project.md alone turns the mode on.
+    let tracked = repo_at(&tmp, "tracked");
+    git(
+        &tracked,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example-org/example-repo.git",
+        ],
+    );
+    fs::create_dir_all(tracked.join(".github")).unwrap();
+    fs::write(
+        tracked.join(".github/oms-project.md"),
+        format!("# P\n\n## Collaboration\n\n- GitHub project: {REPO}\n"),
+    )
+    .unwrap();
+    git(&tracked, &["add", ".github"]);
+    git(&tracked, &["commit", "-qm", "declare"]);
+    assert_eq!(at(&tracked, &["init", "--goal", "g"]).0, 0);
+    let before = plan(&tracked);
+    let (c, _, e) = at(&tracked, &["add", "--id", "t", "--title", "t"]);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("GitHub project mode"), "{e}");
+    assert_eq!(before, plan(&tracked));
+    assert_eq!(
+        at(
+            &tracked,
+            &["add", "--id", "t", "--title", "t", "--issue", "3"]
+        )
+        .0,
+        0
+    );
+    assert_eq!(task(&tracked, "t").text("issue"), format!("{REPO}#3"));
+    // A fork: the tracked upstream declaration does not name origin, so the mode is off.
+    git(
+        &tracked,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:fork-org/example-repo.git",
+        ],
+    );
+    let (c, _, e) = at(&tracked, &["add", "--id", "f", "--title", "f"]);
+    assert_eq!(c, 0, "{e}");
+    assert!(task(&tracked, "f").opt("issue").is_none());
+
+    // Reviewed proposals carry issues through the same validation.
+    let p = repo_at(&tmp, "proposed");
+    git(
+        &p,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example-org/example-repo",
+        ],
+    );
+    let spec =
+        format!("# P\n\n- State: confirmed\n\n## Collaboration\n\n- GitHub project: {REPO}\n");
+    fs::write(p.join("PROJECT.md"), &spec).unwrap();
+    let head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&p)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let proposal = |top: &str, extra: &str| {
+        let body = format!(
+            r#"{{"schema":1,"kind":"agent-plan-proposal","spec_sha256":"{}","plan_sha256":"absent","base_sha":"{}","id_prefix":"","allowed_envelope":["src"],"acceptance_files":[],{top}"tasks":[{{"id":"p1","title":"p","allowed":["src"],"verify":"true","depends":[]{extra}}}]}}"#,
+            json::sha(spec.as_bytes()),
+            head.trim()
+        );
+        let path = tmp.0.join("proposal.json");
+        fs::write(&path, &body).unwrap();
+        at(
+            &p,
+            &[
+                "apply-proposal",
+                "--proposal",
+                path.to_str().unwrap(),
+                "--expected-proposal-sha256",
+                &json::sha(body.as_bytes()),
+                "--expected-plan-sha256",
+                "absent",
+                "--goal",
+                "g",
+                "--accept",
+                "true",
+                "--allowed-envelope",
+                "src",
+            ],
+        )
+    };
+    let (c, _, e) = proposal("", "");
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("requires an issue"), "{e}");
+    assert!(!p.join(".oms/plan/tasks.json").exists());
+    assert_eq!(proposal("", r#","issue":"other-org/x#1""#).0, 2);
+    // A top-level issue must equal every task's issue.
+    let (c, _, e) = proposal(r##""issue":"#22","##, r##","issue":"#21""##);
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("must match every task issue"), "{e}");
+    assert!(!p.join(".oms/plan/tasks.json").exists());
+    let (c, _, e) = proposal(r##""issue":"#21","##, r##","issue":"#21""##);
+    assert_eq!(c, 0, "{e}");
+    assert_eq!(task(&p, "p1").text("issue"), format!("{REPO}#21"));
+    let (c, o, e) = proposal("", r##","issue":"#21""##);
+    assert_eq!(c, 0, "{e}");
+    assert!(o.contains("already applied"), "{o}");
+    let (c, _, e) = at(
+        &p,
+        &["link", "--task", "p1", "--issue", "22", "--reason", "x"],
+    );
+    assert_eq!(c, 2, "{e}");
+    assert!(e.contains("proposal-bound"), "{e}");
+}
+
+#[test]
+fn github_pr_recording_requires_accepted_same_repo_pr_url() {
+    use oms_command_plan::json::{self, Value, number, object, string};
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("OMS_PR_RECEIPT_FIXTURE_STATE").is_none() {
+        let fixture = Tmp::new();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "github_pr_recording_requires_accepted_same_repo_pr_url",
+            "--test-threads=1",
+            "--nocapture",
+        ]);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("OMS_") {
+                command.env_remove(key);
+            }
+        }
+        command.env("XDG_STATE_HOME", fixture.0.join("state"));
+        command.env("OMS_PR_RECEIPT_FIXTURE_STATE", "1");
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+
+    const REPO: &str = "example-org/example-repo";
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    git(
+        &r,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example-org/example-repo.git",
+        ],
+    );
+    fs::write(r.join(".git/info/exclude"), b".oms/\n").unwrap();
+    let at = |rest: &[&str]| {
+        let mut command = vec!["--repo", r.to_str().unwrap()];
+        command.extend_from_slice(rest);
+        go(&tmp.0, &command)
+    };
+    let task = |id: &str| {
+        let (c, o, e) = at(&["show", "--id", id]);
+        assert_eq!(c, 0, "{e}");
+        json::parse(o.as_bytes()).unwrap()
+    };
+    let git_head = || {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&r)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let mut cksum = Command::new("cksum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        cksum.stdin.take().as_mut().unwrap(),
+        std::os::unix::ffi::OsStrExt::as_bytes(r.as_os_str()),
+    )
+    .unwrap();
+    let checksum = cksum.wait_with_output().unwrap();
+    assert!(checksum.status.success());
+    let checksum = String::from_utf8(checksum.stdout).unwrap();
+    let mut checksum = checksum.split_whitespace();
+    let receipt_dir = PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap())
+        .join("oh-my-setting/land")
+        .join(format!(
+            "repo-{}-{}",
+            checksum.next().unwrap(),
+            checksum.next().unwrap()
+        ));
+    fs::create_dir_all(&receipt_dir).unwrap();
+    fs::set_permissions(&receipt_dir, fs::Permissions::from_mode(0o770)).unwrap();
+    fs::create_dir_all(r.join(".oms/artifacts")).unwrap();
+
+    assert_eq!(at(&["init", "--goal", "g"]).0, 0);
+
+    let land_case =
+        |id: &str, issue: &str, receipt_fn: &dyn Fn(&str, &str) -> Value, expect_finish_rc: i32| {
+            let base = git_head();
+            let file = format!("src/{id}.txt");
+            let artifact = format!(".oms/artifacts/{id}.md");
+            assert_eq!(
+                at(&[
+                    "add",
+                    "--id",
+                    id,
+                    "--title",
+                    id,
+                    "--issue",
+                    issue,
+                    "--allowed",
+                    &file,
+                ])
+                .0,
+                0
+            );
+            assert_eq!(at(&["claim", "--id", id, "--provider", "codex"]).0, 0);
+            fs::create_dir_all(r.join("src")).unwrap();
+            fs::write(r.join(&file), format!("{id}\n")).unwrap();
+            git(&r, &["add", &file]);
+            git(&r, &["commit", "-qm", id]);
+            let commit = git_head();
+            let built = receipt_fn(&base, &commit);
+            let remote = built.text("remote");
+            git(
+                &r,
+                &[
+                    "update-ref",
+                    &format!("refs/remotes/{remote}/main"),
+                    &commit,
+                ],
+            );
+            let receipt = json::canonical(&built).unwrap();
+            let path = receipt_dir.join(format!("{commit}-{id}.json"));
+            fs::write(&path, &receipt).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::write(r.join(&artifact), format!("artifact for {id}\n")).unwrap();
+            assert_eq!(at(&["review", "--id", id, "--artifact", &artifact]).0, 0);
+            let (rc, _, err) = at(&["finish", "--id", id, "--landed-commit", &commit]);
+            assert_eq!(rc, expect_finish_rc, "{id}: {err}");
+        };
+
+    let base_receipt = |base: &str, commit: &str| {
+        object([
+            ("schema", number(1)),
+            ("sha", string(commit)),
+            ("state", string("passed")),
+            ("remote", string("origin")),
+            ("target", string("main")),
+            ("gate", object([("rc", number(0))])),
+            (
+                "push",
+                object([
+                    ("rc", number(0)),
+                    ("moved", number(1)),
+                    ("base", string(base)),
+                ]),
+            ),
+            ("ci", object([("conclusion", string("success"))])),
+            (
+                "merge",
+                object([("method", string("squash")), ("state", string("MERGED"))]),
+            ),
+        ])
+    };
+
+    // 1. Valid accepted receipt with matching target repo and actual PR URL records PR identity.
+    land_case(
+        "pr-ok",
+        "7",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("pr_number", number(19)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/Example-Org/Example-Repo/pull/19"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert_eq!(task("pr-ok").text("pr"), format!("{REPO}#19"));
+
+    // 2. Cross-repo PR URL is refused (PR identity omitted).
+    land_case(
+        "pr-cross-repo",
+        "8",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("pr_number", number(20)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/other-org/example-repo/pull/20"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert!(task("pr-cross-repo").opt("pr").is_none());
+
+    // 3. Non-PR URL (/issues/N) is refused.
+    land_case(
+        "pr-issue-url",
+        "9",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("pr_number", number(21)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/issues/21"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert!(task("pr-issue-url").opt("pr").is_none());
+
+    // 4. Mismatched PR number vs PR URL is refused.
+    land_case(
+        "pr-mismatch",
+        "10",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("pr_number", number(22)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/pull/99"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert!(task("pr-mismatch").opt("pr").is_none());
+
+    // 5. Dry-run / unmerged merge state refuses to record PR identity.
+    land_case(
+        "pr-dry-run",
+        "11",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("dry_run", Value::Bool(true)).unwrap();
+            r.set("pr_number", number(23)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/pull/23"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert!(task("pr-dry-run").opt("pr").is_none());
+
+    land_case(
+        "pr-unmerged",
+        "12",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("merge", object([("state", string("SKIPPED"))]))
+                .unwrap();
+            r.set("pr_number", number(24)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/pull/24"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert!(task("pr-unmerged").opt("pr").is_none());
+
+    // 6. Unaccepted receipt state (pending) fails finish closed and records no PR identity.
+    land_case(
+        "pr-pending",
+        "13",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("state", string("pending")).unwrap();
+            r.set("pr_number", number(25)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/pull/25"),
+            )
+            .unwrap();
+            r
+        },
+        2,
+    );
+    assert!(task("pr-pending").opt("pr").is_none());
+
+    // 7. Distinct fetch and push URLs: push destination governs compatibility,
+    // matching landing/delivery's `--push` resolution.
+    // 7a. Named remote whose fetch URL matches origin, but push URL points to a foreign repo -> refused.
+    git(
+        &r,
+        &[
+            "remote",
+            "add",
+            "split-bad",
+            "git@github.com:example-org/example-repo.git",
+        ],
+    );
+    git(
+        &r,
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "split-bad",
+            "git@github.com:other-org/example-repo.git",
+        ],
+    );
+    land_case(
+        "pr-split-bad",
+        "14",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("remote", string("split-bad")).unwrap();
+            r.set("pr_number", number(26)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/pull/26"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert!(task("pr-split-bad").opt("pr").is_none());
+
+    // 7b. Named remote whose fetch URL is foreign, but push URL matches origin -> accepted.
+    git(
+        &r,
+        &[
+            "remote",
+            "add",
+            "split-ok",
+            "git@github.com:other-org/fork-repo.git",
+        ],
+    );
+    git(
+        &r,
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "split-ok",
+            "git@github.com:Example-Org/Example-Repo.git",
+        ],
+    );
+    land_case(
+        "pr-split-ok",
+        "15",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("remote", string("split-ok")).unwrap();
+            r.set("pr_number", number(27)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/pull/27"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert_eq!(task("pr-split-ok").text("pr"), format!("{REPO}#27"));
+
+    // 7c. Even `origin` itself refuses PR recording when its push URL is rewritten to a foreign repo.
+    git(
+        &r,
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "git@github.com:other-org/example-repo.git",
+        ],
+    );
+    land_case(
+        "pr-origin-push-foreign",
+        "16",
+        &|base, commit| {
+            let mut r = base_receipt(base, commit);
+            r.set("pr_number", number(28)).unwrap();
+            r.set(
+                "pr_url",
+                string("https://github.com/example-org/example-repo/pull/28"),
+            )
+            .unwrap();
+            r
+        },
+        0,
+    );
+    assert!(task("pr-origin-push-foreign").opt("pr").is_none());
 }

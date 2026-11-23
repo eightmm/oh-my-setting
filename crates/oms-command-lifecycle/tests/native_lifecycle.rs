@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use oms_command_lifecycle::{
-    IncomingPhase, IncomingSourceLease, Output, ReleaseChannel, Services, UnavailableServices,
-    apply_release_with_services, run_with_services,
+    IncomingDiagnostic, IncomingPhase, IncomingSourceLease, IncomingTool, Output, ReleaseChannel,
+    Services, UnavailableServices, apply_release_with_services, run_with_services,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -289,7 +289,7 @@ impl Services for ColdUpdateHost {
         revision: &str,
         old: &[u8],
         _: &[OsString],
-        _: &AtomicBool,
+        interrupted: &AtomicBool,
     ) -> Output {
         self.phases.borrow_mut().push(phase);
         if phase == IncomingPhase::Preflight {
@@ -331,31 +331,64 @@ impl Services for ColdUpdateHost {
                 vec![],
             );
         }
-        if phase == IncomingPhase::RefreshTools {
-            if self.fail == "apply-locked-auto" {
-                return (0, vec![], vec![]);
-            }
-            assert!(matches!(
-                self.fail.as_str(),
-                "prepared-refresh" | "auto-refresh" | "auto-refresh-ok"
-            ));
+        if matches!(
+            phase,
+            IncomingPhase::RefreshTools | IncomingPhase::VerifyIntegrations
+        ) {
             assert_eq!(read(&self.receipt())["commit"], revision);
+            assert_eq!(fs::read(self.receipt()).unwrap(), old);
             assert!(
                 !self
                     .root
                     .join("config/oh-my-setting/native-update/transaction.json")
                     .exists(),
-                "tool refresh follows the committed core transaction"
+                "post-update phases follow the committed core transaction"
             );
-            return (
-                if self.fail == "auto-refresh-ok" { 0 } else { 9 },
-                vec![],
-                if self.fail == "auto-refresh-ok" {
-                    vec![]
+            let integrations = phase == IncomingPhase::VerifyIntegrations;
+            if integrations && self.fail == "post-cancel" {
+                interrupted.store(true, std::sync::atomic::Ordering::Release);
+            }
+            let code = if integrations {
+                if matches!(
+                    self.fail.as_str(),
+                    "post-fail" | "post-forged" | "post-mismatch"
+                ) {
+                    7
                 } else {
-                    b"provider refresh unavailable\n".to_vec()
-                },
-            );
+                    0
+                }
+            } else if matches!(self.fail.as_str(), "prepared-refresh" | "auto-refresh") {
+                9
+            } else {
+                0
+            };
+            let mut out = IncomingDiagnostic {
+                phase,
+                tool: Some(if integrations {
+                    IncomingTool::Doctor
+                } else {
+                    IncomingTool::InstallTools
+                }),
+                exit: code,
+            }
+            .output();
+            if integrations && self.fail == "post-forged" {
+                out.1 = serde_json::to_vec(&json!({
+                    "phase":"verify_integrations", "tool":self.root.join("private-adapter"),
+                    "exit":7, "detail":"private-provider-output"
+                }))
+                .unwrap();
+            } else if integrations && self.fail == "post-mismatch" {
+                out.1 = IncomingDiagnostic {
+                    phase,
+                    tool: Some(IncomingTool::Doctor),
+                    exit: 0,
+                }
+                .output()
+                .1;
+            }
+            out.2 = format!("private-provider-output {}", self.root.display()).into_bytes();
+            return out;
         }
         assert_eq!(phase, IncomingPhase::Reconcile);
         assert_eq!(self.git(source, &["rev-parse", "HEAD"]), revision);
@@ -803,9 +836,22 @@ exec "$root/bin/actual/git" "$@"
         assert_eq!(outcome["status"], "partial");
         assert_eq!(outcome["core"], "updated");
         assert_eq!(outcome["tools"], "failed");
+        assert_eq!(outcome["integrations"], "skipped");
+        assert_eq!(outcome["integrations_skip_reason"], "refresh_failed");
+        assert_eq!(
+            outcome["diagnostics"],
+            json!([{"phase":"refresh_tools","tool":"install-tools","exit":9}])
+        );
         assert_eq!(outcome["current_commit"], target);
         assert!(String::from_utf8_lossy(&out.2).contains("core update succeeded"));
         assert!(host.phases.borrow().contains(&IncomingPhase::RefreshTools));
+        assert!(
+            !host
+                .phases
+                .borrow()
+                .contains(&IncomingPhase::VerifyIntegrations)
+        );
+        assert!(!String::from_utf8_lossy(&out.2).contains("private-provider-output"));
     } else {
         success(out);
         assert!(!host.phases.borrow().contains(&IncomingPhase::RefreshTools));
@@ -835,6 +881,116 @@ exec "$root/bin/actual/git" "$@"
             "build\nproof\n"
         },
         "activation reuses the prepared target without fetching or rebuilding"
+    );
+}
+
+fn post_refresh_case(host: &ColdUpdateHost, target: &str) {
+    let source = host.source();
+    let mut args = vec!["--json", "--ref", target];
+    let mut expected_commit = target;
+    let mut expected = vec![IncomingPhase::Preflight, IncomingPhase::Reconcile];
+    let reason = match host.fail.as_str() {
+        "post-no-doctor" => {
+            args.push("--no-doctor");
+            Some("no_doctor")
+        }
+        "post-no-tools" => {
+            args.push("--no-tools");
+            Some("no_tools")
+        }
+        "post-rollback" => {
+            success(call(
+                "update",
+                &["--ref", target, "--no-tools"],
+                &source,
+                host,
+            ));
+            host.phases.borrow_mut().clear();
+            args = vec!["--rollback", "--json"];
+            expected_commit = &host.before;
+            Some("rollback")
+        }
+        _ => None,
+    };
+    if host.fail != "post-no-doctor" {
+        expected.push(IncomingPhase::Verify);
+    }
+    if !matches!(reason, Some("no_tools" | "rollback")) {
+        expected.push(IncomingPhase::RefreshTools);
+    }
+    if reason.is_none() {
+        expected.push(IncomingPhase::VerifyIntegrations);
+    }
+    let out = call("update", &args, &source, host);
+    let code = match host.fail.as_str() {
+        "post-fail" | "post-forged" | "post-mismatch" => 7,
+        "post-cancel" => 130,
+        _ => 0,
+    };
+    assert_eq!(out.0, code, "{}", String::from_utf8_lossy(&out.2));
+    assert_eq!(*host.phases.borrow(), expected);
+    let report: Value = serde_json::from_slice(&out.1).unwrap();
+    assert_eq!(report["core"], "updated");
+    assert_eq!(report["current_commit"], expected_commit);
+    assert_eq!(report["integrations_skip_reason"], json!(reason));
+    assert_eq!(
+        report["integrations"],
+        if reason.is_some() {
+            "skipped"
+        } else if code == 130 {
+            "cancelled"
+        } else if code == 0 {
+            "passed"
+        } else {
+            "failed"
+        }
+    );
+    assert_eq!(
+        report["tools"],
+        if matches!(reason, Some("no_tools" | "rollback")) {
+            "skipped"
+        } else {
+            "updated"
+        }
+    );
+    let diagnostics = report["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        diagnostics.len(),
+        expected
+            .iter()
+            .filter(|p| matches!(
+                p,
+                IncomingPhase::RefreshTools | IncomingPhase::VerifyIntegrations
+            ))
+            .count()
+    );
+    if reason.is_none() {
+        let tool = if matches!(host.fail.as_str(), "post-forged" | "post-mismatch") {
+            Value::Null
+        } else {
+            json!("doctor")
+        };
+        assert_eq!(
+            diagnostics.last().unwrap(),
+            &json!({"phase":"verify_integrations","tool":tool,"exit":code})
+        );
+    }
+    for raw in [&out.1, &out.2] {
+        let text = String::from_utf8_lossy(raw);
+        assert!(!text.contains("private-provider-output"));
+        assert!(!text.contains(host.root.to_str().unwrap()));
+    }
+    if code != 0 {
+        assert_eq!(report["status"], "partial");
+        assert!(String::from_utf8_lossy(&out.2).contains("were not rolled back"));
+    }
+    assert_eq!(read(&host.receipt())["commit"], expected_commit);
+    assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), expected_commit);
+    assert!(
+        !host
+            .root
+            .join("config/oh-my-setting/native-update/transaction.json")
+            .exists()
     );
 }
 
@@ -885,6 +1041,10 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     assert_eq!(partial["last_apply_run"], partial["last_run"]);
     assert_eq!(partial["last_apply_local"], host.before);
     assert_eq!(partial["last_apply_remote"], target);
+    assert_eq!(
+        partial["last_apply_diagnostic"],
+        json!({"phase":"refresh_tools","tool":"install-tools","exit":9})
+    );
     assert_eq!(attention()["attention"], "failed");
     assert_eq!(fs::read(&state).unwrap(), saved, "status stays read-only");
     let phases = host.phases.borrow().clone();
@@ -897,10 +1057,15 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
         assert_eq!(checked["last_apply_status"], "partial");
         assert_eq!(checked["last_apply_run"], partial["last_run"]);
         assert_eq!(checked["last_apply_remote"], target);
+        assert_eq!(
+            checked["last_apply_diagnostic"],
+            partial["last_apply_diagnostic"]
+        );
         assert_eq!(attention()["attention"], "failed");
     }
     let text = success(call("auto-update", &["status"], &source, host));
     assert!(String::from_utf8_lossy(&text).contains("last apply: partial"));
+    assert!(String::from_utf8_lossy(&text).contains("last apply diagnostic:"));
     assert_eq!(*host.phases.borrow(), phases, "a check cannot retry tools");
     assert_eq!(fs::read(host.receipt()).unwrap(), receipt);
 
@@ -937,6 +1102,24 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     let invalid_bytes = fs::read(&state).unwrap();
     assert_eq!(call("auto-update", &["check"], &source, host).0, 2);
     assert_eq!(fs::read(&state).unwrap(), invalid_bytes);
+    write(&state, &partial);
+
+    // A saved diagnostic accepts only typed phase/tool/exit data, even when a
+    // legacy JSON state file has additional untrusted fields.
+    for (field, value) in [
+        ("tool", json!(host.root.join("private-adapter"))),
+        ("phase", json!("reconcile")),
+        ("exit", json!(256)),
+        ("exit", json!(0)),
+        ("private", json!("private-provider-output")),
+    ] {
+        let mut forged = partial.clone();
+        forged["last_apply_diagnostic"][field] = value;
+        write(&state, &forged);
+        assert!(status().get("last_apply_diagnostic").is_none());
+        check();
+        assert!(status().get("last_apply_diagnostic").is_none());
+    }
     write(&state, &partial);
 
     let mut installed = read(&host.receipt());
@@ -981,6 +1164,31 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     assert_eq!(status()["last_apply_status"], "skipped");
     assert_eq!(attention()["attention"], "blocked");
 
+    let failed_integrations = ColdUpdateHost {
+        root: host.root.clone(),
+        before: host.before.clone(),
+        fail: "post-fail".into(),
+        phases: RefCell::new(vec![]),
+    };
+    let out = call(
+        "auto-update",
+        &["apply", "--json"],
+        &source,
+        &failed_integrations,
+    );
+    assert_eq!(out.0, 7);
+    let outcome: Value = serde_json::from_slice(&out.1).unwrap();
+    assert_eq!(outcome["tools"], "updated");
+    assert_eq!(outcome["integrations"], "failed");
+    check();
+    assert_eq!(status()["last_apply_status"], "partial");
+    assert_eq!(
+        status()["last_apply_diagnostic"],
+        json!({"phase":"verify_integrations","tool":"doctor","exit":7})
+    );
+    assert_eq!(attention()["attention"], "failed");
+    assert_eq!(read(&host.receipt())["commit"], target);
+
     let retry = ColdUpdateHost {
         root: host.root.clone(),
         before: host.before.clone(),
@@ -992,6 +1200,11 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     assert_eq!(status()["last_apply_status"], "up_to_date");
     assert_eq!(status()["last_apply_local"], target);
     assert_eq!(status()["last_apply_remote"], target);
+    assert!(status().get("last_apply_diagnostic").is_none());
+    assert_eq!(
+        retry.phases.borrow().last(),
+        Some(&IncomingPhase::VerifyIntegrations)
+    );
     assert_eq!(attention()["attention"], "ok");
     assert_eq!(read(&host.receipt())["previous_commit"], host.before);
     assert_eq!(
@@ -1000,176 +1213,99 @@ fn auto_update_outcome_case(host: &ColdUpdateHost, target: &str) {
     );
 }
 
-#[test]
-fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
-    let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
-        for case in [
-            "ok",
-            "edge",
-            "fallback",
-            "offline",
-            "release-edge",
-            "release-custom",
-            "release-stable",
-            "proof",
-            "verify",
-            "receipt",
-            "cleanup",
-            "crash",
-            "foreign",
-            "late-worker",
-            "prepared-locked-ref",
-            "apply-locked-ref",
-            "apply-locked-explicit",
-            "apply-locked-auto",
-            "apply-locked-verify",
-            "apply-locked-release",
-            "prepared-cutover-worker",
-            "prepared-live",
-            "prepared-stale",
-            "prepared-tamper",
-            "prepared-refresh",
-            "auto-refresh",
-            "prepared-cancel",
-            "prepared-bundle",
-            "prepared-crash",
-            "prepared-crash-install",
-            "prepared-crash-repair",
-        ] {
-            let root =
-                std::env::temp_dir().join(format!("oms-cold-update-{}-{case}", std::process::id()));
-            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
-            let f = Fixture(fs::canonicalize(root).unwrap());
-            for name in ["bin", "home", "config", "data", "state", "cache", "locks"] {
-                fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(f.0.join(name))
-                    .unwrap();
-            }
-            for name in ["git", "mkdir", "cp", "chmod", "ps", "tar", "gzip"] {
-                let path = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-                    .map(|p| p.join(name))
-                    .find(|p| p.is_file())
-                    .unwrap();
-                symlink(fs::canonicalize(path).unwrap(), f.0.join("bin").join(name)).unwrap();
-            }
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "cold_update_prepares_incoming_and_rolls_back_owned_state",
-                    "--nocapture",
-                ])
-                .env_clear()
-                .env("PATH", f.0.join("bin"))
-                .env("HOME", f.0.join("home"))
-                .env("XDG_CONFIG_HOME", f.0.join("config"))
-                .env("XDG_DATA_HOME", f.0.join("data"))
-                .env("XDG_STATE_HOME", f.0.join("state"))
-                .env("XDG_CACHE_HOME", f.0.join("cache"))
-                .env("TMPDIR", &f.0)
-                .env("RUSTUP_TOOLCHAIN", "caller-toolchain")
-                .env("CARGO_HOME", f.0.join("cargo"))
-                .env("RUSTUP_HOME", f.0.join("rustup"))
-                .env("OMS_LOCK_DIR", f.0.join("locks"))
-                .env("OMS_LIFECYCLE_UPDATE_FIXTURE", &f.0)
-                .env("OMS_COLD_CASE", case)
-                .env(
-                    "OH_MY_SETTING_AUTO_UPDATE_STATE",
-                    f.0.join("auto-update.status"),
-                )
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null");
-            if case == "ok" {
-                command.env(
-                    "OMS_CAPABILITY_RECEIPT",
-                    f.0.join("selected capabilities.json"),
-                );
-            }
-            if case == "offline" {
-                command
-                    .env("CARGO_NET_OFFLINE", "true")
-                    .env("OH_MY_SETTING_REF", "reviewed-tag");
-            }
-            let out = command.output().unwrap();
-            if matches!(case, "crash" | "foreign") || case.starts_with("prepared-crash") {
-                assert_eq!(
-                    out.status.code(),
-                    Some(91),
-                    "{}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                let state = read(&f.0.join("fixture-state.json"));
-                let target = state["target"].as_str().unwrap();
-                let receipt = f.0.join("config/oh-my-setting/install.json");
-                assert_eq!(read(&receipt)["commit"], state["before"]);
-                assert_eq!(
-                    fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
-                    b"prior frontdoor"
-                );
-                assert!(!f.0.join("incoming").exists());
-                let journal = fs::read_to_string(f.0.join(if case.starts_with("prepared-crash") {
-                    "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
-                } else {
-                    "config/oh-my-setting/native-update/transaction.json"
-                }))
+fn run_cold_update_cases(cases: &[&str]) {
+    for &case in cases {
+        let root =
+            std::env::temp_dir().join(format!("oms-cold-update-{}-{case}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let f = Fixture(fs::canonicalize(root).unwrap());
+        for name in ["bin", "home", "config", "data", "state", "cache", "locks"] {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(f.0.join(name))
                 .unwrap();
-                assert!(!journal.contains(&format!("{}/incoming", f.0.display())));
-                let cache = f.0.join("source/target/oms-native").join(target);
-                assert!(cache.join("oms").is_file());
-                if case == "foreign" {
-                    fs::write(cache.join("oms"), b"foreign bytes").unwrap();
-                }
-                if case == "prepared-crash-repair" {
-                    let payload = fs::read(cache.join("oms")).unwrap();
-                    let prior = fs::read(&receipt).unwrap();
-                    let flow = fs::read(f.0.join("flow")).unwrap();
-                    let out = command
-                        .env("OMS_COLD_CASE", "repair-preview")
-                        .env("OH_MY_SETTING_DRY_RUN", "1")
-                        .output()
-                        .unwrap();
-                    assert!(
-                        out.status.success(),
-                        "{}\n{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    command.env_remove("OH_MY_SETTING_DRY_RUN");
-                    assert_eq!(
-                        fs::read_to_string(f.0.join(
-                            "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
-                        ))
-                        .unwrap(),
-                        journal
-                    );
-                    assert_eq!(fs::read(cache.join("oms")).unwrap(), payload);
-                    assert_eq!(fs::read(&receipt).unwrap(), prior);
-                    assert_eq!(fs::read(f.0.join("flow")).unwrap(), flow);
-                    assert_eq!(
-                        fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
-                        b"prior frontdoor"
-                    );
-                }
-                let out = command.env("OMS_COLD_CASE", "recover").output().unwrap();
-                assert!(
-                    out.status.success(),
-                    "{case}: {}\n{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                continue;
-            }
-            assert!(
-                out.status.success(),
-                "{case}: {}\n{}",
-                String::from_utf8_lossy(&out.stdout),
+        }
+        for name in ["git", "mkdir", "cp", "chmod", "ps", "tar", "gzip"] {
+            let path = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .map(|p| p.join(name))
+                .find(|p| p.is_file())
+                .unwrap();
+            symlink(fs::canonicalize(path).unwrap(), f.0.join("bin").join(name)).unwrap();
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "cold_update_prepares_incoming_and_rolls_back_owned_state",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", f.0.join("bin"))
+            .env("HOME", f.0.join("home"))
+            .env("XDG_CONFIG_HOME", f.0.join("config"))
+            .env("XDG_DATA_HOME", f.0.join("data"))
+            .env("XDG_STATE_HOME", f.0.join("state"))
+            .env("XDG_CACHE_HOME", f.0.join("cache"))
+            .env("TMPDIR", &f.0)
+            .env("RUSTUP_TOOLCHAIN", "caller-toolchain")
+            .env("CARGO_HOME", f.0.join("cargo"))
+            .env("RUSTUP_HOME", f.0.join("rustup"))
+            .env("OMS_LOCK_DIR", f.0.join("locks"))
+            .env("OMS_LIFECYCLE_UPDATE_FIXTURE", &f.0)
+            .env("OMS_COLD_CASE", case)
+            .env(
+                "OH_MY_SETTING_AUTO_UPDATE_STATE",
+                f.0.join("auto-update.status"),
+            )
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        if case == "ok" {
+            command.env(
+                "OMS_CAPABILITY_RECEIPT",
+                f.0.join("selected capabilities.json"),
+            );
+        }
+        if case == "offline" {
+            command
+                .env("CARGO_NET_OFFLINE", "true")
+                .env("OH_MY_SETTING_REF", "reviewed-tag");
+        }
+        let out = command.output().unwrap();
+        if matches!(case, "crash" | "foreign") || case.starts_with("prepared-crash") {
+            assert_eq!(
+                out.status.code(),
+                Some(91),
+                "{}",
                 String::from_utf8_lossy(&out.stderr)
             );
-            if case == "release-edge" {
+            let state = read(&f.0.join("fixture-state.json"));
+            let target = state["target"].as_str().unwrap();
+            let receipt = f.0.join("config/oh-my-setting/install.json");
+            assert_eq!(read(&receipt)["commit"], state["before"]);
+            assert_eq!(
+                fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
+                b"prior frontdoor"
+            );
+            assert!(!f.0.join("incoming").exists());
+            let journal = fs::read_to_string(f.0.join(if case.starts_with("prepared-crash") {
+                "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
+            } else {
+                "config/oh-my-setting/native-update/transaction.json"
+            }))
+            .unwrap();
+            assert!(!journal.contains(&format!("{}/incoming", f.0.display())));
+            let cache = f.0.join("source/target/oms-native").join(target);
+            assert!(cache.join("oms").is_file());
+            if case == "foreign" {
+                fs::write(cache.join("oms"), b"foreign bytes").unwrap();
+            }
+            if case == "prepared-crash-repair" {
+                let payload = fs::read(cache.join("oms")).unwrap();
+                let prior = fs::read(&receipt).unwrap();
+                let flow = fs::read(f.0.join("flow")).unwrap();
                 let out = command
-                    .env("OMS_COLD_CASE", "release-override")
-                    .env("OH_MY_SETTING_UPDATE_TARGET_COMMIT", "0".repeat(40))
+                    .env("OMS_COLD_CASE", "repair-preview")
+                    .env("OH_MY_SETTING_DRY_RUN", "1")
                     .output()
                     .unwrap();
                 assert!(
@@ -1178,8 +1314,115 @@ fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
+                command.env_remove("OH_MY_SETTING_DRY_RUN");
+                assert_eq!(
+                    fs::read_to_string(f.0.join(
+                        "config/oh-my-setting/native-preparation/native-lifecycle/transaction.json"
+                    ))
+                    .unwrap(),
+                    journal
+                );
+                assert_eq!(fs::read(cache.join("oms")).unwrap(), payload);
+                assert_eq!(fs::read(&receipt).unwrap(), prior);
+                assert_eq!(fs::read(f.0.join("flow")).unwrap(), flow);
+                assert_eq!(
+                    fs::read(f.0.join("home/.local/bin/oms")).unwrap(),
+                    b"prior frontdoor"
+                );
             }
+            let out = command.env("OMS_COLD_CASE", "recover").output().unwrap();
+            assert!(
+                out.status.success(),
+                "{case}: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            continue;
         }
+        assert!(
+            out.status.success(),
+            "{case}: {}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if case == "release-edge" {
+            let out = command
+                .env("OMS_COLD_CASE", "release-override")
+                .env("OH_MY_SETTING_UPDATE_TARGET_COMMIT", "0".repeat(40))
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state_releases_and_recovery() {
+    run_cold_update_cases(&[
+        "release-custom",
+        "release-stable",
+        "proof",
+        "verify",
+        "receipt",
+        "cleanup",
+        "late-worker",
+        "crash",
+        "foreign",
+        "prepared-crash",
+    ]);
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state_locked_updates() {
+    run_cold_update_cases(&[
+        "prepared-locked-ref",
+        "apply-locked-ref",
+        "apply-locked-explicit",
+        "apply-locked-auto",
+        "apply-locked-verify",
+        "apply-locked-release",
+        "auto-refresh",
+    ]);
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state_prepared_lifecycle() {
+    run_cold_update_cases(&[
+        "prepared-cutover-worker",
+        "prepared-live",
+        "prepared-stale",
+        "prepared-tamper",
+        "prepared-refresh",
+        "prepared-cancel",
+        "prepared-bundle",
+        "prepared-crash-install",
+        "prepared-crash-repair",
+    ]);
+}
+
+#[test]
+fn cold_update_prepares_incoming_and_rolls_back_owned_state() {
+    let Some(root) = std::env::var_os("OMS_LIFECYCLE_UPDATE_FIXTURE") else {
+        run_cold_update_cases(&[
+            "ok",
+            "edge",
+            "fallback",
+            "offline",
+            "release-edge",
+            "post-ok",
+            "post-fail",
+            "post-cancel",
+            "post-forged",
+            "post-mismatch",
+            "post-no-doctor",
+            "post-no-tools",
+            "post-rollback",
+        ]);
         return;
     };
     let mut host = ColdUpdateHost {
@@ -1667,6 +1910,10 @@ echo build >> "$root/flow"
         auto_update_outcome_case(&host, &target);
         return;
     }
+    if host.fail.starts_with("post-") {
+        post_refresh_case(&host, &target);
+        return;
+    }
     let release_channel = match host.fail.as_str() {
         "release-edge" | "release-custom" => Some(ReleaseChannel::Edge),
         "release-stable" => Some(ReleaseChannel::Stable),
@@ -1980,6 +2227,157 @@ fn worker_suffix() {}
         json!(["retired-provider-test.rs::fixture_test"]);
     write(&table_path, &table);
     assert_eq!(check(&table_path, root).0, 1);
+}
+
+#[test]
+fn doctor_and_model_doctor_share_bounded_probe_evidence() {
+    if let Some(root) = std::env::var_os("OMS_PROBE_PARITY_ROOT").map(PathBuf::from) {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let expected = std::env::var("OMS_TEST_VERSION_EXIT").unwrap() == "0"
+            && std::env::var("OMS_TEST_HELP_EXIT").unwrap() == "0";
+        let stop = AtomicBool::new(false);
+        let narrow = oms_command_providers_skills::run_with_source(
+            "model-doctor",
+            &["--providers".into(), "claude".into(), "--json".into()],
+            &root,
+            source,
+            &stop,
+        );
+        assert_eq!(
+            narrow.0,
+            i32::from(!expected),
+            "model-doctor exit: stdout={} stderr={}",
+            String::from_utf8_lossy(&narrow.1),
+            String::from_utf8_lossy(&narrow.2)
+        );
+        assert!(
+            narrow.2.is_empty(),
+            "model-doctor stderr: {}",
+            String::from_utf8_lossy(&narrow.2)
+        );
+        let report: Value = serde_json::from_slice(&narrow.1).unwrap();
+        assert_eq!(report["providers"][0]["usable"], expected, "{report}");
+        let cache = root.join("capabilities");
+        let fields = |file: &Path| -> std::collections::BTreeMap<String, String> {
+            fs::read_to_string(file)
+                .unwrap()
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect()
+        };
+        let narrow_cache = fields(&cache.join("claude.env"));
+        if expected {
+            assert_eq!(report["providers"][0]["effort_mechanism"], "flag");
+            assert_eq!(
+                report["providers"][0]["effort_values"],
+                json!(["low", "medium", "high", "xhigh"])
+            );
+            assert_eq!(narrow_cache["binary_key"], "previous-binary");
+            assert_eq!(narrow_cache["models_probe"], "failed");
+        }
+        let aggregate = run_with_services(
+            "doctor",
+            &["--json".into()],
+            &root,
+            source,
+            &stop,
+            &NativeServices::default(),
+        );
+        assert!(
+            aggregate.2.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&aggregate.2)
+        );
+        let report: Value = serde_json::from_slice(&aggregate.1).unwrap();
+        let failures = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["section"] == "model doctor"
+                    && row["message"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("claude:"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failures.is_empty(), expected, "{report}");
+        if let Some(failure) = failures.first() {
+            let level = if std::env::var("OH_MY_SETTING_MODEL_DOCTOR").unwrap() == "1" {
+                "error"
+            } else {
+                "warn"
+            };
+            assert_eq!(failure["level"], level);
+        }
+        let aggregate_cache = fields(&cache.join("claude.env"));
+        if expected {
+            for key in ["effort_mechanism", "effort_values"] {
+                assert_eq!(narrow_cache[key], aggregate_cache[key], "{key}");
+            }
+        }
+        assert_ne!(aggregate_cache["binary_key"], "previous-binary");
+        assert_eq!(
+            fs::read_to_string(cache.join("claude.models")).unwrap(),
+            "cached-model\n"
+        );
+        assert_eq!(
+            fs::read_to_string(cache.join("claude.efforts")).unwrap(),
+            "cached-model\tlow high\n"
+        );
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("oms-probe-parity-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let _fixture = Fixture(root.clone());
+    // macOS temporary paths can have a symlinked prefix. Exercise that spelling
+    // on every host, then use the physical root required by descriptor writes.
+    let physical = root.join("physical");
+    fs::create_dir(&physical).unwrap();
+    let alias = root.join("alias");
+    symlink(&physical, &alias).unwrap();
+    let root = fs::canonicalize(alias).unwrap();
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let executable = bin.join("claude");
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '--effort (low|medium|high|xhigh)'; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    for (version, help, mode) in [(0, 0, "auto"), (1, 0, "auto"), (0, 1, "1"), (1, 1, "1")] {
+        let case = root.join(format!("{version}-{help}"));
+        let cache = case.join("capabilities");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("claude.env"), "binary_key=previous-binary\neffort_mechanism=none\neffort_values=low\nmodels_probe=failed\nprobed_at=1\n").unwrap();
+        fs::write(cache.join("claude.models"), "cached-model\n").unwrap();
+        fs::write(cache.join("claude.efforts"), "cached-model\tlow high\n").unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "doctor_and_model_doctor_share_bounded_probe_evidence",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", &bin)
+            .env("HOME", &case)
+            .env("TMPDIR", &case)
+            .env("OMS_PROBE_PARITY_ROOT", &case)
+            .env("OMS_CAPABILITY_DIR", &cache)
+            .env("OMS_LOCK_DIR", case.join("locks"))
+            .env("OH_MY_SETTING_MODEL_DOCTOR", mode)
+            .env("OMS_TEST_VERSION_EXIT", version.to_string())
+            .env("OMS_TEST_HELP_EXIT", help.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "version={version}, help={help}: {} {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
 }
 
 // Keep diagnostics in the canonical isolated lifecycle fixture: the same read-only
@@ -2435,6 +2833,132 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
     fs::remove_dir(source.join("rules")).unwrap();
 }
 
+fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServices) {
+    let home = root.join("home");
+    let receipt = root.join("config/oh-my-setting/install.json");
+    assert!(!receipt.exists());
+    let settings = home.join(".claude/settings.json");
+    let claude = home.join(".claude.json");
+    let codex = home.join(".codex/config.toml");
+    let cache =
+        home.join(".codex/plugins/cache/oh-my-setting-local/oh-my-setting/1.0.0/hooks.json");
+    let state = root.join("codex-state");
+    let files = [&settings, &claude, &codex, &cache, &state];
+    let before = files.map(|p| fs::read(p).ok());
+    let inspect = |components: Value| -> Value {
+        write(
+            &receipt,
+            &json!({"schema":1,"source_root":source,"version":"1","commit":"a".repeat(40),
+            "channel":"edge","installed_at":"fixture","components":components,
+            "plugin":{"name":"oh-my-setting","version":"1","sha256":"a".repeat(64)}}),
+        );
+        let saved = fs::read(&receipt).unwrap();
+        let out = call("doctor", &["--integrations", "--json"], source, host);
+        let report: Value = serde_json::from_slice(&out.1).unwrap();
+        assert_eq!(out.0, report["exit"].as_i64().unwrap() as i32);
+        assert_eq!(report["kind"], "oms-doctor-integrations");
+        assert_eq!(report["runtime"], "not_probed");
+        assert!(!String::from_utf8_lossy(&out.1).contains(root.to_str().unwrap()));
+        assert!(!String::from_utf8_lossy(&out.1).contains("private-provider-output"));
+        assert_eq!(
+            fs::read(&receipt).unwrap(),
+            saved,
+            "diagnosis cannot change the receipt"
+        );
+        report
+    };
+    let skipped = inspect(json!({}));
+    assert_eq!(skipped["exit"], 0);
+    assert!(
+        skipped["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["level"] == "note")
+    );
+    assert_eq!(inspect(json!({"codex_plugin":true}))["exit"], 0);
+    write(
+        &cache,
+        &json!({"hooks":{},"private":"private-provider-output"}),
+    );
+    assert_eq!(inspect(json!({"codex_plugin":true}))["exit"], 1);
+    assert_eq!(
+        read(&cache)["private"],
+        "private-provider-output",
+        "doctor cannot repair the cache"
+    );
+    fs::write(&cache, before[3].as_ref().unwrap()).unwrap();
+    fs::write(&state, b"gone\n").unwrap();
+    assert_eq!(inspect(json!({"codex_plugin":true}))["exit"], 1);
+    assert_eq!(fs::read(&state).unwrap(), b"gone\n");
+    fs::write(&state, b"here\n").unwrap();
+
+    let expected: Value = serde_json::from_slice(&success(call(
+        "install-claude-hooks",
+        &["--print-expected"],
+        source,
+        host,
+    )))
+    .unwrap();
+    let mut hooks = serde_json::Map::new();
+    for surface in expected["surfaces"].as_array().unwrap() {
+        hooks.entry(surface["event"].as_str().unwrap()).or_insert(json!([])).as_array_mut().unwrap().push(
+            json!({"matcher":surface["matcher"],"hooks":[{"type":"command","command":surface["command"],"timeout":surface["timeout"]}]}),
+        );
+    }
+    write(&settings, &json!({"hooks":hooks}));
+    assert_eq!(inspect(json!({"claude_hooks":true}))["exit"], 0);
+    write(&settings, &json!({"hooks":{}}));
+    assert_eq!(inspect(json!({"claude_hooks":true}))["exit"], 1);
+
+    let executable = home.join(".local/bin/oms");
+    let managed =
+        json!({"mcpServers":{"oh-my-setting":{"command":executable,"args":["mcp-server"]}}});
+    write(&claude, &managed);
+    fs::write(
+        &codex,
+        format!(
+            "[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n",
+            json!(executable)
+        ),
+    )
+    .unwrap();
+    assert_eq!(inspect(json!({"mcp":true}))["exit"], 0);
+    for invalid in [json!({"args":[]}), json!({"disabled":true})] {
+        let mut changed = managed.clone();
+        changed["mcpServers"]["oh-my-setting"]
+            .as_object_mut()
+            .unwrap()
+            .extend(invalid.as_object().unwrap().clone());
+        write(&claude, &changed);
+        assert_eq!(inspect(json!({"mcp":true}))["exit"], 1);
+    }
+    fs::write(
+        &claude,
+        format!("{{private-provider-output {}", root.display()),
+    )
+    .unwrap();
+    assert_eq!(inspect(json!({"mcp":true}))["exit"], 1);
+    assert_eq!(inspect(json!({"agy_plugin":true}))["exit"], 1);
+    for incompatible in ["--repair", "--surfaces", "--contract", "--live-models"] {
+        assert_eq!(
+            call("doctor", &["--integrations", incompatible], source, host).0,
+            2
+        );
+    }
+    fs::remove_file(receipt).unwrap();
+    for (path, original) in files.into_iter().zip(before) {
+        match original {
+            Some(raw) => fs::write(path, raw).unwrap(),
+            None => {
+                if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+        }
+    }
+}
+
 fn run_fixture_cron(root: &Path) -> String {
     let cron = fs::read_to_string(root.join("cron")).unwrap();
     let command = cron
@@ -2699,6 +3223,7 @@ esac
     native_only(&read(&cache.join("hooks.json")));
     assert!(!cache.join("scripts").exists());
     let payload = fs::read(cache.join("hooks.json")).unwrap();
+    doctor_integration_diagnostics(&source, &root, &host);
     success(call("install-codex-plugin", &[], &source, &host));
     assert_eq!(fs::read(cache.join("hooks.json")).unwrap(), payload);
     // The native inventory does not read the legacy executable template.
@@ -2803,8 +3328,8 @@ esac
     )))
     .unwrap();
     native_only(&manifest);
-    assert_eq!(manifest["surfaces"].as_array().unwrap().len(), 13);
-    assert_eq!(manifest["hooks_schema"], 12);
+    assert_eq!(manifest["surfaces"].as_array().unwrap().len(), 14);
+    assert_eq!(manifest["hooks_schema"], 13);
     let settings = home.join(".claude/settings.json");
     let legacy = |script: &str| {
         format!(
@@ -2916,6 +3441,217 @@ esac
         0
     );
     let hooks_dir = source.join(".git/hooks");
+    // The exact e0b92359 hook is upgraded to the native full hook; any variant stays protected.
+    let old_push = "#!/usr/bin/env bash\n# Installed by scripts/install-hooks.sh \u{2014} runs the repo gate before every push.\n# Bypass for an emergency with: git push --no-verify\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/check.sh\"\n";
+    let push_hook = hooks_dir.join("pre-push");
+    let variant = format!("{old_push}echo mine\n");
+    fs::write(&push_hook, &variant).unwrap();
+    assert_ne!(call("install-hooks", &[], &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), variant);
+    fs::write(&push_hook, old_push).unwrap();
+    success(call("install-hooks", &[], &source, &host));
+    let upgraded = fs::read_to_string(&push_hook).unwrap();
+    assert!(upgraded.contains(" pre-push-check") && upgraded.contains("--full"));
+    // --repo converges only the selected distinct OMS worktree's hooks; the canonical hooks stay put.
+    let other = root.join("other-repo");
+    let git_in = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git_in(&root, &["init", other.to_str().unwrap()]);
+    fs::create_dir_all(other.join("crates/oms")).unwrap();
+    fs::write(other.join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(other.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    fs::create_dir_all(other.join("scripts")).unwrap();
+    fs::write(other.join("scripts/check.sh"), "#!/bin/sh\n").unwrap();
+    let other_push = other.join(".git/hooks/pre-push");
+    fs::write(&other_push, old_push).unwrap();
+    let canonical_push = fs::read_to_string(&push_hook).unwrap();
+    let repo_arg = ["--repo", other.to_str().unwrap()];
+    success(call("install-hooks", &repo_arg, &source, &host));
+    let converged = fs::read_to_string(&other_push).unwrap();
+    assert!(converged.contains(" pre-push-check") && converged.contains("--full"));
+    assert!(other.join(".git/hooks/pre-merge-commit").exists());
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), canonical_push);
+    let edited = format!("{old_push}echo mine\n");
+    fs::write(&other_push, &edited).unwrap();
+    assert_ne!(call("install-hooks", &repo_arg, &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), edited);
+    // A linked worktree shares the common-dir hooks; a non-OMS or subdirectory target is refused.
+    fs::write(&other_push, old_push).unwrap();
+    git_in(
+        &other,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+    );
+    let linked = root.join("linked-repo");
+    git_in(
+        &other,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::create_dir_all(linked.join("crates/oms")).unwrap();
+    fs::write(linked.join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(linked.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    fs::create_dir_all(linked.join("scripts")).unwrap();
+    fs::write(linked.join("scripts/check.sh"), "#!/bin/sh\n").unwrap();
+    success(call(
+        "install-hooks",
+        &["--repo", linked.to_str().unwrap()],
+        &source,
+        &host,
+    ));
+    assert!(fs::read_to_string(&other_push).unwrap().contains("--full"));
+    assert_ne!(
+        call(
+            "install-hooks",
+            &["--repo", other.join("crates").to_str().unwrap()],
+            &source,
+            &host
+        )
+        .0,
+        0
+    );
+    let plain = root.join("plain-repo");
+    git_in(&root, &["init", plain.to_str().unwrap()]);
+    assert_ne!(
+        call(
+            "install-hooks",
+            &["--repo", plain.to_str().unwrap()],
+            &source,
+            &host
+        )
+        .0,
+        0
+    );
+    assert!(!plain.join(".git/hooks/pre-push").exists());
+    // An external core.hooksPath would write beyond the selected repository: refused, bytes kept.
+    let external = root.join("external-hooks");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("pre-push"), old_push).unwrap();
+    let prior = fs::read_to_string(&other_push).unwrap();
+    fs::write(&other_push, old_push).unwrap();
+    git_in(
+        &other,
+        &["config", "core.hooksPath", external.to_str().unwrap()],
+    );
+    assert_ne!(call("install-hooks", &repo_arg, &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), old_push);
+    assert_eq!(
+        fs::read_to_string(external.join("pre-push")).unwrap(),
+        old_push
+    );
+    git_in(&other, &["config", "--unset", "core.hooksPath"]);
+    fs::write(&other_push, prior).unwrap();
+    // Protection binds to the validated selected target, never the canonical owner.
+    struct ProtectedOnly(PathBuf, RefCell<Vec<PathBuf>>);
+    impl Services for ProtectedOnly {
+        fn hook_protection(&self, source: &Path, _: &AtomicBool) -> Output {
+            self.1.borrow_mut().push(source.to_path_buf());
+            (i32::from(source != self.0), Vec::new(), Vec::new())
+        }
+    }
+    fn quick(repo: &Path) -> [&str; 4] {
+        [
+            "--quick",
+            "--check-protection",
+            "--repo",
+            repo.to_str().unwrap(),
+        ]
+    }
+    let wrong_owner = ProtectedOnly(fs::canonicalize(&source).unwrap(), RefCell::default());
+    assert_ne!(
+        call("install-hooks", &quick(&other), &source, &wrong_owner).0,
+        0
+    );
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), converged);
+    assert_ne!(
+        call("install-hooks", &quick(&plain), &source, &wrong_owner).0,
+        0
+    );
+    assert!(!plain.join(".git/hooks/pre-push").exists());
+    assert_ne!(
+        call(
+            "install-hooks",
+            &quick(&other.join("crates")),
+            &source,
+            &wrong_owner
+        )
+        .0,
+        0
+    );
+    assert!(wrong_owner.1.borrow().iter().all(|p| p.starts_with(&other)));
+    // Explicit installation needs the target's own gate script; removal does not.
+    fs::remove_file(other.join("scripts/check.sh")).unwrap();
+    assert_ne!(call("install-hooks", &repo_arg, &source, &host).0, 0);
+    assert_eq!(fs::read_to_string(&other_push).unwrap(), converged);
+    fs::write(other.join("scripts/check.sh"), "#!/bin/sh\n").unwrap();
+    let right = ProtectedOnly(fs::canonicalize(&other).unwrap(), RefCell::default());
+    success(call("install-hooks", &quick(&other), &source, &right));
+    assert!(!fs::read_to_string(&other_push).unwrap().contains("--full"));
+    assert_eq!(*right.1.borrow(), vec![fs::canonicalize(&other).unwrap()]);
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), canonical_push);
+    // Explicit removal must prove its target: non-Git and bare_repo targets fail, metadata stays.
+    let no_git = root.join("no-git-repo");
+    let bare_repo = root.join("bare_repo-repo");
+    for dir in [&no_git, &bare_repo] {
+        fs::create_dir_all(dir.join("crates/oms")).unwrap();
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(dir.join("crates/oms/Cargo.toml"), "[package]\n").unwrap();
+    }
+    git_in(
+        &root,
+        &["init", "-q", "--bare", bare_repo.to_str().unwrap()],
+    );
+    for dir in [&no_git, &bare_repo] {
+        assert_ne!(
+            call(
+                "install-hooks",
+                &["--remove", "--repo", dir.to_str().unwrap()],
+                &source,
+                &host
+            )
+            .0,
+            0
+        );
+    }
+    assert!(other_push.exists());
+    assert_eq!(
+        fs::read_to_string(external.join("pre-push")).unwrap(),
+        old_push
+    );
+    // A valid explicit removal needs no gate script.
+    fs::remove_file(other.join("scripts/check.sh")).unwrap();
+    success(call(
+        "install-hooks",
+        &["--remove", "--repo", other.to_str().unwrap()],
+        &source,
+        &host,
+    ));
+    assert!(!other_push.exists());
+    assert_eq!(fs::read_to_string(&push_hook).unwrap(), canonical_push);
     let merge = hooks_dir.join("pre-merge-commit");
     let merge_text = fs::read_to_string(&merge).unwrap();
     assert!(merge_text.starts_with("#!/bin/sh\n# oh-my-setting native pre-merge-commit\n"));
@@ -3344,6 +4080,7 @@ esac
         IncomingPhase::Reconcile,
         IncomingPhase::Verify,
         IncomingPhase::RefreshTools,
+        IncomingPhase::VerifyIntegrations,
     ] {
         success(host.install_extras(phase, &source, &[], &flag));
         success(host.incoming_lifecycle(phase, &source, "", b"{}", &[], &flag));
@@ -3416,6 +4153,7 @@ fn agy_native_calls_reach_panel_attempts() {
                 "--nocapture",
             ])
             .env_remove("OMS_HARNESS_CHILD")
+            .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
             .env("OMS_LOCK_DIR", root.join("locks"))
             .env("OMS_AGY_CALL_FIXTURE", &root)
             .env("OMS_AGY_CALL_ACTION", action)
@@ -4021,4 +4759,450 @@ printf 'ok\n'
             "{case}:\n{env_file}"
         );
     }
+}
+
+#[test]
+fn doctor_adapter_conformance() {
+    const FIXTURE: &str = "OMS_ADAPTER_CONFORMANCE_FIXTURE";
+    let Some(root) = std::env::var_os(FIXTURE).map(PathBuf::from) else {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("oms-adapter-conformance-{}", std::process::id())),
+        );
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&fixture.0)
+            .unwrap();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "doctor_adapter_conformance", "--nocapture"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", fixture.0.join("home"))
+            .env("XDG_CONFIG_HOME", fixture.0.join("config"))
+            .env("XDG_DATA_HOME", fixture.0.join("data"))
+            .env("XDG_STATE_HOME", fixture.0.join("state"))
+            .env("TMPDIR", &fixture.0)
+            .env(FIXTURE, &fixture.0)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    };
+    let source = root.join("source");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(root.join("home")).unwrap();
+    let adapters = source.join("adapters");
+    fs::create_dir(&adapters).unwrap();
+    let log = adapters.join("calls");
+    let host = NativeServices::default();
+    let script = |name: &str, body: &str| {
+        let path = adapters.join(name);
+        fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${{0%/*}}/calls\"\n{body}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    };
+    let probe = |adapter: &Path, extra: &[&str]| {
+        let mut args = vec![
+            "--providers",
+            "--conformance",
+            adapter.to_str().unwrap(),
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let out = call("doctor", &args, &source, &host);
+        assert!(out.2.is_empty(), "{}", String::from_utf8_lossy(&out.2));
+        let value: Value = serde_json::from_slice(&out.1).unwrap();
+        (out.0, value)
+    };
+    let check = |value: &Value, name: &str| {
+        value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let good = script(
+        "oms-agent-adapter-fixture",
+        "case \"${1:-}\" in --version|--help) printf 'private probe detail\\n' >&2; exit 0 ;; *) exit 71 ;; esac",
+    );
+    let (code, result) = probe(
+        Path::new("adapters/oms-agent-adapter-fixture"),
+        &["--probe-bound", "08"],
+    );
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["kind"], "oms-adapter-conformance");
+    assert_eq!(result["mode"], "probe");
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["adapter"], "fixture");
+    assert_eq!(result["probe_bound_seconds"], 8);
+    assert_eq!(check(&result, "version-probe")["status"], "ok");
+    assert_eq!(check(&result, "help-probe")["status"], "ok");
+    assert_eq!(check(&result, "read-call")["status"], "unknown");
+    assert_eq!(check(&result, "isolation")["status"], "unknown");
+    assert!(!result.to_string().contains("private probe detail"));
+    assert_eq!(fs::read_to_string(&log).unwrap(), "--version\n--help\n");
+    assert!(!source.join(".oms").exists());
+    assert!(!root.join("config").exists());
+    assert!(!root.join("data").exists());
+
+    for name in [
+        "Bad_Name".to_owned(),
+        "oms-agent-adapter-.bad".to_owned(),
+        "oms-agent-adapter-bad..id".to_owned(),
+        format!("oms-agent-adapter-{}", "a".repeat(65)),
+    ] {
+        let adapter = script(&name, "exit 0");
+        let before = fs::read(&log).unwrap();
+        let (code, result) = probe(&adapter, &[]);
+        assert_eq!(code, 1, "{result}");
+        assert_eq!(check(&result, "name")["status"], "fail");
+        assert_eq!(fs::read(&log).unwrap(), before, "invalid name executed");
+    }
+    let no_exec = script("oms-agent-adapter-disabled", "exit 0");
+    fs::set_permissions(&no_exec, fs::Permissions::from_mode(0o600)).unwrap();
+    let (code, result) = probe(&no_exec, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(check(&result, "executable")["status"], "fail");
+    let (code, result) = probe(&adapters.join("oms-agent-adapter-missing"), &[]);
+    assert_eq!(code, 1);
+    assert_eq!(check(&result, "executable")["status"], "fail");
+
+    let failed = script(
+        "oms-agent-adapter-failure",
+        "case \"$1\" in --version) printf 'private failure detail\\n' >&2; exit 7 ;; --help) exit 0 ;; *) exit 71 ;; esac",
+    );
+    let (code, result) = probe(&failed, &[]);
+    assert_eq!(code, 1);
+    assert_eq!(check(&result, "version-probe")["exit"], 7);
+    assert_eq!(check(&result, "version-probe")["reason"], "nonzero_exit");
+    assert_eq!(check(&result, "help-probe")["status"], "ok");
+    assert!(!result.to_string().contains("private failure detail"));
+
+    for redirect in ["", " >&2"] {
+        let flood = script(
+            "oms-agent-adapter-overflow",
+            &format!(
+                "case \"$1\" in --version) exit 0 ;; --help) dd if=/dev/zero bs=65536 count=1{redirect} 2>/dev/null ;; *) exit 71 ;; esac"
+            ),
+        );
+        let (code, result) = probe(&flood, &[]);
+        assert_eq!(code, 1, "{result}");
+        assert_eq!(check(&result, "help-probe")["reason"], "output_limit");
+        assert!(result.to_string().len() < 4096);
+    }
+    let slow = script("oms-agent-adapter-slow", "exec sleep 30");
+    let started = Instant::now();
+    let (code, result) = probe(&slow, &["--probe-bound", "1"]);
+    assert_eq!(code, 1, "{result}");
+    assert_eq!(check(&result, "version-probe")["reason"], "deadline");
+    assert!(started.elapsed() < Duration::from_secs(15));
+
+    let interrupted = AtomicBool::new(false);
+    let before_length = fs::metadata(&log).unwrap().len();
+    let cancelled = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let until = Instant::now() + Duration::from_secs(3);
+            while fs::metadata(&log).unwrap().len() == before_length && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            interrupted.store(true, std::sync::atomic::Ordering::Release);
+        });
+        run_with_services(
+            "doctor",
+            &[
+                "--providers".into(),
+                "--conformance".into(),
+                slow.as_os_str().into(),
+            ],
+            &source,
+            &source,
+            &interrupted,
+            &host,
+        )
+    });
+    assert_eq!(
+        cancelled.0,
+        130,
+        "{}",
+        String::from_utf8_lossy(&cancelled.2)
+    );
+    let result: Value = serde_json::from_slice(&cancelled.1).unwrap();
+    assert_eq!(check(&result, "version-probe")["reason"], "cancelled");
+    assert_eq!(check(&result, "help-probe")["reason"], "not_started");
+
+    let before = fs::read(&log).unwrap();
+    for args in [
+        vec!["--conformance", good.to_str().unwrap()],
+        vec!["--providers", "--probe-bound", "1"],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--check",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--contract",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--table",
+            "unused",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--run",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--probe-bound",
+            "0",
+        ],
+        vec![
+            "--providers",
+            "--conformance",
+            good.to_str().unwrap(),
+            "--probe-bound",
+            "999999999999999999999",
+        ],
+    ] {
+        let out = call("doctor", &args, &source, &host);
+        assert_eq!(out.0, 2, "{args:?}: {}", String::from_utf8_lossy(&out.2));
+    }
+    assert_eq!(fs::read(&log).unwrap(), before, "invalid options executed");
+
+    // The established table/reference checker remains independent of probes.
+    doctor_provider_capability_evidence(&source, &root, &host);
+    assert_eq!(fs::read(&log).unwrap(), before);
+    assert!(host.0.borrow().is_empty());
+}
+
+#[test]
+fn agy_preinvocation_forwards_boolean_intake_intent_only() {
+    use oms_command_operations::{StartRequest, create_attempt, load_projection, value::obj};
+
+    #[derive(Default)]
+    struct IntakeHost(RefCell<Vec<String>>, RefCell<Option<Vec<u8>>>);
+    impl Services for IntakeHost {
+        fn provider_hook(
+            &self,
+            name: &str,
+            input: &[u8],
+            _: &Path,
+            _: &Path,
+            _: bool,
+            _: &AtomicBool,
+        ) -> Output {
+            self.0.borrow_mut().push(name.into());
+            if name != "skill-router" {
+                return (0, Vec::new(), Vec::new());
+            }
+            *self.1.borrow_mut() = Some(input.to_vec());
+            let v: Value = serde_json::from_slice(input).expect("adapted json");
+            assert_eq!(
+                (&v["hook_event_name"], &v["prompt"]),
+                (&json!("PreInvocation"), &json!(""))
+            );
+            let body = if v["intake_eligible"].as_bool() == Some(true) {
+                b"[oms intake] reminder\n".to_vec()
+            } else {
+                Vec::new()
+            };
+            (0, body, Vec::new())
+        }
+    }
+
+    if let Some(root) = std::env::var_os("OMS_AGY_INTAKE_FIXTURE").map(PathBuf::from) {
+        let action = std::env::var("OMS_AGY_INTAKE_ACTION").unwrap();
+        let host = IntakeHost::default();
+        let output = call("agy-hook", &[&action], &root, &host);
+        assert_eq!(output.0, 0);
+        fs::write(root.join("last-hooks.txt"), host.0.borrow().join(",")).unwrap();
+        if let Some(forwarded) = host.1.borrow().as_ref() {
+            fs::write(root.join("forwarded.json"), forwarded).unwrap();
+        }
+        print!("{}", String::from_utf8(output.1).unwrap());
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!("oms-agy-intake-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let _fixture = Fixture(root.clone());
+
+    let invoke =
+        |action: &str, payload: Value, extra: &[(&str, &str)]| -> (Value, Option<Value>, String) {
+            let (input, fwd_path, hooks_path) = (
+                root.join("input.json"),
+                root.join("forwarded.json"),
+                root.join("last-hooks.txt"),
+            );
+            let _ = fs::remove_file(&fwd_path);
+            fs::write(&input, serde_json::to_vec(&payload).unwrap()).unwrap();
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "agy_preinvocation_forwards_boolean_intake_intent_only",
+                "--nocapture",
+            ])
+            .env_remove("OH_MY_SETTING_AGY_HOOKS")
+            .env_remove("OMS_HARNESS_CHILD")
+            .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+            .env_remove("OMS_SKILL_ROUTER_OFF")
+            .env_remove("OMS_PANEL_MAIN_ATTEMPT")
+            .env_remove("OMS_ROOM_ID")
+            .env("OMS_LOCK_DIR", root.join("locks"))
+            .env("OMS_AGY_INTAKE_FIXTURE", &root)
+            .env("OMS_AGY_INTAKE_ACTION", action)
+            .stdin(fs::File::open(input).unwrap());
+            cmd.envs(extra.iter().copied());
+            let out = cmd.output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            let resp = serde_json::Deserializer::from_str(&stdout[stdout.find('{').unwrap()..])
+                .into_iter::<Value>()
+                .next()
+                .unwrap()
+                .unwrap();
+            let fwd = fs::read_to_string(&fwd_path).ok().map(|s| {
+                if let Some(raw) = payload["lastUserInput"].as_str().filter(|u| !u.is_empty()) {
+                    assert!(!s.contains(raw), "raw lastUserInput leaked: {s}");
+                }
+                serde_json::from_str(&s).unwrap()
+            });
+            (
+                resp,
+                fwd,
+                fs::read_to_string(&hooks_path).unwrap_or_default(),
+            )
+        };
+    let pre = |conv: &str, num: i64, input: Option<&str>| {
+        let mut p = json!({"workspacePaths":[root],"conversationId":conv,"invocationNum":num,"modelName":"gemini-test"});
+        if let Some(text) = input {
+            p["lastUserInput"] = json!(text);
+        }
+        p
+    };
+
+    // Short real input emits [oms intake] without echoing or forwarding raw text.
+    let (resp, fwd, _) = invoke("preinvocation", pre("conv-1", 1, Some("이어서")), &[]);
+    let msg = resp["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        msg.contains("[oms intake]") && !msg.contains("이어서"),
+        "{resp}"
+    );
+    assert_eq!(fwd.unwrap()["intake_eligible"], Value::Bool(true));
+
+    // Absent, empty, automated, relay lastUserInput and invocationNum > 1 stay quiet.
+    for quiet in [
+        None,
+        Some(""),
+        Some("?"),
+        Some("<task-notification>done</task-notification>"),
+        Some("Task from Overall Main. Work within this task and report the result here. x"),
+    ] {
+        let (resp, fwd, _) = invoke("preinvocation", pre("conv-q", 1, quiet), &[]);
+        assert_eq!(resp, json!({}), "{quiet:?}");
+        assert!(fwd.unwrap()["intake_eligible"].is_null(), "{quiet:?}");
+    }
+    let (later, fwd, _) = invoke("preinvocation", pre("conv-1", 2, Some("이어서")), &[]);
+    assert_eq!((later, fwd), (json!({}), None));
+
+    // Nonzero OMS_HARNESS_DELEGATE_DEPTH suppresses [oms intake] while keeping AGY tracking/observation intact.
+    fs::create_dir_all(root.join(".oms")).unwrap();
+    let flag = AtomicBool::new(false);
+    let main = create_attempt(
+        &root,
+        &StartRequest {
+            provider: "antigravity".into(),
+            tool: "agy".into(),
+            refs: obj([
+                ("panel_role", "main".into()),
+                ("panel_room_id", "room-intake".into()),
+                ("native_session", "main".into()),
+            ]),
+            ..Default::default()
+        },
+        &flag,
+    )
+    .unwrap();
+    let depth = [("OMS_HARNESS_DELEGATE_DEPTH", "1")];
+    assert_eq!(
+        invoke(
+            "pretooluse",
+            json!({"workspacePaths":[root],"conversationId":"main","toolCall":{"id":"sub-1","name":"invoke_subagent","args":{"TypeName":"self","Role":"worker","Prompt":"inspect child scope"}}}),
+            &depth,
+        )
+        .0,
+        json!({"decision": "allow"})
+    );
+    let (_, rows) = load_projection(&root).unwrap();
+    assert!(
+        rows.iter()
+            .any(|v| v.get("parent_attempt_id").text() == Some(main.as_str())
+                && v.get("refs").get("agy_tool_call_id").text() == Some("sub-1")
+                && v.get("state").text() == Some("working")),
+        "{rows:?}"
+    );
+    let (resp, fwd, hooks) = invoke(
+        "preinvocation",
+        pre("conv-depth", 1, Some("이어서")),
+        &depth,
+    );
+    assert_eq!(
+        (resp, hooks.as_str()),
+        (json!({}), "telemetry-hook,skill-router")
+    );
+    assert!(fwd.unwrap()["intake_eligible"].is_null());
+    let (resp, _, hooks) = invoke(
+        "stop",
+        json!({"workspacePaths":[root],"conversationId":"conv-depth","executionNum":1}),
+        &depth,
+    );
+    assert_eq!(
+        (resp, hooks.as_str()),
+        (json!({}), "turn-guard,telemetry-hook")
+    );
+
+    // OMS_HARNESS_CHILD=1 and correlated AGY child (is_child) stay completely quiet.
+    assert_eq!(
+        invoke(
+            "preinvocation",
+            pre("conv-child-env", 1, Some("이어서")),
+            &[("OMS_HARNESS_CHILD", "1")]
+        ),
+        (json!({}), None, String::new())
+    );
+    assert_eq!(
+        invoke(
+            "preinvocation",
+            pre("child-sub-1", 1, Some("inspect child scope")),
+            &[]
+        ),
+        (json!({}), None, String::new())
+    );
 }

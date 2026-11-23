@@ -6,6 +6,45 @@ use oms_command_operations::value::{V, obj};
 use oms_panel_core::services::ExecutionRequest;
 
 const MAX_BINDING: usize = 64 * 1024;
+// Codex leads launch without the provider policy, so the assignment carries it.
+const LEAD_DUTIES: &str = "Integrate only; children: roles/disjoint scopes/checks, read-only research/review/verify, builders assigned paths, no delegate/commit/push/land/install/publish; simple: cheaper supported native model, escalate scope/risk, keep explicit user choice/account/isolation/spend.";
+
+/// Codex shows a larger paste as an opaque placeholder that its composer proof
+/// cannot read, so the whole prompt must fit the visible limit untruncated.
+fn assignment_prompt(
+    repo: &Path,
+    room: &str,
+    task: &Value,
+    turn: &str,
+    message: &str,
+    brief: &str,
+) -> Result<String> {
+    let repo = repo
+        .to_str()
+        .ok_or_else(|| Error::new("repository cannot be represented in a Room locator"))?;
+    // One shell variable keeps the state repository pinned without repeating it.
+    let fixed = format!(
+        "{} Turn {turn}. You own this provider's work. {LEAD_DUTIES} `R={}; oms agent-plan --repo \"$R\" evidence-snapshot --id {}; oms room show --repo \"$R\" --id {} --exact --json`. plan {}, lease {}, Room message {message}; obey paths/accept/verifier; report evidence/unverified/model/unknown/binding; receipt!=accept. Task: ",
+        crate::native_children::TASK_PREFIX,
+        assignment_shell_word(repo),
+        assignment_shell_word(text(task, "id")),
+        assignment_shell_word(room),
+        text(task, "plan_id"),
+        text(task, "lease_id"),
+    );
+    let space = CODEX_VISIBLE_PASTE_CHARS.saturating_sub(fixed.chars().count());
+    require(
+        space > 0,
+        "native assignment binding alone fills the visible Codex prompt; shorten the repository path, Room or task id",
+    )?;
+    let over = brief.chars().count().saturating_sub(space);
+    if over > 0 {
+        return Err(Error::new(format!(
+            "native assignment brief is {over} characters over the {space} that fit the {CODEX_VISIBLE_PASTE_CHARS}-character visible Codex prompt; shorten it"
+        )));
+    }
+    Ok(fixed + brief)
+}
 
 fn operation_value(value: &Value) -> Result<V> {
     V::parse(&serde_json::to_vec(value).map_err(Error::new)?).map_err(Error::new)
@@ -226,6 +265,19 @@ pub(super) fn run(
             .is_empty(),
         "native assignment contains sensitive content",
     )?;
+    // Canonical ids have fixed widths, so the exact prompt length is known before
+    // any account, Plan, attempt, Room or tmux step.
+    let zeros = "0".repeat(32);
+    let widths =
+        json!({"id": id, "plan_id": format!("plan_{zeros}"), "lease_id": format!("lease_{zeros}")});
+    assignment_prompt(
+        panel.repo,
+        panel.room,
+        &widths,
+        &zeros[..20],
+        &format!("msg-{zeros}"),
+        &text_task,
+    )?;
     require(
         panel.leads.contains_key("codex"),
         "open the ordinary Codex lead before binding a task",
@@ -293,18 +345,9 @@ pub(super) fn run(
     );
     let turn = &key[..20];
     let message = format!("msg-{}", &key[..32]);
-    let task_reader = format!(
-        "oms plan --repo {} evidence-snapshot --id {}",
-        commands::shell_quote(&panel.repo.to_string_lossy()),
-        commands::shell_quote(&id)
-    );
-    let prompt = format!(
-        "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {}{} Canonical task: {id}; plan: {}; lease: {}; Room message: {message}. Before working, read {task_reader}; match this plan and lease, and obey its allowed/forbidden paths, acceptance criteria and verifier contract. The addressed Room message identifies the operation attempt and immutable binding. Preserve this binding with your result; receipt is not acceptance. Task: {text_task}",
-        STARTUP_PROMPT.trim(),
-        assignment_locator(panel.repo, panel.room)?,
-        text(&canonical, "plan_id"),
-        text(&canonical, "lease_id"),
-    );
+    let prompt = assignment_prompt(
+        panel.repo, panel.room, &canonical, turn, &message, &text_task,
+    )?;
     let payload_digest = oms_panel_core::digest(prompt.as_bytes());
     let (_, _, account_verification) = binding_summary(custody.binding.as_ref());
     let mut packet = json!({"schema": 1, "kind": "oms-native-assignment", "task": canonical,
@@ -458,4 +501,151 @@ pub(super) fn run(
         };
     }
     Ok(output)
+}
+
+// The canonical flow fixture lives in orchestrator.rs; these pin the prompt budget.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canonical() -> Value {
+        json!({"id": "native-one", "plan_id": format!("plan_{}", "a".repeat(32)),
+            "lease_id": format!("lease_{}", "b".repeat(32))})
+    }
+
+    fn build(repo: &str, brief: &str) -> Result<String> {
+        let turn = "c".repeat(20);
+        let message = format!("msg-{}", "d".repeat(32));
+        assignment_prompt(
+            Path::new(repo),
+            "room-eeeeeeeeeeee",
+            &canonical(),
+            &turn,
+            &message,
+            brief,
+        )
+    }
+
+    #[test]
+    fn native_assignment_prompt_fits_ordinary_brief_with_exact_binding() {
+        let repo = format!("/{}", "r".repeat(27));
+        let brief = "Review the claimed source against its acceptance criteria and verifier, then report findings with file and line anchors, the checks you ran and any blockers to Overall Main now.";
+        assert!(brief.len() >= 170);
+        let prompt = build(&repo, brief).unwrap();
+        assert!(prompt.chars().count() <= CODEX_VISIBLE_PASTE_CHARS);
+        assert!(prompt.starts_with(&format!(
+            "{} Turn {}. You own this provider's work. {LEAD_DUTIES} ",
+            crate::native_children::TASK_PREFIX,
+            "c".repeat(20)
+        )));
+        assert!(prompt.ends_with(&format!(" Task: {brief}")));
+        for exact in [
+            format!("plan plan_{},", "a".repeat(32)),
+            format!("lease lease_{},", "b".repeat(32)),
+            format!("Room message msg-{};", "d".repeat(32)),
+        ] {
+            assert_eq!(prompt.matches(&exact).count(), 1, "{exact}");
+        }
+        let lower = prompt.to_ascii_lowercase();
+        for duty in [
+            "roles",
+            "disjoint scopes",
+            "checks",
+            "read-only",
+            "assigned paths",
+            "cheaper supported native model",
+            "explicit user choice",
+            "escalate",
+            "scope",
+            "risk",
+            "account",
+            "isolation",
+            "spend",
+            "model",
+            "unknown",
+        ] {
+            assert!(lower.contains(duty), "{duty}");
+        }
+        for alias in [
+            "haiku", "sonnet", "opus", "flash", "mini", "gpt-", "gemini-", "claude-", "o3", "o4",
+        ] {
+            assert!(
+                !lower.contains(alias),
+                "bound prompt must not hardcode unauthenticated model alias {alias:?}: {prompt}"
+            );
+        }
+        // The one copyable reader line must keep unusual repository bytes intact;
+        // octal-escaped bytes cost visible characters, hence the shorter brief.
+        for repo in [repo, "/odd dir/it's `x` $HOME".to_owned()] {
+            let prompt = build(&repo, "x").unwrap();
+            let readers = prompt.split('`').nth(1).unwrap();
+            let out = std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    &format!("oms() {{ printf '%s|' \"$@\"; echo; }}; {readers}"),
+                ])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert_eq!(
+                String::from_utf8(out.stdout).unwrap(),
+                format!(
+                    "agent-plan|--repo|{repo}|evidence-snapshot|--id|native-one|\nroom|show|--repo|{repo}|--id|room-eeeeeeeeeeee|--exact|--json|\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn native_assignment_prompt_rejects_oversized_briefs_without_truncation() {
+        let repo = format!("/{}", "r".repeat(27));
+        let fixed = build(&repo, "").unwrap().chars().count();
+        assert!(fixed <= 818, "{fixed}");
+        let space = CODEX_VISIBLE_PASTE_CHARS - fixed;
+        assert!(space >= 170, "{space}");
+        // Counted as visible characters, not bytes.
+        let full = "é".repeat(space);
+        assert_eq!(
+            build(&repo, &full).unwrap().chars().count(),
+            CODEX_VISIBLE_PASTE_CHARS
+        );
+        let error = build(&repo, &format!("{full}x")).unwrap_err().message;
+        assert!(
+            error.contains(&format!("1 characters over the {space}")),
+            "{error}"
+        );
+        let error = build(&format!("/{}", "r".repeat(CODEX_VISIBLE_PASTE_CHARS)), "x")
+            .unwrap_err()
+            .message;
+        assert!(error.contains("binding alone"), "{error}");
+
+        let tight_repo = format!("/{}", "r".repeat(29));
+        let mut tight_task = canonical();
+        tight_task["id"] = json!("tight-native-170");
+        let tight_turn = "c".repeat(20);
+        let tight_message = format!("msg-{}", "d".repeat(32));
+        let tight_fixed = assignment_prompt(
+            Path::new(&tight_repo),
+            "room-eeeeeeeeeeee",
+            &tight_task,
+            &tight_turn,
+            &tight_message,
+            "",
+        )
+        .unwrap()
+        .chars()
+        .count();
+        let tight_space = CODEX_VISIBLE_PASTE_CHARS - tight_fixed;
+        assert!(tight_space >= 174, "{tight_space}");
+        let tight_prompt = assignment_prompt(
+            Path::new(&tight_repo),
+            "room-eeeeeeeeeeee",
+            &tight_task,
+            &tight_turn,
+            &tight_message,
+            &"b".repeat(170),
+        )
+        .unwrap();
+        assert!(tight_prompt.chars().count() <= CODEX_VISIBLE_PASTE_CHARS);
+    }
 }

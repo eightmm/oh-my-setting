@@ -721,7 +721,7 @@ fn provider_native_transports_match_shell_contract() {
             for (provider, bin, pattern) in cases {
                 for exact in [false, true] {
                     let native_model = ["deepseek", "vibe", "openhands"].contains(&provider);
-                    let model = if exact && !native_model {
+                    let model = if exact {
                         "fixture-model"
                     } else {
                         "provider-default"
@@ -735,6 +735,23 @@ fn provider_native_transports_match_shell_contract() {
                         "inspect λ\nnext line".as_bytes(),
                         &probe,
                     );
+                    if exact && native_model {
+                        assert_eq!(output.0, 1, "{provider}");
+                        let artifact = String::from_utf8_lossy(&output.1)
+                            .lines()
+                            .find(|line| Path::new(line).is_file())
+                            .map(PathBuf::from)
+                            .expect("failed seat artifact");
+                        assert!(
+                            fs::read_to_string(artifact)
+                                .unwrap()
+                                .contains("no documented per-invocation model override"),
+                            "{provider}: {}",
+                            message(&output)
+                        );
+                        assert!(probe.calls.lock().unwrap().is_empty());
+                        continue;
+                    }
                     if [
                         "muse",
                         "kimi",
@@ -2890,7 +2907,7 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
             fs::create_dir_all(fake_claude.parent().unwrap()).unwrap();
             fs::write(
                 &fake_claude,
-                "#!/bin/sh\nprintf 'changed\\n' >> README.md\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n",
+                "#!/bin/sh\ncase \"$*\" in *'--permission-mode plan'*) ;; *) printf 'changed\\n' >> README.md;; esac\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n",
             )
             .unwrap();
             fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
@@ -2900,40 +2917,71 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
                 std::env::var("PATH").unwrap_or_default()
             );
             if std::env::var_os("OMS_PANEL_DISPATCH_INNER").is_none() {
-                let mut cmd = Command::new(std::env::current_exe().unwrap());
-                clean_env_child(&mut cmd)
-                    .args([
-                        "--exact",
-                        "panel_dispatch_delegate_records_parent_refs_and_index_digests",
-                        "--nocapture",
-                    ])
-                    .env(
-                        CHILD_ENV,
-                        "panel_dispatch_delegate_records_parent_refs_and_index_digests",
-                    )
-                    .env("OMS_PANEL_DISPATCH_INNER", "1")
-                    .env("HOME", std::env::var_os("HOME").unwrap_or_default())
-                    .env("PATH", &path_val)
-                    .env("OMS_PANEL_DISPATCH", "1")
-                    .env("OMS_PANEL_MAIN_ATTEMPT", "att_main1234")
-                    .env("OMS_PANEL_ROLE", "worker")
-                    .env("OMS_PANEL_STRATEGY", "builder")
-                    .env("OMS_PANEL_OWNER", "antigravity")
-                    .env("OMS_PANEL_PURPOSE", "implement")
-                    .env("OMS_PANEL_WORKLOAD", "routine")
-                    .env("OMS_PANEL_ACCESS", "write")
-                    .env("OMS_PANEL_LABEL", "builder test")
-                    .env("OMS_ROOM_ID", "room-1")
-                    .env("OMS_ROOM_PARTICIPANT", "call-p1");
-                let out = cmd.output().unwrap();
-                assert!(
-                    out.status.success(),
-                    "{}\n{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
+                for mode in ["populated", "defaults", "outside"] {
+                    let mut cmd = Command::new(std::env::current_exe().unwrap());
+                    clean_env_child(&mut cmd)
+                        .args([
+                            "--exact",
+                            "panel_dispatch_delegate_records_parent_refs_and_index_digests",
+                            "--nocapture",
+                        ])
+                        .env(
+                            CHILD_ENV,
+                            "panel_dispatch_delegate_records_parent_refs_and_index_digests",
+                        )
+                        .env("OMS_PANEL_DISPATCH_INNER", mode)
+                        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+                        .env("PATH", &path_val)
+                        .env(
+                            "OMS_PANEL_DISPATCH",
+                            if mode == "outside" { "0" } else { "1" },
+                        )
+                        .env("OMS_TASK_ID", "ambient-task")
+                        .env("OMS_PANEL_MAIN_ATTEMPT", "att_main1234")
+                        .env("OMS_PANEL_ROLE", "worker")
+                        .env("OMS_PANEL_STRATEGY", "builder")
+                        .env("OMS_PANEL_OWNER", "antigravity")
+                        .env("OMS_PANEL_PURPOSE", "implement")
+                        .env("OMS_PANEL_WORKLOAD", "routine")
+                        .env("OMS_PANEL_ACCESS", "write")
+                        .env("OMS_PANEL_LABEL", "builder test")
+                        .env("OMS_PANEL_ALIAS", " builder-alias ")
+                        .env("OMS_ROOM_ID", "room-1")
+                        .env("OMS_ROOM_PARTICIPANT", "call-p1")
+                        .env("OMS_PLAN_LEASE_ID", " lease-1 ")
+                        .env("OMS_PANEL_CONTINUES", "att_cafe")
+                        .env("OMS_PANEL_MODEL", "ambient-model")
+                        .env("OMS_PANEL_EFFORT", "low");
+                    if mode == "defaults" {
+                        for name in [
+                            "OMS_PANEL_ROLE",
+                            "OMS_PANEL_STRATEGY",
+                            "OMS_PANEL_OWNER",
+                            "OMS_PANEL_PURPOSE",
+                            "OMS_PANEL_WORKLOAD",
+                            "OMS_PANEL_ACCESS",
+                            "OMS_PANEL_LABEL",
+                            "OMS_PANEL_ALIAS",
+                            "OMS_ROOM_PARTICIPANT",
+                            "OMS_PLAN_LEASE_ID",
+                        ] {
+                            cmd.env(name, " ");
+                        }
+                        cmd.env("OMS_PANEL_CONTINUES", "att_BAD");
+                    }
+                    let out = cmd.output().unwrap();
+                    assert!(
+                        out.status.success(),
+                        "{mode}: {}\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
                 return;
             }
+            let mode = std::env::var("OMS_PANEL_DISPATCH_INNER").unwrap();
+            let populated = mode == "populated";
+            let panel = mode != "outside";
             let values = args(&[
                 "--repo",
                 repo.0.to_str().unwrap(),
@@ -2941,6 +2989,8 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
                 "claude",
                 "--model",
                 "fixture",
+                "--reasoning-effort",
+                "high",
                 "--task-id",
                 "t1",
                 "--no-task",
@@ -2978,15 +3028,43 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
             );
             assert_eq!(created.get("task_id").text(), Some("t1"));
             let refs = created.get("refs");
-            assert_eq!(refs.get("panel_role").text(), Some("worker"));
-            assert_eq!(refs.get("panel_strategy").text(), Some("builder"));
-            assert_eq!(refs.get("panel_owner").text(), Some("antigravity"));
-            assert_eq!(refs.get("panel_purpose").text(), Some("implement"));
-            assert_eq!(refs.get("panel_workload").text(), Some("routine"));
-            assert_eq!(refs.get("panel_access").text(), Some("write"));
-            assert_eq!(refs.get("panel_label").text(), Some("builder test"));
-            assert_eq!(refs.get("panel_room_id").text(), Some("room-1"));
-            assert_eq!(refs.get("panel_room_participant").text(), Some("call-p1"));
+            assert_eq!(refs.get("panel_model").text(), Some("fixture"));
+            assert_eq!(
+                refs.get("panel_role").text(),
+                Some(if panel { "worker" } else { "delegate" })
+            );
+            for (key, expected) in [
+                ("panel_strategy", populated.then_some("builder")),
+                ("panel_owner", populated.then_some("antigravity")),
+                ("panel_purpose", panel.then_some("implement")),
+                ("panel_workload", panel.then_some("routine")),
+                ("panel_access", panel.then_some("write")),
+                ("panel_effort", panel.then_some("high")),
+                (
+                    "panel_label",
+                    Some(if populated {
+                        "builder test"
+                    } else {
+                        "Panel dispatch change"
+                    }),
+                ),
+                (
+                    "panel_alias",
+                    if populated {
+                        Some("builder-alias")
+                    } else if panel {
+                        None
+                    } else {
+                        Some("claude-delegate")
+                    },
+                ),
+                ("panel_room_id", Some("room-1")),
+                ("panel_room_participant", populated.then_some("call-p1")),
+                ("panel_lease_id", populated.then_some("lease-1")),
+                ("panel_continues", populated.then_some("att_cafe")),
+            ] {
+                assert_eq!(refs.get(key).text(), expected, "{mode}: {key}");
+            }
 
             let index_raw = fs::read_to_string(repo.0.join(".oms/artifacts/index.jsonl")).unwrap();
             let row = V::parse(index_raw.lines().last().unwrap().as_bytes()).unwrap();
@@ -3007,6 +3085,90 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
                     .unwrap()
                     .is_empty()
             );
+
+            // Advisory enrollment uses the same metadata boundary while retaining
+            // its own defaults and the ambient task fallback when CLI is absent.
+            let values = args(&[
+                "--repo",
+                repo.0.to_str().unwrap(),
+                "--providers",
+                "claude",
+                "--model",
+                "fixture",
+                "--strategy",
+                "advisor",
+                "--no-failures",
+                "--no-task",
+                "--no-memory",
+                "Read the change",
+            ]);
+            let out = run_with_source(
+                "peer-ask",
+                &values,
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &stop,
+            );
+            assert_eq!(out.0, 0, "{mode}: {}", message(&out));
+            let events = fs::read_to_string(repo.0.join(".oms/lifecycle/events.jsonl")).unwrap();
+            let created = events
+                .lines()
+                .map(|line| V::parse(line.as_bytes()).unwrap())
+                .find(|event| {
+                    event.get("event_type").text() == Some("attempt.created")
+                        && event.get("tool").text() == Some("peer-ask")
+                })
+                .expect("advisory attempt.created event");
+            assert_eq!(created.get("task_id").text(), Some("ambient-task"));
+            assert_eq!(
+                created.get("parent_attempt_id").text(),
+                Some("att_main1234")
+            );
+            let refs = created.get("refs");
+            for (key, expected) in [
+                ("panel_model", Some("fixture")),
+                (
+                    "panel_role",
+                    Some(if populated { "worker" } else { "advisor" }),
+                ),
+                (
+                    "panel_label",
+                    Some(if populated {
+                        "builder test"
+                    } else {
+                        "peer-ask (claude)"
+                    }),
+                ),
+                (
+                    "panel_alias",
+                    Some(if populated {
+                        "builder-alias"
+                    } else {
+                        "claude-peer-ask"
+                    }),
+                ),
+                (
+                    "panel_access",
+                    if populated {
+                        Some("write")
+                    } else if panel {
+                        Some("read")
+                    } else {
+                        None
+                    },
+                ),
+                ("panel_owner", populated.then_some("antigravity")),
+                ("panel_purpose", populated.then_some("implement")),
+                ("panel_workload", populated.then_some("routine")),
+                ("panel_room_id", Some("room-1")),
+                ("panel_room_participant", populated.then_some("call-p1")),
+                ("panel_effort", None),
+                ("panel_strategy", None),
+                ("panel_lease_id", None),
+                ("panel_continues", None),
+            ] {
+                assert_eq!(refs.get(key).text(), expected, "{mode}: advisory {key}");
+            }
         },
     );
 }

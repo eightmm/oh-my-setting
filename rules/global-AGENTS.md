@@ -97,15 +97,23 @@ Default: concise, scoped, evidence-driven.
 
 ## Multi-Agent Work
 
-- Overall Main owns scope, admission, verification and publication. An explicitly
-  authorized Provider Lead may coordinate native subagents within inherited
-  scope, tool permissions, provider and spending limits. Leaf Workers cannot
-  recursively delegate or widen authority; a role label grants no capability.
+- Overall Main owns scope, admission, verification and publication. Running a
+  team (panel Main, control tower), it manages only and routes every repository
+  edit to a worker; a session without a team does its own work. An explicitly
+  authorized Provider Lead leads one assignment, coordinating native subagents
+  within inherited scope, tool permissions, provider and spending limits. Leaf
+  Workers cannot recursively delegate or widen authority; a role label grants no
+  capability.
 - Delegate when parallel work, independent review or noisy source reading
   justifies it within existing authority; keep small lookups local. Reading
   workers return coverage, gaps and source anchors; their parent checks decisive
   text. For authorized delegation, load `oms-agent-harness`.
 - Scope briefs; skip unchanged heartbeats, keep user updates.
+- Before substantive work, record every actionable deliverable from the user
+  cumulatively (scope, dependencies, completion, receipt) in the existing Room
+  note or Plan when available, else internal work state; recheck pending items
+  on each new message and on resume. Answer status questions separately. Keep
+  no raw user text; records grant no authority.
 
 ## Harness
 

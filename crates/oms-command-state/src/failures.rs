@@ -523,7 +523,7 @@ fn display(v: &Value) -> String {
     })
 }
 
-fn stalls(rows: &[Value], opts: &Options) -> Result<Output> {
+pub(crate) fn stall_findings(rows: &[Value]) -> Vec<Value> {
     let newest: Vec<_> = rows.iter().rev().take(20).collect();
     let mut findings = Vec::new();
     if let Some(last) = newest.first() {
@@ -548,6 +548,11 @@ fn stalls(rows: &[Value], opts: &Options) -> Result<Output> {
             ]));
         }
     }
+    findings
+}
+
+fn stalls(rows: &[Value], opts: &Options) -> Result<Output> {
+    let findings = stall_findings(rows);
     if opts.flag("json") {
         return json_output(
             0,

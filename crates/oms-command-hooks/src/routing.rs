@@ -188,6 +188,28 @@ pub(crate) fn plan_tasks(v: &Value) -> Vec<Value> {
             .collect()
     }
 }
+const INTAKE_REMINDER: &str = "[oms intake] Record each distinct actionable request with role, scope, and checks before dispatch (use OMS Room/Plan when available, or the existing task list when there is no Room/Plan; initializes no state). Skip pure status questions; never store raw prompts.";
+const OVERALL_MAIN_RELAY_PREFIX: &str =
+    "Task from Overall Main. Work within this task and report the result here.";
+pub(crate) fn intake_reminder(v: &Value) -> &'static str {
+    if delegate_child() || env("OMS_SKILL_ROUTER_OFF") == "1" {
+        return "";
+    }
+    match event(v) {
+        "UserPromptSubmit" => {
+            let prompt = text(v, "prompt");
+            if !prompt.chars().any(char::is_alphanumeric)
+                || automated_prompt(prompt)
+                || prompt.trim_start().starts_with(OVERALL_MAIN_RELAY_PREFIX)
+            {
+                return "";
+            }
+            INTAKE_REMINDER
+        }
+        "PreInvocation" if v["intake_eligible"].as_bool() == Some(true) => INTAKE_REMINDER,
+        _ => "",
+    }
+}
 fn skip(prompt: &str) -> bool {
     let p = prompt.trim();
     p.is_empty() || p.starts_with(['<', '/']) || p.chars().count() < 4
@@ -235,6 +257,7 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
         panel_hint(&v, &repo, ctx),
         collaboration(&v, &repo, ctx),
         relay_hint(&v, &repo, ctx),
+        intake_reminder(&v).to_owned(),
     ] {
         if !hint.is_empty() {
             output.push_str(&hint);

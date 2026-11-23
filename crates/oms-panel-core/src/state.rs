@@ -62,17 +62,23 @@ fn resolve_state_with(
         .state_repository(path, allow_foreign, &AtomicBool::new(false))
         .map_err(Error::new)
 }
+#[derive(Default)]
+struct CachedState {
+    attempts: Option<(String, Value)>,
+    dispatches: Option<(String, serde_json::Map<String, Value>)>,
+}
+
 // One projection per session bounds memory and prevents cross-repository reuse.
 #[derive(Default)]
-pub struct AttemptCache(Mutex<Option<(String, Value)>>);
+pub struct AttemptCache(Mutex<CachedState>);
 
-fn ledger_generation(repo: &Path) -> Option<String> {
+fn path_generation(repo: &Path, segments: &[(&str, bool)]) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     let root = std::fs::canonicalize(repo).ok()?;
     let mut path = root.clone();
     let root_meta = std::fs::metadata(&root).ok()?;
     let mut parts = vec![format!("{}:{}", root_meta.dev(), root_meta.ino())];
-    for (name, directory) in [(".oms", true), ("lifecycle", true), ("events.jsonl", false)] {
+    for &(name, directory) in segments {
         path.push(name);
         let m = std::fs::symlink_metadata(&path).ok()?;
         if m.file_type().is_symlink()
@@ -93,6 +99,74 @@ fn ledger_generation(repo: &Path) -> Option<String> {
         ));
     }
     Some(format!("{:?}|{}", root, parts.join("|")))
+}
+
+fn ledger_generation(repo: &Path) -> Option<String> {
+    path_generation(
+        repo,
+        &[(".oms", true), ("lifecycle", true), ("events.jsonl", false)],
+    )
+}
+
+fn dispatch_generation(repo: &Path) -> Option<String> {
+    path_generation(
+        repo,
+        &[
+            (".oms", true),
+            ("artifacts", true),
+            ("panel-dispatch", true),
+            ("reservations.json", false),
+        ],
+    )
+}
+
+fn read_dispatches(store: &Store) -> serde_json::Map<String, Value> {
+    let Some(raw) = store
+        .json(
+            Path::new(".oms/artifacts/panel-dispatch/reservations.json"),
+            crate::storage::MAX_STATE,
+            true,
+        )
+        .ok()
+        .flatten()
+    else {
+        return serde_json::Map::new();
+    };
+    if raw["schema"] != 1 {
+        return serde_json::Map::new();
+    }
+    let Some(calls) = raw["calls"].as_object() else {
+        return serde_json::Map::new();
+    };
+    let mut out = serde_json::Map::new();
+    for (member, entry) in calls {
+        if !entry.is_object() {
+            continue;
+        }
+        let route = &entry["route"];
+        out.insert(
+            member.clone(),
+            serde_json::json!({
+                "member": member,
+                "room": text(entry, "room"),
+                "task_id": text(entry, "task_id"),
+                "main": text(entry, "main"),
+                "main_attempt": text(entry, "main_attempt"),
+                "state": text(entry, "state"),
+                "exit": entry.get("exit").and_then(Value::as_i64),
+                "created_at": text(entry, "created_at"),
+                "route": {
+                    "access": text(route, "access"),
+                    "kind": text(route, "kind"),
+                    "role": text(route, "role"),
+                    "provider": text(route, "provider"),
+                    "model": text(route, "model"),
+                    "purpose": text(route, "purpose"),
+                }
+            }),
+        );
+    }
+    out
 }
 
 fn unique_attempt<'a>(attempts: &'a Value, attempt: &str) -> Option<&'a Value> {
@@ -116,7 +190,7 @@ impl AttemptCache {
             return None;
         }
         let cache = self.0.lock().ok()?;
-        let (generation, attempts) = cache.as_ref()?;
+        let (generation, attempts) = cache.attempts.as_ref()?;
         if ledger_generation(repo).as_ref() != Some(generation) {
             return None;
         }
@@ -138,13 +212,13 @@ impl AttemptCache {
         let before = ledger_generation(repo);
         if !stop.load(Ordering::Relaxed)
             && let Some(ref generation) = before
-            && let Some((key, value)) = cache.as_ref()
+            && let Some((key, value)) = cache.attempts.as_ref()
             && key == generation
             && ledger_generation(repo).as_ref() == Some(generation)
         {
             return Ok(value.clone());
         }
-        *cache = None;
+        cache.attempts = None;
         let attempts = query(
             service,
             NativeCommand::Events,
@@ -157,7 +231,7 @@ impl AttemptCache {
             && let Some(generation) = before
             && ledger_generation(repo).as_ref() == Some(&generation)
         {
-            *cache = Some((generation, attempts.clone()));
+            cache.attempts = Some((generation, attempts.clone()));
         }
         Ok(attempts)
     }
@@ -180,7 +254,7 @@ impl AttemptCache {
             .map_err(|_| Error::new("attempt cache unavailable"))?;
         let before = ledger_generation(repo);
         if let Some(ref generation) = before
-            && let Some((key, attempts)) = cache.as_ref()
+            && let Some((key, attempts)) = cache.attempts.as_ref()
             && key == generation
         {
             let selected = unique_attempt(attempts, attempt).cloned();
@@ -191,7 +265,7 @@ impl AttemptCache {
         }
         for _ in 0..2 {
             crate::checkpoint(stop)?;
-            *cache = None;
+            cache.attempts = None;
             let before = ledger_generation(repo);
             let attempts = query(
                 service,
@@ -205,15 +279,43 @@ impl AttemptCache {
             crate::checkpoint(stop)?;
             let after = ledger_generation(repo);
             if before != after {
-                *cache = None;
+                cache.attempts = None;
                 continue;
             }
             if let Some(generation) = after {
-                *cache = Some((generation, attempts));
+                cache.attempts = Some((generation, attempts));
             }
             return Ok(selected);
         }
         Err(Error::new("lifecycle ledger changed during verification"))
+    }
+
+    fn dispatches(
+        &self,
+        repo: &Path,
+        store: &Store,
+        stop: &AtomicBool,
+    ) -> serde_json::Map<String, Value> {
+        let Ok(mut cache) = self.0.lock() else {
+            return serde_json::Map::new();
+        };
+        let Some(before) = dispatch_generation(repo) else {
+            cache.dispatches = None;
+            return serde_json::Map::new();
+        };
+        if !stop.load(Ordering::Relaxed)
+            && let Some((key, map)) = cache.dispatches.as_ref()
+            && key == &before
+            && dispatch_generation(repo).as_ref() == Some(&before)
+        {
+            return map.clone();
+        }
+        cache.dispatches = None;
+        let map = read_dispatches(store);
+        if !stop.load(Ordering::Relaxed) && dispatch_generation(repo).as_ref() == Some(&before) {
+            cache.dispatches = Some((before, map.clone()));
+        }
+        map
     }
 }
 
@@ -238,9 +340,20 @@ pub fn snapshot_with_cache(
         && let Some(cache) = cache
         && let Ok(mut entry) = cache.0.lock()
     {
-        *entry = None;
+        entry.attempts = None;
+        entry.dispatches = None;
     }
     result
+}
+
+fn attempt_matches_room(rid: &str, main_attempt: &str, attempt: &Value) -> bool {
+    let refs = &attempt["refs"];
+    let rooms = [text(refs, "panel_room_id"), text(refs, "panel_room")];
+    if rooms.iter().any(|r| !r.is_empty() && r != rid) {
+        return false;
+    }
+    rooms.iter().any(|r| r == rid)
+        || (!main_attempt.is_empty() && text(attempt, "attempt_id") == main_attempt)
 }
 
 fn snapshot_inner(
@@ -285,29 +398,57 @@ fn snapshot_inner(
         .collect();
     let recent: Vec<_> = array(&attempts).iter().rev().take(100).cloned().collect();
     let mut room_attempts = serde_json::Map::new();
+    let mut room_dispatches = serde_json::Map::new();
     if let Some(rid) = room_id {
         let main_attempt = text(&room, "main");
         for attempt in array(&attempts) {
-            let refs = &attempt["refs"];
-            let att_room = text(refs, "panel_room_id");
-            let att_room_alt = text(refs, "panel_room");
+            if !attempt_matches_room(rid, &main_attempt, attempt) {
+                continue;
+            }
             let attempt_id = text(attempt, "attempt_id");
-            if att_room == rid
-                || att_room_alt == rid
-                || (!main_attempt.is_empty() && attempt_id == main_attempt)
-            {
-                if !attempt_id.is_empty() {
-                    room_attempts.insert(attempt_id, attempt.clone());
-                }
-                let participant = text(refs, "panel_room_participant");
-                if !participant.is_empty() {
+            if !attempt_id.is_empty() {
+                room_attempts.insert(attempt_id, attempt.clone());
+            }
+            let participant = text(&attempt["refs"], "panel_room_participant");
+            if !participant.is_empty() {
+                let replace = room_attempts.get(&participant).is_none_or(|prev| {
+                    // Participant aliases must never replace an exact attempt ID.
+                    text(prev, "attempt_id") != participant
+                        && (LIVE_STATES.contains(&text(attempt, "state").as_str())
+                            || !LIVE_STATES.contains(&text(prev, "state").as_str()))
+                });
+                if replace {
                     room_attempts.insert(participant, attempt.clone());
                 }
             }
         }
+        let enrolled: std::collections::BTreeSet<String> = array(&room["participants"])
+            .iter()
+            .map(|p| text(p, "participant"))
+            .filter(|id| !id.is_empty())
+            .collect();
+        let dispatches = if let Some(cache) = cache {
+            cache.dispatches(repo, &store, stop)
+        } else {
+            read_dispatches(&store)
+        };
+        for (member, entry) in dispatches {
+            if entry["room"] == rid && enrolled.contains(member.as_str()) {
+                room_dispatches.insert(member, entry);
+            }
+        }
     }
-    let report = serde_json::json!({"schema":1,"generated_at":crate::now(),"room":room,"plan":plan,
-        "attempts":{"active":active,"recent":recent},"room_attempts":room_attempts,"collection":{"ok":true},"capacity_stale":false});
+    let report = serde_json::json!({
+        "schema": 1,
+        "generated_at": crate::now(),
+        "room": room,
+        "plan": plan,
+        "attempts": {"active": active, "recent": recent},
+        "room_attempts": room_attempts,
+        "room_dispatches": room_dispatches,
+        "collection": {"ok": true},
+        "capacity_stale": false
+    });
     Ok(Snapshot { report, status: 0 })
 }
 /// Native mains join the room with their attempt id unless an explicit participant is recorded.
@@ -855,5 +996,619 @@ mod tests {
             .unwrap_err();
         assert!(err.message.contains("changed during verification"), "{err}");
         assert_eq!(service.calls.load(Ordering::Relaxed), 10);
+    }
+
+    struct SnapshotTestService {
+        events_calls: std::sync::atomic::AtomicUsize,
+        room_calls: std::sync::atomic::AtomicUsize,
+        attempts: Mutex<Value>,
+        room: Mutex<Value>,
+        room_error: Mutex<Option<String>>,
+    }
+
+    impl SnapshotTestService {
+        fn new(attempts: Value, room: Value) -> Self {
+            Self {
+                events_calls: std::sync::atomic::AtomicUsize::new(0),
+                room_calls: std::sync::atomic::AtomicUsize::new(0),
+                attempts: Mutex::new(attempts),
+                room: Mutex::new(room),
+                room_error: Mutex::new(None),
+            }
+        }
+    }
+
+    impl crate::services::PeerExecutor for SnapshotTestService {
+        fn execute(
+            &self,
+            _request: &crate::services::ExecutionRequest,
+            _interrupted: &AtomicBool,
+        ) -> Result<crate::services::CommandOutput> {
+            Err(Error::new("unexpected external process"))
+        }
+    }
+
+    impl Services for SnapshotTestService {
+        fn command(
+            &self,
+            command: NativeCommand,
+            _repo: &Path,
+            args: &[std::ffi::OsString],
+            _interrupted: &AtomicBool,
+        ) -> Result<crate::services::CommandOutput> {
+            match command {
+                NativeCommand::Events => {
+                    assert_eq!(args, ["list", "--json"]);
+                    self.events_calls.fetch_add(1, Ordering::Relaxed);
+                    let stdout = serde_json::to_vec(&*self.attempts.lock().unwrap()).unwrap();
+                    Ok(crate::services::CommandOutput {
+                        code: 0,
+                        stdout,
+                        stderr: Vec::new(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    })
+                }
+                NativeCommand::Room => {
+                    self.room_calls.fetch_add(1, Ordering::Relaxed);
+                    if let Some(msg) = self.room_error.lock().unwrap().as_ref() {
+                        return Ok(crate::services::CommandOutput {
+                            code: 2,
+                            stdout: Vec::new(),
+                            stderr: msg.as_bytes().to_vec(),
+                            cleanup_complete: true,
+                            output_complete: true,
+                            limited: false,
+                        });
+                    }
+                    let stdout = serde_json::to_vec(&*self.room.lock().unwrap()).unwrap();
+                    Ok(crate::services::CommandOutput {
+                        code: 0,
+                        stdout,
+                        stderr: Vec::new(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        limited: false,
+                    })
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn room_attempts_isolates_rooms_contradictory_refs_and_prefers_live_participant_attempts() {
+        let base = TempDir::new("room-attempts-isolation");
+        let repo = base.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let attempts = serde_json::json!([
+            {
+                "attempt_id": "att_main_clean",
+                "state": "working",
+                "refs": {}
+            },
+            {
+                "attempt_id": "att_main_foreign",
+                "state": "working",
+                "refs": {"panel_room_id": "room-other"}
+            },
+            {
+                "attempt_id": "att_room_id_only",
+                "state": "working",
+                "refs": {"panel_room_id": "room-a"}
+            },
+            {
+                "attempt_id": "att_room_alt_only",
+                "state": "done",
+                "refs": {"panel_room": "room-a"}
+            },
+            {
+                "attempt_id": "att_foreign_id",
+                "state": "working",
+                "refs": {"panel_room_id": "room-b"}
+            },
+            {
+                "attempt_id": "att_foreign_alt",
+                "state": "working",
+                "refs": {"panel_room": "room-b"}
+            },
+            {
+                "attempt_id": "att_contradict_1",
+                "state": "working",
+                "refs": {"panel_room_id": "room-a", "panel_room": "room-b"}
+            },
+            {
+                "attempt_id": "att_contradict_2",
+                "state": "working",
+                "refs": {"panel_room_id": "room-b", "panel_room": "room-a"}
+            },
+            {
+                "attempt_id": "att_p1_live",
+                "state": "working",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P1"}
+            },
+            {
+                "attempt_id": "att_p1_done",
+                "state": "done",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P1"}
+            },
+            {
+                "attempt_id": "att_p2_done",
+                "state": "failed",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P2"}
+            },
+            {
+                "attempt_id": "att_p2_live",
+                "state": "running",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P2"}
+            },
+            {
+                "attempt_id": "att_p3_1",
+                "state": "starting",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P3"}
+            },
+            {
+                "attempt_id": "att_p3_2",
+                "state": "working",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P3"}
+            },
+            {
+                "attempt_id": "att_p4_1",
+                "state": "failed",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P4"}
+            },
+            {
+                "attempt_id": "att_p4_2",
+                "state": "done",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "P4"}
+            }
+        ]);
+        let room = serde_json::json!({
+            "id": "room-a",
+            "main": "att_main_clean",
+            "participants": []
+        });
+        let service = SnapshotTestService::new(attempts, room);
+        let stop = AtomicBool::new(false);
+
+        let snap = snapshot(&repo, Some("room-a"), &service, &stop).unwrap();
+        let ra = snap.report["room_attempts"].as_object().unwrap();
+
+        assert!(ra.contains_key("att_main_clean"));
+        assert!(ra.contains_key("att_room_id_only"));
+        assert!(ra.contains_key("att_room_alt_only"));
+        assert!(!ra.contains_key("att_main_foreign"));
+        assert!(!ra.contains_key("att_foreign_id"));
+        assert!(!ra.contains_key("att_foreign_alt"));
+        assert!(!ra.contains_key("att_contradict_1"));
+        assert!(!ra.contains_key("att_contradict_2"));
+
+        // Distinct attempt_id entries are all retained for room-a.
+        for id in [
+            "att_p1_live",
+            "att_p1_done",
+            "att_p2_done",
+            "att_p2_live",
+            "att_p3_1",
+            "att_p3_2",
+            "att_p4_1",
+            "att_p4_2",
+        ] {
+            assert!(ra.contains_key(id), "missing attempt_id {id}");
+        }
+
+        // Participant key preserves live over terminal, and otherwise prefers latest matching state class.
+        assert_eq!(ra["P1"]["attempt_id"], "att_p1_live");
+        assert_eq!(ra["P2"]["attempt_id"], "att_p2_live");
+        assert_eq!(ra["P3"]["attempt_id"], "att_p3_2");
+        assert_eq!(ra["P4"]["attempt_id"], "att_p4_2");
+
+        // Even if room.main names att_main_foreign, its foreign panel_room_id ref disqualifies it.
+        *service.room.lock().unwrap() = serde_json::json!({
+            "id": "room-a",
+            "main": "att_main_foreign",
+            "participants": []
+        });
+        let snap2 = snapshot(&repo, Some("room-a"), &service, &stop).unwrap();
+        let ra2 = snap2.report["room_attempts"].as_object().unwrap();
+        assert!(!ra2.contains_key("att_main_foreign"));
+        assert!(!ra2.contains_key("att_main_clean"));
+    }
+
+    #[test]
+    fn room_attempts_exact_ids_win_over_live_participant_aliases_in_any_order() {
+        let base = TempDir::new("room-attempt-id-precedence");
+        let repo = base.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let main = serde_json::json!({
+            "attempt_id": "main-attempt", "tool": "panel-main", "state": "working",
+            "refs": {"panel_room_id": "room-a", "panel_room_participant": "main-attempt"}
+        });
+        let council = serde_json::json!({
+            "attempt_id": "council-attempt", "tool": "peer-council", "state": "queued",
+            "refs": {"panel_room_id": "room-a", "panel_room_participant": "main-attempt"}
+        });
+        let returned = serde_json::json!({
+            "attempt_id": "returned-attempt", "state": "done",
+            "refs": {"panel_room_id": "room-a", "panel_room_participant": "council-attempt"}
+        });
+        let orphan = serde_json::json!({
+            "attempt_id": "orphan-attempt", "state": "working",
+            "refs": {"panel_room_id": "room-a"}
+        });
+        let foreign = serde_json::json!({
+            "attempt_id": "foreign-attempt", "state": "running",
+            "refs": {"panel_room_id": "room-other", "panel_room_participant": "main-attempt"}
+        });
+        let room = serde_json::json!({
+            "id": "room-a", "main": "main-attempt",
+            "participants": [{"participant": "main-attempt", "role": "main"}]
+        });
+        let service = SnapshotTestService::new(serde_json::json!([]), room);
+        let stop = AtomicBool::new(false);
+        let rows = [&main, &council, &returned];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            *service.attempts.lock().unwrap() = serde_json::json!([
+                rows[order[0]],
+                rows[order[1]],
+                rows[order[2]],
+                orphan,
+                foreign
+            ]);
+            let report = snapshot(&repo, Some("room-a"), &service, &stop)
+                .unwrap()
+                .report;
+            let attempts = &report["room_attempts"];
+            for expected in [&main, &council, &returned, &orphan] {
+                assert_eq!(
+                    &attempts[text(expected, "attempt_id")],
+                    expected,
+                    "iteration order: {order:?}"
+                );
+            }
+            assert_eq!(attempts.as_object().unwrap().len(), 4);
+            assert!(attempts.get("foreign-attempt").is_none());
+        }
+    }
+
+    #[test]
+    fn room_dispatches_projects_scoped_compact_entries_caches_and_rejects_symlinks() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let base = TempDir::new("room-dispatches-scope");
+        let repo = base.0.join("repo");
+        let lifecycle = repo.join(".oms/lifecycle");
+        let dispatch_dir = repo.join(".oms/artifacts/panel-dispatch");
+        std::fs::create_dir_all(&lifecycle).unwrap();
+        std::fs::create_dir_all(&dispatch_dir).unwrap();
+        std::fs::write(lifecycle.join("events.jsonl"), b"").unwrap();
+        let reservations = dispatch_dir.join("reservations.json");
+
+        let attempts = serde_json::json!([
+            {
+                "attempt_id": "att_main",
+                "state": "working",
+                "refs": {"panel_room_id": "room-a", "panel_room_participant": "main-codex"}
+            }
+        ]);
+        let room = serde_json::json!({
+            "id": "room-a",
+            "main": "att_main",
+            "participants": [
+                {"participant": "main-codex", "role": "main", "joined": true},
+                {"participant": "call-enrolled", "role": "builder", "joined": true},
+                {"participant": "call-reserved", "role": "reviewer", "joined": false},
+                {"participant": "call-foreign-member", "role": "worker", "joined": true}
+            ]
+        });
+        let service = SnapshotTestService::new(attempts, room);
+        let cache = AttemptCache::default();
+        let stop = AtomicBool::new(false);
+
+        // Missing reservations.json yields empty room_dispatches without error.
+        let initial =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(initial.report["room_dispatches"], serde_json::json!({}));
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+
+        let full_registry = serde_json::json!({
+            "schema": 1,
+            "calls": {
+                "call-enrolled": {
+                    "schema": 2,
+                    "member": "call-enrolled",
+                    "room": "room-a",
+                    "task_id": "T1",
+                    "main": "main-codex",
+                    "main_attempt": "att_main",
+                    "state": "awaiting",
+                    "exit": 0,
+                    "created_at": "2026-11-22T00:00:00Z",
+                    "physical": {"pid": 4242, "raw": "bulky"},
+                    "scopes": ["crates/oms-panel-core/src/state.rs"],
+                    "execution_repo": "/tmp/exec-repo",
+                    "route": {
+                        "access": "write",
+                        "kind": "delegate",
+                        "role": "builder",
+                        "provider": "codex",
+                        "model": "gpt-5.4",
+                        "purpose": "implement",
+                        "owner": "codex",
+                        "workload": "medium",
+                        "snapshot": {"schema": 1, "catalog": {"probe": [1, 2, 3]}}
+                    }
+                },
+                "call-reserved": {
+                    "schema": 2,
+                    "member": "call-reserved",
+                    "room": "room-a",
+                    "task_id": "T2",
+                    "main": "main-codex",
+                    "main_attempt": "att_main",
+                    "state": "reserved",
+                    "created_at": "2026-11-22T00:00:01Z",
+                    "route": {
+                        "access": "read",
+                        "kind": "review",
+                        "role": "reviewer",
+                        "provider": "claude",
+                        "model": "sonnet",
+                        "purpose": "verify",
+                        "snapshot": {"schema": 1}
+                    }
+                },
+                "call-unjoined-orphan": {
+                    "schema": 2,
+                    "member": "call-unjoined-orphan",
+                    "room": "room-a",
+                    "task_id": "T3",
+                    "main": "main-codex",
+                    "main_attempt": "att_main",
+                    "state": "reserved",
+                    "created_at": "2026-11-22T00:00:02Z",
+                    "route": {
+                        "access": "write",
+                        "kind": "delegate",
+                        "role": "worker",
+                        "provider": "codex",
+                        "model": "gpt-5.4",
+                        "purpose": "orphan"
+                    }
+                },
+                "call-foreign-member": {
+                    "schema": 2,
+                    "member": "call-foreign-member",
+                    "room": "room-b",
+                    "task_id": "T4",
+                    "main": "main-claude",
+                    "main_attempt": "att_other",
+                    "state": "working",
+                    "created_at": "2026-11-22T00:00:03Z",
+                    "route": {
+                        "access": "write",
+                        "kind": "delegate",
+                        "role": "worker",
+                        "provider": "claude",
+                        "model": "sonnet",
+                        "purpose": "foreign"
+                    }
+                }
+            }
+        });
+        let raw_bytes = serde_json::to_string(&full_registry).unwrap();
+        std::fs::write(&reservations, &raw_bytes).unwrap();
+
+        let populated =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+        let rd = populated.report["room_dispatches"].as_object().unwrap();
+        assert_eq!(rd.len(), 2);
+        assert!(!rd.contains_key("call-unjoined-orphan"));
+        assert!(!rd.contains_key("call-foreign-member"));
+        assert_eq!(
+            rd["call-enrolled"],
+            serde_json::json!({
+                "member": "call-enrolled",
+                "room": "room-a",
+                "task_id": "T1",
+                "main": "main-codex",
+                "main_attempt": "att_main",
+                "state": "awaiting",
+                "exit": 0,
+                "created_at": "2026-11-22T00:00:00Z",
+                "route": {
+                    "access": "write",
+                    "kind": "delegate",
+                    "role": "builder",
+                    "provider": "codex",
+                    "model": "gpt-5.4",
+                    "purpose": "implement"
+                }
+            })
+        );
+        assert_eq!(rd["call-reserved"]["state"], "reserved");
+        assert_eq!(rd["call-reserved"].get("exit"), Some(&Value::Null));
+        assert!(rd["call-reserved"]["route"].get("snapshot").is_none());
+
+        // Unchanged refresh keeps 0 extra Events calls and returns identical room_dispatches.
+        let again =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            again.report["room_dispatches"],
+            populated.report["room_dispatches"]
+        );
+
+        // Updating reservations.json refreshes room_dispatches without invalidating attempts cache.
+        let mut updated_registry = full_registry.clone();
+        updated_registry["calls"]["call-reserved"]["state"] = "awaiting".into();
+        updated_registry["calls"]["call-reserved"]["exit"] = 0.into();
+        let updated_bytes = serde_json::to_string(&updated_registry).unwrap();
+        std::fs::write(&reservations, &updated_bytes).unwrap();
+        let refreshed =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            refreshed.report["room_dispatches"]["call-reserved"]["state"],
+            "awaiting"
+        );
+        assert_eq!(
+            refreshed.report["room_dispatches"]["call-reserved"]["exit"],
+            0
+        );
+
+        // Atomic rename with IDENTICAL byte length (same size, changed inode) refreshes dispatches.
+        let pre_meta = std::fs::metadata(&reservations).unwrap();
+        let same_size_bytes = updated_bytes
+            .replacen("\"state\":\"awaiting\"", "\"state\":\"unknown\"", 1)
+            .replacen("\"purpose\":\"implement\"", "\"purpose\":\"implement1\"", 1);
+        assert_eq!(same_size_bytes.len(), updated_bytes.len());
+        let staging = dispatch_dir.join("reservations.json.tmp");
+        std::fs::write(&staging, &same_size_bytes).unwrap();
+        std::fs::rename(&staging, &reservations).unwrap();
+        let post_meta = std::fs::metadata(&reservations).unwrap();
+        assert_eq!(post_meta.size(), pre_meta.size());
+        assert_ne!(post_meta.ino(), pre_meta.ino());
+        let renamed =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            renamed.report["room_dispatches"]["call-enrolled"]["state"],
+            "unknown"
+        );
+
+        // Corrupt JSON, wrong schema, and non-object calls fail gracefully to empty room_dispatches.
+        for bad in [
+            b"{corrupt".as_slice(),
+            br#"{"schema":2,"calls":{}}"#.as_slice(),
+            br#"{"schema":1,"calls":[]}"#.as_slice(),
+        ] {
+            std::fs::write(&reservations, bad).unwrap();
+            let graceful =
+                snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+            assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(graceful.report["room_dispatches"], serde_json::json!({}));
+        }
+
+        // Symlinked reservations.json fails closed and clears any prior cached dispatches.
+        std::fs::write(&reservations, &raw_bytes).unwrap();
+        let warm =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(warm.report["room_dispatches"].as_object().unwrap().len(), 2);
+        let decoy_file = dispatch_dir.join("decoy.json");
+        std::fs::write(&decoy_file, &raw_bytes).unwrap();
+        std::fs::remove_file(&reservations).unwrap();
+        symlink(&decoy_file, &reservations).unwrap();
+        let sym_file =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_file.report["room_dispatches"], serde_json::json!({}));
+        std::fs::remove_file(&reservations).unwrap();
+
+        // Deleted reservations.json clears prior cached dispatches.
+        std::fs::write(&reservations, &raw_bytes).unwrap();
+        assert_eq!(
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache))
+                .unwrap()
+                .report["room_dispatches"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_file(&reservations).unwrap();
+        let deleted =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(deleted.report["room_dispatches"], serde_json::json!({}));
+
+        // Symlinked panel-dispatch directory fails closed without reading decoy reservations.json.
+        let decoy_dir = repo.join(".oms/artifacts/decoy-dispatch");
+        std::fs::create_dir_all(&decoy_dir).unwrap();
+        std::fs::write(decoy_dir.join("reservations.json"), &raw_bytes).unwrap();
+        std::fs::remove_dir_all(&dispatch_dir).unwrap();
+        symlink(&decoy_dir, &dispatch_dir).unwrap();
+        let sym_dir =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(sym_dir.report["room_dispatches"], serde_json::json!({}));
+        std::fs::remove_file(&dispatch_dir).unwrap();
+
+        // Snapshot error clears cached attempts and dispatches.
+        std::fs::create_dir_all(&dispatch_dir).unwrap();
+        std::fs::write(&reservations, &raw_bytes).unwrap();
+        assert_eq!(
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache))
+                .unwrap()
+                .report["room_dispatches"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        {
+            let guard = cache.0.lock().unwrap();
+            let (cached_gen, cached_map) = guard.dispatches.as_ref().unwrap();
+            assert_eq!(Some(cached_gen), dispatch_generation(&repo).as_ref());
+            assert_eq!(cached_map.len(), 4);
+            assert!(cached_map["call-enrolled"].get("physical").is_none());
+            assert!(
+                cached_map["call-enrolled"]["route"]
+                    .get("snapshot")
+                    .is_none()
+            );
+        }
+        *service.room_error.lock().unwrap() = Some("room unavailable".into());
+        assert!(snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).is_err());
+        {
+            let guard = cache.0.lock().unwrap();
+            assert!(guard.attempts.is_none());
+            assert!(guard.dispatches.is_none());
+        }
+        *service.room_error.lock().unwrap() = None;
+        let recovered =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            recovered.report["room_dispatches"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Hardlinked reservations.json (nlink != 1) fails closed and clears cached dispatches.
+        let hardlink = dispatch_dir.join("hardlink.json");
+        std::fs::hard_link(&reservations, &hardlink).unwrap();
+        let linked =
+            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        assert_eq!(linked.report["room_dispatches"], serde_json::json!({}));
+        assert!(cache.0.lock().unwrap().dispatches.is_none());
+        let uncached_linked = snapshot(&repo, Some("room-a"), &service, &stop).unwrap();
+        assert_eq!(
+            uncached_linked.report["room_dispatches"],
+            serde_json::json!({})
+        );
+        std::fs::remove_file(&hardlink).unwrap();
+
+        // Uncached snapshot projects identically and returns empty maps when room_id is None.
+        let uncached = snapshot(&repo, Some("room-a"), &service, &stop).unwrap();
+        assert_eq!(
+            uncached.report["room_dispatches"],
+            recovered.report["room_dispatches"]
+        );
+        let no_room = snapshot(&repo, None, &service, &stop).unwrap();
+        assert_eq!(no_room.report["room_attempts"], serde_json::json!({}));
+        assert_eq!(no_room.report["room_dispatches"], serde_json::json!({}));
     }
 }

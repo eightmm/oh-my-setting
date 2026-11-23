@@ -1,8 +1,9 @@
 # Worker Roles
 
 Use one strategy role per leaf Worker. Overall Main and Provider Lead authority
-comes from the assignment. Resolve project override, then global override,
-then bundled default:
+comes from the assignment; what each layer manages, integrates and produces is
+in [coordination-layers.md](coordination-layers.md). Resolve project override,
+then global override, then bundled default:
 
 ```bash
 oms agent-role --repo . --name repo-auditor resolve
@@ -13,11 +14,16 @@ Standard roles: `repo-auditor`, `implementation-worker`, `test-designer`,
 native subagent brief; the parent still supplies task, paths, constraints,
 success criteria, and expected output.
 
-`oms agent-role --provider claude|codex --name NAME render` prints a native
-subagent definition (Claude `.claude/agents/` markdown, Codex `.codex/agents/`
-TOML) to stdout from the same role file: name `oms-NAME`, model and effort from
-the role's tier in `config/panel-routing.json`, read-only tools or sandbox
-unless the bundled role is a write role (overrides always render read-only).
+`oms agent-role --provider claude|codex|antigravity --name NAME render` prints
+a native subagent definition (Claude `.claude/agents/` markdown, Codex
+`.codex/agents/` TOML, Antigravity `.agents/agents/` markdown) to stdout from
+the same role file. The rendered name is `oms-NAME`. Claude and Codex model
+and effort come from the role's tier in `config/panel-routing.json`. Antigravity
+renders `mainAgent: false`, `subagent: true`, and `model: inherit`.
+Antigravity read-only profiles allow `view_file` and `grep_search` with
+`commandExecutionPolicy: off`. Bundled write roles add `replace_file_content`,
+`write_to_file`, and `run_command` under `commandExecutionPolicy: sandbox`.
+Local and global overrides render read-only for all three providers.
 The command prints the definition without writing or installing it. A rendered
 access setting expresses the requested boundary. Codex native children inherit
 the parent's sandbox and approval settings, so verify the effective permissions
@@ -143,7 +149,8 @@ For panel tasks, choose the role from source evidence: security-auditor for
 risky authentication, permissions, sensitive data, signals, install, deletion,
 destructive operations, scripts or hooks; verifier before declaring completion
 (original request against final result); architect for structural decisions;
-integrator for merging/conflicts; performance-engineer when measurement is
+integrator for merging/conflicts (a panel Main routes these edits here instead
+of making them); performance-engineer when measurement is
 needed; documenter at completion; release-engineer for deployment. Use each
 when its trigger applies, one at a time, rather than invoking every specialty.
 

@@ -17,9 +17,10 @@ it becomes eligible for provider context only after acceptance.
 `owns`, `usage`, `run_with_services`, and `run_with_io` cover `path`, `init`,
 `show`, `context`, `status`, `update`, `append`, `verify`, `rotate`, and `close`.
 `src/usage.txt` retains every option in `scripts/agent-task.sh`'s usage,
-including status JSON, stdin append, source-session hashes, all loop fields,
-goal-replacement consent and verification skip reasons. `run` is a read-only
-convenience: mutation requires the real injected services.
+including status JSON, stdin append, source-session hashes, same-repository
+`--issue` binding, all loop fields, goal-replacement consent and verification
+skip reasons. `run` is a read-only convenience: mutation requires the real
+injected services.
 
 The implementation follows `scripts/agent-task.sh` and
 `scripts/lib/agent-task-common.sh`; durable writers use the exact level-two

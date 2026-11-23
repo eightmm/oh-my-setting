@@ -189,6 +189,282 @@ fn child_test(name: &str) -> bool {
 }
 
 #[test]
+fn benchmark_compare_keeps_unmeasured_outcomes_unknown() {
+    if child_test("benchmark_compare_keeps_unmeasured_outcomes_unknown") {
+        return;
+    }
+    let f = Fixture::new();
+    let json = |args: &[&str]| -> serde_json::Value {
+        let response = f.run(args, false);
+        assert_eq!(
+            response.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&response.stderr)
+        );
+        serde_json::from_slice(&response.stdout).unwrap()
+    };
+    let empty = json(&["benchmark", "show"]);
+    assert_eq!(empty["manual_outcomes"]["count"], 0);
+    assert_eq!(empty["skill_evals"]["count"], 0);
+    assert_eq!(empty["unknown_metrics"].as_array().unwrap().len(), 5);
+    json(&[
+        "benchmark",
+        "record",
+        "--task-id",
+        "task-zero",
+        "--status",
+        "verified",
+        "--human-corrections",
+        "0",
+    ]);
+    let observed_zero = json(&["benchmark", "show"]);
+    assert_eq!(observed_zero["manual_outcomes"]["count"], 1);
+    assert_eq!(observed_zero["unknown_metrics"], serde_json::json!([]));
+    let report = json(&[
+        "benchmark",
+        "compare",
+        &empty.to_string(),
+        &observed_zero.to_string(),
+    ]);
+    for change in report["changes"].as_array().unwrap() {
+        let field = change["field"].as_str().unwrap();
+        if field.starts_with("manual_outcomes.") || field == "skill_evals.task_pass_delta_sum" {
+            assert_eq!(change["left"], 0);
+            assert_eq!(change["right"], 0);
+            assert!(change["delta"].is_null(), "{change}");
+            assert!(change["reason"].as_str().is_some_and(|s| !s.is_empty()));
+        }
+    }
+    json(&[
+        "benchmark",
+        "record",
+        "--task-id",
+        "task-corrections",
+        "--status",
+        "verified",
+        "--human-corrections",
+        "3",
+    ]);
+    let observed_later = json(&["benchmark", "show"]);
+    assert_eq!(observed_later["manual_outcomes"]["count"], 2);
+    let report = json(&[
+        "benchmark",
+        "compare",
+        &observed_zero.to_string(),
+        &observed_later.to_string(),
+    ]);
+    for change in report["changes"].as_array().unwrap() {
+        let field = change["field"].as_str().unwrap();
+        if field.starts_with("manual_outcomes.") {
+            let expected = if field.ends_with("human_corrections") {
+                3
+            } else {
+                0
+            };
+            assert_eq!(change["delta"], expected, "{change}");
+            assert!(change.get("reason").is_none());
+        }
+    }
+}
+
+#[test]
+fn benchmark_compare_requires_known_basis_and_metric_coverage() {
+    if child_test("benchmark_compare_requires_known_basis_and_metric_coverage") {
+        return;
+    }
+    let f = Fixture::new();
+    let compare = |left: &serde_json::Value, right: &serde_json::Value| -> serde_json::Value {
+        let response = f.run(
+            &[
+                "benchmark",
+                "compare",
+                &left.to_string(),
+                &right.to_string(),
+            ],
+            false,
+        );
+        assert_eq!(
+            response.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&response.stderr)
+        );
+        serde_json::from_slice(&response.stdout).unwrap()
+    };
+    let observed = serde_json::json!({
+        "schema": 1, "measurement_basis": "provider-calls/explicit-verification-v1",
+        "success_rate": 0.25, "decided_outcomes": 1,
+        "tokens": {"count": 1, "sum": 10}, "cost_usd": {"count": 1, "sum": 0},
+        "duration_seconds": {"count": 1, "sum": 2},
+        "skill_evals": {"count": 1, "task_pass_delta_sum": 0},
+        "manual_outcomes": {"count": 1, "totals": {
+            "human_corrections": 0, "escaped_defects": 0, "reverted_lines": 0,
+            "false_refusals": 0, "duplicate_work": 0
+        }},
+        "unknown_metrics": [], "acceptance": {"coverage": 0.5, "risk_score": 0},
+        "context": {"selected_bytes_mean": 10}
+    });
+    let mut later = observed.clone();
+    later["decided_outcomes"] = 2.into();
+    later["success_rate"] = 0.5.into();
+    for metric in [
+        "tokens",
+        "cost_usd",
+        "duration_seconds",
+        "skill_evals",
+        "manual_outcomes",
+    ] {
+        later[metric]["count"] = 2.into();
+    }
+    later["tokens"]["sum"] = 12.into();
+    later["duration_seconds"]["sum"] = 4.into();
+    later["acceptance"]["coverage"] = 0.75.into();
+    later["context"]["selected_bytes_mean"] = 8.into();
+
+    fn change<'a>(report: &'a serde_json::Value, field: &str) -> &'a serde_json::Value {
+        report["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["field"] == field)
+            .unwrap()
+    }
+    fn held(
+        report: &serde_json::Value,
+        left: &serde_json::Value,
+        right: &serde_json::Value,
+        fields: &[&str],
+    ) {
+        for field in fields {
+            let item = change(report, field);
+            let path = format!("/{}", field.replace('.', "/"));
+            assert_eq!(&item["left"], left.pointer(&path).unwrap(), "{field}");
+            assert_eq!(&item["right"], right.pointer(&path).unwrap(), "{field}");
+            assert!(item["delta"].is_null(), "{item}");
+            assert!(
+                item["reason"].as_str().is_some_and(|s| !s.is_empty()),
+                "{item}"
+            );
+        }
+        assert_eq!(change(report, "acceptance.coverage")["delta"], 0.25);
+        assert_eq!(change(report, "context.selected_bytes_mean")["delta"], -2);
+    }
+    fn replace(value: &mut serde_json::Value, path: &str, replacement: Option<&serde_json::Value>) {
+        let (parent, key) = path.rsplit_once('/').unwrap();
+        let object = value.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+        if let Some(replacement) = replacement {
+            object.insert(key.into(), replacement.clone());
+        } else {
+            object.remove(key);
+        }
+    }
+    let report = compare(&observed, &later);
+    assert_eq!(report["schema"], 1);
+    for (field, expected) in [
+        ("success_rate", 0.25),
+        ("tokens.sum", 2.0),
+        ("cost_usd.sum", 0.0),
+        ("duration_seconds.sum", 2.0),
+        ("skill_evals.task_pass_delta_sum", 0.0),
+    ] {
+        let item = change(&report, field);
+        assert_eq!(item["delta"].as_f64(), Some(expected), "{item}");
+        assert!(item.get("reason").is_none());
+    }
+    let basis_fields = [
+        "success_rate",
+        "tokens.sum",
+        "cost_usd.sum",
+        "duration_seconds.sum",
+    ];
+    for basis in [
+        None,
+        Some(serde_json::json!(null)),
+        Some(serde_json::json!("")),
+        Some(serde_json::json!("unknown")),
+        Some(serde_json::json!("provider-calls/explicit-verification-v2")),
+        Some(serde_json::json!({})),
+        Some(serde_json::json!(true)),
+        Some(serde_json::json!(1)),
+    ] {
+        for sides in ["both", "left", "right"] {
+            let mut left = observed.clone();
+            let mut right = later.clone();
+            if sides != "right" {
+                replace(&mut left, "/measurement_basis", basis.as_ref());
+            }
+            if sides != "left" {
+                replace(&mut right, "/measurement_basis", basis.as_ref());
+            }
+            held(&compare(&left, &right), &left, &right, &basis_fields);
+        }
+    }
+    let manual_fields = [
+        "manual_outcomes.totals.human_corrections",
+        "manual_outcomes.totals.escaped_defects",
+        "manual_outcomes.totals.reverted_lines",
+        "manual_outcomes.totals.false_refusals",
+        "manual_outcomes.totals.duplicate_work",
+    ];
+    let coverage: &[(&str, &[&str])] = &[
+        ("/decided_outcomes", &["success_rate"]),
+        ("/tokens/count", &["tokens.sum"]),
+        ("/cost_usd/count", &["cost_usd.sum"]),
+        ("/duration_seconds/count", &["duration_seconds.sum"]),
+        ("/skill_evals/count", &["skill_evals.task_pass_delta_sum"]),
+        ("/manual_outcomes/count", &manual_fields),
+    ];
+    for (path, fields) in coverage {
+        for count in [
+            None,
+            Some(serde_json::json!(null)),
+            Some(serde_json::json!(0)),
+            Some(serde_json::json!(-1)),
+            Some(serde_json::json!(1.5)),
+            Some(serde_json::json!("1")),
+            Some(serde_json::json!(true)),
+        ] {
+            for left_side in [true, false] {
+                let mut left = observed.clone();
+                let mut right = later.clone();
+                replace(
+                    if left_side { &mut left } else { &mut right },
+                    path,
+                    count.as_ref(),
+                );
+                held(&compare(&left, &right), &left, &right, fields);
+            }
+        }
+    }
+    let mut candidate_only = observed.clone();
+    candidate_only["skill_evals"] = serde_json::json!({
+        "count": 0, "task_pass_delta_sum": 0, "candidate_count": 1, "candidate_task_pass_delta_sum": 3
+    });
+    held(
+        &compare(&candidate_only, &later),
+        &candidate_only,
+        &later,
+        &["skill_evals.task_pass_delta_sum"],
+    );
+    for unknown in [
+        None,
+        Some(serde_json::json!(null)),
+        Some(serde_json::json!({})),
+        Some(serde_json::json!([null])),
+    ] {
+        let mut left = observed.clone();
+        replace(&mut left, "/unknown_metrics", unknown.as_ref());
+        held(&compare(&left, &later), &left, &later, &manual_fields);
+    }
+    let mut left = observed.clone();
+    left["unknown_metrics"] = serde_json::json!(["human_corrections"]);
+    let report = compare(&left, &later);
+    held(&report, &left, &later, &[manual_fields[0]]);
+    assert_eq!(change(&report, manual_fields[1])["delta"], 0);
+}
+
+#[test]
 fn context_keeps_cached_memory_summary_explicit() {
     if child_test("context_keeps_cached_memory_summary_explicit") {
         return;

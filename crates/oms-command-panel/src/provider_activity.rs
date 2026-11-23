@@ -46,7 +46,10 @@ pub(crate) fn native_activity(provider: &str, screen: &str) -> Option<NativeActi
     let above = 'above: {
         let mut skipped = 0;
         for line in lines[..prompt].iter().rev().filter(|l| !l.is_empty()) {
-            if rule(line) || line.trim_start().starts_with("└ Tip:") {
+            if rule(line)
+                || line.trim_start().starts_with("└ Tip:")
+                || (provider == "claude" && claude_update_advisory(line))
+            {
                 skipped += 1;
                 if skipped > 4 {
                     break 'above None;
@@ -68,6 +71,7 @@ pub(crate) fn native_activity(provider: &str, screen: &str) -> Option<NativeActi
                 agy_child(&chrome[i])
                     || (agy_timer(&chrome[i]) && chrome.get(i + 1).is_some_and(|l| agy_child(l)))
             })
+            || agy_intact_bare_child(&lines[prompt..])
     };
     if provider == "claude" && claude_advisory_wait(screen, &lines, prompt) {
         return Some(NativeActivity::AgentWait);
@@ -218,6 +222,149 @@ fn ascii_counter(digits: &str, limit: usize) -> Option<u16> {
     digits.parse().ok()
 }
 
+fn claude_update_advisory(line: &str) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    line.len() - trimmed.len() >= 2
+        && trimmed.len() <= 80
+        && !trimmed.chars().any(char::is_control)
+        && trimmed
+            .strip_prefix("✔ Update installed · ")
+            .is_some_and(|rest| !rest.is_empty())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ClaudeRosterRow {
+    pub(crate) slug: String,
+    pub(crate) title: String,
+    pub(crate) state: &'static str,
+}
+
+pub(crate) const CLAUDE_ROSTER_LIMIT: usize = 6;
+
+/// Read structurally validated Claude background-agent rows from the current
+/// prompt footer chrome. Display-only: never grants transcript or detail access.
+pub(crate) fn claude_roster(screen: &str) -> Vec<ClaudeRosterRow> {
+    if screen.len() > 128 * 1024 {
+        return vec![];
+    }
+    let lines: Vec<String> = screen
+        .lines()
+        .map(|line| strip_sgr(line).trim_end().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let Some(newest) = lines.iter().rposition(|line| line.starts_with('❯')) else {
+        return vec![];
+    };
+    if lines[newest] != "❯" {
+        return vec![];
+    }
+    let [lower, hud, mode, main, workers @ ..] = &lines[newest + 1..] else {
+        return vec![];
+    };
+    let lower_ok = lower.len() >= "───".len() && lower.chars().all(|c| c == '─');
+    let hud_ok = hud.starts_with("  ")
+        && hud.len() <= 512
+        && !hud.chars().any(char::is_control)
+        && hud.contains(" | ctx [");
+    let mode_ok = mode.starts_with("  -- INSERT -- ⏵⏵")
+        && mode.len() <= 512
+        && !mode.chars().any(char::is_control)
+        && mode
+            .split_once(" · ← ")
+            .is_some_and(|(_, tail)| tail.contains(" agent"));
+    if !lower_ok
+        || !hud_ok
+        || !mode_ok
+        || main != "  ● main"
+        || workers.is_empty()
+        || workers.len() > 8
+    {
+        return vec![];
+    }
+    let Some(rows) = workers
+        .iter()
+        .map(|line| claude_roster_row(line))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return vec![];
+    };
+    rows.into_iter().take(CLAUDE_ROSTER_LIMIT).collect()
+}
+
+const CLAUDE_ROSTER_ROW_MAX_BYTES: usize = 2048;
+
+fn claude_roster_row(line: &str) -> Option<ClaudeRosterRow> {
+    if line.len() > CLAUDE_ROSTER_ROW_MAX_BYTES || line.chars().any(char::is_control) {
+        return None;
+    }
+    let body = line.strip_prefix("  ◯ ")?;
+    let (slug, after_slug) = body.split_once(' ')?;
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug.as_bytes()[0].is_ascii_alphabetic()
+        || !slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    let (title_raw, tail) = after_slug.trim_start_matches(' ').rsplit_once("  ")?;
+    let title = title_raw.trim_end_matches(' ');
+    if title.trim().is_empty() || title.len() > 160 {
+        return None;
+    }
+    let state = claude_roster_state(tail)?;
+    let title = oms_panel_core::redact(title.as_bytes()).ok()?;
+    Some(ClaudeRosterRow {
+        slug: slug.to_owned(),
+        title,
+        state,
+    })
+}
+
+fn claude_roster_state(tail: &str) -> Option<&'static str> {
+    if tail == "idle" {
+        return Some("unknown");
+    }
+    if let Some((elapsed, rest)) = tail.split_once(" · ↓ ") {
+        let tokens = rest.strip_suffix(" tokens")?;
+        return (claude_roster_elapsed(elapsed) && claude_roster_tokens(tokens))
+            .then_some("working");
+    }
+    claude_roster_elapsed(tail).then_some("working")
+}
+
+fn claude_roster_elapsed(elapsed: &str) -> bool {
+    let Some(rest) = elapsed.strip_suffix('s') else {
+        return false;
+    };
+    let (hours, rest) = rest
+        .split_once("h ")
+        .map_or((None, rest), |(h, r)| (Some(h), r));
+    let (minutes, seconds) = rest
+        .split_once("m ")
+        .map_or((None, rest), |(m, s)| (Some(m), s));
+    hours.is_none_or(|h| ascii_counter(h, 3).is_some())
+        && minutes.is_none_or(|m| ascii_counter(m, 3).is_some())
+        && ascii_counter(seconds, 2).is_some_and(|s| s < 60)
+}
+
+fn claude_roster_tokens(tokens: &str) -> bool {
+    let num = tokens.strip_suffix(['k', 'm']).unwrap_or(tokens);
+    if num.is_empty() || num.len() > 12 {
+        return false;
+    }
+    match num.split_once('.') {
+        Some((whole, frac)) => {
+            !whole.is_empty()
+                && !frac.is_empty()
+                && whole.bytes().all(|b| b.is_ascii_digit())
+                && frac.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => num.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
 const CODEX_BACKGROUND_SUFFIX: &str =
     " · 1 background terminal running · /ps to view · /stop to close";
 
@@ -285,10 +432,10 @@ fn agy_status(l: &str) -> bool {
 }
 
 fn agy_child(l: &str) -> bool {
-    agy_child_fields(l).is_some()
+    agy_child_fields(l, false).is_some()
 }
 
-fn agy_child_fields(l: &str) -> Option<(&str, &str, &str)> {
+fn agy_child_fields(l: &str, allow_bare: bool) -> Option<(&str, &str, &str)> {
     let (head, rest) = l.strip_prefix("  ● Agent(")?.split_once(") · ")?;
     let (model, activity) = rest.split_once("  ")?;
     let (kind, label) = head.split_once(": ")?;
@@ -298,7 +445,8 @@ fn agy_child_fields(l: &str) -> Option<(&str, &str, &str)> {
         .is_some_and(|(name, role)| {
             !name.is_empty() && !role.is_empty() && role.bytes().all(|b| b.is_ascii_alphanumeric())
         })
-        || agy_truncated_model(model);
+        || agy_truncated_model(model)
+        || (allow_bare && agy_bare_model(model));
     // AGY can include digits in generated role slugs.
     (kind.len() <= 64
         && kind.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
@@ -316,16 +464,176 @@ pub(crate) struct AgyRosterRow {
     role: &'static str,
     title: String,
     state: &'static str,
+    activity: Option<&'static str>,
     elapsed: Option<String>,
 }
 
 pub(crate) const AGY_ROSTER_LIMIT: usize = 3;
 
+fn agy_activity_label(activity: &str) -> Option<&'static str> {
+    let operation = activity
+        .split_once(" · ")
+        .map_or(activity, |(head, _)| head);
+    [
+        ("Reading file", "Reading file"),
+        ("Searching", "Searching"),
+        ("Editing", "Editing"),
+        ("Running command", "Running command"),
+        ("Generating", "Generating"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, label)| {
+        operation.strip_prefix(prefix).and_then(|suffix| {
+            (suffix.is_empty() || suffix.starts_with(' ') || suffix == "...").then_some(label)
+        })
+    })
+}
+
+const AGY_PLACEHOLDER: &str =
+    "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
+
+fn agy_divider(line: &str) -> bool {
+    let line = line.trim_end();
+    line.len() >= "───".len() && line.chars().all(|c| c == '─')
+}
+
+fn agy_ctx_field(field: &str) -> bool {
+    field
+        .strip_prefix("ctx ")
+        .and_then(|rest| rest.strip_suffix('%'))
+        .is_some_and(|digits| {
+            !digits.is_empty()
+                && digits.len() <= 3
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && (digits.len() == 1 || !digits.starts_with('0'))
+                && digits.parse::<u8>().is_ok_and(|pct| pct <= 100)
+        })
+}
+
+fn agy_hud_fields(hud: &str) -> Option<Vec<&str>> {
+    if hud.len() > 512
+        || hud.chars().any(char::is_control)
+        || hud.ends_with(" |")
+        || hud.starts_with("| ")
+    {
+        return None;
+    }
+    let fields: Vec<_> = hud.split(" | ").collect();
+    if fields.len() < 2 || fields.iter().any(|field| field.trim().is_empty()) {
+        return None;
+    }
+    let head_ok = fields[0]
+        .split_once(" (Antigravity")
+        .is_some_and(|(model, tier)| !model.is_empty() && tier.ends_with(')'));
+    (head_ok && agy_ctx_field(fields[1])).then_some(fields)
+}
+
+fn agy_hud_live(hud: &str) -> bool {
+    hud.split_once(" (Antigravity")
+        .is_some_and(|(head, suffix)| {
+            !head.is_empty() && suffix.contains(") | ctx ") && !hud.chars().any(char::is_control)
+        })
+}
+
+fn agy_intact_bare_child(tail: &[String]) -> bool {
+    let Some((prompt_line, after)) = tail.split_first() else {
+        return false;
+    };
+    if !matches!(prompt_line.as_str(), ">" | AGY_PLACEHOLDER) {
+        return false;
+    }
+    let mut non_empty = [""; 11];
+    let mut len = 0;
+    for line in after.iter().map(String::as_str).filter(|l| !l.is_empty()) {
+        if len == non_empty.len() {
+            return false;
+        }
+        non_empty[len] = line;
+        len += 1;
+    }
+    let [top, middle @ .., bottom, hud] = &non_empty[..len] else {
+        return false;
+    };
+    !middle.is_empty()
+        && middle.len() <= 8
+        && agy_divider(top)
+        && agy_divider(bottom)
+        && agy_hud_live(hud)
+        && middle.iter().all(|l| {
+            agy_timer(l) || agy_clipped_running_job(l) || agy_child_fields(l, true).is_some()
+        })
+        && middle.iter().any(|l| agy_child_fields(l, true).is_some())
+}
+
+fn agy_prompt_chrome(lines: &[String]) -> Option<(&[String], &str)> {
+    let newest = lines.iter().rposition(|line| line.starts_with('>'))?;
+    if !matches!(lines[newest].trim_end(), ">" | AGY_PLACEHOLDER) {
+        return None;
+    }
+    let (middle, hud) = match &lines[newest + 1..] {
+        [bottom, hud] if agy_divider(bottom) => (&[][..], hud.trim_end()),
+        [top, middle @ .., bottom, hud]
+            if !middle.is_empty()
+                && middle.len() <= 8
+                && agy_divider(top)
+                && agy_divider(bottom) =>
+        {
+            (middle, hud.trim_end())
+        }
+        _ => return None,
+    };
+    Some((middle, hud))
+}
+
+pub(crate) fn valid_agy_footer_remaining(value: &str) -> bool {
+    matches!(value, "0%" | "<1%" | ">99%" | "100%")
+        || value.strip_suffix('%').is_some_and(|digits| {
+            (1..=2).contains(&digits.len())
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && !digits.starts_with('0')
+                && digits
+                    .parse::<u8>()
+                    .is_ok_and(|pct| (1..=99).contains(&pct))
+        })
+}
+
+/// Read the bounded `Gemini weekly <remaining> left` field from AGY's final
+/// intact OMS statusline footer. Display-only: age and reset are unknown.
+pub(crate) fn agy_footer_weekly(screen: &str) -> Option<String> {
+    if screen.len() > 128 * 1024 {
+        return None;
+    }
+    let lines: Vec<_> = screen
+        .lines()
+        .map(strip_sgr)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let (middle, hud) = agy_prompt_chrome(&lines)?;
+    if !middle.iter().all(|line| {
+        let line = line.trim_end();
+        agy_timer(line) || agy_clipped_running_job(line) || agy_child_fields(line, true).is_some()
+    }) {
+        return None;
+    }
+    let fields = agy_hud_fields(hud)?;
+    let weekly = fields.get(2)?;
+    let remaining = weekly
+        .strip_prefix("Gemini weekly ")?
+        .strip_suffix(" left")?;
+    if !valid_agy_footer_remaining(remaining)
+        || fields
+            .iter()
+            .enumerate()
+            .any(|(i, field)| i != 2 && field.contains("Gemini weekly"))
+    {
+        return None;
+    }
+    Some(remaining.to_owned())
+}
+
 /// The current pane's child chrome supplies display text only. A row has no
 /// conversation identity and never supplies transcript or action authority.
 pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
-    const PLACEHOLDER: &str =
-        "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
     if screen.len() > 128 * 1024 {
         return vec![];
     }
@@ -334,25 +642,10 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
         .map(strip_sgr)
         .filter(|line| !line.trim().is_empty())
         .collect();
-    let newest = lines.iter().rposition(|line| line.starts_with('>'));
-    let Some([top, middle @ .., bottom, hud]) = newest.and_then(|index| {
-        matches!(lines[index].trim_end(), ">" | PLACEHOLDER).then(|| &lines[index + 1..])
-    }) else {
+    let Some((middle, hud)) = agy_prompt_chrome(&lines) else {
         return vec![];
     };
-    let divider = |line: &str| {
-        let line = line.trim_end();
-        line.len() >= "───".len() && line.chars().all(|c| c == '─')
-    };
-    let hud_live = hud
-        .split_once(" (Antigravity")
-        .is_some_and(|(head, suffix)| {
-            !head.is_empty() && suffix.contains(") | ctx ") && !hud.chars().any(char::is_control)
-        });
-    if !divider(top) || !divider(bottom) || !hud_live {
-        return vec![];
-    }
-    if middle.len() > 8 {
+    if middle.is_empty() || !agy_hud_live(hud) {
         return vec![];
     }
     let rows = middle
@@ -360,12 +653,12 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
         .map(|line| line.trim_end())
         .filter(|line| !agy_timer(line) && !agy_clipped_running_job(line))
         .map(|line| {
-            let (kind, title, activity) = agy_child_fields(line)?;
+            let (kind, title, activity) = agy_child_fields(line, true)?;
             if title.len() > 512 || title.chars().any(char::is_control) {
                 return None;
             }
             let role = match kind {
-                "slice-builder" | "builder" => "Builder",
+                "slice-builder" | "leaf-builder" | "builder" => "Builder",
                 "research" | "researcher" => "Researcher",
                 "review" | "reviewer" => "Reviewer",
                 "verify" | "verifier" => "Verifier",
@@ -373,11 +666,12 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
             };
             let title = title.strip_suffix(&format!(" {role}")).unwrap_or(title);
             let title = oms_panel_core::redact(title.as_bytes()).ok()?;
-            let state = match activity.split_ascii_whitespace().next()? {
-                "Reading" | "Searching" => "reading",
-                "Editing" => "editing",
-                "Generating" | "Generating..." => "generating",
-                "Running" => "running",
+            let label = agy_activity_label(activity);
+            let state = match label {
+                Some("Reading file" | "Searching") => "reading",
+                Some("Editing") => "editing",
+                Some("Generating") => "generating",
+                Some("Running command") => "running",
                 _ => "working",
             };
             static DURATION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
@@ -393,6 +687,7 @@ pub(crate) fn agy_roster(screen: &str) -> Vec<AgyRosterRow> {
                 role,
                 title,
                 state,
+                activity: label,
                 elapsed,
             })
         })
@@ -438,6 +733,7 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
     );
     let rows = agy_roster(&roster);
     assert_eq!(rows.len(), 2);
+    assert_eq!(agy_roster(&roster.replace("ctx 42%", "ctx …")), rows);
     let mixed = roster.replace(
         "4m timer running\n",
         "4m timer running\n  ● [14:48:20] ( foreground command... running\n",
@@ -460,6 +756,43 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
     assert_eq!(rows[1].role, "Researcher");
     assert_eq!(rows[1].elapsed, None);
 
+    for (operation, expected, state) in [
+        (
+            "Reading file secret/path · 12s",
+            Some("Reading file"),
+            "reading",
+        ),
+        (
+            "Searching secret query · 2m3s",
+            Some("Searching"),
+            "reading",
+        ),
+        (
+            "Editing files secret/path · 1h2m3s",
+            Some("Editing"),
+            "editing",
+        ),
+        (
+            "Running command secret args · 4s",
+            Some("Running command"),
+            "running",
+        ),
+        ("Generating... · 53m1", Some("Generating"), "generating"),
+        ("Reading filefish · 4s", None, "working"),
+        ("Running commands · 4s", None, "working"),
+        ("Unknown secret prompt · 4s", None, "working"),
+    ] {
+        let screen = roster.replace("Reading file · 53m17s", operation);
+        let row = serde_json::to_value(&agy_roster(&screen)[0]).unwrap();
+        assert_eq!(row["activity"].as_str(), expected, "{operation}");
+        assert_eq!(row["state"], state, "{operation}");
+    }
+    let pasted = roster.replace(
+        "prior output",
+        "  ● Agent(research: Pasted) · Gemini 4 Hydrogen (Orchestrator)  Searching secret",
+    );
+    assert_eq!(agy_roster(&pasted), rows);
+
     let generated = roster.replace(
         "slice-builder: Team Check Builder",
         "check270-rosters-builder: Check Live Roster",
@@ -470,6 +803,64 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
     assert_eq!(generated_rows[0].title, "Check Live Roster");
     assert_eq!(generated_rows[0].state, "reading");
     assert_eq!(observe("antigravity", &generated), Some("working"));
+
+    let bare_roster = format!(
+        "prior output\n>\n{rule}\n  ● Agent(slice-builder: Bare Reading Builder) · Gemini 4 Neon  Reading file · 12s\n  ● Agent(research: Bare Format Check) · Gemini 4 Neon  Check formatting · 5s\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 42% | main | oms F18"
+    );
+    let bare_rows = agy_roster(&bare_roster);
+    assert_eq!(bare_rows.len(), 2);
+    assert_eq!(bare_rows[0].role, "Builder");
+    assert_eq!(bare_rows[0].title, "Bare Reading");
+    assert_eq!(bare_rows[0].state, "reading");
+    assert_eq!(bare_rows[0].elapsed.as_deref(), Some("12s"));
+    assert_eq!(bare_rows[1].role, "Researcher");
+    assert_eq!(bare_rows[1].title, "Bare Format Check");
+    assert_eq!(bare_rows[1].state, "working");
+    assert_eq!(bare_rows[1].elapsed.as_deref(), Some("5s"));
+    assert_eq!(observe("antigravity", &bare_roster), Some("working"));
+    let pasted_bare = bare_roster.replace(
+        "prior output",
+        "  ● Agent(research: Pasted Bare) · Gemini 4 Neon  Reading file",
+    );
+    assert_eq!(agy_roster(&pasted_bare), bare_rows);
+    for bad_bare in [
+        format!("{bare_roster}\nNew output after footer"),
+        bare_roster.replace("Gemini 4 Neon", "Other 4 Neon"),
+        bare_roster.replace("Gemini 4 Neon", "Gemini 4 neon"),
+        bare_roster.replace("Gemini 4 Neon", "Gemini 4 Neon extra"),
+        bare_roster.replace("Gemini 4 Neon", "Gemini 4 N"),
+    ] {
+        assert!(agy_roster(&bad_bare).is_empty(), "{bad_bare}");
+    }
+
+    let leaf_bare_roster = format!(
+        "prior output\n>\n{rule}\n  ● Agent(leaf-builder: AGY Display Fix Builder) · Gemini 4 Neon  Reading file · 12s\n  ● Agent(leaf-builder: AGY Bare Model Builder Leaf) · Gemini 4 Neon  Check formatting · 5s\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 42% | main | oms F18"
+    );
+    let leaf_bare_rows = agy_roster(&leaf_bare_roster);
+    assert_eq!(leaf_bare_rows.len(), 2);
+    assert_eq!(leaf_bare_rows[0].role, "Builder");
+    assert_eq!(leaf_bare_rows[0].title, "AGY Display Fix");
+    assert_eq!(leaf_bare_rows[0].state, "reading");
+    assert_eq!(leaf_bare_rows[0].activity, Some("Reading file"));
+    assert_eq!(leaf_bare_rows[0].elapsed.as_deref(), Some("12s"));
+    assert_eq!(leaf_bare_rows[1].role, "Builder");
+    assert_eq!(leaf_bare_rows[1].title, "AGY Bare Model Builder Leaf");
+    assert_eq!(leaf_bare_rows[1].state, "working");
+    assert_eq!(leaf_bare_rows[1].activity, None);
+    assert_eq!(leaf_bare_rows[1].elapsed.as_deref(), Some("5s"));
+    for slug in ["leaf-builders", "custom-builder", "leaf-builder-extra"] {
+        let lookalike = leaf_bare_roster.replace(
+            "Agent(leaf-builder: AGY Display Fix Builder)",
+            &format!("Agent({slug}: AGY Display Fix Builder)"),
+        );
+        let lookalike_rows = agy_roster(&lookalike);
+        assert_eq!(lookalike_rows.len(), 2, "{slug}");
+        assert_eq!(lookalike_rows[0].role, "Worker", "{slug}");
+        assert_eq!(lookalike_rows[0].title, "AGY Display Fix Builder", "{slug}");
+        assert_eq!(lookalike_rows[0].state, "reading", "{slug}");
+        assert_eq!(lookalike_rows[0].activity, Some("Reading file"), "{slug}");
+        assert_eq!(lookalike_rows[0].elapsed.as_deref(), Some("12s"), "{slug}");
+    }
 
     for unsafe_kind in [
         "2research",
@@ -493,6 +884,81 @@ fn agy_roster_reads_only_the_current_prompt_chrome() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn agy_footer_weekly_reads_only_final_intact_oms_footer() {
+    let rule = "────────────────────────";
+    let base = |weekly: &str| {
+        format!(
+            "prior output\n{rule}\n>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | {weekly} | main | oms F1\n"
+        )
+    };
+    for expected in ["0%", "<1%", "1%", "99%", ">99%", "100%"] {
+        let screen = base(&format!("Gemini weekly {expected} left"));
+        assert_eq!(
+            agy_footer_weekly(&screen).as_deref(),
+            Some(expected),
+            "{screen}"
+        );
+    }
+    let placeholder = base("Gemini weekly 99% left").replace(
+        "\n>\n",
+        "\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n",
+    );
+    assert_eq!(agy_footer_weekly(&placeholder).as_deref(), Some("99%"));
+    let sgr = format!(
+        "{rule}\n>\n{rule}\n\x1b[2mOrchestrator (Carbon) (Antigravity ) | ctx 31% | Gemini weekly <1% left | main\x1b[0m\n"
+    );
+    assert_eq!(agy_footer_weekly(&sgr).as_deref(), Some("<1%"));
+    let with_tray = format!(
+        "prior\n>\n{rule}\n  ● [12:03:44] 4m timer running\n  ● Agent(research: Check) · Gemini 4 Hydrogen (Orchestrator)  Reading · 12s\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 42% | Gemini weekly >99% left | main\n"
+    );
+    assert_eq!(agy_footer_weekly(&with_tray).as_deref(), Some(">99%"));
+    let with_bare_tray = format!(
+        "prior\n>\n{rule}\n  ● Agent(slice-builder: Bare Check) · Gemini 4 Neon  Reading file · 12s\n  ● Agent(research: Format) · Gemini 4 Neon  Check formatting · 5s\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 42% | Gemini weekly 88% left | main\n"
+    );
+    assert_eq!(agy_footer_weekly(&with_bare_tray).as_deref(), Some("88%"));
+    assert_eq!(
+        agy_footer_weekly(&with_bare_tray.replace("Gemini 4 Neon", "Gemini 4 neon")),
+        None
+    );
+
+    let ok = base("Gemini weekly 99% left");
+    for bad in [
+        format!("{ok}New output after footer\n"),
+        format!("{ok}>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | main\n"),
+        format!(
+            "Gemini weekly 99% left\n{rule}\n>\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 31% | main\n"
+        ),
+        ok.replace("\n>\n", "\n> Gemini weekly 99% left\n"),
+        ok.replace(
+            "| main | oms F1",
+            "| Gemini weekly 50% left | main | oms F1",
+        ),
+        ok.replace("oms F1", "oms T1 Gemini weekly 50% left"),
+        base("Gemini weekly 00% left"),
+        base("Gemini weekly 09% left"),
+        base("Gemini weekly 101% left"),
+        base("Gemini weekly -1% left"),
+        base("Gemini weekly +1% left"),
+        base("Gemini weekly 99.5% left"),
+        base("Gemini weekly <2% left"),
+        base("Gemini weekly >98% left"),
+        base("Gemini weekly 99% used"),
+        base("Gemini weekly 99% lef"),
+        ok.replace(" (Antigravity ) | ctx 31%", " | ctx 31%"),
+        ok.replace(" | ctx 31%", ""),
+        ok.replace("ctx 31%", "ctx 105%"),
+        format!("{ok}\x07"),
+        ok.replace("oms F1\n", "oms F1 | \n"),
+        format!(
+            "prior\n>\n{rule}\nfake prose between dividers\n{rule}\nOrchestrator (Carbon) (Antigravity ) | ctx 42% | Gemini weekly 99% left\n"
+        ),
+    ] {
+        assert_eq!(agy_footer_weekly(&bad), None, "{bad:?}");
+    }
+}
+
 fn agy_truncated_model(model: &str) -> bool {
     let Some(rest) = model
         .strip_prefix("Gemini ")
@@ -512,6 +978,28 @@ fn agy_truncated_model(model: &str) -> bool {
         && base.len() >= 3
         && base.bytes().all(|b| b.is_ascii_alphabetic())
         && role_tail.is_none_or(|role| role.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+fn agy_bare_model(model: &str) -> bool {
+    let Some(rest) = model.strip_prefix("Gemini ") else {
+        return false;
+    };
+    if rest.contains(['(', ')', '…']) || rest.contains("...") || rest.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let Some((version, name)) = rest.split_once(' ') else {
+        return false;
+    };
+    !version.is_empty()
+        && version.len() <= 8
+        && version.split('.').count() <= 2
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        && (3..=32).contains(&name.len())
+        && name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        && name.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
 fn agy_job_clock(line: &str) -> Option<&str> {
@@ -798,13 +1286,54 @@ Orchestrator (Carbon) (Antigravity ) | ctx 28% | main
             screen.replace(timer, "arbitrary row"),
             screen.replace(timer, &format!("{timer}\n────────────────────────")),
             screen.replace("Gemini 4 Hydrog...", "Gemini 4 Hydrogen"),
+            screen.replace("Gemini 4 Hydrog...", "Gemini 4 Neon"),
             screen.replace("Gemini 4 Hydrog...", "Other 4 Hydrog..."),
+            screen.replace("Gemini 4 Hydrog...", "Other 4 Neon"),
             screen.replace("Gemini 4 Hydrog...", "Gemini 4 ..."),
+            screen.replace("Gemini 4 Hydrog...", "Gemini 4 neon"),
+            screen.replace("Gemini 4 Hydrog...", "Gemini 4 Neon extra"),
+            screen.replace("Gemini 4 Hydrog...", "Gemini 4 N"),
             screen.replace("Gemini 4 Hydrog...", "Gemini 4 Hydrogen (Fake Role)"),
             screen.replace(": Orchestrator", ":Orchestrator"),
             screen.replace(timer, "Orchestrator (Carbon)"),
         ] {
             assert_eq!(observe("antigravity", &bad), None, "{bad}");
+        }
+        let live_screen = screen.replace(
+            "Orchestrator (Carbon)",
+            "Orchestrator (Carbon) (Antigravity ) | ctx 28% | main",
+        );
+        for good in [
+            live_screen.replace("Gemini 4 Hydrog...", "Gemini 4 Hydrogen"),
+            live_screen.replace("Gemini 4 Hydrog...", "Gemini 4 Neon"),
+            live_screen.replace("Gemini 4 Hydrog...", "Gemini 3.8 Flash"),
+            live_screen
+                .replace(&format!("{timer}\n"), "")
+                .replace("Gemini 4 Hydrog...", "Gemini 4 Neon"),
+        ] {
+            assert_eq!(
+                super::native_activity("antigravity", &good),
+                Some(super::NativeActivity::Working),
+                "{good}"
+            );
+        }
+        let bare_live = live_screen.replace("Gemini 4 Hydrog...", "Gemini 4 Neon");
+        for bad_bare in [
+            bare_live.replace("\n────────────────────────\nOrchestrator", "\nOrchestrator"),
+            bare_live.replace(" (Antigravity ) | ctx 28% | main", ""),
+            format!("{bare_live}● New output after footer\n"),
+            bare_live.replace("\n>\n", "\n> user draft\n"),
+            bare_live.replace(timer, "  ● arbitrary invalid tray line"),
+            bare_live.replace("Gemini 4 Neon", "Other 4 Neon"),
+            bare_live.replace("Gemini 4 Neon", "Gemini 4 neon"),
+            bare_live.replace("Gemini 4 Neon", "Gemini 4 Neon extra"),
+            bare_live.replace("Gemini 4 Neon", "Gemini 4 N"),
+        ] {
+            assert_eq!(
+                super::native_activity("antigravity", &bad_bare),
+                None,
+                "{bad_bare}"
+            );
         }
         assert_eq!(observe("codex", &screen.replace(">\n", "› \n")), None);
         assert_eq!(observe("claude", &screen.replace(">\n", "❯ \n")), None);
@@ -907,7 +1436,7 @@ Orchestrator (Carbon) (Antigravity ) | ctx 28% | main
         for (from, to) in [
             ("  Generating...", "  "),
             ("  Generating...", " Generating..."),
-            (" (Orchestrator)", ""),
+            ("Gemini 4 Hydrogen (Orchestrator)", "Other 4 Hydrogen"),
             (" (Orchestrator)", " ()"),
             ("research: Independent Reviewer", "research"),
             ("research: ", ": "),
@@ -944,5 +1473,246 @@ Orchestrator (Carbon) (Antigravity ) | ctx 28% | main
         assert_eq!(observe("claude", &format!("❯ \n{AGY_ROW}\n")), None);
         assert_eq!(observe("gemini", CODEX), None);
         assert_eq!(observe("codex", ""), None);
+    }
+
+    #[test]
+    fn claude_live_activity_skips_right_aligned_update_advisory_only() {
+        let ruler = "─".repeat(80);
+        let advisory = format!("{:>80}", "✔ Update installed · /restart to apply");
+        let screen = format!(
+            "· Whatchamacalliting… (1m 45s · ↓ 2.3k tokens)\n{advisory}\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n{CLAUDE_MODE}\n"
+        );
+        assert_eq!(
+            super::native_activity("claude", &screen),
+            Some(super::NativeActivity::Working)
+        );
+        for bad in [
+            screen.replace(&advisory, "✔ Update installed · /restart to apply"),
+            screen.replace(&advisory, " ✔ Update installed · /restart to apply"),
+            screen.replace(&advisory, "\t\t✔ Update installed · /restart to apply"),
+            screen.replace(&advisory, "  Some unrelated advisory text"),
+            screen.replace(&advisory, "  ✔ Update installed · "),
+            screen.replace(
+                &advisory,
+                &format!("  ✔ Update installed · {}", "x".repeat(65)),
+            ),
+            screen.replace(
+                "· Whatchamacalliting… (1m 45s · ↓ 2.3k tokens)",
+                "● Finished task",
+            ),
+            format!(
+                "· Whatchamacalliting… (1m 45s · ↓ 2.3k tokens)\n● Done\n{advisory}\n{ruler}\n❯\u{00a0}\n"
+            ),
+        ] {
+            assert_eq!(super::native_activity("claude", &bad), None, "{bad:?}");
+        }
+        let codex = screen
+            .replace(
+                "· Whatchamacalliting… (1m 45s · ↓ 2.3k tokens)",
+                "• Working (1s • esc to interrupt)",
+            )
+            .replace('❯', "›");
+        assert_eq!(super::native_activity("codex", &codex), None);
+    }
+
+    #[test]
+    fn claude_roster_reads_only_current_prompt_chrome_and_fails_closed() {
+        let ruler = "─".repeat(80);
+        let row1 = "  ◯ map-gh-project  Map GitHub project structure  9m 49s · ↓ 218.9k tokens";
+        let row2 = "  ◯ builder-gh-templates  Build issue and PR templates  idle";
+        let screen = format!(
+            "prior output\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents\n\n  ● main\n{row1}\n{row2}\n"
+        );
+        let rows = super::claude_roster(&screen);
+        assert_eq!(
+            rows,
+            vec![
+                super::ClaudeRosterRow {
+                    slug: "map-gh-project".into(),
+                    title: "Map GitHub project structure".into(),
+                    state: "working",
+                },
+                super::ClaudeRosterRow {
+                    slug: "builder-gh-templates".into(),
+                    title: "Build issue and PR templates".into(),
+                    state: "unknown",
+                },
+            ]
+        );
+        let elapsed_only = screen.replace("9m 49s · ↓ 218.9k tokens", "1h 2m 3s");
+        assert_eq!(super::claude_roster(&elapsed_only)[0].state, "working");
+        let short_elapsed = screen.replace("9m 49s · ↓ 218.9k tokens", "45s");
+        assert_eq!(super::claude_roster(&short_elapsed)[0].state, "working");
+
+        // Pasted roster line above the prompt is ignored while live footer still parses.
+        let pasted_above = screen.replace("prior output", "  ◯ pasted-worker  Pasted title  idle");
+        assert_eq!(super::claude_roster(&pasted_above), rows);
+
+        for bad in [
+            format!("{screen}New output after footer\n"),
+            format!(
+                "  ◯ pasted-only  Pasted title  idle\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n{CLAUDE_MODE}\n"
+            ),
+            screen.replace("  ● main\n", ""),
+            screen.replace("  Opus 5.5 | proj | git main | ctx [##--] 21%\n", ""),
+            screen.replace(" | ctx [", " | other ["),
+            screen.replace(" · ← 2 agents", ""),
+            screen.replace("  -- INSERT -- ⏵⏵", "  -- NORMAL --"),
+            screen.replace("❯\u{00a0}", "❯ user draft"),
+            screen.replace("9m 49s · ↓ 218.9k tokens", "9m 60s · ↓ 218.9k tokens"),
+            screen.replace("9m 49s · ↓ 218.9k tokens", "9m 49s · ↓ bad tokens"),
+            screen.replace("  idle", " idle"),
+            screen.replace("  idle", "  done"),
+            screen.replace("map-gh-project", "1bad-slug"),
+            screen.replace("map-gh-project", "bad/slug"),
+        ] {
+            assert!(super::claude_roster(&bad).is_empty(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn claude_roster_admits_wide_pane_padding_while_enforcing_semantic_bounds() {
+        let ruler = "─".repeat(316);
+        let pad_row = |slug: &str, title: &str, tail: &str, width: usize| -> String {
+            let prefix = format!("  ◯ {slug}  {title}");
+            let pad = width
+                .checked_sub(prefix.chars().count() + tail.chars().count())
+                .expect("wide test row width");
+            assert!(pad >= 2, "expected inter-column space padding");
+            format!("{prefix}{}{tail}", " ".repeat(pad))
+        };
+        let wide_screen = |rows: &[String]| -> String {
+            format!(
+                "prior output\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21% | 7d 82%\n  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← {} agents\n\n  ● main\n{}\n",
+                rows.len(),
+                rows.join("\n"),
+            )
+        };
+
+        let row_active = pad_row(
+            "map-gh-project",
+            "Map GitHub project structure",
+            "9m 49s · ↓ 218.9k tokens",
+            314,
+        );
+        let row_elapsed = pad_row(
+            "verify-wide-pane",
+            "Verify wide roster layout",
+            "1h 2m 3s",
+            314,
+        );
+        let row_idle = pad_row(
+            "builder-gh-templates",
+            "Build issue and PR templates",
+            "idle",
+            314,
+        );
+        for row in [&row_active, &row_elapsed, &row_idle] {
+            assert_eq!(row.chars().count(), 314);
+            assert!(row.len() > 256);
+        }
+
+        let screen = wide_screen(&[row_active.clone(), row_elapsed.clone(), row_idle.clone()]);
+        let expected = vec![
+            super::ClaudeRosterRow {
+                slug: "map-gh-project".into(),
+                title: "Map GitHub project structure".into(),
+                state: "working",
+            },
+            super::ClaudeRosterRow {
+                slug: "verify-wide-pane".into(),
+                title: "Verify wide roster layout".into(),
+                state: "working",
+            },
+            super::ClaudeRosterRow {
+                slug: "builder-gh-templates".into(),
+                title: "Build issue and PR templates".into(),
+                state: "unknown",
+            },
+        ];
+        assert_eq!(super::claude_roster(&screen), expected);
+
+        // SGR-styled wide row still parses cleanly.
+        let sgr_screen = wide_screen(&[
+            format!("\x1b[2m{row_active}\x1b[0m"),
+            row_elapsed.clone(),
+            row_idle.clone(),
+        ]);
+        assert_eq!(super::claude_roster(&sgr_screen), expected);
+
+        // Exact semantic upper bounds (64-byte slug + 160-byte title + wide ASCII padding) pass.
+        let max_slug = "a".repeat(64);
+        let max_title = "t".repeat(160);
+        let boundary_row = format!(
+            "  ◯ {max_slug}  {max_title}{}9m 49s · ↓ 12.3k tokens",
+            " ".repeat(100)
+        );
+        assert!(boundary_row.len() > 314);
+        assert_eq!(
+            super::claude_roster(&wide_screen(&[boundary_row])),
+            vec![super::ClaudeRosterRow {
+                slug: max_slug,
+                title: max_title,
+                state: "working",
+            }]
+        );
+
+        // Overlong semantic fields, non-ASCII padding, raw-line overflow, control chars,
+        // and untrusted/malformed rows in wide panes must all fail closed.
+        let overlong_slug = pad_row(&"s".repeat(65), "Valid title", "idle", 314);
+        let overlong_title = pad_row("valid-slug", &"t".repeat(161), "idle", 314);
+        let nbsp_padded = format!(
+            "  ◯ valid-slug  Valid title{}  idle",
+            "\u{00a0}".repeat(161)
+        );
+        let overlong_tokens = pad_row(
+            "valid-slug",
+            "Valid title",
+            "9m 49s · ↓ 1234567890123k tokens",
+            314,
+        );
+        let trailing_usage = pad_row(
+            "valid-slug",
+            "Valid title",
+            "9m 49s · ↓ 218.9k tokens extra",
+            314,
+        );
+        let bad_status = pad_row("valid-slug", "Valid title", "completed", 314);
+        let overlong_raw = format!("  ◯ valid-slug  Valid title{}idle", " ".repeat(2050));
+        let with_bel = row_active.replacen("    ", " \x07  ", 1);
+        let with_tab = row_active.replacen("    ", " \t  ", 1);
+        let with_esc = row_active.replacen("    ", " \x1b]0;spoof\x07 ", 1);
+
+        for bad_row in [
+            overlong_slug,
+            overlong_title,
+            nbsp_padded,
+            overlong_tokens,
+            trailing_usage,
+            bad_status,
+            overlong_raw,
+            with_bel,
+            with_tab,
+            with_esc,
+        ] {
+            // Single bad row fails closed.
+            assert!(
+                super::claude_roster(&wide_screen(std::slice::from_ref(&bad_row))).is_empty(),
+                "{bad_row:?}"
+            );
+            // Mixed with valid wide rows also fails closed (entire roster rejected).
+            assert!(super::claude_roster(&wide_screen(&[row_active.clone(), bad_row])).is_empty());
+        }
+
+        // Untrusted wide rows outside valid prompt/footer binding fail closed.
+        for untrusted in [
+            format!("{screen}New output after footer\n"),
+            format!(
+                "{row_active}\n{ruler}\n❯\u{00a0}\n{ruler}\n  Opus 5.5 | proj | git main | ctx [##--] 21%\n{CLAUDE_MODE}\n"
+            ),
+            screen.replace("  ● main\n", ""),
+        ] {
+            assert!(super::claude_roster(&untrusted).is_empty(), "{untrusted:?}");
+        }
     }
 }

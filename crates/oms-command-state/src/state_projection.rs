@@ -646,6 +646,19 @@ pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>
         format!("{failures} actionable failure fingerprint(s)"),
         format!("oms fail-ledger --repo {anchor} list"),
     );
+    let repeat = state
+        .get("failures")
+        .get("recent_repeat")
+        .get("count")
+        .int()
+        .unwrap_or(0) as usize;
+    add(
+        "P1",
+        "recent-failure-repeat",
+        repeat,
+        format!("the newest {repeat} fail-ledger rows are the same failure"),
+        format!("oms fail-ledger --repo {anchor} list --stalls"),
+    );
     if std::env::var("OMS_THREAD_ATTENTION").unwrap_or_default() != "0" {
         let n = state.get("threads").get("stale_open").int().unwrap_or(0) as usize;
         add(

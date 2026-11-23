@@ -895,6 +895,12 @@ fn empty_scope_preserved_on_continue_and_dry_run_launch() {
     assert!(prompt.contains("oms panel --results --room ROOM --task-id ID --json"));
     assert!(prompt.contains("oms panel --orchestrator"));
     assert!(prompt.contains("verify the integrated result"));
+    assert!(prompt.contains("record each distinct user request and unresolved prior item"));
+    assert!(prompt.contains(
+        "`oms agent-plan add-batch --tasks FILE --expected-tasks-sha256 SHA --expected-plan-sha256 PLAN_SHA` (use `absent` if no Plan exists)"
+    ));
+    assert!(prompt.contains("oms agent-plan --help"));
+    assert!(prompt.contains("save a pending Room summary"));
 }
 
 fn settle_review_and_recommend_parity() {
@@ -953,6 +959,112 @@ fn settle_review_and_recommend_parity() {
             {"id": "task-rev", "state": "done", "outcome": "completed"}
         ]
     });
+
+    // Malformed panel_review_reason refs must fail consistently before dry-run
+    // and apply without invoking native Events.
+    let seen_before_bad = services.native_seen.borrow().len();
+    for bad_reason in [
+        "/abs/path",
+        "\\unc\\path",
+        "C:/drive/path",
+        "../escape",
+        "a/../b",
+        "..",
+    ] {
+        for apply in [false, true] {
+            let mut argv = vec![
+                "--repo".to_owned(),
+                repo.path().to_string_lossy().into_owned(),
+                "--owner".to_owned(),
+                "claude".to_owned(),
+                "--settle-review".to_owned(),
+                "--attempt".to_owned(),
+                "att-rev".to_owned(),
+                "--reason".to_owned(),
+                bad_reason.to_owned(),
+            ];
+            if apply {
+                argv.push("--apply".to_owned());
+            }
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let (bad_code, _, bad_err) = run_with_services(
+                "panel",
+                &os(&refs),
+                repo.path(),
+                repo.path(),
+                &STOP,
+                &services,
+            );
+            assert_ne!(
+                bad_code, 0,
+                "malformed reason {bad_reason:?} (apply={apply}) should fail"
+            );
+            assert!(
+                String::from_utf8_lossy(&bad_err).contains("panel_review_reason"),
+                "unexpected stderr for {bad_reason:?} (apply={apply}): {}",
+                String::from_utf8_lossy(&bad_err)
+            );
+        }
+    }
+    for apply in [false, true] {
+        let mut argv = vec![
+            "--repo".to_owned(),
+            repo.path().to_string_lossy().into_owned(),
+            "--settle-review".to_owned(),
+            "--standalone".to_owned(),
+            "--older-than".to_owned(),
+            "1e-250".to_owned(),
+        ];
+        if apply {
+            argv.push("--apply".to_owned());
+        }
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let (bad_code, _, bad_err) = run_with_services(
+            "panel",
+            &os(&refs),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        );
+        assert_ne!(
+            bad_code, 0,
+            "oversized formatted --older-than reason (apply={apply}) should fail"
+        );
+        assert!(
+            String::from_utf8_lossy(&bad_err).contains("panel_review_reason"),
+            "unexpected stderr for oversized --older-than (apply={apply}): {}",
+            String::from_utf8_lossy(&bad_err)
+        );
+    }
+    assert_eq!(services.native_seen.borrow().len(), seen_before_bad);
+
+    // Prior valid relative-path / punctuation reasons remain accepted on dry-run.
+    let (rel_code, rel_out, rel_err) = run_with_services(
+        "panel",
+        &os(&[
+            "--repo",
+            &repo.path().to_string_lossy(),
+            "--owner",
+            "claude",
+            "--settle-review",
+            "--attempt",
+            "att-rev",
+            "--reason",
+            "replaced src/review.rs (score=0)",
+        ]),
+        repo.path(),
+        repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(rel_code, 0, "stderr={}", String::from_utf8_lossy(&rel_err));
+    let rel_dry: Value = serde_json::from_slice(&rel_out).unwrap();
+    assert_eq!(rel_dry["executes"], json!(false));
+    assert_eq!(
+        rel_dry["candidates"][0]["reason"],
+        "replaced src/review.rs (score=0)"
+    );
 
     // Dry settle-review with explicit --attempt.
     let (code, stdout, stderr) = run_with_services(
@@ -1062,6 +1174,47 @@ fn settle_review_and_recommend_parity() {
     let rec: Value = serde_json::from_slice(&rout).unwrap();
     assert_eq!(rec["schema"], json!(1));
     assert!(rec["escalation"].is_object());
+
+    // Configured categories fill defaults only; explicit risk never loses to them.
+    let cat = |args: &[&str]| {
+        let mut argv = vec!["--recommend"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        let (code, out, _) = run_with_services(
+            "panel",
+            &os(&argv),
+            repo.path(),
+            repo.path(),
+            &STOP,
+            &services,
+        );
+        (
+            code,
+            serde_json::from_slice::<Value>(&out).unwrap_or(Value::Null),
+        )
+    };
+    let (code, typo) = cat(&["typo"]);
+    assert_eq!(code, 0);
+    assert_eq!(typo["task_kind"], "mechanical-edit");
+    assert_eq!(
+        (typo["risk"].as_str(), typo["size"].as_str()),
+        (Some("low"), Some("small"))
+    );
+    assert_eq!(typo["category"]["defaulted"], json!(["risk", "size"]));
+    assert_eq!(typo["tier"], "light");
+    let (_, high) = cat(&["typo", "--risk", "high"]);
+    assert_eq!(high["risk"], "high");
+    assert_eq!(high["category"]["defaulted"], json!(["size"]));
+    assert_eq!(high["tier"], "deep");
+    assert_ne!(cat(&["typo", "--risk", "low", "--diff", "HEAD"]).0, 0);
+    assert_ne!(cat(&["nosuchword"]).0, 0);
+    let mut bad = table_val.clone();
+    bad["categories"]["debug"] = json!({"kind": "debug", "risk": "low", "size": "small"});
+    bad["categories"]["Two"] = json!({"kind": "debug"});
+    assert_eq!(recommend::lint(&bad).len(), 3);
+    let mut legacy = table_val.clone();
+    legacy.as_object_mut().unwrap().remove("categories");
+    assert!(recommend::lint(&legacy).is_empty());
 
     std::fs::write(repo.path().join("README.md"), "updated line\n").unwrap();
     git_ok(repo.path(), &["add", "README.md"]);

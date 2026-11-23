@@ -169,11 +169,17 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
         ]),
     )?;
     let failure_rows = storage::rows(&ctx.repo, Path::new(".oms/failures.jsonl"));
+    let repeat = failure_rows
+        .as_ref()
+        .ok()
+        .and_then(|(rows, _)| failures::stall_findings(rows).into_iter().next())
+        .map(|f| f.get("count").int().unwrap_or(0));
     let failure = failure_rows.and_then(|(rows, bad)| failures::project(&rows, bad, "", epoch()));
-    state.set(
-        "failures",
-        collector(failure, ctx.repo.join(".oms/failures.jsonl").exists()),
-    )?;
+    let mut failure = collector(failure, ctx.repo.join(".oms/failures.jsonl").exists());
+    if let Some(count) = repeat {
+        failure.set("recent_repeat", object([("count", number(count))]))?;
+    }
+    state.set("failures", failure)?;
     let journal = decoded(oms_command_journal::run(
         &["status".into(), "--json".into()],
         &ctx.repo,
