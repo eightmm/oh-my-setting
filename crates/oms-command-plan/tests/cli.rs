@@ -3543,6 +3543,66 @@ fn github_pr_recording_requires_accepted_same_repo_pr_url() {
     );
     assert_eq!(task("pr-ok").text("pr"), format!("{REPO}#19"));
 
+    // A passed receipt for the same path cannot complete a different exact review.
+    let published = task("pr-ok");
+    let commit = published.get("landing").text("sha");
+    let id = "exact-external-review";
+    let artifact = ".oms/artifacts/exact-external-review.md";
+    let patch = ".oms/artifacts/exact-external-review.patch";
+    let report = b"Reviewed alternative product\n";
+    let reviewed = b"diff --git a/src/pr-ok.txt b/src/pr-ok.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/pr-ok.txt\n@@ -0,0 +1 @@\n+reviewed product\n";
+    fs::write(r.join(artifact), report).unwrap();
+    fs::write(r.join(patch), reviewed).unwrap();
+    assert_eq!(
+        at(&[
+            "add",
+            "--id",
+            id,
+            "--title",
+            id,
+            "--allowed",
+            "src/pr-ok.txt",
+        ])
+        .0,
+        0
+    );
+    assert_eq!(at(&["claim", "--id", id, "--provider", "codex"]).0, 0);
+    let claimed = task(id);
+    let lease = claimed.text("lease_id");
+    let (rc, _, err) = at(&[
+        "review",
+        "--id",
+        id,
+        "--lease-id",
+        lease,
+        "--artifact",
+        artifact,
+        "--patch",
+        patch,
+        "--expected-review-artifact-sha256",
+        &json::sha(report),
+        "--expected-review-patch-sha256",
+        &json::sha(reviewed),
+    ]);
+    assert_eq!(rc, 0, "{err}");
+    let plan_file = r.join(".oms/plan/tasks.json");
+    let before = fs::read(&plan_file).unwrap();
+    let (rc, _, err) = at(&[
+        "finish",
+        "--id",
+        id,
+        "--lease-id",
+        lease,
+        "--landed-commit",
+        commit,
+    ]);
+    assert_eq!(rc, 2, "{err}");
+    assert!(
+        err.contains("exact reviewed evidence requires patch-land"),
+        "{err}"
+    );
+    assert_eq!(fs::read(&plan_file).unwrap(), before);
+
     // 2. Cross-repo PR URL is refused (PR identity omitted).
     land_case(
         "pr-cross-repo",

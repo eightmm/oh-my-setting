@@ -1928,6 +1928,14 @@ impl<'a> Plan<'a> {
                     "completed task does not match exact landed commit/lease",
                 )?;
             }
+            if let Some(review) = t.opt("review_evidence") {
+                require(
+                    t.opt("panel_accept").is_some_and(|record| {
+                        record.get("patch_sha256") == review.get("patch").get("sha256")
+                    }),
+                    "exact reviewed evidence requires patch-land unless panel acceptance binds the same patch",
+                )?;
+            }
             evidence(req, t)?;
             self.verify_review_evidence(t)?;
             let proof = crate::completion::commit_landing(self, commit, None)?;
