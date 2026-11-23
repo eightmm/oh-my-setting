@@ -54,11 +54,17 @@ fn isolated(name: &str) -> bool {
     true
 }
 
-fn git(repo: &Path, args: &[&str]) {
-    let ok = Command::new("git")
+fn fixture_git(repo: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repo)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"]);
+    command
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let ok = fixture_git(repo)
         .args(args)
         .output()
         .unwrap()
@@ -2005,12 +2011,7 @@ case \"$*\" in *'rev-parse HEAD'*) if [ -f \"${{0%/*}}/gate\" ]; then printf ent
     git(&r, &["add", "."]);
     git(&r, &["commit", "-qm", "freeze Team fixture source"]);
     let git_text = |values: &[&str]| {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&r)
-            .args(values)
-            .output()
-            .unwrap();
+        let output = fixture_git(&r).args(values).output().unwrap();
         assert!(
             output.status.success(),
             "git {values:?}: {}",
