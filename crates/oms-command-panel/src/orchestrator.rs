@@ -1409,6 +1409,20 @@ impl<'a> Panel<'a> {
                         let selected_participant = selected_agy_usage
                             .and_then(|binding| binding.agy_usage_participant(&pane, shown_turn));
                         let private_group = lead_delivery::group_check(self);
+                        let pane_current = || {
+                            !self.stop.load(Ordering::Acquire)
+                                && self
+                                    .chat_pane_with_host("antigravity", host)
+                                    .is_ok_and(|again| again == pane)
+                                && (selected_participant.is_none()
+                                    || self
+                                        .capture_recent(&pane.lead.id)
+                                        .ok()
+                                        .as_deref()
+                                        .and_then(crate::native_children::agy_current_turn)
+                                        == Some(shown_turn))
+                                && !self.stop.load(Ordering::Acquire)
+                        };
                         if let Some(usage) = agy_usage_sighting(
                             &mut observed.rows,
                             shown_turn,
@@ -1423,21 +1437,8 @@ impl<'a> Panel<'a> {
                                     selected.map(|participant| {
                                         (participant, &private_group as &dyn Fn(u32) -> bool)
                                     }),
+                                    pane_current,
                                 )
-                            },
-                            || {
-                                !self.stop.load(Ordering::Acquire)
-                                    && self
-                                        .chat_pane_with_host("antigravity", host)
-                                        .is_ok_and(|again| again == pane)
-                                    && (selected_participant.is_none()
-                                        || self
-                                            .capture_recent(&pane.lead.id)
-                                            .ok()
-                                            .as_deref()
-                                            .and_then(crate::native_children::agy_current_turn)
-                                            == Some(shown_turn))
-                                    && !self.stop.load(Ordering::Acquire)
                             },
                         ) {
                             selected_agy_usage_result = Some(usage);
@@ -6057,14 +6058,13 @@ const AGY_USAGE_ROWS: usize = 3;
 /// `selected_participant` (when eligible and outside the first
 /// [`AGY_USAGE_ROWS`]) is offered to the same single `scan` and returned
 /// separately as detail-only evidence without mutating `rows`.
-/// Nothing is attached or returned unless the scan names the shown Turn and
-/// `prove_again` re-proves the same lead pane afterwards.
+/// The scan re-proves the lead pane while it still holds the evidence. Nothing
+/// is attached or returned unless that scan names the shown Turn.
 fn agy_usage_sighting(
     rows: &mut [Value],
     shown_turn: &str,
     selected_participant: Option<&str>,
     scan: impl FnOnce(&BTreeSet<String>, Option<&str>) -> Option<crate::agy_child_chat::AgyBoardUsage>,
-    prove_again: impl FnOnce() -> bool,
 ) -> Option<AgySelectedResponseUsage> {
     if shown_turn.is_empty() || rows.is_empty() {
         return None;
@@ -6100,10 +6100,7 @@ fn agy_usage_sighting(
         return None;
     }
     let usage = scan(&painted, selected)?;
-    if usage.turn != shown_turn
-        || (usage.rows.is_empty() && usage.selected.is_none())
-        || !prove_again()
-    {
+    if usage.turn != shown_turn {
         return None;
     }
     let mut detail_response = usage.selected.and_then(|(participant, value)| {
@@ -16971,15 +16968,17 @@ pub(crate) mod tests {
                     selected,
                     |painted: &BTreeSet<String>, _| {
                         offered.borrow_mut().push(painted.clone());
+                        if scan_turn == shown {
+                            proofs.set(proofs.get() + 1);
+                            if !proof {
+                                return None;
+                            }
+                        }
                         Some(crate::agy_child_chat::AgyBoardUsage {
                             turn: scan_turn.to_owned(),
                             rows: all.clone(),
                             selected: None,
                         })
-                    },
-                    || {
-                        proofs.set(proofs.get() + 1);
-                        proof
                     },
                 );
                 (rows, detail, offered.into_inner(), proofs.get())
@@ -17012,21 +17011,15 @@ pub(crate) mod tests {
             // Group-only proof belongs to the detail even in an ambient slot.
             let mut rows = vec![row(&b)];
             let before = rows.clone();
-            let detail = agy_usage_sighting(
-                &mut rows,
-                turn,
-                Some(&b),
-                |painted, selected| {
-                    assert_eq!(painted, &set(&[&b]));
-                    assert_eq!(selected, Some(b.as_str()));
-                    Some(crate::agy_child_chat::AgyBoardUsage {
-                        turn: turn.to_owned(),
-                        rows: BTreeMap::new(),
-                        selected: Some((b.clone(), usage(2))),
-                    })
-                },
-                || true,
-            )
+            let detail = agy_usage_sighting(&mut rows, turn, Some(&b), |painted, selected| {
+                assert_eq!(painted, &set(&[&b]));
+                assert_eq!(selected, Some(b.as_str()));
+                Some(crate::agy_child_chat::AgyBoardUsage {
+                    turn: turn.to_owned(),
+                    rows: BTreeMap::new(),
+                    selected: Some((b.clone(), usage(2))),
+                })
+            })
             .unwrap();
             assert_eq!(detail.response, usage(2));
             assert_eq!(rows, before);
@@ -17209,7 +17202,7 @@ pub(crate) mod tests {
                 (rows.clone(), vec![set(&[&a])], 1)
             );
             let mut none = rows.clone();
-            agy_usage_sighting(&mut none, turn, None, |_, _| None, || unreachable!());
+            agy_usage_sighting(&mut none, turn, None, |_, _| None);
             assert_eq!(none, rows);
             assert!(none[0].get("observed_model").is_none());
 
@@ -17219,19 +17212,13 @@ pub(crate) mod tests {
                 invalid["model"] = json!(bad);
                 let scan = BTreeMap::from([(b.clone(), invalid.clone())]);
                 let mut rows = vec![row(&b)];
-                agy_usage_sighting(
-                    &mut rows,
-                    turn,
-                    None,
-                    |_, _| {
-                        Some(crate::agy_child_chat::AgyBoardUsage {
-                            turn: turn.to_owned(),
-                            rows: scan.clone(),
-                            selected: None,
-                        })
-                    },
-                    || true,
-                );
+                agy_usage_sighting(&mut rows, turn, None, |_, _| {
+                    Some(crate::agy_child_chat::AgyBoardUsage {
+                        turn: turn.to_owned(),
+                        rows: scan.clone(),
+                        selected: None,
+                    })
+                });
                 assert!(rows[0].get("observed_model").is_none(), "{bad:?}");
                 assert_eq!(
                     rows[0]["native_response_usage"],

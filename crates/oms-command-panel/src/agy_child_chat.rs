@@ -120,6 +120,7 @@ pub(crate) fn agy_board_child_usage(
     _turn: &str,
     _painted: &std::collections::BTreeSet<String>,
     _selected: SelectedGroupProof<'_>,
+    _pane_current: impl FnOnce() -> bool,
 ) -> Option<AgyBoardUsage> {
     None
 }
@@ -882,10 +883,19 @@ mod linux {
         turn: &str,
         painted: &BTreeSet<String>,
         selected: SelectedGroupProof<'_>,
+        pane_current: impl FnOnce() -> bool,
     ) -> Option<AgyBoardUsage> {
-        agy_current_children_usage_stage(pid, birth, repo, Some(turn), painted, true, selected)
-            .ok()
-            .map(|(_, usage)| usage)
+        agy_current_children_usage_stage(
+            pid,
+            birth,
+            repo,
+            Some(turn),
+            painted,
+            Some(pane_current),
+            selected,
+        )
+        .ok()
+        .map(|(_, usage)| usage)
     }
 
     #[cfg(test)]
@@ -907,7 +917,7 @@ mod linux {
             repo,
             expected_turn,
             painted,
-            include_usage,
+            include_usage.then_some(|| true),
             None,
         )
         .ok()
@@ -922,8 +932,16 @@ mod linux {
         expected_turn: Option<&str>,
         painted: &BTreeSet<String>,
     ) -> Stage<(String, Vec<AgyChildChatLocator>)> {
-        agy_current_children_usage_stage(pid, birth, repo, expected_turn, painted, false, None)
-            .map(|(locators, usage)| (usage.turn, locators))
+        agy_current_children_usage_stage(
+            pid,
+            birth,
+            repo,
+            expected_turn,
+            painted,
+            None::<fn() -> bool>,
+            None,
+        )
+        .map(|(locators, usage)| (usage.turn, locators))
     }
 
     fn agy_current_children_usage_stage(
@@ -932,7 +950,7 @@ mod linux {
         repo: &Path,
         expected_turn: Option<&str>,
         painted: &BTreeSet<String>,
-        include_usage: bool,
+        pane_current: Option<impl FnOnce() -> bool>,
         selected: SelectedGroupProof<'_>,
     ) -> Stage<(Vec<AgyChildChatLocator>, AgyBoardUsage)> {
         gate(!painted.is_empty(), "no-painted")?;
@@ -1057,7 +1075,7 @@ mod linux {
                 app_dir.trail.borrow_mut().0.truncate(snap);
                 continue;
             };
-            let response = if include_usage {
+            let response = if pane_current.is_some() {
                 read_child_suffix(&child_file, &child_stat)
                     .ok()
                     .and_then(|(bytes, recent)| latest_child_response_usage(&bytes, recent))
@@ -1085,13 +1103,27 @@ mod linux {
             ));
         }
 
-        // The selected workspace may run a host group lookup. Recheck AGY
-        // custody and all held transcript names and versions after it returns.
-        if prove_selected {
-            gate(
-                selected_ws.is_some_and(|ws| ws.confirm()),
-                "workspace-changed",
-            )?;
+        let selected_proof = if prove_selected {
+            Some(
+                selected_ws
+                    .as_ref()
+                    .and_then(AgyStrictWorkspaces::confirm_group_membership)
+                    .ok_or("workspace-changed")?,
+            )
+        } else {
+            None
+        };
+        if let Some(pane_current) = pane_current
+            && held_children
+                .iter()
+                .any(|(_, _, response, ..)| response.is_some())
+        {
+            gate(pane_current(), "post-fence")?;
+        }
+        // The pane/Turn check can block. Recheck names, ACLs and the held
+        // transcript versions afterwards using the already checked groups.
+        if let Some(proof) = selected_proof {
+            gate(proof.recheck(), "workspace-changed")?;
         }
         if let Some(ws) = strict_ws {
             gate(ws.confirm(), "workspace-changed")?;
@@ -2519,7 +2551,15 @@ mod tests {
             participant: selected.clone(),
         };
         let usage = |group: super::SelectedGroupProof<'_>| {
-            agy_board_child_usage(pid, &birth, &fixture.repo, TURN_CUR, &painted, group)
+            agy_board_child_usage(
+                pid,
+                &birth,
+                &fixture.repo,
+                TURN_CUR,
+                &painted,
+                group,
+                || true,
+            )
         };
         for group in [
             None,
@@ -2612,6 +2652,40 @@ mod tests {
         swap_during_confirmation(&|race| {
             assert!(usage(Some((&selected, race))).is_none());
         });
+
+        // A pane/Turn sample can succeed after the selected child's name
+        // changes. The same bytes at a new inode must not publish usage.
+        let child = fixture.transcript_path(CHILD_A);
+        let held = fixture.base.join("held-child-transcript");
+        let child_bytes = fs::read(&child).unwrap();
+        let group_calls = Cell::new(0);
+        let counted = |id| {
+            group_calls.set(group_calls.get() + 1);
+            allowed(id)
+        };
+        reset_test_counters();
+        let during_pane_check = agy_board_child_usage(
+            pid,
+            &birth,
+            &fixture.repo,
+            TURN_CUR,
+            &painted,
+            Some((&selected, &counted)),
+            || {
+                assert_eq!(group_calls.get(), 2);
+                assert_eq!(test_counters().2, 1);
+                fs::rename(&child, &held).unwrap();
+                write_private(&child, &child_bytes);
+                true
+            },
+        );
+        fs::rename(&held, &child).unwrap();
+        assert!(during_pane_check.is_none());
+        assert_eq!(
+            group_calls.get(),
+            2,
+            "no membership lookup after pane proof"
+        );
         assert!(
             usage(Some((&selected, &allowed)))
                 .unwrap()
