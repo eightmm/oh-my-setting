@@ -3367,7 +3367,40 @@ userland compatibility), but macOS runners are no longer part of GitHub Actions
 CI; verify macOS/BSD-sensitive changes locally with
 `tests/bsd-portability-smoke.sh` (also wired into `scripts/check.sh`).
 
-Require it in branch protection before enabling a local quick push hook; having a
+`oms ci-status attention [branch] [--limit N] [--json]` reads scheduled and manual
+workflow runs separately, so a newer PR or push run cannot hide a maintenance
+failure. Without a branch it uses the GitHub origin's default branch. It requests
+at most 20 runs per event by default (1–100), then reports the newest run and
+attempt for each observed workflow. Each line includes the event, workflow ID,
+outcome, run URL and the run's last-update time. An incomplete history window is
+labelled `bounded`; it may omit workflows that have not run recently. The JSON
+form is schema 1, kind
+`oms-ci-attention`, with repository, branch, observation time and observations.
+
+Exit 0 means only the selected latest observations succeeded; it establishes
+neither complete workflow coverage, recent scheduled execution, nor a healthy
+default-branch HEAD. Read each run's timestamp to assess its age. Exit 1 means a
+completed failure was observed; exit 2 takes precedence when any outcome is
+pending or unknown. Missing runs, unreadable responses and skipped or unrecognized
+outcomes remain unknown. A newer successful
+run or attempt replaces that workflow's earlier failure; a queued run is pending.
+This explicit GET-only command reads no job logs, writes no ledger, changes no
+checkout and never dispatches, retries or grants landing/install evidence. It is
+not polled by ordinary Board refresh or session startup. `attention` reports
+the workflow events that exist; it does not imply macOS CI is running.
+
+Before restoring a macOS CI lane, resolve the native Team channel investigation
+[#327](https://github.com/eightmm/oh-my-setting/issues/327) and concurrent input
+queue investigation [#343](https://github.com/eightmm/oh-my-setting/issues/343)
+with controlled fixtures and evidence from a macOS host. Check the BSD smoke,
+native Rust tests and install lifecycle on the proposed commit; Linux success
+alone does not establish those results. Reintroduce the lane in a separate,
+reviewed workflow change that states its trigger and runner cost, updates the
+selected-job gate contract, and preserves exact-SHA installation proof. A
+successful portability smoke is useful evidence but does not close the native
+concurrency investigations by itself.
+
+Require `gate` in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
 that on request: it reads the branch's protection and active rulesets (GET only; the
 default is the repository's default branch) and reports whether `gate` is a required

@@ -860,6 +860,255 @@ fn ci_status_fails_closed_without_gh() {
     }
 }
 
+#[test]
+fn ci_attention_observes_maintenance_without_certifying_head_or_writing_state() {
+    let fixture = FeedbackFixture::new();
+    fs::write(&fixture.gh, r#"#!/bin/bash
+[[ "$1 $2 $3" == 'api --method GET' ]] || exit 93
+case "$OMS_CT_INTERRUPT:${@: -1}" in
+  'default:repos/example/project'|'schedule:repos/example/project/actions/runs?event=schedule&branch=main&per_page=20'|'manual:repos/example/project/actions/runs?event=workflow_dispatch&branch=main&per_page=20') exit 130;;
+esac
+case "${@: -1}" in
+  'repos/example/project') printf '%s\n' '{"default_branch":"main"}';;
+  'repos/example/project/actions/runs?event=schedule&branch=main&per_page=20'|'repos/example/project/actions/runs?event=schedule&branch=release%2Fnightly&per_page=20') printf '%s\n' "$OMS_CT_SCHEDULE";;
+  'repos/example/project/actions/runs?event=workflow_dispatch&branch=main&per_page=20'|'repos/example/project/actions/runs?event=workflow_dispatch&branch=release%2Fnightly&per_page=20')
+    [[ "$OMS_CT_MANUAL" != null ]] || { printf 'private transport detail' >&2; exit 2; }
+    printf '%s\n' "$OMS_CT_MANUAL";;
+  *) exit 94;;
+esac
+"#).unwrap();
+    let row = |event: &str,
+               id: usize,
+               workflow: usize,
+               number: usize,
+               attempt: usize,
+               status: &str,
+               conclusion: &str| {
+        obj([
+            ("id", id.into()),
+            ("workflow_id", workflow.into()),
+            ("run_number", number.into()),
+            ("run_attempt", attempt.into()),
+            ("event", event.into()),
+            ("head_branch", "main".into()),
+            ("head_sha", "a".repeat(40).into()),
+            ("updated_at", "2026-11-23T03:23:00Z".into()),
+            ("status", status.into()),
+            ("conclusion", conclusion.into()),
+            (
+                "html_url",
+                format!("https://github.com/example/project/actions/runs/{id}").into(),
+            ),
+        ])
+    };
+    let envelope = |rows: Vec<V>, total: usize| {
+        obj([
+            ("total_count", total.into()),
+            ("workflow_runs", V::Arr(rows)),
+        ])
+    };
+    let query = |schedule: &V, manual: &V, args: &[&str]| {
+        let encode = |v: &V| String::from_utf8(v.json(false).unwrap()).unwrap();
+        fixture.isolated.run_env(
+            "ci-status",
+            &fixture.repo,
+            args,
+            &[
+                ("OMS_GH_BIN", fixture.gh.to_str().unwrap()),
+                ("OMS_CT_SCHEDULE", &encode(schedule)),
+                ("OMS_CT_MANUAL", &encode(manual)),
+            ],
+        )
+    };
+    let failed = row("schedule", 71, 7, 1, 1, "completed", "failure");
+    let passed = row("schedule", 72, 7, 2, 1, "completed", "success");
+    let manual = envelope(
+        vec![row(
+            "workflow_dispatch",
+            81,
+            8,
+            1,
+            1,
+            "completed",
+            "failure",
+        )],
+        1,
+    );
+    // Select by run order, not input ordering or the local checkout's unrelated SHA.
+    let schedule = envelope(vec![failed.clone(), passed.clone()], 2);
+    let output = query(&schedule, &manual, &["attention", "--json"]);
+    assert_eq!(output.0, 1, "{output:?}");
+    let report = V::parse(output.1.as_bytes()).unwrap();
+    assert_eq!(report.get("kind").text(), Some("oms-ci-attention"));
+    assert_eq!(report.get("branch").text(), Some("main"));
+    assert_eq!(report.get("observations").array().len(), 2);
+    assert_eq!(
+        report.get("observations").array()[0].get("state").text(),
+        Some("clear")
+    );
+    assert_eq!(
+        report.get("observations").array()[1].get("state").text(),
+        Some("failed")
+    );
+    let output = query(&schedule, &manual, &["attention", "main"]);
+    assert!(
+        output
+            .1
+            .contains("workflow_dispatch workflow 8 failed failure"),
+        "{output:?}"
+    );
+    assert!(!output.1.contains("actions/runs/71"));
+    assert!(output.1.contains("updated 2026-11-23T03:23:00Z"));
+
+    let mut selected = passed.clone();
+    selected.set("head_branch", "release/nightly");
+    let mut selected_manual = row("workflow_dispatch", 81, 8, 1, 1, "completed", "success");
+    selected_manual.set("head_branch", "release/nightly");
+    let output = query(
+        &envelope(vec![selected], 1),
+        &envelope(vec![selected_manual], 1),
+        &["attention", "release/nightly", "--json"],
+    );
+    assert_eq!(output.0, 0, "percent-encoded branch: {output:?}");
+    assert_eq!(
+        V::parse(output.1.as_bytes()).unwrap().get("branch").text(),
+        Some("release/nightly")
+    );
+
+    let another_workflow = envelope(
+        vec![
+            passed.clone(),
+            row("schedule", 91, 9, 1, 1, "completed", "failure"),
+        ],
+        2,
+    );
+    let output = query(&another_workflow, &manual, &["attention"]);
+    assert_eq!(output.0, 1, "{output:?}");
+    assert!(
+        output.1.contains("schedule workflow 9 failed failure"),
+        "{output:?}"
+    );
+
+    // A successful later attempt resolves the observation; queued work never counts as green.
+    let retry = envelope(
+        vec![failed, row("schedule", 71, 7, 1, 2, "completed", "success")],
+        2,
+    );
+    let green = envelope(
+        vec![row(
+            "workflow_dispatch",
+            81,
+            8,
+            1,
+            2,
+            "completed",
+            "success",
+        )],
+        1,
+    );
+    assert_eq!(query(&retry, &green, &["attention"]).0, 0);
+    let pending = envelope(
+        vec![passed.clone(), row("schedule", 73, 7, 3, 1, "queued", "")],
+        2,
+    );
+    let output = query(&pending, &green, &["attention"]);
+    assert_eq!(output.0, 2, "{output:?}");
+    assert!(output.1.contains("pending queued"), "{output:?}");
+
+    for bad in [
+        V::Null,
+        envelope(vec![], 0),
+        obj([("workflow_runs", V::Arr(vec![]))]),
+        envelope(
+            vec![row("schedule", 72, 7, 2, 1, "completed", "skipped")],
+            1,
+        ),
+    ] {
+        let output = query(&bad, &green, &["attention"]);
+        assert_eq!(output.0, 2, "{output:?}");
+        assert!(output.1.contains("unknown"), "{output:?}");
+    }
+    let output = query(&schedule, &V::Null, &["attention"]);
+    assert_eq!(output.0, 2, "{output:?}");
+    assert!(!format!("{}{}", output.1, output.2).contains("private transport detail"));
+    for (key, value) in [
+        ("event", "push"),
+        ("head_branch", "other"),
+        ("head_sha", "short"),
+        ("html_url", "https://example.invalid/foreign"),
+        (
+            "html_url",
+            "https://github.com/example/project/actions/runs/73",
+        ),
+        (
+            "html_url",
+            "https://github.com/example/project/Actions/runs/72",
+        ),
+        ("updated_at", "not-a-date"),
+    ] {
+        let mut foreign = passed.clone();
+        foreign.set(key, value);
+        let output = query(&envelope(vec![foreign], 1), &green, &["attention"]);
+        assert_eq!(output.0, 2, "{key}: {output:?}");
+        assert!(output.1.contains("unknown"));
+    }
+    let bounded = envelope(vec![passed], 100);
+    let output = query(&bounded, &green, &["attention"]);
+    assert_eq!(output.0, 0, "{output:?}");
+    assert!(output.1.contains("bounded window"), "{output:?}");
+    assert_eq!(
+        query(&bounded, &green, &["attention", "--limit", "101"]).0,
+        2
+    );
+    for phase in ["default", "schedule", "manual"] {
+        let output = fixture.isolated.run_env(
+            "ci-status",
+            &fixture.repo,
+            &["attention", "--json"],
+            &[
+                ("OMS_GH_BIN", fixture.gh.to_str().unwrap()),
+                ("OMS_CT_INTERRUPT", phase),
+                (
+                    "OMS_CT_SCHEDULE",
+                    &String::from_utf8(bounded.json(false).unwrap()).unwrap(),
+                ),
+                (
+                    "OMS_CT_MANUAL",
+                    &String::from_utf8(green.json(false).unwrap()).unwrap(),
+                ),
+            ],
+        );
+        assert_eq!(output.0, 130, "interrupted {phase}: {output:?}");
+        assert!(
+            output.1.is_empty(),
+            "interruption must not publish an observation"
+        );
+    }
+    fixture.isolated.git(
+        &fixture.repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/EXAMPLE/Project.git",
+        ],
+    );
+    let script = fs::read_to_string(&fixture.gh)
+        .unwrap()
+        .replace("repos/example/project", "repos/EXAMPLE/Project");
+    fs::write(&fixture.gh, script).unwrap();
+    let output = query(&bounded, &green, &["attention", "--json"]);
+    assert_eq!(output.0, 0, "GitHub repository casing: {output:?}");
+    assert!(
+        !fixture.repo.join(".oms").exists(),
+        "read-only attention created state"
+    );
+    assert!(
+        !fixture.repo.join(".gitignore").exists(),
+        "read-only attention changed ignores"
+    );
+}
+
 struct FeedbackFixture {
     isolated: Isolated,
     repo: PathBuf,
