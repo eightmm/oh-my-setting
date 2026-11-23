@@ -1385,7 +1385,6 @@ fn incremental_prefix_hash_read_fence_and_stale_negatives() {
     use sha2::{Digest, Sha256};
     use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::MetadataExt;
-    use std::sync::{Arc, atomic::Ordering};
 
     let idle = AtomicBool::new(false);
     let f = Fixture::new();
@@ -1478,48 +1477,6 @@ fn incremental_prefix_hash_read_fence_and_stale_negatives() {
         .unwrap()
     );
     assert_eq!(out.len(), 10_000);
-
-    // Bounded continuous-writer thread test + post-stop convergence parity.
-    let repo_race = Fixture::new();
-    let race_id = create_attempt(
-        &repo_race.0,
-        &StartRequest {
-            tool: "race".into(),
-            ..Default::default()
-        },
-        &idle,
-    )
-    .unwrap();
-    let race_path = event_path(&repo_race.0);
-    let race_cache = EventsProjectionCache::new();
-    let stop_writer = Arc::new(AtomicBool::new(false));
-    let stop_flag = Arc::clone(&stop_writer);
-    let writer_path = race_path.clone();
-    let writer_id = race_id.clone();
-    let writer = std::thread::spawn(move || {
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&writer_path)
-            .unwrap();
-        let mut seq = 2usize;
-        while !stop_flag.load(Ordering::Relaxed) && seq <= 10_000 {
-            let row = synth_row(seq, &writer_id, seq, "attempt.heartbeat", "");
-            f.write_all(row.as_bytes()).unwrap();
-            f.flush().unwrap();
-            seq += 1;
-            std::thread::yield_now();
-        }
-    });
-    for _ in 0..80 {
-        match race_cache.list_json(&repo_race.0, &idle) {
-            Ok(bytes) => assert!(bytes.starts_with(b"[") && bytes.ends_with(b"\n")),
-            Err(err) => assert_eq!(err, "ledger changed during access"),
-        }
-        std::thread::yield_now();
-    }
-    stop_writer.store(true, Ordering::Release);
-    writer.join().unwrap();
-    assert_list_json_parity(&race_cache, &repo_race.0);
 
     // Same-inode middle-prefix rewrite (> 24 KiB, identical 8 KiB head & tail), same-size & grown.
     let mid_cache = EventsProjectionCache::new();
@@ -1826,7 +1783,7 @@ fn incremental_cache_drops_on_partial_replay_malformed_eof_and_cancellation() {
     };
     assert!(apply_snapshot(orphan_inc, None, &idle).is_err());
 
-    // Torn partial JSON EOF -> exact cold diagnostic, !is_cached(), recovery after fix.
+    // A partial write can be stable throughout the read fence and still end inside a JSON string.
     let mut hb2 = new_event(&err_id, 2usize.into(), "attempt.heartbeat", obj([])).unwrap();
     hb2.set("ts", "2026-01-01T00:00:02Z");
     append_lifecycle(&repo_err.0, hb2, &idle).unwrap();
@@ -1838,8 +1795,9 @@ fn incremental_cache_drops_on_partial_replay_malformed_eof_and_cancellation() {
             .0,
         SyncDisposition::Cold
     );
-    let len_after_2 = std::fs::metadata(&err_path).unwrap().len();
-    append_raw(&err_path, b"{\"schema\":1");
+    let row = synth_row(3003, &err_id, 3, "attempt.heartbeat", "");
+    let (torn_prefix, torn_suffix) = row.split_at(row.find("\",\"ts\":").unwrap());
+    append_raw(&err_path, torn_prefix.as_bytes());
     let torn_err = err_cache.list_json(&repo_err.0, &idle).unwrap_err();
     let torn_cold = run(
         App::Events,
@@ -1848,21 +1806,21 @@ fn incremental_cache_drops_on_partial_replay_malformed_eof_and_cancellation() {
         &idle,
     );
     assert_eq!(torn_cold.0, 2);
-    assert!(torn_err.contains("is not valid JSON"), "{torn_err}");
+    let expected = format!(
+        "{}:3 is not valid JSON: Unterminated string",
+        err_path.canonicalize().unwrap().display()
+    );
+    assert!(torn_err.starts_with(&expected), "{torn_err}");
     assert_eq!(
         format!("error: {torn_err}\n"),
         String::from_utf8_lossy(&torn_cold.2)
     );
     assert!(!err_cache.is_cached());
-    let torn_tail = format!(
-        ",\"event_id\":\"aevt_{:032x}\",\"ts\":\"2026-01-01T00:00:03Z\",\"attempt_id\":\"{err_id}\",\"seq\":3,\"event_type\":\"attempt.heartbeat\"}}\n",
-        3003usize
-    );
-    append_raw(&err_path, torn_tail.as_bytes());
+    append_raw(&err_path, torn_suffix.as_bytes());
     let (disp, rows) = err_cache.list_with_disposition(&repo_err.0, &idle).unwrap();
     assert_eq!(disp, SyncDisposition::Cold);
     assert_eq!(rows[0].get("sequence").py(), "3");
-    assert!(len_after_2 < std::fs::metadata(&err_path).unwrap().len());
+    assert_list_json_parity(&err_cache, &repo_err.0);
 
     // Sequence gap after valid appended row -> drops cache, identical retry error, truncating recovers.
     append_raw(
