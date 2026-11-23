@@ -73,11 +73,16 @@ struct CachedState {
 type Dispatches = serde_json::Map<String, Value>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DispatchGeneration(String, Option<u64>);
+struct DispatchGeneration {
+    key: String,
+    size: Option<u64>,
+    leaf_uid: Option<u32>,
+}
 
 struct DispatchRead {
     calls: Option<Dispatches>,
     generation: Option<DispatchGeneration>,
+    capacity_valid: bool,
 }
 
 struct CachedWriteSlots {
@@ -95,12 +100,13 @@ fn path_generation(
     repo: &Path,
     segments: &[(&str, bool)],
     allow_missing: bool,
-) -> Option<(String, Option<u64>)> {
+) -> Option<(String, Option<u64>, Option<u32>)> {
     use std::os::unix::fs::MetadataExt;
     let root = std::fs::canonicalize(repo).ok()?;
     let mut path = root.clone();
     let root_meta = std::fs::metadata(&root).ok()?;
     let mut size = root_meta.size();
+    let mut leaf_uid = None;
     let mut parts = vec![format!("{}:{}", root_meta.dev(), root_meta.ino())];
     for &(name, directory) in segments {
         path.push(name);
@@ -108,7 +114,7 @@ fn path_generation(
             Ok(metadata) => metadata,
             Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
                 parts.push(format!("missing:{name}"));
-                return Some((format!("{:?}|{}", root, parts.join("|")), None));
+                return Some((format!("{:?}|{}", root, parts.join("|")), None, None));
             }
             Err(_) => return None,
         };
@@ -119,10 +125,13 @@ fn path_generation(
             return None;
         }
         size = m.size();
+        let uid = m.uid();
+        leaf_uid = Some(uid);
         parts.push(format!(
-            "{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}",
             m.dev(),
             m.ino(),
+            uid,
             size,
             m.mtime(),
             m.mtime_nsec(),
@@ -130,7 +139,11 @@ fn path_generation(
             m.ctime_nsec()
         ));
     }
-    Some((format!("{:?}|{}", root, parts.join("|")), Some(size)))
+    Some((
+        format!("{:?}|{}", root, parts.join("|")),
+        Some(size),
+        leaf_uid,
+    ))
 }
 
 fn ledger_generation(repo: &Path) -> Option<String> {
@@ -139,7 +152,7 @@ fn ledger_generation(repo: &Path) -> Option<String> {
         &[(".oms", true), ("lifecycle", true), ("events.jsonl", false)],
         false,
     )
-    .map(|(generation, _)| generation)
+    .map(|(generation, _, _)| generation)
 }
 
 fn dispatch_generation(repo: &Path) -> Option<DispatchGeneration> {
@@ -153,28 +166,42 @@ fn dispatch_generation(repo: &Path) -> Option<DispatchGeneration> {
         ],
         true,
     )
-    .map(|(generation, size)| DispatchGeneration(generation, size))
+    .map(|(key, size, leaf_uid)| DispatchGeneration {
+        key,
+        size,
+        leaf_uid,
+    })
 }
 
-fn read_dispatches(store: &Store, missing: bool) -> Option<Dispatches> {
-    let raw = store
-        .json(
-            Path::new(".oms/artifacts/panel-dispatch/reservations.json"),
-            crate::storage::MAX_STATE,
-            true,
-        )
-        .ok()?;
-    // Optional reads also return None for a present empty file. Only an
+fn read_dispatches(store: &Store, missing: bool) -> (Option<Dispatches>, bool) {
+    let Ok(bytes) = store.read(
+        Path::new(".oms/artifacts/panel-dispatch/reservations.json"),
+        crate::storage::MAX_STATE,
+        true,
+    ) else {
+        return (None, false);
+    };
+    // Optional reads also return empty bytes for a present empty file. Only an
     // observed missing path whose generation remains stable proves no calls.
-    let raw = match (raw, missing) {
-        (None, true) => return Some(Dispatches::new()),
-        (Some(raw), false) => raw,
-        _ => return None,
+    if bytes.is_empty() {
+        return if missing {
+            (Some(Dispatches::new()), true)
+        } else {
+            (None, false)
+        };
+    }
+    if missing {
+        return (None, false);
+    }
+    let Ok(raw) = crate::decode(&bytes, crate::storage::MAX_STATE) else {
+        return (None, false);
     };
     if raw["schema"] != 1 {
-        return None;
+        return (None, false);
     }
-    let calls = raw["calls"].as_object()?;
+    let Some(calls) = raw["calls"].as_object() else {
+        return (None, false);
+    };
     let mut out = serde_json::Map::new();
     for (member, entry) in calls {
         if !entry.is_object() {
@@ -203,7 +230,9 @@ fn read_dispatches(store: &Store, missing: bool) -> Option<Dispatches> {
             }),
         );
     }
-    Some(out)
+    let capacity_valid =
+        oms_command_telemetry::store::dispatch::validate_registry_bytes(&bytes).is_ok();
+    (Some(out), capacity_valid)
 }
 
 fn unique_attempt<'a>(attempts: &'a Value, attempt: &str) -> Option<&'a Value> {
@@ -342,6 +371,7 @@ impl AttemptCache {
         let unavailable = DispatchRead {
             calls: None,
             generation: None,
+            capacity_valid: false,
         };
         let Ok(mut cache) = self.0.lock() else {
             return unavailable;
@@ -358,10 +388,11 @@ impl AttemptCache {
             return DispatchRead {
                 calls: cached.calls.clone(),
                 generation: Some(before),
+                capacity_valid: cached.capacity_valid,
             };
         }
         cache.dispatches = None;
-        let calls = read_dispatches(store, before.1.is_none());
+        let (calls, capacity_valid) = read_dispatches(store, before.size.is_none());
         let generation = (!stop.load(Ordering::Relaxed)
             && dispatch_generation(repo).as_ref() == Some(&before))
         .then_some(before);
@@ -369,9 +400,14 @@ impl AttemptCache {
             cache.dispatches = Some(DispatchRead {
                 calls: calls.clone(),
                 generation: Some(generation.clone()),
+                capacity_valid,
             });
         }
-        DispatchRead { calls, generation }
+        DispatchRead {
+            calls,
+            generation,
+            capacity_valid,
+        }
     }
 
     fn write_slots(
@@ -381,11 +417,35 @@ impl AttemptCache {
         ledger: &str,
         dispatches: &DispatchRead,
     ) -> Option<WriteSlots> {
+        self.write_slots_for_uid(
+            main,
+            attempts,
+            ledger,
+            dispatches,
+            rustix::process::getuid().as_raw(),
+        )
+    }
+
+    fn write_slots_for_uid(
+        &self,
+        main: &str,
+        attempts: &Value,
+        ledger: &str,
+        dispatches: &DispatchRead,
+        current_uid: u32,
+    ) -> Option<WriteSlots> {
+        if !dispatches.capacity_valid {
+            return None;
+        }
         let calls = dispatches.calls.as_ref()?;
-        let DispatchGeneration(reservations, size) = dispatches.generation.as_ref()?;
-        if size
+        let generation = dispatches.generation.as_ref()?;
+        if generation
+            .size
             .is_some_and(|size| size > oms_command_telemetry::store::dispatch::MAX_REGISTRY as u64)
         {
+            return None;
+        }
+        if generation.leaf_uid.is_some_and(|uid| uid != current_uid) {
             return None;
         }
         // These values and generations are local to the collecting snapshot.
@@ -393,7 +453,7 @@ impl AttemptCache {
         let mut cache = self.0.lock().ok()?;
         if let Some(warm) = &cache.write_slots
             && warm.ledger == ledger
-            && warm.reservations == *reservations
+            && warm.reservations == generation.key
             && warm.main == main
         {
             return Some(warm.slots);
@@ -401,7 +461,7 @@ impl AttemptCache {
         let slots = write_slots_for_main(array(attempts), calls, main);
         cache.write_slots = Some(CachedWriteSlots {
             ledger: ledger.to_owned(),
-            reservations: reservations.clone(),
+            reservations: generation.key.clone(),
             main: main.to_owned(),
             slots,
         });
@@ -550,9 +610,11 @@ fn snapshot_inner(
         let dispatches = if let Some(cache) = cache {
             cache.dispatches(repo, &store, stop)
         } else {
+            let (calls, capacity_valid) = read_dispatches(&store, false);
             DispatchRead {
-                calls: read_dispatches(&store, false),
+                calls,
                 generation: None,
+                capacity_valid,
             }
         };
         if let (Some(main), Some(cache), Some(ledger)) = (main, cache, ledger.as_deref())
@@ -1801,11 +1863,37 @@ mod tests {
         );
         assert_eq!(oversized_slots, None);
 
-        // Symlinked reservations.json fails closed and clears any prior cached dispatches.
+        // Malformed embedded resource or physical contracts withhold capacity while
+        // preserving the enrolled schema-1 Room rows without re-querying Events.
+        for (key, value) in [
+            ("resources", serde_json::json!({"state": "broken"})),
+            (
+                "physical",
+                serde_json::json!({"calls": {"bad": {"schema": 3}}}),
+            ),
+        ] {
+            let mut malformed = full_registry.clone();
+            malformed[key] = value;
+            std::fs::write(&reservations, serde_json::to_string(&malformed).unwrap()).unwrap();
+            let (degraded, degraded_slots) = collect(Some("att_main"));
+            assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                degraded.report["room_dispatches"]
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert_eq!(degraded_slots, None);
+        }
+
+        // Valid legacy schema-1 (without resources/physical) restores capacity,
+        // and symlinked reservations.json fails closed and clears prior cached dispatches.
         std::fs::write(&reservations, &raw_bytes).unwrap();
-        let warm =
-            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        let (warm, warm_slots) = collect(Some("att_main"));
+        assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
         assert_eq!(warm.report["room_dispatches"].as_object().unwrap().len(), 2);
+        assert_eq!(warm_slots, Some(expected_slots));
         let decoy_file = dispatch_dir.join("decoy.json");
         std::fs::write(&decoy_file, &raw_bytes).unwrap();
         std::fs::remove_file(&reservations).unwrap();
@@ -1816,7 +1904,7 @@ mod tests {
         assert_eq!(sym_file_slots, None);
         std::fs::remove_file(&reservations).unwrap();
 
-        // Deleted reservations.json clears prior cached dispatches.
+        // Deleted reservations.json clears prior cached dispatches and proves empty capacity.
         std::fs::write(&reservations, &raw_bytes).unwrap();
         assert_eq!(
             snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache))
@@ -1828,10 +1916,17 @@ mod tests {
             2
         );
         std::fs::remove_file(&reservations).unwrap();
-        let deleted =
-            snapshot_with_cache(&repo, Some("room-a"), &service, &stop, Some(&cache)).unwrap();
+        let (deleted, deleted_slots) = collect(Some("att_main"));
         assert_eq!(service.events_calls.load(Ordering::Relaxed), 1);
         assert_eq!(deleted.report["room_dispatches"], serde_json::json!({}));
+        assert_eq!(
+            deleted_slots,
+            Some(WriteSlots {
+                active: 0,
+                awaiting: 8,
+                unconfirmed: 0,
+            })
+        );
 
         // Symlinked panel-dispatch directory fails closed without reading decoy reservations.json.
         let decoy_dir = repo.join(".oms/artifacts/decoy-dispatch");
@@ -1915,5 +2010,59 @@ mod tests {
         let no_room = snapshot(&repo, None, &service, &stop).unwrap();
         assert_eq!(no_room.report["room_attempts"], serde_json::json!({}));
         assert_eq!(no_room.report["room_dispatches"], serde_json::json!({}));
+
+        // Foreign-owned reservations.json leaf withholds capacity while preserving
+        // public calls; missing reservations.json (leaf_uid == None) keeps empty capacity.
+        let store = Store::open(&repo).unwrap();
+        let (cached_attempts, ledger) = cache
+            .attempts_with_generation(&repo, &service, &stop)
+            .unwrap();
+        let ledger = ledger.unwrap();
+        let actual_uid = rustix::process::getuid().as_raw();
+        let present_read = cache.dispatches(&repo, &store, &stop);
+        assert_eq!(
+            present_read.generation.as_ref().unwrap().leaf_uid,
+            Some(actual_uid)
+        );
+        assert!(present_read.calls.is_some());
+        assert_eq!(
+            cache.write_slots_for_uid(
+                "att_main",
+                &cached_attempts,
+                &ledger,
+                &present_read,
+                actual_uid,
+            ),
+            Some(expected_slots)
+        );
+        assert_eq!(
+            cache.write_slots_for_uid(
+                "att_main",
+                &cached_attempts,
+                &ledger,
+                &present_read,
+                actual_uid.wrapping_add(1),
+            ),
+            None
+        );
+        assert!(present_read.calls.is_some());
+
+        std::fs::remove_file(&reservations).unwrap();
+        let missing_read = cache.dispatches(&repo, &store, &stop);
+        assert_eq!(missing_read.generation.as_ref().unwrap().leaf_uid, None);
+        assert_eq!(
+            cache.write_slots_for_uid(
+                "att_main",
+                &cached_attempts,
+                &ledger,
+                &missing_read,
+                actual_uid.wrapping_add(1),
+            ),
+            Some(WriteSlots {
+                active: 0,
+                awaiting: 8,
+                unconfirmed: 0,
+            })
+        );
     }
 }
