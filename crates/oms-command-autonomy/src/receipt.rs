@@ -21,7 +21,17 @@ pub const STAGES: &[&str] = &[
 pub fn immutable_view(row: &Value) -> Value {
     let mut row = row.clone();
     if let Some(map) = row.as_object_mut() {
-        for key in ["stage", "updated", "proposal", "branch", "diagnostic"] {
+        // `issue` and `blocked` follow the reviewed proposal; `save` keeps a
+        // bound issue fixed.
+        for key in [
+            "stage",
+            "updated",
+            "proposal",
+            "branch",
+            "diagnostic",
+            "issue",
+            "blocked",
+        ] {
             map.remove(key);
         }
     }
@@ -89,8 +99,22 @@ pub fn validate(row: &Value) -> Result<()> {
             "owner_id",
             "updated",
         ],
-        &["diagnostic"],
+        &["diagnostic", "issue", "blocked"],
     )?;
+    if let Some(issue) = row.get("issue") {
+        require(
+            issue.as_str().is_some_and(crate::github::shaped),
+            "receipt issue must be owner/repo#N",
+        )?;
+    }
+    if let Some(blocked) = row.get("blocked") {
+        require(
+            blocked == crate::github::BLOCKED
+                && row["stage"] == "proposal-review"
+                && row.get("issue").is_none(),
+            "blocked is allowed only on an issue-less proposal-review receipt",
+        )?;
+    }
     require(
         row["schema"].as_u64() == Some(1)
             && row["kind"] == "autopilot-run"
@@ -896,9 +920,19 @@ fn save(ctx: &Context<'_>, row: &mut Value, old: Option<&[u8]>) -> Result<Vec<u8
             before["branch"] == row["branch"],
             "outer receipt branch changed",
         )?;
+        require(
+            before.get("issue").is_none() || before.get("issue") == row.get("issue"),
+            "outer receipt issue changed",
+        )?;
         if before["proposal"] != row["proposal"] {
+            let restamped = before["stage"] == "proposal-review"
+                && row["stage"] == "proposal-review"
+                && before.get("issue").is_none()
+                && row.get("issue").is_some()
+                && !value::text(&before["proposal"], "path").is_empty();
             require(
                 before["stage"] == "proposing" && row["stage"] == "proposal-review"
+                    || restamped
                     || ["driving", "parked"].contains(&value::text(&before, "stage"))
                         && row["stage"] == "proposing"
                         && row["proposal"] == json!({"path": "", "sha256": ""}),
@@ -1112,6 +1146,11 @@ fn propose_args(args: &Args, row: &Value, remainder: bool) -> Args {
     if remainder {
         planning.set("id-prefix", "r1-");
     }
+    // The receipt owns the issue: an explicit --issue is persisted before
+    // propose, and remainder replans inherit it.
+    if let Some(issue) = row["issue"].as_str() {
+        planning.set("issue", issue);
+    }
     if args.flag("discover") && !remainder {
         planning.flags.insert("discover".into());
     }
@@ -1158,12 +1197,75 @@ fn propose(
                 .and_then(|line| line.split_once(" -> ").map(|(_, path)| path))
         })
         .ok_or_else(|| Error::new(3, "planner returned no durable proposal"))?;
-    let bytes = ctx.store.read(path, MAX_FILE)?;
+    let path = path.to_owned();
+    let bytes = ctx.store.read(&path, MAX_FILE)?;
+    let sha = value::hash(&bytes);
     row["stage"] = "proposal-review".into();
-    row["proposal"] = json!({"path": path, "sha256": value::hash(&bytes)});
+    row["proposal"] = json!({"path": path, "sha256": sha});
+    let blocked = mark_issue(ctx, row, &value::parse(&bytes)?)?;
     save(ctx, row, Some(raw))?;
     out.code = 4;
-    out.stdout.extend_from_slice(format!("autopilot: parent review required\noms autopilot run --proposal {path} --expected-proposal-sha256 {}\n", value::hash(bytes)).as_bytes());
+    if blocked {
+        // One continuation: the receipt-owned restamp, not the bare plan one.
+        let text = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| !line.starts_with("plan-from-spec: pending: "))
+            .map(|line| format!("{line}\n"))
+            .collect::<String>();
+        out.stdout = text.into_bytes();
+        out.stdout.extend_from_slice(
+            format!(
+                "autopilot: pending: {}\n",
+                planning::pending_autopilot(&path, &sha)
+            )
+            .as_bytes(),
+        );
+    } else {
+        out.stdout.extend_from_slice(format!("autopilot: parent review required\noms autopilot run --proposal {path} --expected-proposal-sha256 {sha}\n").as_bytes());
+    }
+    Ok(out)
+}
+/// Records the proposal's issue on the receipt, or marks an issue-less
+/// proposal `blocked` while GitHub project mode is active. True when blocked.
+fn mark_issue(ctx: &Context<'_>, row: &mut Value, proposal: &Value) -> Result<bool> {
+    let spec = planning::contract(ctx)?;
+    let checked = planning::validate(ctx, proposal, &spec, 12)?;
+    let blocked = checked.awaiting_issue();
+    if let Some(issue) = checked.issue {
+        row["issue"] = issue.into();
+    }
+    if blocked && let Some(map) = row.as_object_mut() {
+        map.insert("blocked".into(), crate::github::BLOCKED.into());
+    }
+    Ok(blocked)
+}
+/// `propose --restamp`: rebinds a proposal-review receipt, with a CAS on the
+/// bound proposal digest, to a newly stamped copy and clears `blocked`.
+fn restamp(ctx: &Context<'_>, args: &Args, row: &mut Value, raw: &[u8]) -> Result<Output> {
+    require(
+        row["stage"] == "proposal-review" && row.get("issue").is_none(),
+        "restamp requires an issue-less proposal-review receipt",
+    )?;
+    let expected = args.required("expected-proposal-sha256")?;
+    let supplied = args.path("restamp", &ctx.repo);
+    require(
+        expected == value::text(&row["proposal"], "sha256")
+            && supplied == Path::new(value::text(&row["proposal"], "path")),
+        "restamp must name the receipt's exact bound proposal",
+    )?;
+    let (path, sha, issue) =
+        planning::restamp_file(ctx, &supplied, expected, args.required("issue")?)?;
+    row["proposal"] = json!({"path": path, "sha256": sha});
+    row["issue"] = issue.into();
+    if let Some(map) = row.as_object_mut() {
+        map.remove("blocked");
+    }
+    save(ctx, row, Some(raw))?;
+    let mut out = Output::text(format!(
+        "autopilot: restamped {} -> {path}\nautopilot: parent review required\noms autopilot run --proposal {path} --expected-proposal-sha256 {sha}",
+        value::text(row, "issue")
+    ));
+    out.code = 4;
     Ok(out)
 }
 fn assert_scope(ctx: &Context<'_>, row: &Value) -> Result<()> {
@@ -1284,6 +1386,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             &json!({"receipt": receipt, "plan": ctx.plan_value()?, "terminal": rows.iter().rev().find(|r| value::text(r, "kind") == "terminal")}),
         );
     }
+    require(
+        args.action == "propose" || !args.has("issue") && !args.has("restamp"),
+        "--issue and --restamp apply only to autopilot propose",
+    )?;
     ctx.parent()?;
     // One controller owns the entire foreground run. Receipt writes still use
     // exact byte CAS; a killed owner releases this lock, never its spent cycles.
@@ -1384,6 +1490,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             args.action == "propose" || args.action == "run",
             "autopilot action requires a live receipt",
         )?;
+        require(!args.has("restamp"), "no live autopilot receipt to restamp")?;
         let mut fresh = fresh(ctx, args)?;
         let claim = legacy_claim_refusal(&ctx.state.join(".oms/plan"), &fresh, std::process::id());
         require(claim.is_empty(), claim)?;
@@ -1408,6 +1515,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             ctx.store.publish_once(&snapshot, &reviewed, MAX_FILE)?;
             fresh["stage"] = "proposal-review".into();
             fresh["proposal"] = json!({"path": ctx.state.join(snapshot), "sha256": expected});
+            mark_issue(ctx, &mut fresh, &proposal)?;
         }
         let written = save(ctx, &mut fresh, None)?;
         row = Some(fresh);
@@ -1438,6 +1546,18 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     if row["stage"] == "done" {
         return Ok(Output::text("autopilot: done (acceptance passed)"));
     }
+    if args.has("restamp") {
+        return restamp(ctx, args, &mut row, &raw);
+    }
+    if row.get("blocked").is_some() {
+        return Err(Error::new(
+            4,
+            planning::pending_autopilot(
+                value::text(&row["proposal"], "path"),
+                value::text(&row["proposal"], "sha256"),
+            ),
+        ));
+    }
     if args.action == "propose" || row["stage"] == "proposing" {
         require(
             !args.has("proposal")
@@ -1445,6 +1565,19 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 && row["stage"] == "proposing",
             "a reviewed proposal cannot be silently replaced; abandon the receipt first",
         )?;
+        if args.has("issue") {
+            // Persist before the planner runs so a failed proposal's
+            // continuation keeps the explicit issue.
+            let issue = crate::github::Mode::load(ctx)?.canonical(args.required("issue")?)?;
+            if row.get("issue").is_none() {
+                row["issue"] = issue.as_str().into();
+                raw = save(ctx, &mut row, Some(&raw))?;
+            }
+            require(
+                value::text(&row, "issue") == issue,
+                "the receipt already binds a different issue",
+            )?;
+        }
         let reservations = ctx.rows(".oms/plan/autopilot-replans.jsonl")?;
         let remainder = reservations
             .iter()
@@ -1484,16 +1617,30 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         } else {
             ctx.repo.join(supplied)
         };
-        let frozen = value::text(&row["proposal"], "path");
+        let frozen = value::text(&row["proposal"], "path").to_owned();
         require(
             expected == value::text(&row["proposal"], "sha256")
                 && value::hash(ctx.bytes(&supplied, MAX_FILE)?) == expected,
             "proposal differs from the exact parent-reviewed binding",
         )?;
         let mut apply_args = Args::default();
-        apply_args.set("apply", frozen);
+        apply_args.set("apply", &frozen);
         apply_args.set("expected-proposal-sha256", expected);
-        let reviewed = value::parse(&ctx.store.read(frozen, MAX_FILE)?)?;
+        let reviewed = value::parse(&ctx.store.read(&frozen, MAX_FILE)?)?;
+        if row["stage"] == "proposal-review"
+            && row.get("issue").is_none()
+            && crate::github::Mode::load(ctx)?.active.is_some()
+        {
+            // A receipt bound before blocking existed: mark it, keep the proposal.
+            // Mode off and forks keep their unchanged refusal order.
+            if mark_issue(ctx, &mut row, &reviewed)? {
+                save(ctx, &mut row, Some(&raw))?;
+                return Err(Error::new(
+                    4,
+                    planning::pending_autopilot(&frozen, expected),
+                ));
+            }
+        }
         if reenter_record.is_some() {
             let plan = ctx.plan_value()?;
             let tasks = reviewed["tasks"]
@@ -1980,7 +2127,17 @@ mod tests {
         row["updated"] = "2027-01-01T00:00:00Z".into();
         row["branch"] = "oms/autopilot-aaaaaaaaaaaa-r2".into();
         row["proposal"] = json!({"path": "", "sha256": ""});
+        row["issue"] = "example-org/example-repo#7".into();
         assert_eq!(contract_digest(&row), PYTHON_DIGEST);
+        // A remainder replan inherits the receipt's issue.
+        let replan = propose_args(&Args::default(), &row, true);
+        assert_eq!(
+            (
+                replan.text("issue").unwrap(),
+                replan.text("id-prefix").unwrap()
+            ),
+            ("example-org/example-repo#7", "r1-")
+        );
         row["contract"]["max_cycles"] = 9.into();
         assert_ne!(contract_digest(&row), PYTHON_DIGEST);
     }

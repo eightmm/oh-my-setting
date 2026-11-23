@@ -163,7 +163,11 @@ fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], bo
     }
     fixture.write("bin/oms-agent-adapter-disabled", "inert\n");
     fs::create_dir(fixture.0.join("tmp")).unwrap();
-    let mut paths = vec![fixture.0.join("bin")];
+    let mut paths = if layout == "relative" {
+        vec![PathBuf::from("relative-bin"), fixture.0.join("bin")]
+    } else {
+        vec![fixture.0.join("bin")]
+    };
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
@@ -884,26 +888,65 @@ fn provider_adapter_discovery_requires_marker() {
         provider_isolated("provider_adapter_discovery_requires_marker", layout, || {
             use oms_command_peer::providers::{binary, discovered, normalize};
             if layout == "relative" {
+                let home = PathBuf::from(std::env::var_os("HOME").unwrap());
                 let repo = provider_repo();
                 executable_fixture(&repo, "adapters/oms-agent-adapter-owned-fixture");
+                executable_fixture(&repo, "relative-bin/claude");
+                executable_fixture(&repo, "relative-bin/opencode2");
+                repo.git(&["add", "relative-bin/claude", "relative-bin/opencode2"]);
+                repo.git(&[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    "relative-bin",
+                ]);
                 let adapter = repo.0.join("adapters/oms-agent-adapter-owned-fixture");
+                let owner_claude = repo.0.join("relative-bin/claude");
+                let owner_opencode2 = repo.0.join("relative-bin/opencode2");
+                let fixture_codex = home.join("bin/codex");
                 assert_eq!(
                     oms_command_peer::providers::normalize_at("owned-fixture", &repo.0).unwrap(),
                     "owned-fixture"
                 );
                 let probe = ProviderProbe::default();
-                success(provider_call(
-                    &repo,
-                    "owned-fixture",
-                    "provider-default",
-                    "auto",
-                    b"inspect owner adapter",
-                    &probe,
-                ));
+                for (provider, prompt) in [
+                    ("owned-fixture", b"inspect owner adapter".as_slice()),
+                    ("claude", b"inspect relative builtin".as_slice()),
+                    ("opencode", b"inspect relative opencode2".as_slice()),
+                    ("codex", b"inspect shadowed absolute builtin".as_slice()),
+                ] {
+                    success(provider_call(
+                        &repo,
+                        provider,
+                        "provider-default",
+                        "auto",
+                        prompt,
+                        &probe,
+                    ));
+                }
                 let calls = probe.calls.lock().unwrap();
-                assert_eq!(calls.len(), 1);
-                assert_ne!(calls[0].request.cwd, repo.0);
+                assert_eq!(calls.len(), 4);
+                for call in calls.iter() {
+                    assert_ne!(call.request.cwd, repo.0);
+                }
                 assert_eq!(calls[0].request.argv[0], adapter);
+                assert_eq!(calls[1].request.argv[0], owner_claude);
+                assert_ne!(calls[1].request.argv[0], "claude");
+                assert_ne!(
+                    calls[1].request.argv[0],
+                    calls[1].request.cwd.join("relative-bin/claude")
+                );
+                assert_eq!(calls[2].request.argv[0], owner_opencode2);
+                assert_ne!(calls[2].request.argv[0], "opencode2");
+                assert_ne!(
+                    calls[2].request.argv[0],
+                    calls[2].request.cwd.join("relative-bin/opencode2")
+                );
+                assert_eq!(calls[3].request.argv[0], fixture_codex);
+                assert_ne!(calls[3].request.argv[0], "codex");
                 return;
             }
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
@@ -3218,7 +3261,7 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
             fs::create_dir_all(fake_claude.parent().unwrap()).unwrap();
             fs::write(
                 &fake_claude,
-                "#!/bin/sh\nprintf 'changed\\n' >> README.md\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n",
+                "#!/bin/sh\ncase \"$*\" in *'--permission-mode plan'*) ;; *) printf 'changed\\n' >> README.md;; esac\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}\\n'\n",
             )
             .unwrap();
             fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
@@ -3228,40 +3271,71 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
                 std::env::var("PATH").unwrap_or_default()
             );
             if std::env::var_os("OMS_PANEL_DISPATCH_INNER").is_none() {
-                let mut cmd = Command::new(std::env::current_exe().unwrap());
-                clean_env_child(&mut cmd)
-                    .args([
-                        "--exact",
-                        "panel_dispatch_delegate_records_parent_refs_and_index_digests",
-                        "--nocapture",
-                    ])
-                    .env(
-                        CHILD_ENV,
-                        "panel_dispatch_delegate_records_parent_refs_and_index_digests",
-                    )
-                    .env("OMS_PANEL_DISPATCH_INNER", "1")
-                    .env("HOME", std::env::var_os("HOME").unwrap_or_default())
-                    .env("PATH", &path_val)
-                    .env("OMS_PANEL_DISPATCH", "1")
-                    .env("OMS_PANEL_MAIN_ATTEMPT", "att_main1234")
-                    .env("OMS_PANEL_ROLE", "worker")
-                    .env("OMS_PANEL_STRATEGY", "builder")
-                    .env("OMS_PANEL_OWNER", "antigravity")
-                    .env("OMS_PANEL_PURPOSE", "implement")
-                    .env("OMS_PANEL_WORKLOAD", "routine")
-                    .env("OMS_PANEL_ACCESS", "write")
-                    .env("OMS_PANEL_LABEL", "builder test")
-                    .env("OMS_ROOM_ID", "room-1")
-                    .env("OMS_ROOM_PARTICIPANT", "call-p1");
-                let out = cmd.output().unwrap();
-                assert!(
-                    out.status.success(),
-                    "{}\n{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
+                for mode in ["populated", "defaults", "outside"] {
+                    let mut cmd = Command::new(std::env::current_exe().unwrap());
+                    clean_env_child(&mut cmd)
+                        .args([
+                            "--exact",
+                            "panel_dispatch_delegate_records_parent_refs_and_index_digests",
+                            "--nocapture",
+                        ])
+                        .env(
+                            CHILD_ENV,
+                            "panel_dispatch_delegate_records_parent_refs_and_index_digests",
+                        )
+                        .env("OMS_PANEL_DISPATCH_INNER", mode)
+                        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+                        .env("PATH", &path_val)
+                        .env(
+                            "OMS_PANEL_DISPATCH",
+                            if mode == "outside" { "0" } else { "1" },
+                        )
+                        .env("OMS_TASK_ID", "ambient-task")
+                        .env("OMS_PANEL_MAIN_ATTEMPT", "att_main1234")
+                        .env("OMS_PANEL_ROLE", "worker")
+                        .env("OMS_PANEL_STRATEGY", "builder")
+                        .env("OMS_PANEL_OWNER", "antigravity")
+                        .env("OMS_PANEL_PURPOSE", "implement")
+                        .env("OMS_PANEL_WORKLOAD", "routine")
+                        .env("OMS_PANEL_ACCESS", "write")
+                        .env("OMS_PANEL_LABEL", "builder test")
+                        .env("OMS_PANEL_ALIAS", " builder-alias ")
+                        .env("OMS_ROOM_ID", "room-1")
+                        .env("OMS_ROOM_PARTICIPANT", "call-p1")
+                        .env("OMS_PLAN_LEASE_ID", " lease-1 ")
+                        .env("OMS_PANEL_CONTINUES", "att_cafe")
+                        .env("OMS_PANEL_MODEL", "ambient-model")
+                        .env("OMS_PANEL_EFFORT", "low");
+                    if mode == "defaults" {
+                        for name in [
+                            "OMS_PANEL_ROLE",
+                            "OMS_PANEL_STRATEGY",
+                            "OMS_PANEL_OWNER",
+                            "OMS_PANEL_PURPOSE",
+                            "OMS_PANEL_WORKLOAD",
+                            "OMS_PANEL_ACCESS",
+                            "OMS_PANEL_LABEL",
+                            "OMS_PANEL_ALIAS",
+                            "OMS_ROOM_PARTICIPANT",
+                            "OMS_PLAN_LEASE_ID",
+                        ] {
+                            cmd.env(name, " ");
+                        }
+                        cmd.env("OMS_PANEL_CONTINUES", "att_BAD");
+                    }
+                    let out = cmd.output().unwrap();
+                    assert!(
+                        out.status.success(),
+                        "{mode}: {}\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
                 return;
             }
+            let mode = std::env::var("OMS_PANEL_DISPATCH_INNER").unwrap();
+            let populated = mode == "populated";
+            let panel = mode != "outside";
             let values = args(&[
                 "--repo",
                 repo.0.to_str().unwrap(),
@@ -3269,6 +3343,8 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
                 "claude",
                 "--model",
                 "fixture",
+                "--reasoning-effort",
+                "high",
                 "--task-id",
                 "t1",
                 "--no-task",
@@ -3306,15 +3382,43 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
             );
             assert_eq!(created.get("task_id").text(), Some("t1"));
             let refs = created.get("refs");
-            assert_eq!(refs.get("panel_role").text(), Some("worker"));
-            assert_eq!(refs.get("panel_strategy").text(), Some("builder"));
-            assert_eq!(refs.get("panel_owner").text(), Some("antigravity"));
-            assert_eq!(refs.get("panel_purpose").text(), Some("implement"));
-            assert_eq!(refs.get("panel_workload").text(), Some("routine"));
-            assert_eq!(refs.get("panel_access").text(), Some("write"));
-            assert_eq!(refs.get("panel_label").text(), Some("builder test"));
-            assert_eq!(refs.get("panel_room_id").text(), Some("room-1"));
-            assert_eq!(refs.get("panel_room_participant").text(), Some("call-p1"));
+            assert_eq!(refs.get("panel_model").text(), Some("fixture"));
+            assert_eq!(
+                refs.get("panel_role").text(),
+                Some(if panel { "worker" } else { "delegate" })
+            );
+            for (key, expected) in [
+                ("panel_strategy", populated.then_some("builder")),
+                ("panel_owner", populated.then_some("antigravity")),
+                ("panel_purpose", panel.then_some("implement")),
+                ("panel_workload", panel.then_some("routine")),
+                ("panel_access", panel.then_some("write")),
+                ("panel_effort", panel.then_some("high")),
+                (
+                    "panel_label",
+                    Some(if populated {
+                        "builder test"
+                    } else {
+                        "Panel dispatch change"
+                    }),
+                ),
+                (
+                    "panel_alias",
+                    if populated {
+                        Some("builder-alias")
+                    } else if panel {
+                        None
+                    } else {
+                        Some("claude-delegate")
+                    },
+                ),
+                ("panel_room_id", Some("room-1")),
+                ("panel_room_participant", populated.then_some("call-p1")),
+                ("panel_lease_id", populated.then_some("lease-1")),
+                ("panel_continues", populated.then_some("att_cafe")),
+            ] {
+                assert_eq!(refs.get(key).text(), expected, "{mode}: {key}");
+            }
 
             let index_raw = fs::read_to_string(repo.0.join(".oms/artifacts/index.jsonl")).unwrap();
             let row = V::parse(index_raw.lines().last().unwrap().as_bytes()).unwrap();
@@ -3335,6 +3439,90 @@ fn panel_dispatch_delegate_records_parent_refs_and_index_digests() {
                     .unwrap()
                     .is_empty()
             );
+
+            // Advisory enrollment uses the same metadata boundary while retaining
+            // its own defaults and the ambient task fallback when CLI is absent.
+            let values = args(&[
+                "--repo",
+                repo.0.to_str().unwrap(),
+                "--providers",
+                "claude",
+                "--model",
+                "fixture",
+                "--strategy",
+                "advisor",
+                "--no-failures",
+                "--no-task",
+                "--no-memory",
+                "Read the change",
+            ]);
+            let out = run_with_source(
+                "peer-ask",
+                &values,
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &stop,
+            );
+            assert_eq!(out.0, 0, "{mode}: {}", message(&out));
+            let events = fs::read_to_string(repo.0.join(".oms/lifecycle/events.jsonl")).unwrap();
+            let created = events
+                .lines()
+                .map(|line| V::parse(line.as_bytes()).unwrap())
+                .find(|event| {
+                    event.get("event_type").text() == Some("attempt.created")
+                        && event.get("tool").text() == Some("peer-ask")
+                })
+                .expect("advisory attempt.created event");
+            assert_eq!(created.get("task_id").text(), Some("ambient-task"));
+            assert_eq!(
+                created.get("parent_attempt_id").text(),
+                Some("att_main1234")
+            );
+            let refs = created.get("refs");
+            for (key, expected) in [
+                ("panel_model", Some("fixture")),
+                (
+                    "panel_role",
+                    Some(if populated { "worker" } else { "advisor" }),
+                ),
+                (
+                    "panel_label",
+                    Some(if populated {
+                        "builder test"
+                    } else {
+                        "peer-ask (claude)"
+                    }),
+                ),
+                (
+                    "panel_alias",
+                    Some(if populated {
+                        "builder-alias"
+                    } else {
+                        "claude-peer-ask"
+                    }),
+                ),
+                (
+                    "panel_access",
+                    if populated {
+                        Some("write")
+                    } else if panel {
+                        Some("read")
+                    } else {
+                        None
+                    },
+                ),
+                ("panel_owner", populated.then_some("antigravity")),
+                ("panel_purpose", populated.then_some("implement")),
+                ("panel_workload", populated.then_some("routine")),
+                ("panel_room_id", Some("room-1")),
+                ("panel_room_participant", populated.then_some("call-p1")),
+                ("panel_effort", None),
+                ("panel_strategy", None),
+                ("panel_lease_id", None),
+                ("panel_continues", None),
+            ] {
+                assert_eq!(refs.get(key).text(), expected, "{mode}: advisory {key}");
+            }
         },
     );
 }
@@ -4672,6 +4860,114 @@ fn registered_pi_session_resumes_with_owning_home() {
             assert!(!home.join("resumed").exists());
         },
     );
+}
+
+#[test]
+fn session_resume_and_fork_fail_closed_when_owner_binary_absent() {
+    let name = "session_resume_and_fork_fail_closed_when_owner_binary_absent";
+    let (git_only, extra) = if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
+        (None, Vec::new())
+    } else {
+        let git_bin = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|path| path.is_file())
+            .expect("git on PATH");
+        let dir = std::env::temp_dir().join(format!(
+            "oms-git-only-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&git_bin, dir.join("git")).unwrap();
+        let path = format!("relative-bin:{}", dir.display());
+        (Some(dir), vec![("PATH".into(), path)])
+    };
+    account_isolated(name, &extra, |home| {
+        let owner = account_repo();
+        let target = account_repo();
+        let session_dir = home.join("acc/pi1/sessions");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("one.jsonl"),
+            format!(
+                "{{\"type\":\"session\",\"id\":\"sess-1\",\"cwd\":\"{}\"}}\n",
+                target.0.display()
+            ),
+        )
+        .unwrap();
+        let decoy = target.0.join("relative-bin/pi");
+        fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+        fs::write(
+            &decoy,
+            "#!/bin/sh\nprintf 'decoy' > \"$HOME/decoy-ran\"\necho --session\necho --fork\n",
+        )
+        .unwrap();
+        fs::set_permissions(&decoy, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(oms_command_peer::providers::binary_at("pi", &owner.0), "pi");
+        assert_eq!(
+            oms_command_peer::providers::launch_binary_at("pi", &owner.0)
+                .unwrap_err()
+                .code,
+            127
+        );
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let target_arg = target.0.to_str().unwrap();
+        for action in ["resume", "fork"] {
+            let out = run(
+                &owner,
+                source,
+                "session",
+                &[
+                    action,
+                    "--repo",
+                    target_arg,
+                    "--provider",
+                    "pi",
+                    "--session",
+                    "sess-1",
+                    "--apply",
+                ],
+            );
+            assert_eq!(out.0, 127, "{action}: {}", message(&out));
+            assert!(
+                !home.join("decoy-ran").exists(),
+                "{action} must never execute target-cwd decoy"
+            );
+        }
+        let owner_bin = owner.0.join("relative-bin/pi");
+        fs::create_dir_all(owner_bin.parent().unwrap()).unwrap();
+        fs::write(
+            &owner_bin,
+            "#!/bin/sh\nif [ \"$1\" = --help ]; then\n  echo --session\n  exit 0\nfi\nprintf 'owner' > \"$HOME/owner-ran\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&owner_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            oms_command_peer::providers::launch_binary_at("pi", &owner.0).unwrap(),
+            owner_bin
+        );
+        let resumed = run(
+            &owner,
+            source,
+            "session",
+            &[
+                "resume",
+                "--repo",
+                target_arg,
+                "--provider",
+                "pi",
+                "--session",
+                "sess-1",
+                "--apply",
+            ],
+        );
+        assert_eq!(resumed.0, 0, "{}", message(&resumed));
+        assert!(home.join("owner-ran").exists());
+        assert!(!home.join("decoy-ran").exists());
+    });
+    if let Some(dir) = git_only {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 #[test]

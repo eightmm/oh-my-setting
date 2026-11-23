@@ -166,6 +166,11 @@ pub fn binary_at(provider: &str, owner_cwd: &Path) -> String {
         .to_string_lossy()
         .into_owned()
 }
+pub fn launch_binary_at(provider: &str, owner_cwd: &Path) -> Result<PathBuf> {
+    Discovery::from_env(owner_cwd)?
+        .executable_for_launch(provider)
+        .ok_or_else(|| Error::new(127, "provider command not found"))
+}
 pub fn discovered(provider: &str) -> bool {
     std::env::current_dir().is_ok_and(|cwd| discovered_at(provider, &cwd))
 }
@@ -1934,9 +1939,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
 ) -> Result<Completed> {
     prompt.validate()?;
     crate::safety::outbound(prompt.bytes())?;
-    if !discovered_at(&route.provider, context.cwd) {
-        return Err(Error::new(127, "provider command not found"));
-    }
+    let executable = launch_binary_at(&route.provider, context.cwd)?;
     if write
         && builtin_binary(&route.provider).is_none()
         && !std::env::var("OMS_PROVIDER_WRITE_ADAPTERS")
@@ -1974,7 +1977,8 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     {
         return fail("provider does not support read access through this transport");
     }
-    let transport = transport(route, prompt.bytes(), cwd, context.cwd, write, timeout)?;
+    let mut transport = transport(route, prompt.bytes(), cwd, context.cwd, write, timeout)?;
+    transport.argv[0] = executable.into_os_string();
     let team_protocol = if extra_env
         .iter()
         .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")

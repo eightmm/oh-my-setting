@@ -35,6 +35,12 @@ const RESUME_SUBJECT: &str = "autopilot";
 const CHILD_ROLES: [&str; 5] = ["worker", "advisor", "reviewer", "researcher", "delegate"];
 const LAUNCH_HARNESSES: [&str; 4] = ["claude", "codex", "pi", "agy"];
 const APPROVED_STAGES: [&str; 4] = ["approved", "driving", "reviewing", "publishing"];
+/// A proposal held for a GitHub issue is not work a wake can move; only a restamp clears it.
+const ISSUE_PENDING: &str = "autopilot proposal is pending an issue (GitHub project mode)";
+const ISSUE_RESTAMP: &str = "the proposal is restamped with its issue (`oms autopilot propose --restamp PATH --expected-proposal-sha256 SHA --issue REF`)";
+fn issue_held(receipt: &Value) -> bool {
+    receipt["stage"] == "proposal-review" && receipt["blocked"] == "github-issue"
+}
 
 /// A receipt the host validated, with everything the resume decision reads.
 #[derive(Clone, Debug)]
@@ -1288,8 +1294,9 @@ impl Env<'_> {
         }
         Ok((pane, member))
     }
-    /// Why an idle main should continue, or "" when no shared work waits.
-    fn wake_reason(&self) -> std::result::Result<String, String> {
+    /// Why an idle main should continue ("" when no shared work waits), and whether the
+    /// autopilot proposal is held for a GitHub issue.
+    fn wake_reason(&self) -> std::result::Result<(String, bool), String> {
         let mut reasons = vec![];
         let listed = self
             .services
@@ -1324,10 +1331,12 @@ impl Env<'_> {
         let raw = Store::open(&self.repo)
             .and_then(|s| s.read(Path::new(".oms/plan/autopilot-run.json"), 1024 * 1024, true))
             .map_err(|e| e.message)?;
-        if crate::decode(&raw, 1024 * 1024).is_ok_and(|r| r["stage"] == "proposal-review") {
+        let receipt = crate::decode(&raw, 1024 * 1024).unwrap_or(Value::Null);
+        let held = issue_held(&receipt);
+        if receipt["stage"] == "proposal-review" && !held {
             reasons.push("an autopilot proposal waits in proposal-review".into());
         }
-        Ok(reasons.join("; "))
+        Ok((reasons.join("; "), held))
     }
 
     // ---- the resume path
@@ -1545,6 +1554,7 @@ impl Env<'_> {
                 })
                 .unwrap_or_default();
             let after = match stage.as_str() {
+                _ if issue_held(&contract.row) => ISSUE_RESTAMP.to_owned(),
                 "proposal-review" => "the parent reviews the proposal and runs the printed `oms autopilot run --proposal FILE --expected-proposal-sha256 SHA`".to_owned(),
                 "parked" => "the operator resolves the park (`oms autopilot --repo . status`) or abandons it".to_owned(),
                 "done" => "a new `oms autopilot propose` binds the next contract".to_owned(),
@@ -1555,7 +1565,11 @@ impl Env<'_> {
         if !contract.approved_run {
             return Ok(skip(
                 format!("autopilot continuation at stage {stage} is not an approved `run`"),
-                "the parent approves a proposal with `oms autopilot run --proposal FILE --expected-proposal-sha256 SHA`",
+                if issue_held(&contract.row) {
+                    ISSUE_RESTAMP
+                } else {
+                    "the parent approves a proposal with `oms autopilot run --proposal FILE --expected-proposal-sha256 SHA`"
+                },
             ));
         }
         let spent: Vec<&Value> = wakes.iter().filter(|w| w["outcome"] != "skipped").collect();
@@ -1835,10 +1849,14 @@ impl Env<'_> {
             );
         }
         let reason = match self.wake_reason() {
-            Ok(r) if r.is_empty() => {
-                return "skipped: no ready plan work or pending proposal".into();
+            Ok((r, held)) if r.is_empty() => {
+                return if held {
+                    skip(ISSUE_PENDING, ISSUE_RESTAMP)
+                } else {
+                    "skipped: no ready plan work or pending proposal".into()
+                };
             }
-            Ok(r) => r,
+            Ok((r, _)) => r,
             Err(why) => return format!("skipped: {}", cut(&why, 200)),
         };
         let outcome = if dry {
@@ -4140,6 +4158,24 @@ mod tests {
             rig.tick(t, false, None),
             "skipped: autopilot parked: the run is parked for an operator decision; next step: inspect the wall (wall-kill); resumes when the operator resolves the park (`oms autopilot --repo . status`) or abandons it"
         );
+        *rig.host.contract.borrow_mut() = Ok(contract("proposal-review", OWNER, &"e".repeat(64)));
+        rig.host
+            .change(|c| c.row = json!({"stage": "proposal-review", "blocked": "github-issue"}));
+        *rig.host.refusal.borrow_mut() = "the proposal waits for review".into();
+        assert_eq!(
+            rig.tick(t, false, None),
+            format!(
+                "skipped: autopilot proposal-review: the proposal waits for review; resumes when {ISSUE_RESTAMP}"
+            )
+        );
+        rig.refusal_clear();
+        rig.host.change(|c| c.approved_run = false);
+        assert_eq!(
+            rig.tick(t, false, None),
+            format!(
+                "skipped: autopilot continuation at stage proposal-review is not an approved `run`; resumes when {ISSUE_RESTAMP}"
+            )
+        );
         *rig.host.contract.borrow_mut() = Ok(contract("driving", OWNER, &"e".repeat(64)));
         *rig.host.refusal.borrow_mut() = "digest gate: bound base ref moved".into();
         assert!(rig.tick(t, false, None).starts_with("skipped: autopilot driving: digest gate: bound base ref moved; resumes when `oms autopilot --repo "));
@@ -4951,6 +4987,28 @@ mod tests {
             wake(&rig, false),
             "skipped: no ready plan work or pending proposal"
         );
+        // A proposal held for a GitHub issue never wakes the main and records nothing.
+        rig.dir.put(
+            ".oms/plan/autopilot-run.json",
+            "{\"stage\":\"proposal-review\",\"blocked\":\"github-issue\"}",
+        );
+        let ledger = || std::fs::read(rig.dir.0.join(".oms/tick/last.json")).ok();
+        let before = ledger();
+        for _ in 0..2 {
+            assert_eq!(
+                wake(&rig, false),
+                format!("skipped: {ISSUE_PENDING}; resumes when {ISSUE_RESTAMP}")
+            );
+        }
+        assert!(rig.fake.sent.borrow().is_empty());
+        assert_eq!(ledger(), before);
+        *rig.fake.ready.borrow_mut() = "t1 ready\n".into();
+        let held = wake(&rig, true);
+        assert!(
+            held.contains("ready plan tasks t1 ready") && !held.contains("autopilot proposal"),
+            "{held}"
+        );
+        *rig.fake.ready.borrow_mut() = String::new();
         rig.dir.put(
             ".oms/plan/autopilot-run.json",
             "{\"stage\":\"proposal-review\"}",

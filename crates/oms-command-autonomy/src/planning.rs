@@ -1,6 +1,7 @@
 //! Proposal generation is separate from the digest-bound Plan transaction.
 use crate::cli::Args;
 use crate::contract::{self, Contract};
+use crate::github::{self, Mode};
 use crate::services::Invocation;
 use crate::storage::{ACTIVE, Context, MAX_FILE};
 use crate::{Error, Output, Result, require, value, verify};
@@ -181,12 +182,29 @@ fn collaboration_tasks(tasks: &[Value], worker: &str) -> Result<()> {
     }
     Ok(())
 }
+/// What [`validate`] proved beyond the schema.
+#[derive(Debug)]
+pub(crate) struct Checked {
+    /// The stamped issue, canonical for origin.
+    pub issue: Option<String>,
+    /// Every task already exists in the plan: an idempotent re-apply.
+    pub replay: bool,
+    /// GitHub project mode is active.
+    pub active: bool,
+}
+impl Checked {
+    /// Active mode refuses a first apply without an issue; a replay keeps the
+    /// pre-existing tasks as they were applied.
+    pub fn awaiting_issue(&self) -> bool {
+        self.active && self.issue.is_none() && !self.replay
+    }
+}
 pub(crate) fn validate(
     ctx: &Context<'_>,
     proposal: &Value,
     spec: &Contract,
     cap: u64,
-) -> Result<()> {
+) -> Result<Checked> {
     value::keys(
         proposal,
         &[
@@ -200,7 +218,7 @@ pub(crate) fn validate(
             "acceptance_files",
             "tasks",
         ],
-        &[],
+        &["issue"],
     )?;
     require(
         proposal["schema"].as_u64() == Some(1) && proposal["kind"] == "agent-plan-proposal",
@@ -257,7 +275,7 @@ pub(crate) fn validate(
         value::keys(
             task,
             &["id", "title", "allowed", "verify", "depends"],
-            &["assignment", "covers"],
+            &["assignment", "covers", "issue"],
         )?;
         let id = value::text(task, "id");
         require(
@@ -339,10 +357,103 @@ pub(crate) fn validate(
             )?;
         }
     }
-    Ok(())
+    let mode = Mode::load(ctx)?;
+    Ok(Checked {
+        issue: github::proposal_issue(&mode, proposal)?,
+        replay,
+        active: mode.active.is_some(),
+    })
+}
+fn pending(path: &str, sha: &str, verb: &str) -> String {
+    format!(
+        "GitHub project mode requires an issue; run: oms {verb} --restamp {path} --expected-proposal-sha256 {sha} --issue REF"
+    )
+}
+pub(crate) fn pending_plan(path: &str, sha: &str) -> String {
+    pending(path, sha, "plan-from-spec")
+}
+pub(crate) fn pending_autopilot(path: &str, sha: &str) -> String {
+    pending(path, sha, "autopilot propose")
+}
+/// Writes a new stamped copy of an issue-less reviewed proposal after
+/// re-proving its spec, plan and HEAD bindings. Local and provider-free.
+/// Returns the new absolute path, its SHA-256 and the canonical issue.
+pub(crate) fn restamp_file(
+    ctx: &Context<'_>,
+    path: &Path,
+    expected: &str,
+    raw_issue: &str,
+) -> Result<(String, String, String)> {
+    ctx.parent()?;
+    require(
+        value::digest(expected),
+        "expected proposal SHA-256 must be 64 lower-case hex characters",
+    )?;
+    let raw = ctx.bytes(path, MAX_FILE)?;
+    require(
+        value::hash(&raw) == expected,
+        "proposal bytes changed after review",
+    )?;
+    scan(&raw)?;
+    let mut proposal = value::parse(&raw)?;
+    let spec = contract(ctx)?;
+    spec.confirmed()?;
+    let checked = validate(ctx, &proposal, &spec, 12)?;
+    require(checked.issue.is_none(), "proposal already carries an issue")?;
+    require(!checked.replay, "proposal is already applied")?;
+    let plan = ctx
+        .store
+        .optional(ACTIVE, 8 * MAX_FILE)?
+        .map(value::hash)
+        .unwrap_or_else(|| "absent".into());
+    require(
+        value::text(&proposal, "plan_sha256") == plan,
+        "plan changed after proposal generation; propose again",
+    )?;
+    let issue = Mode::load(ctx)?.canonical(raw_issue)?;
+    github::stamp(&mut proposal, &issue);
+    require(
+        validate(ctx, &proposal, &spec, 12)?.issue.as_deref() == Some(issue.as_str()),
+        "restamped proposal lost its issue",
+    )?;
+    let stamped = value::pretty(&proposal)?;
+    scan(&stamped)?;
+    let name = format!(".oms/plan/proposal-{}.json", value::random("")?);
+    ctx.store.publish_once(&name, &stamped, MAX_FILE)?;
+    Ok((
+        ctx.state.join(name).display().to_string(),
+        value::hash(&stamped),
+        issue,
+    ))
+}
+fn restamp(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    for key in [
+        "discover",
+        "milestone",
+        "allowed",
+        "id-prefix",
+        "to",
+        "collaboration",
+    ] {
+        require(!args.has(key), format!("--{key} is not a restamp option"))?;
+    }
+    let path = args.path("restamp", &ctx.repo);
+    let (path, sha, issue) = restamp_file(
+        ctx,
+        &path,
+        args.required("expected-proposal-sha256")?,
+        args.required("issue")?,
+    )?;
+    Ok(Output::text(format!(
+        "plan-from-spec: restamped {issue} -> {path}\nplan-from-spec: proposal sha256: {sha}\nreview the list, then: oms plan-from-spec --apply {path} --expected-proposal-sha256 {sha}"
+    )))
 }
 pub(crate) fn apply(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     ctx.parent()?;
+    require(
+        !args.has("issue"),
+        "--issue is stamped at propose or restamp, never at apply",
+    )?;
     let expected = args.required("expected-proposal-sha256")?;
     require(
         value::digest(expected),
@@ -363,7 +474,13 @@ pub(crate) fn apply(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     let proposal = value::parse(&raw)?;
     let spec = contract(ctx)?;
     spec.confirmed()?;
-    validate(ctx, &proposal, &spec, args.number("max-tasks", 6, 1, 12)?)?;
+    let checked = validate(ctx, &proposal, &spec, args.number("max-tasks", 6, 1, 12)?)?;
+    if checked.awaiting_issue() {
+        return Err(Error::new(
+            2,
+            pending_plan(&path.display().to_string(), expected),
+        ));
+    }
     if args.get("collaboration", "off")? == "auto" {
         collaboration_tasks(
             proposal["tasks"].as_array().unwrap(),
@@ -433,6 +550,7 @@ struct PreparedPropose {
     discovery: Option<Value>,
     wall: std::time::Duration,
     extra_call_args: Vec<OsString>,
+    issue: Option<String>,
 }
 fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
     require(
@@ -443,6 +561,12 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
     ctx.parent()?;
     spec.confirmed()?;
     spec.planner_budget()?;
+    let mode = Mode::load(ctx)?;
+    let issue = if args.has("issue") {
+        Some(mode.canonical(args.required("issue")?)?)
+    } else {
+        mode.adopted(ctx, &spec.sha256)?
+    };
     let max = args.number("max-tasks", 6, 1, 12)?;
     let prefix = args.text("id-prefix")?.to_owned();
     require(
@@ -550,20 +674,24 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args) -> Result<PreparedPropose> {
         discovery,
         wall,
         extra_call_args,
+        issue,
     })
 }
 pub(crate) fn preflight_propose(ctx: &Context<'_>, args: &Args) -> Result<()> {
     prepare_propose(ctx, args).map(|_| ())
 }
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
-    let modes = ["apply", "validate-spec", "scope-only", "roadmap"]
+    let modes = ["apply", "restamp", "validate-spec", "scope-only", "roadmap"]
         .iter()
         .filter(|m| args.has(m))
         .count();
     require(
         modes <= 1,
-        "apply, validate-spec, scope-only and roadmap are separate modes",
+        "apply, restamp, validate-spec, scope-only and roadmap are separate modes",
     )?;
+    if args.has("restamp") {
+        return restamp(ctx, args);
+    }
     if args.has("apply") {
         require(
             !args.flag("discover") && !args.has("milestone"),
@@ -573,8 +701,8 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     }
     if args.has("validate-spec") || args.flag("scope-only") || args.flag("roadmap") {
         require(
-            !args.has("expected-proposal-sha256"),
-            "expected proposal digest requires --apply",
+            !args.has("expected-proposal-sha256") && !args.has("issue"),
+            "expected proposal digest requires --apply; --issue requires propose or --restamp",
         )?;
         let spec = if args.has("validate-spec") {
             contract::parse(
@@ -702,6 +830,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     }
     let answer = artifact(ctx, &invoke(ctx, "agent-call", call, wall)?, 4 * MAX_FILE)?;
     let mut extracted = tasks_from_answer(&answer)?;
+    github::refuse_provider_issue(&extracted)?;
     if let Some(packet) = &discovery {
         let (tasks, report) = crate::discovery::normalize(ctx, &extracted, packet, &spec)?;
         let suffix = value::random("")?;
@@ -728,11 +857,14 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             task["depends"] = json!([]);
         }
     }
-    let proposal = json!({"schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec.sha256, "plan_sha256": before, "base_sha": head, "id_prefix": prefix, "allowed_envelope": allowed, "acceptance_files": spec.acceptance_files, "tasks": tasks});
+    let mut proposal = json!({"schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec.sha256, "plan_sha256": before, "base_sha": head, "id_prefix": prefix, "allowed_envelope": allowed, "acceptance_files": spec.acceptance_files, "tasks": tasks});
     if collaboration == "auto" {
         collaboration_tasks(tasks, &worker)?;
     }
-    validate(ctx, &proposal, &spec, max)?;
+    if let Some(issue) = &prepared.issue {
+        github::stamp(&mut proposal, issue);
+    }
+    let awaiting = validate(ctx, &proposal, &spec, max)?.awaiting_issue();
     require(
         ctx.source.read("PROJECT.md", MAX_FILE)? == spec.raw
             && ctx.git(&["rev-parse", "HEAD"])? == head
@@ -744,13 +876,24 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     let path = format!(".oms/plan/proposal-{}.json", value::random("")?);
     ctx.store.publish_once(&path, &raw, MAX_FILE)?;
     let mut out = Output::text(format!(
-        "plan-from-spec: proposed {} task(s) -> {}\nplan-from-spec: proposal sha256: {}\n  waves: {}\nreview the list, then: oms plan-from-spec --apply {} --expected-proposal-sha256 {}",
+        "plan-from-spec: proposed {} task(s) -> {}\nplan-from-spec: proposal sha256: {}\n  waves: {}\nreview the list, then: oms plan-from-spec --apply {} --expected-proposal-sha256 {}{}",
         tasks.len(),
         ctx.state.join(&path).display(),
         value::hash(&raw),
         waves(tasks).len(),
         ctx.state.join(&path).display(),
-        value::hash(&raw)
+        value::hash(&raw),
+        if awaiting {
+            format!(
+                "\nplan-from-spec: pending: {}",
+                pending_plan(
+                    &ctx.state.join(&path).display().to_string(),
+                    &value::hash(&raw)
+                )
+            )
+        } else {
+            String::new()
+        }
     ));
     out.stderr = spec.warnings().join("\n").into_bytes();
     Ok(out)

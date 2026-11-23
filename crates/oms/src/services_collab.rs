@@ -27,7 +27,7 @@ mod team_requests;
 use crate::services_control::ControlServices;
 use oms_command_autonomy::receipt;
 use oms_command_hooks::HostServices as HookHostServices;
-use oms_command_lifecycle::IncomingPhase;
+use oms_command_lifecycle::{IncomingDiagnostic, IncomingPhase, IncomingTool};
 use oms_command_peer::process::{Completed, Executor as PeerProcessExecutor, Invocation};
 use oms_mcp_server::{Captured, CommandExecutor, CommandRequest};
 use oms_panel_core::services::{
@@ -2120,7 +2120,7 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
     }
 
     /// Preflight proves the incoming revision is already staged and dispatchable
-    /// before live checkout mutation. Reconcile, Verify and RefreshTools run that
+    /// before live checkout mutation. Later phases run that
     /// checkout's own staged `--oms-dispatch` frontdoor to completion with
     /// `OMS_NATIVE_UPDATE_PARENT` in the child's environment only.
     fn incoming_lifecycle(
@@ -2256,18 +2256,43 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
                 }
             }
             IncomingPhase::Verify => run_staged(&launcher, &["doctor"], cwd, parent, interrupted),
+            IncomingPhase::VerifyIntegrations => {
+                let out = run_staged(
+                    &launcher,
+                    &["doctor", "--integrations", "--json", "--no-model-doctor"],
+                    cwd,
+                    parent,
+                    interrupted,
+                );
+                IncomingDiagnostic {
+                    phase,
+                    tool: Some(IncomingTool::Doctor),
+                    exit: out.0,
+                }
+                .output()
+            }
             IncomingPhase::RefreshTools => {
                 let profile = match capability_receipt() {
                     Ok(profile) => profile,
                     Err(error) => return refuse(2, error),
                 };
-                run_staged(
+                let out = run_staged(
                     &launcher,
                     &tools_refresh(profile.as_deref()),
                     cwd,
                     parent,
                     interrupted,
-                )
+                );
+                IncomingDiagnostic {
+                    phase,
+                    tool: Some(if profile.is_some() {
+                        IncomingTool::InstallProfile
+                    } else {
+                        IncomingTool::InstallTools
+                    }),
+                    exit: out.0,
+                }
+                .output()
             }
             IncomingPhase::Preflight => unreachable!("handled above"),
         }
@@ -4143,8 +4168,23 @@ mod tests {
             };
             if let Some(expected) = expected {
                 assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
-                assert_eq!(String::from_utf8_lossy(&out.1), expected);
                 assert!(marker.is_file());
+                assert_eq!(
+                    std::fs::read_to_string(&marker).unwrap(),
+                    expected.trim_start_matches("ran ")
+                );
+                let diagnostic: IncomingDiagnostic = serde_json::from_slice(&out.1).unwrap();
+                assert_eq!(diagnostic.phase, IncomingPhase::RefreshTools);
+                assert_eq!(diagnostic.exit, 0);
+                assert_eq!(
+                    diagnostic.tool,
+                    Some(if matches!(case.as_str(), "custom" | "paths") {
+                        IncomingTool::InstallProfile
+                    } else {
+                        IncomingTool::InstallTools
+                    })
+                );
+                assert!(out.2.is_empty());
                 if case == "paths" {
                     let mut expected = vec![root.clone()];
                     expected.extend(path_overrides.map(|name| {
@@ -4188,6 +4228,7 @@ mod tests {
             IncomingPhase::Reconcile,
             IncomingPhase::Verify,
             IncomingPhase::RefreshTools,
+            IncomingPhase::VerifyIntegrations,
         ] {
             let out = run(phase, rev);
             assert_eq!(out.0, 2);
@@ -4208,7 +4249,7 @@ mod tests {
             rev,
             &format!(
                 r#"shift 4
-[ -z "${{OMS_REFRESH_RECEIPT_FIXTURE:-}}" ] || : > "$OMS_REFRESH_RECEIPT_FIXTURE/refresh-child"
+[ -z "${{OMS_REFRESH_RECEIPT_FIXTURE:-}}" ] || printf '%s' "$*" > "$OMS_REFRESH_RECEIPT_FIXTURE/refresh-child"
 if [ "${{OMS_REFRESH_RECEIPT_CASE:-}}" = paths ]; then
   printf '%s\n' "$PWD" "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$CARGO_HOME" "$RUSTUP_HOME" "$OMS_INSTALL_RECEIPT" "$OMS_CAPABILITY_RECEIPT" "$CODEX_HOME" "$OMS_CODEX_CONFIG" "$OMS_CLAUDE_SETTINGS" "$PI_CODING_AGENT_DIR" "$OH_MY_SETTING_TOOL_LOCK" > "$OMS_REFRESH_RECEIPT_FIXTURE/child-paths"
 fi
@@ -4216,6 +4257,13 @@ case "$1" in
 install) printf '{{"schema":2,"parent":"%s"}}' "$OMS_NATIVE_UPDATE_PARENT" > '{r}'; echo "installed native OMS 0123456789abcdef0123456789abcdef01234567; receipt: {r}" ;;
 install-profile) [ "$#" = 5 ] && [ "$4" = --receipt ] && [ -f "$5" ] || exit 9; printf 'ran %s' "$*" ;;
 install-tools) [ "$#" = 2 ] && [ "$2" = --upgrade ] || exit 9; printf 'ran %s' "$*" ;;
+doctor) if [ "${{2:-}}" = --integrations ]; then
+  [ "$#" = 4 ] && [ "$3" = --json ] && [ "$4" = --no-model-doctor ] || exit 9
+  printf '%s' "$*" > '{r}.integration-argv'
+  printf 'private-provider-output {r}'
+  printf 'private-provider-error {r}' >&2
+else printf 'ran %s' "$*"; fi
+test "$OMS_NATIVE_UPDATE_PARENT" = "$$PARENT" ;;
 *) printf 'ran %s' "$*"; test "$OMS_NATIVE_UPDATE_PARENT" = "$$PARENT" ;;
 esac"#,
                 r = receipt.display()
@@ -4239,7 +4287,27 @@ esac"#,
         );
         let out = run(IncomingPhase::RefreshTools, rev);
         assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
-        assert!(String::from_utf8_lossy(&out.1).starts_with("ran install-"));
+        let diagnostic: IncomingDiagnostic = serde_json::from_slice(&out.1).unwrap();
+        assert_eq!(diagnostic.phase, IncomingPhase::RefreshTools);
+        assert!(matches!(
+            diagnostic.tool,
+            Some(IncomingTool::InstallTools | IncomingTool::InstallProfile)
+        ));
+        let out = run(IncomingPhase::VerifyIntegrations, rev);
+        assert_eq!(out.0, 0);
+        assert_eq!(
+            serde_json::from_slice::<IncomingDiagnostic>(&out.1).unwrap(),
+            IncomingDiagnostic {
+                phase: IncomingPhase::VerifyIntegrations,
+                tool: Some(IncomingTool::Doctor),
+                exit: 0,
+            }
+        );
+        assert!(out.2.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(receipt.with_extension("json.integration-argv")).unwrap(),
+            "doctor --integrations --json --no-model-doctor"
+        );
 
         let invocation = root.join("invocation");
         std::fs::create_dir(&invocation).unwrap();
@@ -4300,14 +4368,34 @@ esac"#,
         );
         assert_eq!(run(IncomingPhase::Reconcile, rev).0, 2);
         // A failing child keeps its exit status.
-        stage(&root, rev, "exit 7");
-        assert_eq!(run(IncomingPhase::Verify, rev).0, 7);
-        let cancelled = AtomicBool::new(true);
-        assert_eq!(
-            host.incoming_lifecycle(IncomingPhase::Verify, &root, rev, b"{}", &[], &cancelled)
-                .0,
-            130
+        stage(
+            &root,
+            rev,
+            "printf 'private-provider-output'; printf 'private-provider-error' >&2; exit 7",
         );
+        assert_eq!(run(IncomingPhase::Verify, rev).0, 7);
+        let out = run(IncomingPhase::VerifyIntegrations, rev);
+        assert_eq!(out.0, 7);
+        assert_eq!(
+            serde_json::from_slice::<IncomingDiagnostic>(&out.1)
+                .unwrap()
+                .exit,
+            7
+        );
+        assert!(!String::from_utf8_lossy(&out.1).contains("private-provider-output"));
+        assert!(out.2.is_empty());
+        let cancelled = AtomicBool::new(true);
+        for phase in [
+            IncomingPhase::Verify,
+            IncomingPhase::RefreshTools,
+            IncomingPhase::VerifyIntegrations,
+        ] {
+            assert_eq!(
+                host.incoming_lifecycle(phase, &root, rev, b"{}", &[], &cancelled)
+                    .0,
+                130
+            );
+        }
     }
 
     #[test]

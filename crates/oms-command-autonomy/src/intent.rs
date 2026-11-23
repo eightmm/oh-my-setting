@@ -248,7 +248,174 @@ fn reject_live(ctx: &Context<'_>) -> Result<()> {
     }
     Ok(())
 }
+fn sanitize_metadata_text(raw: &str, max_chars: usize, fallback: &str) -> String {
+    let flat = raw
+        .chars()
+        .filter(|c| c.is_whitespace() || value::clean_text(&c.to_string()))
+        .collect::<String>();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text: String = flat.chars().take(max_chars).collect();
+    if text.is_empty() || scan(text.as_bytes()).is_err() {
+        fallback.into()
+    } else {
+        text
+    }
+}
+
+/// Read-only, explicit-scope listing of open labeled issues. It selects
+/// nothing and writes no state: the maintainer picks one URL and uses the
+/// pinned `draft --from-issue` flow.
+fn list_issues(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    require(
+        args.values
+            .keys()
+            .all(|k| ["repo", "github", "label", "limit"].contains(&k.as_str()))
+            && args.flags.iter().all(|f| f == "json"),
+        "issues accepts only --github, --label, --limit, --json and --repo",
+    )?;
+    let slug = args.required("github")?;
+    let label = args.required("label")?;
+    let limit = args.number("limit", 10, 1, 20)?;
+    let (owner, name) = slug
+        .split_once('/')
+        .ok_or_else(|| Error::new(2, "--github must be OWNER/REPO"))?;
+    // Validate owner, repo, label, and limit with the same contract as the host GET adapter.
+    crate::services::issues_list_endpoint(owner, name, label, limit)?;
+    let response = ctx
+        .services
+        .list_issues(owner, name, label, limit, ctx.interrupted)?;
+    require(
+        response.len() <= 512 * 1024,
+        "GitHub source response exceeds read limit",
+    )?;
+    let rows = value::parse(&response)?;
+    let rows = rows
+        .as_array()
+        .filter(|rows| rows.len() as u64 <= limit)
+        .ok_or_else(|| Error::new(2, "GitHub response is not a bounded issue list"))?;
+    let stamp =
+        regex::Regex::new(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$").unwrap();
+    struct Candidate {
+        number: u64,
+        url: String,
+        title: String,
+        labels: Vec<String>,
+        updated_at: String,
+        next_step: String,
+    }
+    let mut items = Vec::new();
+    let mut skipped = 0usize;
+    for row in rows {
+        require(
+            row.is_object(),
+            "GitHub response contains a non-object entry",
+        )?;
+        if row.get("pull_request").is_some_and(|v| !v.is_null()) {
+            skipped += 1;
+            continue;
+        }
+        let number = row["number"]
+            .as_u64()
+            .filter(|&n| (1..=9_999_999_999).contains(&n))
+            .ok_or_else(|| Error::new(2, "GitHub response has invalid issue number"))?;
+        let url = value::text(row, "html_url");
+        let expected_url = format!("https://github.com/{owner}/{name}/issues/{number}");
+        let updated = value::text(row, "updated_at");
+        let raw_labels = row["labels"]
+            .as_array()
+            .ok_or_else(|| Error::new(2, "GitHub response has invalid labels"))?;
+        require(
+            raw_labels
+                .iter()
+                .all(|l| l.is_object() && !value::text(l, "name").is_empty()),
+            "GitHub response has malformed label entry",
+        )?;
+        let labeled = raw_labels
+            .iter()
+            .any(|l| value::text(l, "name").eq_ignore_ascii_case(label));
+        require(
+            url.starts_with("https://github.com/")
+                && value::clean_text(url)
+                && !url.chars().any(char::is_whitespace)
+                && url.eq_ignore_ascii_case(&expected_url)
+                && value::text(row, "state") == "open"
+                && labeled
+                && stamp.is_match(updated)
+                && chrono::DateTime::parse_from_rfc3339(updated).is_ok(),
+            "GitHub response does not match the requested repository, label and open state",
+        )?;
+        // Titles and labels are untrusted display metadata; raw issue bodies are never read or emitted.
+        let title = sanitize_metadata_text(value::text(row, "title"), 200, "[title withheld]");
+        let labels = raw_labels
+            .iter()
+            .take(20)
+            .map(|l| sanitize_metadata_text(value::text(l, "name"), 50, "[label withheld]"))
+            .collect::<Vec<_>>();
+        let next_step = format!("oms intent draft --from-issue {url} --dry-run");
+        items.push(Candidate {
+            number,
+            url: url.into(),
+            title,
+            labels,
+            updated_at: updated.into(),
+            next_step,
+        });
+    }
+    if args.flag("json") {
+        let json_items = items
+            .iter()
+            .map(|item| {
+                json!({
+                    "number": item.number,
+                    "url": item.url,
+                    "title": item.title,
+                    "labels": item.labels,
+                    "updated_at": item.updated_at,
+                    "next_step": item.next_step,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Output::json(&json!({
+            "schema": 1,
+            "kind": "oms-intent-issue-candidates",
+            "repository": format!("{owner}/{name}"),
+            "label": label,
+            "limit": limit,
+            "trusted": false,
+            "count": json_items.len(),
+            "checked": rows.len(),
+            "skipped_pull_requests": skipped,
+            "issues": json_items,
+            "note": "Metadata only; listing is not selection or approval. Review one, then: oms intent draft --from-issue URL --dry-run",
+        }));
+    }
+    if items.is_empty() {
+        return Ok(Output::text(format!(
+            "intent: no eligible issues among the {} checked row(s) for {owner}/{name} with label {label} (one bounded page; {skipped} pull request(s) skipped; read-only)",
+            rows.len()
+        )));
+    }
+    let mut lines = vec![format!(
+        "intent: {} open issue(s) for {owner}/{name} with label {label} (metadata only; untrusted)",
+        items.len()
+    )];
+    for item in &items {
+        lines.push(format!("#{} {}", item.number, item.title));
+        lines.push(format!("  url: {}", item.url));
+        lines.push(format!("  labels: {}", item.labels.join(", ")));
+        lines.push(format!("  updated_at: {}", item.updated_at));
+        lines.push(format!("  next: {}", item.next_step));
+    }
+    Ok(Output::text(lines.join("\n")))
+}
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    if args.action == "issues" {
+        return list_issues(ctx, args);
+    }
+    require(
+        !args.has("github") && !args.has("label") && !args.has("limit") && !args.flag("json"),
+        "--github, --label, --limit and --json are valid only with issues",
+    )?;
     require(
         !args.has("kind") || args.action == "draft",
         "--kind is valid only with draft",
@@ -545,6 +712,25 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             args.required("id")?
         )));
     } else {
+        // A GitHub-issue draft binds its issue to these exact PROJECT.md bytes;
+        // propose canonicalizes it against origin and drops a foreign one.
+        let id = args.required("id")?;
+        let issue = ctx
+            .source
+            .optional(format!(".oms/intents/{id}.json"), MAX_FILE)?
+            .and_then(|raw| value::parse(&raw).ok())
+            .filter(|meta| meta["source"]["source"]["kind"] == "github-issue")
+            .and_then(|meta| {
+                crate::github::from_issue_url(value::text(&meta["source"]["source"], "reference"))
+            });
+        if let Some(issue) = issue {
+            let record = json!({"schema": 1, "kind": crate::github::ADOPT_KIND, "id": id, "project_sha256": value::hash(&staged), "issue": issue});
+            ctx.source.publish_once(
+                format!(".oms/intents/{id}.adopt.json"),
+                &value::pretty(&record)?,
+                MAX_FILE,
+            )?;
+        }
         ctx.source.publish_once("PROJECT.md", &staged, MAX_FILE)?;
         out = Output::text(format!(
             "intent: adopted {} -> PROJECT.md (State: confirmed)",

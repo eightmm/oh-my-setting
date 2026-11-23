@@ -1143,9 +1143,27 @@ delegations do not increase verified outcomes in model or overall summaries.
 The artifact reader shares one output-section selector for tokens, model, cost
 and structured usage. Prompt examples, repair prompts and verifier logs are not
 measurements. Previously cached rows/snapshots are retained, not retroactively
-rewritten. Snapshots label `measurement_basis`; `compare` withholds affected
-rate/usage/duration deltas when the bases differ, rather than presenting a
-measurement change as an improvement.
+rewritten. Snapshots label `measurement_basis`; `compare` calculates affected
+rate/usage/duration deltas only when both snapshots carry the supported
+`provider-calls/explicit-verification-v1` basis. Missing, malformed, unsupported
+or different bases preserve the supplied `left` and `right` values and produce
+`delta: null` with a reason.
+
+These comparisons also require positive integer sample counts on both sides:
+`decided_outcomes` for success rate, each usage/duration metric's `count`,
+`skill_evals.count` for its task-pass delta, and `manual_outcomes.count` for manual
+metrics. A manual metric also requires a valid `unknown_metrics` list that does
+not mark it unknown. Missing or unmeasured coverage produces `delta: null` with
+a reason, including a zero total with no outcome or skill-evaluation records.
+An observed zero remains comparable, and differing positive sample counts still
+permit an observational aggregate delta. Acceptance and context comparisons keep
+their existing contracts.
+
+These checks do not establish equivalent tasks or causal improvement. Duration
+still uses provider-call samples when available and otherwise falls back to
+lifecycle-event samples; the shared snapshot basis does not identify that source
+choice. Inspect the underlying receipts before treating time differences as an
+effect of the harness. The paired-task protocol remains separate follow-up work.
 
 Skill changes can be evaluated before adoption with the additive candidate
 comparison mode, for example:

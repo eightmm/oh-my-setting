@@ -76,6 +76,7 @@ explains overlapping entrypoints.
 | `sync-shared` | Fetch and fast-forward an idle shared checkout. | `oms sync-shared` | [Verification and release](#verification-and-release) |
 | `draft-pr` | Publish a verified clean HEAD as a draft pull request. | `oms draft-pr` | [Verification and release](#verification-and-release) |
 | `ci-status` | Read the CI conclusion for a branch HEAD. | `oms ci-status` | [Verification and release](#verification-and-release) |
+| `github` | Show GitHub project mode and cached issue/PR state; refresh, adopt merged PRs, post one evidence comment. | `oms github` | [Verification and release](#verification-and-release) |
 | `change-guard` | Warn about concurrent agent edits. | `oms change-guard` | [Delegating writes](#delegating-writes) |
 | `checkpoint` | Save a reversible snapshot of tracked Git state. | `oms checkpoint` | [Delegating writes](#delegating-writes) |
 | `scratch-worktree` | Manage scratch worktrees around active workers. | `oms scratch-worktree` | [Delegating writes](#delegating-writes) |
@@ -1705,7 +1706,13 @@ none where nothing applies; its answer stays untrusted evidence for the planner
 and nothing parses or gates on those headings. Applying a proposal requires `--expected-proposal-sha256` for the
 reviewed proposal bytes. `oms autopilot propose --discover` uses discovery for
 the initial tranche only; when no eligible work is found, its receipt remains
-at proposing so the attempt can be retried.
+at proposing so the attempt can be retried. In GitHub project mode applied tasks
+need an issue: `oms plan-from-spec --issue REF` / `oms autopilot propose --issue REF`
+stamp the reviewed issue, and an adopted `intent draft --from-issue` contract carries
+its same-repo issue while `PROJECT.md` is unchanged. A proposal pending an issue is
+restamped with `oms plan-from-spec --restamp PATH --expected-proposal-sha256 SHA --issue
+REF`, or for autopilot `oms autopilot propose --restamp PATH --expected-proposal-sha256
+SHA --issue REF`.
 
 
 ### Freeze and commit an approved patch
@@ -1860,7 +1867,8 @@ claim order (creation time, then insertion order). `--json` is schema 1: `total`
 (which must exist) so it is not lost. The new task gets an optional `discovered_from` field.
 It is a provenance link only: the parent does not depend on the new task and keeps its state.
 The task passes the same admission as any `add` (a contract-bound plan still takes new
-tasks only through a reviewed proposal). With `--discovered-from`, `--id` may be omitted: a
+tasks only through a reviewed proposal; in GitHub project mode it inherits its bound
+parent's issue unless `--issue` is given). With `--discovered-from`, `--id` may be omitted: a
 `d-xxxxxx` id is generated from title, time and pid and checked for collision under the plan
 lock. `oms agent-plan discovered [--json]` lists them grouped by parent, and `show`, `brief`,
 `ready --json` and `status` (a `discovered` map, present only when links exist) carry the
@@ -2813,7 +2821,8 @@ HUDs. When supported by the CLI, OMS sets the Opus 5.5 per-model
 `modelSettings.<model>.autoCompactWindow` to 300000 and removes equal values;
 as with effort, an identical user value is treated as OMS-owned on removal.
 Model routing stays explicit in
-delegate/run commands; direct edits do not pay for a separate policy hook.
+delegate/run commands. Direct edits pay for one pre-edit hook, the
+[Main write guard](#main-write-guard), which returns at once outside a panel Main.
 
 
 #### Destructive command guard
@@ -2873,7 +2882,7 @@ refuses the same session again, the refusal line adds `This is refusal N of
 this rule in this session: stop and ask the owner instead of rewording the
 command.` (no blocking or ending; the count reads the log, so a removed log
 restarts it). A script's inside is still unseen. `bash scripts/command-guard-hook.sh --audit [N]` prints the
-newest N rows (default 50) counted by verdict and rule. The log records what
+newest N rows (default 50) counted by verdict and rule; `--audit --hours H` (1-720) counts the rows of the last H UTC hours instead, by verdict category only, and reports unusable timestamps and whether the 1000-row cap makes the window possibly incomplete or unknown (the cutoff is inclusive, so an oldest row exactly at it is not proof of coverage). The log records what
 the guard saw and is not a boundary: any process of the same user, an OMS
 worker included, can write or remove the file.
 
@@ -2912,6 +2921,38 @@ Codex and Antigravity remain uncovered. No Codex or Antigravity CLI was
 available to confirm a pre-tool hook contract, `codex execpolicy` rules or
 Antigravity `command(...)` deny rules, so nothing is generated for them.
 
+
+#### Main write guard
+
+A panel Overall Main manages only
+([Main policy](TEAM-ORCHESTRATION-MAIN-POLICY.md)). This accident-prevention
+hook gates the four Claude native file-edit tools: a PreToolUse hook on
+`Edit`, `Write`, `MultiEdit` and `NotebookEdit` refuses such a call from the
+panel Main when its target is inside the repository the panel manages
+(`OMS_ROOM_REPO`, else the session's directory) or one of that repository's
+linked worktrees. The refusal names the routes: `oms panel --dispatch ROLE
+--access write`, `--continue TASK_ID` for a fix and `--dispatch integrator` for
+a conflict. Files outside that repository and sessions without a panel are not checked.
+Dispatched workers (which carry `OMS_PANEL_DISPATCH=1`) and delegated children
+(`OMS_HARNESS_CHILD=1` or `OMS_HARNESS_DELEGATE_DEPTH`, which include Provider
+Leads and managed workers) are allowed. Unmanaged native subagents
+spawned directly by a Claude panel Main inherit Main's environment without those
+markers and are likewise refused. A brief for `--brief-file` is an outside file:
+Main writes it to session scratch or `TMPDIR`, not into the checkout.
+
+The guard judges the edit tool's target path. It covers files in the managed
+repository and in its linked worktrees, and it also covers submodules inside
+them. When the tool payload cannot be parsed, the call passes and the guard
+prints one stderr diagnostic line. Changes made through Bash are not judged
+by this guard. Shell access stays governed by the provider's own shell
+permissions. The guard runs under Claude Code only, as the command guard
+does. A Codex or Antigravity Main relies on its startup contract.
+
+The switch belongs to the person: `OMS_MAIN_WRITE_GUARD=0` in the environment
+`oms panel` was started from turns the guard off for that Main. When the user
+tells a running Main to make one change itself, the user makes it in their own
+shell or restarts the panel with the switch; the Room records the instruction
+either way.
 
 #### Hook ownership and audits
 
@@ -3075,6 +3116,34 @@ supported or partial cell names its implementation and test, and
 test references without running providers. The
 [native lifecycle fixture](../crates/oms-command-lifecycle/tests/native_lifecycle.rs)
 exercises this check.
+A custom adapter author can check the one-shot contract directly with the
+[reference conformance script](examples/agent-adapter-conformance.sh): name,
+executable and bounded probes by default, and with `--run` a read call (plus
+`--write`) in a throwaway repository. It calls the adapter, not OMS, records
+nothing, and a pass is not sandbox, live-provider or admission evidence.
+
+`oms doctor --providers --conformance PATH [--probe-bound SECONDS]` is a separate,
+explicit probe of one `oms-agent-adapter-ID` executable. Relative paths resolve
+from the caller's directory (or explicit `--repo`) before the probes start in
+private scratch. It validates the marker/name and executable and calls only
+`--version` and `--help`, with closed stdin, a per-probe execution deadline
+(default 10 seconds, decimal range 1–60), and 32 KiB per output stream through
+the existing supervisor. Cancellation, nonzero exits, output overflow and
+incomplete cleanup remain failures; cleanup can outlast the execution deadline.
+The JSON report includes statuses and bounded outcome metadata, not raw provider
+output. Exit status is 0 for these probe checks, 1 for a failed check, 2 for invalid
+options and 130 for interruption. It does not change capability cells or caches.
+
+This is the first native AH-08 slice associated with
+[#319](https://github.com/eightmm/oh-my-setting/pull/319). It makes no inference
+request. `--run`/write conformance, prompt file/`-` transport, no-commit/no-`.oms`
+and clean-read-worktree assertions, and output-file isolation still need an
+explicit execution opt-in implementation. The report leaves those checks,
+whole-tree containment, sandboxing, admission and live compatibility unknown.
+The trusted local executable retains its own environment/network access; the
+probe is not a sandbox. Plain `--providers` and `--providers --check` retain their
+table/report behavior without executing an adapter. See
+[native conformance](../crates/oms-command-lifecycle/src/adapter_conformance.rs).
 
 
 #### Optional hints and budgets
@@ -3275,6 +3344,7 @@ documentation references without its CI orchestration, installation or CLI-help 
 that probe once before installing: only a proven answer (exit 0) installs the quick
 hook; absent (1) and unknown (2) refuse with the probe's line and leave the existing
 hook untouched.
+`--repo PATH` targets another OMS source worktree root. It converges that root's hooks, or withdraws them with `--remove`. The root must hold `scripts/check.sh` to install. `--check-protection` then probes that target. The default hook stays full.
 
 
 ### CI selection and execution
@@ -3284,16 +3354,18 @@ download. Selected smoke runs validate names before dispatch, partition each
 case once, and cap workers to the selected count. Event/ref
 [concurrency groups](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 keep scheduled/manual runs separate from pushes; newer pushes supersede older
-pushes. Native platform checks reuse the lifecycle matrix's macOS runner.
-[`!cancelled()`](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)
-lets later checks report failures after an earlier failure without continuing
-a cancelled run.
+pushes.
 
-PR and main pushes select affected or full verification. Full runs use Linux
-lint and focused Bash checks, the Ubuntu and macOS Rust matrix, and a Linux
-copy-install lifecycle fixture. The lifecycle matrix adds macOS when the
-selector requires native platform checks. The stable `gate` checks the
-selected jobs and their planned skips. [CI workflow](../.github/workflows/test.yml)
+CI is Linux-only. PR and main pushes select affected or full verification. Full
+runs use Linux `lint` and `focused` Bash checks, `rust (ubuntu-24.04)`, and the
+`native (ubuntu-latest, copy)` install lifecycle fixture. The stable `gate`
+checks the selected jobs and their planned skips.
+[CI workflow](../.github/workflows/test.yml)
+
+macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD
+userland compatibility), but macOS runners are no longer part of GitHub Actions
+CI; verify macOS/BSD-sensitive changes locally with
+`tests/bsd-portability-smoke.sh` (also wired into `scripts/check.sh`).
 
 Require it in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
@@ -3350,6 +3422,19 @@ retried, merged or recorded, and no command printed here is run by OMS. Exit 0 w
 suggestions, 1 when nothing is recorded, 2 for usage. `--json` prints schema 1, kind
 `oms-ci-suggest`.
 
+GitHub project mode is on when `PROJECT.md` `## Collaboration` or the committed
+`.github/oms-project.md` declares `- GitHub project: owner/repo` and the slug names
+the github.com origin; a fork that only inherits the committed file is `inactive`.
+In that mode `oms agent-plan add`, `add-batch` and `apply-proposal` need an issue per
+task (`--issue`, a row `issue`, or a `--discovered-from` parent bound to one), `oms
+agent-task init|update|rotate --issue REF` binds the packet, and `oms agent-memory
+recall` adds commit and merged-PR rows. `oms github status` reports the mode offline;
+`refresh` and `adopt-merged` (a preview, then `--apply --expected-sha256`) are its only
+network reads, and `post-evidence --issue --pull --yes` is its only GitHub write: an
+explicit, parent-only comment with an idempotent receipt. The
+[command](../crates/oms-command-landing/src/github.rs) reads the declaration through
+the shared [`oms-github` crate](../crates/oms-github/src/declaration.rs).
+
 Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
@@ -3359,8 +3444,8 @@ the run's jobs prove the full selection (the default proof) or a full local gate
 was affected-only or its scope cannot be read, it supplies no full proof. For an
 affected-only run without a dispatch land finishes `passed`, installs nothing and prints the command that
 requests a full-selection run of the same SHA, `gh workflow run test.yml --repo
-OWNER/REPO --ref TARGET` (`workflow_dispatch` runs the full selection, including the
-macOS lifecycle leg), then the command that resumes the landing. Rerunning it with
+OWNER/REPO --ref TARGET` (`workflow_dispatch` runs the full Linux selection),
+then the command that resumes the landing. Rerunning it with
 `--wait` checks for that run and waits within `--ci-wait` when it is pending;
 when none is visible it returns promptly. Pending proof and a requested receipt
 handoff remain blocked until proof is complete, so a retry can safely hand off.
@@ -3477,6 +3562,6 @@ declared mechanical gate.
 
 Claude's `oms-korean` output style declares `keep-coding-instructions: true`:
 its final-reply language guidance retains Claude's native engineering
-instructions. The repository `CLAUDE.md` imports `AGENTS.md`, avoiding a
-second copy of policy. Global rules remain in `rules/global-AGENTS.md`;
-provider system instructions and user-owned settings are not replaced.
+instructions. Shared repository instructions live in `AGENTS.md`. The
+installer links `rules/global-AGENTS.md` to `~/.claude/CLAUDE.md` and preserves
+provider system instructions and user-owned settings.

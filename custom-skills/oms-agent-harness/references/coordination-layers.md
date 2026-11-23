@@ -52,7 +52,10 @@ configuration and makes no repository edit, including small ones.
 Two exceptions, both visible:
 
 - The user tells Main to make a specific change itself. Main makes that change
-  only and records it in the Room as a `--kind status` message.
+  only and records it in the Room as a `--kind status` message. A Claude Code
+  Main's edit tools are refused inside the managed repository unless the user
+  started the panel with `OMS_MAIN_WRITE_GUARD=0`; otherwise the user edits.
+  Brief files go to session scratch or `TMPDIR`, outside the checkout.
 - No worker can start (no provider, capacity or authority). Main reports the
   blocker to the user and waits; it does not do the work quietly.
 
@@ -90,8 +93,12 @@ about work it can route.
 
 ## Declared, not enforced
 
-These duties are prompt and skill contracts. The runtime still enforces the
-parts it always did: parent-only managed dispatch, worker worktree isolation,
-patch admission, scopes, leases and landing gates. No guard yet refuses an
-edit typed in the Main pane, so treat a Main edit without a recorded user
-instruction as a contract violation to report, not as a blocked action.
+Most of these duties remain prompt and skill contracts. The runtime enforces
+parent-only managed dispatch, worker worktree isolation, patch admission,
+scopes, leases, landing gates, and—for a Claude Code panel Main—the PreToolUse
+Main write guard that refuses `Edit`, `Write`, `MultiEdit` and `NotebookEdit`
+calls inside the managed repository and its linked worktrees (unless started
+with `OMS_MAIN_WRITE_GUARD=0`). Changes made through Bash and edits from a
+Codex or Antigravity Main remain policy-only, not blocked by a guard; treat any
+such Main edit without a recorded user instruction as a contract violation to
+report.

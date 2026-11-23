@@ -12,6 +12,7 @@ mod cli;
 pub mod delivery;
 pub mod feedback;
 mod git;
+mod github;
 pub mod guard;
 pub mod helpers;
 pub mod landing;
@@ -47,6 +48,7 @@ pub const TOOLS: &[&str] = &[
     "draft-pr",
     "ci-status",
     "report",
+    "github",
 ];
 #[derive(Debug, Clone)]
 pub struct Error {
@@ -181,6 +183,7 @@ pub fn run_with_services(
             "draft-pr" => review::execute(&context, &options),
             "ci-status" => ci::execute(&context, &options),
             "report" => report::execute(&context, &options),
+            "github" => github::execute(&context, &options),
             _ => unreachable!(),
         }
     })();

@@ -7,7 +7,7 @@ use crate::{
 };
 use std::{
     collections::BTreeSet,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -649,11 +649,12 @@ pub(crate) fn call(
         "# OMS {tool}\n\n- provider: {}\n- model: {}\n- run: {run}\n- round: {round}\n{seat_line}\n## Prompt\n\n{body}\n",
         target.provider, route.model
     );
+    let dispatch = crate::dispatch_context::DispatchContext::from_environment(args.get("task-id"));
     let panel_council = tool == "peer-ask"
         && args.has("deliberation")
         && args.has("require-complete")
         && args.has("thread")
-        && std::env::var_os("OMS_PANEL_DISPATCH").as_deref() == Some(OsStr::new("1"));
+        && dispatch.panel.is_some();
     let publication_error = |stage| {
         move |error: Error| {
             if panel_council {
@@ -708,67 +709,14 @@ pub(crate) fn call(
         )?;
     }
     let workdir = private.as_ref().map_or(repo, |tree| tree.path.as_path());
-    let env_nonempty = |key: &str| {
-        std::env::var(key)
-            .ok()
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty())
-    };
     let live_attempt = if repo.join(".oms").is_dir() && tool != "_synthesis" {
-        let mut refs = obj([
-            ("artifact", artifact.to_string_lossy().into_owned().into()),
-            ("panel_alias", format!("{}-{tool}", route.provider).into()),
-            (
-                "panel_role",
-                if tool == "peer-review" {
-                    "reviewer"
-                } else {
-                    "advisor"
-                }
-                .into(),
-            ),
-            ("panel_model", route.model.clone().into()),
-            ("panel_label", format!("{tool} ({})", route.provider).into()),
-        ]);
-        if let Some(room_id) = env_nonempty("OMS_ROOM_ID") {
-            refs.set("panel_room_id", room_id);
-        }
-        if !providers::panel_account(&route).is_empty() {
-            refs.set("panel_account", providers::panel_account(&route));
-        }
-        if std::env::var_os("OMS_PANEL_DISPATCH").as_deref() == Some(OsStr::new("1")) {
-            refs.set(
-                "panel_access",
-                env_nonempty("OMS_PANEL_ACCESS").unwrap_or_else(|| "read".to_owned()),
-            );
-            for (key, env_key) in [
-                ("panel_role", "OMS_PANEL_ROLE"),
-                ("panel_owner", "OMS_PANEL_OWNER"),
-                ("panel_purpose", "OMS_PANEL_PURPOSE"),
-                ("panel_workload", "OMS_PANEL_WORKLOAD"),
-                ("panel_label", "OMS_PANEL_LABEL"),
-                ("panel_alias", "OMS_PANEL_ALIAS"),
-                ("panel_room_participant", "OMS_ROOM_PARTICIPANT"),
-            ] {
-                if let Some(val) = env_nonempty(env_key) {
-                    refs.set(key, val);
-                }
-            }
-        }
-        let parent_attempt_id = env_nonempty("OMS_PANEL_MAIN_ATTEMPT").unwrap_or_default();
-        let task_id = {
-            let cli = args.get("task-id");
-            if !cli.is_empty() {
-                cli.to_owned()
-            } else {
-                env_nonempty("OMS_TASK_ID").unwrap_or_default()
-            }
-        };
+        let mut refs = obj([("artifact", artifact.to_string_lossy().into_owned().into())]);
+        dispatch.peer_refs(&mut refs, &route, tool);
         let req = oms_command_operations::StartRequest {
             provider: route.provider.clone(),
             tool: tool.to_owned(),
-            task_id,
-            parent_attempt_id,
+            task_id: dispatch.task_id.clone(),
+            parent_attempt_id: dispatch.parent_attempt_id.clone().unwrap_or_default(),
             refs,
             ..Default::default()
         };

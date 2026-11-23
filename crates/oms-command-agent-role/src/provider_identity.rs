@@ -95,7 +95,12 @@ impl Discovery {
                     .join("oh-my-setting/provider-adapters")
             });
         let search_dirs = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|path| (cwd.join(&path), path.is_relative()))
+            .map(|path| {
+                let relative = path.is_relative();
+                let joined = cwd.join(&path);
+                let resolved = std::path::absolute(&joined).unwrap_or(joined);
+                (resolved, relative)
+            })
             .collect();
         Ok(Self {
             adapter_dir: cwd.join(adapter),
@@ -104,10 +109,17 @@ impl Discovery {
     }
 
     fn on_path(&self, name: &str) -> Option<(PathBuf, bool)> {
+        let mut saw_relative = false;
         self.search_dirs.iter().find_map(|(directory, relative)| {
+            saw_relative |= *relative;
             let candidate = directory.join(name);
-            executable(&candidate).then_some((candidate, *relative))
+            executable(&candidate).then_some((candidate, saw_relative))
         })
+    }
+
+    fn resolve_on_path(&self, name: &str) -> Option<PathBuf> {
+        let (path, bind_path) = self.on_path(name)?;
+        Some(if bind_path { path } else { name.into() })
     }
 
     pub fn normalize<'a>(&self, raw: &'a str) -> Option<&'a str> {
@@ -116,46 +128,49 @@ impl Discovery {
             .then_some(provider)
     }
 
-    pub fn binary(&self, raw: &str) -> Option<PathBuf> {
+    /// Resolve an executable strictly for real process launch/probing.
+    /// Returns `None` when absent in owner discovery so callers fail closed instead
+    /// of re-resolving a bare executable name in a different target cwd.
+    pub fn executable_for_launch(&self, raw: &str) -> Option<PathBuf> {
         let provider = canonical(raw);
         if !valid_id(provider) {
             return None;
         }
         if let Some(binary) = builtin_binary(provider) {
-            return Some(
-                if provider == "opencode"
-                    && self.on_path(binary).is_none()
-                    && self.on_path("opencode2").is_some()
-                {
-                    "opencode2"
-                } else {
-                    binary
-                }
-                .into(),
-            );
+            if let Some(resolved) = self.resolve_on_path(binary) {
+                return Some(resolved);
+            }
+            if provider == "opencode" {
+                return self.resolve_on_path("opencode2");
+            }
+            return None;
         }
         let name = format!("oms-agent-adapter-{provider}");
         let direct = self.adapter_dir.join(&name);
         if executable(&direct) {
             return Some(direct);
         }
-        if let Some((path, true)) = self.on_path(&name) {
-            return Some(path);
+        self.resolve_on_path(&name)
+    }
+
+    /// Display/inventory binary name: prefers the owner-resolved executable and falls
+    /// back to the canonical bare name only for read-only inventory output.
+    pub fn binary(&self, raw: &str) -> Option<PathBuf> {
+        let provider = canonical(raw);
+        if !valid_id(provider) {
+            return None;
         }
-        Some(name.into())
+        if let Some(resolved) = self.executable_for_launch(provider) {
+            return Some(resolved);
+        }
+        if let Some(binary) = builtin_binary(provider) {
+            return Some(binary.into());
+        }
+        Some(format!("oms-agent-adapter-{provider}").into())
     }
 
     pub fn discovered(&self, provider: &str) -> bool {
-        let Some(binary) = self.binary(provider) else {
-            return false;
-        };
-        if binary.is_absolute() {
-            executable(&binary)
-        } else {
-            binary
-                .to_str()
-                .is_some_and(|name| self.on_path(name).is_some())
-        }
+        self.executable_for_launch(provider).is_some()
     }
 
     pub fn providers(&self) -> Vec<String> {

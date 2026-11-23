@@ -16,6 +16,58 @@ pub(crate) const CHILD_ROW_BUDGET: usize = 2048;
 pub(crate) const TOOL_BATCH_LIMIT: usize = 64;
 pub(crate) const WORKSPACE_URI_LIMIT: usize = 8;
 pub(crate) const SPAWN_BUDGET: usize = 64;
+pub(crate) const USAGE_SUFFIX_BUDGET: usize = 64 * 1024;
+const USAGE_ROW_BUDGET: usize = 256;
+
+/// Select a complete response from a bounded transcript suffix, preserving raw counters.
+pub(crate) fn latest_child_response_usage(bytes: &[u8], recent: bool) -> Option<Value> {
+    if bytes.len() > USAGE_SUFFIX_BUDGET || !bytes.ends_with(b"\n") {
+        return None;
+    }
+    let mut lines = bytes.split(|b| *b == b'\n');
+    if recent {
+        lines.next()?;
+    }
+    let mut latest = None;
+    let mut previous: Option<(u64, String)> = None;
+    for (index, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        if index >= USAGE_ROW_BUDGET || line.len() > LINE_BYTE_LIMIT {
+            return None;
+        }
+        let row = decode(line, LINE_BYTE_LIMIT).ok()?;
+        if row["type"] != "PLANNER_RESPONSE" || row["source"] != "MODEL" || row["status"] != "DONE"
+        {
+            continue;
+        }
+        let model = row["model"].as_str()?;
+        if model.is_empty() || model.len() > 128 || !model.bytes().all(|b| b.is_ascii_graphic()) {
+            return None;
+        }
+        let time = row["created_at"].as_str()?;
+        if time.len() != 20
+            || !time.ends_with('Z')
+            || chrono::NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M:%SZ").is_err()
+        {
+            return None;
+        }
+        let step = row["step_index"].as_u64()?;
+        if previous
+            .as_ref()
+            .is_some_and(|(prev_step, prev_time)| step <= *prev_step || time < prev_time.as_str())
+        {
+            return None;
+        }
+        previous = Some((step, time.to_owned()));
+        let count = |name: &str| row[name].as_i64().filter(|n| *n >= 0);
+        latest = Some(serde_json::json!({"model": model, "created_at": time,
+            "input_tokens": count("input_tokens")?, "cached_input_tokens": count("cache_read_tokens")?,
+            "output_tokens": count("output_tokens")?}));
+    }
+    latest
+}
 
 const SYSTEM_PREAMBLE: &str = "The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.\n\n";
 const CHECKPOINT_PREFIX: &str = "# Resuming from a compaction";
@@ -1151,6 +1203,50 @@ fn extract_selected_child_chat_and_setup_stage(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agy_child_response_usage_uses_latest_complete_record() {
+        let rows = concat!(
+            "{\"type\":\"PLANNER_RESPONSE\",\"source\":\"MODEL\",\"status\":\"DONE\",\"step_index\":27,\"created_at\":\"2026-11-22T00:00:00Z\",\"model\":\"gemini-4-hydrogen\",\"input_tokens\":1024,\"cache_read_tokens\":2048,\"output_tokens\":128}\n",
+            "{\"type\":\"PLANNER_RESPONSE\",\"source\":\"MODEL\",\"status\":\"DONE\",\"step_index\":28,\"created_at\":\"2026-11-22T00:00:01Z\",\"model\":\"gemini-4-hydrogen\",\"input_tokens\":5,\"cache_read_tokens\":2,\"output_tokens\":1}\n"
+        );
+        let usage = super::latest_child_response_usage(rows.as_bytes(), false).unwrap();
+        assert_eq!(usage["input_tokens"], 5);
+        assert_eq!(usage["cached_input_tokens"], 2);
+        assert_eq!(usage["output_tokens"], 1);
+        assert!(usage.get("total_tokens").is_none());
+        assert!(super::latest_child_response_usage(rows.trim_end().as_bytes(), false).is_none());
+        let first = rows.lines().next().unwrap();
+        for bad in [
+            first.replace("1024", "-1"),
+            first.replace("1024", "1.5"),
+            first.replace("1024", "18446744073709551615"),
+            first.replace("2026-11-22T00:00:00Z", "2026-02-30T00:00:00Z"),
+            first.replace("\"input_tokens\":1024,", ""),
+            first.replace(
+                "\"input_tokens\":1024",
+                "\"input_tokens\":1024,\"input_tokens\":2",
+            ),
+        ] {
+            assert!(
+                super::latest_child_response_usage(format!("{bad}\n").as_bytes(), false).is_none()
+            );
+        }
+        let second = rows.lines().nth(1).unwrap();
+        for bad in [
+            second.replace(
+                "\"input_tokens\":5,\"cache_read_tokens\":2,\"output_tokens\":1",
+                "\"content\":\"no usage\"",
+            ),
+            second.replace("\"input_tokens\":5", "\"input_tokens\":-1"),
+            second.replace("\"step_index\":28", "\"step_index\":26"),
+            second.replace("2026-11-22T00:00:01Z", "2026-11-21T00:00:01Z"),
+        ] {
+            assert!(
+                super::latest_child_response_usage(format!("{first}\n{bad}\n").as_bytes(), false)
+                    .is_none()
+            );
+        }
+    }
     use super::*;
     use serde_json::json;
 

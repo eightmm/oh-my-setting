@@ -222,7 +222,12 @@ pub(crate) fn activity(v: &Value, repo: &Path, ctx: &Context<'_>) {
             String::new()
         };
         if event(v) == "UserPromptSubmit" {
-            origin=if agent(v, ctx)=="claude"&&!same||cached_regex!(r"^\s*(?:<task-notification(?:\s|>)|\[SYSTEM NOTIFICATION\b|Another Claude session sent a message:|Your claude\.ai usage limit has reset\b)").is_match(text(v,"prompt")){"harness"}else{"user"}.into();
+            origin = if agent(v, ctx) == "claude" && !same || automated_prompt(text(v, "prompt")) {
+                "harness"
+            } else {
+                "user"
+            }
+            .into();
         }
         let state = if kind.is_some() {
             "waiting"

@@ -937,6 +937,25 @@ pub struct SettleReviewRequest {
     pub aged_days: Option<f64>,
 }
 
+/// Validate a human or generated review settlement reason against the native
+/// Events `panel_review_reason` ref contract before dry-run or apply.
+fn validate_review_reason_ref(reason: &str) -> Result<()> {
+    use crate::native::operations::value::{V, obj};
+    let row = obj([
+        ("schema", 1usize.into()),
+        ("event_id", "aevt_0".into()),
+        ("ts", "2000-01-01T00:00:00Z".into()),
+        ("attempt_id", "att_0".into()),
+        ("seq", 1usize.into()),
+        ("event_type", "attempt.state_changed".into()),
+        ("from_state", "review".into()),
+        ("to_state", "cancelled".into()),
+        ("refs", obj([("panel_review_reason", V::from(reason))])),
+    ]);
+    crate::native::operations::validate_event_row(&row, 0)
+        .map_err(|err| Error::new(format!("invalid panel_review_reason ref: {err}")))
+}
+
 pub fn settle_review(
     repo: &Path,
     request: &SettleReviewRequest,
@@ -983,6 +1002,9 @@ pub fn settle_review(
             request.older_than.is_none() && request.explicit.is_empty() && request.reason.is_none(),
             "--aged-days cannot be combined with --older-than, --attempt or --reason",
         )?;
+        validate_review_reason_ref(&format!(
+            "aged verifying without owner decision ({days} days)"
+        ))?;
     }
     require(
         request.older_than.is_none() || request.standalone,
@@ -1003,12 +1025,16 @@ pub fn settle_review(
             )?;
         }
     }
+    if let Some(days) = request.older_than {
+        validate_review_reason_ref(&format!("standalone review older than {days} days"))?;
+    }
     if !request.explicit.is_empty() {
         let reason = request.reason.as_deref().unwrap_or("");
         require(
             !reason.is_empty() && reason.len() <= 200 && !reason.chars().any(|c| (c as u32) < 32),
             "--attempt requires a one-line --reason of 1..200 characters",
         )?;
+        validate_review_reason_ref(reason)?;
     } else {
         require(request.reason.is_none(), "--reason requires --attempt")?;
     }
@@ -1248,6 +1274,9 @@ pub fn settle_review(
                 || legacy_parents.contains(&parent)
                 || request.standalone)
         {
+            if let Some(reason_text) = &selection_reason {
+                validate_review_reason_ref(reason_text)?;
+            }
             report["candidates"]
                 .as_array_mut()
                 .unwrap()
@@ -1336,4 +1365,51 @@ pub fn settle_review(
     }
     report["terminal"] = terminal_count.into();
     Ok(report)
+}
+
+#[cfg(test)]
+mod settle_review_tests {
+    use super::validate_review_reason_ref;
+
+    #[test]
+    fn review_reason_ref_matches_native_events_contract() {
+        for valid in [
+            "superseded attempt",
+            "reworked in PR #332",
+            "replaced src/review.rs",
+            "score=0 retry",
+            "a..b/c",
+            "replaced ../old",
+            "대체된 시도",
+        ] {
+            assert!(
+                validate_review_reason_ref(valid).is_ok(),
+                "expected valid panel_review_reason ref: {valid:?}"
+            );
+        }
+
+        let oversized = "x".repeat(241);
+        for invalid in [
+            "/abs/path",
+            "\\unc\\path",
+            "C:/drive/path",
+            "d:\\drive\\path",
+            "..",
+            "../escape",
+            "a/../b",
+            "a/..",
+            "line1\nline2",
+            "line1\rline2",
+            oversized.as_str(),
+        ] {
+            let Err(err) = validate_review_reason_ref(invalid) else {
+                panic!("expected malformed ref rejection: {invalid:?}");
+            };
+            assert!(
+                err.message.contains("invalid panel_review_reason ref"),
+                "unexpected error for {invalid:?}: {}",
+                err.message
+            );
+        }
+    }
 }

@@ -311,3 +311,274 @@ fn close_with_expected_digest_rejects_missing_packet() {
     assert_eq!(code, 4, "{err}");
     assert!(err.contains("changed before close"), "{err}");
 }
+
+const GIT_ISOLATION: [(&str, &str); 2] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_SYSTEM", "/dev/null"),
+];
+const SSH_ORIGIN: &str = "git@github.com:example-org/example-repo.git";
+
+fn origin(repo: &Repo, url: &str) {
+    let verb = if Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap()
+        .status
+        .success()
+    {
+        "set-url"
+    } else {
+        "add"
+    };
+    let ok = Command::new("git")
+        .args(["remote", verb, "origin", url])
+        .current_dir(repo.path())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+}
+
+fn packet(repo: &Repo) -> Option<Vec<u8>> {
+    std::fs::read(repo.path().join(".oms/task/current.md")).ok()
+}
+
+#[test]
+fn issue_binding_resolves_against_origin_and_is_visible() {
+    let mut extra = GIT_ISOLATION.to_vec();
+    extra.push(("OMS_AGENT_TASK_CONTEXT_CHARS", "300"));
+    if !isolated(
+        "issue_binding_resolves_against_origin_and_is_visible",
+        &extra,
+    ) {
+        return;
+    }
+    let repo = Repo::new();
+    let mut svc = Fake::default();
+    origin(&repo, SSH_ORIGIN);
+    let (code, _, err) = call(&repo, &mut svc, &["init", "--goal", "g", "--issue", "7"]);
+    assert_eq!(code, 0, "{err}");
+    let bound = packet(&repo).unwrap();
+    let text = String::from_utf8_lossy(&bound).into_owned();
+    assert_eq!(text.matches("\n- github_issue: ").count(), 1, "{text}");
+    assert!(
+        text.contains("\n- github_issue: example-org/example-repo#7\n"),
+        "{text}"
+    );
+    assert!(text.contains("- task_id: task-") && text.contains("- source_session:"));
+    // Same ref in every accepted spelling and remote form is a byte-level no-op.
+    origin(&repo, "https://github.com/Example-Org/Example-Repo");
+    for spelling in ["7", "#7", "EXAMPLE-ORG/example-repo#7"] {
+        let (code, _, err) = call(&repo, &mut svc, &["update", "--issue", spelling]);
+        assert_eq!(code, 0, "{spelling}: {err}");
+        assert_eq!(packet(&repo).unwrap(), bound, "{spelling}");
+    }
+    let (_, json, _) = call(&repo, &mut svc, &["status", "--json"]);
+    assert!(
+        json.contains(r#""github_issue": "example-org/example-repo#7""#),
+        "{json}"
+    );
+    let (_, status, _) = call(&repo, &mut svc, &["status"]);
+    assert!(
+        status.contains("github_issue: example-org/example-repo#7\n"),
+        "{status}"
+    );
+    for _ in 0..8 {
+        call(&repo, &mut svc, &["append", "--text", &"x".repeat(80)]);
+    }
+    let (_, context, _) = call(&repo, &mut svc, &["context"]);
+    assert!(context.contains("truncated"), "{context}");
+    assert!(
+        context.contains("- github_issue: example-org/example-repo#7\n"),
+        "{context}"
+    );
+}
+
+#[test]
+fn issue_binding_fails_closed_without_changing_packet() {
+    if !isolated(
+        "issue_binding_fails_closed_without_changing_packet",
+        &GIT_ISOLATION,
+    ) {
+        return;
+    }
+    let repo = Repo::new();
+    let mut svc = Fake::default();
+    let (code, _, err) = call(&repo, &mut svc, &["init", "--goal", "g", "--issue", "5"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("origin remote"), "{err}");
+    assert!(packet(&repo).is_none());
+    let (code, _, err) = call(&repo, &mut svc, &["init", "--goal", "g"]);
+    assert_eq!(code, 0, "{err}");
+    let (_, json, _) = call(&repo, &mut svc, &["status", "--json"]);
+    assert!(!json.contains("github_issue"), "{json}");
+    let before = packet(&repo).unwrap();
+    let refuse = |svc: &mut Fake, argv: &[&str], needle: &str| {
+        let (code, _, err) = call(&repo, svc, argv);
+        assert_eq!(code, 2, "{argv:?}: {err}");
+        assert!(err.contains(needle), "{argv:?}: {err}");
+        assert_eq!(packet(&repo).unwrap(), before, "{argv:?}");
+    };
+    refuse(&mut svc, &["update", "--issue", "5"], "origin remote");
+    origin(&repo, "https://gitlab.com/example-org/example-repo.git");
+    refuse(&mut svc, &["update", "--issue", "5"], "github.com origin");
+    origin(&repo, SSH_ORIGIN);
+    refuse(
+        &mut svc,
+        &["update", "--issue", "other-org/example-repo#5"],
+        "same-repository",
+    );
+    refuse(&mut svc, &["show", "--issue", "5"], "--issue applies to");
+    for bad in [
+        "",
+        "0",
+        "#0",
+        "012",
+        "12345678901",
+        "5a",
+        "5 6",
+        "5\n",
+        "#5#6",
+        "#",
+        "example-org/example-repo#5?x",
+        "https://github.com/example-org/example-repo/issues/5",
+    ] {
+        refuse(
+            &mut svc,
+            &["update", "--issue", bad],
+            "must be N, #N or owner/repo#N",
+        );
+    }
+    // A GitHub project declaration must name origin; duplicates fail closed.
+    let spec = repo.path().join("PROJECT.md");
+    let declare =
+        |lines: &str| std::fs::write(&spec, format!("# P\n\n## Collaboration\n\n{lines}")).unwrap();
+    declare("- GitHub project: other-org/example-repo\n");
+    refuse(
+        &mut svc,
+        &["update", "--issue", "5"],
+        "different GitHub project",
+    );
+    declare(
+        "- GitHub project: example-org/example-repo\n- GitHub project: example-org/example-repo\n",
+    );
+    refuse(&mut svc, &["update", "--issue", "5"], "multiple");
+    declare("- GitHub project: Example-Org/Example-Repo\n");
+    let (code, _, err) = call(&repo, &mut svc, &["update", "--issue", "5"]);
+    assert_eq!(code, 0, "{err}");
+    // A fork's clean checkout: no PROJECT.md, and the committed declaration
+    // names the upstream, so the mode is off and --issue binds to origin.
+    std::fs::remove_file(&spec).unwrap();
+    let tracked = repo.path().join(".github/oms-project.md");
+    std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+    std::fs::write(
+        &tracked,
+        "## Collaboration\n\n- GitHub project: other-org/example-repo\n",
+    )
+    .unwrap();
+    for argv in [
+        &["add", ".github/oms-project.md"][..],
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "declare",
+        ],
+    ] {
+        let ok = Command::new("git")
+            .args(argv)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{argv:?}");
+    }
+    std::fs::remove_file(repo.path().join(".oms/task/current.md")).unwrap();
+    let (code, _, err) = call(&repo, &mut svc, &["init", "--goal", "g", "--issue", "6"]);
+    assert_eq!(code, 0, "{err}");
+    let bound = String::from_utf8(packet(&repo).unwrap()).unwrap();
+    assert!(
+        bound.contains("- github_issue: example-org/example-repo#6"),
+        "{bound}"
+    );
+}
+
+#[test]
+fn issue_rebind_needs_consent_and_rotation_keeps_archive_binding() {
+    if !isolated(
+        "issue_rebind_needs_consent_and_rotation_keeps_archive_binding",
+        &GIT_ISOLATION,
+    ) {
+        return;
+    }
+    let repo = Repo::new();
+    let mut svc = Fake::default();
+    origin(&repo, SSH_ORIGIN);
+    let ok = |svc: &mut Fake, argv: &[&str]| {
+        let (code, _, err) = call(&repo, svc, argv);
+        assert_eq!(code, 0, "{argv:?}: {err}");
+    };
+    ok(&mut svc, &["init", "--goal", "g1", "--issue", "5"]);
+    let before = packet(&repo).unwrap();
+    let (code, _, err) = call(&repo, &mut svc, &["update", "--issue", "6"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--replace-goal REASON"), "{err}");
+    assert_eq!(packet(&repo).unwrap(), before);
+    ok(
+        &mut svc,
+        &["update", "--issue", "#6", "--replace-goal", "split"],
+    );
+    let text = String::from_utf8(packet(&repo).unwrap()).unwrap();
+    assert_eq!(text.matches("\n- github_issue: ").count(), 1, "{text}");
+    assert!(
+        text.contains("- github_issue: example-org/example-repo#6\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("previous github_issue=example-org/example-repo#5; reason: split"),
+        "{text}"
+    );
+    ok(
+        &mut svc,
+        &["rotate", "--goal", "g2", "--replace-goal", "next"],
+    );
+    let current = String::from_utf8(packet(&repo).unwrap()).unwrap();
+    assert!(!current.contains("github_issue"), "{current}");
+    origin(&repo, "https://github.com/example-org/example-repo.git");
+    ok(
+        &mut svc,
+        &[
+            "rotate",
+            "--goal",
+            "g3",
+            "--replace-goal",
+            "next",
+            "--issue",
+            "EXAMPLE-ORG/example-repo#9",
+        ],
+    );
+    ok(&mut svc, &["close", "--reason", "done"]);
+    let archives: Vec<_> = std::fs::read_dir(repo.path().join(".oms/task/archive"))
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    let bound = |goal: &str| {
+        let archive = archives
+            .iter()
+            .find(|a| a.contains(&format!("## Goal\n\n{goal}\n")))
+            .unwrap();
+        archive
+            .lines()
+            .find_map(|l| l.strip_prefix("- github_issue: "))
+            .map(str::to_owned)
+    };
+    assert_eq!(archives.len(), 3);
+    assert_eq!(bound("g1").as_deref(), Some("example-org/example-repo#6"));
+    assert_eq!(bound("g2"), None);
+    assert_eq!(bound("g3").as_deref(), Some("example-org/example-repo#9"));
+}
