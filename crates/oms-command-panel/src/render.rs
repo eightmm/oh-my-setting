@@ -9701,7 +9701,7 @@ mod tests {
             let (tokens, rows) = detail(&entry, 120);
             assert_eq!(tokens, None, "{entry}");
             let parts: Vec<String> = rows
-                .expect(&entry.to_string())
+                .unwrap_or_else(|| panic!("{entry}"))
                 .into_iter()
                 .flatten()
                 .collect();
