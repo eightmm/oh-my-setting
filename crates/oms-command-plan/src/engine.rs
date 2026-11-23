@@ -288,6 +288,8 @@ pub struct Snapshot {
     pub(crate) registry: Value,
     pub(crate) markers: Option<Vec<Value>>,
     pub(crate) settled: BTreeSet<String>,
+    /// Lazily read local GitHub snapshot cache bytes; empty when absent.
+    pub(crate) github_cache: Option<Vec<u8>>,
 }
 impl Snapshot {
     pub fn tasks(&self) -> Result<&[(Vec<u8>, Value)]> {
@@ -473,6 +475,7 @@ impl<'a> Plan<'a> {
             registry: crate::contracts::load(&self.store)?.0,
             markers: None,
             settled: BTreeSet::new(),
+            github_cache: None,
         };
         let tasks = s.ordered()?;
         for task in tasks {
@@ -646,6 +649,7 @@ impl<'a> Plan<'a> {
                 | Cancel
                 | RelocateDecision
                 | Amend
+                | Link
                 | EnsureLineage
                 | RecoverOwner
                 | Finish
@@ -658,7 +662,10 @@ impl<'a> Plan<'a> {
         for name in ["goal", "accept"] {
             screen(req.text(name)?.as_bytes())?;
         }
-        if matches!(req.action, Cancel | RelocateDecision | Amend | Retire) {
+        if matches!(
+            req.action,
+            Cancel | RelocateDecision | Amend | Link | Retire
+        ) {
             screen(req.text("reason")?.as_bytes())?;
         }
         if req.action == SnapshotDecision {
@@ -711,7 +718,7 @@ impl<'a> Plan<'a> {
         self.locked(
             matches!(
                 req.action,
-                RecoverLease | RecoverOwner | Cancel | RelocateDecision | Amend
+                RecoverLease | RecoverOwner | Cancel | RelocateDecision | Amend | Link
             ),
             None,
             || {
@@ -932,6 +939,7 @@ impl<'a> Plan<'a> {
             AddBatch => return self.add_batch(req, s),
             ApplyProposal => return self.proposal(req, s),
             Amend => return self.amend(req, s),
+            Link => return self.link(req, s),
             Cancel => return self.cancel(req, s),
             RelocateDecision => return self.relocate(req, s),
             RecoverOwner => return self.recover_owner(req, s),
@@ -1256,6 +1264,20 @@ impl<'a> Plan<'a> {
             )?;
             s.task(found)?;
         }
+        let issues = Issues::load(self);
+        let issue = if req.has("issue") {
+            Some(issues.canonical(self, req.value("issue")?)?)
+        } else if issues.required()? {
+            // Local decomposition of shared work keeps its parent's issue.
+            let inherited = s.task(found).map(|t| t.text("issue")).unwrap_or("");
+            require(
+                !inherited.is_empty(),
+                "GitHub project mode: add requires --issue, or --discovered-from a task bound to an issue",
+            )?;
+            Some(issues.canonical(self, inherited)?)
+        } else {
+            None
+        };
         let id = if req.text("id")?.is_empty() && !found.is_empty() {
             loop {
                 let candidate = format!("d-{}", &storage::random_hex(4)?[..6]);
@@ -1308,6 +1330,9 @@ impl<'a> Plan<'a> {
         }
         if !found.is_empty() {
             task.set("discovered_from", string(found))?;
+        }
+        if let Some(issue) = issue {
+            task.set("issue", string(issue))?;
         }
         let mut graph = s.ordered()?;
         graph.push(task.clone());
@@ -1367,6 +1392,56 @@ impl<'a> Plan<'a> {
             json::hash(t)? == task,
             format!("task changed after {noun} was reviewed"),
         )
+    }
+    /// Bind a task to one same-repository issue. Inactive tasks only: every
+    /// task digest (team specs, cancellation, completion and landing receipts)
+    /// covers the new field.
+    fn link(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
+        self.canonical_existing(s)?;
+        let id = req.value("task")?;
+        require(valid_id(id), "--task must match [A-Za-z0-9._-]+")?;
+        let mut t = s.task(id)?.clone();
+        let issues = Issues::load(self);
+        let issue = issues.canonical(self, req.value("issue")?)?;
+        let current = t.text("issue").to_owned();
+        if !current.is_empty()
+            && oms_github::IssueRef::parse(&current, issues.origin(self)?)
+                .is_ok_and(|r| r.to_string() == issue)
+        {
+            return Ok(Response::text(format!(
+                "plan: {id} already linked to {current}"
+            )));
+        }
+        require(
+            matches!(s.plan.get("project_contract"), Value::Null),
+            "proposal-bound tasks take their issue from the reviewed proposal",
+        )?;
+        require(
+            ["ready", "blocked"].contains(&t.text("state")) && !t.get("lease_id").truth(),
+            "link requires an unleased ready or blocked task",
+        )?;
+        self.live_veto(s, &[id], "issue link", true)?;
+        if !current.is_empty() {
+            require(
+                req.has("reason"),
+                format!("task {id} is linked to {current}; relinking requires --reason"),
+            )?;
+            let reason = reason(req, "issue relink")?;
+            history(
+                &mut t,
+                object([
+                    ("kind", string("issue-relinked")),
+                    ("before", string(&current)),
+                    ("after", string(&issue)),
+                    ("reason", string(reason)),
+                    ("ts", string(&self.context.ts)),
+                ]),
+            )?;
+        }
+        t.set("issue", string(&issue))?;
+        s.put(id, t)?;
+        self.save(s)?;
+        Ok(Response::text(format!("plan: {id} linked to {issue}")))
     }
     fn amend(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
         let id = req.value("id")?;
@@ -1889,6 +1964,19 @@ impl<'a> Plan<'a> {
                     "completed task landing proof changed",
                 )?;
                 return Ok(true);
+            }
+            // Only issue-bound tasks gain PR evidence from an accepted receipt
+            // whose target repo and actual GitHub PR URL match origin; any
+            // unprovable, unaccepted, cross-repo or non-PR receipt is omitted.
+            if let Some(issue) = t
+                .opt("issue")
+                .and_then(|v| v.str().ok())
+                .filter(|s| !s.is_empty())
+                && let Ok(Ok(origin)) = resolve_origin(self)
+                && receipt_remote_compatible(self, &proof.receipt, &origin)
+                && let Some(pr) = verified_pr_from_receipt(&proof.receipt, issue, &origin)
+            {
+                t.set("pr", string(pr.to_string()))?;
             }
             history(
                 t,
@@ -2629,6 +2717,195 @@ pub(crate) fn new_task(
         ("updated", string(ts)),
     ]))
 }
+/// The local `origin` remote: inner `Err` when it is missing or not a
+/// github.com URL, outer `Err` only when Git itself failed or timed out.
+/// Diagnostics never echo the URL.
+type Remote = std::result::Result<std::result::Result<oms_github::Slug, String>, String>;
+pub(crate) fn resolve_origin(plan: &Plan<'_>) -> Remote {
+    let args = ["remote", "get-url", "origin"].map(std::ffi::OsStr::new);
+    let out = plan
+        .git()
+        .output(&args, None, &[], 64 * 1024)
+        .map_err(|_| "github issue: origin remote could not be read".to_owned())?;
+    if out.code != 0 {
+        return Ok(Err(
+            "github issue: requires an origin remote; none is configured".into(),
+        ));
+    }
+    Ok(std::str::from_utf8(crate::repository::trim(&out.stdout))
+        .map_err(|_| "github issue: remote URL is empty or malformed".to_owned())
+        .and_then(|url| {
+            oms_github::Slug::from_remote(url)
+                .map_err(|e| format!("github issue: requires a github.com origin: {}", e.message))
+        }))
+}
+
+/// Parses an exact GitHub pull request URL (`https://github.com/<owner>/<repo>/pull/<number>`)
+/// bound to the normalized target repository `origin`. Rejects issue URLs,
+/// non-GitHub hosts, cross-repo URLs, trailing segments, queries, fragments,
+/// and non-positive or malformed PR numbers.
+fn parse_github_pr_url(raw: &str, origin: &oms_github::Slug) -> Option<oms_github::PullRef> {
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_graphic()) {
+        return None;
+    }
+    let rest = raw.strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/')?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    if path.contains(['?', '#', '@', '\\']) {
+        return None;
+    }
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let kind = parts.next()?;
+    let number = parts.next()?;
+    if parts.next().is_some() || kind != "pull" {
+        return None;
+    }
+    let slug = oms_github::Slug::parse(&format!("{owner}/{repo}")).ok()?;
+    if !slug.matches(origin) {
+        return None;
+    }
+    let number = oms_github::Number::parse(number).ok()?;
+    Some(oms_github::PullRef {
+        slug: origin.clone(),
+        number,
+    })
+}
+
+/// Verifies that the receipt's pushed remote has a single GitHub push
+/// destination matching `origin` (mirroring landing/delivery's `--push`
+/// resolution, even when fetch and push URLs differ).
+fn receipt_remote_compatible(plan: &Plan<'_>, receipt: &Value, origin: &oms_github::Slug) -> bool {
+    let remote = receipt.text("remote");
+    if remote.is_empty()
+        || remote.starts_with('-')
+        || !remote
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return false;
+    }
+    let args = ["remote", "get-url", "--push", "--all", remote].map(std::ffi::OsStr::new);
+    let Ok(out) = plan.git().output(&args, None, &[], 64 * 1024) else {
+        return false;
+    };
+    if out.code != 0 {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(crate::repository::trim(&out.stdout)) else {
+        return false;
+    };
+    let mut lines = text.lines();
+    let (Some(url), None) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    oms_github::Slug::from_remote(url).is_ok_and(|slug| slug.matches(origin))
+}
+
+/// Extracts a verified PR reference ONLY from an accepted landing receipt whose
+/// target repository and actual GitHub PR URL match `origin` and `pr_number`.
+fn verified_pr_from_receipt(
+    receipt: &Value,
+    issue: &str,
+    origin: &oms_github::Slug,
+) -> Option<oms_github::PullRef> {
+    oms_github::IssueRef::parse(issue, origin).ok()?;
+    if !receipt.get("schema").is_int(1) || receipt.get("dry_run") == &Value::Bool(true) {
+        return None;
+    }
+    if !receipt.get("gate").get("rc").is_int(0)
+        || !receipt.get("push").get("rc").is_int(0)
+        || receipt.get("push").get("moved").is_int(0)
+        || receipt.get("ci").text("conclusion") != "success"
+    {
+        return None;
+    }
+    let update = receipt.get("update");
+    let deferred = update.get("rc").is_int(76) && update.text("reason") == "deferred-live-workers";
+    if receipt.text("state") != "passed" && !deferred {
+        return None;
+    }
+    if let Some(merge) = receipt.opt("merge")
+        && merge.text("state") != "MERGED"
+    {
+        return None;
+    }
+    if let Some(target_repo) = receipt
+        .opt("target_repo")
+        .and_then(|v| v.str().ok())
+        .filter(|s| !s.is_empty())
+        && !oms_github::Slug::parse(target_repo).is_ok_and(|s| s.matches(origin))
+    {
+        return None;
+    }
+    let pr_url = receipt.opt("pr_url").and_then(|v| v.str().ok())?;
+    let pr = parse_github_pr_url(pr_url, origin)?;
+    let n = receipt.get("pr_number").int().ok()?;
+    let pr_number = oms_github::Number::parse(&n.to_string()).ok()?;
+    if pr_number != pr.number {
+        return None;
+    }
+    Some(pr)
+}
+
+/// Opt-in GitHub project mode through the shared declaration reader
+/// (PROJECT.md plus the tracked `.github/oms-project.md` at HEAD) and its
+/// origin guard. Issues own shared work; tasks only reference them. Origin is
+/// resolved locally and only when a declaration or an issue is involved.
+pub(crate) struct Issues {
+    /// The active project; `Err` blocks task creation and issue mutations.
+    mode: std::result::Result<Option<oms_github::Slug>, String>,
+    origin: std::cell::OnceCell<Remote>,
+}
+impl Issues {
+    pub(crate) fn load(plan: &Plan<'_>) -> Self {
+        let mut issues = Self {
+            mode: Ok(None),
+            origin: std::cell::OnceCell::new(),
+        };
+        let prefix = |e: oms_github::Error| format!("github issue: {}", e.message);
+        let mode = match oms_github::declaration::inspect(&plan.context.execution_repo) {
+            Err(e) => Err(prefix(e)),
+            Ok(None) => Ok(None),
+            Ok(Some(decl)) => match issues.remote(plan) {
+                Err(m) => Err(m.clone()),
+                Ok(found) => oms_github::declaration::active(Some(&decl), found.as_ref().ok())
+                    .map_err(prefix),
+            },
+        };
+        issues.mode = mode;
+        issues
+    }
+    fn remote(&self, plan: &Plan<'_>) -> &Remote {
+        self.origin.get_or_init(|| resolve_origin(plan))
+    }
+    pub(crate) fn origin(&self, plan: &Plan<'_>) -> Result<&oms_github::Slug> {
+        match self.remote(plan) {
+            Ok(Ok(slug)) => Ok(slug),
+            Ok(Err(m)) | Err(m) => Err(error(m)),
+        }
+    }
+    /// Refuses any issue mutation under a failed declaration or without a
+    /// github.com origin; an active project already matches origin.
+    fn checked(&self, plan: &Plan<'_>) -> Result<&oms_github::Slug> {
+        self.mode.as_ref().map_err(error)?;
+        self.origin(plan)
+    }
+    /// Canonical `owner/repo#N` for `N`, `#N` or `owner/repo#N`.
+    pub(crate) fn canonical(&self, plan: &Plan<'_>, raw: &str) -> Result<String> {
+        let origin = self.checked(plan)?;
+        oms_github::IssueRef::parse(raw, origin)
+            .map(|r| r.to_string())
+            .map_err(|e| error(format!("github issue: {}", e.message)))
+    }
+    /// Whether new tasks must carry an issue (an active project).
+    pub(crate) fn required(&self) -> Result<bool> {
+        Ok(self.mode.as_ref().map_err(error)?.is_some())
+    }
+}
 pub(crate) fn project_snapshot(source: &Store) -> Result<Value> {
     let raw = source.optional("PROJECT.md", 1024 * 1024);
     let (present, healthy, state, hash) = match raw {
@@ -2664,4 +2941,132 @@ pub(crate) fn project_snapshot(source: &Store) -> Result<Value> {
         ("state", string(state)),
         ("sha256", string(hash)),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin() -> oms_github::Slug {
+        oms_github::Slug::parse("example-org/example-repo").unwrap()
+    }
+
+    fn accepted_receipt() -> Value {
+        object([
+            ("schema", number(1)),
+            ("state", string("passed")),
+            ("remote", string("origin")),
+            ("target", string("main")),
+            ("gate", object([("rc", number(0))])),
+            ("push", object([("rc", number(0)), ("moved", number(1))])),
+            ("ci", object([("conclusion", string("success"))])),
+            (
+                "merge",
+                object([("method", string("squash")), ("state", string("MERGED"))]),
+            ),
+            ("pr_number", number(19)),
+            (
+                "pr_url",
+                string("https://github.com/Example-Org/Example-Repo/pull/19"),
+            ),
+        ])
+    }
+
+    #[test]
+    fn verified_pr_from_receipt_accepts_only_accepted_same_repo_pr_url() {
+        let origin = origin();
+        let receipt = accepted_receipt();
+        let pr = verified_pr_from_receipt(&receipt, "example-org/example-repo#7", &origin)
+            .expect("accepted same-repo PR receipt");
+        assert_eq!(pr.to_string(), "example-org/example-repo#19");
+
+        // Deferred live-worker install state is also accepted.
+        let mut deferred = accepted_receipt();
+        deferred.set("state", string("deferred")).unwrap();
+        deferred
+            .set(
+                "update",
+                object([
+                    ("rc", number(76)),
+                    ("reason", string("deferred-live-workers")),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            verified_pr_from_receipt(&deferred, "example-org/example-repo#7", &origin)
+                .unwrap()
+                .to_string(),
+            "example-org/example-repo#19"
+        );
+    }
+
+    #[test]
+    fn verified_pr_from_receipt_rejects_unaccepted_cross_repo_and_non_pr_inputs() {
+        let origin = origin();
+        let issue = "example-org/example-repo#7";
+
+        // Unaccepted states and dry-run receipts.
+        for state in ["pending", "running", "failed", "rejected", "pr-opened", ""] {
+            let mut r = accepted_receipt();
+            r.set("state", string(state)).unwrap();
+            assert!(
+                verified_pr_from_receipt(&r, issue, &origin).is_none(),
+                "state={state}"
+            );
+        }
+        let mut dry = accepted_receipt();
+        dry.set("dry_run", Value::Bool(true)).unwrap();
+        assert!(verified_pr_from_receipt(&dry, issue, &origin).is_none());
+
+        for merge_state in ["SKIPPED", "requested", "UNKNOWN", "OPEN", "CLOSED"] {
+            let mut r = accepted_receipt();
+            r.set("merge", object([("state", string(merge_state))]))
+                .unwrap();
+            assert!(
+                verified_pr_from_receipt(&r, issue, &origin).is_none(),
+                "merge.state={merge_state}"
+            );
+        }
+
+        // Cross-repo / mismatched target repo.
+        assert!(
+            verified_pr_from_receipt(&accepted_receipt(), "other-org/example-repo#7", &origin)
+                .is_none()
+        );
+        let mut foreign_target = accepted_receipt();
+        foreign_target
+            .set("target_repo", string("other-org/example-repo"))
+            .unwrap();
+        assert!(verified_pr_from_receipt(&foreign_target, issue, &origin).is_none());
+
+        // Non-PR URLs, cross-repo URLs, spoofed hosts, trailing junk, missing URL.
+        for bad_url in [
+            "",
+            "https://github.com/other-org/example-repo/pull/19",
+            "https://github.com/example-org/other-repo/pull/19",
+            "https://github.com/example-org/example-repo/issues/19",
+            "https://github.com/example-org/example-repo/pull/19/files",
+            "https://github.com/example-org/example-repo/pull/19?w=1",
+            "https://github.com/example-org/example-repo/pull/19#issuecomment-1",
+            "https://github.com/example-org/example-repo/pull/20",
+            "http://github.com/example-org/example-repo/pull/19",
+            "https://evil.example/example-org/example-repo/pull/19",
+            "https://github.com.evil.example/example-org/example-repo/pull/19",
+            " https://github.com/example-org/example-repo/pull/19",
+        ] {
+            let mut r = accepted_receipt();
+            r.set("pr_url", string(bad_url)).unwrap();
+            assert!(
+                verified_pr_from_receipt(&r, issue, &origin).is_none(),
+                "pr_url={bad_url:?}"
+            );
+        }
+        let mut no_url = accepted_receipt();
+        no_url.remove("pr_url");
+        assert!(verified_pr_from_receipt(&no_url, issue, &origin).is_none());
+
+        let mut wrong_num = accepted_receipt();
+        wrong_num.set("pr_number", number(20)).unwrap();
+        assert!(verified_pr_from_receipt(&wrong_num, issue, &origin).is_none());
+    }
 }

@@ -72,6 +72,8 @@ impl Plan<'_> {
         let mut seen = BTreeSet::new();
         let mut prepared = Vec::new();
         let mut verifies = Vec::new();
+        let issues = crate::engine::Issues::load(self);
+        let mut bare = false;
         for row in rows {
             json::keys(
                 row,
@@ -86,6 +88,7 @@ impl Plan<'_> {
                     "resources",
                     "contracts",
                     "priority",
+                    "issue",
                 ],
             )?;
             let id = row.get("id").str()?;
@@ -154,6 +157,10 @@ impl Plan<'_> {
                     i32::try_from(priority).map_err(|_| error("batch priority must be an i32"))?,
                 )?;
             }
+            match row.opt("issue") {
+                Some(issue) => task.set("issue", string(issues.canonical(self, issue.str()?)?))?,
+                None => bare = true,
+            }
             verifies.push(verify.to_owned());
             prepared.push(task);
         }
@@ -192,11 +199,12 @@ impl Plan<'_> {
                     "resources",
                     "contracts",
                     "priority",
+                    "issue",
                 ] {
                     let default = match field {
                         "priority" => number(0),
                         "assignment" => empty(),
-                        "verify" | "role" | "discovered_from" => string(""),
+                        "verify" | "role" | "discovered_from" | "issue" => string(""),
                         _ => Value::Array(vec![]),
                     };
                     require(
@@ -210,6 +218,10 @@ impl Plan<'_> {
                 "plan: batch already applied ({ids})"
             )));
         }
+        require(
+            !bare || !issues.required()?,
+            "GitHub project mode: every batch task requires an issue",
+        )?;
         match &s.raw {
             Some(raw) => {
                 require(

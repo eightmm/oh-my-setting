@@ -712,6 +712,25 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             args.required("id")?
         )));
     } else {
+        // A GitHub-issue draft binds its issue to these exact PROJECT.md bytes;
+        // propose canonicalizes it against origin and drops a foreign one.
+        let id = args.required("id")?;
+        let issue = ctx
+            .source
+            .optional(format!(".oms/intents/{id}.json"), MAX_FILE)?
+            .and_then(|raw| value::parse(&raw).ok())
+            .filter(|meta| meta["source"]["source"]["kind"] == "github-issue")
+            .and_then(|meta| {
+                crate::github::from_issue_url(value::text(&meta["source"]["source"], "reference"))
+            });
+        if let Some(issue) = issue {
+            let record = json!({"schema": 1, "kind": crate::github::ADOPT_KIND, "id": id, "project_sha256": value::hash(&staged), "issue": issue});
+            ctx.source.publish_once(
+                format!(".oms/intents/{id}.adopt.json"),
+                &value::pretty(&record)?,
+                MAX_FILE,
+            )?;
+        }
         ctx.source.publish_once("PROJECT.md", &staged, MAX_FILE)?;
         out = Output::text(format!(
             "intent: adopted {} -> PROJECT.md (State: confirmed)",

@@ -675,6 +675,7 @@ fn execute_inner(
                         .canonical_repo()
                         .map(|r| r.join(".oms/handoffs"))
                         .as_deref(),
+                    github: true,
                 },
                 flag,
             )

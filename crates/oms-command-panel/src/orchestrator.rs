@@ -9723,6 +9723,10 @@ mod tests {
             use std::fmt::Write as _;
             let lifecycle = repo.join(".oms/lifecycle");
             std::fs::create_dir_all(&lifecycle).unwrap();
+            // Room storage refuses a group- or other-writable `.oms`; the ambient umask must not decide that.
+            for dir in [repo.join(".oms"), lifecycle.clone()] {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
             let mut out = String::with_capacity(extra_attempts * 220 + 1024);
             for idx in 0..extra_attempts {
                 writeln!(

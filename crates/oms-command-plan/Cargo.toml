@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.99.1"
 
 [dependencies]
+oms-github = { path = "../oms-github" }
 oms-context = { path = "../oms-context" }
 oms-json = { path = "../oms-json" }
 oms-safe-fs = { path = "../oms-safe-fs" }

@@ -2604,6 +2604,7 @@ generation per UTC day (cap in `.oms/hooks/discover-hint.json`; unreadable state
 suggestion). A met acceptance or no goal never reopens the goal. Nothing applies itself.
 
 A registered goal with zero tasks awaits them: use `oms agent-plan add`, never `init`.
+In GitHub project mode (`oms github status`) each new task also needs `--issue N`.
 
 ### State vocabulary
 

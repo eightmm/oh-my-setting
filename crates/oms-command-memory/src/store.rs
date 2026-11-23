@@ -71,11 +71,9 @@ pub(crate) fn absolute(cwd: &Path, path: &Path) -> PathBuf {
         cwd.join(path)
     }
 }
-pub(crate) fn git(repo: &Path, args: &[&OsStr], interrupted: &AtomicBool) -> Option<Vec<u8>> {
-    if interrupted.load(Ordering::Acquire) {
-        return None;
-    }
-    let mut child = Command::new("git")
+fn git_command(repo: &Path, args: &[&OsStr]) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-c")
         .arg("core.fsmonitor=false")
         .arg("-C")
@@ -83,9 +81,14 @@ pub(crate) fn git(repo: &Path, args: &[&OsStr], interrupted: &AtomicBool) -> Opt
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    command
+}
+pub(crate) fn git(repo: &Path, args: &[&OsStr], interrupted: &AtomicBool) -> Option<Vec<u8>> {
+    if interrupted.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut child = git_command(repo, args).spawn().ok()?;
     let stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut out = Vec::new();
@@ -115,6 +118,68 @@ pub(crate) fn git(repo: &Path, args: &[&OsStr], interrupted: &AtomicBool) -> Opt
         Some(out)
     } else {
         None
+    }
+}
+/// Like [`git`], but stdout stops at `cap` bytes: the child is then killed and
+/// the prefix returned with `true` (truncated), whatever its exit status.
+/// Git runs in its own process group, and every early exit kills that group
+/// and reaps the child, so a descendant holding stdout cannot outlive the 30 s
+/// bound. Only a descendant that leaves the group (setsid) could keep the
+/// reader thread blocked; it is then detached rather than joined.
+pub(crate) fn git_capped(
+    repo: &Path,
+    args: &[&OsStr],
+    cap: usize,
+    interrupted: &AtomicBool,
+) -> Option<(Vec<u8>, bool)> {
+    use std::os::unix::process::CommandExt;
+    if interrupted.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut child = git_command(repo, args).process_group(0).spawn().ok()?;
+    let stop = |child: &mut std::process::Child| {
+        if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let Some(stdout) = child.stdout.take() else {
+        stop(&mut child);
+        return None;
+    };
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.take(cap as u64 + 1).read_to_end(&mut out).ok()?;
+        Some(out)
+    });
+    let start = Instant::now();
+    let live = || start.elapsed() < Duration::from_secs(30) && !interrupted.load(Ordering::Acquire);
+    while !reader.is_finished() && live() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !reader.is_finished() {
+        stop(&mut child);
+        return None;
+    }
+    let Some(mut out) = reader.join().ok().flatten() else {
+        stop(&mut child);
+        return None;
+    };
+    if out.len() > cap {
+        stop(&mut child);
+        out.truncate(cap);
+        return Some((out, true));
+    }
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success().then_some((out, false)),
+            Ok(None) if live() => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                stop(&mut child);
+                return None;
+            }
+        }
     }
 }
 pub(crate) fn git_text(repo: &Path, args: &[&str], flag: &AtomicBool) -> String {

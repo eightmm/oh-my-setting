@@ -76,6 +76,7 @@ explains overlapping entrypoints.
 | `sync-shared` | Fetch and fast-forward an idle shared checkout. | `oms sync-shared` | [Verification and release](#verification-and-release) |
 | `draft-pr` | Publish a verified clean HEAD as a draft pull request. | `oms draft-pr` | [Verification and release](#verification-and-release) |
 | `ci-status` | Read the CI conclusion for a branch HEAD. | `oms ci-status` | [Verification and release](#verification-and-release) |
+| `github` | Show GitHub project mode and cached issue/PR state; refresh, adopt merged PRs, post one evidence comment. | `oms github` | [Verification and release](#verification-and-release) |
 | `change-guard` | Warn about concurrent agent edits. | `oms change-guard` | [Delegating writes](#delegating-writes) |
 | `checkpoint` | Save a reversible snapshot of tracked Git state. | `oms checkpoint` | [Delegating writes](#delegating-writes) |
 | `scratch-worktree` | Manage scratch worktrees around active workers. | `oms scratch-worktree` | [Delegating writes](#delegating-writes) |
@@ -1705,7 +1706,13 @@ none where nothing applies; its answer stays untrusted evidence for the planner
 and nothing parses or gates on those headings. Applying a proposal requires `--expected-proposal-sha256` for the
 reviewed proposal bytes. `oms autopilot propose --discover` uses discovery for
 the initial tranche only; when no eligible work is found, its receipt remains
-at proposing so the attempt can be retried.
+at proposing so the attempt can be retried. In GitHub project mode applied tasks
+need an issue: `oms plan-from-spec --issue REF` / `oms autopilot propose --issue REF`
+stamp the reviewed issue, and an adopted `intent draft --from-issue` contract carries
+its same-repo issue while `PROJECT.md` is unchanged. A proposal pending an issue is
+restamped with `oms plan-from-spec --restamp PATH --expected-proposal-sha256 SHA --issue
+REF`, or for autopilot `oms autopilot propose --restamp PATH --expected-proposal-sha256
+SHA --issue REF`.
 
 
 ### Freeze and commit an approved patch
@@ -1860,7 +1867,8 @@ claim order (creation time, then insertion order). `--json` is schema 1: `total`
 (which must exist) so it is not lost. The new task gets an optional `discovered_from` field.
 It is a provenance link only: the parent does not depend on the new task and keeps its state.
 The task passes the same admission as any `add` (a contract-bound plan still takes new
-tasks only through a reviewed proposal). With `--discovered-from`, `--id` may be omitted: a
+tasks only through a reviewed proposal; in GitHub project mode it inherits its bound
+parent's issue unless `--issue` is given). With `--discovered-from`, `--id` may be omitted: a
 `d-xxxxxx` id is generated from title, time and pid and checked for collision under the plan
 lock. `oms agent-plan discovered [--json]` lists them grouped by parent, and `show`, `brief`,
 `ready --json` and `status` (a `discovered` map, present only when links exist) carry the
@@ -3390,6 +3398,19 @@ that nothing recorded stands in the way. Without `--refresh` there is no network
 retried, merged or recorded, and no command printed here is run by OMS. Exit 0 with
 suggestions, 1 when nothing is recorded, 2 for usage. `--json` prints schema 1, kind
 `oms-ci-suggest`.
+
+GitHub project mode is on when `PROJECT.md` `## Collaboration` or the committed
+`.github/oms-project.md` declares `- GitHub project: owner/repo` and the slug names
+the github.com origin; a fork that only inherits the committed file is `inactive`.
+In that mode `oms agent-plan add`, `add-batch` and `apply-proposal` need an issue per
+task (`--issue`, a row `issue`, or a `--discovered-from` parent bound to one), `oms
+agent-task init|update|rotate --issue REF` binds the packet, and `oms agent-memory
+recall` adds commit and merged-PR rows. `oms github status` reports the mode offline;
+`refresh` and `adopt-merged` (a preview, then `--apply --expected-sha256`) are its only
+network reads, and `post-evidence --issue --pull --yes` is its only GitHub write: an
+explicit, parent-only comment with an idempotent receipt. The
+[command](../crates/oms-command-landing/src/github.rs) reads the declaration through
+the shared [`oms-github` crate](../crates/oms-github/src/declaration.rs).
 
 Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection

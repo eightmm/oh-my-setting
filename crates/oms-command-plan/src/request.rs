@@ -30,6 +30,7 @@ pub enum Action {
     Land,
     Finish,
     Amend,
+    Link,
     Cancel,
     RelocateDecision,
     AcceptResearch,
@@ -80,6 +81,7 @@ impl Action {
         ("land", Self::Land),
         ("finish", Self::Finish),
         ("amend", Self::Amend),
+        ("link", Self::Link),
         ("cancel", Self::Cancel),
         ("relocate-decision", Self::RelocateDecision),
         ("accept-research", Self::AcceptResearch),
@@ -174,6 +176,7 @@ pub(crate) const NAMES: &[&str] = &[
     "allowed",
     "role",
     "discovered-from",
+    "issue",
     "limit",
     "forbidden",
     "verify",
@@ -351,6 +354,7 @@ impl Request {
             ("apply", self.action == Retire),
             ("all-inactive", self.action == Cancel),
             ("discovered-from", self.action == Add),
+            ("issue", matches!(self.action, Add | Link)),
             ("limit", self.action == Ready),
             ("reuse-pass", self.action == Accept),
             ("landed-commit", self.action == Finish),
@@ -503,6 +507,7 @@ impl Request {
                 "decision-artifact",
                 "expected-decision-artifact-sha256",
             ]),
+            Link => Some(vec!["task", "issue", "reason"]),
             AddBatch => Some(vec![
                 "tasks",
                 "expected-tasks-sha256",
@@ -521,7 +526,7 @@ impl Request {
         }
         if matches!(
             self.action,
-            SnapshotDecision | Amend | Cancel | RelocateDecision
+            SnapshotDecision | Amend | Link | Cancel | RelocateDecision
         ) {
             require(
                 self.file.is_none(),
