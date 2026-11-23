@@ -1410,8 +1410,8 @@ pub fn results_page(
             projected["round_delta"] = delta;
         }
         if request.task_id.is_some() {
-            // Input transport is the only recorded fact. No canonical writer
-            // acknowledges consumption, and acceptance is the Main's decision.
+            // A retained owner report is separate from native input transport.
+            // Neither proves consumption, completion or the Main's acceptance.
             projected["native_assignment"] = metadata_attempts
                 .iter()
                 .rfind(|v| {
@@ -1431,13 +1431,28 @@ pub fn results_page(
                     if valid.is_none() {
                         entry["transport_issue"] = "invalid transport state".into();
                     }
+                    match crate::native_results::read(&store, v) {
+                        Ok(Some(report)) => entry["report"] = report,
+                        Ok(None) => {}
+                        Err(error) => entry["report"] = serde_json::json!({
+                            "status":"unavailable", "acceptance_eligible":false,
+                            "issue":crate::eventlog::clean(&error.message,240)}),
+                    }
                     entry
                 });
             // Only an undecided task without a failure moves its next step to the
             // recorded transport; nothing here resends or retries.
             let next = match projected["native_assignment"]["transport"].as_str() {
                 Some("intent") => Some("review unsent native assignment intent"),
-                Some("submitted") => Some("await native assignment result evidence"),
+                Some("submitted") => {
+                    match projected["native_assignment"]["report"]["status"].as_str() {
+                        Some("reported") => Some(
+                            "inspect native report; reconcile completion, verification and cleanup before acceptance",
+                        ),
+                        Some("unavailable") => Some("inspect unavailable native result evidence"),
+                        _ => Some("await native assignment result evidence"),
+                    }
+                }
                 Some(_) => Some("inspect and reconcile unconfirmed native send before any retry"),
                 None => None,
             };

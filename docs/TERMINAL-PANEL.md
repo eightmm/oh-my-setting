@@ -2321,6 +2321,78 @@ compare-and-set remains the authority across clones. Use `patch-land --recover` 
 incomplete application receipts. If finish succeeds but result recording fails, retry
 only `--finalize` after confirming the exact task completion.
 
+### Retain a bound native report
+
+The owning Main can retain a report from a canonical task assigned to its existing
+ordinary Codex lead. First bind the task with
+`oms panel --repo . --room ROOM --orchestrator codex --task-id TASK --task TEXT`.
+Keep the returned attempt ID and `binding` path. The SHA-256 of those exact binding
+file bytes anchors the return manifest:
+
+```json
+{
+  "schema": 1,
+  "attempt_id": "ATTEMPT",
+  "binding_sha256": "BINDING_SHA256",
+  "kind": "candidate",
+  "summary": "Candidate and reported verification ready for inspection",
+  "source": {"path": "native-source.txt", "sha256": "SOURCE_SHA256"},
+  "patch": {"path": "native-candidate.patch", "sha256": "PATCH_SHA256"},
+  "verification": [
+    {"path": "native-verification.txt", "sha256": "VERIFICATION_SHA256"}
+  ]
+}
+```
+
+Replace the placeholders with the recorded attempt and lowercase SHA-256 digests
+of the exact files. Use `"kind": "findings"` and omit `patch` for a read-only return.
+Verification references are optional retained evidence; even text claiming a pass
+or exit zero remains **reported**, not a certified review or verification verdict.
+Paths resolve against `--repo` unless absolute. Inputs must be owned, single-link
+regular files. The manifest is bounded to 64 KiB, its summary to 4096 bytes, source
+and each verification file to 1 MiB, patch to 16 MiB, and verification references to
+four. Unknown manifest fields and sensitive content are refused.
+
+```bash
+oms panel --repo . --room ROOM --orchestrator codex --task-id TASK \
+  --native-result native-return.json
+oms panel --repo . --results --task-id TASK --json
+```
+
+Registration rechecks the original task and lease, parent Main, Room, live pane and
+session generation, account binding, working directory and Git base. Candidate
+paths must fit the canonical task's allowed and forbidden scope. Observed pre-append
+custody, claim, digest or scope drift refuses registration. Room, lease, pane and
+account checks are sampled across separate stores rather than an atomic cross-store
+lock, while the lifecycle append rejects exact Main liveness/currentness or
+child/predecessor changes under the ledger lock; post-append cross-store drift can
+return uncertain publication with possible prior registration requiring
+reconciliation. This command never opens a replacement
+lead, sends native input, changes a task's state, or converts native work into a
+managed delegate.
+
+The existing artifact store retains immutable manifest, source, patch and verifier
+snapshots. A checked lifecycle reference publishes the report only after these bytes
+are retained. Retrying the identical manifest reuses the same report and event,
+including after an interruption between retaining snapshots and publication, while
+the original live custody remains valid. A deliberate revision must set
+`previous_sha256` to the current returned `result.sha256`; an older report cannot
+overwrite its successor. Inspect uncertain publication before changing a manifest.
+An unknown native send remains unknown after a report is attached and is never
+resent automatically.
+
+Task Results shows transport, the owner-imported report, reported verification and
+the Main's decision separately. Raw/Transcript opens the retained source and
+verification text; Diff/Files opens the digest-checked candidate. Missing or changed
+bytes appear as unavailable. These are historical custody snapshots checked at
+registration, not continuous proof of the current account or lease. Consumption and
+completion remain `unconfirmed`, write isolation `unmanaged`, effective permissions
+`unknown`, and child cleanup `unsupported`. Native reports are currently ineligible
+for acceptance: later
+completion/cleanup evidence and an explicit adapter into the existing admission and
+review gates are still required. Managed acceptance and publication gates remain in
+force.
+
 ### Results reader
 
 Results lists the latest twenty retained tasks from at most 300 lifecycle attempts and
