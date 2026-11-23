@@ -4243,7 +4243,7 @@ fn watch_shell(
 /// Return `(--oms-dispatch, <source>, <rev>, --)` args when `exe` is a verified
 /// staged payload under `<source>/target/oms-native/<rev>/oms`, so child panes
 /// carry source authority rather than failing as bare direct binary calls.
-fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String)> {
+pub(crate) fn staged_dispatch_args(source: &Path, exe: &Path) -> Option<(String, String)> {
     if exe.file_name().and_then(|v| v.to_str()) != Some("oms") {
         return None;
     }
@@ -5171,7 +5171,7 @@ mod hud_status {
 }
 
 #[cfg(test)]
-mod native_lifecycle_contract {
+pub(crate) mod native_lifecycle_contract {
     use super::{event_id, heartbeat_attempt, transition_attempt};
     use oms_panel_core::{
         NativeCommand, Result, Services, Value,
@@ -5722,7 +5722,7 @@ mod native_lifecycle_contract {
         assert!(!other.0.join(".oms").exists());
     }
 
-    struct RealCliParsers;
+    pub(crate) struct RealCliParsers;
     struct RoomOperations {
         repo: PathBuf,
         bytes: Vec<u8>,
@@ -7062,7 +7062,8 @@ exec /bin/sleep 30"#,
             }
         };
         let rejected = TempRepo::new();
-        let managed = super::session_candidates(&rejected.0)[0].clone();
+        let managed = super::session_candidates(&rejected.0)[1].clone();
+        assert_ne!(managed, session);
         let control = socket
             .command()
             .args([
@@ -7079,7 +7080,11 @@ exec /bin/sleep 30"#,
             ])
             .output()
             .unwrap();
-        assert!(control.status.success());
+        assert!(
+            control.status.success(),
+            "{}",
+            String::from_utf8_lossy(&control.stderr)
+        );
         for argv in [
             [
                 "set-option",

@@ -155,8 +155,9 @@ No shell, Python, generic command execution or transform pipeline runs in produc
 Source anchors: canonical shell routing at `scripts/lib/file-lock.sh:43-150`, process
 identity at `:190-253`, publication/stale rules at `:255-374`, bakery recovery at
 `:376-507`, release/acquire at `:509-550`, callbacks/held locks at `:552-726`,
-probe at `:728-794`, and waiting flock at `:796-843`. The runtime bridge uses its
-separate naming authority in `scripts/lib/oms_runtime/common.py:208-289`.
+probe at `:728-794`, and waiting flock at `:796-843`.
+[Native runtime state locking](../oms-runtime/src/io.rs) uses a separate lock
+name. Its historical port anchor is `scripts/lib/oms_runtime/common.py:208-289`.
 Canonical timing lives in `scripts/lib/poll.sh:5-75`. This implementation was checked
 against the complete shell source and `tests/file-lock-boundary-smoke.sh`, plus the
 nested callback and append/rewrite contention cases in `tests/scripts-smoke.sh:207-365`.
