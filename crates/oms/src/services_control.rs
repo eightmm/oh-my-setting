@@ -5477,7 +5477,7 @@ done
         verify(&mut task, 1);
         let fresh_failure = rows().pop().unwrap();
         let fresh_digest = digest(&fresh_failure);
-        assert_eq!(candidates(), [fresh_digest.clone()]);
+        assert_eq!(candidates().as_slice(), std::slice::from_ref(&fresh_digest));
         std::fs::write(&proof, "ready\n").unwrap();
         verify(&mut task, 0);
         let settled = rows().pop().unwrap();
