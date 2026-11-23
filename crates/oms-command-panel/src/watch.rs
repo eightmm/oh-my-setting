@@ -1112,6 +1112,18 @@ impl MainSwitch {
         nav: &mut navigation::Navigation,
     ) -> Result<()> {
         crate::parent_only()?;
+        self.open_with(scope, report, nav, |current| {
+            crate::native_panel::main_switch_targets(source, current)
+        })
+    }
+
+    fn open_with(
+        &mut self,
+        scope: Option<&BoardScope>,
+        report: &Value,
+        nav: &mut navigation::Navigation,
+        targets: impl FnOnce(&str) -> Result<Vec<crate::native_panel::MainSwitchTarget>>,
+    ) -> Result<()> {
         crate::require(
             self.running.is_none(),
             "A Main switch is already in progress",
@@ -1132,10 +1144,10 @@ impl MainSwitch {
                 && oms_panel_core::state::main_participant(attempt) == main.member,
             "Current Main is unavailable for a managed switch",
         )?;
-        let current = attempt["refs"]["panel_harness"]
-            .as_str()
-            .unwrap_or_default();
-        let targets = crate::native_panel::main_switch_targets(source, current)?;
+        let current = attempt["refs"]["panel_harness"].as_str();
+        crate::native_panel::check_outgoing_main_swap_harness(current)?;
+        let current = current.unwrap_or_default();
+        let targets = targets(current)?;
         nav.main_switch = Some(navigation::MainSwitchMenu {
             current: current.into(),
             choices: targets
@@ -5388,6 +5400,73 @@ mod tests {
             ),
             navigation::Action::None
         );
+        let expected_refusal = crate::native_panel::check_outgoing_main_swap_harness(None)
+            .unwrap_err()
+            .message;
+        for (owner, harness) in [
+            ("claude", Some("claude")),
+            ("antigravity", Some("agy")),
+            ("codex", Some("pi")),
+            ("codex", Some("unknown")),
+            ("codex", None),
+        ] {
+            let mut case_scope = scope.clone();
+            case_scope.main.as_mut().unwrap().owner = owner.into();
+            let mut case_report = report.clone();
+            let attempt = case_report["room_attempts"]["attempt-old"]
+                .as_object_mut()
+                .unwrap();
+            attempt.insert("provider".into(), json!(owner));
+            let refs = attempt["refs"].as_object_mut().unwrap();
+            match harness {
+                Some(value) => {
+                    refs.insert("panel_harness".into(), json!(value));
+                }
+                None => {
+                    refs.remove("panel_harness");
+                }
+            }
+            let mut flow = MainSwitch::default();
+            let mut nav = navigation::Navigation::default();
+            let error = flow
+                .open_with(Some(&case_scope), &case_report, &mut nav, |_| {
+                    panic!("unsupported outgoing harness must not resolve targets")
+                })
+                .unwrap_err();
+            assert_eq!(error.message, expected_refusal);
+            assert!(nav.main_switch.is_none());
+            assert!(flow.selection.is_none());
+            assert!(flow.running.is_none());
+            assert!(!flow.key(
+                &Key::Char('1'),
+                &mut nav,
+                || Some(case_scope.clone()),
+                refuse
+            ));
+            assert!(!flow.key(
+                &Key::Char('y'),
+                &mut nav,
+                || Some(case_scope.clone()),
+                refuse
+            ));
+        }
+        let mut opened_flow = MainSwitch::default();
+        let mut opened_nav = navigation::Navigation {
+            notice: Some("stale".into()),
+            ..Default::default()
+        };
+        opened_flow
+            .open_with(Some(&scope), &report, &mut opened_nav, |current| {
+                assert_eq!(current, "codex");
+                Ok(vec![crate::native_panel::MainSwitchTarget {
+                    harness: "agy",
+                    model: "gemini-4-carbon-high".into(),
+                }])
+            })
+            .unwrap();
+        assert_eq!(opened_nav.main_switch.as_ref().unwrap().current, "codex");
+        assert!(opened_nav.notice.is_none());
+        assert!(opened_flow.selection.is_some());
         let (mut flow, mut nav) = make_menu();
         let modal = frame(&report, &nav, (100, 20), &read, false, None, None, None);
         assert!(modal.main_switch.is_none());
