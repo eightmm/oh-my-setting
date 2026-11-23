@@ -78,6 +78,28 @@ impl IssuanceStage {
     }
 }
 
+// The underlying custody and storage errors can include private details.
+enum EnrollmentFailureStage {
+    MissingCleanupProof,
+    CleanupProofMismatch,
+    ControllerCheck,
+    PrivateBinding,
+    RoomSetup,
+    CheckedRoomLeave,
+}
+impl EnrollmentFailureStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::MissingCleanupProof => "missing-cleanup-proof",
+            Self::CleanupProofMismatch => "cleanup-proof-mismatch",
+            Self::ControllerCheck => "controller-check",
+            Self::PrivateBinding => "private-binding",
+            Self::RoomSetup => "room-setup",
+            Self::CheckedRoomLeave => "checked-room-leave",
+        }
+    }
+}
+
 struct PrivateBinding {
     path: PathBuf,
     raw: Vec<u8>,
@@ -643,8 +665,13 @@ impl<'a, 's> Channel<'a, 's> {
             ]),
         )
     }
-    fn settle_enrollment(&self, proof: &oms_supervisor::process::OwnedCleanup) -> Result<()> {
-        let call = oms_supervisor::process::PhysicalCall::new(&self.call).map_err(err)?;
+    fn settle_enrollment(
+        &self,
+        proof: &oms_supervisor::process::OwnedCleanup,
+    ) -> std::result::Result<(), EnrollmentFailureStage> {
+        use EnrollmentFailureStage as Stage;
+        let call = oms_supervisor::process::PhysicalCall::new(&self.call)
+            .map_err(|_| Stage::CleanupProofMismatch)?;
         if ![
             oms_supervisor::process::Scope::ProcessGroup,
             oms_supervisor::process::Scope::WholeTree,
@@ -656,15 +683,19 @@ impl<'a, 's> Channel<'a, 's> {
                 .as_ref()
                 .is_none_or(|owner| owner.pid != proof.pid())
         {
-            return Err(err("Team enrollment cleanup proof does not match"));
+            return Err(Stage::CleanupProofMismatch);
         }
-        self.controller.check().map_err(err)?;
+        self.controller
+            .check()
+            .map_err(|_| Stage::ControllerCheck)?;
         self.private
             .as_ref()
-            .ok_or_else(|| err("private Team operation unavailable"))?
-            .check()?;
+            .ok_or(Stage::PrivateBinding)?
+            .check()
+            .map_err(|_| Stage::PrivateBinding)?;
         let settling = std::sync::Arc::new(AtomicBool::new(false));
-        let cleanup = CollabServices::new(&settling, &self.service.source).map_err(err)?;
+        let cleanup =
+            CollabServices::new(&settling, &self.service.source).map_err(|_| Stage::RoomSetup)?;
         let room = oms_command_room::Room::open(
             &self.context.state_repo,
             oms_command_room::Session::from_env(),
@@ -673,17 +704,17 @@ impl<'a, 's> Channel<'a, 's> {
             false,
             false,
         )
-        .map_err(|e| err(e.message))?
+        .map_err(|_| Stage::RoomSetup)?
         .with_deadline(Instant::now() + Duration::from_secs(5));
         room.leave_if_enrolled(
             self.binding.text("room_id"),
             &self.participant,
             self.enrollment
                 .try_into()
-                .map_err(|_| err("invalid Team enrollment generation"))?,
+                .map_err(|_| Stage::CheckedRoomLeave)?,
             self.binding.text("root_owner"),
         )
-        .map_err(|e| err(e.message))?;
+        .map_err(|_| Stage::CheckedRoomLeave)?;
         Ok(())
     }
     pub(super) fn complete(&self) -> bool {
@@ -712,7 +743,7 @@ impl<'a, 's> Channel<'a, 's> {
 
 /// Nonsecret failed-condition names, in the order `complete` evaluates them.
 fn incomplete_cues(
-    enrollment_settled: bool,
+    enrollment_failure: Option<EnrollmentFailureStage>,
     protocol_failed: bool,
     stopped: bool,
     output_complete: bool,
@@ -721,7 +752,7 @@ fn incomplete_cues(
     exit: Option<i32>,
 ) -> String {
     let mut cues = Vec::new();
-    if !enrollment_settled {
+    if enrollment_failure.is_some() {
         cues.push("enrollment-unsettled");
     }
     if protocol_failed {
@@ -738,7 +769,12 @@ fn incomplete_cues(
     }
     cues.extend_from_slice(channel);
     let exit = exit.map_or("none".to_owned(), |c| c.to_string());
-    format!("cause={}; exit={exit}", cues.join(","))
+    let mut detail = format!("cause={}; exit={exit}", cues.join(","));
+    if let Some(stage) = enrollment_failure {
+        detail.push_str("; enrollment-stage=");
+        detail.push_str(stage.name());
+    }
+    detail
 }
 impl super::OwnedDuplexConsumer for Channel<'_, '_> {
     fn issuance_stage(&self) -> IssuanceStage {
@@ -809,12 +845,14 @@ impl CollabServices<'_> {
         )
         .map_err(err)
         .map_err(classify)?;
-        let enrollment_settled = done
+        let enrollment_failure = done
             .owned_cleanup()
-            .is_some_and(|proof| channel.settle_enrollment(proof).is_ok());
+            .ok_or(EnrollmentFailureStage::MissingCleanupProof)
+            .and_then(|proof| channel.settle_enrollment(proof))
+            .err();
         let output_complete = done.output_complete();
         let cleanup_complete = done.cleanup_complete();
-        let complete = enrollment_settled
+        let complete = enrollment_failure.is_none()
             && !protocol_failed
             && done.stop.is_none()
             && output_complete
@@ -845,7 +883,7 @@ impl CollabServices<'_> {
                 format!(
                     "Team report channel incomplete; reconcile durable request receipts ({})\n",
                     incomplete_cues(
-                        enrollment_settled,
+                        enrollment_failure,
                         protocol_failed,
                         done.stop.is_some(),
                         output_complete,
@@ -866,13 +904,13 @@ impl CollabServices<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::incomplete_cues;
+    use super::{EnrollmentFailureStage, incomplete_cues};
 
     #[test]
     fn incomplete_cues_name_each_failed_condition_only() {
         assert_eq!(
             incomplete_cues(
-                true,
+                None,
                 false,
                 false,
                 true,
@@ -883,8 +921,30 @@ mod tests {
             "cause=channel-no-hello,channel-partial-frame; exit=0"
         );
         assert_eq!(
-            incomplete_cues(false, true, true, false, false, &[], None),
-            "cause=enrollment-unsettled,protocol-failed,supervisor-stopped,output-incomplete,cleanup-incomplete; exit=none"
+            incomplete_cues(
+                Some(EnrollmentFailureStage::MissingCleanupProof),
+                true,
+                true,
+                false,
+                false,
+                &[],
+                None
+            ),
+            "cause=enrollment-unsettled,protocol-failed,supervisor-stopped,output-incomplete,cleanup-incomplete; exit=none; enrollment-stage=missing-cleanup-proof"
         );
+        use EnrollmentFailureStage as Stage;
+        for (stage, label) in [
+            (Stage::MissingCleanupProof, "missing-cleanup-proof"),
+            (Stage::CleanupProofMismatch, "cleanup-proof-mismatch"),
+            (Stage::ControllerCheck, "controller-check"),
+            (Stage::PrivateBinding, "private-binding"),
+            (Stage::RoomSetup, "room-setup"),
+            (Stage::CheckedRoomLeave, "checked-room-leave"),
+        ] {
+            assert_eq!(
+                incomplete_cues(Some(stage), false, false, true, true, &[], Some(0)),
+                format!("cause=enrollment-unsettled; exit=0; enrollment-stage={label}")
+            );
+        }
     }
 }
