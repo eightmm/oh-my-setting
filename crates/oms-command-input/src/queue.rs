@@ -45,7 +45,8 @@ pub fn under_lock<T>(c: &Ctx, body: impl FnOnce() -> Result<T>) -> Result<T> {
     out.ok_or(UNSAFE)?
 }
 pub fn state(c: &Ctx) -> Result<J> {
-    let Some(bytes) = crate::read_opt(c.root, Path::new(".oms/inputs/queue.json"), MAX_STATE)?
+    let Some(bytes) = crate::read_opt(c.root, Path::new(".oms/inputs/queue.json"), MAX_STATE)
+        .map_err(|_| "input file is missing, unreadable, or unsafe (stage=queue-read)")?
     else {
         return Ok(object([
             ("schema", number(1)),
