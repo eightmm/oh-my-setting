@@ -2441,6 +2441,21 @@ ready task instead of recommending admission again. Native consumption and
 completion claims remain `unconfirmed`, write isolation `unmanaged`, effective
 permissions `unknown`, and child cleanup `unsupported`.
 
+If a first assignment was interrupted before writing its packet and its frozen
+inputs have changed, the owning Main can explicitly retire the original intent.
+Read `refs.native_intent_sha256` from `oms events show --attempt ATTEMPT --json`.
+
+```bash
+oms panel --repo . --room ROOM --owner codex --native-reconcile ATTEMPT \
+  --intent-sha256 INTENT_SHA256 --decision retire-unsent
+```
+
+This requires the original queued record, the exact Plan claim, a missing packet
+and no assignment member in the Room. It frees the Lead reservation without
+changing the Plan. To assign that task again, explicitly release the exact Plan
+lease and claim a fresh one. Bound, sent and uncertain attempts retain their
+existing reconciliation path.
+
 Task, participant and list Results show transport, return claims, Main resolution
 and next action separately. Ordinary typed projection reads at most 20 assignments,
 each with bounded binding/result/source metadata; it does not reopen patch or
