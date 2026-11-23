@@ -237,7 +237,18 @@ fn repair_feedback(
         }
         return Err(error);
     }
-    let mut out = match delegate(ctx, args, id, route, 0, absolute.to_str(), wall) {
+    let repair_task = show(ctx, id)?;
+    feedback_task(&repair_task, task, "claimed", 1)?;
+    let mut out = match delegate(
+        ctx,
+        args,
+        &repair_task,
+        route,
+        0,
+        absolute.to_str(),
+        &head,
+        wall,
+    ) {
         Ok(out) => out,
         Err(error) => {
             feedback_record(ctx, &claim, "unknown")?;
@@ -278,7 +289,7 @@ fn repair_feedback(
 }
 
 fn show(ctx: &Context<'_>, id: &str) -> Result<Value> {
-    let out = ctx.action(&Request::new(Action::Show).with("id", id))?;
+    let out = ctx.action(&Request::new(Action::EvidenceSnapshot).with("id", id))?;
     require(out.code == 0, "cannot read plan task")?;
     value::parse(&out.stdout)
 }
@@ -298,15 +309,26 @@ fn route(ctx: &Context<'_>, task: &Value, args: &Args) -> Result<Value> {
     let raw = oms_command_task::json::encode(&resolved);
     value::parse(&raw)
 }
+#[allow(clippy::too_many_arguments)]
 fn delegate(
     ctx: &Context<'_>,
     args: &Args,
-    id: &str,
+    task: &Value,
     route: &Value,
     repair: u64,
     artifact: Option<&str>,
+    head: &str,
     wall: Duration,
 ) -> Result<Output> {
+    let id = value::text(task, "id");
+    require(
+        ctx.git(&["rev-parse", "HEAD"])? == head,
+        "Plan delegation base moved before dispatch",
+    )?;
+    let binding = json!({"schema":1,"plan_id":task["plan_id"],"task_id":id,
+        "task_sha256":task["task_sha256"],"lease_id":task["lease_id"],
+        "lease_epoch":task["lease_epoch"],"base_sha":head});
+    let binding = oms_command_plan::DelegateBinding::parse(&value::canonical(&binding)?)?;
     let mut call = vec![
         "--repo".into(),
         ctx.repo.as_os_str().to_owned(),
@@ -314,9 +336,14 @@ fn delegate(
         value::text(route, "provider").into(),
         "--plan-task".into(),
         id.into(),
-        "--repair".into(),
-        repair.to_string().into(),
+        "--plan-binding".into(),
+        String::from_utf8(binding.encode()?)
+            .map_err(|_| Error::new(2, "Plan delegation binding is not UTF-8"))?
+            .into(),
     ];
+    if repair > 0 {
+        call.extend(["--repair".into(), repair.to_string().into()]);
+    }
     for (field, option) in [
         ("model", "model"),
         ("fallback_model", "fallback-model"),
@@ -345,10 +372,9 @@ fn delegate(
         .transpose()?;
     let mut dispatch = Value::Null;
     if let Some(operation) = &operation {
-        let task = show(ctx, id)?;
         dispatch = json!({"schema":1,"kind":"autopilot-worker-call","phase":"intent","owner_id":ctx.owner_id,"run_id":ctx.run_id,
-            "operation_id":operation,"plan_id":ctx.plan_value()?["plan_id"],"task_id":id,"task_sha256":crate::adaptive::worker_contract(&task)?,
-            "lease_id":task["lease_id"],"lease_epoch":task["lease_epoch"],"head":ctx.git(&["rev-parse","HEAD"])?,"route":route,"ts":value::now()});
+            "operation_id":operation,"plan_id":task["plan_id"],"task_id":id,"task_sha256":crate::adaptive::worker_contract(task)?,
+            "lease_id":task["lease_id"],"lease_epoch":task["lease_epoch"],"head":head,"route":route,"ts":value::now()});
         let _lock = ctx.lock(PROGRESS)?;
         ctx.append(PROGRESS, &dispatch)?;
     }
@@ -634,13 +660,15 @@ pub(crate) fn run_task(
             return Ok(output);
         }
         if !claimed && !review && !resume {
-            ctx.action(
+            let issued = ctx.action(
                 &Request::new(Action::Claim)
                     .with("id", &id)
-                    .with("provider", provider),
+                    .with("provider", provider)
+                    .flag("json"),
             )?;
+            require(issued.code == 0, "Plan task claim did not complete")?;
             claimed = true;
-            task = show(ctx, &id)?;
+            task = value::parse(&issued.stdout)?;
             lease = value::text(&task, "lease_id").into();
         }
         if !review {
@@ -657,10 +685,11 @@ pub(crate) fn run_task(
             let delegated = delegate(
                 ctx,
                 args,
-                &id,
+                &task,
                 &route,
                 if resume { 0 } else { repair },
                 review_artifact,
+                &base,
                 wall,
             )?;
             let code = delegated.code;
@@ -722,7 +751,22 @@ pub(crate) fn run_task(
                         .with("artifact", absolute.as_os_str()),
                 )?;
                 output.append(landed);
-                let repaired = delegate(ctx, args, &id, &route, 0, absolute.to_str(), wall)?;
+                let repair_task = show(ctx, &id)?;
+                require(
+                    value::text(&repair_task, "lease_id") == lease
+                        && repair_task["repair_count"].as_u64() == Some(1),
+                    "bounded repair no longer owns its original lease",
+                )?;
+                let repaired = delegate(
+                    ctx,
+                    args,
+                    &repair_task,
+                    &route,
+                    0,
+                    absolute.to_str(),
+                    &base,
+                    wall,
+                )?;
                 let repair_code = repaired.code;
                 output.append(repaired);
                 if repair_code == 0 {

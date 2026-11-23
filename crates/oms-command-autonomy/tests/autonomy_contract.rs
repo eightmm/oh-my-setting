@@ -351,7 +351,35 @@ impl Services for FeedbackMock {
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<CommandResult> {
         match call.tool.as_str() {
-            "fail-ledger" => Ok((0, vec![], vec![])),
+            "fail-ledger" => {
+                if self.mode == "head-before-delegate"
+                    && call.args.first().is_some_and(|arg| arg == "check")
+                {
+                    let output = Command::new("git")
+                        .arg("-C")
+                        .arg(&call.cwd)
+                        .args([
+                            "-c",
+                            "commit.gpgsign=false",
+                            "-c",
+                            "user.name=t",
+                            "-c",
+                            "user.email=t@example.invalid",
+                            "commit",
+                            "--allow-empty",
+                            "-qm",
+                            "head moved after runner froze base",
+                        ])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Ok((0, vec![], vec![]))
+            }
             "peer-delegate" => {
                 self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let args: Vec<_> = call
@@ -360,7 +388,9 @@ impl Services for FeedbackMock {
                     .map(|s| s.to_string_lossy().into_owned())
                     .collect();
                 let arg = |name: &str| args.windows(2).find(|w| w[0] == name).unwrap()[1].clone();
-                assert_eq!(arg("--repair"), "0");
+                assert!(!args.iter().any(|arg| arg == "--repair"));
+                let binding =
+                    serde_json::from_str::<serde_json::Value>(&arg("--plan-binding")).unwrap();
                 assert!(args.iter().any(|a| a == "--terminalize-resumed-repair"));
                 let packet: serde_json::Value =
                     serde_json::from_slice(&fs::read(arg("--review-artifact")).unwrap()).unwrap();
@@ -374,6 +404,10 @@ impl Services for FeedbackMock {
                 let id = arg("--plan-task");
                 let task = self.plan(&call.cwd, &["show", "--id", &id]);
                 assert_eq!(task["repair_count"], 1);
+                assert_eq!(binding["task_id"], id);
+                assert_eq!(binding["lease_id"], task["lease_id"]);
+                assert_eq!(binding["lease_epoch"], task["lease_epoch"]);
+                assert_eq!(binding["task_sha256"], task["task_sha256"]);
                 self.plan(
                     &call.cwd,
                     &[
@@ -482,6 +516,47 @@ fn feedback_repair_claim_survives_crash_and_missing_send_acknowledgement() {
             1
         );
     }
+}
+
+#[test]
+fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
+    if scrubbed_child("plan_run_does_not_refresh_its_frozen_base_after_preflight") {
+        return;
+    }
+    let mock = FeedbackMock::new("head-before-delegate");
+    let repo = mock.fixture();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "fresh",
+            "--title",
+            "ordinary claimed worker",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    let result = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--id".into(), "fresh".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_ne!(result.0, 0);
+    assert!(
+        String::from_utf8_lossy(&result.2).contains("base moved before dispatch"),
+        "{result:?}"
+    );
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
+    let task = mock.plan(&repo.0, &["show", "--id", "fresh"]);
+    assert_eq!(
+        task["state"], "ready",
+        "only the newly issued original lease is released"
+    );
 }
 
 #[test]

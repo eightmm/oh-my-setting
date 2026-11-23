@@ -521,11 +521,7 @@ fn brief_label(question: &str) -> String {
 
 pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     safety::parent()?;
-    let interactive = args.has("interactive");
-    if args.has("plan-task")
-        || args.has("observe-plan-binding")
-        || args.has("terminalize-resumed-repair")
-    {
+    if args.has("observe-plan-binding") {
         return fail("plan lease integration must be supplied by the owning native plan adapter");
     }
     if args.has("apply") {
@@ -536,6 +532,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if args.has("resume-session") {
         return fail("native session relocation must be bound before resuming a delegation");
     }
+    let repo = storage::repository(context, &args.path("repo", context.cwd))?;
+    let mut resolved = args.clone();
+    let mut plan = crate::plan_delegate::BoundDelegate::prepare(&mut resolved, &repo, context)?;
+    let args = &resolved;
+    let interactive = args.has("interactive");
     let orientation = if args.has("context-pack") {
         Some(crate::context_pack::orientation(
             &args.path("context-pack", context.cwd),
@@ -546,7 +547,6 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut target = Target::parse(args.required("to")?)?;
     peer::apply_account(args, std::slice::from_mut(&mut target))?;
     let question = peer::question(args, context)?;
-    let repo = storage::repository(context, &args.path("repo", context.cwd))?;
     let directory = peer::directory(args, &repo, "delegate")?;
     let mut read = args.has("read-only");
     if args.has("role")
@@ -590,6 +590,12 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         args.value("reasoning-effort", "auto"),
         role,
     )?;
+    if let Some(plan) = &plan {
+        if read {
+            return fail("Plan patch delegation cannot change into a read-only role");
+        }
+        plan.route(args, &route)?;
+    }
     route.explicit = !providers::panel_implicit_target() || route.account_pinned;
     route.public_research = read
         && matches!(args.get("role"), "researcher" | "scholar")
@@ -738,6 +744,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if interactive && std::io::stdin().is_terminal() {
         return fail("--interactive requires NDJSON turn input on stdin; no worktree created");
     }
+    if let Some(plan) = &mut plan {
+        plan.start(context)?;
+    }
     let worktree = Worktree::create(&repo, &base, context)?;
     let compiled = if args.has("context-manifest") {
         let prepare = || -> Result<_> {
@@ -834,6 +843,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         })
         .unwrap_or_default();
     extra_env = crate::usage::operation_env(&extra_env)?;
+    if let Some(bound) = &plan {
+        extra_env.extend(bound.launch_environment()?);
+    }
     process::TeamLocator::append_args(args, &mut extra_env)?;
     extra_env.push(("OMS_ATTEMPT_ID".into(), attempt.clone().into()));
     if !task_id.is_empty() {
@@ -944,17 +956,22 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 idx += 1;
             }
         } else {
-            let result = providers::execute_with_fallback_env(
-                &mut route,
-                args.get("fallback-model"),
-                &prompt,
-                &worktree.path,
-                !read,
-                peer::timeout(args, "peer-delegate")?,
-                &repo,
-                &extra_env,
-                context,
-            );
+            let result = plan
+                .as_ref()
+                .map_or(Ok(()), |bound| bound.check(context))
+                .and_then(|()| {
+                    providers::execute_with_fallback_env(
+                        &mut route,
+                        args.get("fallback-model"),
+                        &prompt,
+                        &worktree.path,
+                        !read,
+                        peer::timeout(args, "peer-delegate")?,
+                        &repo,
+                        &extra_env,
+                        context,
+                    )
+                });
             let result = match result {
                 Ok(r) => r,
                 Err(error) => {
@@ -1003,6 +1020,9 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 || name == ".git"
                 || name.starts_with(".oms/")
                 || name == ".oms"
+                || plan
+                    .as_ref()
+                    .is_some_and(|bound| bound.forbidden(name).unwrap_or(true))
                 || !scope.is_empty()
                     && !scope
                         .iter()
@@ -1146,7 +1166,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         ("kind", "delegate".into()),
         ("ts", now().into()),
         ("artifact_id", crate::id("art_")?.into()),
-        ("attempt_id", attempt.into()),
+        ("attempt_id", attempt.clone().into()),
         (
             "operation_id",
             extra_env
@@ -1180,13 +1200,34 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if let Some(compiled) = &compiled {
         compiled.index(&mut index);
     }
+    if let Some(plan) = &plan {
+        index.set("plan_binding", plan.issued()?);
+    }
     peer::index(&repo, &index, context)?;
+    let plan_review = if code == 0 {
+        plan.as_ref().map_or(Ok(()), |bound| {
+            bound.review(
+                &index,
+                extra_env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == "OMS_OPERATION_ID")
+                    .and_then(|(_, value)| value.to_str())
+                    .unwrap_or(""),
+                &attempt,
+                context,
+            )
+        })
+    } else {
+        Ok(())
+    };
     let mut note = String::new();
     if needs_keep {
         note.push_str(&format!("worktree retained: {}\n", worktree.path.display()));
     } else if let Err(e) = worktree.remove(context) {
         note.push_str(&format!("worktree cleanup deferred: {}\n", e.message));
     }
+    plan_review?;
     Ok((
         code,
         format!(

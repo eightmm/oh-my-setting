@@ -19,6 +19,54 @@ pub const STATES: &[&str] = &[
     "done",
     "cancelled",
 ];
+/// A caller's issued task snapshot, before any provider call. It cannot select
+/// the current claimant by task id or grant completion/landing authority.
+#[derive(Clone, Debug)]
+pub struct DelegateBinding(Value);
+impl DelegateBinding {
+    pub fn parse(raw: &[u8]) -> Result<Self> {
+        let value = json::parse_bounded(raw, 4096)?;
+        json::keys(
+            &value,
+            &[
+                "schema",
+                "plan_id",
+                "task_id",
+                "task_sha256",
+                "lease_id",
+                "lease_epoch",
+                "base_sha",
+            ],
+            &[],
+        )?;
+        require(
+            value.get("schema").is_int(1)
+                && lineage(value.text("plan_id"), "plan_")
+                && valid_id(value.text("task_id"))
+                && value.text("task_id").len() <= 160
+                && json::hex(value.text("task_sha256"), 64)
+                && lineage(value.text("lease_id"), "lease_")
+                && value.get("lease_epoch").int().is_ok_and(|n| n > 0)
+                && [40, 64]
+                    .iter()
+                    .any(|&n| json::hex(value.text("base_sha"), n)),
+            "invalid exact Plan delegation binding",
+        )?;
+        Ok(Self(value))
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        json::canonical(&self.0)
+    }
+    pub fn task_id(&self) -> &str {
+        self.0.text("task_id")
+    }
+    pub fn lease_id(&self) -> &str {
+        self.0.text("lease_id")
+    }
+    pub fn base_sha(&self) -> &str {
+        self.0.text("base_sha")
+    }
+}
 #[derive(Clone)]
 pub struct Context {
     /// Caller directory that relative request operands resolve against.
@@ -573,7 +621,216 @@ impl<'a> Plan<'a> {
         s.settled.clear();
         Ok(())
     }
+    /// Check one immutable issued lease using the current canonical snapshot.
+    /// Callers reopen Context before each check so expiry never uses launch time.
+    pub fn check_delegate_binding(&self, binding: &DelegateBinding) -> Result<Value> {
+        self.context.parent()?;
+        self.locked(false, None, || {
+            let mut snapshot = self.load()?;
+            self.delegate_task(&mut snapshot, binding)
+        })
+    }
+
+    /// Only Start and Review cross this adapter. The ordinary execute request,
+    /// parent/context guards, locks and mutation checks are retained below.
+    pub fn execute_bound_task(
+        &self,
+        req: &Request,
+        binding: &DelegateBinding,
+        index: Option<&Value>,
+    ) -> Result<DelegateBinding> {
+        self.context.parent()?;
+        require(
+            matches!(req.action, Action::Start | Action::Review)
+                && req.value("id")? == binding.task_id()
+                && req.value("lease-id")? == binding.lease_id()
+                && (req.action == Action::Review) == index.is_some(),
+            "bound delegation permits only its exact Start or Review",
+        )?;
+        let response = self.execute_inner(req, Some(binding), index)?;
+        require(response.code == 0, "bound Plan mutation did not complete")?;
+        DelegateBinding::parse(&response.stdout)
+    }
+
+    fn delegate_task(&self, s: &mut Snapshot, binding: &DelegateBinding) -> Result<Value> {
+        require(
+            self.context.canonical(),
+            "delegation requires the canonical Plan",
+        )?;
+        s.require_contract()?;
+        let task = s.task(binding.task_id())?.clone();
+        require(
+            s.plan.get("plan_id") == binding.0.get("plan_id")
+                && ["claimed", "running"].contains(&task.text("state"))
+                && task.get("lease_id") == binding.0.get("lease_id")
+                && task.get("lease_epoch") == binding.0.get("lease_epoch")
+                && json::hash(&task)? == binding.0.text("task_sha256")
+                && self.git().text(&["rev-parse", "HEAD"])? == binding.base_sha(),
+            "Plan delegation task, lease, scope or base changed",
+        )?;
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| error("invalid delegation clock"))?;
+        let now = DateTime::<Utc>::from_timestamp(time.as_secs() as i64, 0)
+            .ok_or_else(|| error("invalid delegation clock"))?
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        require(
+            crate::contracts::stale(&s.registry, &task)?.is_empty()
+                && !self.expired_at(s, &task, true, &now)?,
+            "Plan delegation contract is stale or its lease expired",
+        )?;
+        Ok(task)
+    }
+
     pub fn execute(&self, req: &Request) -> Result<Response> {
+        self.execute_inner(req, None, None)
+    }
+
+    fn capture_delegate_result(
+        &self,
+        req: &Request,
+        binding: &DelegateBinding,
+        snapshot: &Snapshot,
+        index: &Value,
+    ) -> Result<(Request, Value)> {
+        let task = snapshot.task(binding.task_id())?;
+        let issued = DelegateBinding::parse(&json::canonical(index.get("plan_binding"))?)?;
+        require(
+            index.get("schema").is_int(1)
+                && index.text("kind") == "delegate"
+                && receipt_id(index.text("event_id"), 160)
+                && receipt_id(index.text("attempt_id"), 160)
+                && receipt_id(index.text("operation_id"), 160)
+                && index.text("task_id") == binding.task_id()
+                && index.text("provider") == task.text("provider")
+                && index.text("base_sha") == binding.base_sha()
+                && index.get("exit").is_int(0)
+                && index.get("verify_exit").is_int(0)
+                && index.text("verification") == "passed"
+                && index.text("state") == "review"
+                && index.get("no_change") == &Value::Bool(false)
+                && ["plan_id", "task_id", "lease_id", "lease_epoch", "base_sha"]
+                    .iter()
+                    .all(|key| issued.0.get(key) == binding.0.get(key)),
+            "native delegation index does not bind this verified task result",
+        )?;
+        let rows = self.source.rows(".oms/artifacts/index.jsonl", false)?;
+        let matching = rows
+            .iter()
+            .filter(|row| row.get("event_id") == index.get("event_id"))
+            .collect::<Vec<_>>();
+        require(
+            matching.len() == 1 && matching[0] == index,
+            "native delegation index changed before capture",
+        )?;
+        let mut request = req.clone();
+        let mut retained = object([
+            ("schema", number(1)),
+            ("kind", string("native-delegate-review")),
+            ("plan_id", binding.0.get("plan_id").clone()),
+            ("lease_id", string(binding.lease_id())),
+            ("index", crate::decision::retain_native(&self.store, index)?),
+        ]);
+        for (field, digest, suffix) in [
+            ("artifact", "artifact_sha256", ".md"),
+            ("patch", "patch_sha256", ".patch"),
+        ] {
+            let path = index.get(field).str()?;
+            require(
+                !Path::new(path).is_absolute()
+                    && !path.is_empty()
+                    && Path::new(path)
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    && json::hex(index.text(digest), 64),
+                "native delegation evidence requires a bounded repository path and digest",
+            )?;
+            let absolute = self.context.execution_repo.join(path);
+            let supplied = Path::new(req.value(field)?);
+            let supplied = if supplied.is_absolute() {
+                supplied.to_owned()
+            } else {
+                self.context.execution_repo.join(supplied)
+            };
+            require(
+                supplied == absolute,
+                "Plan Review path differs from the native delegation index",
+            )?;
+            let bytes = self.source.read(path, MAX_PATCH)?;
+            require(
+                !bytes.is_empty() && json::sha(&bytes) == index.text(digest),
+                "native delegation result bytes changed before capture",
+            )?;
+            let (reference, _) =
+                self.store
+                    .immutable(".oms/plan/delegate-results", &bytes, suffix, MAX_PATCH)?;
+            request = request.with(
+                field,
+                self.context
+                    .state_repo
+                    .join(reference.text("path"))
+                    .as_os_str(),
+            );
+            retained.set(field, reference)?;
+        }
+        Ok((request, retained))
+    }
+
+    fn delegate_review_evidence(&self, task: &Value, expected_patch: &str) -> Result<()> {
+        let Some(result) = task.opt("delegate_result") else {
+            return Ok(());
+        };
+        json::keys(
+            result,
+            &[
+                "schema", "kind", "plan_id", "lease_id", "index", "artifact", "patch",
+            ],
+            &[],
+        )?;
+        require(
+            result.get("schema").is_int(1)
+                && result.text("kind") == "native-delegate-review"
+                && result.text("lease_id") == task.text("review_lease_id"),
+            "invalid native delegate review provenance",
+        )?;
+        let index_ref = result.get("index");
+        let index_raw = self.store.read(index_ref.text("path"), 64 * 1024)?;
+        require(
+            json::sha(&index_raw) == index_ref.text("sha256"),
+            "retained native delegate index changed",
+        )?;
+        let index = json::parse(&index_raw)?;
+        require(
+            index.text("task_id") == task.text("id")
+                && index.text("provider") == task.text("provider")
+                && index.get("plan_binding").get("plan_id") == result.get("plan_id")
+                && index.get("plan_binding").get("lease_id") == result.get("lease_id"),
+            "retained native delegate index changed identity",
+        )?;
+        for (field, digest) in [("artifact", "artifact_sha256"), ("patch", "patch_sha256")] {
+            let reference = result.get(field);
+            let bytes = self.store.read(reference.text("path"), MAX_PATCH)?;
+            require(
+                json::sha(&bytes) == reference.text("sha256")
+                    && reference.get("sha256") == index.get(digest)
+                    && Path::new(task.text(field))
+                        == self.context.state_repo.join(reference.text("path")),
+                "retained native delegate review bytes or paths changed",
+            )?;
+        }
+        require(
+            result.get("patch").text("sha256") == expected_patch,
+            "landing patch is not the exact native delegated result",
+        )
+    }
+
+    fn execute_inner(
+        &self,
+        req: &Request,
+        binding: Option<&DelegateBinding>,
+        index: Option<&Value>,
+    ) -> Result<Response> {
         use Action::*;
         req.validate()?;
         {
@@ -726,7 +983,47 @@ impl<'a> Plan<'a> {
                     crate::retirement::cleanup(self)?;
                 }
                 let mut s = self.load()?;
-                self.mutate(req, &mut s)
+                if let Some(binding) = binding
+                    && let Err(error) = self.delegate_task(&mut s, binding)
+                {
+                    if req.action == Review {
+                        self.store.append_private_atomic(
+                            ".oms/plan/late-results.jsonl",
+                            &object([
+                                ("schema", number(1)),
+                                ("ts", string(&self.context.ts)),
+                                ("task_id", string(binding.task_id())),
+                                ("supplied_lease_id", string(binding.lease_id())),
+                                ("reason", string("stale_delegate_binding")),
+                                ("artifact", string(req.text("artifact")?)),
+                                ("patch", string(req.text("patch")?)),
+                            ]),
+                        )?;
+                    }
+                    return Err(error);
+                }
+                let captured = if let (Some(binding), Some(index)) = (binding, index) {
+                    let captured = self.capture_delegate_result(req, binding, &s, index)?;
+                    // File capture and Plan lock acquisition may consume the
+                    // lease. Neither extends the worker's issued authority.
+                    self.delegate_task(&mut s, binding)?;
+                    Some(captured)
+                } else {
+                    None
+                };
+                let selected = captured.as_ref().map_or(req, |(request, _)| request);
+                let response =
+                    self.mutate(selected, &mut s, captured.as_ref().map(|(_, proof)| proof))?;
+                if let Some(binding) = binding {
+                    let mut next = binding.0.clone();
+                    next.set(
+                        "task_sha256",
+                        string(json::hash(s.task(binding.task_id())?)?),
+                    )?;
+                    Response::json(&next)
+                } else {
+                    Ok(response)
+                }
             },
         )
     }
@@ -821,10 +1118,13 @@ impl<'a> Plan<'a> {
         Ok(())
     }
     pub(crate) fn expired(&self, s: &mut Snapshot, t: &Value, running: bool) -> Result<bool> {
+        self.expired_at(s, t, running, &self.context.ts)
+    }
+    fn expired_at(&self, s: &mut Snapshot, t: &Value, running: bool, now: &str) -> Result<bool> {
         if !(t.text("state") == "claimed" || running && t.text("state") == "running") {
             return Ok(false);
         }
-        let Some(age) = age(t, &self.context.ts) else {
+        let Some(age) = age(t, now) else {
             return Ok(false);
         };
         if age < i128::from(task_ttl(t, self.context.claim_ttl)) {
@@ -884,7 +1184,12 @@ impl<'a> Plan<'a> {
         }
         Ok(t.text("state") == "ready" || self.expired(s, t, false)?)
     }
-    fn mutate(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
+    fn mutate(
+        &self,
+        req: &Request,
+        s: &mut Snapshot,
+        delegate_result: Option<&Value>,
+    ) -> Result<Response> {
         use Action::*;
         match req.action {
             Init => {
@@ -1053,6 +1358,11 @@ impl<'a> Plan<'a> {
                 t.set("executor_id", string(""))?;
                 t.set("executor_soul_sha256", string(""))?;
                 t.set("repair_artifact", string(""))?;
+                if let Some(result) = delegate_result {
+                    t.set("delegate_result", result.clone())?;
+                } else {
+                    t.remove("delegate_result");
+                }
                 if let Some(record) = acceptance {
                     t.set("panel_accept", record)?;
                 } else {
@@ -1181,6 +1491,12 @@ impl<'a> Plan<'a> {
         let after = t.text("state").to_owned();
         s.put(id, t)?;
         self.save(s)?;
+        if req.action == Claim && req.has("json") {
+            let task = s.task(id)?.clone();
+            let mut issued = self.view(s, &task, true)?;
+            issued.set("plan_id", s.plan.get("plan_id").clone())?;
+            return Response::json(&issued);
+        }
         Ok(Response::text(format!("plan: {id} -> {after}")))
     }
     pub(crate) fn lease(&self, req: &Request, t: &Value) -> Result<()> {
@@ -1871,6 +2187,7 @@ impl<'a> Plan<'a> {
             json::hex(expected, 64),
             "--expected-review-patch-sha256 must be lowercase SHA-256",
         )?;
+        self.delegate_review_evidence(t, expected)?;
         require(
             json::sha(self.evidence_read(path, MAX_PATCH)?) == expected,
             "reviewed patch bytes changed during admission",

@@ -99,7 +99,10 @@ Commands:
                                      blocked task to an issue. The same issue
                                      is a no-op; replacing a different one
                                      requires --reason, kept in history.
-  claim  --id ID --provider NAME [--ttl SECONDS]   Claim a ready task for a worker.
+  claim  --id ID --provider NAME [--ttl SECONDS] [--json]
+                                     Claim a ready task for a worker. JSON returns
+                                     the atomically issued plan/task digest and
+                                     lease/epoch, without a later Show re-read.
   start  --id ID [--lease-id TOKEN]  Mark a claimed task running.
   touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
                                      claimed_at so a live worker is not reclaimed.

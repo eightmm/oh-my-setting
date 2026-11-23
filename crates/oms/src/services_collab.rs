@@ -789,6 +789,9 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {
+        Some(&self.control)
+    }
     fn experience_context(
         &self,
         repo: &Path,

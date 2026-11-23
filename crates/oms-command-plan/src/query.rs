@@ -339,8 +339,8 @@ impl Plan<'_> {
             self.save(s)?;
         }
         let mut r = if req.has("json") {
-            let mut view = t.clone();
-            view.set("claim_expired", Value::Bool(self.expired(s, &t, false)?))?;
+            let mut view = self.view(s, &t, true)?;
+            view.set("plan_id", s.plan.get("plan_id").clone())?;
             Response::json(&view)?
         } else {
             Response::text(self.brief(s, &t)?)

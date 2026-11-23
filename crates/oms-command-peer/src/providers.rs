@@ -2071,7 +2071,12 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             ("OMS_HARNESS_DELEGATE_DEPTH".into(), "1".into()),
         ]);
         environment.extend(transport.environment.clone());
-        environment.extend(extra_env.iter().cloned());
+        environment.extend(
+            extra_env
+                .iter()
+                .filter(|(key, _)| !crate::plan_delegate::launch_key(key))
+                .cloned(),
+        );
         if let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
             environment.push((
                 "OMS_BASE_SHA".into(),
@@ -2208,25 +2213,28 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                     .map_err(|e| Error::new(2, e))?,
             ),
         };
-        let result = if let Some(protocol) = &team_protocol {
-            context.executor.execute_team_requests(
-                invocation,
-                crate::process::TeamLaunchBinding {
-                    pending: &pending_usage,
-                    attempt: &attempt,
-                    protocol,
-                    actions: &team_actions,
-                },
-                context.interrupted,
-            )
-        } else {
-            context.executor.execute_provider(
-                invocation,
-                &usage_receipt.identity,
-                direct,
-                context.interrupted,
-            )
-        };
+        let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, context)
+            .and_then(|()| {
+                if let Some(protocol) = &team_protocol {
+                    context.executor.execute_team_requests(
+                        invocation,
+                        crate::process::TeamLaunchBinding {
+                            pending: &pending_usage,
+                            attempt: &attempt,
+                            protocol,
+                            actions: &team_actions,
+                        },
+                        context.interrupted,
+                    )
+                } else {
+                    context.executor.execute_provider(
+                        invocation,
+                        &usage_receipt.identity,
+                        direct,
+                        context.interrupted,
+                    )
+                }
+            });
         let mut result = match result {
             Ok(result) => result,
             Err(error) => {
