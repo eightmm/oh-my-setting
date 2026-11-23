@@ -5443,6 +5443,78 @@ done
             )
             .is_err()
         );
+
+        let resolve_manually = || {
+            let (code, _, err) = oms_command_state::run(
+                "fail-ledger",
+                &osv(&["resolve", "--cmd", command]),
+                repo.path(),
+                &stop,
+            );
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            let row = rows().pop().unwrap();
+            assert_eq!(row.text("event"), "resolved");
+            assert!(row.opt("verification").is_none());
+            row
+        };
+        resolve_manually();
+        let candidates = || {
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop,
+            )
+            .unwrap()
+        };
+        assert!(
+            candidates().is_empty(),
+            "manual resolution resets old identities"
+        );
+
+        let proof = repo.path().join("proof-ready");
+        std::fs::remove_file(&proof).unwrap();
+        verify(&mut task, 1);
+        let fresh_failure = rows().pop().unwrap();
+        let fresh_digest = digest(&fresh_failure);
+        assert_eq!(candidates(), [fresh_digest.clone()]);
+        std::fs::write(&proof, "ready\n").unwrap();
+        verify(&mut task, 0);
+        let settled = rows().pop().unwrap();
+        assert_eq!(settled.text("event"), "resolved");
+        assert_eq!(
+            settled
+                .get("verification")
+                .get("prior_failures")
+                .array()
+                .unwrap(),
+            &[oms_command_plan::json::string(fresh_digest)]
+        );
+        assert!(status(&mut task).contains("verification: fresh"));
+
+        // The command's successful receipt still stands if a manual reset occurs
+        // after selection. It cannot claim recovery of that reset failure.
+        std::fs::remove_file(&proof).unwrap();
+        verify(&mut task, 1);
+        assert_eq!(candidates().len(), 1);
+        let before_reset = std::fs::read(&ledger_path).unwrap();
+        let reset = resolve_manually();
+        std::fs::write(&ledger_path, before_reset).unwrap();
+        std::fs::write(
+            repo.path().join(".oms/late-failure.json"),
+            oms_command_plan::json::encoded(&reset).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&proof, "ready\n").unwrap();
+        verify(&mut task, 0);
+        let latest = rows().pop().unwrap();
+        assert_eq!(latest.text("event"), "verified");
+        assert!(matches!(
+            latest.get("verification").get("prior_failures"),
+            oms_command_plan::json::Value::Null
+        ));
+        assert!(candidates().is_empty());
+        assert!(status(&mut task).contains("verification: fresh"));
     }
 
     #[test]

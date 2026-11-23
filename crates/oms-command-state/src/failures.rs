@@ -66,8 +66,55 @@ fn complete_row(row: &Value) -> bool {
     valid_row(row) && (row.opt("verification").is_none() || verification(row).is_some())
 }
 
-/// Exact native failure identities known before a verification rerun. Legacy
-/// command-level resolutions remain separate from receipt-backed correlation.
+type OpenFailures<'a> = BTreeMap<String, &'a Value>;
+
+fn same_task_command(row: &Value, task_id: &[u8], command_sha256: &str) -> bool {
+    verification(row).is_some_and(|failure| {
+        failure.text("active_task_id").as_bytes() == task_id
+            && failure.text("command_sha256") == command_sha256
+    })
+}
+
+fn remove_verified(pending: &mut OpenFailures<'_>, evidence: &Value) {
+    let Ok(prior) = evidence.get("prior_failures").array() else {
+        return;
+    };
+    for key in prior {
+        let key = key.str().unwrap_or("");
+        if pending.get(key).is_some_and(|row| {
+            same_task_command(
+                row,
+                evidence.text("active_task_id").as_bytes(),
+                evidence.text("command_sha256"),
+            )
+        }) {
+            pending.remove(key);
+        }
+    }
+}
+
+fn open_failures<'a>(rows: &'a [Value], fingerprint: &str) -> Result<OpenFailures<'a>> {
+    // Both manual resolutions and fully covered native resolutions close the
+    // fingerprint's epoch. Older identities cannot consume the current bound.
+    let start = rows
+        .iter()
+        .rposition(|row| row.text("fingerprint") == fingerprint && row.text("event") == "resolved")
+        .map_or(0, |index| index + 1);
+    let mut pending = BTreeMap::new();
+    for row in rows[start..]
+        .iter()
+        .filter(|row| row.text("fingerprint") == fingerprint)
+    {
+        if row.text("event") == "fail" {
+            pending.insert(json::hash(row)?, row);
+        } else if let Some(evidence) = verification(row) {
+            remove_verified(&mut pending, evidence);
+        }
+    }
+    Ok(pending)
+}
+
+/// Exact open native failure identities known before a verification rerun.
 pub fn task_failure_candidates(
     repo: &Path,
     active_task_id: &[u8],
@@ -81,33 +128,20 @@ pub fn task_failure_candidates(
         bad == 0 && rows.iter().all(complete_row),
         "failure source is incomplete",
     )?;
+    let raw = std::str::from_utf8(command).map_err(|_| error(2, "failure command is not UTF-8"))?;
+    let fingerprint = fingerprint(&normalize(raw));
     let command_sha256 = oms_command_task::command_hash(command);
-    let mut candidates = BTreeSet::new();
-    for row in &rows {
-        let Some(evidence) = verification(row) else {
-            continue;
-        };
-        if evidence.text("active_task_id").as_bytes() != active_task_id
-            || evidence.text("command_sha256") != command_sha256
-        {
-            continue;
-        }
-        if row.text("event") == "fail" && evidence.text("result") == "failed" {
-            candidates.insert(json::hash(row)?);
-        } else if matches!(row.text("event"), "resolved" | "verified")
-            && evidence.text("result") == "accepted"
-            && let Ok(prior) = evidence.get("prior_failures").array()
-        {
-            for key in prior {
-                candidates.remove(key.str().unwrap_or(""));
-            }
-        }
-    }
+    let candidates: Vec<_> = open_failures(&rows, &fingerprint)?
+        .into_iter()
+        .filter(|(_, row)| same_task_command(row, active_task_id, &command_sha256))
+        .map(|(key, _)| key)
+        .take(MAX_PRIOR_FAILURES + 1)
+        .collect();
     require(
         candidates.len() <= MAX_PRIOR_FAILURES,
         "failure correlation selection exceeds bound",
     )?;
-    Ok(candidates.into_iter().collect())
+    Ok(candidates)
 }
 
 /// The native observer uses the same parser, lock and append owner as the CLI.
@@ -127,8 +161,7 @@ pub fn observe_task_verification(
 
 fn observed_evidence(
     evidence: &VerificationEvidence,
-    rows: &[Value],
-    bad: usize,
+    pending: Option<&OpenFailures<'_>>,
 ) -> Result<Option<Value>> {
     let (Some(snapshot), Some(outcome), Ok(task_id)) = (
         evidence.snapshot_attempt_id(),
@@ -137,27 +170,15 @@ fn observed_evidence(
     ) else {
         return Ok(None);
     };
-    let complete = bad == 0 && rows.iter().all(complete_row);
-    let mut known = BTreeSet::new();
-    if complete
-        && evidence
-            .prior_failures()
-            .is_some_and(|prior| !prior.is_empty())
-    {
-        for row in rows {
-            if row.text("event") == "fail"
-                && verification(row).is_some_and(|v| {
-                    v.text("result") == "failed"
-                        && v.text("active_task_id") == task_id
-                        && v.text("command_sha256") == evidence.command_sha256()
-                })
-            {
-                known.insert(json::hash(row)?);
-            }
-        }
-    }
     let prior = evidence.prior_failures().filter(|prior| {
-        complete && prior.len() <= MAX_PRIOR_FAILURES && prior.iter().all(|key| known.contains(key))
+        prior.len() <= MAX_PRIOR_FAILURES
+            && pending.is_some_and(|pending| {
+                prior.iter().all(|key| {
+                    pending.get(key).is_some_and(|row| {
+                        same_task_command(row, evidence.active_task_id(), evidence.command_sha256())
+                    })
+                })
+            })
     });
     let mut value = object([
         ("scope", string("agent-task-reference-v1")),
@@ -198,53 +219,15 @@ fn observed_evidence(
 /// A native pass may clear the command aggregate only when every currently
 /// open row has exact accepted evidence. Partial passes remain observations;
 /// a manual/legacy resolve retains its established fingerprint-wide meaning.
-fn covers_fingerprint(
-    rows: &[Value],
-    bad: usize,
-    fingerprint: &str,
-    current: &Value,
-) -> Result<bool> {
-    if bad != 0 || !rows.iter().all(complete_row) || current.get("prior_failures").array().is_err()
-    {
-        return Ok(false);
-    }
-    let mut pending = BTreeMap::new();
-    let remove = |pending: &mut BTreeMap<String, &Value>, evidence: &Value| {
-        if let Ok(prior) = evidence.get("prior_failures").array() {
-            for key in prior {
-                let key = key.str().unwrap_or("");
-                if pending
-                    .get(key)
-                    .and_then(|row| verification(row))
-                    .is_some_and(|failure| {
-                        failure.text("active_task_id") == evidence.text("active_task_id")
-                            && failure.text("command_sha256") == evidence.text("command_sha256")
-                    })
-                {
-                    pending.remove(key);
-                }
-            }
-        }
+fn covers_fingerprint(pending: Option<OpenFailures<'_>>, current: &Value) -> bool {
+    let Some(mut pending) = pending else {
+        return false;
     };
-    for row in rows
-        .iter()
-        .filter(|row| row.text("fingerprint") == fingerprint)
-    {
-        match row.text("event") {
-            "fail" => {
-                pending.insert(json::hash(row)?, row);
-            }
-            "resolved" => pending.clear(),
-            "verified" => {
-                if let Some(evidence) = verification(row) {
-                    remove(&mut pending, evidence);
-                }
-            }
-            _ => {}
-        }
+    if current.get("prior_failures").array().is_err() {
+        return false;
     }
-    remove(&mut pending, current);
-    Ok(pending.is_empty())
+    remove_verified(&mut pending, current);
+    pending.is_empty()
 }
 
 fn normalize(value: &str) -> String {
@@ -535,8 +518,12 @@ fn run_observed(
             "verification evidence does not match this observation",
         )?;
     }
+    let pending = evidence
+        .filter(|_| bad == 0 && rows.iter().all(complete_row))
+        .map(|_| open_failures(&rows, &fp))
+        .transpose()?;
     let evidence = evidence
-        .map(|evidence| observed_evidence(evidence, &rows, bad))
+        .map(|evidence| observed_evidence(evidence, pending.as_ref()))
         .transpose()?
         .flatten();
     let now = epoch();
@@ -640,7 +627,7 @@ fn run_observed(
                     "native verification identity unavailable; fingerprint was not resolved",
                 )
             })?;
-            covers_fingerprint(&rows, bad, &fp, evidence)?
+            covers_fingerprint(pending, evidence)
         } else {
             true
         };
