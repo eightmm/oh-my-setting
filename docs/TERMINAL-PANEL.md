@@ -3313,7 +3313,9 @@ response usage record. Input, output, reasoning and total apply to that
 response. The reasoning count is part of output. Cache read/write and
 reasoning use `?` when zero may represent omitted details. The sample can
 come from an incomplete response or compaction. The reader leaves usage
-unreported when it cannot verify a record.
+unreported when it cannot verify the newest recorded response, including
+invalid or conflicting counters. Replaying an older response does not restore
+its counters; a later distinct valid response can supply a new sample.
 
 The selected call's **Launch receipts** list groups measured counters by
 provider and recorded launch account. `@?` marks an unknown account. The
