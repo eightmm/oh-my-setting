@@ -1456,7 +1456,7 @@ what the person typed; it runs only in a repository that already has `.oms`,
 never for a harness child, and holds at most 200 undecided rows.
 
 `append` also checks the new text, with no model call, against the active notes
-and pins before writing (`lib/agent_memory_contradict.py`). Two shapes count after
+and pins before writing ([conflict check](../crates/oms-command-memory/src/conflicts.rs)). Two shapes count after
 lowercasing and whitespace normalisation: the same `KEY: value` subject with a
 disjoint value, and `use X` / `run X` against `do not use X` / `never X` /
 `avoid X` with the same subject and the same trailing qualifier ("in prod").
@@ -1837,15 +1837,10 @@ from the shared check, or a merge driver) prints "not checked" and runs nothing;
 and `--json` reports `status: unavailable` with a `reason`. Pending patch files are not
 included.
 
-`python3 scripts/lib/gate_timings.py` shows where gate and CI time goes, from logs that
-already exist; it runs nothing and writes nothing. `--timings FILE` reads a check runtime
-`timings` file, `--gate-log FILE` a gate log (`ok: NAME (Ns)`, `check: NAME FAILED (Ns)`,
-runner `smoke-timing:` lines, an optional `exit=N wall=S` line), and `--ci-jobs FILE`
-(`gh api repos/OWNER/REPO/actions/runs/ID/jobs?per_page=100`) with `--ci-run FILE`,
-`--ci-logs DIR` (files `job-<job id>.log`) reports job time, the sum of job time against the
-run's wall clock, suite totals and the slowest tests the logs printed. `--json` prints one
-document. A local gate prints per-test seconds only when `OMS_SMOKE_TIMINGS=1` reaches the
-runner; CI logs keep the slowest 25 tests of each scripts-smoke shard.
+Gate stage and test seconds are parsed by the native
+[`gate_timings` helper](../crates/oms-command-landing/src/helpers.rs). The standalone report
+that summarised gate logs and CI job logs went away with the Python sources and has no native
+command; read job durations from the workflow run instead.
 
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
@@ -2392,7 +2387,7 @@ automatically retried; inspect GitHub before retrying because the post may exist
 
 ## Graphs
 
-`oms graph` (`scripts/lib/oms_graph/`, standard library only) adds two
+`oms graph` ([graph command](../crates/oms-command-graph/README.md)) adds two
 inspectable graphs above the plane described in the previous section; the
 contract is `docs/GRAPH-ENGINEERING.md`.
 
@@ -3468,9 +3463,8 @@ used for installation.
 The [installation verification policy](INSTALL.md#verification-policy) records the
 explicit differences between land, scheduled updates, and fresh/manual edge installs.
 Scheduled updates continue to accept successful affected-only CI and report the
-actual scope in their existing state message. Both automated paths share
-`ci-query.py` for exact-SHA conclusions and scope; that helper can read public OMS
-CI without `gh` or user authentication. This does not grant affected-only CI the
+actual scope in their existing state message. Both automated paths read
+exact-SHA CI conclusions and scope. This does not grant affected-only CI the
 full-proof authority required by land.
 
 
