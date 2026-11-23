@@ -12,7 +12,7 @@ pub use atomic_bytes::{
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
 use std::ffi::OsStr;
 use std::io::Read;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -219,7 +219,7 @@ fn workspace_group_writable(stat: &Stat) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn group_workspace_has_mode_only_access(fd: &OwnedFd, before: &Stat) -> bool {
+fn group_workspace_has_mode_only_access(fd: BorrowedFd<'_>, before: &Stat) -> bool {
     // Linux exposes owner-readable POSIX access ACLs at this name on the ext
     // family (0xef53) and tmpfs (0x01021994). Other filesystems can enforce other ACLs.
     workspace_group_writable(before)
@@ -234,8 +234,20 @@ fn group_workspace_has_mode_only_access(fd: &OwnedFd, before: &Stat) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn group_workspace_has_mode_only_access(_: &OwnedFd, _: &Stat) -> bool {
+fn group_workspace_has_mode_only_access(_: BorrowedFd<'_>, _: &Stat) -> bool {
     false
+}
+
+/// Prove mode-only access for a group-writable, owner-owned regular file.
+/// Callers must also prove the group membership and the file's named custody.
+pub fn workspace_file_has_mode_only_group_access(fd: &OwnedFd, named: &Stat) -> bool {
+    FileType::from_raw_mode(named.st_mode) == FileType::RegularFile
+        && named.st_nlink == 1
+        && fs::fstat(fd).is_ok_and(|opened| {
+            stable(named, &opened)
+                && named.st_gid == opened.st_gid
+                && group_workspace_has_mode_only_access(fd.as_fd(), &opened)
+        })
 }
 
 fn size_matches(stat: &Stat, count: usize) -> bool {
@@ -341,7 +353,7 @@ impl Root {
             if !same_directory_mode(&named, &opened) {
                 return Err(Error::Changed);
             }
-            if needs_group && !group_workspace_has_mode_only_access(&fd, &opened) {
+            if needs_group && !group_workspace_has_mode_only_access(fd.as_fd(), &opened) {
                 return Err(Error::Unsafe);
             }
             ancestry.push((fd, opened, name.to_owned()));
@@ -403,7 +415,7 @@ impl Root {
             }
             if workspace_group_writable(initial)
                 && !(i + 1 < chain.len() && root_sticky_directory(initial))
-                && !group_workspace_has_mode_only_access(fd, &opened)
+                && !group_workspace_has_mode_only_access(fd.as_fd(), &opened)
             {
                 return Err(());
             }
@@ -435,6 +447,15 @@ impl Root {
     /// Physical spelling captured when this root was opened; it may later be replaced.
     pub fn physical_root(&self) -> &Path {
         &self.path
+    }
+
+    /// Borrow the held directory after revalidating its private ancestry.
+    pub fn pinned_private_directory(&self) -> Result<BorrowedFd<'_>, Error> {
+        if self.private_ancestry.is_none() {
+            return Err(Error::Unsafe);
+        }
+        self.revalidate_private().map_err(|()| Error::Changed)?;
+        Ok(self.fd.as_fd())
     }
 
     /// Read an explicit manifest using pathlib-style lexical normalization.

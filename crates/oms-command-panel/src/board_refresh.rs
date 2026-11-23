@@ -188,8 +188,10 @@ pub(crate) struct BoardRefresh {
 }
 
 impl BoardRefresh {
-    pub(crate) fn start() -> Result<Self> {
-        Self::spawn_with(|| {
+    pub(crate) fn start(
+        workspace_group: Option<oms_panel_core::services::WorkspaceGroupResolver>,
+    ) -> Result<Self> {
+        Self::spawn_with_group(workspace_group, || {
             Ok(BoardCollector {
                 commands: SubcommandServices::sibling()?,
                 events: EventsProjectionCache::new(),
@@ -197,7 +199,15 @@ impl BoardRefresh {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_with<T: Services>(
+        factory: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<Self> {
+        Self::spawn_with_group(None, factory)
+    }
+
+    fn spawn_with_group<T: Services>(
+        workspace_group: Option<oms_panel_core::services::WorkspaceGroupResolver>,
         factory: impl FnOnce() -> Result<T> + Send + 'static,
     ) -> Result<Self> {
         let (sender, jobs) = mpsc::channel::<Job>();
@@ -225,7 +235,9 @@ impl BoardRefresh {
                         .as_ref()
                         .zip(result.as_mut().ok())
                         .and_then(|(native, (snapshot, sources))| {
-                            let adapter = SubcommandServices::sibling().ok()?;
+                            let adapter = SubcommandServices::sibling()
+                                .ok()?
+                                .with_workspace_group(workspace_group);
                             native.observe(
                                 snapshot,
                                 sources,
@@ -617,6 +629,15 @@ impl PeerExecutor for ChatReads<'_> {
 }
 
 impl Services for ChatReads<'_> {
+    fn workspace_group(
+        &self,
+        gid: u32,
+        deadline: Instant,
+        stop: &AtomicBool,
+    ) -> Option<oms_command_plan::services::GroupMembership> {
+        self.0.workspace_group(gid, deadline, stop)
+    }
+
     fn command(
         &self,
         command: NativeCommand,

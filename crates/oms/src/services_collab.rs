@@ -1133,13 +1133,10 @@ impl oms_command_room::Services for CollabServices<'_> {
 }
 
 impl PanelServices for CollabServices<'_> {
-    fn workspace_group(
-        &self,
-        gid: u32,
-        deadline: std::time::Instant,
-        stop: &AtomicBool,
-    ) -> Option<oms_command_plan::services::GroupMembership> {
-        crate::services_runtime::resolve_group_membership_before(gid, deadline, stop).ok()
+    fn workspace_group_resolver(&self) -> Option<oms_panel_core::services::WorkspaceGroupResolver> {
+        Some(|gid, deadline, stop| {
+            crate::services_runtime::resolve_group_membership_before(gid, deadline, stop).ok()
+        })
     }
 
     fn swap_main_host(
