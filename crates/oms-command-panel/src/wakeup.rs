@@ -14,6 +14,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -183,6 +185,122 @@ pub fn notify_wakeup(repo: &Path) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) struct AgyRosterWatch {
+    fd: rustix::fd::OwnedFd,
+    watch: i32,
+    lost: AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+impl AgyRosterWatch {
+    /// Arm on the already-opened parent transcript, never by reopening its name.
+    /// Callers must still confirm that the descriptor is the current transcript.
+    pub(crate) fn arm(file: &fs::File) -> Option<Arc<Self>> {
+        use rustix::fs::inotify::{CreateFlags, WatchFlags, add_watch, init};
+        use std::os::fd::AsRawFd;
+
+        let fd = init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).ok()?;
+        let watch = add_watch(
+            &fd,
+            format!("/proc/self/fd/{}", file.as_raw_fd()),
+            WatchFlags::MODIFY
+                | WatchFlags::CLOSE_WRITE
+                | WatchFlags::ATTRIB
+                | WatchFlags::MOVE_SELF
+                | WatchFlags::DELETE_SELF,
+        )
+        .ok()?;
+        Some(Arc::new(Self {
+            fd,
+            watch,
+            lost: AtomicBool::new(false),
+        }))
+    }
+
+    pub(crate) fn active(&self) -> bool {
+        !self.lost.load(Ordering::Relaxed)
+    }
+
+    fn changed(&self) -> Option<bool> {
+        use rustix::fs::inotify::{ReadFlags, Reader};
+        use std::mem::MaybeUninit;
+
+        let mut buf = [MaybeUninit::uninit(); 1024];
+        let mut reader = Reader::new(&self.fd, &mut buf);
+        let writes = ReadFlags::MODIFY | ReadFlags::CLOSE_WRITE;
+        let mut changed = false;
+        for _ in 0..64 {
+            let event = match reader.next() {
+                Ok(event) => event,
+                Err(rustix::io::Errno::AGAIN) => return Some(changed),
+                Err(_) => return None,
+            };
+            if event.wd() != self.watch
+                || event.file_name().is_some()
+                || event.events().is_empty()
+                || !writes.contains(event.events())
+            {
+                // Identity changes and queue loss use the normal refresh fallback.
+                return None;
+            }
+            changed = true;
+        }
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub(crate) struct AgyFirstChildWake {
+    source: Option<Arc<AgyRosterWatch>>,
+    dirty: bool,
+    next_refresh: Option<Instant>,
+}
+
+#[cfg(target_os = "linux")]
+impl AgyFirstChildWake {
+    pub(crate) fn replace(&mut self, source: Option<Arc<AgyRosterWatch>>) {
+        let source = source.filter(|source| source.active());
+        if !self
+            .source
+            .as_ref()
+            .zip(source.as_ref())
+            .is_some_and(|(before, after)| Arc::ptr_eq(before, after))
+        {
+            self.dirty = false;
+        }
+        self.source = source;
+    }
+
+    pub(crate) fn fd(&self) -> Option<BorrowedFd<'_>> {
+        // Once dirty, wait for the permitted refresh without waking on each write.
+        self.source
+            .as_ref()
+            .filter(|_| !self.dirty)
+            .map(|source| source.fd.as_fd())
+    }
+
+    pub(crate) fn refresh(&mut self, readable: bool, idle: bool, now: Instant) -> bool {
+        let dispatch = idle && self.next_refresh.is_none_or(|after| now >= after);
+        if (readable || (dispatch && self.dirty))
+            && let Some(source) = &self.source
+        {
+            if let Some(changed) = source.changed() {
+                self.dirty |= changed;
+            } else {
+                source.lost.store(true, Ordering::Relaxed);
+                self.replace(None);
+            }
+        }
+        if dispatch && std::mem::take(&mut self.dirty) {
+            self.next_refresh = Some(now + Duration::from_secs(1));
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +319,45 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn first_child_wake_coalesces_writes_and_discards_a_lost_watch() {
+        let dir = Dir::new("j");
+        let file = dir.0.join("parent");
+        fs::write(&file, b"empty roster").unwrap();
+        let source = AgyRosterWatch::arm(&fs::File::open(&file).unwrap()).unwrap();
+        let mut wake = AgyFirstChildWake::default();
+        wake.replace(Some(source.clone()));
+        let ready = |wake: &AgyFirstChildWake| {
+            wake.fd().is_some_and(|fd| {
+                let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+                poll(&mut fds, Some(&timespec(Duration::ZERO))).unwrap() > 0
+            })
+        };
+        let now = Instant::now();
+        fs::write(dir.0.join("foreign"), b"other transcript").unwrap();
+        assert!(!ready(&wake));
+
+        fs::write(&file, b"write while busy").unwrap();
+        assert!(ready(&wake));
+        assert!(!wake.refresh(true, false, now));
+        assert!(wake.fd().is_none());
+        fs::write(&file, b"second write").unwrap();
+        assert!(wake.refresh(false, true, now));
+        assert!(!wake.refresh(ready(&wake), true, now));
+
+        fs::write(&file, b"write during the rate limit").unwrap();
+        assert!(ready(&wake));
+        assert!(!wake.refresh(true, true, now));
+        fs::rename(&file, dir.0.join("moved")).unwrap();
+        fs::write(&file, b"unverified replacement").unwrap();
+        assert!(!wake.refresh(false, true, now + Duration::from_secs(1)));
+        assert!(wake.fd().is_none());
+        assert!(!source.active());
+        wake.replace(Some(source));
+        assert!(wake.fd().is_none());
     }
 
     #[test]

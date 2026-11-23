@@ -96,6 +96,8 @@ fn run_with_source_writer(
         room.clear();
     }
     let mut requested = true;
+    #[cfg(target_os = "linux")]
+    let mut agy_first_child_wake = crate::wakeup::AgyFirstChildWake::default();
     let mut deadline = Instant::now();
     let mut scope_sample = None;
     let mut read = attention::load(repo, &room);
@@ -186,8 +188,14 @@ fn run_with_source_writer(
             } else {
                 AgyDetailFrame::Unchanged
             };
+            #[cfg(target_os = "linux")]
+            if changed || checkout_changed || rejected_native || !board.phase.retains_agy_detail() {
+                agy_first_child_wake.replace(None);
+            }
             let mut native_projection = None;
             if let Some(reading) = native {
+                #[cfg(target_os = "linux")]
+                agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
                 native_projection = Some(reading.projection);
                 if accepted_refresh {
                     checked_agy = reading.agy;
@@ -467,12 +475,26 @@ fn run_with_source_writer(
                 break;
             }
             if let Some(terminal) = &mut terminal {
-                let (keys, woken) = terminal.wait_woken(
+                #[cfg(target_os = "linux")]
+                let native_fd = agy_first_child_wake.fd();
+                #[cfg(not(target_os = "linux"))]
+                let native_fd = None;
+                let (keys, woken, _native_ready) = terminal.wait_woken(
                     deadline
                         .saturating_duration_since(Instant::now())
                         .min(Duration::from_millis(100)),
                     wake.as_ref(),
+                    native_fd,
                 )?;
+                #[cfg(target_os = "linux")]
+                let woken = {
+                    let idle = board.as_ref().is_some_and(|board| !board.worker.busy());
+                    // Settle the current authoritative paint before scheduling
+                    // another job from a burst of transcript writes.
+                    let native_woken =
+                        agy_first_child_wake.refresh(_native_ready, idle, Instant::now());
+                    woken || native_woken
+                };
                 let mut refresh = woken;
                 let mut collect_ready = false;
                 let mut scope = InputScope {
@@ -1138,7 +1160,7 @@ fn run_with_source_writer(
 }
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const EVENT_BACKED_FALLBACK: Duration = Duration::from_secs(30);
+pub(crate) const EVENT_BACKED_FALLBACK: Duration = Duration::from_secs(30);
 
 fn refresh_interval(event_backed: bool, fresh: bool, bounded_retry: bool) -> Duration {
     if event_backed && fresh && !bounded_retry {
@@ -9289,6 +9311,7 @@ mod tests {
         let bin = tmp.0.join("bin");
         let log = tmp.0.join("tmux-calls.log");
         let counters = tmp.0.join("counters.txt");
+        let watch_pid = tmp.0.join("watch-pid");
         let gemini = home.join(".gemini");
         let app_root = gemini.join("antigravity-cli");
         let presence = app_root.join("presence");
@@ -9493,6 +9516,15 @@ join "$@"; call=$r
 is() { join "$@"; [ "$call" = "$r" ]; }
 log=${OMS_FAKE_TMUX_LOG:-}
 [ -z "$log" ] || printf '%s\n' "$*" >> "$log"
+stall=${OMS_FAKE_STALL_CAPTURE:-}
+stall_ticket() {
+  [ -n "$stall" ] && [ -e "$stall" ] && /bin/cat "$stall"
+}
+hold_capture() {
+  ticket=$1
+  printf '%s\n%s' "$ticket" "$$" > "${OMS_FAKE_CAPTURE_ENTERED?}"
+  while [ -e "$stall" ] && [ "$(/bin/cat "$stall" 2>/dev/null)" = "$ticket" ]; do /bin/sleep 0.01; done
+}
 quota=${OMS_FAKE_QUOTA_STAGE:-}
 stage=
 if [ -n "$quota" ] && [ -e "$quota" ]; then IFS= read -r stage < "$quota" || :; fi
@@ -9503,6 +9535,9 @@ SERVER="#{session_id}$T#{pid}$T#{socket_path}$T."
 WATCH="#{session_id}$T#{window_id}$T#{pane_pid}$T#{pane_dead}$T#{window_active}$T#{pane_in_mode}$T#{@oms_panel_main_watch}$T#{@oms_panel_main_attempt}$T#{@oms_panel_room}$T#{@oms_panel_repo}"
 if is list-panes -t %2 -F "$PANES"; then
   repo=${OMS_TEST_REPO?} room=${OMS_FAKE_ROOM?} attempt=${OMS_FAKE_ATTEMPT?} execution=${OMS_TEST_EXECUTION?}
+  if [ -n "$stall" ] && [ -e "$stall.sampled" ] && [ "$(stall_ticket)" = native-after-sample ]; then
+    hold_capture native-after-sample
+  fi
   printf '$1\t@1\t%%2\t%s\t0\t1\t%s\t%%1\tcodex\t%s\t%s\t%s\t.\n' "$PPID" "$attempt" "$attempt" "$room" "$repo"
   printf '$1\t@1\t%%1\t%s\t0\t0\t%s\t%%1\tcodex\t%s\t%s\t%s\t.\t%s\n' "$PPID" "$attempt" "$attempt" "$room" "$repo" "$execution"
 elif is list-panes -s -t %2 -F "$SESSION"; then
@@ -9511,7 +9546,9 @@ elif is list-panes -s -t %2 -F "$SESSION"; then
   printf '$1\t@1\t%%2\t%s\t0\t1\t%%1\t%s\tcodex\t%s\t%s\t\t\t0\t.__\n' "$PPID" "$attempt" "$attempt" "$room"
   window=@4
   if [ -n "${OMS_FAKE_LEAD_WINDOW+x}" ]; then IFS= read -r window < "$OMS_FAKE_LEAD_WINDOW" || :; fi
-  printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+  if [ "$window" != absent ]; then
+    printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
+  fi
 elif is display-message -p -t '$1' "$SERVER" ';' show-options -v -t '$1' @oms_panel_repo; then
   repo=${OMS_TEST_REPO?}
   printf '$1\t%s\tfake-socket\t.\n%s\n' "$PPID" "$repo"
@@ -9544,11 +9581,13 @@ elif { [ "$stage" = dialog ] || [ "$stage" = confirm ]; } && is capture-pane -p 
 elif is capture-pane -p -t %1; then
   printf '› \n\n  GPT-6.2-Sol high · Context 9%% left · weekly 13%% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts\n'
 elif is capture-pane -p -t %4 || is capture-pane -p -J -S -100 -t %4; then
-  stall=${OMS_FAKE_STALL_CAPTURE:-}
-  if [ -n "$stall" ] && is capture-pane -p -t %4 && [ -e "$stall" ]; then
-    ticket=$(/bin/cat "$stall")
-    printf '%s\n%s' "$ticket" "$$" > "${OMS_FAKE_CAPTURE_ENTERED?}"
-    while [ -e "$stall" ] && [ "$(/bin/cat "$stall" 2>/dev/null)" = "$ticket" ]; do /bin/sleep 0.01; done
+  if [ -n "$stall" ] && [ -e "$stall" ]; then
+    ticket=$(stall_ticket)
+    if [ "$ticket" = native-after-sample ]; then
+      if is capture-pane -p -J -S -100 -t %4; then : > "$stall.sampled"; fi
+    elif is capture-pane -p -t %4; then
+      hold_capture "$ticket"
+    fi
   fi
   /bin/cat "${OMS_FAKE_PROMPT_FILE?}"
   if [ -n "${OMS_FAKE_PROVIDER_MODEL+x}" ]; then
@@ -9654,6 +9693,7 @@ fi
                        drive: &mut PtyDriver<'_>|
          -> ([usize; 8], String) {
             let _ = std::fs::remove_file(&stall_capture);
+            let _ = std::fs::remove_file(stall_capture.with_extension("sampled"));
             let _ = std::fs::remove_file(&capture_entered);
             let _ = std::fs::remove_file(&quota_stage);
             if first_capture_held {
@@ -9722,6 +9762,7 @@ fi
                 .stdout(slave)
                 .stderr(Stdio::inherit());
             let mut child = pty_cmd.spawn().unwrap();
+            std::fs::write(&watch_pid, child.id().to_string()).unwrap();
             // The command holds the last parent copies of the slave.
             drop(pty_cmd);
 
@@ -10565,6 +10606,175 @@ fi
         assert!(!detail_log.contains("UNEXPECTED:"), "{detail_log}");
         assert_eq!(detail_counts[2], 3 * detail_counts[1] + 1);
         assert_eq!(detail_counts[3], 0);
+
+        // A markerless typed Turn opens the exact bounded parent roster.
+        // It starts empty so only a provider-native write can reveal its first child.
+        let transcript = brain
+            .join(lead_id)
+            .join(".system_generated/logs/transcript.jsonl");
+        let prepare_empty_roster = |markerless: bool| {
+            std::fs::write(&lead_window, "@4").unwrap();
+            if markerless {
+                std::fs::write(&prompt_file, "Antigravity ready\n").unwrap();
+            } else {
+                write_prompt(&prompt_line);
+            }
+            write_jsonl(lead_id, "transcript.jsonl", &detail_lead[..1]);
+        };
+        let append = |path: &Path, rows: &[Value]| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            for row in rows {
+                writeln!(&mut file, "{row}").unwrap();
+            }
+        };
+        let start_child = |index| {
+            let mut spawn = [detail_lead[5].clone(), detail_lead[6].clone()];
+            spawn[0]["step_index"] = json!(index);
+            spawn[1]["step_index"] = json!(index + 1);
+            spawn
+        };
+        let has_first_child =
+            |screen: &[String]| screen.iter().any(|line| line.contains("Bound Researcher"));
+        let count_observations = || {
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "capture-pane -p -t %4")
+                .count()
+        };
+        let watch_armed = || {
+            let pid = std::fs::read_to_string(&watch_pid).unwrap();
+            std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .flatten()
+                .any(|fd| {
+                    std::fs::read_link(fd.path())
+                        .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                })
+        };
+        let quiet = |rx: &mpsc::Receiver<Vec<u8>>, duration| {
+            let snapshot = std::fs::read_to_string(&log).unwrap();
+            let until = Instant::now() + duration;
+            while let Some(wait) = until.checked_duration_since(Instant::now()) {
+                let _ = rx.recv_timeout(wait);
+                assert_eq!(std::fs::read_to_string(&log).unwrap(), snapshot);
+            }
+        };
+        prepare_empty_roster(true);
+        set_model("First child fixture");
+        let (_, first_child_log) = run_pty(false, false, &mut |_, stream, screen, rx| {
+            // A markerless recovered child proves its presence, with no trusted role.
+            let markerless_child = |s: &[String]| {
+                s.iter()
+                    .any(|line| line.contains("Worker") && line.contains("work unreported"))
+            };
+            wait_for(stream, screen, rx, "accepted empty roster", &mut |s| {
+                s.iter().any(|line| line.contains("First child fixture")) && !markerless_child(s)
+            });
+            assert!(
+                watch_armed(),
+                "no watch on the accepted markerless empty roster"
+            );
+            let foreign = brain
+                .join(child_b)
+                .join(".system_generated/logs/transcript.jsonl");
+            append(&foreign, &start_child(1));
+            // No key, OMS notification, or periodic observation during this quiet interval.
+            quiet(rx, super::REFRESH_INTERVAL);
+            let captures = count_observations();
+            let began = Instant::now();
+            append(&transcript, &start_child(1));
+            wait_for(stream, screen, rx, "native wake capture", &mut |_| {
+                count_observations() > captures
+            });
+            let captured = Instant::now();
+            wait_for(stream, screen, rx, "provider-only first child", &mut |s| {
+                markerless_child(s)
+            });
+            let elapsed = began.elapsed();
+            assert!(elapsed < super::REFRESH_INTERVAL, "{elapsed:?}");
+            assert_eq!(count_observations(), captures + 1);
+            eprintln!(
+                "synthetic AGY append-to-first-row {elapsed:?}, observed capture-to-row {:?}",
+                captured.elapsed()
+            );
+        });
+        assert!(!first_child_log.contains("UNEXPECTED:"));
+
+        prepare_empty_roster(false);
+        set_model("Native burst fixture");
+        let (_, native_burst_log) = run_pty(false, false, &mut |_, stream, screen, rx| {
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "accepted empty burst roster",
+                &mut |s| s.iter().any(|line| line.contains("Native burst fixture")),
+            );
+            assert!(
+                watch_armed(),
+                "no watch on the accepted anchored empty roster"
+            );
+            let first = count_observations();
+            set_model("Accepted empty sample");
+            std::fs::write(&stall_capture, "native-after-sample").unwrap();
+            let neutral = |index| {
+                json!({"step_index":index,"source":"MODEL","type":"PLANNER_RESPONSE",
+                    "status":"DONE","content":"fixture progress"})
+            };
+            append(&transcript, &[neutral(1)]);
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "native refresh held after empty sample",
+                &mut |_| entered("native-after-sample"),
+            );
+            for index in 2..22 {
+                append(&transcript, &[neutral(index)]);
+            }
+            append(&transcript, &start_child(22));
+            assert_eq!(count_observations(), first + 1);
+            set_model("Native burst fixture");
+            std::fs::write(&stall_capture, "native-follow-up").unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "accepted empty frame while follow-up held",
+                &mut |s| {
+                    entered("native-follow-up")
+                        && s.iter().any(|line| line.contains("Accepted empty sample"))
+                        && !has_first_child(s)
+                },
+            );
+            std::fs::remove_file(&stall_capture).unwrap();
+            wait_for(
+                stream,
+                screen,
+                rx,
+                "authoritative first child after burst",
+                &mut |s| has_first_child(s),
+            );
+            quiet(rx, Duration::from_millis(1_100));
+            assert_eq!(count_observations(), first + 2);
+
+            // Re-arm from a newly accepted empty roster, then remove the Lead
+            // from the verified pane census. Its old inode cannot wake the Board.
+            prepare_empty_roster(false);
+            crate::wakeup::notify_wakeup(&repo);
+            wait_for(stream, screen, rx, "rearmed empty roster", &mut |s| {
+                s.iter().any(|line| line.contains("Native burst fixture")) && !has_first_child(s)
+            });
+            std::fs::write(&lead_window, "absent").unwrap();
+            crate::wakeup::notify_wakeup(&repo);
+            wait_for(stream, screen, rx, "retired AGY scope", &mut |s| {
+                s.iter().all(|line| !line.contains("Native burst fixture")) && !has_first_child(s)
+            });
+            append(&transcript, &start_child(1));
+            quiet(rx, Duration::from_millis(1_100));
+        });
+        assert!(!native_burst_log.contains("UNEXPECTED:"));
 
         let _ = holder.kill();
         let _ = holder.wait();
