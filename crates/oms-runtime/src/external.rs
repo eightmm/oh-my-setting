@@ -372,12 +372,12 @@ pub fn observe(rt: &Runtime<'_>, binding: &Value, refresh: bool) -> Result<Value
                 .iter()
                 .rev()
                 .find(|row| row.text("type") == "submitted");
-            let cluster = submitted.map_or_else(
+            let cluster_name = submitted.map_or_else(
                 || intent.text("cluster_name"),
                 |row| row.text("cluster_name"),
             );
             require(
-                cluster == id.text("cluster_name")
+                cluster_name == id.text("cluster_name")
                     && (intent.text("cluster_name").is_empty()
                         || intent.get("cluster_name") == id.get("cluster_name")),
                 "Slurm wait cluster changed",
