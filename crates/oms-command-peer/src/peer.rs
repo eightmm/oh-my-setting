@@ -103,6 +103,8 @@ pub(crate) const FLAGS: &[&str] = &[
     "json",
     "terminalize-resumed-repair",
     "team-requests",
+    "synthesis-json",
+    "output-json",
 ];
 pub(crate) fn parse(argv: &[OsString]) -> Result<Args> {
     let mut expanded = Vec::new();
@@ -142,6 +144,33 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
     let args = parse(argv)?;
     if args.has("team-requests") && tool != "peer-ask" {
         return fail("Team requests are supported only by read-only peer-ask");
+    }
+    if args.has("synthesis-json")
+        && (tool != "peer-ask"
+            || !args.has("synthesize")
+            || !args.has("deliberation")
+            || !args.has("require-complete")
+            || !args.has("debate")
+            || args.has("until-agreement")
+            || args.has("dry-run")
+            || args.has("export-only"))
+    {
+        return fail(
+            "--synthesis-json requires peer-ask --synthesize TARGET --deliberation --require-complete --debate N",
+        );
+    }
+    if args.has("output-json")
+        && (tool != "agent-call"
+            || args.has("debate")
+            || args.has("synthesize")
+            || args.has("until-agreement")
+            || args.has("dry-run")
+            || args.has("export-only")
+            || args.has("deliberation"))
+    {
+        return fail(
+            "--output-json requires one completed agent-call without council or dry-run options",
+        );
     }
     if args.has("help") {
         return Ok(out(help(tool).to_vec()));
@@ -539,7 +568,9 @@ pub(crate) fn prompt(
             body.untrusted("tool_result", "repository", "git diff", diff)?;
         }
     }
-    if args.has("gate") {
+    if args.has("synthesis-json") {
+        body.push_str("\nDiscuss the question before proposing tasks. Return nonempty sections, each headed with a colon: Alternatives:, Evidence:, Counterargument:, Verification:. Preserve uncertainty; task JSON alone is insufficient.\n");
+    } else if args.has("gate") {
         body.push_str(crate::review::GATE_INSTRUCTION);
     } else {
         body.push_str("\nAnswer:\nTradeoffs:\nEvidence:\nRisks:\nRecommendation:\nVerification:\n");
@@ -547,15 +578,41 @@ pub(crate) fn prompt(
     safety::outbound(body.as_bytes())?;
     Ok(body)
 }
+#[derive(Clone)]
 pub(crate) struct Seat {
     pub target: Target,
     pub route: providers::Route,
+    pub requested_model: String,
     pub artifact: PathBuf,
     pub answer: String,
     pub code: i32,
     pub complete: bool,
     pub quality: String,
     pub round: usize,
+    pub artifact_sha256: String,
+    pub output_start: usize,
+}
+impl Seat {
+    fn council_output(&self) -> Result<oms_command_plan::discussion::CouncilOutput> {
+        Ok(oms_command_plan::discussion::CouncilOutput {
+            provider: self.route.provider.clone(),
+            requested_model: self.requested_model.clone(),
+            round: self.round as u64,
+            artifact: self
+                .artifact
+                .file_name()
+                .and_then(|v| v.to_str())
+                .ok_or_else(|| Error::new(2, "council artifact filename unavailable"))?
+                .to_owned(),
+            artifact_sha256: self.artifact_sha256.clone(),
+            output_start: self.output_start,
+            output_bytes: self.answer.len(),
+            output_sha256: storage::hash(self.answer.as_bytes()),
+            complete: self.complete,
+            exit: self.code,
+            quality: self.quality.clone(),
+        })
+    }
 }
 pub(crate) fn index(repo: &Path, row: &V, context: &Context<'_>) -> Result<()> {
     storage::append(
@@ -618,6 +675,7 @@ pub(crate) fn call(
     if !dry(args, tool) && !args.has("export-only") {
         providers::bind_account(&mut route, repo)?;
     }
+    let requested_model = route.model.clone();
     let suffix = if round == 0 {
         String::new()
     } else {
@@ -688,6 +746,9 @@ pub(crate) fn call(
             complete: false,
             quality: "empty".into(),
             round,
+            artifact_sha256: String::new(),
+            output_start: 0,
+            requested_model,
         });
     }
     let before = process::git(context, repo, &["diff", "--binary", "HEAD", "--"]);
@@ -890,7 +951,10 @@ pub(crate) fn call(
         "truncated".into()
     };
     let mut bytes = header.into_bytes();
-    bytes.extend_from_slice(format!("\n## Output\n\n{answer}\n").as_bytes());
+    bytes.extend_from_slice(b"\n## Output\n\n");
+    let output_start = bytes.len();
+    bytes.extend_from_slice(answer.as_bytes());
+    bytes.push(b'\n');
     if !result.stderr.is_empty() {
         bytes.extend_from_slice(b"\n## Diagnostics\n\n");
         bytes.extend_from_slice(&safety::redact(&result.stderr)?);
@@ -901,6 +965,7 @@ pub(crate) fn call(
             seat_resolve(repo, &cmd_key, context.interrupted)?;
         }
     }
+    let artifact_sha256 = storage::hash(&bytes);
     storage::write(repo, &artifact, bytes, true, context.interrupted)
         .map_err(publication_error("artifact write"))?;
     index(
@@ -961,6 +1026,9 @@ pub(crate) fn call(
         complete: result.complete,
         quality,
         round,
+        artifact_sha256,
+        output_start,
+        requested_model,
     })
 }
 pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<Output> {
@@ -983,6 +1051,13 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         resolved.set_value("thread", ident);
     }
     let args = &resolved;
+    let synthesis_json = args.has("synthesis-json");
+    if synthesis_json && dry(args, tool) {
+        return fail("--synthesis-json requires completed calls, not dry-run artifacts");
+    }
+    if args.has("output-json") && dry(args, tool) {
+        return fail("--output-json requires completed output, not a dry-run artifact");
+    }
     if args.has("interactive") {
         return fail("--interactive belongs to peer-delegate");
     }
@@ -1093,6 +1168,22 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     if targets.iter().all(|t| t.optional) {
         return fail("at least one seat must be required");
     }
+    if args.has("output-json") && (targets.len() != 1 || targets[0].optional) {
+        return fail("--output-json requires exactly one required provider");
+    }
+    if synthesis_json && targets.iter().any(|t| t.optional) {
+        return fail("--synthesis-json requires every declared council seat");
+    }
+    if synthesis_json
+        && targets
+            .iter()
+            .map(|target| &target.provider)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != targets.len()
+    {
+        return fail("--synthesis-json requires one seat per provider");
+    }
     let mut seen = BTreeSet::new();
     if targets
         .iter()
@@ -1124,6 +1215,14 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     }
     if args.has("deliberation") && rounds == 0 {
         return fail("--deliberation requires --debate");
+    }
+    if synthesis_json {
+        let target = Target::parse(args.required("synthesize")?)?;
+        if target.optional || target.model.is_empty() {
+            return fail("--synthesis-json requires an exact synthesis target model");
+        }
+        let mut route = providers::route(context, &target, "", "auto", "advisor")?;
+        providers::bind_account(&mut route, &repo)?;
     }
     if !dry(args, tool) && !args.has("export-only") {
         let mut valid = Vec::new();
@@ -1215,6 +1314,27 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             context,
         )?);
     }
+    if args.has("output-json") {
+        let result = &seats[0];
+        if result.code == 130 {
+            return Err(Error::new(130, "native output interrupted"));
+        }
+        if !result.complete || result.code != 0 || result.quality != "ok" {
+            return fail("native call did not complete with usable output");
+        }
+        let raw = oms_command_plan::discussion::encode_agent_output(
+            &question,
+            &run,
+            &result.council_output()?,
+        )
+        .map_err(|e| Error::new(e.code, e.message))?;
+        return Ok((0, raw, warnings));
+    }
+    let mut council_history = if synthesis_json {
+        seats.clone()
+    } else {
+        Vec::new()
+    };
     if !dry(args, tool) && !args.has("export-only") {
         for round in 1..=rounds {
             if seats
@@ -1241,7 +1361,11 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                     safety::truncate(&seat.answer, budget / seats.len()).as_bytes(),
                 )?);
             }
-            debate.push_str("\nAnswer:\nEvidence:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:\n");
+            if synthesis_json {
+                debate.push_str("\nReturn nonempty sections: Alternatives:, Evidence:, Counterargument:, Verification:, Changed from previous round:, Remaining disagreements:. State none explicitly for unchanged positions or absent disagreements; this does not establish consensus.\n");
+            } else {
+                debate.push_str("\nAnswer:\nEvidence:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:\n");
+            }
             if args.has("gate") {
                 debate.push_str(crate::review::GATE_INSTRUCTION);
             }
@@ -1267,7 +1391,10 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                     .contains("changed from previous round:\nnone")
             });
             seats = next;
-            if stable {
+            if synthesis_json {
+                council_history.extend(seats.iter().cloned());
+            }
+            if stable && !synthesis_json {
                 break;
             }
         }
@@ -1289,6 +1416,29 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         }
     }
     if args.has("synthesize") {
+        if synthesis_json {
+            if council_history.iter().any(|seat| seat.code == 130) {
+                return Err(Error::new(
+                    130,
+                    "council interrupted; synthesis was not started",
+                ));
+            }
+            if council_history.len() != targets.len() * (rounds + 1)
+                || council_history
+                    .iter()
+                    .any(|s| !s.complete || s.code != 0 || s.quality != "ok")
+            {
+                return fail("council rounds are incomplete; synthesis was not started");
+            }
+            for seat in &council_history {
+                oms_command_plan::discussion::lint_council_response(
+                    &seat.answer,
+                    seat.round as u64,
+                    false,
+                )
+                .map_err(|e| Error::new(e.code, e.message))?;
+            }
+        }
         let target = Target::parse(args.get("synthesize"))?;
         let mut synthesis = format!(
             "Synthesize these independent answers. Preserve disagreements, missing evidence and uncertainty. Question:\n{question}\n"
@@ -1299,6 +1449,9 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                 "peer answer",
                 safety::truncate(&seat.answer, 16384).as_bytes(),
             )?);
+        }
+        if synthesis_json {
+            synthesis.push_str("\nReturn nonempty sections: Decision:, Evidence:, Remaining disagreements:, Verification:. Preserve unresolved evidence and dissent. This is an advisory synthesis, not acceptance or authority to act.\n");
         }
         let mut options = args.clone();
         options.remove("model");
@@ -1316,6 +1469,29 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             &mut warnings,
             context,
         )?;
+        if synthesis_json {
+            if result.code == 130 {
+                return Err(Error::new(130, "council synthesis interrupted"));
+            }
+            if !result.complete || result.code != 0 || result.quality != "ok" {
+                return fail("council synthesis did not complete with usable output");
+            }
+            oms_command_plan::discussion::lint_council_response(&result.answer, 0, true)
+                .map_err(|e| Error::new(e.code, e.message))?;
+            let participants = council_history
+                .iter()
+                .map(Seat::council_output)
+                .collect::<Result<Vec<_>>>()?;
+            let raw = oms_command_plan::discussion::encode_council_synthesis(
+                &question,
+                &run,
+                rounds as u64,
+                &participants,
+                &result.council_output()?,
+            )
+            .map_err(|e| Error::new(e.code, e.message))?;
+            return Ok((0, raw, warnings));
+        }
         output.push_str(&format!(
             "synthesis: {}\n{}\n",
             result.artifact.display(),
@@ -1341,6 +1517,16 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         "{tool}: {usable}/{} target(s) answered, {families} independent model family(ies)\n",
         seats.len()
     ));
+    if tool == "agent-call" {
+        // Native references follow all untrusted prose. Existing autonomy
+        // consumers select the last artifact line, never a provider's claim.
+        for seat in &seats {
+            output.push_str(&format!(
+                "artifact: {}\n",
+                repo.join(&seat.artifact).display()
+            ));
+        }
+    }
     let complete = seats
         .iter()
         .all(|s| s.target.optional || s.complete && s.code == 0 && s.quality == "ok");

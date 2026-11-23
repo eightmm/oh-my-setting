@@ -75,6 +75,40 @@ The crate reexports native completion/decision/retirement APIs, task packet and
 consumer APIs, task verification observations/fingerprints, and work-inspection
 projections instead of creating alternate authorities for those records.
 
+## Discussion before decomposition
+
+`plan-from-spec --collaboration auto` runs the existing Codex/Claude/Antigravity
+council through its initial answers and one rebuttal round, then explicitly
+requests synthesis on the planner's resolved advisor route. The synthesis and
+decomposition share the exact requested model and effort; those settings do not
+override the other council seats. Defaults and explicit model names go through
+the existing registry and transport checks, without an extra GPT-generation
+allowlist. Autopilot retains one implementation transport and a different gated
+review provider. The mode remains explicit; omission selects `off`.
+
+The additive `peer-ask --synthesis-json` protocol binds the exact question, run,
+complete provider/round matrix, requested synthesis route, native artifact bytes
+and output byte ranges. Missing, refused, incomplete or malformed observations
+stop before decomposition. Section lint preserves alternatives, evidence,
+counterargument, verification, deltas and disagreements for parent review; it
+does not prove correctness, consensus or actual served-model independence.
+
+Every decomposition call uses additive `agent-call --output-json`, backed by the
+same native output validator and a fresh artifact directory. Only the validated
+stdout byte range reaches the task JSON parser. Task-shaped JSON in the prompt,
+contract or diagnostics cannot become the proposed work; incomplete, refused,
+timed-out and nonzero calls stop first. Ordinary peer text output remains available.
+
+The native decision catalog retains a digest-addressed discussion manifest.
+The resulting proposal's optional `discussion` reference binds that manifest to
+its spec, prior plan, base and allowed envelope. Generation revalidates every
+source after decomposition; direct Plan apply, exact replay and autopilot resume
+also validate retained bytes without another provider call. Applied tasks retain
+the same reference. Auto apply/resume require it, while legacy proposals without
+the field remain usable outside auto mode. Reviewed proposal SHA/CAS and fresh
+acceptance remain separate authority boundaries; discussion never applies tasks
+or starts an unbounded next cycle.
+
 ## Campaign usage admission
 
 Campaigns may add `usage` inside the existing immutable manifest `budget`:

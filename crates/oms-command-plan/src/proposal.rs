@@ -31,6 +31,11 @@ impl Plan<'_> {
             "proposal bytes changed after review",
         )?;
         let p = json::parse_legacy(&raw, 1024 * 1024)?;
+        if p.opt("discussion").is_some() {
+            // Typed native lineage has one unambiguous interpretation at both
+            // entry points; retain legacy parsing only for legacy proposals.
+            json::parse_bounded(&raw, 1024 * 1024)?;
+        }
         json::keys(
             &p,
             &[
@@ -44,12 +49,13 @@ impl Plan<'_> {
                 "acceptance_files",
                 "tasks",
             ],
-            &["issue"],
+            &["issue", "discussion"],
         )?;
         require(
             p.get("schema").is_int(1) && p.text("kind") == "agent-plan-proposal",
             "proposal has an unsupported schema/kind",
         )?;
+        crate::discussion::validate_proposal(&self.store, &p)?;
         let spec = json::digest(p.get("spec_sha256"))?;
         require(
             crate::repository::commit(p.text("base_sha")),
@@ -221,6 +227,9 @@ impl Plan<'_> {
                 route,
                 &self.context.ts,
             )?;
+            if let Some(reference) = p.opt("discussion") {
+                t.set("discussion", reference.clone())?;
+            }
             if row.opt("resources").is_some()
                 || row.opt("contracts").is_some()
                 || row.opt("priority").is_some()
@@ -317,6 +326,10 @@ impl Plan<'_> {
             )?;
             for row in &prepared {
                 let current = s.task(row.text("id"))?;
+                require(
+                    current.get("discussion") == row.get("discussion"),
+                    "existing task discussion differs from reviewed proposal",
+                )?;
                 for field in [
                     "id",
                     "title",
