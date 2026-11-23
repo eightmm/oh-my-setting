@@ -509,6 +509,21 @@ retained for the same Room is marked `last observed`. Detail parses live
 provider-stream activity for running calls and shows a What it did summary for
 finished calls; tree rows include the latest event.
 
+Headless calls with a named account bind their usage receipt to the selected
+private account-home directory generation. Re-registering an alias to another
+home, replacing that directory, or losing its proof breaks cumulative token and
+cost attribution. A later complete observation in the same proven home can
+anchor subsequent deltas. Missing birth-time support leaves that continuity
+unknown. Ordinary files changing within the directory do not change its
+generation; this is home continuity, not verification of the logged-in billing
+account or effective child permissions. A home change observed during execution
+retains an unknown receipt and the executor's cleanup evidence, then stops
+without automatically retrying account overflow or model fallback.
+
+Receipts store a scope digest without the account-home path. Shared repositories
+need compatible readers before these calls run; see the
+[usage schema compatibility contract](../crates/oms-command-telemetry/README.md#lifetime-provider-usage-receipts).
+
 When space permits, the Weekly quota strip includes activity for each connected
 lead. Wide boards spell out `working`, `idle`, `unknown`, `pending`, or `stale`.
 When the words exceed the available width, the strip uses the suffixes `*`,

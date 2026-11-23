@@ -3742,6 +3742,170 @@ fn provider_accounts_select_pin_overflow_and_validate() {
 }
 
 #[test]
+fn provider_usage_follows_bound_account_home_generation() {
+    // The canonical account fixture previously exercised selection with no
+    // provider counters. This covers the actual headless producer -> intent ->
+    // durable receipt -> per-attempt/ledger projection across registrations.
+    account_isolated(
+        "provider_usage_follows_bound_account_home_generation",
+        &[("OMS_RESUME_SESSION".into(), "continuity-thread".into())],
+        |home| {
+            use oms_command_telemetry::store::{physical, usage};
+            let repo = account_repo();
+            let config = home.join(".config/oh-my-setting/provider-accounts.json");
+            let original = home.join("acc/codex-work");
+            let replacement = home.join("acc/codex-replacement");
+            fs::create_dir(&replacement).unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(home.join("bin/codex"), concat!(
+                "#!/bin/sh\n",
+                "printf 'codex|%s\\n' \"$CODEX_HOME\" >> \"$HOME/calls.log\"\n",
+                "if [ -f \"$HOME/replace-account-home\" ]; then\n",
+                "  mv \"$CODEX_HOME\" \"$CODEX_HOME.during-call\" || exit 81\n",
+                "  mkdir -m 700 \"$CODEX_HOME\" || exit 82\n",
+                "fi\n",
+                "n=$(cat \"$HOME/usage-total\")\n",
+                "printf '{\"type\":\"thread.started\",\"thread_id\":\"continuity-thread\"}\\n'\n",
+                "printf '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\\n'\n",
+                "printf '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":%s,\"output_tokens\":0,\"cached_input_tokens\":0,\"total_tokens\":%s}}\\n' \"$n\" \"$n\"\n",
+                "if [ -f \"$HOME/replace-account-home\" ]; then echo 'rate limit reached' >&2; exit 1; fi\n",
+            )).unwrap();
+            let invoke = |total: u64| {
+                fs::write(home.join("usage-total"), total.to_string()).unwrap();
+                account_delegate(
+                    &repo,
+                    &[
+                        "--to",
+                        "codex",
+                        "--account",
+                        "work",
+                        "--fallback-model",
+                        "fallback-fixture",
+                    ],
+                )
+            };
+            let assert_latest = |expected, phase| {
+                let projected = usage::load(&repo.0).unwrap();
+                let call = projected.calls.last().unwrap();
+                assert_eq!(call.receipt.identity.account.as_deref(), Some("work"));
+                assert_eq!(call.receipt.phase, phase);
+                assert_eq!(call.tokens, expected);
+                let attempt = call.receipt.identity.attempt_id.as_deref().unwrap();
+                assert_eq!(
+                    projected
+                        .attributed_calls()
+                        .iter()
+                        .find(|row| row.attempt_id == attempt)
+                        .unwrap()
+                        .usage
+                        .total_tokens,
+                    expected
+                );
+                let intents = physical::load(&repo.0, &STOP).unwrap();
+                assert_eq!(
+                    intents
+                        .iter()
+                        .find(|intent| intent.identity.call_id == call.receipt.identity.call_id)
+                        .unwrap()
+                        .identity,
+                    call.receipt.identity
+                );
+                call.receipt.identity.account_scope_sha256.clone()
+            };
+            let first = invoke(100);
+            assert_eq!(first.0, 0, "{}", message(&first));
+            if fs::metadata(&original).unwrap().created().is_err() {
+                assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
+                let next = invoke(120);
+                assert_eq!(next.0, 0, "{}", message(&next));
+                assert_eq!(assert_latest(None, usage::Phase::Unknown), None);
+                return;
+            }
+            let first_scope = assert_latest(None, usage::Phase::Final).unwrap();
+            assert_eq!(first_scope.len(), 64);
+            // Ordinary contents change; the directory generation remains stable.
+            fs::write(original.join("fixture-config"), "updated\n").unwrap();
+            let second = invoke(130);
+            assert_eq!(second.0, 0, "{}", message(&second));
+            assert_eq!(
+                assert_latest(Some(30), usage::Phase::Final).as_ref(),
+                Some(&first_scope)
+            );
+            let registered = fs::read_to_string(&config).unwrap();
+            fs::write(
+                &config,
+                registered.replace("acc/codex-work", "acc/codex-replacement"),
+            )
+            .unwrap();
+            let changed = invoke(500);
+            assert_eq!(changed.0, 0, "{}", message(&changed));
+            let changed_scope = assert_latest(None, usage::Phase::Final).unwrap();
+            assert_ne!(changed_scope, first_scope);
+            let continued = invoke(540);
+            assert_eq!(continued.0, 0, "{}", message(&continued));
+            assert_eq!(
+                assert_latest(Some(40), usage::Phase::Final).as_ref(),
+                Some(&changed_scope)
+            );
+            // Identical canonical spelling is insufficient after replacement.
+            fs::rename(&replacement, home.join("acc/codex-replacement-old")).unwrap();
+            fs::create_dir(&replacement).unwrap();
+            fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700)).unwrap();
+            let replaced = invoke(600);
+            assert_eq!(replaced.0, 0, "{}", message(&replaced));
+            let replaced_scope = assert_latest(None, usage::Phase::Final).unwrap();
+            assert_ne!(replaced_scope, changed_scope);
+            let continued = invoke(650);
+            assert_eq!(continued.0, 0, "{}", message(&continued));
+            assert_eq!(
+                assert_latest(Some(50), usage::Phase::Final).as_ref(),
+                Some(&replaced_scope)
+            );
+            // A mid-call change preserves unknown liability and cleanup. Even a
+            // capacity-looking error must not trigger fallback/resend.
+            let before = account_log(home).len();
+            fs::write(home.join("replace-account-home"), "replace\n").unwrap();
+            let interrupted = invoke(700);
+            assert_ne!(interrupted.0, 0, "{}", message(&interrupted));
+            let output = String::from_utf8_lossy(&interrupted.1);
+            let report = fs::read_to_string(output.lines().next().unwrap()).unwrap();
+            assert!(
+                report.contains("home changed during invocation"),
+                "{report}"
+            );
+            assert_eq!(account_log(home).len(), before + 1);
+            assert_eq!(
+                assert_latest(None, usage::Phase::Unknown).as_ref(),
+                Some(&replaced_scope)
+            );
+            assert_eq!(
+                usage::load(&repo.0)
+                    .unwrap()
+                    .calls
+                    .last()
+                    .unwrap()
+                    .receipt
+                    .cleanup_complete,
+                Some(true)
+            );
+            fs::remove_file(home.join("replace-account-home")).unwrap();
+            let after = invoke(730);
+            assert_eq!(after.0, 0, "{}", message(&after));
+            assert_latest(None, usage::Phase::Final).unwrap();
+            let continued = invoke(750);
+            assert_eq!(continued.0, 0, "{}", message(&continued));
+            assert_latest(Some(20), usage::Phase::Final).unwrap();
+            let raw = fs::read_to_string(repo.0.join(usage::RECEIPTS)).unwrap();
+            assert!(
+                !raw.contains(&home.display().to_string()),
+                "home paths must not enter the ledger"
+            );
+            assert_eq!(usage::load(&repo.0).unwrap().calls.len(), 9);
+        },
+    );
+}
+
+#[test]
 fn claude_binding_refuses_credential_overrides_and_resume_guesses() {
     let key = format!("ANTHROPIC_{}", "API_KEY");
     account_isolated(

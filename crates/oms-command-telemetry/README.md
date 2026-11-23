@@ -163,6 +163,18 @@ write rather than forgetting lifetime spend. A pending receipt is durable
 before each physical provider invocation; a crash can therefore leave an
 unresolved liability without needing a completed artifact.
 
+Usage schema 3 and physical-call schema 4 add optional `account_scope_sha256`
+evidence to the immutable call identity. The headless producer records the
+selected named account's private home generation, not credentials or a billing
+identity. A changed or missing proof breaks cumulative token/cost baselines;
+missing proof cannot downgrade to an older alias-only baseline. Incomplete
+cumulative observations cannot anchor a following call. Schemas 1/2 usage and
+1/2/3 physical calls remain readable, and producers without this evidence retain
+their existing encoding. Mixed histories are validated as a whole. Older
+binaries refuse the new schemas, so upgrade every reader of the shared state
+before scoped calls run. Binary rollback must retain a compatible reader for
+that history; do not delete scope fields or history to bypass the version barrier.
+
 `store::budget` projects those receipts with canonical logical operations and
 outstanding physical intents. A matching call/operation identity is counted
 once, including an intent whose pending receipt was never published. The first
@@ -235,7 +247,8 @@ cannot bypass capacity. Normal receipt revisions remain independent.
 that same registry. Activation compares exact expected bytes and refuses all
 legacy dispatch, physical or receipt history whose custody has not been
 reconciled. It never deletes history or starts a new empty epoch over unknown
-work. Schema 2 blocks schema-1-only writers; bound physical records use schema 3.
+work. Schema 2 blocks schema-1-only writers; bound physical records use schema 3,
+or schema 4 when their immutable identity includes account-home evidence.
 Missing domains/claims, changed immutable bindings and unsupported outer legacy
 dispatch custody refuse while preserving bytes. No policy activates by default.
 

@@ -794,6 +794,7 @@ struct Bound {
     environment: Vec<(OsString, OsString)>,
     remove: Vec<OsString>,
     id: Option<String>,
+    home: Option<PathBuf>,
 }
 fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bound> {
     if spec.name == "claude"
@@ -805,7 +806,7 @@ fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bou
         return fail("credential environment overrides the selected Claude account");
     }
     Ok(Bound {
-        environment: vec![(spec.env.into(), location.into_os_string())],
+        environment: vec![(spec.env.into(), location.as_os_str().to_owned())],
         // A session directory override would leave transcripts outside the account.
         remove: if spec.name == "pi" {
             vec!["PI_CODING_AGENT_SESSION_DIR".into()]
@@ -813,7 +814,95 @@ fn bind(spec: &Isolated, home: &Path, id: &str, location: PathBuf) -> Result<Bou
             Vec::new()
         },
         id: Some(id.into()),
+        home: Some(location),
     })
+}
+
+/// Keep the selected directory open through execution. Its stable generation
+/// excludes mutable contents: login/config writes do not change this proof.
+/// As with native Codex home evidence, unavailable birth time stays unknown.
+struct AccountHome {
+    provider: String,
+    named: PathBuf,
+    physical: PathBuf,
+    directory: std::fs::File,
+    sha256: String,
+}
+impl AccountHome {
+    fn capture(provider: &str, named: &Path) -> Option<Self> {
+        if !owned_private(named) {
+            return None;
+        }
+        let physical = named.canonicalize().ok()?;
+        let directory = std::fs::File::from(
+            rustix::fs::open(
+                &physical,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .ok()?,
+        );
+        let sha256 = Self::digest(provider, &physical, &directory.metadata().ok()?)?;
+        let proof = Self {
+            provider: provider.into(),
+            named: named.into(),
+            physical,
+            directory,
+            sha256,
+        };
+        proof.current().then_some(proof)
+    }
+
+    fn digest(provider: &str, path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
+        if !metadata.is_dir()
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.mode() & 0o022 != 0
+            || metadata.ino() == 0
+        {
+            return None;
+        }
+        let birth = metadata
+            .created()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        if birth.is_zero() {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        digest.update(format!("oms-account-home-v1\0{provider}\0"));
+        digest.update(path.as_os_str().as_bytes());
+        digest.update(format!(
+            "\0{}\0{}\0{}\0{}\0{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.uid(),
+            birth.as_secs(),
+            birth.subsec_nanos(),
+        ));
+        Some(format!("{:x}", digest.finalize()))
+    }
+
+    fn current(&self) -> bool {
+        owned_private(&self.named)
+            && self.named.canonicalize().ok().as_ref() == Some(&self.physical)
+            && [
+                &self.directory.metadata(),
+                &std::fs::symlink_metadata(&self.physical),
+            ]
+            .into_iter()
+            .all(|metadata| {
+                metadata
+                    .as_ref()
+                    .ok()
+                    .and_then(|metadata| Self::digest(&self.provider, &self.physical, metadata))
+                    .as_deref()
+                    == Some(self.sha256.as_str())
+            })
+    }
 }
 pub(crate) type SessionEnv = (Vec<(OsString, OsString)>, Vec<OsString>, Option<String>);
 
@@ -2060,6 +2149,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             mut environment,
             remove,
             id: account,
+            home: account_home,
         } = bound;
         if let Some(id) = &account {
             route.account.clone_from(id);
@@ -2072,6 +2162,23 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         ]);
         environment.extend(transport.environment.clone());
         environment.extend(extra_env.iter().cloned());
+        if let (Some(home), Some(spec)) = (&account_home, isolated(&route.provider))
+            && environment
+                .iter()
+                .rev()
+                .find(|(key, _)| key == spec.env)
+                .is_none_or(|(_, value)| canonical(Path::new(value)) != canonical(home))
+        {
+            return fail("provider account home changed after selection");
+        }
+        let named_account = account
+            .as_deref()
+            .filter(|id| !id.is_empty() && *id != "default");
+        let account_home = named_account.and_then(|_| {
+            account_home
+                .as_deref()
+                .and_then(|home| AccountHome::capture(&route.provider, home))
+        });
         if let Ok(base) = crate::process::git(context, cwd, &["rev-parse", "HEAD"]) {
             environment.push((
                 "OMS_BASE_SHA".into(),
@@ -2158,6 +2265,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                     &usage_repo,
                     route,
                     account.as_deref(),
+                    account_home.as_ref().map(|home| home.sha256.as_str()),
                     write,
                     &extra_env,
                     context.interrupted,
@@ -2190,6 +2298,13 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
             context.interrupted,
         );
         pending_usage.fence(context.interrupted)?;
+        if account_home.as_ref().is_some_and(|home| !home.current()) {
+            let _ = crate::usage::finish(&usage_repo, usage_receipt, &[], false, None);
+            return Err(Error::new(
+                75,
+                "provider account home changed before launch; reconcile before retrying",
+            ));
+        }
         let started = std::time::Instant::now();
         let direct = matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
             && exec_argv == transport.argv;
@@ -2246,11 +2361,17 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         } else {
             decode_output(&route.provider, &result.stdout)
         };
+        let home_changed = account_home.as_ref().is_some_and(|home| !home.current());
+        let account_observed = named_account.is_none() || account_home.is_some();
         let accounting = crate::usage::finish(
             &usage_repo,
             usage_receipt,
             &result.stdout,
-            result.complete && terminal && (route.provider != "antigravity" || result.code == 0),
+            result.complete
+                && terminal
+                && !home_changed
+                && account_observed
+                && (route.provider != "antigravity" || result.code == 0),
             result.cleanup_complete,
         )
         .map_err(|error| {
@@ -2266,6 +2387,17 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         // completed invocation into a retry-eligible failure.
         let context_record = request_context
             .and_then(|mut prepared| prepared.returned(&usage_repo, true, context.interrupted));
+        if home_changed {
+            // The provider may have consumed the request. Preserve its unknown
+            // receipt and cleanup evidence, but do not retry overflow/fallback.
+            return Err(Error::new(
+                75,
+                "provider account home changed during invocation; reconcile before retrying",
+            ));
+        }
+        if !account_observed {
+            result.stderr.extend_from_slice(b"\nwarning: account-home continuity unavailable; usage attribution remains unknown\n");
+        }
         result.stdout = decoded.into_bytes();
         if !result.stdout.is_empty()
             && let Some(model) = configured
