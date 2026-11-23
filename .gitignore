@@ -1,4 +1,8 @@
 .env
+/.env.*
+!/.env.example
+!/.env.sample
+!/.env.template
 *.key
 *.pem
 *.log
@@ -11,6 +15,9 @@ custom-skills/slurm-hpc/references/cluster.generated.md
 node_modules/
 __pycache__/
 .DS_Store
+/CLAUDE.local.md
+/.claude/settings.local.json
+/.claude/agent-memory-local/
 .oms/
 /target/
 /crates/*/target
