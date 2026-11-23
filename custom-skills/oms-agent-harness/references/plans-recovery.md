@@ -17,6 +17,10 @@ oms agent-plan --repo . reclaim
 oms agent-plan --repo . reclaim --include-review
 ```
 
+In GitHub project mode (`oms github status`), `add`, `add-batch` and
+`apply-proposal` refuse a task without `--issue N`, a row `issue`, or a
+`--discovered-from` parent bound to one.
+
 When the active plan is stale because the same goal was completed outside its
 task transitions, retire its exact projection instead of calling `finish`,
 `block`, or `init` to make the display look current:

@@ -113,6 +113,32 @@ pub(crate) fn carry(s: &Store, o: &Options, author: &str, flag: &AtomicBool) -> 
         return Ok((0, out.into_bytes(), target.take_warnings()));
     }
     let name = o.value("--to");
+    const LONG: &str =
+        "the note is longer than 400 characters on one line; supersede it with a shorter one first";
+    let line = flat(&body);
+    // In GitHub project mode the reviewed pull request owns the decision
+    // record, so no local PROJECT.md is needed (the declaration may be tracked).
+    if name == "PROJECT.md"
+        && let Some(slug) = crate::github::mode(s, flag)
+    {
+        if line.chars().count() > 400 {
+            return err(LONG);
+        }
+        let section = crate::github::decision_section(&line, &e.event_id);
+        if o.has("--json") {
+            return Ok((
+                0,
+                json_line(
+                    &json!({"schema":1,"kind":"oms-memory-graduate","id":e.event_id,"to":name,"line":format!("- {line}"),"diff":[],"applied":false,"github_project":slug.to_string(),"pull_request_section":section}),
+                )?,
+                Vec::new(),
+            ));
+        }
+        return Ok(output(format!(
+            "{section}\nmemory: preview only; nothing was written. Put this section in the pull request that lands the change, then:\n    oms agent-memory retire --id {} --reason graduated",
+            e.event_id
+        )));
+    }
     let path = s.repo.join(&name);
     if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()) {
         return err(format!(
@@ -126,11 +152,8 @@ pub(crate) fn carry(s: &Store, o: &Options, author: &str, flag: &AtomicBool) -> 
     if before.last().is_some_and(String::is_empty) {
         before.pop();
     }
-    let line = flat(&body);
     if line.chars().count() > 400 {
-        return err(
-            "the note is longer than 400 characters on one line; supersede it with a shorter one first",
-        );
+        return err(LONG);
     }
     let item = format!("- {line}");
     if before.contains(&item) {

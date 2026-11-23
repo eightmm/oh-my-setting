@@ -12,6 +12,7 @@ mod cli;
 pub mod conflicts;
 pub mod contract;
 pub mod discovery;
+mod github;
 pub mod goal;
 pub mod handoff;
 mod install;
@@ -77,6 +78,7 @@ pub fn run_with_services(
         for name in [
             "repo",
             "apply",
+            "restamp",
             "validate-spec",
             "proposal",
             "context-pack",

@@ -562,6 +562,7 @@ dependencies = [
  "oms-command-telemetry",
  "oms-context",
  "oms-contract-markdown",
+ "oms-github",
  "oms-json",
  "oms-lock",
  "oms-safe-fs",
@@ -706,6 +707,7 @@ dependencies = [
  "oms-command-task",
  "oms-context",
  "oms-contract-markdown",
+ "oms-github",
  "oms-json",
  "oms-lock",
  "oms-reference",
@@ -751,6 +753,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "oms-context",
+ "oms-github",
  "oms-json",
  "oms-lock",
  "oms-safe-fs",
@@ -846,6 +849,7 @@ dependencies = [
  "chrono",
  "oms-context",
  "oms-contract-markdown",
+ "oms-github",
  "oms-json",
  "oms-lock",
  "oms-safe-fs",
@@ -983,6 +987,7 @@ dependencies = [
  "chrono",
  "oms-context",
  "oms-contract-markdown",
+ "oms-github",
  "oms-lock",
  "oms-safe-fs",
  "oms-scrub",
@@ -1073,6 +1078,13 @@ dependencies = [
  "oms-json",
  "regex",
  "unicode-general-category",
+]
+
+[[package]]
+name = "oms-github"
+version = "0.1.0"
+dependencies = [
+ "oms-json",
 ]
 
 [[package]]

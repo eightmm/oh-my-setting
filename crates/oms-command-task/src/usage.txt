@@ -30,6 +30,7 @@ Options:
                     of a task that is still being pursued. Without it a
                     different goal is refused; with it the Decisions section of
                     the new packet records the replaced task id and REASON.
+                    The same consent rebinds a packet to a different --issue.
   --skip-verify-run REASON
                     verify: do not run the stored command and record why.
                     The task remains active and is not marked verified.
@@ -47,6 +48,20 @@ Options:
   --source-session HASH
                     init/update/rotate: hash-only source session id
                     (16-64 lowercase hexadecimal characters).
+  --issue REF       init/rotate/update: bind a same-repository GitHub issue,
+                    given as N, '#N' (quote it in the shell) or owner/repo#N
+                    (N: 1-10 digits, no leading zero). The repository comes
+                    from the local origin remote; nothing contacts GitHub.
+                    A PROJECT.md "- GitHub project: owner/repo" under
+                    ## Collaboration must match origin; a committed
+                    .github/oms-project.md naming another repository (a
+                    fork's upstream) is ignored. A fork opts in only by
+                    committing its own declaration; a PROJECT.md naming the
+                    fork conflicts with the inherited file and is refused.
+                    Stored as github_issue: owner/repo#N, a reference only and
+                    never acceptance authority. Re-binding the same ref leaves
+                    the packet unchanged; archives keep the binding, and a
+                    rotated successor is bound only by its own --issue.
   --text TEXT       append: append a Current State bullet.
   --stdin           Read append text from stdin.
   --dedupe-key HASH  append: idempotent note key (64 lowercase hex).

@@ -2204,7 +2204,7 @@ pub(crate) fn init(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     if root.join(".oms/plan/tasks.json").is_file() {
         out.push_str("- A plan exists: 'oms agent-plan ready' for actionable tasks.\n");
     } else {
-        out.push_str("- To split work across agents: 'oms agent-plan add ...' then 'next --claim --provider NAME'.\n");
+        out.push_str("- To split work across agents: 'oms agent-plan add ...' (in GitHub project mode add --issue N) then 'next --claim --provider NAME'.\n");
     }
     out.push_str("- Distill verified repo lessons (build quirks, test invocation, domain rules) into project skills: 'oms skill-forge add --name oms-NAME' — evidence-backed only, all three CLIs load them natively.\n");
     if selected == "ml" {
