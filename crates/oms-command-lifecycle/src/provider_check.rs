@@ -2,6 +2,7 @@ use crate::{
     receipt::Paths,
     runtime::{self as r, Result},
 };
+use oms_command_providers_skills::model_probe;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -226,8 +227,6 @@ pub(crate) fn models(
                 .unwrap_or(paths.home.join(".cache"))
                 .join("oh-my-setting/capabilities")
         });
-    let effort_pattern = regex::Regex::new(r"\(([a-z][a-z0-9]*(?:\s*[,|]\s*[a-z][a-z0-9]*)+)\)")
-        .map_err(|_| r::Error(2, "invalid effort pattern".into()))?;
     for (provider, binary, family) in [
         ("codex", "codex", "openai"),
         ("claude", "claude", "anthropic"),
@@ -276,14 +275,12 @@ pub(crate) fn models(
         let mut reachable = false;
         let mut release = None;
         let mut catalog = Vec::<String>::new();
-        let mut mechanism = "absent";
-        let mut effort = Vec::<String>::new();
+        let mut evidence = model_probe::Evidence::absent();
         if let Some(program) = &found.as_ref().filter(|p| intact(p).unwrap_or(false)) {
-            let args: Vec<std::ffi::OsString> = if provider == "grok" {
-                vec!["--no-auto-update".into(), "version".into()]
-            } else {
-                vec!["--version".into()]
-            };
+            let args = model_probe::version_args(provider)
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
             let out = r::command(
                 program,
                 &args,
@@ -293,8 +290,8 @@ pub(crate) fn models(
                 Duration::from_secs(10),
             )?;
             r::check(flag)?;
-            usable = out.0 == 0;
-            if usable {
+            let version_code = out.0;
+            if version_code == 0 {
                 release = Some(
                     String::from_utf8_lossy(&out.1)
                         .lines()
@@ -306,13 +303,10 @@ pub(crate) fn models(
                         .collect::<String>(),
                 );
             }
-            let help: Vec<std::ffi::OsString> = match provider {
-                "codex" | "muse" => vec!["exec".into(), "--help".into()],
-                "kiro" => vec!["chat".into(), "--help".into()],
-                "goose" | "kilo" => vec!["run".into(), "--help".into()],
-                "grok" => vec!["--no-auto-update".into(), "--help".into()],
-                _ => vec!["--help".into()],
-            };
+            let help = model_probe::help_args(provider)
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
             let out = r::command(
                 program,
                 &help,
@@ -321,54 +315,10 @@ pub(crate) fn models(
                 flag,
                 Duration::from_secs(10),
             )?;
-            reachable = out.0 == 0;
             r::check(flag)?;
-            let text = String::from_utf8_lossy(&out.1);
-            usable |= reachable;
-            let control = match provider {
-                "claude" | "antigravity" | "grok" | "copilot" | "kiro" => "--effort",
-                "pi" | "cline" => "--thinking",
-                "droid" | "aider" | "muse" => "--reasoning-effort",
-                "kilo" => "--variant",
-                _ => "",
-            };
-            mechanism = if provider == "codex" {
-                "config"
-            } else if !control.is_empty() && text.contains(control) {
-                "flag"
-            } else {
-                "none"
-            };
-            if mechanism != "none" {
-                effort = match provider {
-                    "codex" | "claude" | "antigravity" | "grok" | "aider" | "muse" | "kiro" => {
-                        vec!["low", "medium", "high"]
-                    }
-                    "cline" => vec!["none", "low", "medium", "high", "xhigh"],
-                    "pi" | "copilot" | "droid" => vec!["low", "medium", "high", "xhigh", "max"],
-                    _ => vec![],
-                }
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
-                if mechanism == "flag" {
-                    let lines = text.lines().collect::<Vec<_>>();
-                    let pattern = &effort_pattern;
-                    for (i, line) in lines.iter().enumerate() {
-                        if line.contains(control) {
-                            let window = lines[i..lines.len().min(i + 3)].join(" ");
-                            if let Some(found) = pattern.captures(&window) {
-                                effort = found[1]
-                                    .split([',', '|'])
-                                    .map(str::trim)
-                                    .map(str::to_owned)
-                                    .collect();
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            evidence = model_probe::inspect(provider, version_code, out.0, &out.1);
+            usable = evidence.usable();
+            reachable = evidence.reachable;
             if live && usable && reachable {
                 if provider == "codex" {
                     probe_status = "failed";
@@ -491,14 +441,15 @@ pub(crate) fn models(
                 }
             }
         }
-        let snapshot = format!(
-            "binary_key={original}\neffort_mechanism={mechanism}\neffort_values={}\nmodels_probe={probe_status}\nprobed_at={}\n",
-            effort.join(" "),
+        let mut fields = evidence.cache_fields(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| r::Error(2, "clock unavailable".into()))?
-                .as_secs()
+                .as_secs(),
         );
+        fields.insert("binary_key".into(), original);
+        fields.insert("models_probe".into(), probe_status.into());
+        let snapshot = model_probe::cache_text(&fields);
         r::atomic(&cache_file, snapshot.as_bytes())?;
         if found.is_none() {
             warnings.push(format!("{provider}: provider binary is not installed"));
@@ -546,7 +497,7 @@ pub(crate) fn models(
         if standing == Some(false) {
             warnings.push(format!("{provider}: configured default is not routable (previous generation or foreign family)"));
         }
-        rows.push(json!({"provider":provider,"binary":binary,"installed":found.is_some(),"usable":usable,"version":release,"provider_default_reachable":reachable,"family":family,"effort_mechanism":mechanism,"effort_values":effort,"configured_default":configured,"configured_default_routable":standing,"routable":routable}));
+        rows.push(json!({"provider":provider,"binary":binary,"installed":found.is_some(),"usable":usable,"version":release,"provider_default_reachable":reachable,"family":family,"effort_mechanism":evidence.effort_mechanism,"effort_values":evidence.effort_values,"configured_default":configured,"configured_default_routable":standing,"routable":routable}));
     }
     if strict && families.len() < 2 {
         errors.push("model-family diversity needs at least two usable families".into());
