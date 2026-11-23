@@ -1134,8 +1134,111 @@ pub fn answer_quality(raw: &str) -> &'static str {
         "ok"
     }
 }
+fn incomplete_stop(reason: &str) -> bool {
+    matches!(
+        reason,
+        "length" | "max_output" | "refusal" | "error" | "aborted"
+    ) || reason.starts_with("max_")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputMode {
+    Legacy,
+    Native,
+}
+
+pub(crate) fn require_native_output(provider: &str) -> Result<()> {
+    if !oms_command_plan::discussion::supports_native_output(provider) {
+        return fail("provider transport cannot prove native output completion");
+    }
+    if !discovered(provider) {
+        return Err(Error::new(127, "provider command not found"));
+    }
+    Ok(())
+}
+
+fn native_text(row: &oms_json::Value, key: &str) -> Option<String> {
+    row.get(key)?.as_string()?.to_str_checked()
+}
+
+fn native_stopped_early(row: &oms_json::Value) -> bool {
+    [
+        native_text(row, "stop_reason"),
+        native_text(row, "finish_reason"),
+        row.get("message")
+            .and_then(|m| native_text(m, "stop_reason")),
+        row.get("event")
+            .and_then(|e| e.get("delta"))
+            .and_then(|d| native_text(d, "stop_reason")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|reason| incomplete_stop(&reason))
+}
+
+fn decode_native_output(provider: &str, raw: &[u8]) -> Option<String> {
+    if provider == "antigravity" {
+        // Unlike JSONL, print mode emits one envelope. Completion and accounting
+        // have separate contracts, including for continued conversations.
+        let row = oms_json::parse_strict(raw).ok()?;
+        let id = native_text(&row, "conversation_id")?;
+        if native_text(&row, "status").as_deref() != Some("SUCCESS")
+            || id.is_empty()
+            || id.chars().any(|c| c.is_whitespace() || c.is_control())
+            || row
+                .get("error")
+                .is_some_and(|v| !matches!(v, oms_json::Value::Null))
+            || native_stopped_early(&row)
+        {
+            return None;
+        }
+        return native_text(&row, "response");
+    }
+    let mut answer = None;
+    let mut terminal = false;
+    for line in std::str::from_utf8(raw)
+        .ok()?
+        .lines()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let row = oms_json::parse_strict(line.as_bytes()).ok()?;
+        let kind = native_text(&row, "type")?;
+        // The terminal event closes the stream. Trailing partial events and
+        // explicit errors invalidate the proof even after an answer was seen.
+        if terminal || native_stopped_early(&row) {
+            return None;
+        }
+        match (provider, kind.as_str()) {
+            ("codex", "turn.failed" | "error") | ("claude", "error") => return None,
+            ("codex", "turn.started") => answer = None,
+            ("codex", "item.completed") => {
+                let item = row.get("item")?;
+                if native_text(item, "type").as_deref() == Some("agent_message") {
+                    answer = Some(native_text(item, "text")?);
+                }
+            }
+            ("codex", "turn.completed") => terminal = true,
+            ("claude", "result") => {
+                if native_text(&row, "subtype").as_deref() != Some("success")
+                    || !matches!(row.get("is_error"), Some(oms_json::Value::Bool(false)))
+                {
+                    return None;
+                }
+                answer = Some(native_text(&row, "result")?);
+                terminal = true;
+            }
+            _ => {}
+        }
+    }
+    answer.filter(|_| terminal)
+}
+
 pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
     let input = String::from_utf8_lossy(raw);
+    decode_provider_events(provider, &input).unwrap_or_else(|| (input.into_owned(), true))
+}
+
+fn decode_provider_events(provider: &str, input: &str) -> Option<(String, bool)> {
     let mut output = Vec::new();
     let mut recognized = false;
     let mut terminal = false;
@@ -1151,10 +1254,7 @@ pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
             row.get("message").get("stop_reason"),
             row.get("event").get("delta").get("stop_reason"),
         ] {
-            if reason.text().is_some_and(|s| {
-                matches!(s, "length" | "max_output" | "refusal" | "error" | "aborted")
-                    || s.starts_with("max_")
-            }) {
+            if reason.text().is_some_and(incomplete_stop) {
                 stopped_early = true;
             }
         }
@@ -1257,11 +1357,7 @@ pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
             }
         }
     }
-    if recognized {
-        (output.join("\n\n"), terminal && !stopped_early)
-    } else {
-        (input.into_owned(), true)
-    }
+    recognized.then(|| (output.join("\n\n"), terminal && !stopped_early))
 }
 struct ProviderScratch(PathBuf);
 impl ProviderScratch {
@@ -1962,6 +2058,7 @@ fn is_clean_retry(snapshot: &Option<Option<[u8; 32]>>, context: &Context<'_>, cw
         Some(None) => false,
     }
 }
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     route: &mut Route,
@@ -1973,9 +2070,36 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
+    execute_env_with_output(
+        route,
+        prompt,
+        cwd,
+        write,
+        timeout,
+        account_repo,
+        extra_env,
+        OutputMode::Legacy,
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
+    route: &mut Route,
+    prompt: &P,
+    cwd: &Path,
+    write: bool,
+    timeout: u64,
+    account_repo: &Path,
+    extra_env: &[(OsString, OsString)],
+    output_mode: OutputMode,
+    context: &Context<'_>,
+) -> Result<Completed> {
     prompt.validate()?;
     crate::safety::outbound(prompt.bytes())?;
-    if !discovered(&route.provider) {
+    if output_mode == OutputMode::Native {
+        require_native_output(&route.provider)?;
+    } else if !discovered(&route.provider) {
         return Err(Error::new(127, "provider command not found"));
     }
     if write
@@ -2022,6 +2146,9 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     {
         if write {
             return fail("Team request channels are read-only");
+        }
+        if output_mode == OutputMode::Native {
+            return fail("Team request channels do not emit typed native output");
         }
         Some(team_protocol(route, &transport.argv)?)
     } else {
@@ -2243,6 +2370,23 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
                 String::from_utf8_lossy(&result.stdout).into_owned(),
                 result.complete,
             )
+        } else if output_mode == OutputMode::Native {
+            match decode_native_output(&route.provider, &result.stdout) {
+                Some(answer) => (answer, result.code == 0),
+                None => {
+                    result.stderr.extend_from_slice(
+                        b"\nnative output completion could not be established\n",
+                    );
+                    // Preserve decoded provider diagnostics for capacity retries.
+                    if let Some((diagnostic, _)) = decode_provider_events(
+                        &route.provider,
+                        &String::from_utf8_lossy(&result.stdout),
+                    ) {
+                        result.stderr.extend_from_slice(diagnostic.as_bytes());
+                    }
+                    (String::new(), false)
+                }
+            }
         } else {
             decode_output(&route.provider, &result.stdout)
         };
@@ -2267,7 +2411,8 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         let context_record = request_context
             .and_then(|mut prepared| prepared.returned(&usage_repo, true, context.interrupted));
         result.stdout = decoded.into_bytes();
-        if !result.stdout.is_empty()
+        if output_mode == OutputMode::Legacy
+            && !result.stdout.is_empty()
             && let Some(model) = configured
         {
             result
@@ -2323,10 +2468,37 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
 ) -> Result<Completed> {
+    execute_with_fallback_output(
+        route,
+        fallback,
+        prompt,
+        cwd,
+        write,
+        timeout,
+        account_repo,
+        extra_env,
+        OutputMode::Legacy,
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?Sized>(
+    route: &mut Route,
+    fallback: &str,
+    prompt: &P,
+    cwd: &Path,
+    write: bool,
+    timeout: u64,
+    account_repo: &Path,
+    extra_env: &[(OsString, OsString)],
+    output_mode: OutputMode,
+    context: &Context<'_>,
+) -> Result<Completed> {
     let extra_env = crate::usage::operation_env(extra_env)?;
     let write_snapshot = (write && !fallback.is_empty() && fallback != route.model)
         .then(|| repo_state(context, cwd));
-    let result = execute_env(
+    let result = execute_env_with_output(
         route,
         prompt,
         cwd,
@@ -2334,6 +2506,7 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
         timeout,
         account_repo,
         &extra_env,
+        output_mode,
         context,
     )?;
     if !fallback.is_empty()
@@ -2347,7 +2520,7 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
         if !route.account_pinned {
             route.account.clear();
         }
-        execute_env(
+        execute_env_with_output(
             route,
             prompt,
             cwd,
@@ -2355,6 +2528,7 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
             timeout,
             account_repo,
             &extra_env,
+            output_mode,
             context,
         )
     } else {

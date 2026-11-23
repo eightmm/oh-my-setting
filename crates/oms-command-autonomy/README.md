@@ -97,7 +97,9 @@ Every decomposition call uses additive `agent-call --output-json`, backed by the
 same native output validator and a fresh artifact directory. Only the validated
 stdout byte range reaches the task JSON parser. Task-shaped JSON in the prompt,
 contract or diagnostics cannot become the proposed work; incomplete, refused,
-timed-out and nonzero calls stop first. Ordinary peer text output remains available.
+timed-out and nonzero calls stop first. Decomposition requires a transport with
+native terminal evidence. Codex, Claude and Antigravity currently support this
+contract. Ordinary peer text output remains available.
 
 The native decision catalog retains a digest-addressed discussion manifest.
 The resulting proposal's optional `discussion` reference binds that manifest to

@@ -996,28 +996,48 @@ fn receipt_validates_proposal_binding_and_budget_edges() {
     assert!(receipt::validate(&row).is_err(), "blocked outside review");
 }
 
-#[test]
-fn council_evidence_requires_exact_rounds_and_native_output_bindings() {
+fn council_fixture(prompt: &str) -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
     use oms_command_plan::discussion::{
-        CouncilOutput, encode_council_synthesis, lint_council_response, validate_council_synthesis,
+        COUNCIL_INITIAL_PRECEDENCE, COUNCIL_INITIAL_ROLE, COUNCIL_INITIAL_SECTIONS,
+        COUNCIL_REBUTTAL_SECTIONS, COUNCIL_REBUTTAL_TASK, COUNCIL_ROUND_BYTES,
+        COUNCIL_SYNTHESIS_BYTES, COUNCIL_SYNTHESIS_PREFIX, COUNCIL_SYNTHESIS_SECTIONS,
+        CouncilOutput, council_peer_answer, encode_council_synthesis,
     };
-    let prompt = "Discuss the bounded fixture work";
     let run = "fixture-run";
     let providers = ["codex", "claude", "antigravity"];
+    let initial = format!(
+        "{COUNCIL_INITIAL_ROLE}{COUNCIL_INITIAL_PRECEDENCE}Question:\n{prompt}\n\nRepository context: omitted.\n{COUNCIL_INITIAL_SECTIONS}"
+    );
+    let first_answers = providers.map(|provider| format!(
+        "Alternatives: inspect or defer\nEvidence: tracked {provider} source\nCounterargument: evidence may be incomplete\nVerification: run the existing check\n"
+    ));
+    let next_answers = first_answers.clone().map(|answer| {
+        format!(
+            "{answer}Changed from previous round: none\nRemaining disagreements: evidence scope\n"
+        )
+    });
+    let quotes = |answers: &[String], budget| {
+        providers
+            .iter()
+            .zip(answers)
+            .enumerate()
+            .map(|(index, (provider, answer))| {
+                council_peer_answer(provider, answer, budget, &format!("{index:032x}"))
+            })
+            .collect::<String>()
+    };
+    let previous = quotes(&first_answers, COUNCIL_ROUND_BYTES / providers.len());
+    let rebuttal =
+        format!("Question:\n{prompt}{COUNCIL_REBUTTAL_TASK}{previous}{COUNCIL_REBUTTAL_SECTIONS}");
+    let final_answers = quotes(&next_answers, COUNCIL_SYNTHESIS_BYTES);
+    let synthesis_prompt =
+        format!("{COUNCIL_SYNTHESIS_PREFIX}{prompt}\n{final_answers}{COUNCIL_SYNTHESIS_SECTIONS}");
     let mut files = std::collections::BTreeMap::new();
-    let mut row = |provider: &str, round: u64, synthesis: bool| {
-        let answer = if synthesis {
-            "Decision: inspect the fixture\nEvidence: tracked source\nRemaining disagreements: none claimed\nVerification: run the existing check\n".to_owned()
-        } else {
-            format!(
-                "Alternatives: inspect or defer\nEvidence: tracked source\nCounterargument: evidence may be incomplete\nVerification: run the existing check\n{}",
-                if round == 0 {
-                    ""
-                } else {
-                    "Changed from previous round: none\nRemaining disagreements: evidence scope\n"
-                }
-            )
-        };
+    let mut row = |provider: &str,
+                   round: u64,
+                   synthesis: bool,
+                   actual_prompt: &str,
+                   answer: &str| {
         let tool = if synthesis { "_synthesis" } else { "peer-ask" };
         let artifact = if synthesis {
             format!("_synthesis-{run}.md")
@@ -1026,7 +1046,7 @@ fn council_evidence_requires_exact_rounds_and_native_output_bindings() {
         } else {
             format!("{provider}-fixture-{run}-r{round}.md")
         };
-        let mut bytes = format!("# OMS {tool}\n\n- provider: {provider}\n- model: fixture-model\n- run: {run}\n- round: {round}\n\n## Prompt\n\n{prompt}\n\n## Output\n\n").into_bytes();
+        let mut bytes = format!("# OMS {tool}\n\n- provider: {provider}\n- model: fixture-model\n- run: {run}\n- round: {round}\n\n## Prompt\n\n{actual_prompt}\n\n## Output\n\n").into_bytes();
         let output_start = bytes.len();
         bytes.extend_from_slice(answer.as_bytes());
         bytes.extend_from_slice(b"\n\n## Exit\n\n0\n");
@@ -1038,7 +1058,7 @@ fn council_evidence_requires_exact_rounds_and_native_output_bindings() {
             artifact_sha256: value::hash(&bytes),
             output_start,
             output_bytes: answer.len(),
-            output_sha256: value::hash(&answer),
+            output_sha256: value::hash(answer),
             complete: true,
             exit: 0,
             quality: "ok".into(),
@@ -1046,35 +1066,58 @@ fn council_evidence_requires_exact_rounds_and_native_output_bindings() {
         files.insert(artifact, bytes);
         observation
     };
-    let participants = (0..=1)
-        .flat_map(|round| providers.map(|provider| (provider, round)))
-        .map(|(provider, round)| row(provider, round, false))
-        .collect::<Vec<_>>();
-    let synthesis = row("codex", 0, true);
-    let raw = encode_council_synthesis(prompt, run, 1, &participants, &synthesis).unwrap();
-    let validate = |raw: &[u8], question: &str| {
-        validate_council_synthesis(
-            raw,
-            question,
-            &providers,
-            ("codex", "fixture-model"),
-            1,
-            |name| {
-                files
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| oms_command_plan::Error {
-                        code: 2,
-                        message: "missing fixture artifact".into(),
-                    })
-            },
-        )
-    };
-    let checked = validate(&raw, prompt).unwrap();
-    assert_eq!(checked.run, run);
+    let mut participants = Vec::new();
+    for (round, actual_prompt, answers) in [
+        (0, initial.as_str(), &first_answers),
+        (1, rebuttal.as_str(), &next_answers),
+    ] {
+        for (provider, answer) in providers.iter().zip(answers) {
+            participants.push(row(provider, round, false, actual_prompt, answer));
+        }
+    }
+    let synthesis = row(
+        "codex",
+        0,
+        true,
+        &synthesis_prompt,
+        "Decision: inspect the fixture\nEvidence: tracked source\nRemaining disagreements: none claimed\nVerification: run the existing check\n",
+    );
+    (
+        encode_council_synthesis(prompt, run, 1, &participants, &synthesis).unwrap(),
+        files,
+    )
+}
+
+#[test]
+fn council_evidence_requires_exact_rounds_and_native_output_bindings() {
+    use oms_command_plan::discussion::{lint_council_response, validate_council_synthesis};
+    let prompt = "Discuss the bounded fixture work";
+    let providers = ["codex", "claude", "antigravity"];
+    let (raw, files) = council_fixture(prompt);
+    let validate =
+        |raw: &[u8], question: &str, files: &std::collections::BTreeMap<String, Vec<u8>>| {
+            validate_council_synthesis(
+                raw,
+                question,
+                &providers,
+                ("codex", "fixture-model"),
+                1,
+                |name| {
+                    files
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| oms_command_plan::Error {
+                            code: 2,
+                            message: "missing fixture artifact".into(),
+                        })
+                },
+            )
+        };
+    let checked = validate(&raw, prompt, &files).unwrap();
+    assert_eq!(checked.run, "fixture-run");
     assert_eq!(checked.artifacts.len(), 7);
     assert!(checked.answer.starts_with("Decision:"));
-    assert!(validate(&raw, "different question").is_err());
+    assert!(validate(&raw, "different question", &files).is_err());
     let report = value::parse(&raw).unwrap();
     for mutation in [
         "missing",
@@ -1106,16 +1149,74 @@ fn council_evidence_requires_exact_rounds_and_native_output_bindings() {
             _ => changed["synthesis"]["unreviewed"] = true.into(),
         }
         assert!(
-            validate(&value::pretty(&changed).unwrap(), prompt).is_err(),
+            validate(&value::pretty(&changed).unwrap(), prompt, &files).is_err(),
             "{mutation}"
         );
     }
+    let mut advertised = report.clone();
+    let foreign = "different question";
+    advertised["prompt_sha256"] = value::hash(foreign).into();
+    let err = validate(&value::pretty(&advertised).unwrap(), foreign, &files)
+        .err()
+        .unwrap();
+    assert!(
+        err.message.contains("native council prompt differs"),
+        "{}",
+        err.message
+    );
+
+    for (participant, from, to) in [
+        (Some(0), prompt, "another requested discussion"),
+        (
+            Some(3),
+            "Evidence: tracked claude source",
+            "Evidence: unrelated context",
+        ),
+        (
+            Some(4),
+            "Evidence: tracked claude source",
+            "Evidence: unrelated context",
+        ),
+        (
+            None,
+            "Changed from previous round: none",
+            "Changed from previous round: foreign context",
+        ),
+    ] {
+        let mut advertised = report.clone();
+        let mut changed_files = files.clone();
+        let row = if let Some(index) = participant {
+            &mut advertised["participants"][index]
+        } else {
+            &mut advertised["synthesis"]
+        };
+        let artifact = changed_files
+            .get_mut(row["artifact"].as_str().unwrap())
+            .unwrap();
+        let start = row["output_start"].as_u64().unwrap() as usize;
+        let rewritten = std::str::from_utf8(&artifact[..start])
+            .unwrap()
+            .replacen(from, to, 1);
+        assert_ne!(rewritten.as_bytes(), &artifact[..start]);
+        row["output_start"] = rewritten.len().into();
+        artifact.splice(..start, rewritten.into_bytes());
+        row["artifact_sha256"] = value::hash(&artifact).into();
+        let err = validate(&value::pretty(&advertised).unwrap(), prompt, &changed_files)
+            .err()
+            .unwrap();
+        assert!(
+            err.message.contains("native council prompt differs"),
+            "{}",
+            err.message
+        );
+    }
+
     let duplicate = String::from_utf8(raw.clone()).unwrap().replacen(
         "\"schema\": 1",
         "\"schema\": 1, \"schema\": 1",
         1,
     );
-    assert!(validate(duplicate.as_bytes(), prompt).is_err());
+    assert!(validate(duplicate.as_bytes(), prompt, &files).is_err());
     for answer in [
         "fixture answer",
         "Decision:\nEvidence:\nRemaining disagreements:\nVerification:\n",
@@ -1571,6 +1672,188 @@ fn proposals(repo: &Repo) -> usize {
         })
         .count()
     })
+}
+
+#[test]
+fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model() {
+    if scrubbed_child("autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model")
+    {
+        return;
+    }
+
+    struct Routes(Planner);
+    impl oms_command_plan::Services for Routes {
+        fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+            oms_command_plan::Services::group_membership_resolver(&self.0)
+        }
+    }
+    impl Services for Routes {
+        fn state_repository(
+            &self,
+            work: &Path,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<PathBuf> {
+            Ok(work.to_owned())
+        }
+        fn resolve_route(
+            &self,
+            _: &Path,
+            assignment: &serde_json::Value,
+            _: &str,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<oms_command_autonomy::services::ModelRoute> {
+            use oms_command_autonomy::services::ModelRoute;
+            Ok(ModelRoute {
+                provider: value::text(assignment, "provider").into(),
+                model_class: "fixture".into(),
+                primary: "receipt-model".into(),
+                fallback: String::new(),
+                effort: "auto".into(),
+                fallback_effort: "auto".into(),
+            })
+        }
+        fn invoke(
+            &self,
+            call: &Invocation,
+            _: &AtomicBool,
+        ) -> oms_command_autonomy::Result<CommandResult> {
+            panic!(
+                "receipt admission dispatched provider command {}",
+                call.tool
+            );
+        }
+    }
+
+    use oms_command_plan::decision::CATALOG;
+    use oms_command_plan::discussion::planning_question;
+    let repo = Repo::github("git@github.com:example-org/fixture-fork.git", Some(SPEC));
+    repo.git(&["branch", "-M", "main"]);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo.0)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let head = String::from_utf8(output.stdout).unwrap();
+    let head = head.trim();
+    let spec = value::hash(SPEC);
+    let directory = format!(".oms/plan/council-{}", "0".repeat(32));
+    let question_file = format!("{directory}/question.md");
+    let proposal_file = ".oms/plan/fixture-proposal.json";
+    let run_file = ".oms/plan/autopilot-run.json";
+    let write_proposal = |question: &str| {
+        let (report, files) = council_fixture(question);
+        repo.write(&question_file, question);
+        for (name, bytes) in files {
+            repo.write(&format!("{directory}/{name}"), bytes);
+        }
+        let manifest = json!({
+            "schema": 1, "kind": "oms-planning-discussion", "spec_sha256": spec,
+            "plan_sha256": "absent", "base_sha": head, "allowed_envelope": ["src"],
+            "question": {"path": question_file, "sha256": value::hash(question)},
+            "providers": ["codex", "claude", "antigravity"], "rounds": 1,
+            "synthesis_route": {"provider": "codex", "requested_model": "fixture-model"},
+            "report": value::parse(&report).unwrap(),
+        });
+        let manifest = value::pretty(&manifest).unwrap();
+        let digest = value::hash(&manifest);
+        let path = format!("{CATALOG}/{digest}.json");
+        repo.write(&path, manifest);
+        let proposal = json!({
+            "schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec,
+            "plan_sha256": "absent", "base_sha": head, "id_prefix": "",
+            "allowed_envelope": ["src"], "acceptance_files": ["tests/check.sh"],
+            "discussion": {"path": path, "sha256": digest},
+            "tasks": value::parse(ANSWER.as_bytes()).unwrap()["tasks"],
+        });
+        let proposal = value::pretty(&proposal).unwrap();
+        let sha = value::hash(&proposal);
+        repo.write(proposal_file, proposal);
+        sha
+    };
+    let host = Routes(repo.planner(ANSWER));
+    let run = |tool, arguments: &[&str]| {
+        let (code, _, err) = run_with_services(
+            tool,
+            &arguments.iter().map(OsString::from).collect::<Vec<_>>(),
+            &repo.0,
+            &AtomicBool::new(false),
+            &host,
+        );
+        (code, String::from_utf8(err).unwrap())
+    };
+    for question in [
+        planning_question(&["src"], head, "foreign specification", None, ""),
+        planning_question(&["src"], head, SPEC, Some("foreign prior plan"), ""),
+        planning_question(&["src"], "different-head", SPEC, None, ""),
+        planning_question(&["docs"], head, SPEC, None, ""),
+    ] {
+        let sha = write_proposal(&question);
+        let (code, err) = run(
+            "plan-from-spec",
+            &["--apply", proposal_file, "--expected-proposal-sha256", &sha],
+        );
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("discussion question differs from planning inputs"),
+            "{err}"
+        );
+    }
+
+    let sha = write_proposal(&planning_question(&["src"], head, SPEC, None, ""));
+    let (code, err) = run(
+        "autopilot",
+        &[
+            "run",
+            "--base",
+            "main",
+            "--planner",
+            "codex",
+            "--collaboration",
+            "auto",
+            "--review-mode",
+            "gate",
+            "--proposal",
+            proposal_file,
+            "--expected-proposal-sha256",
+            &sha,
+        ],
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("discussion synthesis route differs from the frozen planner route"),
+        "{err}"
+    );
+    assert!(!repo.0.join(run_file).exists());
+
+    let route = json!({"model": "fixture-model", "fallback_model": "", "reasoning_effort": "auto", "timeout": "1s"});
+    let mut receipt = json!({
+        "schema": 1, "kind": "autopilot-run", "stage": "proposal-review", "repo": repo.0,
+        "spec_sha256": spec, "providers": {"planner": "codex", "worker": "codex", "reviewer": "claude"},
+        "routing": {"provider_timeout": "1s", "planner": route, "worker": route, "reviewer": route},
+        "contract": {"allowed": "src", "base": "main", "base_sha": head, "remote": "origin",
+            "max_cycles": 1, "initial_tasks": 1, "replan_tasks": 1, "auto_repair": false,
+            "retry_known": false, "review_mode": "gate", "draft_pr": false, "allow_verifier_change": false,
+            "allow_floor_change": "", "collaboration": "auto"},
+        "proposal": {"path": repo.0.join(proposal_file), "sha256": sha},
+        "branch": format!("oms/autopilot-{}", &spec[..12]), "owner_id": format!("owner_{}", "a".repeat(32)),
+        "updated": value::now(),
+    });
+    repo.write(run_file, value::pretty(&receipt).unwrap());
+    let (_, err) = run("autopilot", &["run"]);
+    assert!(err.contains("parent proposal review required"), "{err}");
+    receipt["routing"]["planner"]["model"] = "receipt-model".into();
+    let altered = value::pretty(&receipt).unwrap();
+    repo.write(run_file, &altered);
+    let (code, err) = run("autopilot", &["run"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("discussion synthesis route differs from the frozen planner route"),
+        "{err}"
+    );
+    assert_eq!(fs::read(repo.0.join(run_file)).unwrap(), altered);
+    assert!(!repo.0.join(".oms/plan/tasks.json").exists());
 }
 
 #[test]
