@@ -1160,7 +1160,7 @@ fn run_with_source_writer(
 }
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const EVENT_BACKED_FALLBACK: Duration = Duration::from_secs(30);
+pub(crate) const EVENT_BACKED_FALLBACK: Duration = Duration::from_secs(30);
 
 fn refresh_interval(event_backed: bool, fresh: bool, bounded_retry: bool) -> Duration {
     if event_backed && fresh && !bounded_retry {

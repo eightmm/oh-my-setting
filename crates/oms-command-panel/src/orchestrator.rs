@@ -1345,7 +1345,7 @@ impl<'a> Panel<'a> {
                             .then(|| (pane, fresh.participant.clone()))
                         });
                     if sample.agy_roster_scope != agy_roster_scope {
-                        sample.agy_parent.take_roster();
+                        sample.agy_parent.clear_roster_proof();
                         sample.agy_roster_scope = agy_roster_scope;
                     }
                     let mut observed = crate::native_children::observe(
