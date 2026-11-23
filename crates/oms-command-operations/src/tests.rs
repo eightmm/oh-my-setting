@@ -45,6 +45,54 @@ fn lifecycle_idempotence_usage_cas_and_recovery() {
     let id = f.ok(App::Events, &request);
     assert_eq!(f.ok(App::Events, &request), id);
     assert_eq!(read_rows(&event_path(&f.0)).unwrap().len(), 3);
+    let observations = std::cell::RefCell::new(Vec::new());
+    let interrupted = AtomicBool::new(false);
+    let path = event_path(&f.0);
+    let before = std::fs::read(&path).unwrap();
+    let heartbeat = new_event(&id, 0usize.into(), "attempt.heartbeat", obj([])).unwrap();
+    let refused = append_lifecycle_checked_observed(
+        &f.0,
+        heartbeat.clone(),
+        &interrupted,
+        |rows, current| {
+            assert_eq!(rows.len(), 3);
+            assert_eq!(current.unwrap().get("state").text(), Some("working"));
+            observations.borrow_mut().push("authorized-check");
+            Err("fixture append refusal".into())
+        },
+        |phase| {
+            observations.borrow_mut().push(match phase {
+                CheckedAppendPhase::LockAcquired => "lock-acquired",
+                CheckedAppendPhase::ProjectionReady => "projection-ready",
+            });
+        },
+    );
+    assert_eq!(refused.unwrap_err(), "fixture append refusal");
+    assert_eq!(
+        observations.into_inner(),
+        ["lock-acquired", "projection-ready", "authorized-check"]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let mut malformed = before.clone();
+    malformed.extend_from_slice(b"{\n");
+    std::fs::write(&path, &malformed).unwrap();
+    let mut lock_observed = false;
+    assert!(
+        append_lifecycle_checked_observed(
+            &f.0,
+            heartbeat,
+            &interrupted,
+            |_, _| panic!("read refusal must precede authorization"),
+            |phase| {
+                assert!(matches!(phase, CheckedAppendPhase::LockAcquired));
+                lock_observed = true;
+            },
+        )
+        .is_err()
+    );
+    assert!(lock_observed);
+    assert_eq!(std::fs::read(&path).unwrap(), malformed);
+    std::fs::write(&path, before).unwrap();
     assert_eq!(
         f.call(
             App::Events,
