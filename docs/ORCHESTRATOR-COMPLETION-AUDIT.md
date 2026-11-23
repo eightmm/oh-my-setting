@@ -6,6 +6,12 @@
 설계 채택, fixture 통과 기록, 실제 provider 호환성, 운영 활성화를 구분한다.
 문서 추가 자체로 모델 호출, 기본 설정 변경, 설치 또는 자동 병합을 수행하지 않는다.
 
+각 절의 날짜·SHA는 당시 조사 범위다. 2026-11-22 main `8527cd07`에서 다시 확인한
+구현 상태와 여덟 통합 경계는 [작업 큐 §8](ORCHESTRATOR-WORK-QUEUE.md#8-2026-11-22-재대조와-작은-통합-단위)이
+소유한다. 특히 #258/#276의 과거 open 상태, 초기 landing parser 누락과 docs planning
+문제를 현재 미구현으로 다시 제안하지 않는다. 이전 baseline·future acceptance는 보존하며,
+이 갱신은 아래 감사 전체나 runtime 검증을 다시 수행했다는 뜻이 아니다.
+
 추가 조사에서 확인한 17개 성능·신뢰성·검증·원격 산출물 작업은
 [구현 대기 큐](ORCHESTRATOR-WORK-QUEUE.md)에 PR #260–#263과 함께 연결했다.
 Graph 저장·검색의 비교 분석과 13개 정확성·평가 작업은
@@ -319,7 +325,9 @@ Antigravity `gemini-pro-orchestrator`이며 `orchestrator_command`에서 고정�
 **`--model`과 `--reasoning-effort` 조합을 모두 거절**한다. 조용히 무시하는 동작이 아니다.
 
 작은 runtime 보완 [PR #258](https://github.com/eightmm/oh-my-setting/pull/258)은
-새 orchestrator 생성 시 명시적 model/effort를 전달하는 구현 draft다.
+새 orchestrator 생성 시 명시적 model/effort를 전달하는 변경으로, 이 절 작성 당시 draft였다.
+2026-11-22에는 병합된 구현으로 확인했으며 [작업 큐 §8](ORCHESTRATOR-WORK-QUEUE.md#8-2026-11-22-재대조와-작은-통합-단위)의
+남은 capability·관측 경계를 따른다.
 기존 대화를 재개하면서 모델이 바뀐 것처럼 응답하거나 unsupported provider effort를
 추정해 전달하지 않는다. 이 보완 PR의 구현·검증 상태는 해당 PR에서 별도로 기록한다.
 본 감사의 pinned baseline에는 explicit override가 없다는 사실을 유지한다.
