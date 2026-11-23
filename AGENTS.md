@@ -43,8 +43,8 @@
 - Hosted CI is Linux-only for PRs and main pushes alike: pure-Rust lint, Rust
   fmt/clippy/tests on Ubuntu, pure-Bash focused E2E and a Linux copy-install
   lifecycle, on pinned Rust `1.99.1`. Only plan-authorized skips pass the stable
-  gate; CI is authoritative. CI scope is not platform support: macOS remains a
-  runtime/install host, verified locally by `tests/bsd-portability-smoke.sh`.
+  gate. CI evidence covers its Linux runner userland. macOS remains an optional
+  runtime and installation host.
 - Every tracked file passes `scrubber_passes_tracked_repository_sources`: in
   fixtures split key-shaped strings and home paths across quotes; avoid
   identifiers that read as a credential assignment.

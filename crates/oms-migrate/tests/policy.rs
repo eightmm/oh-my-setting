@@ -152,7 +152,7 @@ fn bash_shellcheck_disables_must_name_codes_outside_strings() {
     let disable = "# shellcheck disable=all\n";
     let shell = |shebang: &str| source_violations("scripts/oms", &format!("{shebang}\n{disable}"));
     assert_eq!(shell("#!/usr/bin/env bash").len(), 1);
-    assert!(shell("#!/usr/bin/env python3").is_empty());
+    assert!(shell("#!/usr/bin/env node").is_empty());
 }
 
 #[test]
