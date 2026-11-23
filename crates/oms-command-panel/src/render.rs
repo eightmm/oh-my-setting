@@ -511,6 +511,8 @@ fn active_verb(call: &Value) -> Option<&'static str> {
 fn call_badge(call: &Value) -> (String, &'static str) {
     if call["returned_at"].is_string() {
         ("[✓ returned]".to_owned(), SGR_SAGE)
+    } else if call["lifecycle_stale"] == true {
+        ("[no events]".to_owned(), SGR_AMBER_BOLD)
     } else if let Some(verb) = active_verb(call) {
         (format!("[⟳ {verb}]"), SGR_CYAN)
     } else {
@@ -811,6 +813,22 @@ pub fn calls(report: &Value) -> Vec<Value> {
             call["board_elapsed"] = json!(elapsed.as_deref().unwrap_or("—"));
         }
     }
+    let direct: BTreeSet<_> = direct_work(report, &output, overall_main(room, &output))
+        .into_iter()
+        .map(|(participant, attempt)| (participant.to_owned(), attempt.to_owned()))
+        .collect();
+    for call in &mut output {
+        if let Some(fields) = call.as_object_mut() {
+            fields.remove("lifecycle_stale");
+        }
+        if direct.contains(&(
+            text(call, "participant").into(),
+            text(call, "attempt").into(),
+        )) && stale_lifecycle(report, &report["room_attempts"][text(call, "attempt")])
+        {
+            call["lifecycle_stale"] = true.into();
+        }
+    }
     // At most three recently seen Codex children, newest first, stay unfolded.
     if let Some(observed) = oms_panel_core::metrics::stamp(&report["generated_at"]) {
         let mut seen: Vec<_> = output
@@ -846,6 +864,43 @@ pub fn calls(report: &Value) -> Vec<Value> {
         output[index] = call;
     }
     output
+}
+
+fn stale_lifecycle(report: &Value, row: &Value) -> bool {
+    if report["collection"]["ok"] != true
+        || report["collection"]["pending"] == true
+        || report["capacity_stale"] == true
+        || report["room"].get("error").is_some_and(|v| !v.is_null())
+        || row["tool"] == "panel-native-assignment"
+        || row["refs"]["panel_native_scheduling"] == "unmanaged"
+        || ["panel_heartbeat_interval", "panel_heartbeat_ttl"]
+            .iter()
+            .any(|key| row["refs"].get(*key).is_some_and(|v| !v.is_string()))
+        || !matches!(
+            text(row, "state"),
+            "starting" | "working" | "running" | "verifying"
+        )
+    {
+        return false;
+    }
+    let stamp = oms_panel_core::metrics::stamp;
+    let (Some(now), Some(created), Some(updated), Some(heartbeat)) = (
+        stamp(&report["generated_at"]),
+        stamp(&row["created_at"]),
+        stamp(&row["updated_at"]),
+        stamp(&row["last_heartbeat_at"]),
+    ) else {
+        return false;
+    };
+    if !(0.0 <= created && created <= heartbeat && heartbeat <= updated && updated <= now) {
+        return false;
+    }
+    // A usage event is also current lifecycle evidence. Reuse the heartbeat
+    // window without treating it as output progress or changing the receipt.
+    let evidence = json!({
+        "refs": row["refs"], "created_at": row["created_at"], "last_heartbeat_at": row["updated_at"]
+    });
+    oms_panel_core::release::heartbeat_fresh(&evidence, now).is_ok_and(|fresh| !fresh)
 }
 
 fn event_room_matches(room: &str, refs: &Value) -> bool {
@@ -1568,6 +1623,7 @@ fn visible_from<'a>(
         .filter(|v| {
             !nav.attention_only
                 || awaiting_review(v)
+                || v["lifecycle_stale"] == true
                 || [
                     "waiting_input",
                     "waiting_approval",
@@ -2440,8 +2496,8 @@ fn render_card_row(
     let (badge, badge_sgr) = call_badge(call);
     let badge_width = width(&badge);
     let mut available = metadata_limit.saturating_sub(spans_width(&right) + 2);
-    // A live operation outranks the placeholder for an unknown total.
-    if badge_width > available && active_verb(call).is_some() {
+    // An operation or stale-event advisory outranks an unknown-total placeholder.
+    if badge_width > available && (active_verb(call).is_some() || call["lifecycle_stale"] == true) {
         let compact = token_span_with(
             call,
             left_budget(inner, prefix_width + label_min),
@@ -2454,6 +2510,10 @@ fn render_card_row(
             right = compact;
             available = room;
         }
+    }
+    if call["lifecycle_stale"] == true && badge_width > available {
+        right.clear();
+        available = left_budget(inner, prefix_width + label_min).saturating_sub(2);
     }
     if badge_width <= available {
         let field = if columns >= 88 && available >= 14 {
@@ -4519,6 +4579,23 @@ fn render_detail_card(
         None,
         colored,
     ));
+    if call["lifecycle_stale"] == true {
+        for notice in [
+            "No recent lifecycle events".to_owned(),
+            format!("Last recorded state: {}", text(call, "state")),
+        ] {
+            for part in wrap(&notice, inner_width.max(1)) {
+                out.push(card_row_lr(
+                    vec![Span::raw(part, inner_width, Some(SGR_AMBER_BOLD))],
+                    vec![],
+                    columns,
+                    use_cards,
+                    None,
+                    colored,
+                ));
+            }
+        }
+    }
     let (observed, source) = headline_tokens(call);
     let token_width = left_budget(inner_width, width("Tokens"));
     let source_short = if source == "Session incl. cache" {
@@ -7432,6 +7509,150 @@ mod tests {
         let items = visible(&report, &nav);
         assert_eq!(text(&items[0], "participant"), "M");
         assert_eq!(text(&items[1], "participant"), "direct");
+        let mut lifecycle = report.clone();
+        let now = 1_800_000_600u64;
+        lifecycle["generated_at"] = now.into();
+        lifecycle["room_attempts"]["direct-attempt"]["created_at"] = (now - 600).into();
+        lifecycle["room_attempts"]["direct-attempt"]["updated_at"] = (now - 300).into();
+        lifecycle["room_attempts"]["direct-attempt"]["last_heartbeat_at"] = (now - 300).into();
+        let stale_ids = |report: &Value| {
+            attention::items(report, &read)
+                .into_iter()
+                .filter(|item| item.cls == "stale")
+                .map(|item| item.row_id.1)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stale_ids(&lifecycle), ["direct"]);
+        let stale = attention::items(&lifecycle, &read);
+        assert_eq!(stale[0].what, "no recent lifecycle events: Direct changes");
+        let marked = BTreeMap::from([(attention::row_key(&stale[0].row_id), "stale".into())]);
+        assert!(!attention::items(&lifecycle, &marked)[0].unread);
+        let attention_nav = navigation::Navigation {
+            attention_only: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            visible(&lifecycle, &attention_nav)
+                .iter()
+                .map(|call| text(call, "participant"))
+                .collect::<Vec<_>>(),
+            ["M", "direct"]
+        );
+        for columns in [32, 56, 160] {
+            let board = board_frame(&lifecycle, &attention_nav, columns, 24, &read, false, true);
+            assert!(board.lines.iter().all(|line| width(line) <= columns));
+            let (&hit, _) = board
+                .worker_rows
+                .iter()
+                .find(|(_, (id, _))| id == "direct")
+                .unwrap();
+            assert!(
+                board.lines[hit].contains("[no events]"),
+                "{}",
+                board.lines[hit]
+            );
+            let detail_nav = navigation::Navigation {
+                selected: 1,
+                detail: true,
+                ..attention_nav.clone()
+            };
+            let detail = frame(&lifecycle, &detail_nav, columns, 24, &read);
+            assert!(detail.iter().all(|line| width(line) <= columns));
+            let detail = detail.join("\n");
+            assert!(detail.contains("No recent lifecycle events"), "{detail}");
+            assert!(detail.contains("Last recorded state: working"), "{detail}");
+        }
+        assert!(
+            calls(&lifecycle)
+                .iter()
+                .any(|call| call["participant"] == "direct" && call["state"] == "working")
+        );
+        for (path, value) in [
+            ("generated_at", json!(now - 1)),
+            ("generated_at", Value::Null),
+            ("collection.ok", json!(false)),
+            ("collection.pending", json!(true)),
+            ("capacity_stale", json!(true)),
+            ("room.error", json!("unavailable")),
+            ("room.closed", json!(true)),
+            ("room_attempts.main-live.terminal", json!(true)),
+            (
+                "room_attempts.direct-attempt.parent_attempt_id",
+                json!("main-old"),
+            ),
+            ("room_attempts.direct-attempt.terminal", json!(true)),
+            ("room_attempts.direct-attempt.created_at", json!(now + 1)),
+            ("room_attempts.direct-attempt.updated_at", json!(now + 1)),
+            ("room_attempts.direct-attempt.updated_at", json!(now - 299)),
+            ("room_attempts.direct-attempt.updated_at", Value::Null),
+            ("room_attempts.direct-attempt.updated_at", json!("invalid")),
+            (
+                "room_attempts.direct-attempt.last_heartbeat_at",
+                Value::Null,
+            ),
+            (
+                "room_attempts.direct-attempt.last_heartbeat_at",
+                json!(now + 1),
+            ),
+            (
+                "room_attempts.direct-attempt.tool",
+                json!("panel-native-assignment"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_native_scheduling",
+                json!("unmanaged"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_room_id",
+                json!("room-other"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("600"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("0"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("bad"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!("30"),
+            ),
+            (
+                "room_attempts.direct-attempt.refs.panel_heartbeat_ttl",
+                json!(300),
+            ),
+        ] {
+            let mut changed = lifecycle.clone();
+            let mut target = &mut changed;
+            for key in path.split('.') {
+                target = &mut target[key];
+            }
+            *target = value.clone();
+            assert!(stale_ids(&changed).is_empty(), "{path}={value}");
+        }
+        for state in [
+            "queued",
+            "review",
+            "done",
+            "waiting_input",
+            "waiting_approval",
+            "blocked",
+        ] {
+            let mut changed = lifecycle.clone();
+            changed["room_attempts"]["direct-attempt"]["state"] = state.into();
+            assert!(stale_ids(&changed).is_empty(), "{state}");
+        }
+        // Persisted snapshots age only at their recorded observation time;
+        // native children cannot supply a stale marker as lifecycle evidence.
+        let mut held = lifecycle.clone();
+        held["generated_at"] = (now - 300).into();
+        held["native_children"][0]["lifecycle_stale"] = true.into();
+        assert!(stale_ids(&held).is_empty());
         nav.selected = 1;
         for (columns, height) in [(160, 34), (56, 20), (32, 12)] {
             let board = board_frame(&report, &nav, columns, height, &read, false, true);
