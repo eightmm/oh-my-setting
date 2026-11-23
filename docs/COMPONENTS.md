@@ -3284,24 +3284,18 @@ download. Selected smoke runs validate names before dispatch, partition each
 case once, and cap workers to the selected count. Event/ref
 [concurrency groups](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 keep scheduled/manual runs separate from pushes; newer pushes supersede older
-pushes. Native platform checks reuse the lifecycle matrix's macOS runner on
-the runs that include macOS.
-[`!cancelled()`](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)
-lets later checks report failures after an earlier failure without continuing
-a cancelled run.
+pushes.
 
-PR and main pushes select affected or full verification. Full runs use Linux
-lint and focused Bash checks, the Ubuntu Rust job, and a Linux copy-install
-lifecycle fixture. The stable `gate` checks the selected jobs and their planned
-skips. [CI workflow](../.github/workflows/test.yml)
+CI is Linux-only. PR and main pushes select affected or full verification. Full
+runs use Linux `lint` and `focused` Bash checks, `rust (ubuntu-24.04)`, and the
+`native (ubuntu-latest, copy)` install lifecycle fixture. The stable `gate`
+checks the selected jobs and their planned skips.
+[CI workflow](../.github/workflows/test.yml)
 
-macOS is off the path a person or `oms land` waits on. The macOS Rust job and
-the macOS install lifecycle with its BSD userland fixtures run on the daily
-schedule and on `gh workflow run test.yml --ref REF -f macos=true`. A plain
-dispatch, which is what `oms land --ci-full` requests, stays on Linux. A macOS
-regression therefore shows on `main` within a day instead of blocking the
-change that caused it; request the `macos=true` run before landing a change to
-install lifecycle, locking, path resolution or BSD-sensitive shell.
+macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD
+userland compatibility), but macOS runners are no longer part of GitHub Actions
+CI; verify macOS/BSD-sensitive changes locally with
+`tests/bsd-portability-smoke.sh` (also wired into `scripts/check.sh`).
 
 Require it in branch protection before enabling a local quick push hook; having a
 workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
@@ -3367,8 +3361,8 @@ the run's jobs prove the full selection (the default proof) or a full local gate
 was affected-only or its scope cannot be read, it supplies no full proof. For an
 affected-only run without a dispatch land finishes `passed`, installs nothing and prints the command that
 requests a full-selection run of the same SHA, `gh workflow run test.yml --repo
-OWNER/REPO --ref TARGET` (`workflow_dispatch` runs the full selection, including the
-macOS lifecycle leg), then the command that resumes the landing. Rerunning it with
+OWNER/REPO --ref TARGET` (`workflow_dispatch` runs the full Linux selection),
+then the command that resumes the landing. Rerunning it with
 `--wait` checks for that run and waits within `--ci-wait` when it is pending;
 when none is visible it returns promptly. Pending proof and a requested receipt
 handoff remain blocked until proof is complete, so a retry can safely hand off.

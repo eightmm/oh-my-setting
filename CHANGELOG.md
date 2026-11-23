@@ -526,12 +526,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
-- CI runs macOS only on the daily schedule (was weekly) or a dispatch with
-  `macos=true`. Pushes, PRs and the full run `oms land --ci-full` requests use
-  Linux jobs, so a land no longer waits for a macOS runner; one measured full
-  run spent about 16 of its 32 minutes queued for macOS. The macOS Rust and
-  install lifecycle jobs and the BSD userland fixtures are unchanged. A macOS
-  regression now surfaces on `main` within a day rather than on the PR.
+- CI is now Linux-only: removed the `macos-latest` Rust and install lifecycle
+  jobs (and macOS-only workflow steps) from `.github/workflows/test.yml`,
+  keeping `lint`, `rust (ubuntu-24.04)`, `focused`,
+  `native (ubuntu-latest, copy)`, and `gate` intact. macOS remains a supported
+  runtime and installation host, and `tests/bsd-portability-smoke.sh` remains
+  wired in `scripts/check.sh` for GNU/BSD userland verification.
 - A panel Overall Main now manages only. Its startup contract and the
   `oms-panel-orchestrator` skill no longer allow "integration and unblocking"
   edits: every repository change goes to a worker or Provider Lead, fixes
