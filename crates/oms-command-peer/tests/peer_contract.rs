@@ -1284,7 +1284,14 @@ fn council_default_seat_sources() {
                 " codex:model=gpt-6.1-sol:account=work , claude:model=claude-sonnet-5-5:optional ",
             ),
         ),
+        (
+            "writer-model-override",
+            Some("claude,codex:effort=low:model=gpt-6.1-sol"),
+        ),
         ("invalid", Some("unmarked-fixture")),
+        ("trailing-comma", Some("codex,")),
+        ("leading-comma", Some(",codex")),
+        ("bare-comma", Some(",")),
         ("duplicate", Some("codex,codex")),
         ("optional", Some("codex:optional")),
     ] {
@@ -1368,13 +1375,37 @@ fn council_default_seat_sources() {
             ));
             // A repository-local file never overrides the trusted installation root.
             repo.write("config/panel-routing.json", "not installation policy");
-            if matches!(layout, "invalid" | "duplicate" | "optional") {
+            if matches!(
+                layout,
+                "invalid"
+                    | "trailing-comma"
+                    | "leading-comma"
+                    | "bare-comma"
+                    | "duplicate"
+                    | "optional"
+            ) {
                 let message = match layout {
                     "duplicate" => "duplicate council seat",
                     "optional" => "at least one seat must be required",
                     _ => "unsupported provider name",
                 };
                 refused(invoke("peer-ask", &[]), "OMS_PEER_PROVIDERS", message);
+            } else if layout == "writer-model-override" {
+                let replaced = invoke(
+                    "peer-review",
+                    &["--writer", "claude", "--model", "gpt-6.2-terra"],
+                );
+                let artifact = String::from_utf8_lossy(&replaced.1)
+                    .lines()
+                    .find_map(|line| line.strip_prefix("dry-run: codex -> "))
+                    .unwrap()
+                    .to_owned();
+                seats(replaced, &["codex"], "OMS_PEER_PROVIDERS");
+                assert!(
+                    fs::read_to_string(&artifact)
+                        .unwrap()
+                        .contains("- model: gpt-6.2-terra\n")
+                );
             } else if layout == "environment" {
                 for tool in ["peer-ask", "peer-review"] {
                     seats(
@@ -1442,6 +1473,308 @@ fn council_default_seat_sources() {
                     CONFIG,
                     "no available peer target",
                 );
+                configure(Some(r#"["codex:effort=low:model=gpt-6.1-sol"]"#));
+                let probe = ProviderProbe::default();
+                let overridden = oms_command_peer::run_with_executor(
+                    "peer-ask",
+                    &args(&[
+                        "--reasoning-effort",
+                        "high",
+                        "--prompt",
+                        "Inspect council",
+                        "--no-task",
+                        "--no-memory",
+                    ]),
+                    &repo.0,
+                    &source.0,
+                    &STOP,
+                    &probe,
+                );
+                assert_eq!(overridden.0, 0, "{}", message(&overridden));
+                let calls = probe.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert!(
+                    calls[0]
+                        .request
+                        .argv
+                        .iter()
+                        .any(|arg| arg == r#"model_reasoning_effort="high""#),
+                    "{:?}",
+                    calls[0].request.argv
+                );
+                drop(calls);
+                let explicit_probe = ProviderProbe::default();
+                let kept = oms_command_peer::run_with_executor(
+                    "peer-ask",
+                    &args(&[
+                        "--providers",
+                        "codex:effort=low:model=gpt-6.1-sol",
+                        "--reasoning-effort",
+                        "high",
+                        "--prompt",
+                        "Inspect council",
+                        "--no-task",
+                        "--no-memory",
+                    ]),
+                    &repo.0,
+                    &source.0,
+                    &STOP,
+                    &explicit_probe,
+                );
+                assert_eq!(kept.0, 0, "{}", message(&kept));
+                let calls = explicit_probe.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert!(
+                    calls[0]
+                        .request
+                        .argv
+                        .iter()
+                        .any(|arg| arg == r#"model_reasoning_effort="low""#),
+                    "{:?}",
+                    calls[0].request.argv
+                );
+                drop(calls);
+                let replaced = invoke("peer-ask", &["--model", "gpt-6.2-terra"]);
+                let artifact = String::from_utf8_lossy(&replaced.1)
+                    .lines()
+                    .find_map(|line| line.strip_prefix("dry-run: codex -> "))
+                    .unwrap()
+                    .to_owned();
+                seats(replaced, &["codex"], CONFIG);
+                assert!(
+                    fs::read_to_string(&artifact)
+                        .unwrap()
+                        .contains("- model: gpt-6.2-terra\n")
+                );
+                refused(
+                    invoke(
+                        "peer-ask",
+                        &[
+                            "--providers",
+                            "codex:effort=low:model=gpt-6.1-sol",
+                            "--model",
+                            "gpt-6.2-terra",
+                        ],
+                    ),
+                    "seat effort override requires its exact model",
+                    "exact model",
+                );
+                configure(Some(r#"["claude:effort=low:model=claude-sonnet-5-5"]"#));
+                refused(
+                    invoke("peer-ask", &["--reasoning-effort", "ultra"]),
+                    "Claude does not support the requested effort",
+                    "requested effort",
+                );
+                seats(
+                    invoke(
+                        "peer-ask",
+                        &[
+                            "--providers",
+                            "claude:effort=low:model=claude-sonnet-5-5",
+                            "--reasoning-effort",
+                            "ultra",
+                        ],
+                    ),
+                    &["claude"],
+                    "--providers",
+                );
+                configure(Some(
+                    r#"["codex:model=gpt-6.1-sol","opencode:model=anthropic/claude-sonnet-5-5","pi:model=claude-sonnet-5-5"]"#,
+                ));
+                seats(
+                    invoke("peer-review", &["--writer", "claude"]),
+                    &["codex"],
+                    CONFIG,
+                );
+                let correlated = invoke(
+                    "peer-review",
+                    &[
+                        "--providers",
+                        "codex:model=gpt-6.1-sol,opencode:model=anthropic/claude-sonnet-5-5",
+                        "--writer",
+                        "claude",
+                    ],
+                );
+                assert!(
+                    String::from_utf8_lossy(&correlated.2)
+                        .contains("correlated judgment is not independent"),
+                    "{}",
+                    String::from_utf8_lossy(&correlated.2)
+                );
+                seats(correlated, &["codex", "opencode"], "--providers");
+                assert_eq!(oms_command_peer::providers::family("grok-build", ""), "xai");
+                assert_eq!(
+                    oms_command_peer::providers::family("qwen-code", ""),
+                    "alibaba"
+                );
+                assert_eq!(oms_command_peer::providers::family("custom", ""), "custom");
+                assert_eq!(oms_command_peer::providers::family("", ""), "");
+                configure(Some(
+                    r#"["codex:model=gpt-6.1-sol","opencode:model=xai/grok-4","fixture:model=custom/demo"]"#,
+                ));
+                seats(
+                    invoke("peer-review", &["--writer", "grok-build"]),
+                    &["codex", "fixture"],
+                    CONFIG,
+                );
+                configure(Some(
+                    r#"["codex:model=gpt-6.1-sol","opencode:model=qwen/qwen3-coder","fixture:model=custom/demo"]"#,
+                ));
+                seats(
+                    invoke("peer-review", &["--writer", "qwen-code"]),
+                    &["codex", "fixture"],
+                    CONFIG,
+                );
+                configure(Some(
+                    r#"["opencode:model=provider-default","fixture:model=custom/demo"]"#,
+                ));
+                seats(
+                    invoke("peer-review", &["--writer", "grok-build"]),
+                    &["opencode", "fixture"],
+                    CONFIG,
+                );
+                for (default_seats, writer, fallback_model) in [
+                    (
+                        r#"["opencode:model=openai/gpt-6.1-sol","claude"]"#,
+                        "claude",
+                        "anthropic/claude-sonnet-5-5",
+                    ),
+                    (
+                        r#"["opencode:model=openai/gpt-6.1-sol","grok"]"#,
+                        "grok",
+                        "xai/grok-4",
+                    ),
+                ] {
+                    configure(Some(default_seats));
+                    let fallback_probe = ProviderProbe::default();
+                    let rejected = oms_command_peer::run_with_executor(
+                        "peer-review",
+                        &args(&[
+                            "--writer",
+                            writer,
+                            "--fallback-model",
+                            fallback_model,
+                            "--no-diff",
+                            "--no-verify",
+                            "--no-task",
+                            "--no-memory",
+                            "--prompt",
+                            "Inspect council",
+                        ]),
+                        &repo.0,
+                        &source.0,
+                        &STOP,
+                        &fallback_probe,
+                    );
+                    refused(rejected, CONFIG, "no available peer target");
+                    assert!(fallback_probe.calls.lock().unwrap().is_empty());
+                }
+                configure(Some(
+                    r#"["claude","opencode:effort=high:model=anthropic/claude-sonnet-5-5"]"#,
+                ));
+                for extra in [
+                    &["--writer", "claude", "--model", "openai/gpt-6.1-sol"][..],
+                    &[
+                        "--writer",
+                        "claude",
+                        "--model",
+                        "openai/gpt-6.1-sol",
+                        "--reasoning-effort",
+                        "medium",
+                    ][..],
+                ] {
+                    let overridden = invoke("peer-review", extra);
+                    let artifact = String::from_utf8_lossy(&overridden.1)
+                        .lines()
+                        .find_map(|line| line.strip_prefix("dry-run: opencode -> "))
+                        .unwrap()
+                        .to_owned();
+                    seats(overridden, &["opencode"], CONFIG);
+                    assert!(
+                        fs::read_to_string(&artifact)
+                            .unwrap()
+                            .contains("- model: openai/gpt-6.1-sol\n")
+                    );
+                }
+                configure(Some(
+                    r#"["claude","opencode:effort=high:model=openai/gpt-6.1-sol"]"#,
+                ));
+                let replaced_same_family_probe = ProviderProbe::default();
+                let rejected_model = oms_command_peer::run_with_executor(
+                    "peer-review",
+                    &args(&[
+                        "--writer",
+                        "claude",
+                        "--model",
+                        "anthropic/claude-sonnet-5-5",
+                        "--no-diff",
+                        "--no-verify",
+                        "--no-task",
+                        "--no-memory",
+                        "--prompt",
+                        "Inspect council",
+                    ]),
+                    &repo.0,
+                    &source.0,
+                    &STOP,
+                    &replaced_same_family_probe,
+                );
+                refused(rejected_model, CONFIG, "no available peer target");
+                assert!(replaced_same_family_probe.calls.lock().unwrap().is_empty());
+                let correlated_fallback = invoke(
+                    "peer-review",
+                    &[
+                        "--providers",
+                        "opencode:model=openai/gpt-6.1-sol",
+                        "--writer",
+                        "claude",
+                        "--fallback-model",
+                        "anthropic/claude-sonnet-5-5",
+                    ],
+                );
+                assert!(
+                    String::from_utf8_lossy(&correlated_fallback.2)
+                        .contains("correlated judgment is not independent"),
+                    "{}",
+                    String::from_utf8_lossy(&correlated_fallback.2)
+                );
+                seats(correlated_fallback, &["opencode"], "--providers");
+                configure(Some(
+                    r#"["codex:model=gpt-6.1-sol","opencode:model=anthropic/claude-sonnet-5-5","fixture:model=custom/demo:account=work:optional"]"#,
+                ));
+                let optional_probe = ProviderProbe::default();
+                let reviewed = oms_command_peer::run_with_executor(
+                    "peer-review",
+                    &args(&[
+                        "--writer",
+                        "claude",
+                        "--no-diff",
+                        "--no-verify",
+                        "--no-task",
+                        "--no-memory",
+                        "--prompt",
+                        "Inspect council",
+                    ]),
+                    &repo.0,
+                    &source.0,
+                    &STOP,
+                    &optional_probe,
+                );
+                assert_eq!(reviewed.0, 0, "{}", message(&reviewed));
+                let diagnostic = String::from_utf8_lossy(&reviewed.2);
+                assert!(
+                    diagnostic.contains("warning: optional fixture seat unavailable:"),
+                    "{diagnostic}"
+                );
+                let calls = optional_probe.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    Path::new(&calls[0].request.argv[0])
+                        .file_name()
+                        .and_then(|name| name.to_str()),
+                    Some("codex")
+                );
+                drop(calls);
                 configure(Some(r#"["fixture:model=custom/demo"]"#));
                 let team = run(
                     &repo,

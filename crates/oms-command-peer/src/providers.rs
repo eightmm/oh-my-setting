@@ -96,6 +96,10 @@ impl Target {
             effort,
         })
     }
+
+    pub(crate) fn clear_effort(&mut self) {
+        self.effort = None;
+    }
 }
 pub fn account_id(value: &str) -> Result<()> {
     if cached_regex!(r"\A[a-z0-9][a-z0-9_-]{0,63}\z").is_match(value) {
@@ -139,11 +143,13 @@ pub fn family(provider: &str, model: &str) -> String {
             return family.into();
         }
     }
-    match provider {
+    match oms_command_agent_role::provider_identity::canonical(provider) {
         "codex" => "openai",
         "claude" => "anthropic",
         "antigravity" | "gemini" => "google",
-        _ => provider,
+        "grok" => "xai",
+        "qwen" => "alibaba",
+        other => other,
     }
     .into()
 }

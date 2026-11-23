@@ -1118,13 +1118,59 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             ),
         )
     };
-    if tool == "peer-review" && args.has("writer") && !args.has("providers") {
-        let writer = providers::normalize_at(args.get("writer"), context.cwd)?;
-        targets.retain(|s| s.provider != writer);
+    let review_role = if !args.get("role").is_empty() {
+        args.get("role")
+    } else {
+        "reviewer"
+    };
+    let implicit_writer_family =
+        if tool == "peer-review" && args.has("writer") && !args.has("providers") {
+            let writer = providers::normalize_at(args.get("writer"), context.cwd)?;
+            targets.retain(|s| s.provider != writer);
+            Some(providers::family(&writer, ""))
+        } else {
+            None
+        };
+    if !single && !args.has("providers") {
+        if args.has("reasoning-effort") {
+            for target in &mut targets {
+                target.clear_effort();
+            }
+        }
+        if targets.len() == 1
+            && args.has("model")
+            && !args.get("model").is_empty()
+            && args.get("model") != targets[0].model
+        {
+            targets[0].clear_effort();
+        }
+    }
+    if let Some(writer_family) = implicit_writer_family
+        && !writer_family.is_empty()
+    {
+        let fallback = args.get("fallback-model");
+        let mut independent = Vec::with_capacity(targets.len());
+        for target in targets {
+            if let Ok(route) = providers::route(
+                context,
+                &target,
+                args.get("model"),
+                args.value("reasoning-effort", "auto"),
+                review_role,
+            ) && (providers::family(&route.provider, &route.model) == writer_family
+                || (!fallback.is_empty()
+                    && providers::family(&route.provider, fallback) == writer_family))
+            {
+                continue;
+            }
+            independent.push(target);
+        }
+        targets = independent;
     }
     if tool == "peer-review" && args.has("writer") && args.has("providers") {
         let writer = providers::normalize_at(args.required("writer")?, context.cwd)?;
         let writer_family = providers::family(&writer, "");
+        let fallback = args.get("fallback-model");
         let mut correlated = false;
         for target in &targets {
             let route = providers::route(
@@ -1132,9 +1178,11 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                 target,
                 args.get("model"),
                 args.value("reasoning-effort", "auto"),
-                "reviewer",
+                review_role,
             )?;
-            correlated |= providers::family(&route.provider, &route.model) == writer_family;
+            correlated |= providers::family(&route.provider, &route.model) == writer_family
+                || (!fallback.is_empty()
+                    && providers::family(&route.provider, fallback) == writer_family);
         }
         if correlated {
             warnings.extend_from_slice(b"warning: explicit reviewer council includes the writer's model family; correlated judgment is not independent\n");
