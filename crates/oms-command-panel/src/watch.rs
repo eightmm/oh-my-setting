@@ -90,7 +90,7 @@ fn run_with_source_writer(
         managed: false,
     };
     let mut board = (options.has("watch") && max_count.is_none() && terminal.is_some())
-        .then(InteractiveRefresh::start)
+        .then(|| InteractiveRefresh::start(services.workspace_group_resolver()))
         .transpose()?;
     if board.is_some() {
         room.clear();
@@ -2487,9 +2487,11 @@ struct InteractiveRefresh {
 }
 
 impl InteractiveRefresh {
-    fn start() -> Result<Self> {
+    fn start(
+        workspace_group: Option<oms_panel_core::services::WorkspaceGroupResolver>,
+    ) -> Result<Self> {
         Ok(Self {
-            worker: BoardRefresh::start()?,
+            worker: BoardRefresh::start(workspace_group)?,
             quota: QuotaCompletion::default(),
             scope: None,
             phase: RefreshPhase::Pending,

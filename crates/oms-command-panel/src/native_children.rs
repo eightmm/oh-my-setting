@@ -2746,6 +2746,15 @@ fn agy_private(stat: &Stat, common: &Stat) -> bool {
 /// One bounded, single-line pointer file read without following symlinks; the
 /// caller checks the returned stat with `agy_private`.
 fn agy_meta(dir: &OwnedFd, name: &str, bytes: &mut usize) -> Option<(String, Stat)> {
+    agy_meta_checked(dir, name, bytes, |_, _| true)
+}
+
+fn agy_meta_checked(
+    dir: &OwnedFd,
+    name: &str,
+    bytes: &mut usize,
+    admissible: impl FnOnce(&OwnedFd, &Stat) -> bool,
+) -> Option<(String, Stat)> {
     let fd = fs::openat(dir, name, AGY_FILE_FLAGS, Mode::empty()).ok()?;
     let before = fs::fstat(&fd).ok()?;
     let size = usize::try_from(before.st_size)
@@ -2753,7 +2762,10 @@ fn agy_meta(dir: &OwnedFd, name: &str, bytes: &mut usize) -> Option<(String, Sta
         .filter(|&size| size <= AGY_META_LIMIT)?;
     // The probe includes one byte past the size and is spent even if it fails.
     *bytes = bytes.checked_sub(size + 1)?;
-    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile || before.st_nlink != 1 {
+    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
+        || before.st_nlink != 1
+        || !admissible(&fd, &before)
+    {
         return None;
     }
     let file = File::from(fd);
@@ -2965,62 +2977,232 @@ pub(crate) fn agy_dir_strict(path: &Path) -> Option<(OwnedFd, Stat)> {
     None
 }
 
-/// Strict workspace authority for AGY child chat reads: owner-only write (`0o022 == 0`),
-/// symlink-free ancestors, `st_nlink == 1` on files, and post-scan re-walk confirmation.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) struct AgyStrictWorkspaces {
-    root: String,
-    repo: PathBuf,
-    common: Option<Option<(PathBuf, OwnedFd, Stat)>>,
-    verdicts: BTreeMap<String, bool>,
-    bytes: usize,
-    trail: Vec<(PathBuf, bool, (fs::Dev, u64))>,
+type AgyWorkspaceTrail = Vec<(PathBuf, AgyWorkspaceEntry)>;
+type AgyGitCommon = (PathBuf, OwnedFd, Stat);
+
+enum AgyWorkspaceEntry {
+    Directory(Stat, Option<oms_safe_fs::Root>),
+    Metadata(Stat),
+    Missing,
+}
+
+#[derive(Default)]
+struct AgyWorkspaceAuthority<'a> {
+    group: Option<&'a dyn Fn(u32) -> bool>,
+    proven_groups: BTreeMap<u32, bool>,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-impl AgyStrictWorkspaces {
+impl AgyWorkspaceAuthority<'_> {
+    fn private_group(&mut self, gid: u32) -> bool {
+        let Some(group) = self.group else {
+            return false;
+        };
+        *self.proven_groups.entry(gid).or_insert_with(|| group(gid))
+    }
+
+    fn directory(&mut self, path: &Path, trail: &mut AgyWorkspaceTrail) -> Option<(OwnedFd, Stat)> {
+        if let Some((fd, stat)) = agy_dir_strict(path) {
+            trail.push((path.to_owned(), AgyWorkspaceEntry::Directory(stat, None)));
+            return Some((fd, stat));
+        }
+        self.group?;
+        let root =
+            oms_safe_fs::Root::open_private_workspace(path, |gid| self.private_group(gid)).ok()?;
+        let fd = root
+            .pinned_private_directory()
+            .ok()?
+            .try_clone_to_owned()
+            .ok()?;
+        let stat = fs::fstat(&fd).ok()?;
+        if stat.st_uid != rustix::process::geteuid().as_raw() {
+            return None;
+        }
+        trail.push((
+            path.to_owned(),
+            AgyWorkspaceEntry::Directory(stat, Some(root)),
+        ));
+        Some((fd, stat))
+    }
+
+    fn child_directory(
+        &mut self,
+        dir: &OwnedFd,
+        parent: &Path,
+        name: &str,
+        trail: &mut AgyWorkspaceTrail,
+    ) -> Option<(OwnedFd, Stat)> {
+        let expected = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        let child = self.directory(&parent.join(name), trail)?;
+        let named = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        (workspace_same_directory(&expected, &child.1)
+            && workspace_same_directory(&named, &child.1))
+        .then_some(child)
+    }
+
+    fn allows_file(&mut self, fd: &OwnedFd, stat: &Stat) -> bool {
+        FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+            && stat.st_nlink == 1
+            && (agy_strict_stat(stat)
+                || (self.group.is_some()
+                    && oms_safe_fs::workspace_file_has_mode_only_group_access(fd, stat)
+                    && self.private_group(stat.st_gid)))
+    }
+
+    fn metadata(
+        &mut self,
+        dir: &OwnedFd,
+        parent: &Path,
+        name: &str,
+        bytes: &mut usize,
+        trail: &mut AgyWorkspaceTrail,
+    ) -> Option<String> {
+        let before = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        let (value, opened) = agy_meta_checked(dir, name, bytes, |fd, stat| {
+            workspace_same_file(&before, stat) && self.allows_file(fd, stat)
+        })?;
+        let named = fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        if !workspace_same_file(&named, &opened) {
+            return None;
+        }
+        trail.push((parent.join(name), AgyWorkspaceEntry::Metadata(opened)));
+        Some(value)
+    }
+
+    fn confirm_entry(&mut self, path: &Path, entry: &AgyWorkspaceEntry) -> Option<()> {
+        match entry {
+            AgyWorkspaceEntry::Directory(expected, held) => {
+                let now = if let Some(root) = held {
+                    root.recheck_private_workspace(|gid| self.private_group(gid))
+                        .ok()?;
+                    fs::fstat(root.pinned_private_directory().ok()?).ok()?
+                } else {
+                    agy_dir_strict(path)?.1
+                };
+                workspace_same_directory(expected, &now).then_some(())
+            }
+            AgyWorkspaceEntry::Metadata(expected) => {
+                let (parent, name) = (path.parent()?, path.file_name()?);
+                let (dir, _) = self.directory(parent, &mut Vec::new())?;
+                let fd = fs::openat(&dir, name, AGY_FILE_FLAGS, Mode::empty()).ok()?;
+                let now = fs::fstat(&fd).ok()?;
+                let named = fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+                (workspace_same_file(expected, &now)
+                    && workspace_same_file(&named, &now)
+                    && self.allows_file(&fd, &now))
+                .then_some(())
+            }
+            AgyWorkspaceEntry::Missing => {
+                let (parent, name) = (path.parent()?, path.file_name()?);
+                let (dir, _) = self.directory(parent, &mut Vec::new())?;
+                matches!(
+                    fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW),
+                    Err(rustix::io::Errno::NOENT)
+                )
+                .then_some(())
+            }
+        }
+    }
+}
+
+fn workspace_same_directory(a: &Stat, b: &Stat) -> bool {
+    FileType::from_raw_mode(a.st_mode) == FileType::Directory
+        && FileType::from_raw_mode(b.st_mode) == FileType::Directory
+        && agy_same(a, b)
+        && (a.st_uid, a.st_gid, a.st_mode) == (b.st_uid, b.st_gid, b.st_mode)
+}
+
+fn workspace_same_file(a: &Stat, b: &Stat) -> bool {
+    codex_same_identity(a, b) && codex_same_version(a, b) && a.st_gid == b.st_gid
+}
+
+/// Direct workspace and registered linked-checkout authority. Only explicit
+/// reads may supply a private-group proof. The proof never applies to AGY logs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct AgyStrictWorkspaces<'a> {
+    root: String,
+    repo: PathBuf,
+    common: Option<Option<AgyGitCommon>>,
+    verdicts: BTreeMap<String, bool>,
+    bytes: usize,
+    trail: AgyWorkspaceTrail,
+    authority: AgyWorkspaceAuthority<'a>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl<'a> AgyStrictWorkspaces<'a> {
     pub(crate) fn new(repo: &Path) -> Option<Self> {
+        Self::with_group(repo, None)
+    }
+
+    pub(crate) fn with_group(repo: &Path, group: Option<&'a dyn Fn(u32) -> bool>) -> Option<Self> {
         if repo.canonicalize().ok().as_deref() != Some(repo) {
             return None;
         }
         let repo_str = repo.to_str()?;
-        let (repo_fd, repo_stat) = agy_dir_strict(repo)?;
-        let mut trail = vec![(
-            repo.to_path_buf(),
-            false,
-            (repo_stat.st_dev, repo_stat.st_ino),
-        )];
-        match fs::statat(&repo_fd, ".git", AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(dot) => {
-                let kind = FileType::from_raw_mode(dot.st_mode);
-                let valid = match kind {
-                    FileType::Directory => {
-                        let (_, dot_stat) = agy_dir_strict(&repo.join(".git"))?;
-                        agy_same(&dot_stat, &dot)
-                    }
-                    FileType::RegularFile => dot.st_nlink == 1 && agy_strict_stat(&dot),
-                    _ => false,
-                };
-                if !valid {
-                    return None;
-                }
-                trail.push((
-                    repo.join(".git"),
-                    kind == FileType::RegularFile,
-                    (dot.st_dev, dot.st_ino),
-                ));
-            }
-            Err(rustix::io::Errno::NOENT) => {}
-            Err(_) => return None,
-        }
-        Some(Self {
+        let mut result = Self {
             root: format!("file://{repo_str}"),
             repo: repo.to_path_buf(),
             common: None,
             verdicts: BTreeMap::new(),
             bytes: AGY_META_BUDGET,
-            trail,
-        })
+            trail: Vec::new(),
+            authority: AgyWorkspaceAuthority {
+                group,
+                ..Default::default()
+            },
+        };
+        let (repo_fd, _) = result.authority.directory(repo, &mut result.trail)?;
+        match fs::statat(&repo_fd, ".git", AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(dot) => match FileType::from_raw_mode(dot.st_mode) {
+                FileType::Directory => {
+                    let common = result.authority.child_directory(
+                        &repo_fd,
+                        repo,
+                        ".git",
+                        &mut result.trail,
+                    )?;
+                    result.common = Some(Some((repo.join(".git"), common.0, common.1)));
+                }
+                FileType::RegularFile => {
+                    let fd = fs::openat(&repo_fd, ".git", AGY_FILE_FLAGS, Mode::empty()).ok()?;
+                    let now = fs::fstat(&fd).ok()?;
+                    if !workspace_same_file(&dot, &now) || !result.authority.allows_file(&fd, &now)
+                    {
+                        return None;
+                    }
+                    result
+                        .trail
+                        .push((repo.join(".git"), AgyWorkspaceEntry::Metadata(now)));
+                    if group.is_some() {
+                        // A relaxed direct worktree must prove its own backlink, even
+                        // when the child record names only that current checkout.
+                        let common = agy_common_strict(
+                            repo,
+                            &mut result.authority,
+                            &mut result.bytes,
+                            &mut result.trail,
+                        )?;
+                        agy_linked_strict(
+                            &common,
+                            &result.root,
+                            &mut result.authority,
+                            &mut result.bytes,
+                            &mut result.trail,
+                        )?;
+                        result.common = Some(Some(common));
+                    }
+                }
+                _ => return None,
+            },
+            Err(rustix::io::Errno::NOENT) => {
+                result
+                    .trail
+                    .push((repo.join(".git"), AgyWorkspaceEntry::Missing));
+            }
+            Err(_) => return None,
+        }
+        Some(result)
     }
 
     pub(crate) fn accepts(&mut self, uri: &str) -> bool {
@@ -3033,16 +3215,21 @@ impl AgyStrictWorkspaces {
         if self.verdicts.len() >= AGY_URIS_PER_FRAME {
             return false;
         }
-        let (repo, bytes, trail) = (&self.repo, &mut self.bytes, &mut self.trail);
+        let (repo, authority, bytes, trail) = (
+            &self.repo,
+            &mut self.authority,
+            &mut self.bytes,
+            &mut self.trail,
+        );
         let common = self.common.get_or_insert_with(|| {
             let mut local = Vec::new();
-            let found = agy_common_strict(repo, bytes, &mut local)?;
+            let found = agy_common_strict(repo, authority, bytes, &mut local)?;
             trail.extend(local);
             Some(found)
         });
         let verdict = common.as_ref().is_some_and(|common| {
             let mut local = Vec::new();
-            if agy_linked_strict(common, uri, bytes, &mut local).is_some() {
+            if agy_linked_strict(common, uri, authority, bytes, &mut local).is_some() {
                 trail.extend(local);
                 true
             } else {
@@ -3054,80 +3241,42 @@ impl AgyStrictWorkspaces {
     }
 
     pub(crate) fn confirm(&self) -> bool {
-        self.trail.iter().all(|(path, is_file, ident)| {
-            if *is_file {
-                let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-                    return false;
-                };
-                let Some((dir_fd, _)) = agy_dir_strict(parent) else {
-                    return false;
-                };
-                let Ok(fd) = fs::openat(&dir_fd, name, AGY_FILE_FLAGS, Mode::empty()) else {
-                    return false;
-                };
-                let Ok(now) = fs::fstat(&fd) else {
-                    return false;
-                };
-                FileType::from_raw_mode(now.st_mode) == FileType::RegularFile
-                    && now.st_nlink == 1
-                    && agy_strict_stat(&now)
-                    && (now.st_dev, now.st_ino) == *ident
-            } else {
-                agy_dir_strict(path).is_some_and(|(_, now)| (now.st_dev, now.st_ino) == *ident)
-            }
-        })
+        let mut fresh = AgyWorkspaceAuthority {
+            group: self.authority.group,
+            ..Default::default()
+        };
+        self.trail
+            .iter()
+            .all(|(path, entry)| fresh.confirm_entry(path, entry).is_some())
     }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn agy_common_strict(
     repo: &Path,
+    authority: &mut AgyWorkspaceAuthority<'_>,
     bytes: &mut usize,
-    trail: &mut Vec<(PathBuf, bool, (fs::Dev, u64))>,
-) -> Option<(PathBuf, OwnedFd, Stat)> {
-    let (repo_fd, _) = agy_dir_strict(repo)?;
+    trail: &mut AgyWorkspaceTrail,
+) -> Option<AgyGitCommon> {
+    let (repo_fd, _) = authority.directory(repo, trail)?;
     let dot = fs::statat(&repo_fd, ".git", AtFlags::SYMLINK_NOFOLLOW).ok()?;
     if FileType::from_raw_mode(dot.st_mode) == FileType::Directory {
-        let path = repo.join(".git");
-        let (fd, stat) = agy_dir_strict(&path)?;
-        if !agy_same(&stat, &dot) {
-            return None;
-        }
-        trail.push((path.clone(), false, (stat.st_dev, stat.st_ino)));
-        return Some((path, fd, stat));
+        let (fd, stat) = authority.child_directory(&repo_fd, repo, ".git", trail)?;
+        return Some((repo.join(".git"), fd, stat));
     }
-    let (pointer, pointer_stat) = agy_meta(&repo_fd, ".git", bytes)?;
-    if !agy_strict_stat(&pointer_stat) {
-        return None;
-    }
-    trail.push((
-        repo.join(".git"),
-        true,
-        (pointer_stat.st_dev, pointer_stat.st_ino),
-    ));
+    let pointer = authority.metadata(&repo_fd, repo, ".git", bytes, trail)?;
     let admin = agy_join(repo, pointer.strip_prefix("gitdir: ")?)?;
-    let (admin_fd, admin_stat) = agy_dir_strict(&admin)?;
-    trail.push((admin.clone(), false, (admin_stat.st_dev, admin_stat.st_ino)));
+    let (admin_fd, admin_stat) = authority.directory(&admin, trail)?;
     match fs::statat(&admin_fd, "commondir", AtFlags::SYMLINK_NOFOLLOW) {
-        Err(rustix::io::Errno::NOENT) => Some((admin, admin_fd, admin_stat)),
+        Err(rustix::io::Errno::NOENT) => {
+            trail.push((admin.join("commondir"), AgyWorkspaceEntry::Missing));
+            Some((admin, admin_fd, admin_stat))
+        }
         Err(_) => None,
         Ok(_) => {
-            let (shared, shared_stat) = agy_meta(&admin_fd, "commondir", bytes)?;
-            if !agy_strict_stat(&shared_stat) {
-                return None;
-            }
-            trail.push((
-                admin.join("commondir"),
-                true,
-                (shared_stat.st_dev, shared_stat.st_ino),
-            ));
+            let shared = authority.metadata(&admin_fd, &admin, "commondir", bytes, trail)?;
             let common_path = agy_join(&admin, &shared)?;
-            let (common_fd, common_stat) = agy_dir_strict(&common_path)?;
-            trail.push((
-                common_path.clone(),
-                false,
-                (common_stat.st_dev, common_stat.st_ino),
-            ));
+            let (common_fd, common_stat) = authority.directory(&common_path, trail)?;
             Some((common_path, common_fd, common_stat))
         }
     }
@@ -3135,31 +3284,19 @@ fn agy_common_strict(
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn agy_linked_strict(
-    common: &(PathBuf, OwnedFd, Stat),
+    common: &AgyGitCommon,
     uri: &str,
+    authority: &mut AgyWorkspaceAuthority<'_>,
     bytes: &mut usize,
-    trail: &mut Vec<(PathBuf, bool, (fs::Dev, u64))>,
+    trail: &mut AgyWorkspaceTrail,
 ) -> Option<()> {
     let path = uri.strip_prefix("file://")?;
     if path.contains(['%', '?', '#', '\\']) || path.chars().any(char::is_control) {
         return None;
     }
     let tree = Path::new(path);
-    let (tree_fd, tree_stat) = agy_dir_strict(tree)?;
-    trail.push((
-        tree.to_path_buf(),
-        false,
-        (tree_stat.st_dev, tree_stat.st_ino),
-    ));
-    let (pointer, pointer_stat) = agy_meta(&tree_fd, ".git", bytes)?;
-    if !agy_strict_stat(&pointer_stat) {
-        return None;
-    }
-    trail.push((
-        tree.join(".git"),
-        true,
-        (pointer_stat.st_dev, pointer_stat.st_ino),
-    ));
+    let (tree_fd, tree_stat) = authority.directory(tree, trail)?;
+    let pointer = authority.metadata(&tree_fd, tree, ".git", bytes, trail)?;
     let admin = agy_join(tree, pointer.strip_prefix("gitdir: ")?)?;
     let name = admin.file_name()?.to_str()?;
     let worktrees = admin.parent()?;
@@ -3167,72 +3304,26 @@ fn agy_linked_strict(
         return None;
     }
     let worktrees_parent = worktrees.parent()?;
-    let (_, worktrees_parent_stat) = agy_dir_strict(worktrees_parent)?;
-    if !agy_same(&worktrees_parent_stat, &common.2) {
+    let (_, worktrees_parent_stat) = authority.directory(worktrees_parent, trail)?;
+    if !workspace_same_directory(&worktrees_parent_stat, &common.2) {
         return None;
     }
-    trail.push((
-        worktrees_parent.to_path_buf(),
-        false,
-        (worktrees_parent_stat.st_dev, worktrees_parent_stat.st_ino),
-    ));
-    let registry = fs::openat(&common.1, "worktrees", CODEX_DIR_FLAGS, Mode::empty()).ok()?;
-    let registry_stat = fs::fstat(&registry).ok()?;
-    if FileType::from_raw_mode(registry_stat.st_mode) != FileType::Directory
-        || !agy_strict_stat(&registry_stat)
-    {
-        return None;
-    }
-    trail.push((
-        common.0.join("worktrees"),
-        false,
-        (registry_stat.st_dev, registry_stat.st_ino),
-    ));
-    let record = fs::openat(&registry, name, CODEX_DIR_FLAGS, Mode::empty()).ok()?;
-    let record_stat = fs::fstat(&record).ok()?;
-    if FileType::from_raw_mode(record_stat.st_mode) != FileType::Directory
-        || !agy_strict_stat(&record_stat)
-    {
-        return None;
-    }
-    trail.push((
-        common.0.join("worktrees").join(name),
-        false,
-        (record_stat.st_dev, record_stat.st_ino),
-    ));
-    let (backlink, backlink_stat) = agy_meta(&record, "gitdir", bytes)?;
-    let (shared, shared_stat) = agy_meta(&record, "commondir", bytes)?;
-    if !agy_strict_stat(&backlink_stat) || !agy_strict_stat(&shared_stat) {
-        return None;
-    }
-    trail.push((
-        admin.join("gitdir"),
-        true,
-        (backlink_stat.st_dev, backlink_stat.st_ino),
-    ));
-    trail.push((
-        admin.join("commondir"),
-        true,
-        (shared_stat.st_dev, shared_stat.st_ino),
-    ));
-    let (_, admin_stat) = agy_dir_strict(&admin)?;
-    trail.push((admin.clone(), false, (admin_stat.st_dev, admin_stat.st_ino)));
+    let (registry, _) = authority.child_directory(&common.1, &common.0, "worktrees", trail)?;
+    let (record, record_stat) =
+        authority.child_directory(&registry, &common.0.join("worktrees"), name, trail)?;
+    let backlink = authority.metadata(&record, &admin, "gitdir", bytes, trail)?;
+    let shared = authority.metadata(&record, &admin, "commondir", bytes, trail)?;
+    let (_, admin_stat) = authority.directory(&admin, trail)?;
     let (backlink, shared) = (agy_join(&admin, &backlink)?, agy_join(&admin, &shared)?);
-    if !agy_same(&record_stat, &admin_stat) || backlink != tree.join(".git") {
+    if !workspace_same_directory(&record_stat, &admin_stat) || backlink != tree.join(".git") {
         return None;
     }
-    let (_, shared_dir_stat) = agy_dir_strict(&shared)?;
-    trail.push((
-        shared,
-        false,
-        (shared_dir_stat.st_dev, shared_dir_stat.st_ino),
-    ));
-    let (_, tree_recheck_stat) = agy_dir_strict(tree)?;
+    let (_, shared_dir_stat) = authority.directory(&shared, trail)?;
+    let (_, tree_recheck_stat) = authority.directory(tree, trail)?;
     let common_now = fs::fstat(&common.1).ok()?;
-    (agy_same(&shared_dir_stat, &common.2)
-        && agy_same(&tree_recheck_stat, &tree_stat)
-        && agy_same(&common_now, &common.2)
-        && agy_strict_stat(&common_now))
+    (workspace_same_directory(&shared_dir_stat, &common.2)
+        && workspace_same_directory(&tree_recheck_stat, &tree_stat)
+        && workspace_same_directory(&common_now, &common.2))
     .then_some(())
 }
 

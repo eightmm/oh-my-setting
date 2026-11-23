@@ -44,11 +44,12 @@ struct LeadExecution<'a> {
 enum AssignmentEvidence<'a> {
     Bound(&'a native_assignment::Binding),
     Primary(&'a Transaction<'a>),
-    Lead(
-        &'a lead_delivery::Scope,
-        &'a dyn AccountHost,
-        &'a AttemptCache,
-    ),
+    Lead {
+        scope: &'a lead_delivery::Scope,
+        host: &'a dyn AccountHost,
+        attempts: &'a AttemptCache,
+        ticket: Option<&'a lead_delivery::AgyTicket<'a>>,
+    },
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1406,20 +1407,22 @@ impl<'a> Panel<'a> {
                         );
                         let selected_participant = selected_agy_usage
                             .and_then(|binding| binding.agy_usage_participant(&pane, shown_turn));
+                        let private_group = lead_delivery::group_check(self);
                         if let Some(usage) = agy_usage_sighting(
                             &mut observed.rows,
                             shown_turn,
                             selected_participant,
-                            |painted| {
-                                crate::agy_child_chat::agy_current_children_with_usage(
+                            |painted, selected| {
+                                crate::agy_child_chat::agy_board_child_usage(
                                     pane.lead.pid,
                                     &pane.lead.birth,
                                     &pane.repo,
-                                    Some(shown_turn),
+                                    shown_turn,
                                     painted,
-                                    true,
+                                    selected.map(|participant| {
+                                        (participant, &private_group as &dyn Fn(u32) -> bool)
+                                    }),
                                 )
-                                .map(|(turn, _, usage)| (turn, usage))
                             },
                             || {
                                 !self.stop.load(Ordering::Acquire)
@@ -2255,7 +2258,7 @@ impl<'a> Panel<'a> {
         owner: Option<&str>,
         attempts: &AttemptCache,
     ) -> crate::agy_child_chat::AgyChatOpen {
-        use crate::agy_child_chat::{AgyChatOpen, agy_open_selected_child_fenced};
+        use crate::agy_child_chat::{AgyChatOpen, agy_open_selected_child_with_group};
 
         let NativeLocator::Antigravity(selected) = &binding.locator else {
             return AgyChatOpen::Unavailable;
@@ -2270,9 +2273,12 @@ impl<'a> Panel<'a> {
         ) else {
             return AgyChatOpen::Unavailable;
         };
-        agy_open_selected_child_fenced(&pane.repo, selected, || {
-            self.agy_post_fence_current(&pane, &selected.turn, owner, attempts)
-        })
+        agy_open_selected_child_with_group(
+            &pane.repo,
+            selected,
+            &lead_delivery::group_check(self),
+            || self.agy_post_fence_current(&pane, &selected.turn, owner, attempts),
+        )
     }
 
     pub(crate) fn recheck_open_agy_chat(
@@ -2303,9 +2309,12 @@ impl<'a> Panel<'a> {
         ) else {
             return false;
         };
-        crate::agy_child_chat::agy_locator_still_current_fenced(&pane.repo, locator, || {
-            self.agy_post_fence_current(&pane, &locator.record.turn, owner, attempts)
-        })
+        crate::agy_child_chat::agy_locator_still_current_with_group(
+            &pane.repo,
+            locator,
+            &lead_delivery::group_check(self),
+            || self.agy_post_fence_current(&pane, &locator.record.turn, owner, attempts),
+        )
     }
 
     pub(crate) fn open_chat(
@@ -3605,20 +3614,24 @@ impl<'a> Panel<'a> {
     }
 
     fn require_lead_assignment_main(&self, attempts: &AttemptCache) -> Result<()> {
+        let repo = self.repo.canonicalize().map_err(Error::new)?;
+        self.require_lead_assignment_main_at(attempts, &repo)
+    }
+
+    fn require_lead_assignment_main_at(&self, attempts: &AttemptCache, repo: &Path) -> Result<()> {
         require(
             self.caller == self.main.id
                 && std::env::var_os("OMS_CAMPAIGN_MANIFEST_SHA256").is_none(),
             "native provider scheduling requires the current Main",
         )?;
-        let repo = self.repo.canonicalize().map_err(Error::new)?;
-        let main = attempts.resolve_attempt(&repo, &self.attempt, self.services, self.stop)?;
+        let main = attempts.resolve_attempt(repo, &self.attempt, self.services, self.stop)?;
         require(
             main.is_some_and(|main| {
                 self.is_live_main(&main) && main["refs"]["panel_native_scheduling"] == "unmanaged"
             }),
             "live Main attempt could not be verified for lead assignment",
         )?;
-        self.require_exact_main_membership(&repo)
+        self.require_exact_main_membership(repo)
     }
 
     fn require_exact_main_membership(&self, repo: &Path) -> Result<()> {
@@ -3881,21 +3894,38 @@ impl<'a> Panel<'a> {
                     let tx = transaction
                         .ok_or_else(|| Error::new("managed lead assignment receipt unavailable"))?;
                     let scope = lead_delivery::Scope::sample(self, provider, host)?;
+                    let ticket = if provider == "antigravity" {
+                        self.require_lead_assignment_main(attempts)?;
+                        Some(lead_delivery::AgyTicket::prepare(
+                            self, &scope, tx, turn, &prompt,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let wire_prompt = ticket
+                        .as_ref()
+                        .map_or(prompt.as_str(), |ticket| ticket.prompt.as_str());
                     let mut receipt = lead_delivery::Receipt::new(scope, turn);
                     // Retain an unverified receipt if a transport or writer is interrupted.
                     receipt.write(tx, provider)?;
                     crate::wakeup::notify_wakeup(self.repo);
                     let observed = self.send_checked(
                         provider,
-                        &prompt,
+                        wire_prompt,
                         Proof::LeadTurn {
                             turn,
                             agy_user_turn: &|| {
-                                receipt.scope.proves_agy_turn(self.repo, turn, &prompt)
+                                receipt.scope.proves_agy_turn(self.repo, turn, wire_prompt)
                             },
+                            agy_enter: ticket.as_ref().map(|ticket| (ticket, &receipt.scope)),
                         },
                         None,
-                        Some(AssignmentEvidence::Lead(&receipt.scope, host, attempts)),
+                        Some(AssignmentEvidence::Lead {
+                            scope: &receipt.scope,
+                            host,
+                            attempts,
+                            ticket: ticket.as_ref(),
+                        }),
                     )?;
                     receipt.delivery = observed.delivery;
                     let recorded = receipt.write(tx, provider).is_ok();
@@ -3924,6 +3954,9 @@ impl<'a> Panel<'a> {
                 output["delivery"] = serde_json::json!(state.delivery);
                 output["turn_id"] = turn.into();
                 output["task_completion"] = "unconfirmed".into();
+                if provider == "antigravity" {
+                    output["payload_consumption"] = "unconfirmed".into();
+                }
                 output["receipt_recorded"] = recorded.into();
                 if status == "unknown" {
                     output["reconcile_required"] = true.into();
@@ -4039,13 +4072,25 @@ impl<'a> Panel<'a> {
             }
             match evidence {
                 Some(AssignmentEvidence::Bound(binding)) => binding.revalidate(self)?,
-                Some(AssignmentEvidence::Lead(scope, host, attempts)) => {
+                Some(AssignmentEvidence::Lead {
+                    scope,
+                    host,
+                    attempts,
+                    ticket,
+                }) => {
                     require(
                         self.owner == fresh.owner
                             && &lead_delivery::Scope::sample(&fresh, provider, host)? == scope,
                         "provider or Main process generation changed",
                     )?;
-                    fresh.require_lead_assignment_main(attempts)?;
+                    if let Some(ticket) = ticket {
+                        ticket.verify_room(|repo| {
+                            fresh.require_lead_assignment_main_at(attempts, repo)
+                        })?;
+                        ticket.revalidate(&fresh, scope)?;
+                    } else {
+                        fresh.require_lead_assignment_main(attempts)?;
+                    }
                 }
                 _ => {}
             }
@@ -4058,6 +4103,14 @@ impl<'a> Panel<'a> {
             }
             _ => None,
         };
+        let has_ticket = ticket.is_some()
+            || matches!(
+                evidence,
+                Some(AssignmentEvidence::Lead {
+                    ticket: Some(_),
+                    ..
+                })
+            );
         let mut before_paste = true;
         paste_and_submit(
             provider,
@@ -4069,9 +4122,9 @@ impl<'a> Panel<'a> {
                 fence(false)?;
                 if let Some(ticket) = &ticket {
                     ticket.revalidate(self)?;
-                    if std::mem::take(&mut before_paste) {
-                        self.require_provider_input(provider)?;
-                    }
+                }
+                if has_ticket && std::mem::take(&mut before_paste) {
+                    self.require_provider_input(provider)?;
                 }
                 Ok(())
             },
@@ -4510,6 +4563,7 @@ enum Proof<'a> {
     LeadTurn {
         turn: &'a str,
         agy_user_turn: &'a dyn Fn() -> bool,
+        agy_enter: Option<(&'a lead_delivery::AgyTicket<'a>, &'a lead_delivery::Scope)>,
     },
     /// The explicitly pinned alternate requires an exact draft and whole-token terminal receipt.
     AlternateCodexTurn(&'a AlternateTurn<'a>),
@@ -4682,6 +4736,13 @@ fn paste_and_submit(
                 "Room, Main, or provider custody changed after pasting. Enter was withheld. Inspect the provider pane before resending.",
             ));
         }
+        if provider == "antigravity"
+            && lead_delivery::Frame::exact_draft(tmux, pane, provider, prompt) != previous
+        {
+            return Ok(Outcome::uncertain(
+                "The pasted draft changed. Enter was withheld. Inspect the provider pane before resending.",
+            ));
+        }
         lead_draft = previous;
     } else {
         let mut previous = None;
@@ -4710,7 +4771,29 @@ fn paste_and_submit(
             ))
         })?;
     }
-    if tmux(&["send-keys", "-t", pane, "Enter"]).is_err() {
+    let entered = if let Proof::LeadTurn {
+        agy_enter: Some((ticket, scope)),
+        ..
+    } = proof
+    {
+        let Some(draft) = lead_draft.as_ref() else {
+            return Ok(Outcome::uncertain(
+                "The AGY draft could not be verified. Enter was withheld. Inspect the provider pane before resending.",
+            ));
+        };
+        match ticket.enter(scope, draft, tmux) {
+            Ok(false) => {
+                return Ok(Outcome::uncertain(
+                    "Room or tmux generation changed. Enter was withheld. Inspect the provider pane before resending.",
+                ));
+            }
+            Ok(true) => true,
+            Err(_) => false,
+        }
+    } else {
+        tmux(&["send-keys", "-t", pane, "Enter"]).is_ok()
+    };
+    if !entered {
         return if ordinary_lead {
             Ok(Outcome::uncertain(
                 "Enter may have reached the provider. Inspect the provider pane before resending.",
@@ -5971,7 +6054,7 @@ fn agy_usage_sighting(
     rows: &mut [Value],
     shown_turn: &str,
     selected_participant: Option<&str>,
-    scan: impl FnOnce(&BTreeSet<String>) -> Option<(String, BTreeMap<String, Value>)>,
+    scan: impl FnOnce(&BTreeSet<String>, Option<&str>) -> Option<crate::agy_child_chat::AgyBoardUsage>,
     prove_again: impl FnOnce() -> bool,
 ) -> Option<AgySelectedResponseUsage> {
     if shown_turn.is_empty() || rows.is_empty() {
@@ -5996,25 +6079,28 @@ fn agy_usage_sighting(
         .take(AGY_USAGE_ROWS)
         .map(str::to_owned)
         .collect();
-    let selected_only = selected_participant.and_then(|selected| {
-        (agy_rows.contains(selected)
-            && total_counts.get(selected).copied() == Some(1)
-            && !ambient.contains(selected))
-        .then(|| selected.to_owned())
+    let selected = selected_participant.filter(|selected| {
+        agy_rows.contains(selected) && total_counts.get(selected).copied() == Some(1)
     });
+    let selected_only = selected.filter(|selected| !ambient.contains(*selected));
     let mut painted = ambient.clone();
-    if let Some(selected) = &selected_only {
-        painted.insert(selected.clone());
+    if let Some(selected) = selected_only {
+        painted.insert(selected.to_owned());
     }
     if painted.is_empty() {
         return None;
     }
-    let (turn, usage) = scan(&painted)?;
-    if turn != shown_turn || usage.is_empty() || !prove_again() {
+    let usage = scan(&painted, selected)?;
+    if usage.turn != shown_turn
+        || (usage.rows.is_empty() && usage.selected.is_none())
+        || !prove_again()
+    {
         return None;
     }
-    let mut detail_usage = None;
-    for (participant, value) in usage {
+    let mut detail_response = usage
+        .selected
+        .and_then(|(participant, value)| (selected == Some(participant.as_str())).then_some(value));
+    for (participant, value) in usage.rows {
         if ambient.contains(&participant) {
             let mut named = rows
                 .iter_mut()
@@ -6029,18 +6115,17 @@ fn agy_usage_sighting(
                 row["native_response_usage"] =
                     json!({"scope": "latest_child_response", "response": value});
             }
-        } else if selected_only.as_deref() == Some(participant.as_str()) {
-            let observed_model = value["model"]
-                .as_str()
-                .and_then(crate::native_children::observed_model)
-                .map(str::to_owned);
-            detail_usage = Some(AgySelectedResponseUsage {
-                response: value,
-                observed_model,
-            });
+        } else if selected_only == Some(participant.as_str()) {
+            detail_response = Some(value);
         }
     }
-    detail_usage
+    detail_response.map(|response| AgySelectedResponseUsage {
+        observed_model: response["model"]
+            .as_str()
+            .and_then(crate::native_children::observed_model)
+            .map(str::to_owned),
+        response,
+    })
 }
 
 /// Bind unique painted `"antigravity"` `native_child` rows ONLY to the proven lead
@@ -6976,20 +7061,25 @@ pub(crate) mod tests {
         prove_user_turn: impl Fn(&str) -> bool,
     ) {
         use super::lead_delivery::Delivery;
-        let prompt = super::native_lead_prompt(
+        let full_prompt = super::native_lead_prompt(
             turn,
             STARTUP_PROMPT.trim(),
             "",
             "Verify the assigned geometry fixture and report the evidence.",
         );
-        let wire = format!("> {prompt}");
         let header = format!(
-            "> {} Turn {turn}. You own this provider's work.",
+            "{} Turn {turn}. You own this provider's work.",
             crate::native_children::TASK_PREFIX
         );
-        assert!(wire.is_ascii() && header.len() > 126);
+        let reference = format!("{header} Read '/fixture/task.json'; stop if unavailable.");
+        assert!(full_prompt.is_ascii() && header.len() > 126);
         let height = 21;
-        for (columns, cropped) in [(126, false), (70, true)] {
+        for (prompt, columns, cropped) in [
+            (full_prompt.as_str(), 126, false),
+            (full_prompt.as_str(), 70, true),
+            (reference.as_str(), 70, false),
+        ] {
+            let wire = format!("> {prompt}");
             let rule = "─".repeat(columns);
             let rows: Vec<_> = wire
                 .as_bytes()
@@ -7022,13 +7112,14 @@ pub(crate) mod tests {
             let outcome = paste_and_submit(
                 "antigravity",
                 "%7",
-                &prompt,
+                prompt,
                 Proof::LeadTurn {
                     turn,
                     agy_user_turn: &|| {
                         reads.set(reads.get() + 1);
-                        prove_user_turn(&prompt)
+                        prove_user_turn(prompt)
                     },
+                    agy_enter: None,
                 },
                 &mut |args| match args {
                     ["display-message", _, _, _, _, ";", ..] if enters.get() > 0 => {
@@ -7052,7 +7143,7 @@ pub(crate) mod tests {
                     ["send-keys", _, _, "Enter"] => {
                         assert!(!cropped);
                         enters.set(enters.get() + 1);
-                        record_user_turn(&prompt);
+                        record_user_turn(prompt);
                         Ok(String::new())
                     }
                     _ => panic!("unexpected synthetic tmux call"),
@@ -7222,6 +7313,7 @@ pub(crate) mod tests {
                         role_reads.set(role_reads.get() + 1);
                         role_proven
                     },
+                    agy_enter: None,
                 },
                 &mut |args| match args {
                     ["display-message", _, _, _, _, ";", ..] => {
@@ -7348,6 +7440,7 @@ pub(crate) mod tests {
                 Proof::LeadTurn {
                     turn: TURN_ID,
                     agy_user_turn: &|| panic!("Claude cannot read AGY evidence"),
+                    agy_enter: None,
                 },
                 &mut |args| match args {
                     ["display-message", _, _, _, _, ";", ..] if enters.get() > 0 => {
@@ -8486,6 +8579,11 @@ pub(crate) mod tests {
             dock_rows: RefCell<String>,
             task_transition: RefCell<Option<TaskTransition>>,
             primary_columns: Cell<Option<usize>>,
+            agy_geometry: Cell<Option<(usize, usize)>>,
+            agy_opaque: Cell<bool>,
+            agy_cwd: RefCell<Option<PathBuf>>,
+            agy_enter_response: Cell<Option<&'static str>>,
+            workspace_group: RefCell<Option<oms_command_plan::services::GroupMembership>>,
         }
 
         impl SpyPanel {
@@ -8544,6 +8642,11 @@ pub(crate) mod tests {
                     dock_rows: Default::default(),
                     task_transition: RefCell::new(None),
                     primary_columns: Cell::new(None),
+                    agy_geometry: Cell::new(None),
+                    agy_opaque: Cell::new(false),
+                    agy_cwd: Default::default(),
+                    agy_enter_response: Cell::new(None),
+                    workspace_group: Default::default(),
                 }
             }
 
@@ -8629,6 +8732,52 @@ pub(crate) mod tests {
                         "display-message",
                         "-p",
                         "-t",
+                        "%4",
+                        lead_delivery::TICKET_SERVER,
+                    ] => {
+                        format!("{}\t1\t2\t.", self.server_pid)
+                    }
+                    ["tmux", "if-shell", "-F", "-t", "%4", predicate, yes, no] => {
+                        let suffix = format!(
+                            "{}:1:2:$1:@4:%4:2001:0:0:0:{ROOM}:antigravity:{MAIN}:",
+                            self.server_pid
+                        );
+                        assert!(predicate.contains(&suffix), "{predicate}");
+                        assert!(
+                            predicate.contains("#{pane_in_mode}")
+                                && predicate.contains("#{cursor_x}")
+                        );
+                        assert_eq!(
+                            *yes,
+                            "send-keys -t '%4' Enter ; display-message -p OMS_AGY_ENTER_SENT"
+                        );
+                        assert_eq!(*no, "display-message -p OMS_AGY_ENTER_REFUSED");
+                        if let Some(response) = self.agy_enter_response.get() {
+                            return Ok(out(response));
+                        }
+                        let send = ExecutionRequest::new(
+                            crate::commands::strings(&["tmux", "send-keys", "-t", "%4", "Enter"]),
+                            &self.repo,
+                        );
+                        self.execute(&send, &self.stop)?;
+                        return Ok(out(lead_delivery::ENTER_SENT));
+                    }
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        _,
+                        lead_delivery::TICKET_CWD,
+                    ] => {
+                        let cwd = self.agy_cwd.borrow();
+                        format!("{}\t.", cwd.as_ref().unwrap_or(&self.repo).display())
+                    }
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
                         pane,
                         native_assignment::PRIMARY_TICKET_LAYOUT,
                     ] => {
@@ -8652,16 +8801,32 @@ pub(crate) mod tests {
                     ] => {
                         let screens = self.screens.borrow();
                         let screen = &screens[*pane];
-                        let row = screen
-                            .lines()
-                            .position(|line| CHAT_SGR.replace_all(line, "").starts_with(['❯', '>']))
-                            .unwrap();
-                        let body = if capture.contains(&"-J") {
-                            screen.lines().nth(row).unwrap()
+                        if let Some((width, height)) = self.agy_geometry.get() {
+                            let x = self.cursor_x.get();
+                            let y = screen.lines().count() - 2;
+                            let head = format!("{pane}\t0\t0\t{x}\t{y}\t{width}\t{height}\t.");
+                            if capture.is_empty() {
+                                head
+                            } else if capture.contains(&"-J") {
+                                let draft: String = screen.lines().skip(1).take(y).collect();
+                                format!("{head}\n{draft}\n.")
+                            } else {
+                                format!("{head}\n{screen}\n.")
+                            }
                         } else {
-                            screen
-                        };
-                        super::lead_frame(pane, body, self.cursor_x.get() as usize, row, 8192)
+                            let row = screen
+                                .lines()
+                                .position(|line| {
+                                    CHAT_SGR.replace_all(line, "").starts_with(['❯', '>'])
+                                })
+                                .unwrap();
+                            let body = if capture.contains(&"-J") {
+                                screen.lines().nth(row).unwrap()
+                            } else {
+                                screen
+                            };
+                            super::lead_frame(pane, body, self.cursor_x.get() as usize, row, 8192)
+                        }
                     }
                     [
                         "tmux",
@@ -9147,7 +9312,22 @@ pub(crate) mod tests {
                     ["tmux", "delete-buffer", "-b", _] => String::new(),
                     ["tmux", "paste-buffer", "-p", "-d", "-b", _, "-t", pane] => {
                         let pane = pane.rsplit_once('.').map_or(*pane, |(_, pane)| pane);
-                        if self.alternate_parents.borrow().contains_key(pane) {
+                        if let Some((width, _)) = self.agy_geometry.get() {
+                            let wire = if self.agy_opaque.get() {
+                                "> [Pasted text: assignment]".to_owned()
+                            } else {
+                                format!("> {}", self.recent_screens.borrow()["_pending_paste"])
+                            };
+                            let physical: Vec<_> = wire
+                                .as_bytes()
+                                .chunks(width)
+                                .map(|part| std::str::from_utf8(part).unwrap())
+                                .collect();
+                            self.cursor_x.set((wire.len() % width) as u32);
+                            self.screens
+                                .borrow_mut()
+                                .insert(pane.into(), super::lead_box(&physical.join("\n")));
+                        } else if self.alternate_parents.borrow().contains_key(pane) {
                             let text = self.recent_screens.borrow()["_pending_paste"].clone();
                             let text = text
                                 .strip_suffix(r"\;")
@@ -9192,7 +9372,9 @@ pub(crate) mod tests {
                             .get("_pending_paste")
                             .cloned()
                             .unwrap_or_default();
-                        let screen = if self.alternate_parents.borrow().contains_key(pane) {
+                        let screen = if self.agy_geometry.get().is_some() {
+                            super::lead_box("> ")
+                        } else if self.alternate_parents.borrow().contains_key(pane) {
                             let (message, (_, last)) = alternate_draft(&pasted);
                             let message: Vec<_> = message.lines().take(last + 1).collect();
                             self.alternate_task_cursor.set((2, last + 2));
@@ -9207,6 +9389,16 @@ pub(crate) mod tests {
                         String::new()
                     }
                     ["tmux", "send-keys", ..] => String::new(),
+                    ["tmux", "capture-pane", "-p", "-t", pane, "-S", _, "-E", _]
+                    | ["tmux", "capture-pane", "-p", "-e", "-S", _, "-t", pane]
+                        if self.agy_geometry.get().is_some() =>
+                    {
+                        self.screens.borrow()[*pane]
+                            .lines()
+                            .skip(1)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
                     ["tmux", "capture-pane", "-p", "-t", pane, "-S", _, "-E", _]
                     | ["tmux", "capture-pane", "-p", "-S", "0", "-E", _, "-t", pane] => self
                         .screens
@@ -9252,6 +9444,13 @@ pub(crate) mod tests {
                 };
                 let operation = if refs.get(5) == Some(&ALTERNATE_TASK_INPUT_FORMAT) {
                     Some("alternate-task-capture")
+                } else if refs.get(5) == Some(&lead_delivery::TICKET_CWD) {
+                    Some("agy-task-cwd")
+                } else if self.agy_geometry.get().is_some()
+                    && refs.get(5) == Some(&lead_delivery::FRAME)
+                    && refs.contains(&"-J")
+                {
+                    Some("agy-joined-capture")
                 } else {
                     refs.get(1).copied()
                 };
@@ -9268,6 +9467,14 @@ pub(crate) mod tests {
         }
 
         impl Services for SpyPanel {
+            fn workspace_group(
+                &self,
+                _gid: u32,
+                _deadline: Instant,
+                _stop: &AtomicBool,
+            ) -> Option<oms_command_plan::services::GroupMembership> {
+                self.workspace_group.borrow().clone()
+            }
             fn command(
                 &self,
                 command: NativeCommand,
@@ -12439,6 +12646,369 @@ pub(crate) mod tests {
                 .unwrap_err();
             assert!(main_err.message.contains("live Main attempt"));
             assert!(spy.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn ordinary_agy_task_reference_preserves_payload_and_fences_enter() {
+            let tmp = TempDir::new("orch-agy-ticket");
+            let repo = private_dir(&tmp.0.join("répo"));
+            let set_mode = |mode| {
+                std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(mode)).unwrap();
+            };
+            set_mode(0o775);
+            let group_writes = oms_safe_fs::Root::open_private_workspace(&repo, |_| true).is_ok();
+            let workspace_mode = if group_writes { 0o775 } else { 0o755 };
+            set_mode(workspace_mode);
+            let oms = private_dir(&repo.join(".oms"));
+            let room_log = private_dir(&oms.join("threads")).join(format!("{ROOM}.jsonl"));
+            std::fs::write(&room_log, b"fixture initial Room").unwrap();
+            std::fs::set_permissions(&room_log, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let group = oms_command_plan::services::GroupMembership {
+                gid: std::os::unix::fs::MetadataExt::gid(&std::fs::metadata(&repo).unwrap()),
+                explicit_member_uids: vec![],
+                primary_member_uids: vec![rustix::process::getuid().as_raw()],
+            };
+            let mut host = FakeHost::new(private_dir(&tmp.0.join("state")));
+            let spy = SpyPanel::new(repo.clone());
+            let uid = host.uid;
+            host.owners
+                .insert(spy.main_pid, owner_entry(spy.main_pid, "main-birth", uid));
+            host.owners
+                .insert(2001, owner_entry(2001, "lead-birth", uid));
+            spy.allow_board_queries.set(true);
+            spy.real_events.set(true);
+            write_synthetic_ledger(&repo, 0);
+            spy.load()
+                .execute_with_host("antigravity", None, None, &host)
+                .unwrap();
+            let store = Store::open(&repo).unwrap();
+            let tx = store
+                .transaction("panel-provider-sessions", Duration::from_secs(3))
+                .unwrap();
+            let task = "Review the exact fixture;  preserve the résultat.";
+            let send = || {
+                spy.load().execute_with_host_cached(
+                    "antigravity",
+                    None,
+                    Some(task),
+                    LeadLaunch::default(),
+                    LeadExecution {
+                        host: &host,
+                        attempts: &AttemptCache::default(),
+                        transaction: Some(&tx),
+                    },
+                )
+            };
+            let reset = |width, height| {
+                spy.calls.borrow_mut().clear();
+                spy.agy_geometry.set(Some((width, height)));
+                spy.agy_opaque.set(false);
+                spy.agy_cwd.replace(None);
+                spy.agy_enter_response.set(None);
+                spy.workspace_group.replace(Some(group.clone()));
+                spy.cursor_x.set(2);
+                spy.screens
+                    .borrow_mut()
+                    .insert("%4".into(), super::lead_box("> "));
+            };
+            fn path_from_prompt(prompt: &str) -> PathBuf {
+                PathBuf::from(
+                    prompt
+                        .split_once(" Read '")
+                        .unwrap()
+                        .1
+                        .strip_suffix("'; stop if unavailable.")
+                        .unwrap(),
+                )
+            }
+
+            for width in [320, 126, 70] {
+                reset(width, 21);
+                let state = send().unwrap();
+                assert_eq!(state["status"], "unknown", "{state}");
+                assert_eq!(state["delivery"], "input_cleared_unverified", "{state}");
+                assert_eq!(state["task_completion"], "unconfirmed");
+                assert_eq!(state["payload_consumption"], "unconfirmed");
+                assert_eq!(state["receipt_recorded"], true);
+                let turn = state["turn_id"].as_str().unwrap();
+                let buffers = spy.calls_named("set-buffer");
+                assert_eq!(buffers.len(), 1);
+                let wire = &buffers[0][5];
+                let path = path_from_prompt(wire);
+                assert!(wire.is_ascii() && !wire.contains(task));
+                assert!(wire.contains(&format!("Turn {turn}.")));
+                assert_eq!(wire.len() + 2 <= width, width == 320);
+                assert_eq!(
+                    path,
+                    PathBuf::from(format!(".oms/artifacts/native-agy-tasks/{turn}.json"))
+                );
+                assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+                assert_eq!(spy.calls_named("send-keys").len(), 1);
+                assert_eq!(spy.calls_named("if-shell").len(), 1);
+                let path = repo.join(path);
+                let packet: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                assert_eq!(packet["turn"], turn);
+                assert_eq!(packet["repo"], json!(repo.canonicalize().unwrap()));
+                assert_eq!(packet["main_owner"], "codex");
+                assert_eq!(packet["scope"]["room"], ROOM);
+                assert_eq!(packet["scope"]["attempt"], MAIN);
+                assert_eq!(packet["scope"]["member"], MAIN);
+                assert_eq!(packet["scope"]["provider"], "antigravity");
+                assert_eq!(packet["scope"]["lead"]["birth"], "lead-birth");
+                let payload = native_lead_prompt(turn, STARTUP_PROMPT.trim(), "", task);
+                assert_eq!(packet["payload"], payload);
+                assert_eq!(
+                    packet["payload_sha256"],
+                    oms_panel_core::digest(payload.as_bytes())
+                );
+            }
+
+            reset(126, 21);
+            let existing_turn = "00000000000000000000";
+            let existing = repo.join(format!(
+                ".oms/artifacts/native-agy-tasks/{existing_turn}.json"
+            ));
+            std::fs::write(&existing, b"").unwrap();
+            std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let panel = spy.load();
+            let scope = lead_delivery::Scope::sample(&panel, "antigravity", &host).unwrap();
+            let Err(err) =
+                lead_delivery::AgyTicket::prepare(&panel, &scope, &tx, existing_turn, task)
+            else {
+                panic!("an existing empty reference must block publication");
+            };
+            assert!(err.message.contains("created exclusively"), "{err}");
+            assert!(std::fs::read(existing).unwrap().is_empty());
+            assert!(spy.mutating_calls().is_empty());
+
+            reset(70, 4);
+            let err = send().unwrap_err();
+            assert!(err.message.contains("cannot fit"), "{err}");
+            assert!(spy.calls_named("set-buffer").is_empty());
+            assert!(spy.calls_named("paste-buffer").is_empty());
+            assert!(spy.calls_named("send-keys").is_empty());
+
+            for wrong in [
+                tmp.0.clone(),
+                PathBuf::from(format!("{}\r", repo.display())),
+            ] {
+                reset(126, 21);
+                spy.agy_cwd.replace(Some(wrong));
+                let err = send().unwrap_err();
+                assert!(err.message.contains("cwd"), "{err}");
+                assert!(spy.mutating_calls().is_empty());
+            }
+
+            reset(126, 21);
+            spy.task_transition.replace(Some((
+                "set-buffer",
+                Box::new(|spy| {
+                    let path = spy.repo.join(path_from_prompt(
+                        &spy.recent_screens.borrow()["_pending_paste"],
+                    ));
+                    std::fs::remove_file(path).unwrap();
+                }),
+            )));
+            let err = send().unwrap_err();
+            assert!(err.message.contains("missing or changed"), "{err}");
+            assert!(spy.calls_named("paste-buffer").is_empty());
+            assert!(spy.calls_named("send-keys").is_empty());
+
+            for changed in [
+                "packet",
+                "mode",
+                "inode",
+                "link",
+                "geometry",
+                "room",
+                "room-after-draft",
+                "group",
+                "cwd",
+                "draft",
+            ] {
+                if changed == "group" && !group_writes {
+                    continue;
+                }
+                reset(126, 21);
+                spy.room_closed.set(false);
+                spy.task_transition.replace(Some((
+                    "paste-buffer",
+                    Box::new(move |spy| {
+                        let path = spy.repo.join(path_from_prompt(
+                            &spy.recent_screens.borrow()["_pending_paste"],
+                        ));
+                        match changed {
+                            "packet" => std::fs::write(path, b"changed").unwrap(),
+                            "mode" => std::fs::set_permissions(
+                                path,
+                                std::fs::Permissions::from_mode(0o644),
+                            )
+                            .unwrap(),
+                            "inode" => {
+                                let replacement = path.with_extension("replacement");
+                                std::fs::copy(&path, &replacement).unwrap();
+                                std::fs::rename(replacement, path).unwrap();
+                            }
+                            "link" => {
+                                std::fs::hard_link(&path, path.with_extension("linked")).unwrap()
+                            }
+                            "geometry" => spy.agy_geometry.set(Some((126, 22))),
+                            "room" => spy.room_closed.set(true),
+                            "cwd" => {
+                                spy.agy_cwd
+                                    .replace(Some(spy.repo.parent().unwrap().to_path_buf()));
+                            }
+                            "group" => {
+                                spy.workspace_group.replace(None);
+                            }
+                            "room-after-draft" => {
+                                spy.task_transition.replace(Some((
+                                    "agy-task-cwd",
+                                    Box::new(|spy| {
+                                        spy.task_transition.replace(Some((
+                                            "agy-joined-capture",
+                                            Box::new(|spy| {
+                                                let room = spy
+                                                    .repo
+                                                    .join(format!(".oms/threads/{ROOM}.jsonl"));
+                                                std::fs::write(
+                                                    room,
+                                                    b"fixture changed during final capture",
+                                                )
+                                                .unwrap();
+                                            }),
+                                        )));
+                                    }),
+                                )));
+                            }
+                            "draft" => {
+                                spy.task_transition.replace(Some((
+                                    "agy-task-cwd",
+                                    Box::new(|spy| {
+                                        spy.screens.borrow_mut().insert(
+                                            "%4".into(),
+                                            super::lead_box("> unrelated edited draft"),
+                                        );
+                                        spy.cursor_x.set(24);
+                                    }),
+                                )));
+                            }
+                            _ => unreachable!(),
+                        }
+                    }),
+                )));
+                let state = send().unwrap();
+                assert_eq!(state["status"], "unknown", "{changed}: {state}");
+                assert!(
+                    state["reason"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Enter was withheld")
+                );
+                assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+                assert!(spy.calls_named("send-keys").is_empty());
+                assert!(spy.calls_named("if-shell").is_empty());
+                if changed == "room-after-draft" {
+                    assert!(
+                        state["reason"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Room or tmux generation changed")
+                    );
+                }
+                if changed == "draft" {
+                    assert!(state["reason"].as_str().unwrap().contains("draft changed"));
+                    assert!(spy.screens.borrow()["%4"].contains("unrelated edited draft"));
+                }
+            }
+
+            for (reply, cue) in [
+                (lead_delivery::ENTER_REFUSED, "Enter was withheld"),
+                ("other output", "Enter may have reached"),
+            ] {
+                reset(126, 21);
+                spy.agy_enter_response.set(Some(reply));
+                let state = send().unwrap();
+                assert_eq!(state["status"], "unknown");
+                assert!(state["reason"].as_str().unwrap().contains(cue));
+                assert_eq!(spy.calls_named("if-shell").len(), 1);
+                assert!(spy.calls_named("send-keys").is_empty());
+                assert!(send().is_err(), "held draft must still block another send");
+            }
+
+            if group_writes {
+                for proof in [
+                    None,
+                    Some(oms_command_plan::services::GroupMembership {
+                        explicit_member_uids: vec![uid + 1],
+                        ..group.clone()
+                    }),
+                    Some(oms_command_plan::services::GroupMembership {
+                        primary_member_uids: vec![uid, uid + 1],
+                        ..group.clone()
+                    }),
+                ] {
+                    reset(126, 21);
+                    spy.workspace_group.replace(proof);
+                    let err = send().unwrap_err();
+                    assert!(err.message.contains("workspace ancestry"), "{err}");
+                    assert!(spy.mutating_calls().is_empty());
+                }
+            }
+            reset(126, 21);
+            set_mode(0o777);
+            assert!(oms_safe_fs::Root::open_private_workspace(&repo, |_| true).is_err());
+            let err = send().unwrap_err();
+            assert!(err.message.contains("workspace ancestry"), "{err}");
+            assert!(spy.mutating_calls().is_empty());
+            set_mode(workspace_mode);
+
+            let artifacts = repo.join(".oms/artifacts");
+            let original = std::fs::metadata(&artifacts).unwrap().permissions();
+            for mode in [0o775, 0o777] {
+                reset(126, 21);
+                std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+                let root = oms_safe_fs::Root::open_private_workspace(&repo, |_| true).unwrap();
+                let packet = Path::new(".oms/artifacts/native-agy-tasks/probe.json");
+                assert!(matches!(
+                    root.create_private(packet, b"fixture", 1024),
+                    Err(oms_safe_fs::MutationError::Storage {
+                        phase: oms_safe_fs::MutationPhase::BeforePublication,
+                        error: oms_safe_fs::ByteError::Unsafe,
+                    })
+                ));
+                let err = send().unwrap_err();
+                assert!(
+                    err.message.contains("created exclusively")
+                        || err.message.contains("file lock: Unsafe"),
+                    "{err}"
+                );
+                assert!(!repo.join(packet).exists());
+                assert!(spy.mutating_calls().is_empty());
+            }
+            std::fs::set_permissions(&artifacts, original).unwrap();
+
+            reset(126, 21);
+            spy.room_closed.set(false);
+            spy.agy_opaque.set(true);
+            let state = send().unwrap();
+            assert_eq!(state["status"], "unknown");
+            assert!(
+                state["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Enter was withheld")
+            );
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
+            assert!(send().is_err(), "an opaque draft must stay held");
+            assert_eq!(spy.calls_named("paste-buffer").len(), 1);
+            assert!(spy.calls_named("send-keys").is_empty());
         }
 
         #[test]
@@ -16389,9 +16959,13 @@ pub(crate) mod tests {
                     &mut rows,
                     shown,
                     selected,
-                    |painted: &BTreeSet<String>| {
+                    |painted: &BTreeSet<String>, _| {
                         offered.borrow_mut().push(painted.clone());
-                        Some((scan_turn.to_owned(), all.clone()))
+                        Some(crate::agy_child_chat::AgyBoardUsage {
+                            turn: scan_turn.to_owned(),
+                            rows: all.clone(),
+                            selected: None,
+                        })
                     },
                     || {
                         proofs.set(proofs.get() + 1);
@@ -16424,6 +16998,28 @@ pub(crate) mod tests {
             assert_eq!(got[1], unrelated);
             // Repeating the same sample gives the same rows with one scan each.
             assert_eq!(sample(rows, turn, turn, true).0, got);
+
+            // Group-only proof belongs to the detail even in an ambient slot.
+            let mut rows = vec![row(&b)];
+            let before = rows.clone();
+            let detail = agy_usage_sighting(
+                &mut rows,
+                turn,
+                Some(&b),
+                |painted, selected| {
+                    assert_eq!(painted, &set(&[&b]));
+                    assert_eq!(selected, Some(b.as_str()));
+                    Some(crate::agy_child_chat::AgyBoardUsage {
+                        turn: turn.to_owned(),
+                        rows: BTreeMap::new(),
+                        selected: Some((b.clone(), usage(2))),
+                    })
+                },
+                || true,
+            )
+            .unwrap();
+            assert_eq!(detail.response, usage(2));
+            assert_eq!(rows, before);
 
             // A participant on two rows (painted twice, or also named by another row)
             // is never offered or attached, even if the scan returns it.
@@ -16603,7 +17199,7 @@ pub(crate) mod tests {
                 (rows.clone(), vec![set(&[&a])], 1)
             );
             let mut none = rows.clone();
-            agy_usage_sighting(&mut none, turn, None, |_| None, || unreachable!());
+            agy_usage_sighting(&mut none, turn, None, |_, _| None, || unreachable!());
             assert_eq!(none, rows);
             assert!(none[0].get("observed_model").is_none());
 
@@ -16617,7 +17213,13 @@ pub(crate) mod tests {
                     &mut rows,
                     turn,
                     None,
-                    |_| Some((turn.to_owned(), scan.clone())),
+                    |_, _| {
+                        Some(crate::agy_child_chat::AgyBoardUsage {
+                            turn: turn.to_owned(),
+                            rows: scan.clone(),
+                            selected: None,
+                        })
+                    },
                     || true,
                 );
                 assert!(rows[0].get("observed_model").is_none(), "{bad:?}");
