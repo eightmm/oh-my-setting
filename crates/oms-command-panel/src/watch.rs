@@ -139,6 +139,7 @@ fn run_with_source_writer(
                 )
             });
         let mut accepted_refresh = false;
+        let mut native_activity_current = false;
         let mut checkout_changed = false;
         let mut scope_changed = false;
         let mut detail_usage_frame = DetailUsageFrame::Unchanged;
@@ -193,6 +194,9 @@ fn run_with_source_writer(
             } else {
                 DetailUsageFrame::Unchanged
             };
+            native_activity_current = board
+                .phase
+                .accepts_native_activity(native.is_some(), changed || checkout_changed);
             #[cfg(target_os = "linux")]
             if changed || checkout_changed || rejected_native || !board.phase.retains_detail_usage()
             {
@@ -429,7 +433,7 @@ fn run_with_source_writer(
                 size = crate::layout::dimensions();
             }
             let display_report = report_for_frame(&report, &nav, retained_detail_usage.as_ref());
-            let frame = frame(
+            let frame = frame_with_native_activity(
                 &display_report,
                 &nav,
                 size,
@@ -438,6 +442,7 @@ fn run_with_source_writer(
                 interactive.then_some(&mut split),
                 chat.as_mut(),
                 weekly.overlay(weekly_phase),
+                native_activity_current,
             );
             provider_rows = frame.provider_rows;
             worker_rows = frame.worker_rows;
@@ -1044,7 +1049,10 @@ fn run_with_source_writer(
                         Err(e) => nav.notice = Some(e.message),
                     }
                 }
-                if refresh || collect_ready || scope.changed {
+                let recollect = refresh || collect_ready || scope.changed;
+                // Once invalidated, later redraws of this report keep the pending cue.
+                native_activity_current &= scope.accepts_native_activity_redraw(recollect);
+                if recollect {
                     clear_private_weekly(&mut report);
                     if let Some(observation) = report.get_mut("main_model_observation") {
                         retain_main_model(observation);
@@ -1092,7 +1100,7 @@ fn run_with_source_writer(
                 {
                     let display_report =
                         report_for_frame(&report, &nav, retained_detail_usage.as_ref());
-                    let frame = frame(
+                    let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
                         last_size,
@@ -1101,6 +1109,7 @@ fn run_with_source_writer(
                         interactive.then_some(&mut split),
                         chat.as_mut(),
                         weekly.overlay(weekly_phase.awaiting(refresh || collect_ready)),
+                        native_activity_current,
                     );
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
@@ -1116,7 +1125,7 @@ fn run_with_source_writer(
                     )?;
                     output.flush().map_err(Error::new)?;
                 }
-                if refresh || collect_ready || scope.changed {
+                if recollect {
                     requested = refresh;
                     break;
                 }
@@ -1129,7 +1138,7 @@ fn run_with_source_writer(
                     last_size = size;
                     let display_report =
                         report_for_frame(&report, &nav, retained_detail_usage.as_ref());
-                    let frame = frame(
+                    let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
                         size,
@@ -1138,6 +1147,7 @@ fn run_with_source_writer(
                         interactive.then_some(&mut split),
                         chat.as_mut(),
                         weekly.overlay(weekly_phase),
+                        native_activity_current,
                     );
                     provider_rows = frame.provider_rows;
                     worker_rows = frame.worker_rows;
@@ -1203,6 +1213,10 @@ struct InputScope {
 }
 
 impl InputScope {
+    fn accepts_native_activity_redraw(&self, recollect: bool) -> bool {
+        self.current && !self.checkout_repaint && !recollect
+    }
+
     fn observe(
         &mut self,
         board: &InteractiveRefresh,
@@ -2394,6 +2408,10 @@ fn reset_weekly_scope(weekly: &mut WeeklyUsage, changed: bool) {
 impl RefreshPhase {
     fn pending(&self) -> bool {
         matches!(self, Self::Pending | Self::RetryingAfterFailure)
+    }
+
+    fn accepts_native_activity(&self, has_reading: bool, scope_changed: bool) -> bool {
+        matches!(self, Self::Pending) && has_reading && !scope_changed
     }
 
     fn retains_detail_usage(&self) -> bool {
@@ -3699,6 +3717,21 @@ fn frame(
     chat: Option<&mut ChatDock>,
     weekly: Option<(&mut ChatDock, WeeklyPhase)>,
 ) -> render::BoardFrame {
+    frame_with_native_activity(report, nav, size, read, colored, split, chat, weekly, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn frame_with_native_activity(
+    report: &Value,
+    nav: &navigation::Navigation,
+    size: (usize, usize),
+    read: &std::collections::BTreeMap<String, String>,
+    colored: bool,
+    split: Option<&mut DockSplit>,
+    chat: Option<&mut ChatDock>,
+    weekly: Option<(&mut ChatDock, WeeklyPhase)>,
+    native_activity_current: bool,
+) -> render::BoardFrame {
     let (columns, height) = size;
     if let Some(menu) = &nav.main_switch {
         return render::main_switch_frame(menu, columns, height);
@@ -3777,7 +3810,7 @@ fn frame(
     };
     let nav = nav.as_ref();
     let interactive = dock_rows.is_some();
-    let mut board = render::board_frame(
+    let mut board = render::board_frame_with_native_activity(
         report,
         nav,
         columns,
@@ -3785,6 +3818,7 @@ fn frame(
         read,
         colored,
         interactive,
+        native_activity_current,
     );
     if interactive && let Some(provider) = report["native_dock"].as_str() {
         board.lines.resize(board_height, String::new());
@@ -5924,6 +5958,127 @@ mod tests {
                 "held {key} survived rejected proof"
             );
         }
+    }
+
+    #[test]
+    fn coalesced_pending_paints_only_the_current_native_activity() {
+        use super::*;
+        use serde_json::json;
+
+        let room = "room-fixture";
+        let mut observed = idle_report(room);
+        observed["provider_sessions"] = json!(["codex", "claude"]);
+        observed["provider_activity"] = json!({"codex":"idle"});
+        let nav = navigation::Navigation::default();
+        let first = RefreshPhase::Pending.frame_report(None, None, room);
+        assert!(first["provider_activity"].is_null());
+        assert!(!RefreshPhase::Pending.accepts_native_activity(false, false));
+        let observation = |phase: &RefreshPhase, has_reading, scope_changed| {
+            let mut report = phase.frame_report(None, Some(observed.clone()), room);
+            let observed_here = phase.accepts_native_activity(has_reading, scope_changed);
+            if has_reading && !scope_changed {
+                let current = json!({
+                    "provider_sessions": ["codex", "claude"],
+                    "provider_activity": {"codex":"working"},
+                });
+                replace_native_projection(
+                    &mut report,
+                    NATIVE_FIELDS.map(|key| current.get(key).cloned()),
+                );
+            }
+            if phase.pending() {
+                assert_eq!(report["collection"]["pending"], true);
+            }
+            (report, observed_here)
+        };
+        let weekly_line = |report: &Value, nav: &navigation::Navigation, size, observed_here| {
+            let frame = frame_with_native_activity(
+                report,
+                nav,
+                size,
+                &Default::default(),
+                false,
+                None,
+                None,
+                None,
+                observed_here,
+            );
+            let hit = frame.weekly_usage.unwrap();
+            frame.lines[hit.row].clone()
+        };
+
+        let (report, observed_here) = observation(&RefreshPhase::Pending, true, false);
+        let accepted = weekly_line(&report, &nav, (120, 25), observed_here);
+        assert!(
+            observed_here && accepted.contains("Codex — · working"),
+            "{accepted}"
+        );
+        assert!(accepted.contains("Claude — · unknown"), "{accepted}");
+
+        let mut moved = nav.clone();
+        assert!(!key_checks_scope(&input::Key::Down, false, false, false));
+        assert_eq!(
+            moved.apply(&input::Key::Down, 2, 10),
+            navigation::Action::None,
+        );
+        assert_eq!(moved.selected, 1);
+        let same_scope = InputScope {
+            current: true,
+            ..Default::default()
+        };
+        let redraw_current = observed_here && same_scope.accepts_native_activity_redraw(false);
+        for size in [(120, 25), (145, 30)] {
+            let redrawn = weekly_line(&report, &moved, size, redraw_current);
+            assert!(redrawn.contains("Codex — · working"), "{redrawn}");
+        }
+        let checkout_changed = InputScope {
+            current: true,
+            checkout_repaint: true,
+            ..Default::default()
+        };
+        for (scope, recollect) in [
+            (&same_scope, true),
+            (&checkout_changed, false),
+            (&InputScope::default(), false),
+        ] {
+            let mut still_current = redraw_current;
+            still_current &= scope.accepts_native_activity_redraw(recollect);
+            let invalidated = weekly_line(&report, &moved, (120, 25), still_current);
+            assert!(invalidated.contains("Codex — · pending"), "{invalidated}");
+            still_current &= same_scope.accepts_native_activity_redraw(false);
+            let later_resize = weekly_line(&report, &moved, (145, 30), still_current);
+            assert!(later_resize.contains("Codex — · pending"), "{later_resize}");
+        }
+
+        assert_eq!(
+            allow_board_action(
+                &mut nav.clone(),
+                navigation::Action::Open,
+                true,
+                RefreshPhase::Pending == RefreshPhase::Fresh,
+            ),
+            navigation::Action::None,
+        );
+
+        for (phase, has_reading, scope_changed) in [
+            (RefreshPhase::Pending, false, false),
+            (RefreshPhase::Pending, true, true),
+            (RefreshPhase::RetryingAfterFailure, false, false),
+        ] {
+            let (report, observed_here) = observation(&phase, has_reading, scope_changed);
+            let carried = weekly_line(&report, &nav, (120, 25), observed_here);
+            assert!(
+                !observed_here && carried.contains("Codex — · pending"),
+                "{carried}"
+            );
+        }
+        let (report, observed_here) =
+            observation(&RefreshPhase::Failed("fixture".into()), false, false);
+        let failed = weekly_line(&report, &nav, (120, 25), observed_here);
+        assert!(
+            !observed_here && failed.contains("Codex — · stale"),
+            "{failed}"
+        );
     }
 
     #[test]
