@@ -1142,7 +1142,15 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
             .canonicalize()
             .unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$*\" in *'rev-parse HEAD'*) if [ -f \"${{0%/*}}/gate\" ]; then printf entered > \"${{0%/*}}/entered\"; while [ -f \"${{0%/*}}/gate\" ]; do /bin/sleep 0.02; done; fi;; esac\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\n\
+case \"${{OMS_PLAN_GIT_IO_CASE-}}\" in\n\
+  echo) cat; printf tail; printf ignored >&2; exit 7;;\n\
+  held-pipe) /bin/sleep 5 & printf tail; exit 0;;\n\
+  blocked-input) printf entered > \"${{0%/*}}/io-entered\"; exec /bin/sleep 5;;\n\
+  closed-input) exec 0<&-; printf tail; exit 0;;\n\
+  signal) kill -TERM $$;;\n\
+esac\n\
+case \"$*\" in *'rev-parse HEAD'*) if [ -f \"${{0%/*}}/gate\" ]; then printf entered > \"${{0%/*}}/entered\"; while [ -f \"${{0%/*}}/gate\" ]; do /bin/sleep 0.02; done; fi;; esac\nexec '{}' \"$@\"\n",
             real.to_str().unwrap().replace('\'', "'\\''")
         );
         fs::write(bin.join("git"), script).unwrap();
@@ -1371,6 +1379,77 @@ fn team_contracts_preserve_parent_lineage_and_generation() {
     let tmp = Tmp::new();
     let r = repo(&tmp);
     let stop = AtomicBool::new(false);
+    // Reuse the isolated Git shim for the default query path as well as the
+    // admission deadline path exercised below.
+    let mut proof = oms_command_plan::repository::Git {
+        repo: &r,
+        interrupted: &stop,
+        group_resolver: None,
+        deadline: None,
+        group_snapshot: None,
+    };
+    let query =
+        |proof: &oms_command_plan::repository::Git<'_>, case: &str, input: Option<&[u8]>, limit| {
+            proof.output(
+                &[],
+                input,
+                &[("OMS_PLAN_GIT_IO_CASE".into(), case.into())],
+                limit,
+            )
+        };
+    let input = vec![b'x'; 1024 * 1024];
+    for bounded in [false, true] {
+        proof.deadline =
+            bounded.then(|| std::time::Instant::now() + std::time::Duration::from_secs(5));
+        for bytes in [None, Some(&[][..]), Some(input.as_slice())] {
+            let mut expected = bytes.unwrap_or_default().to_vec();
+            expected.extend_from_slice(b"tail");
+            let output = query(&proof, "echo", bytes, expected.len()).unwrap();
+            assert_eq!(output.code, 7);
+            assert_eq!(output.stdout, expected);
+        }
+        assert_eq!(
+            query(&proof, "echo", Some(&[]), 3).err().unwrap().message,
+            "Git output exceeds bound"
+        );
+        assert_eq!(
+            query(&proof, "signal", None, 16).unwrap().code,
+            if bounded { 143 } else { 128 }
+        );
+        let closed = query(&proof, "closed-input", Some(&input), 16);
+        if bounded {
+            assert_eq!(closed.unwrap().stdout, b"tail");
+        } else {
+            assert_eq!(closed.err().unwrap().message, "Git input unavailable");
+        }
+    }
+    proof.deadline = None;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        query(&proof, "held-pipe", None, 16).unwrap().stdout,
+        b"tail"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let git_bin = PathBuf::from(std::env::var_os("OMS_TEAM_GIT_FIXTURE_BIN").unwrap());
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !git_bin.join("io-entered").is_file() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            stop.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let refused = query(&proof, "blocked-input", Some(&input), 16)
+            .err()
+            .unwrap();
+        assert_eq!(refused.code, 2, "{refused}");
+        assert_eq!(refused.message, "local Git proof interrupted or timed out");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    });
+    assert!(git_bin.join("io-entered").is_file());
+    stop.store(false, Ordering::Release);
+    fs::remove_file(git_bin.join("io-entered")).unwrap();
     let host = TeamHost::default();
     let call = |values: &[&str], child: bool| {
         let req = Request::parse(&args(values)).unwrap();

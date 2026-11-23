@@ -135,7 +135,13 @@ when their producer is unavailable.
   before live checkout mutation; `Reconcile` invokes that checkout's
   native `--oms-dispatch` frontdoor to converge recorded components and returns a
   schema-2 receipt; `Verify` invokes its native doctor; `RefreshTools` runs after
-  core commit. Child processes must finish before returning. The child receives
+  core commit; `VerifyIntegrations` follows successful tool refresh using
+  `doctor --integrations --json --no-model-doctor`. It checks recorded Claude hook
+  surfaces, Codex plugin inventory/generated cache, Antigravity plugin ownership,
+  and managed MCP launch registrations. These are configuration and inventory
+  checks: hook delivery, actual served models, and MCP runtime availability remain
+  unproven. No live inference, arbitrary MCP server probe, or repair is added.
+  Child processes must finish before returning. The child receives
   `OMS_NATIVE_UPDATE_PARENT` only in its own environment. Borrowing the receipt
   mutex requires the durable `native-update/lease.json`, matching receipt,
   live parent generation, process ancestry, and held mutex. It uses its own
@@ -146,6 +152,13 @@ when their producer is unavailable.
   provider paths are resolved before switching child cwd. Generated
   schedulers retain the installation and Rust paths without freezing a temporary
   toolchain override or sourcing interactive shell startup files.
+  The integration check reports `passed`, `failed`, `cancelled`, or `skipped`;
+  skips distinguish `no_doctor`, `no_tools`, `rollback`, and `refresh_failed`.
+  Post-commit failure returns `partial` and retains the committed core receipt.
+  Neither core rollback nor restoration of vendor binaries is claimed. Diagnostics
+  carry only allowlisted phase/tool names and shell exit codes, never child output
+  or executable paths. Scheduled status preserves the last failure diagnostic
+  across subsequent checks and clears it on a later successful apply.
 - `apply_project_template` and `provider_hook`: call the existing native
   template/hook domains for doctor fixtures and certified Antigravity routing.
   Fixture destinations are disposable. Advisory hooks cannot block a turn.

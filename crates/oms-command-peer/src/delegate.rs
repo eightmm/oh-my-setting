@@ -792,106 +792,22 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 .into(),
         ),
     ]);
-    let env_nonempty = |key: &str| {
-        std::env::var(key)
-            .ok()
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty())
-    };
-    let task_id = {
-        let cli = args.get("task-id");
-        if !cli.is_empty() {
-            cli.to_owned()
-        } else {
-            env_nonempty("OMS_TASK_ID").unwrap_or_default()
-        }
-    };
-    let mut parent_attempt_id = String::new();
-    if std::env::var_os("OMS_PANEL_DISPATCH").as_deref() == Some(OsStr::new("1")) {
-        if let Some(main_id) = env_nonempty("OMS_PANEL_MAIN_ATTEMPT") {
-            parent_attempt_id = main_id;
-        }
-        attempt_refs.set(
-            "panel_role",
-            V::from(
-                env_nonempty("OMS_PANEL_ROLE")
-                    .unwrap_or_else(|| if read { "researcher" } else { "worker" }.to_owned()),
-            ),
-        );
-        attempt_refs.set(
-            "panel_purpose",
-            V::from(
-                env_nonempty("OMS_PANEL_PURPOSE")
-                    .unwrap_or_else(|| if read { "research" } else { "implement" }.to_owned()),
-            ),
-        );
-        attempt_refs.set(
-            "panel_workload",
-            V::from(env_nonempty("OMS_PANEL_WORKLOAD").unwrap_or_else(|| "routine".to_owned())),
-        );
-        attempt_refs.set(
-            "panel_access",
-            V::from(
-                env_nonempty("OMS_PANEL_ACCESS")
-                    .unwrap_or_else(|| if read { "read" } else { "write" }.to_owned()),
-            ),
-        );
-        attempt_refs.set("panel_model", V::from(route.model.as_str()));
-        attempt_refs.set("panel_effort", V::from(route.effort.as_str()));
-        attempt_refs.set(
-            "panel_label",
-            V::from(env_nonempty("OMS_PANEL_LABEL").unwrap_or_else(|| brief_label(&question))),
-        );
-        for (key, env_key) in [
-            ("panel_strategy", "OMS_PANEL_STRATEGY"),
-            ("panel_owner", "OMS_PANEL_OWNER"),
-            ("panel_alias", "OMS_PANEL_ALIAS"),
-            ("panel_room_id", "OMS_ROOM_ID"),
-            ("panel_room_participant", "OMS_ROOM_PARTICIPANT"),
-            ("panel_lease_id", "OMS_PLAN_LEASE_ID"),
-        ] {
-            if let Some(val) = env_nonempty(env_key) {
-                attempt_refs.set(key, V::from(val));
-            }
-        }
-        if let Some(cont) = env_nonempty("OMS_PANEL_CONTINUES")
-            && cont.strip_prefix("att_").is_some_and(|hex| {
-                !hex.is_empty()
-                    && hex
-                        .bytes()
-                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            })
-        {
-            attempt_refs.set("panel_continues", V::from(cont));
-        }
-    } else {
-        attempt_refs.set(
-            "panel_alias",
-            V::from(format!("{}-delegate", target.provider)),
-        );
-        attempt_refs.set(
-            "panel_role",
-            V::from(if read { "researcher" } else { "delegate" }),
-        );
-        attempt_refs.set("panel_model", V::from(route.model.as_str()));
-        attempt_refs.set("panel_label", V::from(brief_label(&question)));
-        if let Some(room_id) = env_nonempty("OMS_ROOM_ID") {
-            attempt_refs.set("panel_room_id", V::from(room_id));
-        }
-        if let Some(main_id) = env_nonempty("OMS_PANEL_MAIN_ATTEMPT") {
-            parent_attempt_id = main_id;
-        }
-    }
-    if !providers::panel_account(&route).is_empty() {
-        attempt_refs.set("panel_account", V::from(providers::panel_account(&route)));
-    }
+    let dispatch = crate::dispatch_context::DispatchContext::from_environment(args.get("task-id"));
+    let task_id = dispatch.task_id.clone();
+    dispatch.delegate_refs(
+        &mut attempt_refs,
+        &route,
+        &target.provider,
+        read,
+        &brief_label(&question),
+    );
     let attempt = oms_command_operations::create_attempt(
         &repo,
         &oms_command_operations::StartRequest {
             provider: target.provider.clone(),
             tool: "peer-delegate".into(),
             task_id: task_id.clone(),
-            parent_attempt_id,
+            parent_attempt_id: dispatch.parent_attempt_id.clone().unwrap_or_default(),
             refs: attempt_refs,
             ..Default::default()
         },
@@ -1197,10 +1113,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         );
     }
     let no_change = !read && captured.is_empty();
-    if no_change
-        && !args.has("allow-no-change")
-        && std::env::var_os("OMS_PANEL_DISPATCH").is_some_and(|v| v == "1")
-    {
+    if no_change && !args.has("allow-no-change") && dispatch.panel.is_some() {
         code = 6;
     }
     let state = if code == 0 {
