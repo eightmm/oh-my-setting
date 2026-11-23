@@ -2032,6 +2032,29 @@ pub(crate) fn board_frame(
     colored: bool,
     fill_height: bool,
 ) -> BoardFrame {
+    board_frame_with_native_activity(
+        report,
+        nav,
+        columns,
+        height,
+        read,
+        colored,
+        fill_height,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn board_frame_with_native_activity(
+    report: &Value,
+    nav: &navigation::Navigation,
+    columns: usize,
+    height: usize,
+    read: &BTreeMap<String, String>,
+    colored: bool,
+    fill_height: bool,
+    native_activity_current: bool,
+) -> BoardFrame {
     frame_with_capacity(
         report,
         nav,
@@ -2040,6 +2063,7 @@ pub(crate) fn board_frame(
         read,
         colored,
         fill_height,
+        native_activity_current,
         false,
         &mut 1,
     )
@@ -2062,6 +2086,7 @@ pub fn page_capacity(
         columns,
         height,
         read,
+        false,
         false,
         false,
         true,
@@ -2090,6 +2115,7 @@ fn frame_with_capacity(
     read: &BTreeMap<String, String>,
     colored: bool,
     fill_height: bool,
+    native_activity_current: bool,
     capacity_only: bool,
     page_capacity: &mut usize,
 ) -> BoardFrame {
@@ -2203,7 +2229,14 @@ fn frame_with_capacity(
         // One usage projection per frame; painting never rereads provider state.
         let now = oms_panel_core::timestamp() as f64;
         let usage = crate::usage::snapshot(report, now);
-        let (line, complete) = provider_line(report, &usage, now, columns, colored);
+        let (line, complete) = provider_line(
+            report,
+            &usage,
+            now,
+            columns,
+            colored,
+            native_activity_current,
+        );
         weekly_usage = complete.map(|columns| WeeklyUsageHit {
             row: lines.len(),
             columns,
@@ -3852,6 +3885,7 @@ fn provider_line(
     now: f64,
     columns: usize,
     colored: bool,
+    native_activity_current: bool,
 ) -> (String, Option<usize>) {
     // 0 tiny, 1 compact, 2 medium, 3 full; fall back while the line overflows.
     let widest = match columns {
@@ -3864,12 +3898,13 @@ fn provider_line(
     // Lead activity rides beside each connected provider's weekly value. The
     // orchestrator writes only "working" and omits the key when unsure, so a
     // connected lead without an explicit state is `unknown`, never `idle`.
-    // Only an in-flight read is pending. Failed or held reads retain stale activity.
+    // A native sample accepted by this frame can precede a queued follow-up.
+    // That follow-up keeps action authority pending without changing this sample.
     // Tier 0 and unconnected providers have no activity suffix.
     let carried_activity = if report["collection"]["ok"] != true || report["capacity_stale"] == true
     {
         Some("stale")
-    } else if report["collection"]["pending"] == true {
+    } else if report["collection"]["pending"] == true && !native_activity_current {
         Some("pending")
     } else {
         None
@@ -7384,6 +7419,7 @@ mod tests {
             now,
             80,
             false,
+            false,
         )
         .0;
         assert!(usage.contains("Claude stale"), "{usage}");
@@ -7632,6 +7668,7 @@ mod tests {
                 columns,
                 height,
                 &read,
+                false,
                 false,
                 false,
                 false,
@@ -8558,7 +8595,7 @@ mod tests {
         });
         let generic = crate::usage::snapshot(&report, now);
         assert!(weekly_window(&generic["providers"]["claude"]).is_none());
-        let line = |r: &Value, at| provider_line(r, &generic, at, 80, false).0;
+        let line = |r: &Value, at| provider_line(r, &generic, at, 80, false, false).0;
         assert!(line(&report, now).contains("Claude 86%"));
         assert!(weekly_usage_detail(&report, now).contains(
             "Claude · 86% left\n  Source Claude local statusline · Callback age 25s · Reset in 1h00m"
@@ -8593,7 +8630,7 @@ mod tests {
         assert!(weekly_window(&generic["providers"]["antigravity"]).is_none());
         let line = |r: &Value, cols, at| {
             let usage = crate::usage::snapshot(r, at);
-            provider_line(r, &usage, at, cols, false)
+            provider_line(r, &usage, at, cols, false, false)
                 .0
                 .trim_end()
                 .to_owned()
@@ -9304,7 +9341,7 @@ mod tests {
         };
         let line = |report: &Value, columns| {
             let usage = crate::usage::snapshot(report, now);
-            provider_line(report, &usage, now, columns, false)
+            provider_line(report, &usage, now, columns, false, false)
                 .0
                 .trim_end()
                 .to_owned()
@@ -9352,6 +9389,25 @@ mod tests {
             line(&pending, 80),
             "Weekly left · Codex 75%~ │ Claude 100%~ │ AGY Gemini 95%~"
         );
+        let accepted_activity = |report: &Value, columns| {
+            provider_line(
+                report,
+                &crate::usage::snapshot(report, now),
+                now,
+                columns,
+                false,
+                true,
+            )
+            .0
+            .trim_end()
+            .to_owned()
+        };
+        for columns in [40, 80, 170] {
+            assert_eq!(accepted_activity(&pending, columns), line(&gemini, columns));
+            let mut stale = pending.clone();
+            stale["capacity_stale"] = json!(true);
+            assert_eq!(accepted_activity(&stale, columns), line(&stale, columns));
+        }
         let mut exhausted = gemini.clone();
         for provider in ["codex", "claude", "antigravity"] {
             exhausted["provider_status"][provider]["weekly_used"] = json!(100);
@@ -9588,7 +9644,7 @@ mod tests {
             for (columns, line) in [40, 80, 120].into_iter().zip(expected) {
                 assert!(!line.contains("acct-zeta"));
                 assert_eq!(
-                    provider_line(report, &usage, now, columns, false)
+                    provider_line(report, &usage, now, columns, false, false)
                         .0
                         .trim_end(),
                     line
@@ -9597,7 +9653,7 @@ mod tests {
         }
         let usage = crate::usage::snapshot(&exhausted, now);
         assert_eq!(
-            provider_line(&exhausted, &usage, now, 24, false)
+            provider_line(&exhausted, &usage, now, 24, false, false)
                 .0
                 .trim_end(),
             "W C0% L! A—"
@@ -9637,7 +9693,7 @@ mod tests {
             assert!(!detail.contains("ambient-account-name"));
             let usage = crate::usage::snapshot(&native, now);
             assert!(
-                provider_line(&native, &usage, now, 120, false)
+                provider_line(&native, &usage, now, 120, false, false)
                     .0
                     .contains("Claude >99%")
             );
@@ -9647,12 +9703,16 @@ mod tests {
             json!({"weekly_native_observed_at":now - 30.0, "weekly_used":40});
         let usage = crate::usage::snapshot(&gemini, now);
         assert_eq!(
-            provider_line(&gemini, &usage, now, 80, false).0.trim_end(),
+            provider_line(&gemini, &usage, now, 80, false, false)
+                .0
+                .trim_end(),
             "Weekly left · Codex 0% exhausted │ Claude stale │ AGY Gemini 60%"
         );
         // A variant wider than the row falls back whole instead of clipping a value.
         assert_eq!(
-            provider_line(&gemini, &usage, now, 56, false).0.trim_end(),
+            provider_line(&gemini, &usage, now, 56, false, false)
+                .0
+                .trim_end(),
             "Wk left Cdx0% Cldstale AGY60%"
         );
 
@@ -11324,7 +11384,7 @@ mod tests {
             }
         });
         let usage = crate::usage::snapshot(&ambient, now);
-        let strip = provider_line(&ambient, &usage, now, 120, false).0;
+        let strip = provider_line(&ambient, &usage, now, 120, false, false).0;
         assert!(strip.contains("Weekly left · Codex 23%"), "{strip}");
         for alias in ["primary", "alternate", "@"] {
             assert!(!strip.contains(alias), "{strip}");
