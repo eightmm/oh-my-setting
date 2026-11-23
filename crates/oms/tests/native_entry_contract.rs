@@ -3702,6 +3702,10 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
     l.ok(&["agent-plan", "claim", "--id", "t2", "--provider", "codex"]);
     let task: serde_json::Value =
         serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
+    let reviewed_patch = ".oms/p/exact.patch";
+    let reviewed = std::fs::read(l.repo.join(".oms/p/p.patch")).unwrap();
+    let report = std::fs::read(l.repo.join(".oms/p/r.md")).unwrap();
+    std::fs::write(l.repo.join(reviewed_patch), &reviewed).unwrap();
     l.ok(&[
         "agent-plan",
         "review",
@@ -3712,28 +3716,99 @@ fn landing_admission_covers_and_plan_scope_use_native_context() {
         "--artifact",
         ".oms/p/r.md",
         "--patch",
-        ".oms/p/p.patch",
+        reviewed_patch,
+        "--expected-review-artifact-sha256",
+        &oms_command_plan::json::sha(&report),
+        "--expected-review-patch-sha256",
+        &oms_command_plan::json::sha(&reviewed),
     ]);
+    let before = std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap();
+    let alternative = ".oms/p/alternative.patch";
+    std::fs::write(
+        l.repo.join(alternative),
+        String::from_utf8(reviewed.clone())
+            .unwrap()
+            .replace("+b", "+other"),
+    )
+    .unwrap();
+    let (code, out, err) = l.oms(&["patch-admit", "--patch", alternative, "--plan-task", "t2"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(
+        err.contains("patch differs from exact reviewed evidence"),
+        "{err}"
+    );
+    for (path, original, changed, message) in [
+        (
+            reviewed_patch,
+            reviewed.as_slice(),
+            String::from_utf8(reviewed.clone())
+                .unwrap()
+                .replace("+b", "+changed")
+                .into_bytes(),
+            "reviewed patch bytes changed",
+        ),
+        (
+            ".oms/p/r.md",
+            report.as_slice(),
+            b"changed report\n".to_vec(),
+            "reviewed artifact bytes changed",
+        ),
+    ] {
+        std::fs::write(l.repo.join(path), changed).unwrap();
+        for verb in ["patch-admit", "patch-land"] {
+            let (code, out, err) = l.oms(&[verb, "--patch", reviewed_patch, "--plan-task", "t2"]);
+            assert_eq!(code, 2, "{out}{err}");
+            assert!(err.contains(message), "{err}");
+            assert_eq!(
+                std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap(),
+                before
+            );
+            assert_eq!(
+                std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
+                "a\n"
+            );
+        }
+        std::fs::write(l.repo.join(path), original).unwrap();
+    }
+    let mutate_report = format!(
+        "printf 'changed during advisory verification\\n' > '{}'",
+        l.repo.join(".oms/p/r.md").display(),
+    );
     let (code, out, err) = l.oms(&[
         "patch-admit",
         "--patch",
-        ".oms/p/p.patch",
+        reviewed_patch,
+        "--plan-task",
+        "t2",
+        "--red-check",
+        &mutate_report,
+    ]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("reviewed artifact bytes changed"), "{err}");
+    assert_eq!(
+        std::fs::read(l.repo.join(".oms/plan/tasks.json")).unwrap(),
+        before
+    );
+    std::fs::write(l.repo.join(".oms/p/r.md"), &report).unwrap();
+    let (code, out, err) = l.oms(&[
+        "patch-admit",
+        "--patch",
+        reviewed_patch,
         "--plan-task",
         "t2",
     ]);
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains("ADMIT"), "{out}");
-    let (code, out, err) = l.oms(&[
-        "patch-land",
-        "--patch",
-        ".oms/p/p.patch",
-        "--plan-task",
-        "t2",
-    ]);
+    let (code, out, err) = l.oms(&["patch-land", "--patch", reviewed_patch, "--plan-task", "t2"]);
     assert_eq!(code, 0, "{out}{err}");
     let done: serde_json::Value =
         serde_json::from_str(&l.ok(&["agent-plan", "show", "--id", "t2"])).unwrap();
     assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(
+        done["review_evidence"]["patch"]["sha256"],
+        oms_command_plan::json::sha(&reviewed)
+    );
+    assert_ne!(done["patch"], reviewed_patch);
     assert_eq!(
         std::fs::read_to_string(l.repo.join("a.txt")).unwrap(),
         "a\nb\n"

@@ -524,6 +524,22 @@ fn notice(
         .success()
 }
 
+fn reviewed_binding(current: &Current, retained: &Value) -> Result<()> {
+    require(
+        matches!(current.task["state"].as_str(), Some("review" | "done"))
+            && current.task["review_lease_id"] == current.assignment.lease_id()
+            && current.task["artifact"] == retained["artifact"]
+            && (current.task["state"] == "done"
+                || current.task["patch"] == retained["patch"]["path"])
+            && current.task["review_evidence"]["schema"] == 1
+            && current.task["review_evidence"]["artifact"]["path"] == retained["artifact"]
+            && current.task["review_evidence"]["artifact"]["sha256"] == retained["artifact_sha256"]
+            && current.task["review_evidence"]["patch"]["path"] == retained["patch"]["path"]
+            && current.task["review_evidence"]["patch"]["sha256"] == retained["patch"]["sha256"],
+        "Plan review lacks the exact native evidence binding; reconciliation cannot overwrite it",
+    )
+}
+
 pub(super) fn reconcile(
     panel: &Panel<'_>,
     options: &Options,
@@ -546,6 +562,18 @@ pub(super) fn reconcile(
     )?;
     let source = source_report(panel, &current.assignment, &retained)?;
     let decision = options.required("decision")?;
+    let candidate = retained["patch"].is_object();
+    let artifact = text(&retained, "artifact");
+    let patch_path = text(&retained["patch"], "path");
+    let replayed = current.operation["refs"]["native_resolution"] == decision
+        && current.operation["refs"]["native_resolution_result_sha256"] == result_sha;
+    if decision == "reviewed"
+        && candidate
+        && current.task["state"] != "cancelled"
+        && (replayed || matches!(current.task["state"].as_str(), Some("review" | "done")))
+    {
+        reviewed_binding(&current, &retained)?;
+    }
     if settled(&current.task) {
         require(
             decision == "reviewed",
@@ -559,21 +587,8 @@ pub(super) fn reconcile(
             "child_cleanup":"unsupported","native_session":"preserved",
             "next_action":"select the next canonical ready task"}));
     }
-    let replayed = current.operation["refs"]["native_resolution"] == decision
-        && current.operation["refs"]["native_resolution_result_sha256"] == result_sha;
-    let candidate = retained["patch"].is_object();
-    let artifact = text(&retained, "artifact");
-    let patch_path = text(&retained["patch"], "path");
     // Capture already froze these exact bytes before publishing its reference.
     // The independent Plan review never consumes a report-supplied verifier.
-    if decision == "reviewed" && candidate && current.task["state"] == "review" {
-        require(
-            current.task["review_lease_id"] == current.assignment.lease_id()
-                && current.task["artifact"] == artifact
-                && current.task["patch"] == patch_path,
-            "Plan review changed; native reconciliation cannot overwrite it",
-        )?;
-    }
     if !replayed {
         require(
             current.operation["refs"]["native_resolution"] != "reviewed",
@@ -598,6 +613,10 @@ pub(super) fn reconcile(
                             artifact,
                             "--patch",
                             patch_path,
+                            "--expected-review-artifact-sha256",
+                            result_sha,
+                            "--expected-review-patch-sha256",
+                            text(&retained["patch"], "sha256"),
                         ]),
                         panel.stop,
                     )?
@@ -611,6 +630,9 @@ pub(super) fn reconcile(
             fresh.operation == current.operation,
             "native assignment changed before reconciliation",
         )?;
+        if decision == "reviewed" && candidate {
+            reviewed_binding(&fresh, &retained)?;
+        }
         tx.check()?;
         annotate(
             panel,
