@@ -3376,8 +3376,9 @@ checks the selected jobs and their planned skips.
 
 macOS remains a supported runtime and installation host (Bash 5.0+, GNU/BSD
 userland compatibility), but macOS runners are no longer part of GitHub Actions
-CI; verify macOS/BSD-sensitive changes locally with
-`tests/bsd-portability-smoke.sh` (also wired into `scripts/check.sh`).
+CI. `tests/bsd-portability-smoke.sh` (wired into `scripts/check.sh`) exercises
+userland-sensitive tools on the host's own userland, which is GNU in CI, so it
+does not prove macOS/BSD behaviour there.
 
 `oms ci-status attention [branch] [--limit N] [--json]` reads scheduled and manual
 workflow runs separately, so a newer PR or push run cannot hide a maintenance

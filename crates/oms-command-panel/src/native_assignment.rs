@@ -9,6 +9,136 @@ const MAX_BINDING: usize = 64 * 1024;
 // Codex leads launch without the provider policy, so the assignment carries it.
 const LEAD_DUTIES: &str = "Integrate only; children: roles/disjoint scopes/checks, read-only research/review/verify, builders assigned paths, no delegate/commit/push/land/install/publish; simple: cheaper supported native model, escalate scope/risk, keep explicit user choice/account/isolation/spend.";
 
+pub(super) const PRIMARY_TICKET_LAYOUT: &str = concat!(
+    "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t",
+    "#{pane_in_mode}\t#{pane_active}\t#{window_active}\t#{pane_width}\t.",
+);
+
+// Leave room for the prompt marker and composer margins. The exact post-paste
+// check still owns the decision to send Enter.
+const TICKET_MARGIN: usize = 8;
+
+pub(super) struct PrimaryTicket<'a> {
+    pub(super) prompt: String,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    lead: PaneIdentity,
+    columns: usize,
+    transaction: &'a Transaction<'a>,
+}
+
+impl<'a> PrimaryTicket<'a> {
+    pub(super) fn prepare(
+        panel: &Panel<'_>,
+        custody: &CodexAssignment,
+        transaction: &'a Transaction<'a>,
+        turn: &str,
+        payload: &str,
+    ) -> Result<Option<Self>> {
+        let columns = primary_ticket_columns(panel, &custody.lead)?;
+        let limit = columns.saturating_sub(TICKET_MARGIN);
+        if crate::render::width(payload) <= limit {
+            return Ok(None);
+        }
+        let path = PathBuf::from(format!(".oms/artifacts/native-tasks/{turn}.json"));
+        let absolute = custody.repo.join(&path);
+        let absolute = absolute
+            .to_str()
+            .ok_or_else(|| Error::new("repository cannot be represented in a task reference"))?;
+        let prompt = format!(
+            "{} Turn {turn}. You own this provider's work. Read {} for the assignment; stop if unavailable.",
+            crate::native_children::TASK_PREFIX,
+            assignment_shell_word(absolute),
+        );
+        if !prompt.is_ascii() || crate::render::width(&prompt) > limit {
+            return Ok(None);
+        }
+        let pane = |pane: &PaneIdentity| json!({"id": pane.id, "window": pane.window, "pid": pane.pid, "birth": pane.birth});
+        let packet = json!({
+            "schema": 1, "kind": "oms-primary-codex-task", "turn": turn,
+            "repo": custody.repo, "room": panel.room, "provider": "codex",
+            "main_attempt": panel.attempt, "main_participant": panel.participant,
+            "main_owner": panel.owner, "session": panel.session_proof,
+            "main_pane": pane(&custody.main), "lead_pane": pane(&custody.lead),
+            "account": custody.binding, "payload": payload,
+            "payload_sha256": oms_panel_core::digest(payload.as_bytes()),
+        });
+        let bytes = serde_json::to_vec(&packet).map_err(Error::new)?;
+        // This private file needs the physical repository locator. Refuse any
+        // secret the environment-aware scrubber would remove.
+        for original in [payload.as_bytes(), bytes.as_slice()] {
+            require(
+                oms_panel_core::redact(original)?.as_bytes() == original,
+                "Codex task reference content refused by scrubber",
+            )?;
+        }
+        transaction.write(&path, &bytes, true, MAX_BINDING)?;
+        let ticket = Self {
+            prompt,
+            path,
+            bytes,
+            lead: custody.lead.clone(),
+            columns,
+            transaction,
+        };
+        ticket.revalidate(panel)?;
+        Ok(Some(ticket))
+    }
+
+    pub(super) fn revalidate(&self, panel: &Panel<'_>) -> Result<()> {
+        require(
+            primary_ticket_columns(panel, &self.lead)? == self.columns,
+            "Codex task reference layout changed",
+        )?;
+        require(
+            self.transaction
+                .read(&self.path, MAX_BINDING, true)
+                .is_ok_and(|bytes| bytes == self.bytes),
+            "Codex task reference is missing or changed",
+        )
+    }
+}
+
+fn primary_ticket_columns(panel: &Panel<'_>, lead: &PaneIdentity) -> Result<usize> {
+    let layout = panel.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &lead.id,
+        PRIMARY_TICKET_LAYOUT,
+    ])?;
+    let fields: Vec<_> = layout.split('\t').collect();
+    let [
+        session,
+        window,
+        pane,
+        pid,
+        "0",
+        "0",
+        active,
+        focused,
+        columns,
+        ".",
+    ] = fields.as_slice()
+    else {
+        return Err(Error::new("Codex task reference layout is unavailable"));
+    };
+    require(
+        *session == panel.session
+            && *window == lead.window
+            && *pane == lead.id
+            && pid.parse::<u32>() == Ok(lead.pid)
+            && matches!((*active, *focused), ("0", "0" | "1") | ("1", "0")),
+        "Codex task reference pane changed",
+    )?;
+    columns
+        .parse::<u16>()
+        .ok()
+        .filter(|columns| *columns > 0)
+        .map(usize::from)
+        .ok_or_else(|| Error::new("Codex task reference layout is unavailable"))
+}
+
 /// Codex shows a larger paste as an opaque placeholder that its composer proof
 /// cannot read, so the whole prompt must fit the visible limit untruncated.
 fn assignment_prompt(
@@ -288,8 +418,11 @@ pub(super) fn run(
         options.get("account"),
         None,
         LeadLaunch::default(),
-        host,
-        attempts,
+        LeadExecution {
+            host,
+            attempts,
+            transaction: Some(tx),
+        },
     )?;
     let custody = panel.codex_assignment_custody(host)?;
     panel.require_codex_assignment_main(panel.repo, attempts)?;
@@ -481,7 +614,7 @@ pub(super) fn run(
         &prompt,
         Proof::Turn(turn),
         Some((&custody, host, attempts)),
-        Some(&binding),
+        Some(AssignmentEvidence::Bound(&binding)),
     );
     let state = if sent.is_ok() { "submitted" } else { "unknown" };
     let annotation = annotate(
