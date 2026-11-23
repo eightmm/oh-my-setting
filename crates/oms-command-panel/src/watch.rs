@@ -1882,12 +1882,13 @@ pub(crate) struct NativeReading {
     agy: Option<AgyDockCheck>,
 }
 
-const NATIVE_FIELDS: [&str; 11] = [
+const NATIVE_FIELDS: [&str; 12] = [
     "native_children",
     "native_dock",
     "provider_sessions",
     "provider_models",
     "provider_activity",
+    "provider_delivery",
     "provider_accounts",
     "provider_status",
     "claude_local_weekly",
@@ -2046,6 +2047,7 @@ impl RefreshPhase {
                     "provider_sessions",
                     "provider_models",
                     "provider_activity",
+                    "provider_delivery",
                     "provider_accounts",
                     "provider_status",
                     "native_children",

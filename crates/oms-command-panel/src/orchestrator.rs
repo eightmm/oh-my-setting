@@ -1,6 +1,8 @@
 //! Persistent native provider windows beneath the room's interactive main.
 #[path = "account_binding.rs"]
 pub(crate) mod account_binding;
+#[path = "lead_delivery.rs"]
+mod lead_delivery;
 #[path = "native_assignment.rs"]
 mod native_assignment;
 #[path = "native_result.rs"]
@@ -42,6 +44,11 @@ struct LeadExecution<'a> {
 enum AssignmentEvidence<'a> {
     Bound(&'a native_assignment::Binding),
     Primary(&'a Transaction<'a>),
+    Lead(
+        &'a lead_delivery::Scope,
+        &'a dyn AccountHost,
+        &'a AttemptCache,
+    ),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -427,7 +434,8 @@ impl ChatPane {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 struct PaneIdentity {
     window: String,
     id: String,
@@ -1096,6 +1104,11 @@ impl<'a> Panel<'a> {
             fields.remove("codex_weekly_account");
             fields.remove("agy_footer_weekly");
         }
+        report["provider_delivery"] = json!({});
+        let delivery_store = self
+            .has_live_report_scope(report)
+            .then(|| Store::open(self.repo).ok())
+            .flatten();
         let mut children = Vec::new();
         let census = std::cell::OnceCell::new();
         let mut bound_codex = None;
@@ -1108,6 +1121,11 @@ impl<'a> Panel<'a> {
             .panes
             .retain(|provider, _| self.leads.contains_key(provider));
         for (provider, pane) in &self.leads {
+            if let Some(delivery) = delivery_store.as_ref().and_then(|store| {
+                lead_delivery::Receipt::for_live_lead(store, self, provider, host)
+            }) {
+                report["provider_delivery"][provider] = json!(delivery);
+            }
             let (identity, binding) = self.observation_state(provider, pane, host);
             let sample = readings
                 .panes
@@ -3510,6 +3528,23 @@ impl<'a> Panel<'a> {
         )
     }
 
+    fn require_lead_assignment_main(&self, attempts: &AttemptCache) -> Result<()> {
+        require(
+            self.caller == self.main.id
+                && std::env::var_os("OMS_CAMPAIGN_MANIFEST_SHA256").is_none(),
+            "native provider scheduling requires the current Main",
+        )?;
+        let repo = self.repo.canonicalize().map_err(Error::new)?;
+        let main = attempts.resolve_attempt(&repo, &self.attempt, self.services, self.stop)?;
+        require(
+            main.is_some_and(|main| {
+                self.is_live_main(&main) && main["refs"]["panel_native_scheduling"] == "unmanaged"
+            }),
+            "live Main attempt could not be verified for lead assignment",
+        )?;
+        self.require_exact_main_membership(&repo)
+    }
+
     fn require_exact_main_membership(&self, repo: &Path) -> Result<()> {
         let canonical = repo
             .to_str()
@@ -3732,18 +3767,15 @@ impl<'a> Panel<'a> {
                     "cannot rebind live provider session to a different account",
                 )?;
             }
+            let mut delivery = None;
             let status = if let Some(task) = task {
                 static TURN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-                let stamp = if assignment.is_some() {
-                    format!(
-                        "{:?}:{}:{}",
-                        std::time::SystemTime::now(),
-                        std::process::id(),
-                        TURN_SEQUENCE.fetch_add(1, Ordering::Relaxed),
-                    )
-                } else {
-                    oms_panel_core::now()
-                };
+                let stamp = format!(
+                    "{:?}:{}:{}",
+                    std::time::SystemTime::now(),
+                    std::process::id(),
+                    TURN_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+                );
                 let turn = oms_panel_core::digest(
                     format!("{}:{provider}:{stamp}:{task}", self.attempt).as_bytes(),
                 );
@@ -3758,31 +3790,71 @@ impl<'a> Panel<'a> {
                 } else {
                     STARTUP_PROMPT.trim()
                 };
-                let prompt = format!(
-                    "Task from Overall Main. Work within this task and report the result here. Turn {turn}. You own this provider's work. {role_contract}{locator} Task: {task}"
-                );
-                self.send_checked(
-                    provider,
-                    &prompt,
-                    Proof::Turn(turn),
-                    assignment.as_ref().map(|proof| (proof, host, attempts)),
-                    assignment
-                        .as_ref()
-                        .and(transaction)
-                        .map(AssignmentEvidence::Primary),
-                )?;
-                "submitted"
+                let prompt = native_lead_prompt(turn, role_contract, &locator, task);
+                if provider == "codex" {
+                    self.send_checked(
+                        provider,
+                        &prompt,
+                        Proof::Turn(turn),
+                        assignment.as_ref().map(|proof| (proof, host, attempts)),
+                        transaction.map(AssignmentEvidence::Primary),
+                    )?;
+                    "submitted"
+                } else {
+                    self.require_provider_input(provider)?;
+                    let tx = transaction
+                        .ok_or_else(|| Error::new("managed lead assignment receipt unavailable"))?;
+                    let scope = lead_delivery::Scope::sample(self, provider, host)?;
+                    let mut receipt = lead_delivery::Receipt::new(scope, turn);
+                    // Retain an unverified receipt if a transport or writer is interrupted.
+                    receipt.write(tx, provider)?;
+                    crate::wakeup::notify_wakeup(self.repo);
+                    let observed = self.send_checked(
+                        provider,
+                        &prompt,
+                        Proof::LeadTurn {
+                            turn,
+                            agy_user_turn: &|| {
+                                receipt.scope.proves_agy_turn(self.repo, turn, &prompt)
+                            },
+                        },
+                        None,
+                        Some(AssignmentEvidence::Lead(&receipt.scope, host, attempts)),
+                    )?;
+                    receipt.delivery = observed.delivery;
+                    let recorded = receipt.write(tx, provider).is_ok();
+                    if recorded {
+                        crate::wakeup::notify_wakeup(self.repo);
+                    }
+                    delivery = Some((turn.to_owned(), observed, recorded));
+                    if recorded && observed.delivery == lead_delivery::Delivery::TurnObserved {
+                        "submitted"
+                    } else {
+                        "unknown"
+                    }
+                }
             } else {
                 "connected"
             };
             let (account, account_pinned, account_verification) = binding_summary(live_binding);
-            Ok(json!({
+            let mut output = json!({
                 "status": status,
                 "provider": provider,
                 "account": account,
                 "account_pinned": account_pinned,
                 "account_verification": account_verification,
-            }))
+            });
+            if let Some((turn, state, recorded)) = delivery {
+                output["delivery"] = serde_json::json!(state.delivery);
+                output["turn_id"] = turn.into();
+                output["task_completion"] = "unconfirmed".into();
+                output["receipt_recorded"] = recorded.into();
+                if status == "unknown" {
+                    output["reconcile_required"] = true.into();
+                    output["reason"] = state.reconcile_cue().into();
+                }
+            }
+            Ok(output)
         } else if task.is_some() {
             if let Some(req_alias) = requested_account {
                 let env_lines = self.tmux_env_lines()?;
@@ -3837,6 +3909,7 @@ impl<'a> Panel<'a> {
         assignment: Option<(&CodexAssignment, &dyn AccountHost, &AttemptCache)>,
     ) -> Result<()> {
         self.send_checked(provider, prompt, proof, assignment, None)
+            .map(|_| ())
     }
 
     fn send_checked(
@@ -3846,7 +3919,7 @@ impl<'a> Panel<'a> {
         proof: Proof,
         assignment: Option<(&CodexAssignment, &dyn AccountHost, &AttemptCache)>,
         evidence: Option<AssignmentEvidence<'_>>,
-    ) -> Result<()> {
+    ) -> Result<lead_delivery::Outcome> {
         if provider == "codex"
             && !matches!(evidence, Some(AssignmentEvidence::Bound(_)))
             && matches!(proof, Proof::Turn(_))
@@ -3888,8 +3961,17 @@ impl<'a> Panel<'a> {
                     "Codex assignment custody changed",
                 )?;
             }
-            if let Some(AssignmentEvidence::Bound(binding)) = evidence {
-                binding.revalidate(self)?;
+            match evidence {
+                Some(AssignmentEvidence::Bound(binding)) => binding.revalidate(self)?,
+                Some(AssignmentEvidence::Lead(scope, host, attempts)) => {
+                    require(
+                        self.owner == fresh.owner
+                            && &lead_delivery::Scope::sample(&fresh, provider, host)? == scope,
+                        "provider or Main process generation changed",
+                    )?;
+                    fresh.require_lead_assignment_main(attempts)?;
+                }
+                _ => {}
             }
             Ok(())
         };
@@ -3956,6 +4038,13 @@ impl<'a> Panel<'a> {
             "provider input is busy or a draft is present; try again when ready",
         )
     }
+}
+
+fn native_lead_prompt(turn: &str, role_contract: &str, locator: &str, task: &str) -> String {
+    format!(
+        "{} Turn {turn}. You own this provider's work. {role_contract}{locator} Task: {task}",
+        crate::native_children::TASK_PREFIX,
+    )
 }
 
 fn validate_task(task: &str) -> Result<()> {
@@ -4338,9 +4427,14 @@ impl AlternateTurn<'_> {
 /// What proves that a submitted prompt reached the provider.
 #[derive(Clone, Copy)]
 enum Proof<'a> {
-    /// A task carrying `Turn <turn_id>`: the input must empty and, for Codex, a
-    /// native user message above the prompt must show the turn_id.
+    /// An ordinary Codex task carrying `Turn <turn_id>`.
     Turn(&'a str),
+    /// Ordinary AGY or Claude lead. Only a provider-typed user record can
+    /// turn a cleared composer into a confirmed delivery.
+    LeadTurn {
+        turn: &'a str,
+        agy_user_turn: &'a dyn Fn() -> bool,
+    },
     /// The explicitly pinned alternate requires an exact draft and whole-token terminal receipt.
     AlternateCodexTurn(&'a AlternateTurn<'a>),
     /// A command whose caller verifies its own effect, so Enter is the last step.
@@ -4380,7 +4474,9 @@ fn paste_and_submit(
     tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
     fence: &mut dyn FnMut() -> Result<()>,
     mut pace: Pace,
-) -> Result<()> {
+) -> Result<lead_delivery::Outcome> {
+    use lead_delivery::{Delivery, Outcome};
+
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let uncertain = |message: String| Error {
         publication_uncertain: true,
@@ -4397,7 +4493,15 @@ fn paste_and_submit(
         &oms_panel_core::digest(seed.as_bytes())[..16]
     );
     tmux(&["set-buffer", "-b", &buffer, "--", &literal_tmux_arg(prompt)])?;
-    let mut before_paste = || {
+    let ordinary_lead = matches!(proof, Proof::LeadTurn { .. });
+    let agy_preexisting_turn = if let Proof::LeadTurn { turn, .. } = proof
+        && provider == "antigravity"
+    {
+        lead_delivery::Frame::capture(tmux, pane).is_ok_and(|frame| frame.shows_turn(turn))
+    } else {
+        false
+    };
+    let mut before_paste = || -> Result<()> {
         fence()?;
         if let Proof::AlternateCodexTurn(expected) = proof {
             require(
@@ -4408,13 +4512,20 @@ fn paste_and_submit(
         }
         Ok(())
     };
-    let pasted = before_paste()
-        .map_err(|error: Error| Error::new(format!("pane changed before pasting: {error}")))
-        .and_then(|()| tmux(&["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane]));
-    if let Err(error) = pasted {
+    if let Err(error) = before_paste() {
         let _ = tmux(&["delete-buffer", "-b", &buffer]);
+        return Err(Error::new(format!("pane changed before pasting: {error}")));
+    }
+    if let Err(error) = tmux(&["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane]) {
+        let _ = tmux(&["delete-buffer", "-b", &buffer]);
+        if ordinary_lead {
+            return Ok(Outcome::uncertain(
+                "Paste outcome is unknown. Enter was withheld. Inspect the provider pane before resending.",
+            ));
+        }
         return Err(error);
     }
+    let mut lead_draft = None;
     if let Proof::AlternateCodexTurn(expected) = proof {
         let mut previous = None;
         let settled = pace.poll(PASTE_DEADLINE, || {
@@ -4472,6 +4583,30 @@ fn paste_and_submit(
                     .into(),
             ));
         }
+    } else if ordinary_lead {
+        let mut previous = None;
+        let settled = pace.poll(PASTE_DEADLINE, || {
+            let draft = lead_delivery::Frame::exact_draft(tmux, pane, provider, prompt);
+            let settled = draft.is_some() && draft == previous;
+            previous = draft;
+            settled
+        });
+        if !settled {
+            return Ok(Outcome::uncertain(
+                "The complete pasted draft could not be verified. Enter was withheld. Inspect the provider pane before resending.",
+            ));
+        }
+        if lead_delivery::Frame::exact_draft(tmux, pane, provider, prompt) != previous {
+            return Ok(Outcome::uncertain(
+                "The pasted draft changed. Enter was withheld. Inspect the provider pane before resending.",
+            ));
+        }
+        if fence().is_err() {
+            return Ok(Outcome::uncertain(
+                "Room, Main, or provider custody changed after pasting. Enter was withheld. Inspect the provider pane before resending.",
+            ));
+        }
+        lead_draft = previous;
     } else {
         let mut previous = None;
         let settled = pace.poll(PASTE_DEADLINE, || {
@@ -4489,10 +4624,9 @@ fn paste_and_submit(
             settled
         });
         if !settled {
-            // The paste command succeeded, so an unobserved draft may still be present.
             return Err(uncertain(
-            "task paste was not observed; Enter was not sent and a draft may remain — inspect the provider input before resending".into(),
-        ));
+                "task paste was not observed; Enter was not sent and a draft may remain — inspect the provider input before resending".into(),
+            ));
         }
         fence().map_err(|error| {
             uncertain(format!(
@@ -4500,12 +4634,53 @@ fn paste_and_submit(
             ))
         })?;
     }
-    tmux(&["send-keys", "-t", pane, "Enter"]).map_err(|_| uncertain(UNCONFIRMED.into()))?;
+    if tmux(&["send-keys", "-t", pane, "Enter"]).is_err() {
+        return if ordinary_lead {
+            Ok(Outcome::uncertain(
+                "Enter may have reached the provider. Inspect the provider pane before resending.",
+            ))
+        } else {
+            Err(uncertain(UNCONFIRMED.into()))
+        };
+    }
     let confirmed = match proof {
-        Proof::Dispatched => true,
+        Proof::Dispatched => return Ok(Delivery::Unverified.into()),
+        Proof::LeadTurn { agy_user_turn, .. } => {
+            let scope_lost = || {
+                Outcome::uncertain(
+                    "Room, Main, or provider custody changed after Enter. Inspect the provider pane before resending.",
+                )
+            };
+            let mut delivery = Delivery::Unverified;
+            pace.poll(SUBMIT_DEADLINE, || {
+                let Ok(frame) = lead_delivery::Frame::capture(tmux, pane) else {
+                    delivery = Delivery::Unverified;
+                    return false;
+                };
+                delivery = frame.delivery(provider, lead_draft.as_ref());
+                delivery == Delivery::InputClearedUnverified
+            });
+            if fence().is_err() {
+                return Ok(scope_lost());
+            }
+            if provider == "antigravity"
+                && !agy_preexisting_turn
+                && delivery == Delivery::InputClearedUnverified
+            {
+                // The exact typed request can outlive a wrapped or scrolled-off user row.
+                let confirmed = agy_user_turn();
+                if fence().is_err() {
+                    return Ok(scope_lost());
+                }
+                if confirmed {
+                    delivery = Delivery::TurnObserved;
+                }
+            }
+            return Ok(delivery.into());
+        }
         Proof::Turn(turn_id) => {
             let turn = format!("Turn {turn_id}");
-            pace.poll(SUBMIT_DEADLINE, || submitted(provider, pane, &turn, tmux))
+            pace.poll(SUBMIT_DEADLINE, || codex_submitted(pane, &turn, tmux))
         }
         Proof::AlternateCodexTurn(expected) => pace.poll(SUBMIT_DEADLINE, || {
             expected
@@ -4513,14 +4688,14 @@ fn paste_and_submit(
                 .is_ok_and(|c| c.acknowledged(expected.turn))
         }),
     };
-    require(confirmed, UNCONFIRMED).map_err(|_| uncertain(UNCONFIRMED.into()))
+    require(confirmed, UNCONFIRMED).map_err(|_| uncertain(UNCONFIRMED.into()))?;
+    Ok(Delivery::TurnObserved.into())
 }
 
 /// An empty input alone may be a cleared draft, so Codex must also show the
 /// turn in a submitted user message. One capture spans the history through the
 /// editable prompt row, keeping the cut point consistent if the screen scrolls.
-fn submitted(
-    provider: &str,
+fn codex_submitted(
     pane: &str,
     turn: &str,
     tmux: &mut dyn FnMut(&[&str]) -> Result<String>,
@@ -4528,20 +4703,19 @@ fn submitted(
     let Some((row, input)) = prompt_capture(tmux, pane, true) else {
         return false;
     };
-    input_ready(provider, &input)
-        && (provider != "codex"
-            || tmux(&[
-                "capture-pane",
-                "-p",
-                "-J",
-                "-S",
-                "-200",
-                "-E",
-                &format!("{row}"),
-                "-t",
-                pane,
-            ])
-            .is_ok_and(|capture| codex_turn_shown(&capture, turn)))
+    input_ready("codex", &input)
+        && tmux(&[
+            "capture-pane",
+            "-p",
+            "-J",
+            "-S",
+            "-200",
+            "-E",
+            &format!("{row}"),
+            "-t",
+            pane,
+        ])
+        .is_ok_and(|capture| codex_turn_shown(&capture, turn))
 }
 
 /// Whether a Codex user message (a `›` row plus its continuation rows up to a
@@ -5549,7 +5723,7 @@ fn run_with_host(
         value["task_completion"] = "unconfirmed".into();
         value["acceptance"] = "unsupported".into();
     }
-    let code = if options.has("task-id") && value["status"] == "unknown" {
+    let code = if (options.has("task-id") || options.has("task")) && value["status"] == "unknown" {
         75
     } else {
         0
@@ -5955,6 +6129,10 @@ pub(crate) mod codex_chat_fixture {
             panel
         }
 
+        pub(crate) fn main_panel(&self) -> Panel<'_> {
+            Panel::load_for_caller(&self.repo, ROOM, "%1", self, &self.stop).unwrap()
+        }
+
         pub(crate) fn observations(&self, participant: &str, tag: &str) -> Observations {
             Observations {
                 chats: BTreeMap::from([(
@@ -6055,7 +6233,15 @@ pub(crate) mod codex_chat_fixture {
                 .collect();
             let pid = std::process::id();
             let body = match args.as_slice() {
-                ["tmux", "list-panes", "-s", "-t", "%2", "-F", PANE_FORMAT] => {
+                [
+                    "tmux",
+                    "list-panes",
+                    "-s",
+                    "-t",
+                    "%1" | "%2",
+                    "-F",
+                    PANE_FORMAT,
+                ] => {
                     let window = if self.docked.get() { "@1" } else { "@3" };
                     let lead = self.lead.get();
                     let main_active = u8::from(self.main_active.get());
@@ -6114,6 +6300,16 @@ pub(crate) mod codex_chat_fixture {
                     assert!(
                         args == ["show", "--id", ROOM, "--exact", "--json"]
                             || args == ["show", "--id", ROOM, "--json"]
+                            || args
+                                == [
+                                    "show",
+                                    "--repo",
+                                    self.repo.to_str().unwrap(),
+                                    "--id",
+                                    ROOM,
+                                    "--exact",
+                                    "--json"
+                                ]
                     );
                     json!({
                         "id": ROOM, "closed": self.room_closed.get(),
@@ -6125,7 +6321,7 @@ pub(crate) mod codex_chat_fixture {
                         "attempt_id": MAIN, "tool": "panel-main", "provider": "codex",
                         "terminal": self.main_terminal.get(),
                         "state": if self.main_terminal.get() { "done" } else { "working" },
-                        "refs": {"panel_role": "main", "panel_room_id": ROOM}
+                        "refs": {"panel_role": "main", "panel_room_id": ROOM, "panel_native_scheduling": "unmanaged"}
                     });
                     if args == ["list", "--json"] {
                         self.list_count.set(self.list_count.get() + 1);
@@ -6144,7 +6340,7 @@ pub(crate) mod codex_chat_fixture {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         CHAT_SGR, LeadLaunch, PASTE_DEADLINE, POLL_STEP, Pace, Proof, STARTUP_PROMPT,
         SUBMIT_DEADLINE, codex_model_from_chrome, codex_turn_shown, input_ready, literal_tmux_arg,
@@ -6305,7 +6501,7 @@ mod tests {
                 },
             },
         );
-        (result, sleeps)
+        (result.map(|_| ()), sleeps)
     }
 
     fn require_fence(ok: bool) -> Result<()> {
@@ -6609,6 +6805,507 @@ mod tests {
         );
         assert!(unowned_rows.is_empty());
         assert!(unowned_activity.get("claude").is_none());
+    }
+
+    fn lead_frame(pane: &str, body: &str, x: usize, y: usize, columns: usize) -> String {
+        format!(
+            "{pane}\t0\t0\t{x}\t{y}\t{columns}\t90\t.\n{}\n.",
+            body.trim_end_matches('\n')
+        )
+    }
+
+    fn lead_box(draft: &str) -> String {
+        let border = "─".repeat(20);
+        format!("{border}\n{draft}\n{border}")
+    }
+
+    #[test]
+    fn ordinary_lead_delivery_only_joins_tmux_proven_wrapped_drafts() {
+        let intended = "01234567890123456 789abcdef";
+        let physical = lead_box("> 01234567890123456\n789abcdef");
+        for (joined, cursor, verified) in [
+            ("> 01234567890123456 789abcdef", (9, 2), true),
+            ("> 01234567890123456\n789abcdef", (9, 2), false),
+            ("> 01234567890123456789abcdef", (9, 2), false),
+            ("> 01234567890123456 789abcdef", (8, 2), false),
+        ] {
+            let mut captures = 0;
+            let result = super::lead_delivery::Frame::exact_draft(
+                &mut |args| {
+                    captures += 1;
+                    let body = if args.contains(&"-J") {
+                        assert!(
+                            args.windows(5)
+                                .any(|args| args == ["-J", "-S", "1", "-E", "2"])
+                        );
+                        joined
+                    } else {
+                        physical.as_str()
+                    };
+                    Ok(lead_frame("%7", body, cursor.0, cursor.1, 20))
+                },
+                "%7",
+                "antigravity",
+                intended,
+            );
+            assert_eq!(result.is_some(), verified, "{cursor:?}");
+            assert_eq!(captures, 2);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn check_ordinary_agy_delivery_geometry(
+        turn: &str,
+        record_user_turn: impl Fn(&str),
+        prove_user_turn: impl Fn(&str) -> bool,
+    ) {
+        use super::lead_delivery::Delivery;
+        let prompt = super::native_lead_prompt(
+            turn,
+            STARTUP_PROMPT.trim(),
+            "",
+            "Verify the assigned geometry fixture and report the evidence.",
+        );
+        let wire = format!("> {prompt}");
+        let header = format!(
+            "> {} Turn {turn}. You own this provider's work.",
+            crate::native_children::TASK_PREFIX
+        );
+        assert!(wire.is_ascii() && header.len() > 126);
+        let height = 21;
+        for (columns, cropped) in [(126, false), (70, true)] {
+            let rule = "─".repeat(columns);
+            let rows: Vec<_> = wire
+                .as_bytes()
+                .chunks(columns)
+                .map(|part| std::str::from_utf8(part).unwrap().trim_end_matches(' '))
+                .collect();
+            assert_eq!(rows.len() + 2 > height, cropped);
+            let (screen, cursor_row) = if cropped {
+                let tail = rows[rows.len() - (height - 2)..].join("\n");
+                (format!("{tail}\n{rule}\nOrchestrator (Carbon)"), height - 3)
+            } else {
+                (format!("{rule}\n{}\n{rule}", rows.join("\n")), rows.len())
+            };
+            let cleared = format!(
+                "The provider accepted a request.\n{rule}\n>\n{rule}\nOrchestrator (Carbon)"
+            );
+            let cursor_x = wire.len() % columns;
+            assert!(cursor_x > 0);
+            let captured = |body, x, y| {
+                Ok(format!(
+                    "%7\t0\t0\t{x}\t{y}\t{columns}\t{height}\t.\n{body}\n."
+                ))
+            };
+            let start = Instant::now();
+            let elapsed = Cell::new(Duration::ZERO);
+            let pastes = Cell::new(0);
+            let enters = Cell::new(0);
+            let reads = Cell::new(0);
+            let mut fences = 0;
+            let outcome = paste_and_submit(
+                "antigravity",
+                "%7",
+                &prompt,
+                Proof::LeadTurn {
+                    turn,
+                    agy_user_turn: &|| {
+                        reads.set(reads.get() + 1);
+                        prove_user_turn(&prompt)
+                    },
+                },
+                &mut |args| match args {
+                    ["display-message", _, _, _, _, ";", ..] if enters.get() > 0 => {
+                        captured(&cleared, 2, 2)
+                    }
+                    ["display-message", _, _, _, _, ";", ..] if pastes.get() == 0 => {
+                        captured(&cleared, 2, 2)
+                    }
+                    ["display-message", _, _, _, _, ";", ..] if args.contains(&"-J") => {
+                        assert!(!cropped, "cropped composer must not expose a joined draft");
+                        captured(&wire, cursor_x, cursor_row)
+                    }
+                    ["display-message", _, _, _, _, ";", ..] => {
+                        captured(&screen, cursor_x, cursor_row)
+                    }
+                    ["set-buffer", ..] => Ok(String::new()),
+                    ["paste-buffer", ..] => {
+                        pastes.set(pastes.get() + 1);
+                        Ok(String::new())
+                    }
+                    ["send-keys", _, _, "Enter"] => {
+                        assert!(!cropped);
+                        enters.set(enters.get() + 1);
+                        record_user_turn(&prompt);
+                        Ok(String::new())
+                    }
+                    _ => panic!("unexpected synthetic tmux call"),
+                },
+                &mut || {
+                    fences += 1;
+                    Ok(())
+                },
+                Pace {
+                    now: &mut || start + elapsed.get(),
+                    sleep: &mut |step| elapsed.set(elapsed.get() + step),
+                },
+            )
+            .unwrap();
+            assert_eq!(pastes.get(), 1);
+            if cropped {
+                assert_eq!((enters.get(), reads.get(), fences), (0, 0, 1));
+                assert_eq!(outcome.delivery, Delivery::Unverified);
+                assert!(outcome.reconcile_cue().contains("Enter was withheld"));
+            } else {
+                assert_eq!((enters.get(), reads.get(), fences), (1, 1, 4));
+                assert_eq!(outcome.delivery, Delivery::TurnObserved);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_lead_delivery_checks_the_exact_post_enter_evidence() {
+        use super::lead_delivery::Delivery;
+        use crate::native_children::TASK_PREFIX;
+
+        let user = |mark, turn| {
+            format!(
+                "{mark} {TASK_PREFIX} Turn {turn}. You own this provider's work. Task: inspect the fixture"
+            )
+        };
+        let agy = user('>', TURN_ID);
+        let old = user('>', OLD_TURN_ID);
+        let claude = user('❯', TURN_ID);
+        let turn = format!("{agy}\n\nThe native response\n\n>\n");
+        let old_latest = format!("{agy}\n\n{old}\n\n>\n");
+        let quoted_turn = format!("{agy}\n\n>\n");
+        let claude_turn = format!("{claude}\n\n❯\n");
+        let agy_draft = lead_box(&agy);
+        let claude_draft = lead_box(&claude);
+        for (provider, before, after, cursor, fences_ok, role_proven, role_checks, expected) in [
+            (
+                "antigravity",
+                ">",
+                ">\n",
+                (2, 0),
+                4,
+                true,
+                1,
+                Delivery::TurnObserved,
+            ),
+            (
+                "antigravity",
+                ">",
+                old_latest.as_str(),
+                (2, 4),
+                4,
+                false,
+                1,
+                Delivery::InputClearedUnverified,
+            ),
+            (
+                "antigravity",
+                turn.as_str(),
+                turn.as_str(),
+                (2, 4),
+                4,
+                true,
+                0,
+                Delivery::InputClearedUnverified,
+            ),
+            (
+                "antigravity",
+                ">",
+                turn.as_str(),
+                (2, 4),
+                4,
+                true,
+                1,
+                Delivery::TurnObserved,
+            ),
+            (
+                "antigravity",
+                ">",
+                quoted_turn.as_str(),
+                (2, 2),
+                4,
+                false,
+                1,
+                Delivery::InputClearedUnverified,
+            ),
+            (
+                "antigravity",
+                ">",
+                agy_draft.as_str(),
+                (crate::render::width(&agy), 1),
+                4,
+                false,
+                0,
+                Delivery::DraftRetained,
+            ),
+            (
+                "antigravity",
+                ">",
+                turn.as_str(),
+                (2, 4),
+                2,
+                true,
+                0,
+                Delivery::Unverified,
+            ),
+            (
+                "antigravity",
+                ">",
+                turn.as_str(),
+                (2, 4),
+                3,
+                true,
+                1,
+                Delivery::Unverified,
+            ),
+            (
+                "claude",
+                "❯",
+                claude_turn.as_str(),
+                (2, 2),
+                4,
+                true,
+                0,
+                Delivery::InputClearedUnverified,
+            ),
+            (
+                "claude",
+                "❯",
+                claude_draft.as_str(),
+                (crate::render::width(&claude), 1),
+                4,
+                false,
+                0,
+                Delivery::DraftRetained,
+            ),
+        ] {
+            let start = Instant::now();
+            let elapsed = Cell::new(Duration::ZERO);
+            let enters = Cell::new(0);
+            let pastes = Cell::new(0);
+            let (draft, row) = if provider == "claude" {
+                (&claude_draft, &claude)
+            } else {
+                (&agy_draft, &agy)
+            };
+            let before_row = before.lines().count() - 1;
+            let role_reads = Cell::new(0);
+            let mut fences = 0;
+            let result = paste_and_submit(
+                provider,
+                "%7",
+                &row[row.find(' ').unwrap() + 1..],
+                Proof::LeadTurn {
+                    turn: TURN_ID,
+                    agy_user_turn: &|| {
+                        role_reads.set(role_reads.get() + 1);
+                        role_proven
+                    },
+                },
+                &mut |args| match args {
+                    ["display-message", _, _, _, _, ";", ..] => {
+                        let ((x, y), body) = if enters.get() != 0 {
+                            (cursor, after)
+                        } else if pastes.get() != 0 {
+                            ((crate::render::width(row), 1), draft.as_str())
+                        } else {
+                            ((2, before_row), before)
+                        };
+                        let body = if args.contains(&"-J") {
+                            assert_eq!(y, 1);
+                            body.lines().nth(1).unwrap()
+                        } else {
+                            body
+                        };
+                        Ok(lead_frame("%7", body, x, y, 160))
+                    }
+                    ["paste-buffer", ..] => {
+                        pastes.set(pastes.get() + 1);
+                        Ok(String::new())
+                    }
+                    ["send-keys", _, _, "Enter"] => {
+                        enters.set(enters.get() + 1);
+                        Ok(String::new())
+                    }
+                    ["set-buffer", ..] => Ok(String::new()),
+                    _ => panic!("unexpected fake tmux route"),
+                },
+                &mut || {
+                    fences += 1;
+                    require_fence(fences <= fences_ok)
+                },
+                Pace {
+                    now: &mut || start + elapsed.get(),
+                    sleep: &mut |step| elapsed.set(elapsed.get() + step),
+                },
+            )
+            .unwrap();
+            assert_eq!(result.delivery, expected, "{provider} {cursor:?}");
+            assert_eq!((pastes.get(), enters.get()), (1, 1));
+            assert_eq!(role_reads.get(), role_checks);
+            if expected == Delivery::Unverified {
+                assert!(
+                    result
+                        .reconcile_cue()
+                        .contains("custody changed after Enter")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_lead_delivery_main_authority_tracks_room_and_lifecycle_changes() {
+        use super::codex_chat_fixture::BoardSpy;
+        use oms_panel_core::state::AttemptCache;
+
+        let observed = BoardSpy::new("delivery-authority");
+        let attempts = AttemptCache::default();
+        let main = observed.main_panel();
+        main.require_lead_assignment_main(&attempts).unwrap();
+        observed.room_closed.set(true);
+        assert!(
+            main.require_lead_assignment_main(&attempts)
+                .unwrap_err()
+                .message
+                .contains("membership")
+        );
+        observed.room_closed.set(false);
+        main.require_lead_assignment_main(&attempts).unwrap();
+        observed.main_terminal.set(true);
+        std::fs::write(observed.ledger(), b"fixture ledger generation changed\n").unwrap();
+        assert!(
+            main.require_lead_assignment_main(&attempts)
+                .unwrap_err()
+                .message
+                .contains("live Main attempt")
+        );
+        assert!(
+            observed
+                .panel()
+                .require_lead_assignment_main(&attempts)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinary_lead_delivery_transport_errors_and_fence_loss_stay_uncertain() {
+        use super::lead_delivery::Delivery;
+
+        let header = format!(
+            "{} Turn {TURN_ID}. You own this provider's work.",
+            crate::native_children::TASK_PREFIX
+        );
+        let expected = format!("{header} Task: inspect");
+        let intended = format!("❯ {expected}");
+        let correct = lead_box(&intended);
+        let wrong = lead_box(&format!("❯ {header} Task: replace"));
+        let partial = lead_box(&format!("❯ {header}"));
+        let extra = lead_box(&format!("{intended}\n  extra editable input"));
+        for (failure, expected_paste, expected_enter, cue) in [
+            ("before-paste", 0, 0, "before pasting"),
+            ("paste", 1, 0, "Paste outcome is unknown"),
+            ("unseen-draft", 1, 0, "draft could not be verified"),
+            ("wrong-draft", 1, 0, "draft could not be verified"),
+            ("marker-only", 1, 0, "draft could not be verified"),
+            ("extra-input", 1, 0, "draft could not be verified"),
+            ("trailing-input", 1, 0, "draft could not be verified"),
+            ("room-after-paste", 1, 0, "custody changed after pasting"),
+            ("changed-draft", 1, 0, "draft changed"),
+            ("enter", 1, 1, "Enter may have reached"),
+            ("room-after-enter", 1, 1, "custody changed after Enter"),
+        ] {
+            let start = Instant::now();
+            let elapsed = Cell::new(Duration::ZERO);
+            let pastes = Cell::new(0);
+            let enters = Cell::new(0);
+            let reads = Cell::new(0);
+            let mut fences = 0;
+            let result = paste_and_submit(
+                "claude",
+                "%7",
+                &expected,
+                Proof::LeadTurn {
+                    turn: TURN_ID,
+                    agy_user_turn: &|| panic!("Claude cannot read AGY evidence"),
+                },
+                &mut |args| match args {
+                    ["display-message", _, _, _, _, ";", ..] if enters.get() > 0 => {
+                        Ok(lead_frame("%7", "❯", 2, 0, 160))
+                    }
+                    ["display-message", _, _, _, _, ";", ..] if args.contains(&"-J") => {
+                        let body = if failure == "trailing-input" {
+                            format!("{intended} ")
+                        } else {
+                            match failure {
+                                "wrong-draft" => wrong.lines().nth(1).unwrap(),
+                                "marker-only" => partial.lines().nth(1).unwrap(),
+                                _ => &intended,
+                            }
+                            .to_owned()
+                        };
+                        let x = if failure == "trailing-input" {
+                            crate::render::width(&intended)
+                        } else {
+                            crate::render::width(&body)
+                        };
+                        Ok(lead_frame("%7", &body, x, 1, 160))
+                    }
+                    ["display-message", _, _, _, _, ";", ..] => {
+                        reads.set(reads.get() + 1);
+                        let screen = match failure {
+                            "unseen-draft" => return Ok(lead_frame("%7", "❯", 2, 0, 160)),
+                            "wrong-draft" => &wrong,
+                            "marker-only" => &partial,
+                            "extra-input" => &extra,
+                            "changed-draft" if reads.get() == 3 => &wrong,
+                            _ => &correct,
+                        };
+                        let row = screen.lines().nth(1).unwrap();
+                        Ok(lead_frame("%7", screen, crate::render::width(row), 1, 160))
+                    }
+                    ["paste-buffer", ..] => {
+                        pastes.set(pastes.get() + 1);
+                        require_fence(failure != "paste").map(|()| String::new())
+                    }
+                    ["send-keys", _, _, "Enter"] => {
+                        enters.set(enters.get() + 1);
+                        require_fence(failure != "enter").map(|()| String::new())
+                    }
+                    ["set-buffer" | "delete-buffer", ..] => Ok(String::new()),
+                    _ => panic!("unexpected fake tmux route"),
+                },
+                &mut || {
+                    fences += 1;
+                    if fences == 2 {
+                        assert_eq!(reads.get(), 3, "custody must follow final draft capture");
+                    }
+                    require_fence(!matches!(
+                        (failure, fences),
+                        ("before-paste", 1) | ("room-after-paste", 2) | ("room-after-enter", 3)
+                    ))
+                },
+                Pace {
+                    now: &mut || start + elapsed.get(),
+                    sleep: &mut |step| elapsed.set(elapsed.get() + step),
+                },
+            );
+            assert_eq!(
+                (pastes.get(), enters.get()),
+                (expected_paste, expected_enter)
+            );
+            if failure == "before-paste" {
+                assert!(result.unwrap_err().message.contains(cue));
+            } else {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.delivery, Delivery::Unverified);
+                assert!(outcome.reconcile_cue().contains(cue), "{failure}");
+            }
+        }
     }
 
     #[test]
@@ -7827,6 +8524,28 @@ mod tests {
                             "$1\t{}\t{pane}\t{}\t0\t0\t1\t{active}\t{width}\t.",
                             lead.window, lead.pid,
                         )
+                    }
+                    [
+                        "tmux",
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane,
+                        lead_delivery::FRAME,
+                        capture @ ..,
+                    ] => {
+                        let screens = self.screens.borrow();
+                        let screen = &screens[*pane];
+                        let row = screen
+                            .lines()
+                            .position(|line| CHAT_SGR.replace_all(line, "").starts_with(['❯', '>']))
+                            .unwrap();
+                        let body = if capture.contains(&"-J") {
+                            screen.lines().nth(row).unwrap()
+                        } else {
+                            screen
+                        };
+                        super::lead_frame(pane, body, self.cursor_x.get() as usize, row, 8192)
                     }
                     [
                         "tmux",
@@ -11959,9 +12678,28 @@ mod tests {
             let mut host = FakeHost::new(state);
             host.accounts = Some(make_accounts(vec![("claude", vec![("work", claude_home)])]));
             host.owners.insert(2001, owner_entry(2001, "p2001", uid));
+            host.owners.insert(2002, owner_entry(2002, "p2002", uid));
             let spy = SpyPanel::new(repo);
             host.owners
                 .insert(spy.main_pid, owner_entry(spy.main_pid, "fixture-main", uid));
+            spy.allow_board_queries.set(true);
+            spy.event_projection.replace(Some(json!([{
+                "attempt_id": spy.main_attempt,
+                "tool": "panel-main",
+                "provider": "codex",
+                "terminal": false,
+                "state": "working",
+                "refs": {
+                    "panel_role": "main",
+                    "panel_room_id": spy.room,
+                    "panel_native_scheduling": "unmanaged"
+                }
+            }])));
+            let store = Store::open(&spy.repo).unwrap();
+            let tx = store
+                .transaction("panel-provider-sessions", Duration::from_secs(1))
+                .unwrap();
+            let attempts = AttemptCache::default();
             spy.load()
                 .execute_with_host("claude", Some("work"), None, &host)
                 .unwrap();
@@ -11990,16 +12728,44 @@ mod tests {
                 spy.cursor_x.set(2);
                 spy.screens.borrow_mut().insert(pane.into(), screen.into());
                 spy.task_transition.replace(Some((
-                    "send-keys",
+                    "paste-buffer",
                     Box::new(move |spy| {
-                        spy.screens.borrow_mut().insert(pane.into(), screen.into());
+                        let text = spy.recent_screens.borrow()["_pending_paste"].clone();
+                        let marker = if provider == "claude" {
+                            "❯\u{a0}"
+                        } else {
+                            "> "
+                        };
+                        let draft = format!("{marker}{text}");
+                        spy.cursor_x.set(crate::render::width(&draft) as u32);
+                        spy.screens
+                            .borrow_mut()
+                            .insert(pane.into(), super::lead_box(&draft));
+                        spy.task_transition.replace(Some((
+                            "send-keys",
+                            Box::new(move |spy| {
+                                spy.screens.borrow_mut().insert(pane.into(), screen.into());
+                            }),
+                        )));
                     }),
                 )));
                 let out = spy
                     .load()
-                    .execute_with_host(provider, account, Some(task_text), &host)
+                    .execute_with_host_cached(
+                        provider,
+                        account,
+                        Some(task_text),
+                        LeadLaunch::default(),
+                        LeadExecution {
+                            host: &host,
+                            attempts: &attempts,
+                            transaction: Some(&tx),
+                        },
+                    )
                     .unwrap();
-                assert_eq!(out["status"], "submitted");
+                assert_eq!(out["status"], "unknown");
+                assert_eq!(out["delivery"], "input_cleared_unverified");
+                assert_eq!(spy.calls_named("send-keys").len(), 1);
                 let buffers = spy.calls_named("set-buffer");
                 assert_eq!(buffers.len(), 1);
                 let prompt = &buffers[0][5];
