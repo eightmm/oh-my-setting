@@ -219,10 +219,14 @@ pub(super) fn task(panel: &Panel<'_>, id: &str) -> Result<Value> {
 }
 
 pub(super) fn claimed(panel: &Panel<'_>, task: &Value) -> Result<()> {
+    claimed_by(task, &panel.participant, &panel.owner)
+}
+
+pub(super) fn claimed_by(task: &Value, participant: &str, owner: &str) -> Result<()> {
     require(
         ["claimed", "running"].contains(&text(task, "state"))
-            && task["claimed_by_participant"] == panel.attempt
-            && task["provider"] == panel.owner
+            && task["claimed_by_participant"] == participant
+            && task["provider"] == owner
             && task["claim_expired"] == false
             && text(task, "plan_id")
                 .strip_prefix("plan_")
@@ -301,12 +305,16 @@ pub(super) struct Binding {
 impl Binding {
     pub(super) fn revalidate(&self, panel: &Panel<'_>) -> Result<()> {
         let current = task(panel, text(&self.task, "id"))?;
-        claimed(panel, &current)?;
+        let operation = current_operation(panel, &self.attempt)?;
+        if operation["refs"]["native_return_schema"] == "1" {
+            native_succession::claimed(panel, &current, &operation)?;
+        } else {
+            claimed(panel, &current)?;
+        }
         require(
             current == self.task,
             "native assignment task, lease or criteria changed before input",
         )?;
-        let operation = current_operation(panel, &self.attempt)?;
         require(
             operation["terminal"] == false
                 && operation["refs"]["native_intent_sha256"] == self.intent_digest
@@ -326,7 +334,7 @@ impl Binding {
     }
 }
 
-fn require_live_main_in_locked_ledger(
+pub(super) fn require_live_main_in_locked_ledger(
     panel: &Panel<'_>,
     projected: &std::collections::BTreeMap<String, V>,
 ) -> std::result::Result<(), String> {
@@ -470,12 +478,11 @@ pub(super) fn register_result_with_before_append(
             && packet["kind"] == "oms-native-assignment"
             && packet["provider"] == "codex"
             && packet["attempt_id"] == input.attempt()
-            && packet["parent_attempt_id"] == panel.attempt
+            && packet["parent_attempt_id"] == operation["parent_attempt_id"]
             && packet["room"] == panel.room
             && packet["task"]["id"] == options.required("task-id")?
             && operation["tool"] == "panel-native-assignment"
             && operation["provider"] == "codex"
-            && operation["parent_attempt_id"] == panel.attempt
             && operation["task_id"] == packet["task"]["id"]
             && operation["refs"]["native_assignment_schema"] == "1"
             && operation["refs"]["native_binding_sha256"] == input.binding_digest()
@@ -484,6 +491,14 @@ pub(super) fn register_result_with_before_append(
             && operation["refs"]["panel_room_id"] == panel.room,
         "native result does not belong to this task, Main, lease or Room",
     )?;
+    if let Some(checked) = &checked {
+        native_succession::authorize(panel, &operation, checked)?;
+    } else {
+        require(
+            packet["parent_attempt_id"] == panel.attempt,
+            "legacy native result belongs to another Main",
+        )?;
+    }
     let transport = match text(&operation["refs"], "native_transport") {
         "submitted" => "submitted",
         "sending" => "sending",
@@ -542,13 +557,15 @@ pub(super) fn register_result_with_before_append(
         let pane =
             |p: &PaneIdentity| json!({"id":p.id,"window":p.window,"pid":p.pid,"birth":p.birth});
         let (_, _, verification) = binding_summary(custody.binding.as_ref());
+        let expected = native_succession::custody(&fresh, &packet)?;
         require(
-            packet["session"] == serde_json::to_value(&fresh.session_proof).map_err(Error::new)?
-                && packet["main_pane"] == pane(&custody.main)
-                && packet["lead_pane"] == pane(&custody.lead)
-                && packet["account"]
+            expected["session"]
+                == serde_json::to_value(&fresh.session_proof).map_err(Error::new)?
+                && expected["main_pane"] == pane(&custody.main)
+                && expected["lead_pane"] == pane(&custody.lead)
+                && expected["account"]
                     == serde_json::to_value(&custody.binding).map_err(Error::new)?
-                && packet["account_verification"]
+                && expected["account_verification"]
                     == serde_json::to_value(verification).map_err(Error::new)?,
             "native result session generation or account changed",
         )?;
@@ -674,6 +691,10 @@ pub(super) fn register_result_with_before_append(
                     "native_result_sha256",
                     "native_resolution",
                     "native_resolution_result_sha256",
+                    "native_succession_schema",
+                    "native_succession_path",
+                    "native_succession_sha256",
+                    "native_custodian_attempt",
                 ]
                 .iter()
                 .any(|key| refs.get(key) != previous_refs.get(key))
@@ -777,7 +798,7 @@ pub(super) fn run(
                 && attempt["refs"]["plan_id"] == canonical["plan_id"]
                 && attempt["terminal"] == false
                 && (attempt["refs"]["lease_id"] != canonical["lease_id"]
-                    || attempt["parent_attempt_id"] != panel.attempt)
+                    || !native_succession::selected(panel, attempt))
         }),
         "an earlier native assignment for this task remains live or unconfirmed; reconcile its existing attempt before a new lease or Main can dispatch",
     )?;
@@ -800,18 +821,19 @@ pub(super) fn run(
             .success()?;
         canonical = task(panel, &id)?;
     }
-    claimed(panel, &canonical)?;
     if let Some(prior) = crate::rows(&history).iter().find(|attempt| {
         attempt["tool"] == "panel-native-assignment"
             && attempt["task_id"] == id
             && attempt["refs"]["plan_id"] == canonical["plan_id"]
             && attempt["refs"]["lease_id"] == canonical["lease_id"]
-            && attempt["parent_attempt_id"] == panel.attempt
+            && native_succession::selected(panel, attempt)
     }) {
+        native_succession::claimed(panel, &canonical, prior)?;
         return resume(
             panel, options, host, attempts, tx, &custody, prior, &text_task,
         );
     }
+    claimed(panel, &canonical)?;
     require(
         !options.has("after-native-result"),
         "native continuation has no existing assignment",
@@ -839,7 +861,9 @@ pub(super) fn run(
     let payload_digest = oms_panel_core::digest(prompt.as_bytes());
     let (_, _, account_verification) = binding_summary(custody.binding.as_ref());
     let mut packet = json!({"schema": 1, "kind": "oms-native-assignment", "task": canonical,
-        "parent_attempt_id": panel.attempt, "room": panel.room, "provider": "codex",
+        "parent_attempt_id": panel.attempt, "parent_participant": panel.participant,
+        "lead_parent_attempt":panel.inherited_codex_parent.as_deref().unwrap_or(&panel.attempt),
+        "room": panel.room, "provider": "codex",
         "session": panel.session_proof, "main_pane": {"id": custody.main.id,
             "window": custody.main.window, "pid": custody.main.pid, "birth": custody.main.birth},
         "lead_pane": {"id": custody.lead.id, "window": custody.lead.window,
@@ -951,7 +975,7 @@ fn deliver(
         "--role",
         "worker",
         "--parent",
-        &panel.attempt,
+        text(&canonical, "claimed_by_participant"),
         "--task-id",
         text(&canonical, "id"),
         "--label",
@@ -983,7 +1007,7 @@ fn deliver(
                 "--id",
                 panel.room,
                 "--participant",
-                &panel.attempt,
+                &panel.participant,
                 "--to",
                 &attempt,
                 "--kind",
@@ -1058,7 +1082,7 @@ fn resume(
             && packet["kind"] == "oms-native-assignment"
             && packet["provider"] == "codex"
             && packet["attempt_id"] == prior["attempt_id"]
-            && packet["parent_attempt_id"] == panel.attempt
+            && packet["parent_attempt_id"] == prior["parent_attempt_id"]
             && packet["room"] == panel.room
             && packet["task"]["id"] == prior["task_id"]
             && packet["task"]["plan_id"] == prior["refs"]["plan_id"]
@@ -1066,7 +1090,7 @@ fn resume(
         "native assignment replay lineage changed",
     )?;
     let canonical = task(panel, text(&packet["task"], "id"))?;
-    claimed(panel, &canonical)?;
+    native_succession::claimed(panel, &canonical, prior)?;
     let same_contract = match oms_panel_core::native_contract::CheckedAssignment::parse(&raw)? {
         Some(assignment) => assignment.matches_task(&canonical)?,
         None => packet["task"] == canonical,
@@ -1147,6 +1171,9 @@ fn resume(
         packet["room_message_id"] = message.into();
         packet["payload_sha256"] = oms_panel_core::digest(prompt.as_bytes()).into();
         packet["payload"] = prompt.into();
+        if let Some(digest) = current.operation["refs"]["native_succession_sha256"].as_str() {
+            packet["custody_succession_sha256"] = digest.into();
+        }
         let bytes = serde_json::to_vec(&packet).map_err(Error::new)?;
         oms_panel_core::native_contract::CheckedAssignment::parse(&bytes)?;
         let digest = oms_panel_core::digest(&bytes);

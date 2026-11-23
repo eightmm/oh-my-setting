@@ -5,6 +5,8 @@ pub(crate) mod account_binding;
 mod native_assignment;
 #[path = "native_result.rs"]
 mod native_result;
+#[path = "native_succession.rs"]
+mod native_succession;
 
 use crate::claude_lead_usage::LeadReading;
 use crate::native_panel::{MAIN_PERMISSIONS_REF, MainPermissions};
@@ -213,6 +215,7 @@ pub struct Panel<'a> {
     owner: String,
     room: &'a str,
     leads: BTreeMap<String, Pane>,
+    inherited_codex_parent: Option<String>,
     codex_chat_mark: CodexChatMark,
     claude_quota_mark: Option<String>,
     live_providers: BTreeSet<&'static str>,
@@ -709,6 +712,7 @@ impl<'a> Panel<'a> {
         let session = main[0].to_owned();
         let session_proof = terminals::provider_session_proof(services, repo, &session, stop)?;
         let mut leads = BTreeMap::new();
+        let mut inherited_codex_parent = None;
         let mut codex_chat_mark = CodexChatMark::Absent;
         let mut claude_quota_mark = None;
         let mut live_providers = BTreeSet::new();
@@ -738,12 +742,15 @@ impl<'a> Panel<'a> {
             };
             live_providers.insert(provider);
             live_codex_panes += usize::from(provider == "codex");
-            if f[10] == room && f[12] == main[7] {
+            if f[10] == room && (f[12] == main[7] || provider == "codex" && valid_attempt(f[12])) {
                 require(
                     leads.insert(provider.into(), pane(f)?).is_none(),
                     "multiple windows for the provider session",
                 )?;
                 if provider == "codex" {
+                    if f[12] != main[7] {
+                        inherited_codex_parent = Some(f[12].to_owned());
+                    }
                     codex_chat_mark = match f[14].split_once('_').map(|(_, mark)| mark) {
                         None | Some("" | "_") => CodexChatMark::Absent,
                         Some("1" | "1_") => CodexChatMark::Bound,
@@ -793,6 +800,7 @@ impl<'a> Panel<'a> {
             owner: main[8].into(),
             room,
             leads,
+            inherited_codex_parent,
             codex_chat_mark,
             claude_quota_mark,
             live_providers,
@@ -852,6 +860,11 @@ impl<'a> Panel<'a> {
             return None;
         }
         self.binding_with_birth("orchestrator", provider, pane, &owner.birth, host)
+            .or_else(|| {
+                (provider == "codex" && self.attempt != self.participant)
+                    .then(|| self.codex_assignment_custody(host).ok()?.binding)
+                    .flatten()
+            })
     }
 
     fn observation_state(
@@ -3333,14 +3346,67 @@ impl<'a> Panel<'a> {
     }
 
     fn codex_assignment_custody(&self, host: &dyn AccountHost) -> Result<CodexAssignment> {
+        self.codex_assignment_custody_from(host, None)
+    }
+
+    fn codex_assignment_custody_from(
+        &self,
+        host: &dyn AccountHost,
+        declared: Option<&Value>,
+    ) -> Result<CodexAssignment> {
         let lead = self
             .leads
             .get("codex")
             .ok_or_else(|| Error::new("Codex lead is unavailable"))?;
         let main = PaneIdentity::sample_with_host(&self.main, host, true)?;
         let lead_id = PaneIdentity::sample_with_host(lead, host, true)?;
-        let anchor = self.binding_anchor("codex", lead, &lead_id.birth);
+        let direct = self.binding_anchor("codex", lead, &lead_id.birth);
+        let inherited = if let Some(declared) = declared {
+            Some(declared.clone())
+        } else if self.inherited_codex_parent.is_some()
+            || (self.attempt != self.participant
+                && account_binding::load_verified_binding(host, "orchestrator", &direct).is_none())
+        {
+            let origin = native_succession::account_origin(self, &main, &lead_id)?;
+            require(
+                self.inherited_codex_parent.is_none() || origin.is_some(),
+                "previous Main's Codex Lead requires explicit native adoption",
+            )?;
+            origin
+        } else {
+            None
+        };
+        let inherited = inherited
+            .filter(|value| !value.is_null())
+            .map(serde_json::from_value::<PersistedAccountBinding>)
+            .transpose()
+            .map_err(Error::new)?;
+        let anchor = if let Some(binding) = &inherited {
+            require(
+                binding.session == self.session_proof
+                    && binding.room == self.room
+                    && binding.provider == "codex"
+                    && binding.pane_id == lead_id.id
+                    && binding.pid == lead_id.pid
+                    && binding.birth == lead_id.birth,
+                "inherited native account custody changed",
+            )?;
+            BindingAnchor {
+                main_attempt: &binding.main_attempt,
+                main_owner: &binding.main_owner,
+                session: &binding.session,
+                ..direct
+            }
+        } else {
+            direct
+        };
         let binding = account_binding::load_verified_binding(host, "orchestrator", &anchor);
+        require(
+            inherited
+                .as_ref()
+                .is_none_or(|expected| binding.as_ref() == Some(expected)),
+            "original native account binding is missing or changed",
+        )?;
         let unavailable = || Error::new("Codex assignment account custody could not be verified");
         let root = match (self.codex_chat_mark, binding.as_ref()) {
             (CodexChatMark::Absent, None) => None,
@@ -5384,7 +5450,9 @@ fn run_with_host(
             launch.permissions = Some(lead_permissions(main)?);
         }
         tx.check()?;
-        if options.has("native-reconcile") {
+        if options.has("native-adopt") {
+            native_succession::adopt(&panel, options, host, &tx)?
+        } else if options.has("native-reconcile") {
             native_result::reconcile(&panel, options, host, &attempts_cache, &tx)?
         } else if options.has("native-result") {
             native_assignment::register_result(&panel, options, host, &attempts_cache, &tx)?
@@ -7472,6 +7540,8 @@ mod tests {
         const ROOM: &str = "room-acct";
         const MAIN: &str = "att_11111111111111111111111111111111";
 
+        include!("native_succession_tests.rs");
+
         struct FakeLead {
             window: String,
             pane_id: String,
@@ -7498,6 +7568,8 @@ mod tests {
             event_lists: Cell<usize>,
             assignment_events: Cell<usize>,
             main_attempt: String,
+            main_participant: String,
+            ordinary_parent: Option<String>,
             main_pane: String,
             main_pid: u32,
             main_owner: Cell<&'static str>,
@@ -7554,6 +7626,8 @@ mod tests {
                     event_lists: Cell::new(0),
                     assignment_events: Cell::new(0),
                     main_attempt: MAIN.into(),
+                    main_participant: MAIN.into(),
+                    ordinary_parent: None,
                     main_pane: "%1".into(),
                     main_pid: pid,
                     main_owner: Cell::new("codex"),
@@ -7713,7 +7787,7 @@ mod tests {
                             self.main_pane,
                             self.main_attempt,
                             self.main_owner.get(),
-                            self.main_attempt,
+                            self.main_participant,
                             self.room,
                             if self.main_account_ready.get() {
                                 "1"
@@ -7726,7 +7800,12 @@ mod tests {
                             let dead = u8::from(self.dead_panes.borrow().contains(&lead.pane_id));
                             let alternate = self.alternate_parents.borrow();
                             let (room, parent) = alternate.get(&lead.pane_id).map_or(
-                                (self.room.as_str(), self.main_attempt.as_str()),
+                                (
+                                    self.room.as_str(),
+                                    self.ordinary_parent
+                                        .as_deref()
+                                        .unwrap_or(&self.main_attempt),
+                                ),
                                 |parent| ("", parent.as_str()),
                             );
                             lines.push(format!(
@@ -8397,7 +8476,7 @@ mod tests {
                             "closed": self.room_closed.get(),
                             "successor": if exact { successor } else { None },
                             "participants": [{
-                                "participant": self.main_attempt,
+                                "participant": self.main_participant,
                                 "role": "main",
                                 "provider": self.main_owner.get(),
                                 "joined": true

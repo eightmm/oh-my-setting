@@ -5171,7 +5171,7 @@ mod hud_status {
 }
 
 #[cfg(test)]
-mod native_lifecycle_contract {
+pub(crate) mod native_lifecycle_contract {
     use super::{event_id, heartbeat_attempt, transition_attempt};
     use oms_panel_core::{
         NativeCommand, Result, Services, Value,
@@ -5722,7 +5722,7 @@ mod native_lifecycle_contract {
         assert!(!other.0.join(".oms").exists());
     }
 
-    struct RealCliParsers;
+    pub(crate) struct RealCliParsers;
     struct RoomOperations {
         repo: PathBuf,
         bytes: Vec<u8>,
