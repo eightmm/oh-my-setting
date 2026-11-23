@@ -381,7 +381,7 @@ caller/정책/측정이 선행한다는 뜻이다. `미재검증`은 기능 부�
 | 원 ID / 항목 | 확인한 상태·기존 owner | 다음 slice / 선행·합격 조건 |
 |---|---|---|
 | 1 Main 직접 수정 거절 | 부분. [guards::main_write](../crates/oms-command-hooks/src/guards.rs), Main policy | Claude Bash의 명확한 쓰기 패턴 경고부터 별도 검토. Codex/AGY 적용과 Room에 기록되는 1회 예외는 provider별 증거 필요. 패턴 검사를 임의 shell 실행의 sandbox로 표시하지 않음 |
-| 2 batch land·bisect | 후속. [landing](../crates/oms-command-landing/src/cli.rs), #340 | #340 정착 뒤 base/head SHA와 순서를 고정하는 bounded 후보 dry-run. 이후 composite tree 검증·실패 분할은 상호작용 실패와 exact-SHA를 보존; 성공 subset 자동 병합이나 별도 CI 우회 금지 |
+| 2 batch land·bisect | [landing](../crates/oms-command-landing/README.md#ordered-landing-preview), #340, #391, #398 | 순서와 누적 트리를 고정한 preview 뒤, 명시한 digest로 격리된 Linux 로컬 검증을 실행한다. 실패하면 앞선 누적 트리 하나를 확인한다. 병합과 설치는 별도의 exact-SHA GitHub CI 절차를 따른다. |
 | 3 fail-fast `./verify` | 진행. #344 → #351, VW owner | 기존 PR의 stage 순서·첫 실패 종료·architecture·offline invariant artifact 검토. 두 번째 verify entrypoint 불필요 |
 | 4 native 배정·결과·task card | 부분. [native_assignment](../crates/oms-command-panel/src/native_assignment.rs), P0-B/TM-06 | Codex `--task-id`의 Plan claim/lease/attempt/Room intent는 있음. Exact candidate·result·verifier를 같은 카드로 읽고 기존 acceptance에 연결; submitted를 consumption/completion으로 승격하지 않음 |
 | 5 호출별 token Board | 부분·[#279](https://github.com/eightmm/oh-my-setting/issues/279). [usage](../crates/oms-command-telemetry/src/store/usage.rs), Board owner | Headless receipt·exact reasoning supplement 재사용. Provider별 child/turn/account 귀속과 zero/partial/unavailable·좁은 화면을 완료; 일반 refresh transcript 재독 금지 |
