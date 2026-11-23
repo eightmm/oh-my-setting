@@ -15,6 +15,42 @@ pub struct VerifyRequest {
     pub wall: Duration,
     pub environment: Vec<(OsString, OsString)>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerificationOutcome {
+    Passed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    OutputLimited,
+    Unavailable,
+}
+impl VerificationOutcome {
+    pub(crate) fn status(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::OutputLimited => "output_limited",
+            Self::Unavailable => "unavailable",
+        }
+    }
+    pub(crate) fn exit(self) -> i32 {
+        match self {
+            Self::Passed => 0,
+            Self::Failed => 1,
+            Self::Cancelled => 130,
+            Self::TimedOut => 124,
+            Self::OutputLimited => 125,
+            Self::Unavailable => 2,
+        }
+    }
+}
+pub struct BatchVerification {
+    pub outcome: VerificationOutcome,
+    pub verifier_exit: Option<i32>,
+    pub elapsed: Duration,
+}
 #[derive(Clone, Debug)]
 pub struct PublicationScan {
     pub repo: PathBuf,
@@ -57,6 +93,16 @@ pub trait Services {
     }
     fn supervise(&self, _request: &VerifyRequest, _interrupted: &AtomicBool) -> Result<Execution> {
         Err(Error::unavailable("whole-tree verification"))
+    }
+    /// Run an acknowledged batch candidate with network disabled and only the
+    /// private copied checkout writable. The ordinary landing gate has a
+    /// different environment contract and cannot substitute for this method.
+    fn supervise_batch(
+        &self,
+        _request: &VerifyRequest,
+        _interrupted: &AtomicBool,
+    ) -> Result<BatchVerification> {
+        Err(Error::unavailable("isolated batch verification"))
     }
     /// Invoke `review::scan_worker` in a dedicated native process, retaining
     /// whole-tree timeout/cancellation/output enforcement and the exact request.
