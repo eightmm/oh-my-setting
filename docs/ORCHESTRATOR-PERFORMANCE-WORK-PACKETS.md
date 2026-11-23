@@ -128,13 +128,41 @@ Reader의 idle/scroll test는 회귀 확인만 하며 Reader cache를 새 기능
 
 ### 확인한 문제
 
-[usage.rs](../crates/oms-command-telemetry/src/store/usage.rs) `begin_inner` 579–642와
-`record` 646–681은 history를 읽고 검증한 뒤 `old.to_vec()`에 새 receipt를 붙인다.
+[usage.rs](../crates/oms-command-telemetry/src/store/usage.rs)의 `begin_inner`와
+`record`는 history를 읽고 검증한 뒤 `old.to_vec()`에 새 receipt를 붙인다.
 [store::mutate](../crates/oms-command-telemetry/src/store/mod.rs) 293–328와
 `Root::atomic_mutate`는 바뀐 전체 byte stream을 temporary file로 쓰고 fsync/rename한다.
 따라서 **새 revision을 추가할 때** history 크기만큼 쓰는 경로가 남아 있다.
 동일 receipt replay는 `new == old`로 physical write를 생략하므로 이 둘은 분리 측정한다.
 현행 input/output 상한은 256 MiB이며 이를 없애거나 단순히 키우는 것이 해결책은 아니다.
+
+### 2026-11-23 재검증과 읽기 전용 용량 표시
+
+`oms artifact-index telemetry --json`의 `lifetime_provider_usage.storage`는 같은
+검증된 snapshot에서 retained bytes, 모든 receipt row 수, 256 MiB 상한과 남은 bytes를
+보여 준다. 일반 text 출력에도 `usage storage:` 한 줄이 나온다. 과거 revision을 포함하며
+artifact 날짜/행수 필터의 영향을 받지 않는다. 추가 history read, provider transcript read,
+writer/lock/schema 변경은 없다. Optional reasoning supplement 크기는 포함하지 않는다.
+남은 bytes는 추가 호출 횟수나 예산을 보증하지 않으며, 잘못된 history는 0으로 표시하지 않는다.
+
+기존 public `begin`/`record`와 canonical receipt 형식을 사용한 offline probe를 실행했다.
+유효한 pending receipt를 서로 다른 call/operation ID와 ordinal로 16/256/4,096개 seed한 뒤
+새 call의 begin, final revision, 동일 final replay를 순서대로 측정했다. Rust 1.99.1,
+unoptimized test-profile library, Linux temporary filesystem에서 각 크기당 한 번 실행한 값이다.
+각 changed update의 inode 교체와 replay의 inode/mtime/bytes 보존 및 최종 projection을 확인했다.
+
+| 기존 receipt 수 | 기존 bytes | final 추가 bytes | final replacement body bytes | replacement/추가 bytes | begin / final / replay 경과 시간(ms) |
+|---:|---:|---:|---:|---:|---:|
+| 16 | 9,735 | 609 | 10,949 | 18.0× | 8.0 / 7.3 / 7.3 |
+| 256 | 156,052 | 610 | 157,268 | 257.8× | 99.7 / 88.3 / 77.0 |
+| 4,096 | 2,501,549 | 611 | 2,502,767 | 4,096.2× | 1,177.4 / 1,288.9 / 1,135.7 |
+
+Replacement body bytes는 검증된 file 길이와 기존 `write_all(&new)` 경로의 논리적 쓰기량이다.
+실제 장치 I/O, allocation 수, lock hold 또는 fsync 시간의 개별 측정값은 아니다. 경과 시간은
+전체 API 호출의 한 sample이며 build profile·cache·동시 부하의 영향을 받으므로 release 성능이나
+개선 배수로 해석하지 않는다. Replay는 추가/replacement bytes가 모두 0이지만 전체 history
+검증 비용은 남는다. 이 결과는 기존 PERF-03의 저장 비용 문제를 확인하며, 이 변경 자체가
+증분 persistence나 compaction을 구현한 것은 아니다. 새 benchmark job이나 runtime store는 없다.
 
 ### 단계 A: 현재 형식을 유지하는 작은 개선
 
