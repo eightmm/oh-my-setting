@@ -2659,6 +2659,30 @@ fn sha256(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+
+    fn run_fake_remote() -> bool {
+        let Some(script) = std::env::var_os("OMS_TEST_REMOTE_SCRIPT") else {
+            return false;
+        };
+        // A real remote host is outside the local SSH client's process group.
+        // Keep the fake transport supervised while its remote shell survives
+        // local transport cleanup, using the same boundary on Linux and macOS.
+        let mut remote = Command::new("sh")
+            .args([OsStr::new("-c"), script.as_os_str()])
+            .env_remove("OMS_TEST_REMOTE_SCRIPT")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = rustix::process::Pid::from_raw(remote.id().try_into().unwrap()).unwrap();
+        assert_eq!(rustix::process::getpgid(Some(pid)).unwrap(), pid);
+        assert_ne!(rustix::process::getpgid(None).unwrap(), pid);
+        let _ = remote.wait().unwrap();
+        true
+    }
 
     #[test]
     fn remote_path_expands_leading_tilde() {
@@ -3338,6 +3362,9 @@ exec sh -c "$last"
 
     #[test]
     fn pid_reuse_boot_id_and_conflicting_op_id_are_fenced() {
+        if run_fake_remote() {
+            return;
+        }
         if std::env::var_os("OMS_TEST_SCENARIO7").is_none() {
             let temp = TempDir::new().unwrap();
             let state_dir = temp.0.join("remote_state");
@@ -3347,7 +3374,7 @@ printf '%s\n' "$@" >> "$OMS_TEST_ARGS"
 for last do :; done
 if [ -f "$OMS_TEST_DROP_ACTIVE" ]; then
   rm -f "$OMS_TEST_DROP_ACTIVE"
-  sh -c "$last" >/dev/null 2>&1 &
+  OMS_TEST_REMOTE_SCRIPT="$last" "$OMS_TEST_REMOTE_EXE" --exact "$OMS_TEST_REMOTE_CASE" --nocapture >/dev/null 2>&1 &
   i=0
   while [ ! -f "$OMS_REMOTE_STATE_DIR/op-live/child.pid" ] && [ "$i" -lt 250 ]; do
     i=$((i + 1))
@@ -3366,6 +3393,11 @@ exec sh -c "$last"
                     "--nocapture",
                 ])
                 .env("OMS_TEST_SCENARIO7", "1")
+                .env("OMS_TEST_REMOTE_EXE", std::env::current_exe().unwrap())
+                .env(
+                    "OMS_TEST_REMOTE_CASE",
+                    "ssh_adapter::tests::pid_reuse_boot_id_and_conflicting_op_id_are_fenced",
+                )
                 .env("OMS_SSH_BIN", &fake)
                 .env("OMS_TEST_DIR", &temp.0)
                 .env("OMS_TEST_ARGS", temp.0.join("args"))
@@ -4417,6 +4449,9 @@ exec sh -c "$last"
 
     #[test]
     fn cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart() {
+        if run_fake_remote() {
+            return;
+        }
         fn pid_live(pid: impl ToString) -> bool {
             let pid = pid.to_string();
             if !Command::new("kill")
@@ -4450,7 +4485,7 @@ if [ -f "$OMS_TEST_DROP_ACTIVE" ]; then
   target=$(cat "$OMS_TEST_DROP_ACTIVE" 2>/dev/null || true)
   rm -f "$OMS_TEST_DROP_ACTIVE"
   [ "$target" = "1" ] && target="$OMS_REMOTE_STATE_DIR/op-sigign/child.pid"
-  sh -c "$last" >/dev/null 2>&1 &
+  OMS_TEST_REMOTE_SCRIPT="$last" "$OMS_TEST_REMOTE_EXE" --exact "$OMS_TEST_REMOTE_CASE" --nocapture >/dev/null 2>&1 &
   i=0
   while [ ! -f "$target" ] && [ "$i" -lt 250 ]; do
     i=$((i + 1))
@@ -4469,6 +4504,11 @@ exec sh -c "$last"
                     "--nocapture",
                 ])
                 .env("OMS_TEST_CANCEL_HARDENING", "1")
+                .env("OMS_TEST_REMOTE_EXE", std::env::current_exe().unwrap())
+                .env(
+                    "OMS_TEST_REMOTE_CASE",
+                    "ssh_adapter::tests::cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart",
+                )
                 .env("OMS_SSH_BIN", &fake)
                 .env("OMS_TEST_DIR", &temp.0)
                 .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
