@@ -2493,6 +2493,174 @@ fn manifest_failure_holds_dependents_keeps_integrated_repos_and_resumes_idempote
 }
 
 #[test]
+fn batch_preview_pins_the_order_and_leaves_source_unchanged() {
+    let iso = Isolated::new();
+    let repo = iso.repo("ordered-preview");
+    let version = iso.git_out(&repo, &["version"]);
+    let mut version = version.split_whitespace().nth(2).unwrap().split('.');
+    let major = version.next().unwrap().parse::<u32>().unwrap();
+    let minor = version.next().unwrap().parse::<u32>().unwrap();
+    if (major, minor) < (2, 38) {
+        let branch = "refs/heads/main";
+        let (code, out, err) = iso.run("land", &repo, &["batch-preview", "--base", branch, branch]);
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains("requires Git 2.38"), "{err}");
+        return;
+    }
+    let base = iso.git_out(&repo, &["rev-parse", "HEAD"]);
+    let branch = |name: &str, from: &str, file: &str, content: &str| {
+        iso.git(&repo, &["checkout", "-qb", name, from]);
+        fs::write(repo.join(file), content).unwrap();
+        iso.git(&repo, &["add", "--", file]);
+        iso.git(&repo, &["commit", "-qm", name]);
+        iso.git_out(&repo, &["rev-parse", "HEAD"])
+    };
+    let first = "refs/heads/oms/first";
+    let first_alias = "refs/remotes/origin/first";
+    let stacked = "refs/heads/oms/stacked";
+    let independent = "refs/remotes/origin/independent";
+    let conflicting = "refs/heads/oms/conflicting";
+    let target = "refs/remotes/origin/main";
+    let first_oid = branch("oms/first", &base, "a.txt", "first\n");
+    let stacked_oid = branch("oms/stacked", &first_oid, "stacked.txt", "stacked\n");
+    let independent_oid = branch("oms/independent", &base, "independent.txt", "solo\n");
+    let conflicting_oid = branch("oms/conflicting", &base, "a.txt", "other\n");
+    iso.git(&repo, &["checkout", "-q", "main"]);
+    iso.git(&repo, &["update-ref", target, &base]);
+    iso.git(&repo, &["update-ref", first_alias, &first_oid]);
+    iso.git(&repo, &["update-ref", independent, &independent_oid]);
+    fs::write(repo.join("local.txt"), "user work\n").unwrap();
+    let source = || {
+        (
+            iso.git_out(
+                &repo,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            ),
+            iso.git_out(&repo, &["rev-parse", "HEAD"]),
+            iso.git_out(&repo, &["worktree", "list", "--porcelain"]),
+            iso.git_out(&repo, &["cat-file", "--batch-all-objects", "--batch-check"]),
+            fs::read(repo.join(".git/index")).unwrap(),
+            fs::read_to_string(repo.join("local.txt")).unwrap(),
+        )
+    };
+    let before = source();
+    let preview = |candidates: &[&str], code: i32| {
+        let mut args = vec!["batch-preview", "--base", target, "--json"];
+        args.extend_from_slice(candidates);
+        let (actual, out, err) = iso.run("land", &repo, &args);
+        assert_eq!(actual, code, "{out}{err}");
+        V::parse(out.as_bytes()).unwrap()
+    };
+    let clean = preview(&[first, independent, stacked, first_alias], 0);
+    assert_eq!(clean.get("status").text(), Some("clean"));
+    assert_eq!(clean.get("base").get("oid").text(), Some(base.as_str()));
+    let rows = clean.get("steps").array();
+    assert_eq!(rows[0].get("oid").text(), Some(first_oid.as_str()));
+    assert_eq!(rows[1].get("oid").text(), Some(independent_oid.as_str()));
+    assert_eq!(rows[2].get("oid").text(), Some(stacked_oid.as_str()));
+    assert_eq!(rows[2].get("depends_on").array().len(), 1);
+    assert_eq!(rows[2].get("depends_on").array()[0].text(), Some(first));
+    assert_eq!(rows[3].get("ref").text(), Some(first_alias));
+    assert_eq!(rows[3].get("oid").text(), Some(first_oid.as_str()));
+    assert_eq!(rows[3].get("status").text(), Some("already_present"));
+
+    assert_eq!(
+        preview(&[conflicting], 0).get("status").text(),
+        Some("clean")
+    );
+    let user_git_config = iso.home.path().join(".config/git");
+    fs::create_dir_all(&user_git_config).unwrap();
+    let user_attributes = user_git_config.join("attributes");
+    fs::write(&user_attributes, "a.txt merge=union\n").unwrap();
+    let blocked = preview(
+        &[first, independent, stacked, conflicting, "refs/heads/main"],
+        1,
+    );
+    assert_eq!(blocked.get("status").text(), Some("conflict"));
+    assert!(matches!(blocked.get("tree_oid"), V::Null));
+    assert_eq!(
+        blocked.get("conflict_paths").array()[0].text(),
+        Some("a.txt")
+    );
+    let rows = blocked.get("steps").array();
+    assert_eq!(rows[3].get("oid").text(), Some(conflicting_oid.as_str()));
+    assert_eq!(rows[3].get("status").text(), Some("conflict"));
+    assert_eq!(rows[4].get("status").text(), Some("blocked"));
+    fs::remove_file(user_attributes).unwrap();
+
+    let wrong_order = preview(&[stacked, first_alias, first], 3);
+    let rows = wrong_order.get("steps").array();
+    assert_eq!(rows[0].get("status").text(), Some("out_of_order"));
+    assert_eq!(rows[0].get("depends_on").array().len(), 1);
+    assert_eq!(
+        rows[0].get("depends_on").array()[0].text(),
+        Some(first_alias)
+    );
+    assert_eq!(rows[1].get("status").text(), Some("blocked"));
+    assert_eq!(rows[2].get("status").text(), Some("blocked"));
+    assert!(matches!(wrong_order.get("tree_oid"), V::Null));
+    for extra in ["--pr", "--merge", "--local-merge", "--execute-manifest"] {
+        let (code, out, err) = iso.run(
+            "land",
+            &repo,
+            &["batch-preview", "--base", target, first, extra],
+        );
+        assert_eq!(code, 2, "{out}{err}");
+        assert!(err.contains("accepts only"), "{err}");
+    }
+    assert_eq!(source(), before);
+    assert!(!repo.join(".oms").exists());
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
+
+    // Simulate an independent ref update after pinning, during merge-tree.
+    let git = iso.bin.join("git");
+    let real_git = fs::read_link(&git).unwrap();
+    fs::remove_file(&git).unwrap();
+    fs::write(
+        &git,
+        r#"#!/bin/bash
+for arg in "$@"; do
+    if [[ "$arg" == merge-tree ]]; then
+        "$PREVIEW_TEST_GIT" -C "$PREVIEW_TEST_REPO" update-ref "$PREVIEW_TEST_REF" "$PREVIEW_TEST_OID" || exit $?
+        break
+    fi
+done
+exec "$PREVIEW_TEST_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    let (code, out, err) = iso.run_env(
+        "land",
+        &repo,
+        &["batch-preview", "--base", target, first, "--json"],
+        &[
+            ("PREVIEW_TEST_GIT", real_git.to_str().unwrap()),
+            ("PREVIEW_TEST_REPO", repo.to_str().unwrap()),
+            ("PREVIEW_TEST_REF", first),
+            ("PREVIEW_TEST_OID", &conflicting_oid),
+        ],
+    );
+    assert_eq!(code, 3, "{out}{err}");
+    let stale = V::parse(out.as_bytes()).unwrap();
+    assert_eq!(stale.get("status").text(), Some("stale"));
+    assert_eq!(stale.get("moved_refs").array()[0].text(), Some(first));
+    assert!(matches!(stale.get("tree_oid"), V::Null));
+    fs::remove_file(&git).unwrap();
+    std::os::unix::fs::symlink(real_git, git).unwrap();
+    iso.git(&repo, &["update-ref", first, &first_oid]);
+    assert_eq!(source(), before);
+    assert!(fs::read_dir(&iso.tmp).unwrap().next().is_none());
+
+    iso.git(&repo, &["checkout", "-qb", "expected", &base]);
+    for head in [first, independent, stacked] {
+        iso.git(&repo, &["merge", "-q", "--no-ff", "--no-edit", head]);
+    }
+    let expected = iso.git_out(&repo, &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(clean.get("tree_oid").text(), Some(expected.as_str()));
+}
+
+#[test]
 fn manifest_check_publishes_nothing_and_execution_needs_the_publication_fence() {
     let iso = Isolated::new();
     let m = Manifest::new(&iso, false);
