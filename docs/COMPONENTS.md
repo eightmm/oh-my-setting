@@ -1554,9 +1554,21 @@ is scanned before projection, and unsafe sources are withheld while independent
 sources remain available. Output lines carry source tags. Each collection can
 contribute up to six whole records within a 2,048-byte per-row budget. The
 renderer scans the final draft before printing or writing and respects
-`--max-bytes` (512-65536, default 4096), counting omitted records and draft lines.
+`--max-bytes` (512-65536, default 4096), counting omitted content records.
 Recorded claims require fresh verification before action. `--output` creates a
 new file and refuses to overwrite one. The draft conveys advisory context.
+Each section retains compact coverage flags outside the removable content rows:
+`p` for producer selection loss, `r` for renderer selection or excerpt loss,
+`w` for withheld sources, `u` for unavailable sources, `e` for a successfully
+observed empty section, and `-` for no observed loss. Several flags can coexist;
+they survive the minimum 512-byte budget. A withheld or unavailable task packet
+marks both Goal and Decisions. The footer counts omitted whole records once
+across producer selection and rendering; an abbreviated goal sets `r` without
+counting its retained row as omitted. A closed packet's excluded decisions are
+policy, not truncation. Removing synthetic gap or empty-source notes does not
+count the same underlying records again or turn known empty data into loss.
+These flags describe delivery coverage, not whether the
+recorded claims are true or freshly verified.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.

@@ -22,6 +22,59 @@ const SECTIONS: &[&str] = &[
 const MAX_PROJECTION_BYTES: usize = 65536;
 const WITHHELD: &str = "withheld: this source matched the sensitive-content scan; open the source";
 
+#[derive(Default)]
+struct Section {
+    rows: Vec<Row>,
+    producer_omitted: u64,
+    renderer_omitted: u64,
+    shortened: bool,
+    withheld: bool,
+    unavailable: bool,
+    has_records: bool,
+}
+
+struct Row {
+    text: String,
+    source: String,
+    record: bool,
+}
+
+impl Section {
+    fn push(&mut self, text: String, source: &str) {
+        self.rows.push(Row {
+            text,
+            source: source.to_owned(),
+            record: true,
+        });
+    }
+
+    fn note(&mut self, text: String, source: &str) {
+        self.rows.push(Row {
+            text,
+            source: source.to_owned(),
+            record: false,
+        });
+    }
+
+    fn flags(&self) -> String {
+        let mut flags = String::new();
+        for (flag, present) in [
+            ('p', self.producer_omitted > 0),
+            ('r', self.renderer_omitted > 0 || self.shortened),
+            ('w', self.withheld),
+            ('u', self.unavailable),
+        ] {
+            if present {
+                flags.push(flag);
+            }
+        }
+        if flags.is_empty() {
+            flags.push(if self.has_records { '-' } else { 'e' });
+        }
+        flags
+    }
+}
+
 fn projection_records<'a>(projection: &'a Value, key: Option<&str>) -> Option<(&'a [Value], u64)> {
     let Some(key) = key else {
         let rows = projection
@@ -50,7 +103,7 @@ fn blocked_task(record: &Value) -> bool {
         })
 }
 
-fn line(raw: &str, limit: usize) -> String {
+fn line(raw: &str, limit: usize) -> (String, bool) {
     let mut clean = raw
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -58,7 +111,12 @@ fn line(raw: &str, limit: usize) -> String {
     if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty() && s != "/") {
         clean = clean.replace(&home.to_string_lossy().into_owned(), "~");
     }
-    oms_contract_markdown::bounded_line(&clean, limit)
+    let clean = oms_contract_markdown::bounded_line(&clean, usize::MAX);
+    let shortened = clean.chars().count() > limit;
+    (
+        oms_contract_markdown::bounded_line(&clean, limit),
+        shortened,
+    )
 }
 pub fn render(
     repo: &Path,
@@ -94,15 +152,10 @@ pub fn render_checked(
         services,
         interrupted,
     )?;
-    let mut data = BTreeMap::<&str, Vec<(String, String)>>::new();
+    let mut data = BTreeMap::<&str, Section>::new();
     for name in SECTIONS {
-        data.insert(name, vec![]);
+        data.insert(name, Section::default());
     }
-    let mut push = |section, text: String, source: &str| {
-        data.get_mut(section)
-            .unwrap()
-            .push((text, source.to_owned()));
-    };
     let request = oms_command_plan::Request::new(oms_command_plan::Action::Show);
     let plan = oms_command_plan::Context::from_selected_state_before(
         &request,
@@ -122,21 +175,28 @@ pub fn render_checked(
                 .as_deref()
                 .is_none_or(|raw| check_source(raw).is_ok()) =>
         {
-            push(
-                "Goal",
-                format!("plan goal: {}", line(snapshot.plan.text("goal"), 300)),
-                "agent-plan status",
-            )
+            let raw = snapshot.plan.text("goal");
+            let (goal, shortened) = line(raw, 300);
+            let section = data.get_mut("Goal").unwrap();
+            section.has_records |= !goal.is_empty();
+            section.shortened |= shortened;
+            if goal.is_empty() {
+                section.note("plan goal: not recorded".into(), "agent-plan status");
+            } else {
+                section.push(format!("plan goal: {goal}"), "agent-plan status");
+            }
         }
         Ok(_) => {
             withheld += 1;
-            push("Goal", WITHHELD.into(), "agent-plan status");
+            let section = data.get_mut("Goal").unwrap();
+            section.withheld = true;
+            section.note(WITHHELD.into(), "agent-plan status");
         }
-        Err(_) => push(
-            "Goal",
-            "plan source unavailable".into(),
-            "agent-plan status",
-        ),
+        Err(_) => {
+            let section = data.get_mut("Goal").unwrap();
+            section.unavailable = true;
+            section.note("plan source unavailable".into(), "agent-plan status");
+        }
     }
     let packet = ctx
         .store
@@ -147,27 +207,38 @@ pub fn render_checked(
             let packet = packet.unwrap_or_default();
             if check_source(&packet).is_ok() {
                 let goal = oms_command_task::packet::section(&packet, "Goal");
-                push(
-                    "Goal",
-                    format!(
-                        "task goal: {}",
-                        if goal.is_empty() {
-                            "not recorded".into()
-                        } else {
-                            line(&String::from_utf8_lossy(&goal), 300)
-                        }
-                    ),
-                    "task packet",
-                );
-                for decision in crate::advisory::handoff_decisions(&packet, 6, 4096) {
-                    push("Decisions", decision, "task packet Decisions");
+                let section = data.get_mut("Goal").unwrap();
+                let (goal, shortened) = line(&String::from_utf8_lossy(&goal), 300);
+                section.has_records |= !goal.is_empty();
+                section.shortened |= shortened;
+                if goal.is_empty() {
+                    section.note("task goal: not recorded".into(), "task packet");
+                } else {
+                    section.push(format!("task goal: {goal}"), "task packet");
+                }
+                let (decisions, omitted) = crate::advisory::handoff_decisions(&packet, 6, 4096);
+                let section = data.get_mut("Decisions").unwrap();
+                section.has_records |= !decisions.is_empty();
+                section.producer_omitted = omitted as u64;
+                for decision in decisions {
+                    section.push(decision, "task packet Decisions");
                 }
             } else {
                 withheld += 1;
-                push("Goal", WITHHELD.into(), "task packet");
+                for name in ["Goal", "Decisions"] {
+                    let section = data.get_mut(name).unwrap();
+                    section.withheld = true;
+                    section.note(WITHHELD.into(), "task packet");
+                }
             }
         }
-        Err(_) => push("Goal", "task source unavailable".into(), "task packet"),
+        Err(_) => {
+            for name in ["Goal", "Decisions"] {
+                let section = data.get_mut(name).unwrap();
+                section.unavailable = true;
+                section.note("task source unavailable".into(), "task packet");
+            }
+        }
     }
     let readers = [
         ("State", "agent-task", &["status", "--json"][..], None),
@@ -196,14 +267,14 @@ pub fn render_checked(
             None,
         ),
     ];
-    let mut source_omitted = 0u64;
-    for (section, tool, arguments, collection) in readers {
+    for (name, tool, arguments, collection) in readers {
         crate::checkpoint(interrupted)?;
+        let section = data.get_mut(name).unwrap();
         let source = format!("{tool} {}", arguments.join(" "));
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            push(
-                section,
+            section.unavailable = true;
+            section.note(
                 "native producer unavailable: shared read deadline exhausted".into(),
                 &source,
             );
@@ -214,8 +285,8 @@ pub fn render_checked(
         let output = invoke(&ctx, tool, args, remaining);
         crate::checkpoint(interrupted)?;
         if Instant::now() >= deadline {
-            push(
-                section,
+            section.unavailable = true;
+            section.note(
                 "native producer unavailable: shared read deadline exhausted".into(),
                 &source,
             );
@@ -224,8 +295,8 @@ pub fn render_checked(
         match output {
             Ok(out) if out.code == 0 => {
                 if out.stdout.len() > MAX_PROJECTION_BYTES {
-                    push(
-                        section,
+                    section.unavailable = true;
+                    section.note(
                         "projection exceeds read budget; open the source".into(),
                         &source,
                     );
@@ -233,12 +304,13 @@ pub fn render_checked(
                 }
                 if check_source(&out.stdout).is_err() {
                     withheld += 1;
-                    push(section, WITHHELD.into(), &source);
+                    section.withheld = true;
+                    section.note(WITHHELD.into(), &source);
                     continue;
                 }
                 let Ok(projection) = value::parse(&out.stdout) else {
-                    push(
-                        section,
+                    section.unavailable = true;
+                    section.note(
                         "producer projection unavailable or malformed".into(),
                         &source,
                     );
@@ -247,8 +319,8 @@ pub fn render_checked(
                 let Some((records, omitted_by_producer)) =
                     projection_records(&projection, collection)
                 else {
-                    push(
-                        section,
+                    section.unavailable = true;
+                    section.note(
                         "producer projection unavailable or malformed".into(),
                         &source,
                     );
@@ -279,86 +351,96 @@ pub fn render_checked(
                     .take(6)
                     .collect::<Vec<_>>();
                 let omitted_here = (records.len() - rows.len()) as u64;
-                source_omitted = source_omitted
-                    .saturating_add(omitted_here)
-                    .saturating_add(omitted_by_producer);
+                section.has_records |= !records.is_empty();
+                section.producer_omitted =
+                    section.producer_omitted.saturating_add(omitted_by_producer);
+                section.renderer_omitted = section.renderer_omitted.saturating_add(omitted_here);
                 if rows.is_empty() {
                     let note = if records.is_empty() {
                         "no records returned by the producer"
                     } else {
                         "projection exceeds line budget; open the source"
                     };
-                    push(section, note.into(), &source);
+                    section.note(note.into(), &source);
                 }
                 for row in rows {
-                    push(section, row, &source);
+                    section.push(row, &source);
                 }
             }
-            _ => push(
-                section,
-                "native producer unavailable; not recorded".into(),
-                &source,
-            ),
+            _ => {
+                section.unavailable = true;
+                section.note("native producer unavailable; not recorded".into(), &source);
+            }
         }
     }
-    push(
-        "Pointers",
+    let pointers = data.get_mut("Pointers").unwrap();
+    pointers.has_records = true;
+    pointers.push(
         ".oms/task/current.md; .oms/plan/tasks.json; .oms/plan/progress.jsonl".into(),
         "local source records",
     );
-    for rows in data.values_mut() {
-        for (text, _) in rows {
-            if crate::planning::scan(text.as_bytes()).is_err() {
-                *text = "withheld: this line matched the sensitive-content scan; open the source"
-                    .into();
+    for section in data.values_mut() {
+        for row in &mut section.rows {
+            if crate::planning::scan(row.text.as_bytes()).is_err() {
+                row.text =
+                    "withheld: this line matched the sensitive-content scan; open the source"
+                        .into();
+                row.record = false;
                 withheld += 1;
+                section.withheld = true;
             }
         }
     }
-    let mut omitted = BTreeMap::<&str, u64>::new();
-    let compose = |data: &BTreeMap<&str, Vec<(String, String)>>, omitted: &BTreeMap<&str, u64>| {
+    let drafted_at = value::now();
+    let compose = |data: &BTreeMap<&str, Section>| {
         let mut out = format!(
-            "# Next-session prompt (draft: review and edit before use)\n\nDrafted mechanically at {}; no model was called. Recorded text is a claim, not fresh verification; recheck sources before acting.\n",
-            value::now()
+            "# Next-session prompt (draft: review and edit before use)\nRecorded text is a claim, not fresh verification; recheck sources.\nDrafted at {drafted_at}; no model called.\nFlags: p=producer loss,r=render loss,w=withheld,u=unavailable,e=empty,-=none.\n",
         );
         for name in SECTIONS {
-            out.push_str(&format!("\n## {name}\n"));
-            for (text, source) in &data[name] {
-                out.push_str(&format!("- {text} [src: {source}]\n"));
+            let section = &data[name];
+            out.push_str(&format!("\n## {name}\n[{}]\n", section.flags()));
+            for row in &section.rows {
+                out.push_str(&format!("- {} [src: {}]\n", row.text, row.source));
             }
         }
+        let omitted = data.values().fold(0u64, |total, section| {
+            total
+                .saturating_add(section.producer_omitted)
+                .saturating_add(section.renderer_omitted)
+        });
         out.push_str(&format!(
-            "\ntruncated: {} line(s) omitted; withheld: {withheld} line(s)\n",
-            source_omitted.saturating_add(omitted.values().sum::<u64>())
+            "\ntruncated: {omitted} line(s) omitted; withheld: {withheld} line(s)\n",
         ));
         out
     };
     loop {
-        let out = compose(&data, &omitted);
+        let out = compose(&data);
         if out.len() <= max_bytes {
             return Ok(out);
         }
         let pool = SECTIONS
             .iter()
             .filter(|name| {
-                !["Goal", "Next step", "Pointers"].contains(name) && !data[**name].is_empty()
+                !["Goal", "Next step", "Pointers"].contains(name) && !data[**name].rows.is_empty()
             })
             .copied()
             .collect::<Vec<_>>();
         let pool = if pool.is_empty() {
             SECTIONS
                 .iter()
-                .filter(|name| !data[**name].is_empty())
+                .filter(|name| !data[**name].rows.is_empty())
                 .copied()
                 .collect::<Vec<_>>()
         } else {
             pool
         };
-        let Some(victim) = pool.iter().max_by_key(|name| data[**name].len()) else {
+        let Some(victim) = pool.iter().max_by_key(|name| data[**name].rows.len()) else {
             return Err(Error::new(2, "handoff header exceeds byte budget"));
         };
-        data.get_mut(*victim).unwrap().pop();
-        *omitted.entry(victim).or_default() += 1;
+        let section = data.get_mut(*victim).unwrap();
+        if section.rows.pop().is_some_and(|row| row.record) {
+            section.renderer_omitted = section.renderer_omitted.saturating_add(1);
+        }
     }
 }
 /// Append advisory consumption at most once per digest/session. A killed
@@ -378,7 +460,7 @@ pub fn record_pickup(
     crate::checkpoint(interrupted)?;
     let store = Store::open(state)?;
     store.read(format!(".oms/handoffs/{name}"), MAX_FILE)?;
-    let session = line(session, 120);
+    let (session, _) = line(session, 120);
     let session = if session.is_empty() {
         "unknown".into()
     } else {
