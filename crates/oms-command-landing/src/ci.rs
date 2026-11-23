@@ -406,7 +406,7 @@ pub fn full_scope(run: &V, sha: &str) -> Result<&'static str> {
         None
     };
     if let Some(required) = matched_required {
-        let optional = regex::Regex::new(r"^(?:python311|native \((?:macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks|rust \((?:ubuntu-24\.04|macos-latest)\))$").unwrap();
+        let optional = regex::Regex::new(r"^(?:python311|native \(windows-latest, auto\)|operator-tools \(affected\)|affected checks|rust \(ubuntu-24\.04\))$").unwrap();
         require(
             names.iter().all(|(name, value)| {
                 required.contains(name)
@@ -1139,14 +1139,17 @@ mod tests {
         let streamlined = [
             ("affected_plan".to_string(), "success"),
             ("lint".into(), "success"),
+            ("rust (ubuntu-24.04)".into(), "success"),
             ("focused".into(), "success"),
             ("native (ubuntu-latest, copy)".into(), "success"),
-            ("native (macos-latest, auto)".into(), "skipped"),
-            ("rust (ubuntu-24.04)".into(), "success"),
-            ("rust (macos-latest)".into(), "success"),
             ("affected checks".into(), "skipped"),
             ("gate".into(), "success"),
         ];
         assert_eq!(scope(&streamlined).unwrap(), "full");
+        for stale in ["native (macos-latest, auto)", "rust (macos-latest)"] {
+            let mut with = streamlined.to_vec();
+            with.push((stale.into(), "skipped"));
+            assert!(scope(&with).is_err(), "{stale}");
+        }
     }
 }
