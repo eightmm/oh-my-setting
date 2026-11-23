@@ -1043,14 +1043,29 @@ pub fn dispatch(
             .success()?;
     }
     let mut execution_request = ExecutionRequest::new(argv, execution.repo());
-    execution_request.environment = vec![
-        ("OMS_PANEL_DISPATCH".into(), "1".into()),
-        ("OMS_PANEL_ROLE".into(), request.route.kind.clone().into()),
-        (
-            "OMS_PANEL_STRATEGY".into(),
-            request.route.role.clone().into(),
-        ),
-        ("OMS_TASK_ID".into(), request.task_id.clone().into()),
+    execution_request.environment = oms_command_peer::dispatch_context::DispatchContext {
+        task_id: request.task_id.clone(),
+        parent_attempt_id: request.main_attempt.clone(),
+        room_id: request.room.clone(),
+        panel: Some(oms_command_peer::dispatch_context::PanelDispatch {
+            role: Some(request.route.kind.clone()),
+            strategy: Some(request.route.role.clone()),
+            owner: Some(request.route.owner.clone()),
+            purpose: Some(request.route.purpose.clone()),
+            workload: Some(request.route.workload.clone()),
+            access: Some(request.route.access.clone()),
+            label: request.label.clone(),
+            alias: request.alias.clone(),
+            participant: request.room.as_ref().map(|_| member.clone()),
+            continues: request
+                .carried_patch
+                .as_ref()
+                .map(|patch| patch.attempt.clone()),
+            ..Default::default()
+        }),
+    }
+    .environment();
+    execution_request.environment.extend([
         ("OMS_PANEL_REPO".into(), store.repo().into()),
         ("OMS_ROOM_REPO".into(), store.repo().into()),
         (
@@ -1062,58 +1077,31 @@ pub fn dispatch(
             }
             .into(),
         ),
-    ];
+    ]);
     execution_request.remove_environment = crate::services::args(&[
         "OMS_ATTEMPT_ID",
         "OMS_PANEL_NO_WEB",
         "OMS_RESUME_USAGE_BASELINE",
         "OMS_PANEL_CONTINUES",
+        "OMS_PANEL_LABEL",
+        "OMS_PANEL_ALIAS",
+        "OMS_PANEL_MAIN_PARTICIPANT",
     ]);
-    if let Some(room) = &request.room {
-        execution_request.environment.extend([
-            ("OMS_ROOM_ID".into(), room.into()),
-            ("OMS_ROOM_PARTICIPANT".into(), member.clone().into()),
-            (
-                "OMS_ROOM_ADMITTED_PARTICIPANT".into(),
-                member.clone().into(),
-            ),
-        ]);
+    if request.room.is_some() {
+        execution_request.environment.push((
+            "OMS_ROOM_ADMITTED_PARTICIPANT".into(),
+            member.clone().into(),
+        ));
     }
-    for (name, value) in [
-        ("OMS_PANEL_LABEL", request.label.as_deref()),
-        ("OMS_PANEL_ALIAS", request.alias.as_deref()),
-        ("OMS_PANEL_MAIN_PARTICIPANT", request.main.as_deref()),
-        (
-            "OMS_PANEL_CONTINUES",
-            request.carried_patch.as_ref().map(|v| v.attempt.as_str()),
-        ),
-    ] {
-        execution_request.remove_environment.push(name.into());
-        if let Some(value) = value {
-            execution_request
-                .environment
-                .push((name.into(), value.into()));
-        }
+    if let Some(main) = &request.main {
+        execution_request
+            .environment
+            .push(("OMS_PANEL_MAIN_PARTICIPANT".into(), main.into()));
     }
-    execution_request.environment.extend([
-        (
-            "OMS_PANEL_ACCESS".into(),
-            request.route.access.clone().into(),
-        ),
-        ("OMS_PANEL_OWNER".into(), request.route.owner.clone().into()),
-        (
-            "OMS_PANEL_PURPOSE".into(),
-            request.route.purpose.clone().into(),
-        ),
-        (
-            "OMS_PANEL_WORKLOAD".into(),
-            request.route.workload.clone().into(),
-        ),
-        (
-            "OMS_PANEL_GRAPH_SCOPES".into(),
-            serde_json::to_string(&scopes).map_err(Error::new)?.into(),
-        ),
-    ]);
+    execution_request.environment.push((
+        "OMS_PANEL_GRAPH_SCOPES".into(),
+        serde_json::to_string(&scopes).map_err(Error::new)?.into(),
+    ));
     execution_request
         .remove_environment
         .push("OMS_PANEL_CONTINUATION".into());
@@ -1150,11 +1138,6 @@ pub fn dispatch(
             "OMS_PANEL_CONTINUES".into(),
             text(previous, "attempt_id").into(),
         ));
-    }
-    if let Some(main) = &request.main_attempt {
-        execution_request
-            .environment
-            .push(("OMS_PANEL_MAIN_ATTEMPT".into(), main.into()));
     }
     if request.no_web && request.route.role == "researcher" {
         execution_request
@@ -1874,6 +1857,42 @@ mod tests {
                     .next()
                     .unwrap()
                     .clone();
+                if matches!(self.mode, "metadata" | "label") {
+                    let environment = |name: &str| {
+                        request
+                            .environment
+                            .iter()
+                            .find_map(|(key, value)| (key == name).then(|| value.to_str().unwrap()))
+                    };
+                    for (name, expected) in [
+                        ("OMS_PANEL_DISPATCH", "1"),
+                        ("OMS_TASK_ID", "t1"),
+                        ("OMS_PANEL_MAIN_ATTEMPT", "att_main_1"),
+                        ("OMS_PANEL_ROLE", "worker"),
+                        ("OMS_PANEL_STRATEGY", "worker"),
+                        ("OMS_PANEL_OWNER", "antigravity"),
+                        ("OMS_PANEL_PURPOSE", "explain"),
+                        ("OMS_PANEL_WORKLOAD", "routine"),
+                        ("OMS_PANEL_ACCESS", "read"),
+                        ("OMS_PANEL_MAIN_PARTICIPANT", "main-a"),
+                    ] {
+                        assert_eq!(environment(name), Some(expected), "{name}");
+                    }
+                    assert_eq!(environment("OMS_PANEL_ALIAS"), None);
+                    assert_eq!(environment("OMS_PANEL_CONTINUES"), None);
+                    assert_eq!(environment("OMS_PLAN_LEASE_ID"), None);
+                    assert_eq!(
+                        environment("OMS_PANEL_LABEL"),
+                        (self.mode == "label").then_some("Fix dispatch labels")
+                    );
+                    assert_eq!(
+                        environment("OMS_ROOM_ID"),
+                        (self.mode == "label").then_some("room-1")
+                    );
+                    for name in ["OMS_PANEL_ALIAS", "OMS_PANEL_LABEL", "OMS_PANEL_CONTINUES"] {
+                        assert!(request.remove_environment.iter().any(|key| key == name));
+                    }
+                }
                 if self.mode.starts_with("label") {
                     let participant = request
                         .environment

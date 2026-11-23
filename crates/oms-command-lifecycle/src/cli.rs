@@ -79,6 +79,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
                 "--remediation-plan",
                 "--repair",
                 "--surfaces",
+                "--integrations",
                 "--tool-lock",
                 "--contract",
                 "--security",
@@ -370,10 +371,18 @@ pub(crate) fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         }
     }
     if tool == "doctor" {
+        if out.has("--integrations")
+            && ["--contract", "--live-models", "--strict-diversity"]
+                .iter()
+                .any(|s| out.has(s))
+        {
+            return r::fail("--integrations checks recorded wiring without live model probes");
+        }
         let modes = [
             "--security",
             "--sandbox",
             "--surfaces",
+            "--integrations",
             "--extensions",
             "--mcp",
             "--providers",

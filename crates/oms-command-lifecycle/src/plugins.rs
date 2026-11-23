@@ -160,6 +160,23 @@ fn unrelated(mut value: serde_json::Value) -> serde_json::Value {
     }
     value
 }
+/// Read-only inventory and generated-cache comparison, using the installer's
+/// existing bounded CLI and ownership checks without refreshing the plugin.
+pub(crate) fn codex_healthy(paths: &Paths, flag: &AtomicBool) -> Result<bool> {
+    let (installed, root) = inventory(paths, flag)?;
+    if !installed || root.as_ref().and_then(|p| r::physical(p).ok()).as_ref() != Some(&paths.source)
+    {
+        return Ok(false);
+    }
+    let destination = cache(paths)?;
+    if !destination.is_dir() {
+        return Ok(false);
+    }
+    owned_cache(paths, &destination, false)?;
+    let native = native_codex(paths)?;
+    Ok(crate::fingerprint::tree(&destination, false)?
+        == crate::fingerprint::tree(&native.0, false)?)
+}
 pub(crate) fn preflight(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<()> {
     if options.tool == "install-agy-plugin" {
         return Ok(());

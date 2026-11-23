@@ -1,4 +1,5 @@
 use crate::Output;
+use serde::{Deserialize, Serialize};
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 
 /// A parent-owned managed checkout for one exact incoming revision. A path or
@@ -73,7 +74,10 @@ pub trait Services {
     /// is dispatchable before live checkout/local-ref/install mutation. Reconcile
     /// validates that checkout's own payload and converges recorded components,
     /// returning its schema-2 install receipt as JSON. Verify runs its doctor.
-    /// RefreshTools runs after the core transaction commits. Implementations
+    /// RefreshTools and VerifyIntegrations run after the core transaction commits.
+    /// The latter checks recorded integrations after tool refresh, without live
+    /// model inference or arbitrary MCP server probes. Post-commit operations
+    /// return only an IncomingDiagnostic; child output is withheld. Implementations
     /// launch the incoming native --oms-dispatch frontdoor with the child-only
     /// OMS_NATIVE_UPDATE_PARENT environment set to the updater PID. The child
     /// verifies the lease, live PID generation, ancestry and held receipt mutex
@@ -144,10 +148,68 @@ fn unavailable(message: &str) -> Output {
 }
 
 /// Explicit host operations, with no inference of authority from provider data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncomingPhase {
     Preflight,
     Reconcile,
     Verify,
     RefreshTools,
+    VerifyIntegrations,
+}
+
+/// Fixed command names only. Provider output and executable paths must never
+/// become update diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IncomingTool {
+    #[serde(rename = "install-tools")]
+    InstallTools,
+    #[serde(rename = "install-profile")]
+    InstallProfile,
+    #[serde(rename = "doctor")]
+    Doctor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncomingDiagnostic {
+    pub phase: IncomingPhase,
+    /// None means the host could not establish which command was launched.
+    pub tool: Option<IncomingTool>,
+    pub exit: i32,
+}
+impl IncomingDiagnostic {
+    pub fn output(self) -> Output {
+        (
+            self.exit,
+            serde_json::to_vec(&self).expect("fixed diagnostic fields serialize"),
+            Vec::new(),
+        )
+    }
+    pub(crate) fn valid(&self) -> bool {
+        (0..=255).contains(&self.exit)
+            && matches!(
+                (self.phase, self.tool),
+                (
+                    IncomingPhase::RefreshTools,
+                    None | Some(IncomingTool::InstallTools | IncomingTool::InstallProfile)
+                ) | (
+                    IncomingPhase::VerifyIntegrations,
+                    None | Some(IncomingTool::Doctor)
+                )
+            )
+    }
+    pub(crate) fn capture(phase: IncomingPhase, out: &Output) -> Self {
+        // Hosts may predate the diagnostic contract or fail before launching.
+        // Keep their exit status, but never interpret raw output as a tool name.
+        (out.1.len() <= 1024)
+            .then(|| serde_json::from_slice::<Self>(&out.1).ok())
+            .flatten()
+            .filter(|d| d.phase == phase && d.exit == out.0 && d.valid())
+            .unwrap_or(Self {
+                phase,
+                tool: None,
+                exit: if (0..=255).contains(&out.0) { out.0 } else { 2 },
+            })
+    }
 }
