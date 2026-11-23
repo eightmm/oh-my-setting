@@ -89,20 +89,35 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
     Ok(values)
 }
 fn status(dir: &Path) -> (&'static str, Option<i64>) {
-    match storage::read_run(dir, "status", 4096) {
-        Ok(b) => {
-            return (
-                "done",
-                Some(
-                    String::from_utf8_lossy(&b)
-                        .trim_matches(crate::whitespace)
-                        .parse()
-                        .unwrap_or(1),
-                ),
-            );
-        }
-        Err(_) if dir.join("status").symlink_metadata().is_ok() => return ("done", Some(1)),
-        _ => (),
+    status_with(
+        dir,
+        || storage::read_run(dir, "status", 4096),
+        |pid| rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH),
+    )
+}
+
+fn status_with(
+    dir: &Path,
+    read_status: impl Fn() -> Result<Vec<u8>, String>,
+    owner_gone: impl FnOnce(Pid) -> bool,
+) -> (&'static str, Option<i64>) {
+    let terminal_exit = || {
+        let read = match read_status() {
+            // The owner can publish the status between the secure read and
+            // this presence check. Confirm the bytes before treating it as invalid.
+            Err(_) if dir.join("status").symlink_metadata().is_ok() => read_status(),
+            Err(_) => return None,
+            result => result,
+        };
+        Some(read.map_or(1, |bytes| {
+            String::from_utf8_lossy(&bytes)
+                .trim_matches(crate::whitespace)
+                .parse()
+                .unwrap_or(1)
+        }))
+    };
+    if let Some(exit) = terminal_exit() {
+        return ("done", Some(exit));
     }
     let pid = storage::read_run(dir, "pid", 4096)
         .ok()
@@ -114,10 +129,9 @@ fn status(dir: &Path) -> (&'static str, Option<i64>) {
         })
         .filter(|pid| *pid > 0)
         .and_then(Pid::from_raw);
-    if let Some(pid) = pid
-        && rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH)
-    {
-        return ("stalled", None);
+    if pid.is_some_and(owner_gone) {
+        // A completed owner publishes its exit before it can disappear.
+        return terminal_exit().map_or(("stalled", None), |exit| ("done", Some(exit)));
     }
     ("running", None)
 }
@@ -1321,6 +1335,77 @@ fn owner_run(pin: Option<&Path>, repo: &Path, op: &str, dir: &Directory) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_status_observes_atomic_publication_before_reporting_failure_or_stall() {
+        use std::cell::Cell;
+        use std::os::unix::fs::{DirBuilderExt, symlink};
+
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("oms-peer-terminal-status-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let repo = Temp(path);
+        let dir = Directory::open(
+            &repo.0,
+            &format!("{RUN_ROOT}/advise-20261123T215445Z-aabbccdd"),
+            true,
+            true,
+        )
+        .unwrap();
+        let read = || storage::read_run(&dir.path, "status", 4096);
+        let status_path = dir.path.join("status");
+
+        let first = Cell::new(true);
+        assert_eq!(
+            status_with(
+                &dir.path,
+                || {
+                    let result = read();
+                    if first.replace(false) {
+                        assert!(result.is_err());
+                        assert!(!status_path.exists());
+                        dir.atomic("status", b"0\n").unwrap();
+                    }
+                    result
+                },
+                |_| panic!("published terminal status should precede the owner check"),
+            ),
+            ("done", Some(0))
+        );
+
+        std::fs::remove_file(&status_path).unwrap();
+        assert_eq!(status(&dir.path), ("running", None));
+        dir.atomic("pid", b"123\n").unwrap();
+        assert_eq!(status_with(&dir.path, read, |_| true), ("stalled", None));
+        assert_eq!(
+            status_with(&dir.path, read, |pid| {
+                assert_eq!(Some(pid), Pid::from_raw(123));
+                dir.atomic("status", b"7\n").unwrap();
+                true
+            }),
+            ("done", Some(7))
+        );
+
+        dir.atomic("status", b"malformed\n").unwrap();
+        assert_eq!(status(&dir.path), ("done", Some(1)));
+        std::fs::remove_file(&status_path).unwrap();
+        dir.atomic("other", b"0\n").unwrap();
+        symlink(dir.path.join("other"), &status_path).unwrap();
+        assert!(read().is_err());
+        assert_eq!(status(&dir.path), ("done", Some(1)));
+    }
+
     #[test]
     fn canonical_provider_aliases_and_cursor_bytes() {
         let aliases: Value =
