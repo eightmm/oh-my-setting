@@ -12562,6 +12562,119 @@ mod tests {
             );
             assert_eq!(std::fs::read(&events_path).unwrap(), after_unknown);
             assert!(spy.mutating_calls().is_empty());
+
+            // If Main transitions to terminal after the final pre-append
+            // revalidation sample and before append_lifecycle_checked acquires
+            // the ledger lock, both register_result and annotate must refuse
+            // without marking publication_uncertain or appending any event.
+            let mut race_manifest = unknown_manifest.clone();
+            race_manifest["summary"] = "Report racing terminal Main".into();
+            race_manifest["previous_sha256"] = unknown_report["result"]["sha256"].clone();
+            std::fs::write(&input_path, serde_json::to_vec(&race_manifest).unwrap()).unwrap();
+            let race_options = Options::parse(&commands::strings(&[
+                "--orchestrator",
+                "codex",
+                "--room",
+                ROOM,
+                "--task-id",
+                "native-two",
+                "--native-result",
+                input_path.to_str().unwrap(),
+            ]))
+            .unwrap();
+            let race_panel = spy.load();
+            let race_attempts = AttemptCache::default();
+            race_panel
+                .require_main_with_cache(race_options.get("owner"), &race_attempts)
+                .unwrap();
+            let race_tx = store
+                .transaction("native-result-main-terminal-race", Duration::from_secs(3))
+                .unwrap();
+            let before_race_lines = std::fs::read_to_string(&events_path)
+                .unwrap()
+                .lines()
+                .count();
+            let mut main_terminated = false;
+            let race_err = native_assignment::register_result_with_before_append(
+                &race_panel,
+                &race_options,
+                &host,
+                &race_attempts,
+                &race_tx,
+                || {
+                    for to_state in ["blocked", "abandoned"] {
+                        let event = oms_command_operations::new_event(
+                            MAIN,
+                            0usize.into(),
+                            "attempt.state_changed",
+                            oms_command_operations::value::obj([
+                                ("to_state", to_state.into()),
+                                (
+                                    "actor",
+                                    oms_command_operations::value::obj([
+                                        ("kind", "owner".into()),
+                                        ("name", "test-main-terminal".into()),
+                                    ]),
+                                ),
+                            ]),
+                        )
+                        .unwrap();
+                        oms_command_operations::append_lifecycle(&repo, event, &spy.stop).unwrap();
+                    }
+                    main_terminated = true;
+                },
+            )
+            .unwrap_err();
+            assert!(main_terminated);
+            assert!(!race_err.publication_uncertain);
+            assert!(
+                race_err
+                    .message
+                    .contains("live Main attempt could not be verified"),
+                "{}",
+                race_err.message
+            );
+            let after_race_text = std::fs::read_to_string(&events_path).unwrap();
+            let appended_rows: Vec<Value> = after_race_text
+                .lines()
+                .skip(before_race_lines)
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(appended_rows.len(), 2);
+            assert!(appended_rows.iter().any(|row| {
+                row["attempt_id"] == MAIN
+                    && row["event_type"] == "attempt.state_changed"
+                    && row["to_state"] == "abandoned"
+            }));
+            assert!(
+                !appended_rows
+                    .iter()
+                    .any(|row| { row["actor"]["name"] == "panel-native-result" })
+            );
+            let after_race_bytes = std::fs::read(&events_path).unwrap();
+            let unknown_transport = match text(&unknown_before["refs"], "native_transport") {
+                "sending" => "sending",
+                "unknown" => "unknown",
+                other => panic!("unexpected unknown transport: {other}"),
+            };
+            let annotate_err = native_assignment::annotate_with_binding(
+                &race_panel,
+                text(&unknown, "attempt_id"),
+                text(&unknown_before["refs"], "native_intent_sha256"),
+                text(&unknown_before["refs"], "native_binding_sha256"),
+                unknown_transport,
+                "native-annotate-after-main-terminal",
+                json!({"native_transport": "unknown"}),
+            )
+            .unwrap_err();
+            assert!(
+                annotate_err
+                    .message
+                    .contains("live Main attempt could not be verified"),
+                "{}",
+                annotate_err.message
+            );
+            assert_eq!(std::fs::read(&events_path).unwrap(), after_race_bytes);
         }
 
         #[test]

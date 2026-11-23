@@ -2361,8 +2361,13 @@ oms panel --repo . --results --task-id TASK --json
 
 Registration rechecks the original task and lease, parent Main, Room, live pane and
 session generation, account binding, working directory and Git base. Candidate
-paths must fit the canonical task's allowed and forbidden scope. Changed custody,
-claims, digests or scope refuse registration. This command never opens a replacement
+paths must fit the canonical task's allowed and forbidden scope. Observed pre-append
+custody, claim, digest or scope drift refuses registration. Room, lease, pane and
+account checks are sampled across separate stores rather than an atomic cross-store
+lock, while the lifecycle append rejects exact Main liveness/currentness or
+child/predecessor changes under the ledger lock; post-append cross-store drift can
+return uncertain publication with possible prior registration requiring
+reconciliation. This command never opens a replacement
 lead, sends native input, changes a task's state, or converts native work into a
 managed delegate.
 

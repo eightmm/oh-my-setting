@@ -113,21 +113,44 @@ pub fn finalize_snapshot<S: Services + ?Sized>(
         stop,
         false,
     )?;
-    let related: Vec<_> = array(&attempts)
-        .iter()
-        .filter(|v| {
-            v["tool"] != "panel-main"
-                && (v["task_id"] == request.task_id
-                    || (v["task_id"].as_str().is_none_or(str::is_empty)
-                        && parents.contains(&text(v, "parent_attempt_id"))))
-        })
-        .cloned()
-        .collect();
+    let requires_acceptance = request.outcome == "accepted" || request.landed_commit.is_some();
+    let attempts_slice = array(&attempts);
+    let mut summary_ancestry =
+        (!requires_acceptance).then(|| SummaryAncestry::new(attempts_slice, &parents));
+    let mut related = Vec::new();
+    let mut certified_inferred = Vec::new();
+    for v in attempts_slice {
+        if v["tool"] == "panel-main" {
+            continue;
+        }
+        let certified = if v["task_id"] == request.task_id {
+            Some(false)
+        } else if v["task_id"].as_str().is_none_or(str::is_empty) {
+            if requires_acceptance {
+                parents
+                    .contains(&text(v, "parent_attempt_id"))
+                    .then_some(false)
+            } else {
+                (summary_ancestry
+                    .as_mut()
+                    .and_then(|ancestry| ancestry.task_for(v))
+                    == Some(request.task_id.as_str()))
+                .then_some(true)
+            }
+        } else {
+            None
+        };
+        if let Some(certified) = certified {
+            related.push(v.clone());
+            certified_inferred.push(certified);
+        }
+    }
     require(!related.is_empty(), "task has no recorded attempts")?;
     require(
         related
             .iter()
-            .all(|v| descends(v, array(&attempts), &parents)),
+            .zip(&certified_inferred)
+            .all(|(v, &certified)| certified || descends(v, attempts_slice, &parents)),
         "task includes attempts owned by another main",
     )?;
     const MAX_FINALIZE_BLOCKERS: usize = 4;
@@ -316,6 +339,88 @@ fn descends(row: &Value, attempts: &[Value], parents: &std::collections::BTreeSe
         cursor = text(row, "parent_attempt_id");
     }
     true
+}
+
+#[derive(Clone, Copy)]
+enum Ancestry<'a> {
+    Invalid,
+    Certified(Option<&'a str>),
+}
+
+struct SummaryAncestry<'a> {
+    by_id: std::collections::HashMap<&'a str, Option<&'a Value>>,
+    parents: &'a std::collections::BTreeSet<String>,
+    memo: std::collections::HashMap<&'a str, Ancestry<'a>>,
+}
+
+impl<'a> SummaryAncestry<'a> {
+    fn new(attempts: &'a [Value], parents: &'a std::collections::BTreeSet<String>) -> Self {
+        let mut by_id = std::collections::HashMap::with_capacity(attempts.len());
+        for row in attempts {
+            if let Some(id) = row["attempt_id"].as_str().filter(|v| !v.is_empty()) {
+                by_id
+                    .entry(id)
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some(row));
+            }
+        }
+        Self {
+            by_id,
+            parents,
+            memo: std::collections::HashMap::new(),
+        }
+    }
+
+    fn task_for(&mut self, row: &'a Value) -> Option<&'a str> {
+        let start_id = row["attempt_id"].as_str().filter(|v| !v.is_empty())?;
+        let mut cursor = start_id;
+        let mut path: Vec<(&'a str, Option<&'a str>)> = Vec::new();
+        let mut in_path = std::collections::HashSet::new();
+        let terminal = loop {
+            if let Some(&cached) = self.memo.get(cursor) {
+                break cached;
+            }
+            if self.parents.contains(cursor) {
+                break if matches!(self.by_id.get(cursor), Some(Some(_))) {
+                    Ancestry::Certified(None)
+                } else {
+                    Ancestry::Invalid
+                };
+            }
+            if !in_path.insert(cursor) {
+                break Ancestry::Invalid;
+            }
+            match self.by_id.get(cursor) {
+                Some(Some(node)) => {
+                    if node["tool"] == "panel-main" {
+                        break Ancestry::Invalid;
+                    }
+                    let own_task = node["task_id"].as_str().filter(|v| !v.is_empty());
+                    path.push((cursor, own_task));
+                    if let Some(parent) =
+                        node["parent_attempt_id"].as_str().filter(|v| !v.is_empty())
+                    {
+                        cursor = parent;
+                    } else {
+                        break Ancestry::Invalid;
+                    }
+                }
+                Some(None) | None => break Ancestry::Invalid,
+            }
+        };
+        let mut resolved = terminal;
+        for (node_id, own_task) in path.into_iter().rev() {
+            resolved = match resolved {
+                Ancestry::Invalid => Ancestry::Invalid,
+                Ancestry::Certified(above) => Ancestry::Certified(own_task.or(above)),
+            };
+            self.memo.insert(node_id, resolved);
+        }
+        match resolved {
+            Ancestry::Certified(task) => task,
+            Ancestry::Invalid => None,
+        }
+    }
 }
 
 pub fn finalize(
@@ -2197,10 +2302,14 @@ mod tests {
             files
         };
         let initial_snapshot = snapshot();
-        let refusal = |attempts, expected: String| {
+        let mut accepted = request.clone();
+        accepted.outcome = "accepted".into();
+        let mut landed = request.clone();
+        landed.landed_commit = Some("a".repeat(40));
+        let refusal_for = |req: &FinalizeRequest, attempts, expected: String| {
             let err = finalize_snapshot(
                 &repo.0,
-                &request,
+                req,
                 &ClaimedTask(attempts),
                 &AtomicBool::new(false),
             )
@@ -2208,10 +2317,15 @@ mod tests {
             assert_eq!(err, Error::new(expected));
             err
         };
+        let refusal = |attempts, expected: String| refusal_for(&request, attempts, expected);
+        let accepted_refusal =
+            |attempts, expected: String| refusal_for(&accepted, attempts, expected);
         let read = worker(WORKER, "read", "working");
         let review_id = "call-finalization:review";
         let mut review = worker(review_id, "write", "review");
         review["refs"]["panel_room_participant"] = WORKER.into();
+        let mut read_review = worker("call-read-review", "read", "review");
+        read_review["refs"]["panel_room_participant"] = WORKER.into();
         let later = worker("call-later", "write", "running");
         let done = worker("call-done", "write", "done");
         refusal(
@@ -2228,10 +2342,22 @@ mod tests {
                 "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup)"
             ),
         );
+        refusal(
+            vec![read_review],
+            "task has live or unconfirmed attempts (task attempt call-read-review, missing verified whole-tree cleanup)"
+                .to_owned(),
+        );
         let mut taskless = worker(WORKER, "write", "waiting_approval");
         taskless["task_id"] = Value::Null;
-        refusal(
+        accepted_refusal(
             vec![taskless.clone()],
+            format!(
+                "task has live or unconfirmed attempts (inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
+            ),
+        );
+        refusal_for(
+            &landed,
+            vec![done.clone(), taskless.clone()],
             format!(
                 "task has live or unconfirmed attempts (inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
             ),
@@ -2240,7 +2366,7 @@ mod tests {
         let mut taskless_review = worker(taskless_review_id, "write", "review");
         taskless_review["task_id"] = "".into();
         taskless_review["refs"]["panel_room_participant"] = WORKER.into();
-        refusal(
+        accepted_refusal(
             vec![
                 done.clone(),
                 review.clone(),
@@ -2251,7 +2377,7 @@ mod tests {
                 "task has live or unconfirmed attempts (task attempt {review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {taskless_review_id}, missing verified whole-tree cleanup · inherited taskless descendant attempt {WORKER}, lifecycle state waiting_approval)"
             ),
         );
-        let exact_cap_err = refusal(
+        let exact_cap_err = accepted_refusal(
             vec![
                 done.clone(),
                 read.clone(),
@@ -2267,11 +2393,11 @@ mod tests {
         let mut fifth = worker("call-fifth", "write", "blocked");
         fifth["task_id"] = Value::Null;
         let sixth = worker("call-sixth", "write", "verifying");
-        let overflow_err = refusal(
+        let overflow_err = accepted_refusal(
             vec![
-                done,
+                done.clone(),
                 review,
-                taskless_review,
+                taskless_review.clone(),
                 read.clone(),
                 later,
                 fifth,
@@ -2283,6 +2409,200 @@ mod tests {
         );
         assert!(!overflow_err.message.contains("call-fifth"));
         assert!(!overflow_err.message.contains("call-sixth"));
+        // Summary-only outcomes exclude unrelated taskless siblings of Main and
+        // taskless descendants of other tasks, while still blocking on proven
+        // taskless descendants of this task.
+        let mut other_task_root = worker("call-other-task", "read", "working");
+        other_task_root["task_id"] = "other-task".into();
+        let mut other_task_child = worker("call-other-child", "read", "working");
+        other_task_child["task_id"] = Value::Null;
+        other_task_child["parent_attempt_id"] = "call-other-task".into();
+        for outcome in ["completed", "failed", "rejected"] {
+            let mut summary_req = request.clone();
+            summary_req.outcome = outcome.into();
+            let snap = finalize_snapshot(
+                &repo.0,
+                &summary_req,
+                &ClaimedTask(vec![
+                    done.clone(),
+                    taskless.clone(),
+                    taskless_review.clone(),
+                    other_task_root.clone(),
+                    other_task_child.clone(),
+                ]),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let related = array(&snap["related_attempts"]);
+            assert_eq!(related.len(), 1);
+            assert_eq!(related[0]["attempt_id"], "call-done");
+        }
+        let mut task_child = worker("call-task-child", "read", "working");
+        task_child["task_id"] = Value::Null;
+        task_child["parent_attempt_id"] = "call-done".into();
+        let mut task_child_review = worker("call-task-child-review", "read", "review");
+        task_child_review["task_id"] = "".into();
+        task_child_review["parent_attempt_id"] = "call-done".into();
+        task_child_review["refs"]["panel_room_participant"] = WORKER.into();
+        let mut task_mid = worker("call-task-mid", "read", "done");
+        task_mid["task_id"] = "".into();
+        task_mid["parent_attempt_id"] = "call-done".into();
+        let mut task_grandchild = worker("call-task-grandchild", "read", "waiting_approval");
+        task_grandchild["task_id"] = Value::Null;
+        task_grandchild["parent_attempt_id"] = "call-task-mid".into();
+        let mut task_grandchild_review = worker("call-task-grandchild-review", "read", "review");
+        task_grandchild_review["task_id"] = Value::Null;
+        task_grandchild_review["parent_attempt_id"] = "call-task-mid".into();
+        task_grandchild_review["refs"]["panel_room_participant"] = WORKER.into();
+        for outcome in ["completed", "failed", "rejected"] {
+            let mut summary_req = request.clone();
+            summary_req.outcome = outcome.into();
+            refusal_for(
+                &summary_req,
+                vec![
+                    done.clone(),
+                    taskless.clone(),
+                    other_task_root.clone(),
+                    other_task_child.clone(),
+                    task_child.clone(),
+                    task_child_review.clone(),
+                    task_mid.clone(),
+                    task_grandchild.clone(),
+                    task_grandchild_review.clone(),
+                ],
+                "task has live or unconfirmed attempts (inherited taskless descendant attempt call-task-child, lifecycle state working · inherited taskless descendant attempt call-task-child-review, missing verified whole-tree cleanup · inherited taskless descendant attempt call-task-grandchild, lifecycle state waiting_approval · inherited taskless descendant attempt call-task-grandchild-review, missing verified whole-tree cleanup)"
+                    .to_owned(),
+            );
+        }
+        // Accepted/landed preserves the direct-Main taskless safeguard and does
+        // not widen into nested taskless children via nearest_task_id.
+        let done_read = worker("call-done-read", "read", "done");
+        let mut nested_child = worker("call-nested-child", "read", "working");
+        nested_child["task_id"] = Value::Null;
+        nested_child["parent_attempt_id"] = "call-done-read".into();
+        let landed_snap = finalize_snapshot(
+            &repo.0,
+            &landed,
+            &ClaimedTask(vec![done_read.clone(), nested_child.clone()]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let landed_related = array(&landed_snap["related_attempts"]);
+        assert_eq!(landed_related.len(), 1);
+        assert_eq!(landed_related[0]["attempt_id"], "call-done-read");
+        refusal_for(
+            &accepted,
+            vec![done_read, nested_child],
+            "accepted requires native plan completion/publication proof".to_owned(),
+        );
+        // Summary-only ancestry certification refuses to cross a foreign
+        // panel-main even when linked to current Main, and rejects cycles,
+        // missing parents, and ambiguous duplicate parent IDs.
+        let foreign_main = json!({
+            "attempt_id": "main-foreign", "tool": "panel-main", "provider": "codex",
+            "parent_attempt_id": MAIN, "state": "working", "terminal": false
+        });
+        let mut done_under_foreign = worker("call-done-under-foreign", "read", "done");
+        done_under_foreign["parent_attempt_id"] = "main-foreign".into();
+        let mut taskless_under_foreign = worker("call-taskless-under-foreign", "read", "working");
+        taskless_under_foreign["task_id"] = Value::Null;
+        taskless_under_foreign["parent_attempt_id"] = "call-done-under-foreign".into();
+        let foreign_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(vec![
+                foreign_main,
+                done_under_foreign,
+                taskless_under_foreign,
+            ]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let foreign_related = array(&foreign_snap["related_attempts"]);
+        assert_eq!(foreign_related.len(), 1);
+        assert_eq!(foreign_related[0]["attempt_id"], "call-done-under-foreign");
+
+        let mut cycle_a = worker("call-cycle-a", "read", "working");
+        cycle_a["task_id"] = Value::Null;
+        cycle_a["parent_attempt_id"] = "call-cycle-b".into();
+        let mut cycle_b = worker("call-cycle-b", "read", "working");
+        cycle_b["task_id"] = Value::Null;
+        cycle_b["parent_attempt_id"] = "call-cycle-a".into();
+        let mut orphan = worker("call-orphan", "read", "working");
+        orphan["task_id"] = Value::Null;
+        orphan["parent_attempt_id"] = "call-missing".into();
+        let graph_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(vec![done.clone(), cycle_a, cycle_b, orphan]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let graph_related = array(&graph_snap["related_attempts"]);
+        assert_eq!(graph_related.len(), 1);
+        assert_eq!(graph_related[0]["attempt_id"], "call-done");
+
+        let mut cycle_task = worker("call-cycle-task", "read", "done");
+        cycle_task["parent_attempt_id"] = "call-cycle-task-parent".into();
+        let mut cycle_task_parent = worker("call-cycle-task-parent", "read", "done");
+        cycle_task_parent["task_id"] = Value::Null;
+        cycle_task_parent["parent_attempt_id"] = "call-cycle-task".into();
+        let mut cycle_task_child = worker("call-cycle-task-child", "read", "working");
+        cycle_task_child["task_id"] = Value::Null;
+        cycle_task_child["parent_attempt_id"] = "call-cycle-task".into();
+        let cycle_attempts = vec![cycle_task, cycle_task_parent, cycle_task_child];
+        let cycle_parents = std::collections::BTreeSet::from([MAIN.to_owned()]);
+        let mut cycle_ancestry = SummaryAncestry::new(&cycle_attempts, &cycle_parents);
+        assert_eq!(cycle_ancestry.task_for(&cycle_attempts[2]), None);
+
+        let dup_a = worker("call-dup-parent", "read", "done");
+        let dup_b = worker("call-dup-parent", "read", "done");
+        let mut taskless_dup = worker("call-taskless-dup", "read", "working");
+        taskless_dup["task_id"] = Value::Null;
+        taskless_dup["parent_attempt_id"] = "call-dup-parent".into();
+        let dup_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(vec![dup_a, dup_b, taskless_dup]),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let dup_related = array(&dup_snap["related_attempts"]);
+        assert_eq!(dup_related.len(), 2);
+        assert!(
+            dup_related
+                .iter()
+                .all(|row| row["attempt_id"] == "call-dup-parent")
+        );
+
+        let mut deep_chain = Vec::with_capacity(1002);
+        deep_chain.push(done.clone());
+        let mut prev_id = "call-done".to_owned();
+        for idx in 0..1000 {
+            let id = format!("call-deep-{idx}");
+            let mut node = worker(&id, "read", "done");
+            node["task_id"] = Value::Null;
+            node["parent_attempt_id"] = prev_id.into();
+            deep_chain.push(node);
+            prev_id = id;
+        }
+        let deep_snap = finalize_snapshot(
+            &repo.0,
+            &request,
+            &ClaimedTask(deep_chain.clone()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(array(&deep_snap["related_attempts"]).len(), 1001);
+        let mut deep_live = worker("call-deep-live", "read", "working");
+        deep_live["task_id"] = Value::Null;
+        deep_live["parent_attempt_id"] = prev_id.into();
+        deep_chain.push(deep_live);
+        refusal(
+            deep_chain,
+            "task has live or unconfirmed attempts (inherited taskless descendant attempt call-deep-live, lifecycle state working)"
+                .to_owned(),
+        );
         let mut foreign = worker("call-foreign", "write", "working");
         foreign["parent_attempt_id"] = "foreign-main".into();
         refusal(

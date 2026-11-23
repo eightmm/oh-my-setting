@@ -17,9 +17,10 @@ pub use approvals::{
     parse_scalar_map, public_approval,
 };
 pub use events::{
-    StartRequest, append_lifecycle, append_lifecycle_checked, attempt_spec_from_created,
-    attempt_spec_path, create_attempt, effective_run_id, existing_idempotent, lifecycle_semantics,
-    load_projection, new_event, project_attempts, validate_event_row,
+    StartRequest, append_lifecycle, append_lifecycle_checked,
+    append_lifecycle_checked_with_projection, attempt_spec_from_created, attempt_spec_path,
+    create_attempt, effective_run_id, existing_idempotent, lifecycle_semantics, load_projection,
+    new_event, project_attempts, validate_event_row,
 };
 pub use incremental::EventsProjectionCache;
 use std::io::Read;
