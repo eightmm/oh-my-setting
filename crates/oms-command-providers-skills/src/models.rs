@@ -1,5 +1,8 @@
 use crate::common::*;
-use oms_command_agent_role::native_model::{agy_catalog_selector, fixed_effort_model};
+use crate::model_probe;
+use oms_command_agent_role::native_model::{
+    agy_catalog_selector, fixed_effort_model, supports_exact_model_override,
+};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -153,14 +156,6 @@ fn family(provider: &str) -> &str {
         "muse" => "meta",
         "kimi" => "moonshot",
         _ => "unknown",
-    }
-}
-fn mechanism(provider: &str) -> &str {
-    match provider {
-        "codex" => "config",
-        "claude" | "antigravity" | "grok" | "pi" | "copilot" | "droid" | "aider" | "muse"
-        | "kiro" | "cline" | "kilo" => "flag",
-        _ => "none",
     }
 }
 fn age(path: &std::path::Path) -> Option<u64> {
@@ -323,36 +318,24 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
         let mut version = None;
         let mut reachable = false;
         if (refresh || doctor) && present {
-            let version_args = if provider == "grok" {
-                vec!["--no-auto-update", "version"]
-            } else {
-                vec!["--version"]
-            };
-            let output = ctx.command(&bin, &version_args, 10)?;
+            let output = ctx.command(&bin, model_probe::version_args(&provider), 10)?;
             version = String::from_utf8_lossy(&output.out)
                 .lines()
                 .next()
                 .map(str::to_owned);
-            let help_args = match provider.as_str() {
-                "codex" | "muse" => vec!["exec", "--help"],
-                "kiro" => vec!["chat", "--help"],
-                "goose" | "kilo" => vec!["run", "--help"],
-                "grok" => vec!["--no-auto-update", "--help"],
-                _ => vec!["--help"],
-            };
-            let help = ctx.command(&bin, &help_args, 10)?;
-            reachable = help.code == 0;
-            usable = Some(output.code == 0 && reachable);
+            let help = ctx.command(&bin, model_probe::help_args(&provider), 10)?;
+            let evidence = model_probe::inspect(&provider, output.code, help.code, &help.out);
+            reachable = evidence.reachable;
+            usable = Some(evidence.usable());
             if usable == Some(true) {
                 let _guard = lock(&env_file)?;
-                fields.insert("effort_mechanism".into(), mechanism(&provider).into());
-                fields.insert(
-                    "probed_at".into(),
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                        .to_string(),
+                fields.extend(
+                    evidence.cache_fields(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    ),
                 );
                 if refresh {
                     let listed = if provider == "codex" {
@@ -427,10 +410,7 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
                         }
                     }
                 }
-                let bytes = fields
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}\n"))
-                    .collect::<String>();
+                let bytes = model_probe::cache_text(&fields);
                 write_locked(&env_file, bytes.as_bytes(), false, None)?;
             }
         } else if refresh || doctor {
@@ -534,7 +514,7 @@ pub(crate) fn run(raw: &[OsString], doctor: bool, ctx: &Context<'_>) -> Result<O
             }
             rows.push(json!({"provider":provider,"binary":bin,"installed":present,"usable":usable.unwrap_or(false),"version":version,"provider_default_reachable":reachable,"family":family(&provider),"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"configured_default":configured,"configured_default_routable":configured_standing,"routable":routable}));
         } else {
-            rows.push(json!({"provider":provider,"binary":bin,"present":present,"usable":usable,"exact_model_override":true,"catalog_models":catalog,"models":models,"routable":routable,"not_routed":not_routed,"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"model_effort_scales":scales,"catalog_probe":if ["codex","antigravity","opencode"].contains(&provider.as_str()){fields.get("models_probe").map(String::as_str).unwrap_or("unknown")}else{"unsupported"},"snapshot_age_seconds":snapshot_age,"catalog_age_seconds":age(&models_file)}));
+            rows.push(json!({"provider":provider,"binary":bin,"present":present,"usable":usable,"exact_model_override":supports_exact_model_override(&provider),"catalog_models":catalog,"models":models,"routable":routable,"not_routed":not_routed,"effort_mechanism":fields.get("effort_mechanism"),"effort_values":efforts,"model_effort_scales":scales,"catalog_probe":if ["codex","antigravity","opencode"].contains(&provider.as_str()){fields.get("models_probe").map(String::as_str).unwrap_or("unknown")}else{"unsupported"},"snapshot_age_seconds":snapshot_age,"catalog_age_seconds":age(&models_file)}));
         }
         text.push_str(&format!(
             "## {provider} ({})\nmodels: {}\neffort: {} {}\n",
