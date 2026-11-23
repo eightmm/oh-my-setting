@@ -2703,6 +2703,15 @@ impl oms_command_task::Services for ControlTask<'_> {
             ))
         }
     }
+    fn failure_candidates(
+        &mut self,
+        repo: &Path,
+        active_task_id: &[u8],
+        command: &[u8],
+    ) -> oms_command_task::Result<Vec<String>> {
+        oms_command_state::task_failure_candidates(repo, active_task_id, command, self.interrupted)
+            .map_err(|error| task_error(error.to_string()))
+    }
     fn observe_failure(
         &mut self,
         request: FailureObservation<'_>,
@@ -2710,9 +2719,15 @@ impl oms_command_task::Services for ControlTask<'_> {
         let command = OsString::from_vec(request.command.to_vec());
         let mut args: Vec<OsString> = vec!["--repo".into(), request.repo.as_os_str().to_owned()];
         if request.exit == 0 {
-            // A passing gate clears its own row; the shell ignored this result.
+            // The ledger records the accepted rerun and clears the aggregate
+            // only when its exact evidence covers every currently open row.
             args.extend(["resolve".into(), "--cmd".into(), command]);
-            let _ = oms_command_state::run("fail-ledger", &args, request.repo, self.interrupted);
+            let _ = oms_command_state::observe_task_verification(
+                &args,
+                request.repo,
+                self.interrupted,
+                request.verification,
+            );
             return Ok(Vec::new());
         }
         args.extend([
@@ -2728,8 +2743,12 @@ impl oms_command_task::Services for ControlTask<'_> {
             args.push("--summary".into());
             args.push(OsString::from_vec(request.summary.to_vec()));
         }
-        let (code, stdout, stderr) =
-            oms_command_state::run("fail-ledger", &args, request.repo, self.interrupted);
+        let (code, stdout, stderr) = oms_command_state::observe_task_verification(
+            &args,
+            request.repo,
+            self.interrupted,
+            request.verification,
+        );
         if code != 0 {
             return Err(task_error("fail-ledger did not record the failure"));
         }
@@ -5086,6 +5105,7 @@ done
                     command: b"make check",
                     exit,
                     summary: b"FAIL one",
+                    verification: None,
                 },
             )
         };
@@ -5126,6 +5146,268 @@ done
         )
         .unwrap();
         assert!(observed.lines.starts_with(b"env: "));
+
+        // Same command, different tasks and a failure appended after selection:
+        // only failures observed for this exact task before rerun may be linked.
+        let command = "if test -f .oms/late-failure.json; then cat .oms/late-failure.json >> .oms/failures.jsonl; fi; test -f proof-ready";
+        let call = |task: &mut ControlTask<'_>, args: &[&str]| {
+            oms_command_task::run_with_services(&osv(args), repo.path(), &stop, task)
+        };
+        let (code, _, err) = call(
+            &mut task,
+            &[
+                "init",
+                "--goal",
+                "exact recovery fixture",
+                "--verify",
+                command,
+            ],
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let packet_path = repo.path().join(".oms/task/current.md");
+        let packet_a = std::fs::read(&packet_path).unwrap();
+        let task_a = oms_command_task::packet::metadata(&packet_a, "task_id")
+            .unwrap()
+            .to_vec();
+        let ledger_path = repo.path().join(".oms/failures.jsonl");
+        let rows = || {
+            std::fs::read_to_string(&ledger_path)
+                .unwrap()
+                .lines()
+                .map(|line| oms_command_plan::json::parse(line.as_bytes()).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let digest =
+            |row: &oms_command_plan::json::Value| oms_command_plan::json::hash(row).unwrap();
+        let verify = |task: &mut ControlTask<'_>, expected: i32| {
+            let (code, _, err) = call(task, &["verify"]);
+            assert_eq!(code, expected, "{}", String::from_utf8_lossy(&err));
+        };
+        verify(&mut task, 1);
+        let failure_a = rows().pop().unwrap();
+        assert_eq!(failure_a.get("verification").text("result"), "failed");
+        assert_eq!(
+            failure_a
+                .get("verification")
+                .text("active_task_id")
+                .as_bytes(),
+            task_a
+        );
+        assert_eq!(
+            failure_a
+                .get("verification")
+                .get("prior_failures")
+                .array()
+                .unwrap()
+                .len(),
+            0
+        );
+
+        std::fs::write(
+            &packet_path,
+            oms_command_task::packet::set_metadata(&packet_a, "task_id", b"task-other"),
+        )
+        .unwrap();
+        verify(&mut task, 1);
+        let failure_b = rows().pop().unwrap();
+        std::fs::write(&packet_path, &packet_a).unwrap();
+        let before_late = std::fs::read(&ledger_path).unwrap();
+        verify(&mut task, 1);
+        let late_failure = rows().pop().unwrap();
+        // Replay a genuine producer record at the deterministic execution seam.
+        std::fs::write(&ledger_path, before_late).unwrap();
+        std::fs::write(
+            repo.path().join(".oms/late-failure.json"),
+            oms_command_plan::json::encoded(&late_failure).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("proof-ready"), "ready\n").unwrap();
+        verify(&mut task, 0);
+        let resolved = rows().pop().unwrap();
+        assert_eq!(
+            resolved.text("event"),
+            "verified",
+            "other and late failures stay open"
+        );
+        let evidence = resolved.get("verification");
+        assert_eq!(evidence.text("result"), "accepted");
+        assert_eq!(evidence.text("active_task_id").as_bytes(), task_a);
+        assert_eq!(
+            evidence.text("command_sha256"),
+            oms_command_task::command_hash(command.as_bytes())
+        );
+        assert_eq!(
+            evidence.text("outcome_sha256"),
+            oms_command_plan::json::sha(std::fs::read(&packet_path).unwrap())
+        );
+        assert_eq!(
+            evidence.text("verified_state").as_bytes(),
+            oms_command_task::packet::metadata(
+                &std::fs::read(&packet_path).unwrap(),
+                "verified_state"
+            )
+            .unwrap()
+        );
+        let prior = evidence.get("prior_failures").array().unwrap();
+        assert_eq!(prior, &[oms_command_plan::json::string(digest(&failure_a))]);
+        assert!(!prior.contains(&oms_command_plan::json::string(digest(&failure_b))));
+        assert!(!prior.contains(&oms_command_plan::json::string(digest(&late_failure))));
+        assert_eq!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop
+            )
+            .unwrap(),
+            [digest(&late_failure)]
+        );
+        assert_eq!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                b"task-other",
+                command.as_bytes(),
+                &stop
+            )
+            .unwrap(),
+            [digest(&failure_b)]
+        );
+        // The exact IDs are native packet reference operations in the lifecycle
+        // ledger, not guessed worker/Lead attempt IDs or time-window matches.
+        let lifecycle =
+            std::fs::read_to_string(repo.path().join(".oms/lifecycle/events.jsonl")).unwrap();
+        for key in ["snapshot_attempt_id", "outcome_attempt_id"] {
+            assert!(!evidence.text(key).is_empty());
+            assert!(lifecycle.lines().any(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["attempt_id"].as_str()
+                    == Some(evidence.text(key))
+            }));
+        }
+        let (code, out, err) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&[
+                "show",
+                "--fingerprint",
+                resolved.text("fingerprint"),
+                "--json",
+            ]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let shown: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(shown["failure"]["resolved"], false);
+        assert_eq!(shown["failure"]["failure_sha256"], digest(&late_failure));
+        assert_eq!(
+            shown["failure"]["resolution_verification"]["prior_failures"][0],
+            digest(&failure_a)
+        );
+        let (code, _, _) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&["check", "--cmd", command, "--ignore-state"]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(
+            code, 3,
+            "partial accepted evidence must not clear retry guards"
+        );
+        let (code, out, err) = oms_command_memory::run_with_source(
+            &osv(&["search", "--text", "proof-ready", "--json"]),
+            repo.path(),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let entries = String::from_utf8(out).unwrap();
+        assert!(!entries.is_empty());
+        for line in entries.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(row["kind"], "failure", "{line}");
+        }
+        let (code, out, err) = oms_command_memory::run_with_source(
+            &osv(&["health", "--json"]),
+            repo.path(),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let health: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(health["failures"]["open_fingerprints"], 1);
+
+        // Later exact passes can accumulate safely; the fingerprint closes
+        // only after every open failure has its own accepted task/command link.
+        std::fs::remove_file(repo.path().join(".oms/late-failure.json")).unwrap();
+        verify(&mut task, 0);
+        assert_eq!(rows().pop().unwrap().text("event"), "verified");
+        std::fs::write(
+            &packet_path,
+            oms_command_task::packet::set_metadata(&packet_a, "task_id", b"task-other"),
+        )
+        .unwrap();
+        verify(&mut task, 0);
+        assert_eq!(rows().pop().unwrap().text("event"), "resolved");
+        let (code, _, _) = oms_command_state::run(
+            "fail-ledger",
+            &osv(&["check", "--cmd", command, "--ignore-state"]),
+            repo.path(),
+            &stop,
+        );
+        assert_eq!(code, 0);
+        std::fs::write(&packet_path, &packet_a).unwrap();
+
+        // Missing/invalid/over-bound evidence stays unknown; no empty success.
+        let accepted_ledger = std::fs::read(&ledger_path).unwrap();
+        std::fs::write(
+            &ledger_path,
+            [accepted_ledger.as_slice(), b"torn-row\n"].concat(),
+        )
+        .unwrap();
+        assert!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop
+            )
+            .is_err()
+        );
+        verify(&mut task, 0);
+        let last = std::fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned();
+        let last = oms_command_plan::json::parse(last.as_bytes()).unwrap();
+        assert_eq!(last.text("event"), "verified");
+        assert!(matches!(
+            last.get("verification").get("prior_failures"),
+            oms_command_plan::json::Value::Null
+        ));
+        let mut bounded = Vec::new();
+        for index in 0..129 {
+            let mut row = failure_a.clone();
+            let mut identity = row.get("verification").clone();
+            identity
+                .set(
+                    "outcome_attempt_id",
+                    oms_command_plan::json::string(format!("fixture-outcome-{index}")),
+                )
+                .unwrap();
+            row.set("verification", identity).unwrap();
+            bounded.extend(oms_command_plan::json::encoded(&row).unwrap());
+        }
+        std::fs::write(&ledger_path, bounded).unwrap();
+        assert!(
+            oms_command_state::task_failure_candidates(
+                repo.path(),
+                &task_a,
+                command.as_bytes(),
+                &stop
+            )
+            .is_err()
+        );
     }
 
     #[test]

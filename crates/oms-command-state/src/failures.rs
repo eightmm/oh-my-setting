@@ -3,11 +3,15 @@ use crate::{
     Context, Options, Output, Result, Value, epoch, error, json, json_output, parse_timestamp,
     require, storage, success, timestamp,
 };
+use oms_command_task::services::VerificationEvidence;
 use regex::Regex;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 const STORE: &str = ".oms/failures.jsonl";
+const MAX_PRIOR_FAILURES: usize = 128;
 pub(crate) const HELP: &str = "Usage: oms fail-ledger [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT] [--next TEXT]\n       oms fail-ledger [--repo PATH] check --cmd CMD [--ignore-state]\n       oms fail-ledger [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]\n       oms fail-ledger [--repo PATH] list [--unresolved] [--json] [--limit N]\n       oms fail-ledger [--repo PATH] list --stalls [--json]\n       oms fail-ledger [--repo PATH] show --fingerprint FP [--json]\n\nAppend-only failure memory; unchanged retries exit 3. Hook failures expire on\nread after OMS_HOOK_FAIL_TTL (default 86400s). Reads count invalid rows.\n";
 
 pub fn fingerprint(command: &str) -> String {
@@ -16,6 +20,231 @@ pub fn fingerprint(command: &str) -> String {
         .expect("static expression")
         .replace_all(&normalized, "N");
     json::sha(normalized.as_bytes())[..16].into()
+}
+
+fn ledger_path(ctx: &Context<'_>, state: &Path) -> PathBuf {
+    std::env::var_os("OMS_FAIL_LEDGER")
+        .filter(|p| !p.is_empty())
+        .map(|p| crate::helpers::absolute(&ctx.cwd, p))
+        .unwrap_or_else(|| state.join(STORE))
+}
+
+fn verification(row: &Value) -> Option<&Value> {
+    let evidence = row.opt("verification")?;
+    let digest =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let attempt = |key: &str| {
+        let value = evidence.text(key);
+        !value.is_empty()
+            && value.len() <= 160
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+    };
+    (evidence.text("scope") == "agent-task-reference-v1"
+        && evidence.text("action") == "verification-rerun"
+        && !evidence.text("active_task_id").is_empty()
+        && ["snapshot_attempt_id", "outcome_attempt_id"]
+            .iter()
+            .all(|key| attempt(key))
+        && ["snapshot_sha256", "outcome_sha256", "command_sha256"]
+            .iter()
+            .all(|key| digest(evidence.text(key)))
+        && (matches!(evidence.get("prior_failures"), Value::Null)
+            || evidence.get("prior_failures").array().is_ok_and(|keys| {
+                keys.len() <= MAX_PRIOR_FAILURES
+                    && keys.iter().all(|key| key.str().is_ok_and(digest))
+            }))
+        && ((evidence.text("result") == "failed" && row.text("event") == "fail")
+            || (evidence.text("result") == "accepted"
+                && matches!(row.text("event"), "resolved" | "verified")
+                && !evidence.text("verified_state").is_empty())))
+    .then_some(evidence)
+}
+
+fn complete_row(row: &Value) -> bool {
+    valid_row(row) && (row.opt("verification").is_none() || verification(row).is_some())
+}
+
+/// Exact native failure identities known before a verification rerun. Legacy
+/// command-level resolutions remain separate from receipt-backed correlation.
+pub fn task_failure_candidates(
+    repo: &Path,
+    active_task_id: &[u8],
+    command: &[u8],
+    interrupted: &AtomicBool,
+) -> Result<Vec<String>> {
+    crate::checkpoint(interrupted)?;
+    let ctx = Context::new(repo, interrupted)?;
+    let (rows, bad) = storage::rows(&ctx.repo, &ledger_path(&ctx, &ctx.repo))?;
+    require(
+        bad == 0 && rows.iter().all(complete_row),
+        "failure source is incomplete",
+    )?;
+    let command_sha256 = oms_command_task::command_hash(command);
+    let mut candidates = BTreeSet::new();
+    for row in &rows {
+        let Some(evidence) = verification(row) else {
+            continue;
+        };
+        if evidence.text("active_task_id").as_bytes() != active_task_id
+            || evidence.text("command_sha256") != command_sha256
+        {
+            continue;
+        }
+        if row.text("event") == "fail" && evidence.text("result") == "failed" {
+            candidates.insert(json::hash(row)?);
+        } else if matches!(row.text("event"), "resolved" | "verified")
+            && evidence.text("result") == "accepted"
+            && let Ok(prior) = evidence.get("prior_failures").array()
+        {
+            for key in prior {
+                candidates.remove(key.str().unwrap_or(""));
+            }
+        }
+    }
+    require(
+        candidates.len() <= MAX_PRIOR_FAILURES,
+        "failure correlation selection exceeds bound",
+    )?;
+    Ok(candidates.into_iter().collect())
+}
+
+/// The native observer uses the same parser, lock and append owner as the CLI.
+/// There is deliberately no CLI flag for supplying accepted receipt evidence.
+pub fn observe_task_verification(
+    args: &[OsString],
+    repo: &Path,
+    interrupted: &AtomicBool,
+    evidence: Option<&VerificationEvidence>,
+) -> Output {
+    let result = (|| {
+        crate::checkpoint(interrupted)?;
+        run_observed(args, &Context::new(repo, interrupted)?, evidence)
+    })();
+    result.unwrap_or_else(|e| (e.code, vec![], format!("error: {e}\n").into_bytes()))
+}
+
+fn observed_evidence(
+    evidence: &VerificationEvidence,
+    rows: &[Value],
+    bad: usize,
+) -> Result<Option<Value>> {
+    let (Some(snapshot), Some(outcome), Ok(task_id)) = (
+        evidence.snapshot_attempt_id(),
+        evidence.outcome_attempt_id(),
+        std::str::from_utf8(evidence.active_task_id()),
+    ) else {
+        return Ok(None);
+    };
+    let complete = bad == 0 && rows.iter().all(complete_row);
+    let mut known = BTreeSet::new();
+    if complete
+        && evidence
+            .prior_failures()
+            .is_some_and(|prior| !prior.is_empty())
+    {
+        for row in rows {
+            if row.text("event") == "fail"
+                && verification(row).is_some_and(|v| {
+                    v.text("result") == "failed"
+                        && v.text("active_task_id") == task_id
+                        && v.text("command_sha256") == evidence.command_sha256()
+                })
+            {
+                known.insert(json::hash(row)?);
+            }
+        }
+    }
+    let prior = evidence.prior_failures().filter(|prior| {
+        complete && prior.len() <= MAX_PRIOR_FAILURES && prior.iter().all(|key| known.contains(key))
+    });
+    let mut value = object([
+        ("scope", string("agent-task-reference-v1")),
+        ("active_task_id", string(task_id)),
+        ("action", string("verification-rerun")),
+        ("snapshot_attempt_id", string(snapshot)),
+        ("snapshot_sha256", string(evidence.snapshot_sha256())),
+        ("outcome_attempt_id", string(outcome)),
+        ("outcome_sha256", string(evidence.outcome_sha256())),
+        ("command_sha256", string(evidence.command_sha256())),
+        (
+            "result",
+            string(if evidence.verified_state().is_some() {
+                "accepted"
+            } else {
+                "failed"
+            }),
+        ),
+        (
+            "prior_failures",
+            prior.map_or(Value::Null, |prior| {
+                Value::Array(prior.iter().map(string).collect())
+            }),
+        ),
+    ]);
+    if let Some(state) = evidence.verified_state() {
+        value.set("verified_state", string(state))?;
+    }
+    require(
+        oms_scrub::scan_secret(&json::canonical(&value)?, &[])
+            .map_err(|e| error(3, format!("{e:?}")))?
+            .is_empty(),
+        "verification identity looks sensitive",
+    )?;
+    Ok(Some(value))
+}
+
+/// A native pass may clear the command aggregate only when every currently
+/// open row has exact accepted evidence. Partial passes remain observations;
+/// a manual/legacy resolve retains its established fingerprint-wide meaning.
+fn covers_fingerprint(
+    rows: &[Value],
+    bad: usize,
+    fingerprint: &str,
+    current: &Value,
+) -> Result<bool> {
+    if bad != 0 || !rows.iter().all(complete_row) || current.get("prior_failures").array().is_err()
+    {
+        return Ok(false);
+    }
+    let mut pending = BTreeMap::new();
+    let remove = |pending: &mut BTreeMap<String, &Value>, evidence: &Value| {
+        if let Ok(prior) = evidence.get("prior_failures").array() {
+            for key in prior {
+                let key = key.str().unwrap_or("");
+                if pending
+                    .get(key)
+                    .and_then(|row| verification(row))
+                    .is_some_and(|failure| {
+                        failure.text("active_task_id") == evidence.text("active_task_id")
+                            && failure.text("command_sha256") == evidence.text("command_sha256")
+                    })
+                {
+                    pending.remove(key);
+                }
+            }
+        }
+    };
+    for row in rows
+        .iter()
+        .filter(|row| row.text("fingerprint") == fingerprint)
+    {
+        match row.text("event") {
+            "fail" => {
+                pending.insert(json::hash(row)?, row);
+            }
+            "resolved" => pending.clear(),
+            "verified" => {
+                if let Some(evidence) = verification(row) {
+                    remove(&mut pending, evidence);
+                }
+            }
+            _ => {}
+        }
+    }
+    remove(&mut pending, current);
+    Ok(pending.is_empty())
 }
 
 fn normalize(value: &str) -> String {
@@ -47,9 +276,12 @@ pub fn valid_row(row: &Value) -> bool {
         .int()
         .unwrap_or(0);
     if ![1, 2].contains(&schema)
-        || !["fail", "resolved"].contains(&row.text("event"))
+        || !["fail", "resolved", "verified"].contains(&row.text("event"))
         || row.text("fingerprint").trim().is_empty()
     {
+        return false;
+    }
+    if row.text("event") == "verified" && (schema != 2 || verification(row).is_none()) {
         return false;
     }
     for key in [
@@ -85,7 +317,7 @@ pub fn valid_row(row: &Value) -> bool {
     schema == 1
         || (!row.text("ts").trim().is_empty()
             && !row.text("agent").trim().is_empty()
-            && (row.text("event") == "resolved"
+            && (matches!(row.text("event"), "resolved" | "verified")
                 || (!row.text("kind").trim().is_empty()
                     && !row.text("cmd").trim().is_empty()
                     && row.get("exit").int().is_ok_and(|n| n >= 0))))
@@ -98,6 +330,7 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
         expired: usize,
         resolved: bool,
         how: Value,
+        resolution_verification: Value,
         heads: BTreeSet<String>,
         last_expired: Value,
     }
@@ -120,6 +353,7 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
                         expired: 0,
                         resolved: false,
                         how: Value::Null,
+                        resolution_verification: Value::Null,
                         heads: BTreeSet::new(),
                         last_expired: Value::Null,
                     },
@@ -128,16 +362,22 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
             }
         };
         let entry = &mut found[index].1;
+        if row.text("event") == "verified" {
+            entry.resolution_verification = verification(row).cloned().unwrap_or(Value::Null);
+            continue;
+        }
         if row.text("event") == "resolved" {
             entry.count = 0;
             entry.expired = 0;
             entry.resolved = true;
             entry.how = row.get("how").clone();
+            entry.resolution_verification = verification(row).cloned().unwrap_or(Value::Null);
             entry.heads.clear();
             entry.last_expired = Value::Null;
         } else {
             entry.resolved = false;
             entry.how = Value::Null;
+            entry.resolution_verification = Value::Null;
             if hook_expired(row, now, ttl()) {
                 entry.expired += 1;
                 entry.last_expired = row.clone();
@@ -191,6 +431,13 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
         for key in ["exit", "ts", "kind", "cmd", "summary", "failure_code"] {
             row.set(key, last.get(key).clone())?;
         }
+        if let Some(evidence) = verification(last) {
+            row.set("failure_sha256", string(json::hash(last)?))?;
+            row.set("verification", evidence.clone())?;
+        }
+        if !matches!(entry.resolution_verification, Value::Null) {
+            row.set("resolution_verification", entry.resolution_verification)?;
+        }
         if entry.expired > 0 {
             row.set("expired_count", number(entry.expired))?;
         }
@@ -210,6 +457,15 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
 }
 
 pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
+    run_observed(args, ctx, None)
+}
+
+fn run_observed(
+    args: &[OsString],
+    ctx: &Context<'_>,
+    evidence: Option<&VerificationEvidence>,
+) -> Result<Output> {
+    let native_observation = evidence.is_some();
     let opts = Options::parse(
         args,
         &[
@@ -259,10 +515,7 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     } else {
         &repo
     };
-    let path = std::env::var_os("OMS_FAIL_LEDGER")
-        .filter(|p| !p.is_empty())
-        .map(|p| crate::helpers::absolute(&ctx.cwd, p))
-        .unwrap_or_else(|| state.join(STORE));
+    let path = ledger_path(ctx, state);
     let cmd = normalize(opts.get("cmd"));
     let fp = if opts.get("fingerprint").is_empty() {
         fingerprint(&cmd)
@@ -275,6 +528,17 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         None
     };
     let (rows, bad) = storage::rows(state, &path)?;
+    if let Some(evidence) = evidence {
+        require(
+            oms_command_task::command_hash(opts.get("cmd").as_bytes()) == evidence.command_sha256()
+                && ((action == "resolve") == evidence.verified_state().is_some()),
+            "verification evidence does not match this observation",
+        )?;
+    }
+    let evidence = evidence
+        .map(|evidence| observed_evidence(evidence, &rows, bad))
+        .transpose()?
+        .flatten();
     let now = epoch();
     let head = oms_command_operations::storage::git_head(&repo);
     let mut report = project(&rows, bad, &head, now)?;
@@ -343,6 +607,9 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         if !next.is_empty() {
             row.set("next", string(next))?;
         }
+        if let Some(evidence) = evidence {
+            row.set("verification", evidence)?;
+        }
         storage::append_locked(state, &path, &row)?;
         return Ok((
             0,
@@ -366,19 +633,34 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         {
             return Err(error(3, "--how looks sensitive"));
         }
-        let row = object([
+        let resolves = if native_observation {
+            let evidence = evidence.as_ref().ok_or_else(|| {
+                error(
+                    2,
+                    "native verification identity unavailable; fingerprint was not resolved",
+                )
+            })?;
+            covers_fingerprint(&rows, bad, &fp, evidence)?
+        } else {
+            true
+        };
+        let event = if resolves { "resolved" } else { "verified" };
+        let mut row = object([
             ("schema", number(2)),
-            ("event", string("resolved")),
+            ("event", string(event)),
             ("ts", string(timestamp(now)?)),
             ("agent", string("agent")),
             ("fingerprint", string(&fp)),
             ("how", string(how)),
         ]);
+        if let Some(evidence) = evidence {
+            row.set("verification", evidence)?;
+        }
         storage::append_locked(state, &path, &row)?;
         return Ok((
             0,
             Vec::new(),
-            format!("fail-ledger: resolved {fp}\n").into_bytes(),
+            format!("fail-ledger: {event} {fp}\n").into_bytes(),
         ));
     }
     if action == "check" {

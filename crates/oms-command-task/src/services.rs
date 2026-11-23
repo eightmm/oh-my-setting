@@ -10,6 +10,11 @@ use std::{
 /// ownership. Drop must stop its owned monitor, leaving uncertain operations
 /// unresolved. `finish` must preserve an already terminal no-write refusal.
 pub trait ReferenceOperation {
+    /// Actual native reference-operation attempt, when the owner has one.
+    /// This is not an inferred worker, Lead, or environment-supplied attempt.
+    fn attempt_id(&self) -> Option<&str> {
+        None
+    }
     /// Called under the canonical packet lock, before publication. Validate old
     /// AND proposed bytes plus all arguments against live managed references;
     /// preserve landing-capture ownership/index checks and namespace guards.
@@ -70,6 +75,50 @@ pub struct FailureObservation<'a> {
     pub command: &'a [u8],
     pub exit: i32,
     pub summary: &'a [u8],
+    pub verification: Option<&'a VerificationEvidence>,
+}
+
+/// Bytes and native reference identities actually published by this verify.
+/// Only the task producer constructs this evidence, after publication and its
+/// reference finish succeed. An accepted historical receipt is not authority
+/// for a later tree, environment, task or memory promotion.
+pub struct VerificationEvidence {
+    pub(crate) active_task_id: Vec<u8>,
+    pub(crate) snapshot_attempt_id: Option<String>,
+    pub(crate) snapshot_sha256: String,
+    pub(crate) outcome_attempt_id: Option<String>,
+    pub(crate) outcome_sha256: String,
+    pub(crate) command_sha256: String,
+    pub(crate) verified_state: Option<String>,
+    pub(crate) prior_failures: Option<Vec<String>>,
+}
+impl VerificationEvidence {
+    pub fn active_task_id(&self) -> &[u8] {
+        &self.active_task_id
+    }
+    pub fn snapshot_attempt_id(&self) -> Option<&str> {
+        self.snapshot_attempt_id.as_deref()
+    }
+    pub fn snapshot_sha256(&self) -> &str {
+        &self.snapshot_sha256
+    }
+    pub fn outcome_attempt_id(&self) -> Option<&str> {
+        self.outcome_attempt_id.as_deref()
+    }
+    pub fn outcome_sha256(&self) -> &str {
+        &self.outcome_sha256
+    }
+    pub fn command_sha256(&self) -> &str {
+        &self.command_sha256
+    }
+    pub fn verified_state(&self) -> Option<&str> {
+        self.verified_state.as_deref()
+    }
+    /// Exact failure row hashes observed before this command ran. `None`
+    /// means the source was unavailable, invalid or over its selection bound.
+    pub fn prior_failures(&self) -> Option<&[String]> {
+        self.prior_failures.as_deref()
+    }
 }
 #[derive(Default)]
 pub struct VerifyObservation {
@@ -93,7 +142,18 @@ pub trait Services {
     fn observe_journal(&mut self, request: JournalObservation<'_>) -> Result<()>;
     /// Wire to oms-command-memory's project append API, not a second writer.
     fn promote_memory(&mut self, request: MemoryOutcome<'_>) -> Result<()>;
-    /// Record a failing verify or resolve this exact command after a pass.
+    /// Snapshot task/command-scoped failure identities before running verify;
+    /// unknown is not an empty set, and timing never establishes causality.
+    fn failure_candidates(
+        &mut self,
+        _repo: &Path,
+        _active_task_id: &[u8],
+        _command: &[u8],
+    ) -> Result<Vec<String>> {
+        Err(Error::service("failure correlation"))
+    }
+    /// Record a failure or an accepted rerun. The ledger owns the distinction
+    /// between exact recovery evidence and command-wide aggregate resolution.
     /// Return only advisory text intended for stderr (e.g. `oms advise`).
     fn observe_failure(&mut self, request: FailureObservation<'_>) -> Result<Vec<u8>>;
     /// Advisory native verify_observe equivalent; errors drop advisory lines.

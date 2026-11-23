@@ -942,6 +942,9 @@ impl Drop for OwnedReference {
     }
 }
 impl oms_command_task::services::ReferenceOperation for OwnedReference {
+    fn attempt_id(&self) -> Option<&str> {
+        Some(self.attempt())
+    }
     fn validate(
         &mut self,
         request: &oms_command_task::services::ReferenceWrite<'_>,

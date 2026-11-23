@@ -364,6 +364,45 @@ fn lifecycle_and_failure_limits_and_empty_ledger() {
                 .contains(&format!("\"rows_omitted\": {}", count.saturating_sub(50)))
         );
     }
+    // Exact native reference IDs are useful outside the time window; nearby
+    // unrelated or legacy records never acquire that correlation.
+    let digest = "a".repeat(64);
+    let exact = format!(
+        r#"{{"ts":"2026-01-02T00:00:00Z","event":"verified","fingerprint":"exact","verification":{{"scope":"agent-task-reference-v1","active_task_id":"task-one","action":"verification-rerun","snapshot_attempt_id":"snapshot-one","snapshot_sha256":"{digest}","outcome_attempt_id":"attempt1","outcome_sha256":"{digest}","command_sha256":"{digest}","result":"accepted","verified_state":"tree-one","prior_failures":["{digest}"]}}}}"#
+    );
+    let other = exact
+        .replace("2026-01-02T00:00:00Z", "2026-01-01T00:00:01Z")
+        .replace("\"exact\"", "\"other\"")
+        .replace("\"attempt1\"", "\"other-attempt\"");
+    let malformed = exact
+        .replace("\"snapshot-one\"", "null")
+        .replace("\"exact\"", "\"invalid\"");
+    let legacy = r#"{"ts":"2026-01-01T00:00:01Z","event":"fail","fingerprint":"legacy"}"#;
+    fs::write(
+        f.0.join(".oms/failures.jsonl"),
+        format!("{exact}\n{other}\n{malformed}\n{legacy}\n"),
+    )
+    .unwrap();
+    let (code, out, err) = f.call(&["--json"]);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let body = String::from_utf8(out).unwrap();
+    assert!(body.contains("\"fingerprint\": \"exact\""), "{body}");
+    assert!(body.contains("\"fingerprint\": \"other\""));
+    assert!(body.contains("\"fingerprint\": \"legacy\""));
+    assert!(!body.contains("\"fingerprint\": \"invalid\""));
+    assert_eq!(
+        body.matches("\"correlation\": \"native-reference-attempt\"")
+            .count(),
+        1
+    );
+    assert_eq!(
+        body.matches("\"correlation\": \"time-window-only\"")
+            .count(),
+        2
+    );
+    assert!(body.contains("neither proves a repair cause or current verification"));
+    assert!(body.contains("\"outcome_sha256\""));
+    assert!(body.contains("\"prior_failures\""));
     fs::write(f.0.join(".oms/lifecycle/events.jsonl"), "").unwrap();
     let (code, out, err) = f.call(&["--json"]);
     assert_eq!(code, 2);

@@ -186,6 +186,15 @@ consumer 계약 증거이며 semantic 모델 품질 개선의 증거는 아니�
 수정 뒤 테스트 통과는 그 검사 범위의 결과이며 유일한 root cause의 증명이 아니다.
 실패·미결·효과 없는 조치도 근거에 남기고, 결과가 연결되지 않은 성공 서술을 verified로 승격하지 않는다.
 
+**구현된 출처 경계:** native task verify는 같은 active task·정확한 command의 failure hash를
+실행 전에 선택하고, 실제 snapshot/outcome reference-operation attempt와 수락된 packet hash·
+verified state를 기존 fail-ledger에 함께 남긴다. 수락된 `prior_failures`만 해당 rerun과 연결되며,
+다른 task나 실행 중 추가된 failure를 시간 구간으로 붙이지 않는다. 여기서 action은 검증 재실행이다.
+미연결 failure가 남으면 accepted observation만 기록하고 command 전체를 resolved로 만들지 않는다.
+수정 원인이나 구체적 repair 절차의 효과를 추론하지 않는다. Legacy·결측·범위 초과 출처는
+불확실성을 유지하며, 이를 절차 후보로 만드는 작업과 DR-04의 review/supersede 책임은 별도다.
+필드와 호환성은 [component 계약](COMPONENTS.md#state-memory-and-handoff)에 정리한다.
+
 출력은 지식 메모리, 재사용 절차 후보, 관련 변경에 적용할 검증 방법으로 구분한다.
 Skill 후보는 기존 skill-forge/lifecycle 경로에서 다루며 배포되는 이름은 `oms-*`를 따른다.
 추출한 명령을 자동 실행하거나 AGENTS/CI/권한 정책을 자동 수정하지 않는다. 검증 방법은 어떤
