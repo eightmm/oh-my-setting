@@ -3,9 +3,9 @@ use crate::{
     receipt::Paths,
     runtime::{self as r, Result},
 };
-use oms_safe_fs::{ByteReadOptions, Root};
+use oms_safe_fs::{Policy, Root};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt, path::Path};
 
 const TRACE: &str = ".oms/hooks/codex-trace.jsonl";
 const TRACE_LIMIT: usize = 1024 * 1024;
@@ -173,6 +173,46 @@ fn trace_summary(raw: &[u8], expected: &Value) -> Value {
         "active_session":"unknown", "provider_loading":"unverified"})
 }
 
+fn read_trace(repo: &Path) -> Option<Vec<u8>> {
+    // This is a checkout sidecar, not an account registry. An ordinary shared
+    // ancestor such as sticky /tmp must not hide valid private local evidence.
+    // Keep the local directory/leaf policy and recheck it around the existing
+    // bounded, owned, single-link, no-follow repository reader.
+    let uid = rustix::process::getuid().as_raw();
+    let snapshot = || {
+        let metadata = [
+            fs::symlink_metadata(repo).ok()?,
+            fs::symlink_metadata(repo.join(".oms")).ok()?,
+            fs::symlink_metadata(repo.join(".oms/hooks")).ok()?,
+            fs::symlink_metadata(repo.join(TRACE)).ok()?,
+        ];
+        if metadata[..3].iter().any(|info| {
+            !info.is_dir() || ![0, uid].contains(&info.uid()) || info.mode() & 0o022 != 0
+        }) || !metadata[3].is_file()
+            || metadata[3].uid() != uid
+            || metadata[3].nlink() != 1
+            || metadata[3].mode() & 0o7077 != 0
+        {
+            return None;
+        }
+        Some(metadata.map(|info| {
+            (
+                info.dev(),
+                info.ino(),
+                info.uid(),
+                info.mode(),
+                info.nlink(),
+            )
+        }))
+    };
+    let before = snapshot()?;
+    let raw = Root::open(repo)
+        .ok()?
+        .read(TRACE, TRACE_LIMIT, Policy::manifest())
+        .ok()?;
+    (snapshot()? == before).then_some(raw)
+}
+
 fn trace(paths: &Paths, expected: &Value) -> Value {
     // Match the callback writer's command-checkout selection, including subdirectories.
     let repo = paths
@@ -191,16 +231,7 @@ fn trace(paths: &Paths, expected: &Value) -> Value {
     {
         return missing();
     }
-    let raw = Root::open_private_registry(repo).ok().and_then(|root| {
-        root.read_no_follow(
-            Path::new(TRACE),
-            ByteReadOptions {
-                missing_ok: false,
-                max_bytes: TRACE_LIMIT,
-            },
-        )
-        .ok()
-    });
+    let raw = read_trace(repo);
     match raw {
         Some(raw) => trace_summary(&raw, expected),
         None => json!({"status":"unavailable", "diagnosis":"trace_unavailable",

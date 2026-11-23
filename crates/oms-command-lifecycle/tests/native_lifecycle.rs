@@ -3098,7 +3098,12 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     fs::write(&trace, &raw).unwrap();
     fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
     let before = fs::metadata(&trace).unwrap();
+    // Match a normal CI /tmp ancestor even on hosts whose /tmp is private.
+    // The checkout and its diagnostic paths remain owned, without group/world write.
+    let parent_permissions = fs::metadata(root).unwrap().permissions();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o1777)).unwrap();
     let observed = diagnostic(&report());
+    fs::set_permissions(root, parent_permissions).unwrap();
     let after = fs::metadata(&trace).unwrap();
     assert_eq!(
         (before.ino(), before.mtime(), before.mtime_nsec()),
@@ -3123,6 +3128,23 @@ fn doctor_hook_evidence(source: &Path, root: &Path, host: &NativeServices, hooks
     let text = String::from_utf8(success(call("doctor", &["--surfaces"], source, host))).unwrap();
     assert!(text.contains("turn-guard handler_internal_failure=1"));
     assert!(text.contains("retained evidence cannot prove current account/session delivery"));
+    // Shared ancestors are allowed; unsafe local diagnostic storage is not.
+    fs::set_permissions(&trace, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::set_permissions(&trace, fs::Permissions::from_mode(0o600)).unwrap();
+    let hardlink = trace.with_extension("copy");
+    fs::hard_link(&trace, &hardlink).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::remove_file(hardlink).unwrap();
+    let hooks_directory = trace.parent().unwrap();
+    let hooks_permissions = fs::metadata(hooks_directory).unwrap().permissions();
+    fs::set_permissions(hooks_directory, fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::set_permissions(hooks_directory, hooks_permissions).unwrap();
+    let checkout_permissions = fs::metadata(source).unwrap().permissions();
+    fs::set_permissions(source, fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(diagnostic(&report())["trace"]["status"], "unavailable");
+    fs::set_permissions(source, checkout_permissions).unwrap();
     // A conflicting repeat and a truncated row cannot become clean success evidence.
     fs::write(&trace, format!("{raw}{}\n{{", rows[0])).unwrap();
     let invalid = diagnostic(&report());
