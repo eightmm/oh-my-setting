@@ -137,6 +137,8 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
                     .any(|v| v == &call["participant"]))
         {
             "decide"
+        } else if call["lifecycle_stale"] == true {
+            "stale"
         } else {
             continue;
         };
@@ -156,6 +158,7 @@ pub fn items(report: &Value, read: &BTreeMap<String, String>) -> Vec<Item> {
             "needs" if state == "waiting_approval" => "waiting for approval",
             "needs" if state == "waiting_input" => "waiting for input",
             "decide" => "awaiting decision",
+            "stale" => "no recent lifecycle events",
             "needs" => "blocked",
             other => other,
         };

@@ -402,8 +402,14 @@ fn uninstall_keeps_everything_when_a_link_is_foreign_or_changed() {
                 &serde_json::from_slice(&before[4]).unwrap(),
             );
             let claude_link = w.link("claude", "CLAUDE.md");
-            fs::remove_file(&claude_link).unwrap();
+            // Keep the original inode live: unlink/recreate can reuse its identity.
+            let retained_link = claude_link.with_file_name("CLAUDE.md.original");
+            fs::rename(&claude_link, &retained_link).unwrap();
             symlink(w.homes[2].1.join("CLAUDE.md"), &claude_link).unwrap();
+            let effects = get(&w.receipt("provider-account-effects.json"));
+            let recorded_identity = &effects["accounts"][0]["links"]["CLAUDE.md"]["identity"];
+            assert_eq!(&id_of(&retained_link), recorded_identity);
+            assert_ne!(&id_of(&claude_link), recorded_identity);
             let out = call("uninstall", &["--yes"], &w.source);
             assert_ne!(out.0, 0);
             assert!(
