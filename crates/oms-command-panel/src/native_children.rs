@@ -1837,6 +1837,14 @@ impl AgyParent {
             _ => None,
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn empty_roster_watch(&self) -> Option<Arc<crate::wakeup::AgyRosterWatch>> {
+        match self {
+            Self::Bounded(Some(roster)) => roster.watch.clone(),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) struct AgyRoster {
@@ -1846,6 +1854,8 @@ pub(crate) struct AgyRoster {
     directory: Stat,
     transcript: Stat,
     rows: Vec<Value>,
+    #[cfg(target_os = "linux")]
+    watch: Option<Arc<crate::wakeup::AgyRosterWatch>>,
 }
 
 fn agy_oversized(brain: &Path, file: &Path) -> bool {
@@ -2119,6 +2129,8 @@ fn agy(
         *parent = AgyParent::Unseen;
     }
 
+    let warm_legacy = cached_rows.is_some();
+    let mut small_custody = None;
     let rows = if let Some(rows) = cached_rows {
         rows
     } else if let Some(custody) = {
@@ -2132,7 +2144,7 @@ fn agy(
             || matches!(parent, AgyParent::Bounded(_))
             || agy_oversized(&brain, &file)
         {
-            if anchor.is_some() {
+            if anchor.is_some() || reuse_roster {
                 *parent = AgyParent::Bounded(None);
             }
             let cache = match parent {
@@ -2149,6 +2161,7 @@ fn agy(
             }
             note_legacy_parent_read(1);
             *parent = AgyParent::Legacy(file);
+            small_custody = Some(custody);
             rows
         }
     } else {
@@ -2197,7 +2210,29 @@ fn agy(
         rows
     };
 
-    Some(agy_roster_rows(&rows, &mut AgyWorkspaces::new(repo), None))
+    let roster = agy_roster_rows(&rows, &mut AgyWorkspaces::new(repo), None);
+    if reuse_roster
+        && roster.is_empty()
+        && let Some(custody) = small_custody.or_else(|| {
+            warm_legacy
+                .then(|| {
+                    note_legacy_custody_call(1);
+                    crate::agy_lead_custody::agy_lead_custody(pid, birth, repo)
+                })
+                .flatten()
+        })
+    {
+        // An empty anchored roster can wake only after the same strict
+        // descriptor and current-Turn proof as the bounded Board path.
+        let mut cache = None;
+        if let Some(verified) = agy_bounded_roster(&custody, anchor, Some(&mut cache), None) {
+            if cache.is_some() {
+                *parent = AgyParent::Bounded(cache);
+            }
+            return Some(verified);
+        }
+    }
+    Some(roster)
 }
 
 fn agy_bounded_roster(
@@ -2209,7 +2244,7 @@ fn agy_bounded_roster(
     let mut transcript = AgyTranscript::open(custody)?;
     let anchor_digest = anchor.map(|anchor| oms_panel_core::digest(anchor.as_bytes()));
     if let Some(cache) = cache.as_deref_mut()
-        && let Some(previous) = previous
+        && let Some(previous) = previous.as_ref()
         && previous.custody == *custody
         && previous.anchor_digest == anchor_digest
         && codex_same_identity(&previous.directory, &transcript.directory)
@@ -2220,7 +2255,7 @@ fn agy_bounded_roster(
         if !transcript.confirm(custody) {
             return None;
         }
-        *cache = Some(previous);
+        *cache = Some(previous.clone());
         return Some(rows);
     }
     let (rows, start) = transcript.rows(anchor, MAX_TRANSCRIPT)?;
@@ -2231,32 +2266,50 @@ fn agy_bounded_roster(
     };
     let mut workspaces = AgyWorkspaces::new(&custody.repo);
     let rows = agy_roster_rows(&rows, &mut workspaces, Some(scope));
+    let cache = cache.filter(|_| {
+        workspaces.verdicts.is_empty()
+            && rows.iter().all(|row| {
+                ["updated_at", "created_at", "started_at", "ended_at"]
+                    .into_iter()
+                    .all(|field| {
+                        row.get(field).is_none_or(|value| {
+                            value.as_str().is_some_and(|stamp| {
+                                stamp.is_empty()
+                                    || (stamp.len() <= 35
+                                        && chrono::DateTime::parse_from_rfc3339(stamp).is_ok())
+                            })
+                        })
+                    })
+            })
+    });
+    #[cfg(target_os = "linux")]
+    let watch = cache.as_ref().filter(|_| rows.is_empty()).and_then(|_| {
+        previous
+            .as_deref()
+            .filter(|previous| {
+                previous.custody == *custody
+                    && previous.anchor_digest == anchor_digest
+                    && codex_same_identity(&previous.directory, &transcript.directory)
+                    && codex_same_identity(&previous.transcript, &transcript.stat)
+            })
+            .and_then(|previous| previous.watch.as_ref())
+            .filter(|watch| watch.active())
+            .cloned()
+            .or_else(|| crate::wakeup::AgyRosterWatch::arm(&transcript.file))
+    });
     if !transcript.confirm(custody) {
         return None;
     }
     note_legacy_parent_read(1);
-    if let Some(cache) = cache
-        && workspaces.verdicts.is_empty()
-        && rows.iter().all(|row| {
-            ["updated_at", "created_at", "started_at", "ended_at"]
-                .into_iter()
-                .all(|field| {
-                    row.get(field).is_none_or(|value| {
-                        value.as_str().is_some_and(|stamp| {
-                            stamp.is_empty()
-                                || (stamp.len() <= 35
-                                    && chrono::DateTime::parse_from_rfc3339(stamp).is_ok())
-                        })
-                    })
-                })
-        })
-    {
+    if let Some(cache) = cache {
         *cache = Some(Arc::new(AgyRoster {
             custody: custody.clone(),
             anchor_digest,
             directory: transcript.directory,
             transcript: transcript.stat,
             rows: rows.clone(),
+            #[cfg(target_os = "linux")]
+            watch,
         }));
     }
     Some(rows)
@@ -6233,6 +6286,7 @@ mod tests {
             let AgyParent::Legacy(ref file) = cached else {
                 panic!("expected short parent in legacy cache");
             };
+            let legacy_file = file.clone();
             let transcript = PathBuf::from(std::env::var_os("HOME").unwrap())
                 .join(".gemini/antigravity-cli/brain")
                 .join(file);
@@ -6544,6 +6598,16 @@ mod tests {
                 println!(
                     "AGY parent body: {bounded_bytes} bytes cold, 0 bytes across 20 stable frames"
                 );
+                let short = root_rows[..2]
+                    .iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>();
+                std::fs::write(&transcript, short).unwrap();
+                let mut warm = AgyParent::Legacy(legacy_file);
+                assert!(sample(&terminal, &mut warm, false).is_empty());
+                assert!(matches!(warm, AgyParent::Legacy(_)));
+                assert!(sample(&terminal, &mut warm, true).is_empty());
+                assert!(warm.empty_roster_watch().is_some());
                 std::fs::write(&transcript, &long).unwrap();
             }
 
