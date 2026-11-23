@@ -767,11 +767,11 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
         );
     }
     refuse_managed_resume(&repo, &source, fork, context)?;
-    let binary = providers::binary_at(&source.provider, context.cwd);
+    let binary = providers::launch_binary_at(&source.provider, context.cwd)?;
     let help = process::invoke(
         context,
         &repo,
-        vec![binary.clone().into(), "--help".into()],
+        vec![binary.clone().into_os_string(), "--help".into()],
         None,
         5,
         false,
@@ -780,7 +780,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
         return fail("native provider help probe failed");
     }
     let help = String::from_utf8_lossy(&help.stdout);
-    let mut native = vec![OsString::from(&binary)];
+    let mut native = vec![binary.clone().into_os_string()];
     match source.provider.as_str() {
         "codex" => {
             let action = if fork { "fork" } else { "resume" };
@@ -793,7 +793,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
             let supported = process::invoke(
                 context,
                 &repo,
-                vec![binary.into(), action.into(), "--help".into()],
+                vec![binary.into_os_string(), action.into(), "--help".into()],
                 None,
                 5,
                 false,

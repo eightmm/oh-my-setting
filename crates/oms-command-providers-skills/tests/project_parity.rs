@@ -519,12 +519,16 @@ fn models_use_canonical_provider_identity_and_owner_adapter_directory() {
         assert_eq!(code, 2, "{bad}");
     }
     let path_adapter = owner.join("bin/oms-agent-adapter-fallback");
+    let path_claude = owner.join("bin/claude");
+    let path_opencode2 = owner.join("bin/opencode2");
     fs::create_dir_all(path_adapter.parent().unwrap()).unwrap();
-    fs::write(&path_adapter, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&path_adapter, fs::Permissions::from_mode(0o700)).unwrap();
+    for executable in [&path_adapter, &path_claude, &path_opencode2] {
+        fs::write(executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let (code, out, err) = isolated(
         "models",
-        &["--providers", "fallback", "--json"],
+        &["--providers", "fallback,claude,opencode", "--json"],
         &owner,
         &oms_source(),
         &[
@@ -536,6 +540,8 @@ fn models_use_canonical_provider_identity_and_owner_adapter_directory() {
     assert_eq!(code, 0, "{err}");
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(report["providers"][0]["binary"], utf8(&path_adapter));
+    assert_eq!(report["providers"][1]["binary"], utf8(&path_claude));
+    assert_eq!(report["providers"][2]["binary"], utf8(&path_opencode2));
 }
 
 fn write_all(base: &Path, files: &[(&str, &str)]) {

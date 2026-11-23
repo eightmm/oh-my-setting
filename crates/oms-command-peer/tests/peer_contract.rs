@@ -163,7 +163,11 @@ fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], bo
     }
     fixture.write("bin/oms-agent-adapter-disabled", "inert\n");
     fs::create_dir(fixture.0.join("tmp")).unwrap();
-    let mut paths = vec![fixture.0.join("bin")];
+    let mut paths = if layout == "relative" {
+        vec![PathBuf::from("relative-bin"), fixture.0.join("bin")]
+    } else {
+        vec![fixture.0.join("bin")]
+    };
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
@@ -884,26 +888,65 @@ fn provider_adapter_discovery_requires_marker() {
         provider_isolated("provider_adapter_discovery_requires_marker", layout, || {
             use oms_command_peer::providers::{binary, discovered, normalize};
             if layout == "relative" {
+                let home = PathBuf::from(std::env::var_os("HOME").unwrap());
                 let repo = provider_repo();
                 executable_fixture(&repo, "adapters/oms-agent-adapter-owned-fixture");
+                executable_fixture(&repo, "relative-bin/claude");
+                executable_fixture(&repo, "relative-bin/opencode2");
+                repo.git(&["add", "relative-bin/claude", "relative-bin/opencode2"]);
+                repo.git(&[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    "relative-bin",
+                ]);
                 let adapter = repo.0.join("adapters/oms-agent-adapter-owned-fixture");
+                let owner_claude = repo.0.join("relative-bin/claude");
+                let owner_opencode2 = repo.0.join("relative-bin/opencode2");
+                let fixture_codex = home.join("bin/codex");
                 assert_eq!(
                     oms_command_peer::providers::normalize_at("owned-fixture", &repo.0).unwrap(),
                     "owned-fixture"
                 );
                 let probe = ProviderProbe::default();
-                success(provider_call(
-                    &repo,
-                    "owned-fixture",
-                    "provider-default",
-                    "auto",
-                    b"inspect owner adapter",
-                    &probe,
-                ));
+                for (provider, prompt) in [
+                    ("owned-fixture", b"inspect owner adapter".as_slice()),
+                    ("claude", b"inspect relative builtin".as_slice()),
+                    ("opencode", b"inspect relative opencode2".as_slice()),
+                    ("codex", b"inspect shadowed absolute builtin".as_slice()),
+                ] {
+                    success(provider_call(
+                        &repo,
+                        provider,
+                        "provider-default",
+                        "auto",
+                        prompt,
+                        &probe,
+                    ));
+                }
                 let calls = probe.calls.lock().unwrap();
-                assert_eq!(calls.len(), 1);
-                assert_ne!(calls[0].request.cwd, repo.0);
+                assert_eq!(calls.len(), 4);
+                for call in calls.iter() {
+                    assert_ne!(call.request.cwd, repo.0);
+                }
                 assert_eq!(calls[0].request.argv[0], adapter);
+                assert_eq!(calls[1].request.argv[0], owner_claude);
+                assert_ne!(calls[1].request.argv[0], "claude");
+                assert_ne!(
+                    calls[1].request.argv[0],
+                    calls[1].request.cwd.join("relative-bin/claude")
+                );
+                assert_eq!(calls[2].request.argv[0], owner_opencode2);
+                assert_ne!(calls[2].request.argv[0], "opencode2");
+                assert_ne!(
+                    calls[2].request.argv[0],
+                    calls[2].request.cwd.join("relative-bin/opencode2")
+                );
+                assert_eq!(calls[3].request.argv[0], fixture_codex);
+                assert_ne!(calls[3].request.argv[0], "codex");
                 return;
             }
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
@@ -4530,6 +4573,114 @@ fn registered_pi_session_resumes_with_owning_home() {
             assert!(!home.join("resumed").exists());
         },
     );
+}
+
+#[test]
+fn session_resume_and_fork_fail_closed_when_owner_binary_absent() {
+    let name = "session_resume_and_fork_fail_closed_when_owner_binary_absent";
+    let (git_only, extra) = if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
+        (None, Vec::new())
+    } else {
+        let git_bin = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|path| path.is_file())
+            .expect("git on PATH");
+        let dir = std::env::temp_dir().join(format!(
+            "oms-git-only-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&git_bin, dir.join("git")).unwrap();
+        let path = format!("relative-bin:{}", dir.display());
+        (Some(dir), vec![("PATH".into(), path)])
+    };
+    account_isolated(name, &extra, |home| {
+        let owner = account_repo();
+        let target = account_repo();
+        let session_dir = home.join("acc/pi1/sessions");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("one.jsonl"),
+            format!(
+                "{{\"type\":\"session\",\"id\":\"sess-1\",\"cwd\":\"{}\"}}\n",
+                target.0.display()
+            ),
+        )
+        .unwrap();
+        let decoy = target.0.join("relative-bin/pi");
+        fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+        fs::write(
+            &decoy,
+            "#!/bin/sh\nprintf 'decoy' > \"$HOME/decoy-ran\"\necho --session\necho --fork\n",
+        )
+        .unwrap();
+        fs::set_permissions(&decoy, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(oms_command_peer::providers::binary_at("pi", &owner.0), "pi");
+        assert_eq!(
+            oms_command_peer::providers::launch_binary_at("pi", &owner.0)
+                .unwrap_err()
+                .code,
+            127
+        );
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let target_arg = target.0.to_str().unwrap();
+        for action in ["resume", "fork"] {
+            let out = run(
+                &owner,
+                source,
+                "session",
+                &[
+                    action,
+                    "--repo",
+                    target_arg,
+                    "--provider",
+                    "pi",
+                    "--session",
+                    "sess-1",
+                    "--apply",
+                ],
+            );
+            assert_eq!(out.0, 127, "{action}: {}", message(&out));
+            assert!(
+                !home.join("decoy-ran").exists(),
+                "{action} must never execute target-cwd decoy"
+            );
+        }
+        let owner_bin = owner.0.join("relative-bin/pi");
+        fs::create_dir_all(owner_bin.parent().unwrap()).unwrap();
+        fs::write(
+            &owner_bin,
+            "#!/bin/sh\nif [ \"$1\" = --help ]; then\n  echo --session\n  exit 0\nfi\nprintf 'owner' > \"$HOME/owner-ran\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&owner_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            oms_command_peer::providers::launch_binary_at("pi", &owner.0).unwrap(),
+            owner_bin
+        );
+        let resumed = run(
+            &owner,
+            source,
+            "session",
+            &[
+                "resume",
+                "--repo",
+                target_arg,
+                "--provider",
+                "pi",
+                "--session",
+                "sess-1",
+                "--apply",
+            ],
+        );
+        assert_eq!(resumed.0, 0, "{}", message(&resumed));
+        assert!(home.join("owner-ran").exists());
+        assert!(!home.join("decoy-ran").exists());
+    });
+    if let Some(dir) = git_only {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 #[test]
