@@ -58,7 +58,8 @@ Commands:
                                      JSON file ({"schema":1,"kind":
                                      "agent-plan-batch","tasks":[{id,title,
                                      depends,allowed,forbidden,verify,role,
-                                     assignment,resources,contracts,priority}]}).
+                                     assignment,resources,contracts,priority,
+                                     issue}]}).
                                      Same limits as add; contract-bound plans
                                      refuse. Exact replay is idempotent; any
                                      conflict or invalid row changes nothing.
@@ -67,12 +68,37 @@ Commands:
          [--resources CSV] [--contracts CSV] [--priority I32]
          [--assignment '{"provider":"claude","workload":"routine"}']
          [--verify CMD] [--role NAME] [--discovered-from TASK_ID]
+         [--issue N|#N|owner/repo#N]
                                      --discovered-from records work found while
                                      doing TASK_ID (must exist): the new task
                                      carries a discovered_from link, TASK_ID
                                      does not depend on it and keeps its state.
                                      With it, --id may be omitted: a short
                                      collision-checked id is generated.
+                                     --issue binds the task to one issue of
+                                     the local github.com origin, stored as
+                                     owner/repo#N; nothing contacts GitHub.
+                                     When PROJECT.md or the committed
+                                     .github/oms-project.md declares
+                                     "- GitHub project: owner/repo" under
+                                     "## Collaboration" for origin (a
+                                     tracked-only declaration naming
+                                     another repository, as in a fork,
+                                     leaves the mode off; a broken,
+                                     conflicting or mismatched local one
+                                     refuses task creation), issues own
+                                     shared work: add,
+                                     add-batch and apply-proposal refuse
+                                     tasks without an issue, except that a
+                                     --discovered-from child inherits its
+                                     bound parent's issue. A finish
+                                     --landed-commit of a bound task records
+                                     pr: owner/repo#N from the land receipt.
+  link --task ID --issue REF [--reason TEXT]
+                                     Parent-only. Bind an unleased ready or
+                                     blocked task to an issue. The same issue
+                                     is a no-op; replacing a different one
+                                     requires --reason, kept in history.
   claim  --id ID --provider NAME [--ttl SECONDS]   Claim a ready task for a worker.
   start  --id ID [--lease-id TOKEN]  Mark a claimed task running.
   touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
@@ -191,11 +217,17 @@ Commands:
                                      longer TTL (86400) unless --ttl is given;
                                      its artifact/patch fields are kept.
   reopen --id ID                     Return a blocked task to ready.
-  show   --id ID                     Print one task as JSON.
+  show   --id ID                     Print one task as JSON. A bound task
+                                     adds issue_cache {state, freshness
+                                     fresh|stale|unavailable, captured_at,
+                                     title} read only from the local
+                                     .oms/github/cache.jsonl snapshot.
   evidence-snapshot --id ID          Print one task plus its immutable plan_id
                                      for a plan-scoped evidence producer.
   list   [--state STATE] [--json]    List tasks (optionally by state); --json
                                      emits every task's `show` view at once.
+                                     Bound tasks show "issue REF (state,
+                                     freshness)"; titles stay in --json.
   ready  [--json] [--limit N]        Print ids actionable now (deps done), in
                                      claim order; --json adds title, allowed,
                                      verify, depends, why_ready, role,

@@ -13,6 +13,7 @@ pub use batch::{JournalBatchReport, JournalProposal, JournalPublication, append_
 mod conflicts;
 mod db;
 mod diagnostics;
+mod github;
 mod hygiene;
 mod records;
 mod redact;

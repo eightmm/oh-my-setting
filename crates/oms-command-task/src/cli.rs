@@ -37,6 +37,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("state", "text"),
     ("next", "text"),
     ("source-session", "hash"),
+    ("issue", "ref"),
     ("text", "text"),
 ];
 #[derive(Default)]
@@ -211,6 +212,14 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Options> {
         return Err(Error::new(
             2,
             "--source-session must be a 16-64 character lowercase hexadecimal hash",
+        ));
+    }
+    if o.values.contains_key("issue")
+        && ![b"init".as_slice(), b"rotate", b"update"].contains(&o.action.as_slice())
+    {
+        return Err(Error::new(
+            2,
+            "--issue applies to init, rotate and update only",
         ));
     }
     if o.has("replace-goal") {

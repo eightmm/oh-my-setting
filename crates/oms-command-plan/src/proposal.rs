@@ -44,7 +44,7 @@ impl Plan<'_> {
                 "acceptance_files",
                 "tasks",
             ],
-            &[],
+            &["issue"],
         )?;
         require(
             p.get("schema").is_int(1) && p.text("kind") == "agent-plan-proposal",
@@ -139,13 +139,22 @@ impl Plan<'_> {
         )?;
         let mut seen = Vec::new();
         let mut prepared = Vec::new();
+        let issues = crate::engine::Issues::load(self);
+        let mut bare = false;
         for row in entries {
             // Match the actual exact reviewed schema, including the legacy
             // parser's rejection of unreviewed forbidden/role additions.
             json::keys(
                 row,
                 &["id", "title", "allowed", "verify", "depends"],
-                &["assignment", "covers", "resources", "contracts", "priority"],
+                &[
+                    "assignment",
+                    "covers",
+                    "resources",
+                    "contracts",
+                    "priority",
+                    "issue",
+                ],
             )?;
             let route = row.opt("assignment").cloned().unwrap_or_else(empty);
             assignment(&route)?;
@@ -244,8 +253,19 @@ impl Plan<'_> {
             if !cover_ids.is_empty() {
                 t.set("covers", covers)?;
             }
+            match row.opt("issue") {
+                Some(issue) => t.set("issue", string(issues.canonical(self, issue.str()?)?))?,
+                None => bare = true,
+            }
             seen.push(id.to_owned());
             prepared.push(t);
+        }
+        if let Some(issue) = p.opt("issue") {
+            let issue = issues.canonical(self, issue.str()?)?;
+            require(
+                prepared.iter().all(|t| t.text("issue") == issue),
+                "proposal issue must match every task issue",
+            )?;
         }
         let mut graph = s.ordered()?;
         for task in &prepared {
@@ -310,12 +330,13 @@ impl Plan<'_> {
                     "resources",
                     "contracts",
                     "priority",
+                    "issue",
                 ] {
                     let default = if field == "priority" {
                         number(0)
                     } else if field == "assignment" {
                         empty()
-                    } else if ["verify", "role"].contains(&field) {
+                    } else if ["verify", "role", "issue"].contains(&field) {
                         string("")
                     } else {
                         Value::Array(vec![])
@@ -340,6 +361,10 @@ impl Plan<'_> {
                 )));
             }
         }
+        require(
+            !bare || !issues.required()?,
+            "GitHub project mode: every proposal task requires an issue",
+        )?;
         require(
             self.git().text(&["rev-parse", "HEAD"])? == p.text("base_sha"),
             "repository HEAD changed after proposal review",

@@ -6,6 +6,7 @@ rust-version = "1.99.1"
 
 
 [dependencies]
+oms-github = { path = "../oms-github" }
 oms-reference = { path = "../oms-reference" }
 oms-command-plan = { path = "../oms-command-plan" }
 oms-command-task = { path = "../oms-command-task" }

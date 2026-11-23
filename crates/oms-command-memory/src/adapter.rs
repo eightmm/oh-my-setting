@@ -248,6 +248,7 @@ fn database(args: &[OsString], cwd: &Path, flag: &AtomicBool) -> Result<Output> 
                     } else {
                         Some(&handoffs)
                     },
+                    github: false,
                 },
                 flag,
             )
@@ -313,6 +314,7 @@ pub fn provider_context(repo: &Path, query: &str, interrupted: &AtomicBool) -> O
                         drop_scoped: true,
                         context_only: true,
                         handoffs: None,
+                        github: false,
                     },
                     interrupted,
                 );
