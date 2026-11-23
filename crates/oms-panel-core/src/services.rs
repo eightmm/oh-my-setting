@@ -156,6 +156,15 @@ pub trait PeerExecutor {
 }
 /// Only these domain services may produce authority. Display snapshots confer none.
 pub trait Services: PeerExecutor {
+    /// Complete host account-database proof for a group writable only by this UID.
+    fn workspace_group(
+        &self,
+        _gid: u32,
+        _deadline: std::time::Instant,
+        _stop: &AtomicBool,
+    ) -> Option<oms_command_plan::services::GroupMembership> {
+        None
+    }
     /// Team/source readers share the caller's selected roots. Contextual hosts
     /// can bind them directly; subprocess hosts pass an explicit state locator.
     fn team_contracts(
